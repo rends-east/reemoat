@@ -1,7 +1,7 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { forgetAttachments } from "./attach";
 import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
-import { clearEcho, landEcho, settleEcho } from "./echo";
+import { clearEcho, landEcho, settleEcho, type PendingEcho } from "./echo";
 import { forgetHiddenFinished } from "./finishedTasks";
 import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
@@ -53,142 +53,18 @@ import {
   type StoredEvent,
 } from "./wire";
 
-/**
- * All of the client's state, and the one place that orchestrates it.
- *
- * A plain external store rather than a state library: `useSyncExternalStore` is
- * in React, this is one screen's worth of state, and a reducer would obscure the
- * only part that is actually subtle — which is `resume()`.
- *
- * The shape of the whole thing follows from one constraint: **partial
- * availability is normal.** Machines are asleep, on other networks, or behind a
- * relay that just restarted. Every operation here is therefore per machine and
- * independent, and there is no code path where one unreachable machine can blank
- * the list, stall a poll, or fail a resume for the others.
- */
-
-/** How often to re-list sessions on a reachable machine while the tab is visible. */
 const POLL_INTERVAL_MS = 4_000;
-/** How often to re-probe a machine that is not answering. Slower: it is probably off. */
 const OFFLINE_RETRY_MS = 15_000;
-/** Live sockets, most-recently-viewed first. Twenty sockets on a phone is not a design. */
 const MAX_LIVE_STREAMS = 3;
-/**
- * How many conversations a tab keeps in memory at once.
- *
- * The companion to `MAX_TRANSCRIPT_BYTES`, which bounds one conversation and was
- * documented as bounding the tab. See `trimTranscripts` for why a stream is never
- * evicted and why the order is arrival rather than a true LRU.
- *
- * Twelve, against `MAX_LIVE_STREAMS` of 3: four times as many held as can be
- * streaming, so navigating back through a handful of sessions costs nothing, and
- * a tab left open all day cannot accumulate without bound.
- */
 export const MAX_HELD_TRANSCRIPTS = 12;
-/**
- * Bytes held per session, and **the only ceiling a tab has**.
- *
- * **There was a `MAX_TRANSCRIPT_EVENTS` here and it is deleted, not raised.** It
- * was a bound on a browser tab, so what it was trying to express is memory — and
- * an event count expresses memory only if events have a size, while theirs ranges
- * over three orders of magnitude (68 B for a text delta, 128 KiB at
- * `truncateEvent`'s own cap). At 20 000 it stood for **49 MiB** on a kimi session
- * whose tool call typed its arguments one token at a time and **2.8 MiB** on the
- * same session once those drafts were emptied: one number, two completely
- * different tabs. What it *did* was cut a 33 898-event conversation at seq 13 989,
- * hiding three of its six prompts and its own first message, on a transcript that
- * costs 4.53 MiB and 9 ms to hold whole.
- *
- * **Raising it was tried first and is the wrong shape**, which is worth writing
- * down because it is the obvious move: at 50 000 events beside a 16 MiB ceiling,
- * the *count* is still what fires first on light events — 50 000 × 140 B is 7 MiB
- * — so the truncation survives at exactly the size that must never be truncated,
- * just further out and harder to notice. Two ceilings for one resource means the
- * wrong one decides.
- *
- * Measured on this fleet: the largest conversation is **4.53 MiB across 33 898
- * events**, and the largest before its superseded drafts were emptied was
- * 79.2 MiB — the pathology this guards against, and one the daemon no longer
- * writes. 16 MiB is three and a half times the biggest real conversation, so
- * nothing anybody has reaches it, and it is still a number a phone survives.
- *
- * What is *not* bounded any more is the array's length, and therefore
- * `buildTail`'s walk, which runs on every streamed token — 9 ms at 33 898 events,
- * and about 32 ms at the ~120 000 that 16 MiB of 140-byte events would be. That is
- * the price of the deletion, it is a frame rate rather than a truncation, and it is
- * the right way round: a conversation that arrives whole and redraws slowly can be
- * read, and one that is cut cannot.
- *
- * Approximate by construction — `sizeOfEvent` is one `JSON.stringify` per event,
- * memoised on the event's identity — and approximate is the right kind of answer:
- * it decides when to stop fetching, never what to draw.
- *
- * There is deliberately **no render window under this**. A transcript used to hold
- * 1200 and draw the newest 400, with a button growing the second number — which
- * meant opening any real conversation started three or four taps from its
- * beginning. A conversation is a thing you read from the top; the only cut is the
- * one the *agent* made, at `/clear`, and it is `clearedAt` below.
- */
+/** Bytes, never an event count: the only ceiling a tab has, per session. */
 export const MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024;
-/**
- * History fetched by one `loadAll`, before it stops and offers to carry on.
- *
- * A budget rather than a limit: what it stops short of is still on the daemon and
- * the transcript says so with a button that resumes exactly here. Bounded because
- * a session's log is now unbounded — opening one on a phone must not mean an
- * open-ended sequence of requests before anything settles.
- */
 export const MAX_AUTO_HISTORY = 5_000;
-/**
- * The server's own `EVENTS_PAGE_LIMIT`, mirrored. Asking for less is asking more
- * times.
- *
- * **500 was a round-trip count in disguise.** A window spans this many *seqs*, so
- * the number is how many sequential requests a conversation costs: 68 of them for a
- * 33 898-event session, each one a full relay round trip before the next can be
- * asked for, which is the whole of "it loads slowly and in pieces". At 5000 the
- * same session is **seven** requests.
- *
- * Raising it is safe because it was never the bound that mattered: the daemon caps
- * a page at `EVENTS_PAGE_BYTES` (768 KiB) as well, and `fillWindow` already refills a
- * byte-capped window from the last seq it received. So a light conversation now
- * arrives in one request per window and a heavy one degrades to exactly the number
- * of requests it costs today — the byte cap is what governs it, in both cases, and
- * it has not moved.
- */
+/** Mirrors the daemon's `EVENTS_PAGE_LIMIT`; its byte cap still governs heavy pages. */
 export const HISTORY_PAGE = 5_000;
-/**
- * The daemon's own `ATTACH_REPLAY_MAX`, mirrored — and it has to be mirrored.
- *
- * `attach` replays at most this much down the socket and reports the rest as
- * `lagged{backlog}`. So this is the largest lag a re-attach can ask the socket to
- * fill, and asking for more does not fail — it silently gets less, which is how
- * a hole opens in the middle of a transcript.
- *
- * It was read off the tab's own event ceiling — 20 000 at the time — against a
- * daemon that would only ever serve 2 000, which is the mismatch itself. That
- * ceiling is deleted now (see `MAX_TRANSCRIPT_BYTES`), which removes the number
- * this could be confused with rather than the need for it: if `server.ts` changes,
- * change this. Too small only costs a refetch; too large costs somebody's
- * conversation.
- */
+/** Mirrors the daemon's `ATTACH_REPLAY_MAX`: asking for more silently gets less. */
 export const ATTACH_REPLAY_MAX = 2_000;
-/** Enough recent events to find the `tool_call` behind a pending permission. */
 const PRIME_WINDOW = 60;
-/**
- * Sessions asked for per machine, per poll.
- *
- * The daemon retains 200 and every row is a full snapshot, so an unbounded poll
- * every four seconds per machine is a hundred megabytes an hour on LTE for a list
- * whose interesting part is a handful of rows. With a limit the daemon answers
- * blocked-first, then live, then most-recent terminal, so what a cut drops is the
- * tail nobody is waiting on — and it says `truncated` so the prune below knows the
- * difference between "gone" and "outside the window".
- *
- * 60 rather than 20: it has to comfortably cover every blocked and live session
- * across a fleet plus recent history, because the collapsed "ended" section reads
- * from the same list.
- */
 const SESSION_LIST_LIMIT = 60;
 
 export interface Gap {
@@ -202,98 +78,24 @@ export interface SessionRow {
   ref: SessionRef;
   machineName: string;
   snapshot: SessionSnapshot;
-  /**
-   * The daemon's clock when this row was fetched, and ours at the same instant.
-   *
-   * Elapsed times are `(daemonNow - raisedAt) + (Date.now() - fetchedAt)`. Using
-   * the browser clock alone is wrong in the one case that matters: a phone that
-   * has been asleep has a clock that drifted, and "blocked for −2 minutes" is
-   * both incorrect and alarming.
-   */
+  /** Daemon clock at fetch and ours at that instant; elapsed time uses both, since a slept phone's clock drifts. */
   daemonNow: number;
   fetchedAt: number;
-  /**
-   * The last controls a *running* agent published, kept across the window where
-   * there is no agent to publish any. See {@link holdConfig}.
-   */
   heldConfig?: AgentConfig;
-  /**
-   * How to render this row's paths as the person working in them would write them.
-   *
-   * Carried per row rather than per machine because it arrives on the same
-   * response the row did, so the two cannot be out of step — and a row from a
-   * daemon that does not publish it simply shows the path it was given.
-   */
 }
 
 export interface Transcript {
   events: StoredEvent[];
   gaps: Gap[];
-  /**
-   * Roughly how many bytes `events` is, and the number the tab's ceiling is about.
-   *
-   * Carried rather than derived because it is read by `loadStop` on every window
-   * and every poll, and deriving it means walking the whole array. Maintained
-   * wherever events are added or dropped, through `sizeOfEvent`, which memoises per
-   * event so no event is measured twice however many times it is counted.
-   */
   heldBytes: number;
-  /** The lowest seq held in memory. Below this, history is on the daemon. */
   loadedFrom: number;
-  /** The lowest seq the daemon still has. Below this, it is gone for good. */
   daemonFirstSeq: number;
-  /**
-   * The newest `context_cleared` found while paging, or `null` for none.
-   *
-   * The one place a transcript is cut, and it is the agent's own cut rather than
-   * a render budget: everything at or below this seq is a conversation the agent
-   * has been told to forget. `loadAll` stops here, so those events are not even
-   * fetched until somebody asks for them.
-   *
-   * The `/clear` prompt itself sits *below* the marker — `registry.ts` appends the
-   * prompt and then the marker — so cutting strictly below the marker hides the
-   * prompt with the conversation it ended and leaves the marker as the top row.
-   * `EventList` draws that row as the command *and* the words, because the marker
-   * is the only thing `clearContext` emits and nothing else reaches it.
-   *
-   * **There is no way back past it and that is deliberate.** A control offering to
-   * re-fetch the conversation above was drawn here for two releases and is gone on
-   * the owner's word: what the agent has been told to forget is not something this
-   * client offers to read. It is still on the daemon, and `pnpm client` still
-   * prints it.
-   */
+  /** The agent's `/clear` cut; nothing offers the conversation above it back. */
   clearedAt: number | null;
   loadingHistory: boolean;
   stream: StreamStatus | null;
 }
 
-/* ------------------------------------------------------------------ *
- * The transcript's rules, as pure functions
- *
- * Out here for the same reason `commandsPlan` below is, and `keys.ts`, `tail.ts`
- * and `commands.ts` are: `webcheck` has no daemon and no DOM, so a rule that
- * lives in a method on `AppStore` is a rule nothing can assert. That is not an
- * abstract worry here. Every one of these decides where a transcript is cut or
- * joined, and getting one wrong produces a conversation that looks **contiguous
- * and is not** — which a reader cannot tell from something the agent said.
- *
- * Two of them are here because they were wrong in exactly that way, on the
- * ordinary paths rather than in corners, and the measurements are written at the
- * functions themselves.
- * ------------------------------------------------------------------ */
-
-/**
- * Roughly what one event costs to hold, memoised on the event itself.
- *
- * `JSON.stringify` rather than the daemon's hand-rolled `estimateBytes`, because
- * this needs no agreement with anything on the wire — it decides when a tab stops
- * *fetching*, never what it draws — and because a `WeakMap` on `StoredEvent`
- * identity means every event is measured exactly once for the life of the tab.
- * `StoredEvent` is never mutated, which is what makes the identity a valid key.
- *
- * The fallback matters more than it looks: a cyclic payload would throw here, and
- * this runs on the socket's own path, so a throw would take the whole batch with it.
- */
 const EVENT_SIZE = new WeakMap<StoredEvent, number>();
 
 export function sizeOfEvent(stored: StoredEvent): number {
@@ -303,172 +105,44 @@ export function sizeOfEvent(stored: StoredEvent): number {
   try {
     size = JSON.stringify(stored).length;
   } catch {
-    // Unmeasurable, so charged something rather than nothing: a batch of these
-    // must still walk the tab toward its ceiling.
     size = 512;
   }
   EVENT_SIZE.set(stored, size);
   return size;
 }
 
-/** What a batch of events adds to {@link Transcript.heldBytes}. */
 export function sizeOfEvents(events: readonly StoredEvent[]): number {
   let total = 0;
   for (const stored of events) total += sizeOfEvent(stored);
   return total;
 }
 
-/**
- * Where a re-attaching socket resumes, and whether what is held survives it.
- *
- * `closeStream` deliberately keeps the transcript, so coming back to a session
- * the socket LRU evicted is instant. But attaching at the daemon's `lastSeq`
- * while holding events only up to some earlier seq draws those two runs as one
- * transcript with the middle quietly absent — and paging cannot repair it,
- * because `loadAll` only ever goes *backwards* from `loadedFrom` and the hole is
- * above it. On the screen whose whole job is deciding whether to approve a
- * command, missing agent output is a correctness failure rather than a cosmetic
- * one.
- *
- * So a lag is either replayed down the socket or the held transcript is dropped
- * and paged back in contiguously, and the boundary between those two is
- * `ATTACH_REPLAY_MAX` — **the daemon's number, not this client's.** That is the
- * defect this function exists to make assertable: the test read the *tab's* own
- * event ceiling, 20 000 at the time, so every lag between 2 000 and 20 000 took
- * the arm chosen *because* it replays exactly the hole, asked the socket to replay
- * it, and got the newest 2 000 with a `lagged{backlog}` frame for the rest. Asking
- * for more than the daemon replays does not fail; it silently gets less. There is
- * no such ceiling to read by accident any more — `MAX_TRANSCRIPT_BYTES` is not a
- * count — and `webcheck` asserts that this function names no bound but this one.
- *
- * A third answer is folded in rather than left implicit: **no held events at all
- * is a restart too.** `openSession` distinguished "no transcript" from "a
- * transcript holding nothing", and kept the second — which only ever arises from
- * `primeBlocked` writing a sixty-event window that came back empty, leaving
- * `loadedFrom` sixty seqs below a tail the socket will never send. The same hole
- * by a quieter route. There is nothing held to weigh, so there is nothing to
- * weigh it against.
- */
+/** Replays a lag down the socket only up to the daemon's `ATTACH_REPLAY_MAX`; beyond it, or with nothing held, drop and re-page. */
 export function reattachSince(heldLast: number | null, daemonLast: number): { since: number; keepHeld: boolean } {
   if (heldLast === null) return { since: daemonLast, keepHeld: false };
-  /*
-   * Ahead of the row, which is ordinary rather than strange: the snapshot is up
-   * to one poll old while `onEvents` has already moved the transcript past it,
-   * and that is the ordinary state of a session that is talking.
-   *
-   * The answer is the **held tail**, not `daemonLast`. This arm used to return
-   * the row's number and let `openSession` raise it with a `Math.max`, on the
-   * argument that the overlap is free because the socket skips `seq <=
-   * lastAppliedSeq` — true, but only while the cursor it is compared against is
-   * what is held. Seed the stream below that and the skip cannot fire for the
-   * overlap at all: `store.onEvents` concatenates with no dedup, so every event
-   * between the poll-stale row and the held tail was appended a second time —
-   * the agent's last sentence drawn twice, under a React key already in the
-   * list, and perfectly contiguous so the hole check saw nothing.
-   *
-   * So the correction lives here rather than at the caller. With it outside, the
-   * one exported function anybody can ask answered a number the socket never
-   * sent, and `webcheck` pinned that number — the drift `sessionOf` is named
-   * for, in the direction where the assertable copy is the wrong one.
-   *
-   * Asking from the held tail is safe in the other direction too: the daemon
-   * clamps forward with `Math.min(sinceParam, stats.lastSeq)` and `hello`
-   * absorbs that clamp with its own `Math.max`.
-   */
+  // Ahead of the poll-stale row: resume from the held tail, or the overlap is appended twice.
   if (heldLast >= daemonLast) return { since: heldLast, keepHeld: true };
-  // `read` is `WHERE seq > ?`, so this replays exactly the hole. If the daemon
-  // has since pruned part of it, its `hello` reports `gap` and clamps us
-  // forward, which the gap handling already covers.
   if (daemonLast - heldLast <= ATTACH_REPLAY_MAX) return { since: heldLast, keepHeld: true };
   return { since: daemonLast, keepHeld: false };
 }
 
-/** What a `lagged` frame means for the transcript: refetch it, or record a hole. */
 export type GapPlan = { kind: "restart"; loadedFrom: number } | { kind: "record"; reason: Gap["reason"] };
 
-/**
- * `backlog` is not a loss and must never be drawn as one — and must not be
- * *ignored* either, which is what the first version of this did.
- *
- * It says the **socket** declined to replay this far (`ATTACH_REPLAY_MAX` in
- * `server.ts`); every one of those events is on disk and
- * `GET /sessions/:id/events` serves them. So the answer is to go and fetch them —
- * and simply calling `loadAll` was not fetching them, because `loadAll` only ever
- * pages backwards from `loadedFrom` and this range sits *above* whatever is held.
- * `stream.ts` has by then advanced its own cursor to `to`, so its seq-continuity
- * check cannot fire either, and everything from `to + 1` was appended straight
- * onto the held events: a contiguous-looking transcript with the middle silently
- * absent, no `Gap`, no marker, and nothing anywhere saying so.
- *
- * Restarting at `to + 1` is the same choice `reattachSince` makes for a lag too
- * large to replay, for the same reason — the cost is refetching rather than a
- * hole to describe.
- *
- * The other two reasons are real losses and are recorded: `evicted` is the
- * daemon's retention having destroyed them, `slow_consumer` is this client
- * having failed to keep up, and `GapMarker` names both causes. Drawing either
- * over an intact conversation is the untrue message this split exists to
- * prevent — measured against the live database, a session reporting 3162 events
- * "not shown (beyond retention)" had every one of them still on the daemon,
- * whose own floor was thousands of seqs below.
- *
- * The record arm carries the narrowed reason rather than leaving the caller to
- * re-test it. `Gap["reason"]` has no `backlog` member, so "a backlog can never
- * be filed as a hole" stops being a rule somebody has to remember and becomes
- * the only thing that type-checks.
- */
+/** `backlog` is no loss (the daemon still holds it), so it restarts above what is held; only the others are holes. */
 export function gapPlan(reason: LaggedFrame["reason"], to: number): GapPlan {
   if (reason === "backlog") return { kind: "restart", loadedFrom: to + 1 };
   return { kind: "record", reason };
 }
 
-/** One window of history, filled forwards, and whether it reached what is held. */
 export interface HistoryWindow {
   block: StoredEvent[];
-  /**
-   * The daemon's own floor, or `null` for "no page ever answered".
-   *
-   * Three answers rather than two, the same discipline `probeExists` and
-   * `Liveness` carry on the daemon side: `0` is a real floor, and reporting
-   * "could not tell" as one would have `EventList` announce that the start of
-   * the conversation is gone.
-   */
+  /** Null when no page answered, which must never read as a floor of zero. */
   firstSeq: number | null;
-  /** The window reached `loadedFrom - 1`. Only then may it be prepended. */
   closed: boolean;
-  /** Events actually taken, so the caller's budget is spent by what it received. */
   fetched: number;
 }
 
-/**
- * Fill `[loadedFrom - HISTORY_PAGE, loadedFrom - 1]` forwards, and say whether
- * it closed.
- *
- * A page is capped by **bytes** as well as by count (`EVENTS_PAGE_BYTES` 768 KiB
- * against `EVENTS_PAGE_LIMIT` 5000), and both event stores fill one by scanning
- * *ascending* from `since` and breaking — so a byte-capped page keeps its oldest
- * events and drops its **newest**. Anchoring `loadedFrom` on the page's first
- * event, which is what this used to do, therefore spliced the page's *last*
- * event straight onto the held window and left everything between them missing:
- * no `Gap`, no marker, and `loadedFrom` now *below* the hole, so paging never
- * returned to it. The byte cap bites first for anything but a trivial page —
- * `EVENTS_PAGE_BYTES / EVENTS_PAGE_LIMIT` is about 157 bytes an event, and one
- * `file_change` carrying content clears that on its own — so this fired on an
- * ordinary session open rather than in a corner. It was a narrower trap when the
- * page was 500 seqs against 2 MiB; both numbers have moved since, in the
- * direction that makes the byte cap the one that governs.
- *
- * So the window is filled forwards from its floor until it reaches the events
- * already held, and the caller commits it only if `closed`. Each call either
- * yields at least one usable event and moves `cursor` strictly forward, or ends
- * the window there and then — which is what stops a daemon whose floor is above
- * this window (or one that has stopped answering usefully) spinning against the
- * network.
- *
- * `budget` is spent **inside** the window rather than merely per window. A
- * byte-capped page turns one window into an unknown number of requests, so a
- * bound that only counted windows would not be a bound at all.
- */
+/** A byte-capped page drops its newest events, so only a `closed` window may be prepended. */
 export async function fillWindow(
   fetchPage: (since: number) => Promise<{ events: readonly StoredEvent[]; firstSeq: number }>,
   loadedFrom: number,
@@ -483,12 +157,7 @@ export async function fillWindow(
   while (cursor < top && fetched < budget) {
     const page = await fetchPage(cursor);
     firstSeq = page.firstSeq;
-    // `since` is exclusive and the window has a ceiling; anything outside either
-    // end is the daemon answering a wider question than the one asked.
     const got = page.events.filter((stored) => stored.seq > cursor && stored.seq <= top);
-    // The daemon answered and cannot go further — its floor is above this window,
-    // or the caller has decided to stop. Either way there is no next `since` to
-    // ask from, and asking the same one again is the spin.
     if (got.length === 0) break;
     block.push(...got);
     fetched += got.length;
@@ -498,161 +167,38 @@ export async function fillWindow(
   return { block, firstSeq, closed: cursor >= top, fetched };
 }
 
-/** Why `loadAll` stopped paging. */
 export type LoadStop = "start_of_log" | "cleared" | "held_full";
 
-/** What `loadStop` needs to know, which is four numbers and not the events themselves. */
 export interface LoadState {
   loadedFrom: number;
-  /** The lowest seq the daemon still holds. Below it there is nothing to ask for. */
   daemonFirstSeq: number;
   clearedAt: number | null;
-  /** How many events are held. A count, so the ceiling can be asserted without 50 000 objects. */
   heldEvents: number;
-  /** Roughly how many bytes those are — the ceiling that actually decides. */
   heldBytes: number;
 }
 
-/**
- * Whether there is anything left worth fetching, asked before a window is tried.
- *
- * Three of the four ways `loadAll` stops, in the order it asks them. The fourth —
- * a window that cannot be filled — is `fillWindow`'s `closed` and is not
- * knowable until a window has been attempted, so it is asserted there rather
- * than restated here as an arm somebody would then have to keep in step.
- *
- *   - `start_of_log` — the ordinary ending, and it is **`max(1, daemonFirstSeq)`
- *     rather than 1**. See below.
- *   - `cleared` — the agent's own cut, and the bottom of what is worth showing.
- *     **Nothing carries on past it.** A `revealedBeforeClear` flag did, set by a
- *     button at the head of the transcript, and both are deleted: a conversation
- *     the agent has been told to forget is not one this client offers to re-read.
- *   - `held_full` — `MAX_TRANSCRIPT_BYTES`, the tab's own and **only** ceiling.
- *     Without it a terminal session — which receives no events and so never
- *     reaches `onEvents`' trim at the other end — grew on every single open, for
- *     ever. It was an event count and is deliberately no longer one; the reasoning
- *     is at the constant.
- *
- * **There was a `budget` arm and it is gone, parameter and all.** It fired at
- * `MAX_AUTO_HISTORY` and left the rest of the conversation on the daemon behind a
- * button reading "N earlier events did not load — try again" — which is this
- * client reporting its own bookkeeping as a failure, on the one screen whose job
- * is to show a conversation. That constant survives as `loadAll`'s **yield**
- * chunk, not as a stop; removing the parameter is what stops it being reintroduced
- * by accident.
- *
- * **The floor arm is the guard that makes self-healing affordable**, and it is
- * new. Nothing here read `daemonFirstSeq`, which was harmless while `loadAll` ran
- * once per open: a legacy session whose oldest surviving event is seq 6145 sits at
- * `loadedFrom === 6145` and can never reach 1, so this answered `null` for ever
- * and the loop went one fruitless request further every time it was called. With
- * `attachWanted` re-driving on every 4s poll that is a permanent request loop, on
- * exactly the sessions least able to answer it. `max(1, daemonFirstSeq)` is the
- * *same expression* `EventList` computes as `unfetched === 0` — one rule, two
- * readers — and the `max` matters because `daemonFirstSeq` is 0 for "no page has
- * answered yet", which must behave as 1 rather than as "everything is fetched".
- *
- * The order is part of the rule and not incidental. `cleared` is asked before
- * `held_full` so a cut conversation reports the cut, and `start_of_log` before
- * everything because there is nothing below it to have an opinion about.
- */
+/** The floor is `max(1, daemonFirstSeq)`, so a pruned log cannot loop requests. */
 export function loadStop(held: LoadState): LoadStop | null {
   if (held.loadedFrom <= Math.max(1, held.daemonFirstSeq)) return "start_of_log";
   if (held.clearedAt !== null) return "cleared";
-  // One ceiling, and it is bytes — see `MAX_TRANSCRIPT_BYTES` for why the event
-  // count that used to be beside this is deleted rather than raised.
   if (held.heldBytes >= MAX_TRANSCRIPT_BYTES) return "held_full";
   return null;
 }
 
-/** What a transcript says above its rows about not starting at its own beginning. */
 export type TranscriptNotice =
   | { kind: "skeleton" }
   | { kind: "loading"; earlier: number }
   | { kind: "stalled"; earlier: number }
-  /**
-   * `held` rather than the constant: with two quantities able to raise this stop —
-   * a byte ceiling and a count — the number in the sentence has to be what is
-   * actually on screen, or it reports 50 000 events about a tab holding 6000.
-   */
   | { kind: "ceiling"; held: number }
   | { kind: "floor"; destroyed: number }
-  /**
-   * Nothing has arrived and nothing is outstanding.
-   *
-   * **This is a partition over the *transcript*, not over the screen, so `empty` and
-   * a working agent can be true at the same time** — and on a session you have just
-   * created they routinely are, because the daemon's first rows are all in
-   * `TRANSCRIPT_SILENT` while the agent is already starting. `EventList` draws the
-   * empty sentence and `footSays` draws `working…` underneath it, and neither knows
-   * the other exists.
-   *
-   * Harmless today: the two say different true things. Written down because it is
-   * the seam where a seventh arm produces a *contradiction* rather than a pair —
-   * the `switch` with no `default` in `noticeText` will force that arm to be
-   * written, and it cannot force it to agree with the foot.
-   */
   | { kind: "empty" }
   | null;
 
-/** What {@link transcriptNotice} reads: {@link LoadState} plus what is on screen. */
 export interface NoticeState extends LoadState {
   loadingHistory: boolean;
-  /**
-   * Rows the transcript actually draws — **not** `heldEvents`.
-   *
-   * The two are wildly different and the difference is why this is a parameter
-   * rather than something derived here: measured on the live log, the newest 500
-   * of a 1285-event session draw **one** row, and 2856 events draw 14. So "is
-   * anything on screen" cannot be answered from a count of events.
-   */
   rows: number;
 }
 
-/**
- * Why this conversation does not start at its beginning, as one answer.
- *
- * **Six states, one function, and the reason it exists is that they were five
- * booleans in JSX and nothing could assert that they covered the space.** They
- * did not. `awaitingHistory` required `rows.length === 0`, `showFloor` required
- * `unfetched === 0`, `atCeiling` required 20 000 held events and the reveal
- * button required a `/clear` marker — so the ordinary state of a reload,
- * *rows on screen with thousands of events still missing*, fell through every
- * one of them and drew **nothing at all**. Rendered under `react-dom/server`, the
- * markup above the rows is byte-identical for "newest 500 of 2856 held" and "all
- * 2856 held": 48 characters, the bare column `<div>`. The `role="status"` region
- * was empty in that state too, so a screen reader got the same silence.
- *
- * A conversation that begins mid-word — measured, the top row at 1000 held events
- * of `s_cdea4faa` starts `"ntract roles (guardian = timelock, …"`, the tail of a
- * phrase cut mid-word —
- * presented as a complete one is the failure `EventList`'s own floor line was
- * written against.
- *
- * The arms mirror `loadStop`'s, in its order, because the two answer the same
- * question from opposite ends: that one decides whether paging carries on, this
- * one says why it is not there yet. A state where `loadStop` says `null` (paging
- * is still willing) and this says `null` (nothing to report) is precisely the hole
- * that was here, so `webcheck` asserts the pair rather than either alone.
- *
- *   - `null` under a cut, because the marker row is the thing to read there — it
- *     draws the `/clear` that caused it and says the context was cleared — and
- *     `unfetched` is enormous by construction, being everything above it. Nothing
- *     offers to fetch that any more, so a sentence counting it would name a number
- *     with no control behind it.
- *   - `floor` / `empty` — paging has reached the bottom. `showFloor` used to
- *     require `!loadingHistory`; dropped, because at `unfetched === 0` the
- *     destroyed prefix is a permanent fact about the daemon that no run can
- *     change, and the arm existed only to avoid a one-frame flash.
- *   - `ceiling` before `skeleton`, so a tab that is genuinely full says so rather
- *     than showing a placeholder for events it has decided not to hold.
- *   - `loading` / `stalled` — the two new ones, and they are split because a
- *     sentence has to be true in the state it is drawn in: one run is in flight,
- *     the other has spent its schedule and is waiting for `attachWanted` on the
- *     next poll that a session list survives. Neither offers an action, for the
- *     reason the "try again" button was deleted: there is nothing for the reader
- *     to do and the client retries by itself.
- */
 export function transcriptNotice(held: NoticeState): TranscriptNotice {
   if (held.clearedAt !== null) return null;
   const destroyed = held.daemonFirstSeq > 1 ? held.daemonFirstSeq - 1 : 0;
@@ -661,57 +207,12 @@ export function transcriptNotice(held: NoticeState): TranscriptNotice {
     if (destroyed > 0) return { kind: "floor", destroyed };
     return held.rows === 0 ? { kind: "empty" } : null;
   }
-  // Asked of `loadStop` rather than restated, so the sentence cannot claim a ceiling
-  // the loader does not believe in — they read the same two fields and there are two
-  // of them now.
   if (loadStop(held) === "held_full") return { kind: "ceiling", held: held.heldEvents };
   if (held.rows === 0) return { kind: "skeleton" };
   return held.loadingHistory ? { kind: "loading", earlier: unfetched } : { kind: "stalled", earlier: unfetched };
 }
 
-/**
- * How long to wait before asking for the same page again, or `null` to stop.
- *
- * `loadAll` used to answer this with `catch {}`: one dropped request — a radio
- * handing over, a relay blipping — left the transcript empty for the life of the
- * tab, because nothing re-drives it (`SessionView`'s effect never fires again and
- * `attachWanted` skipped any key that already had a stream). What the reader got
- * was a button asking them to do by hand what the client had simply not retried.
- *
- * **The schedule is the load-bearing half, not the classification, and the first
- * version of this had that the wrong way round.** It retried transport failures
- * only, on `[500, 2000]`, and argued the point at length: an `ApiError` is the
- * relay *answering*, so asking again gets the same answer. Measured against the
- * live database with the real store, that argument is refuted by its own
- * favourable case — the identical eight-second outage delivered as **transport**
- * failures, which the old function did retry, left a byte-identical transcript
- * (`loadedFrom=1357`, `span=[1357..2878]` of 2878). 2.5 s of schedule is shorter
- * than any outage worth surviving, so the classification only decided *which*
- * flavour of the same truncation you got.
- *
- * So both halves moved. `meansLater` admits the three answered refusals that
- * describe a route coming back on its own (see it for why `machine_over_limit`
- * and `owner_disabled` are not among them), and the schedule now covers the
- * thing it has to survive: **the daemon's own redial, which is 1 s→30 s with
- * full jitter**, so a relay recreated by a deploy answers `no_tunnel` for up to
- * half a minute. Five waits totalling 37.5 s.
- *
- * A fixed table rather than jitter, deliberately: it is pure, so `webcheck`
- * asserts it, and there is no herd to spread — at most `MAX_LIVE_STREAMS` runs
- * exist per tab, against a relay that is not being protected from three
- * requests. The 500 ms first step is *too early* for a `no_tunnel` (the daemon's
- * first redial lands around a second in) and costs one wasted request; kept
- * anyway, because a second schedule per error class is a second thing to keep in
- * step and the same step is exactly right for a radio handing over.
- *
- * **The cost is a longer latch, and that is only acceptable because it is now
- * visible.** `machine.request` burns a route re-probe plus a replayed GET
- * internally, so each attempt is up to two fetches against the 15 s request
- * timeout: six attempts against a black-holing relay is minutes with
- * `loadingHistory` held. Silently, that would be the defect this fixes wearing a
- * longer coat — `transcriptNotice`'s `loading` arm is what makes it a sentence on
- * screen instead, and the two changes are one change.
- */
+/** Outlasts the daemon's own redial, up to 30 s; a fixed table so webcheck can assert it. */
 export const HISTORY_RETRY_MS: readonly number[] = [500, 2_000, 5_000, 10_000, 20_000];
 
 export function historyRetry(attempt: number, error: unknown): number | null {
@@ -719,20 +220,10 @@ export function historyRetry(attempt: number, error: unknown): number | null {
   return HISTORY_RETRY_MS[attempt] ?? null;
 }
 
-/** A delay, as a promise. `0` is a macrotask, which is how `loadAll` yields. */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * {@link loadStop} asked of a whole transcript, or `null` when there is none.
- *
- * Two callers inside `loadAll` — the check that runs *before* the latch and the
- * one at the top of each turn of the loop — and writing the five fields out twice
- * is how the two come to disagree about which stop applies. An absent transcript
- * answers `null` rather than a stop, because "there is nothing here yet" is the
- * state a first load starts in.
- */
 function stopFor(held: Transcript | undefined): LoadStop | null {
   if (held === undefined) return null;
   return loadStop({
@@ -744,22 +235,6 @@ function stopFor(held: Transcript | undefined): LoadStop | null {
   });
 }
 
-/**
- * Where a batch arriving down the socket leaves the `/clear` cut.
- *
- * A `/clear` arriving live cuts the transcript the same way one found by paging
- * does — it is the same fact, and which side of the socket it came from is not
- * something the reader should be able to tell.
- *
- * Newest in the batch wins. It used to clear a `revealedBeforeClear` flag with it,
- * and that flag is gone — nothing offers to read past a cut any more, so there is
- * one field here rather than a pair that could disagree.
- *
- * A batch with no marker changes nothing, and that is the overwhelmingly ordinary
- * case — every streamed token takes it. It is written as a walk that finds nothing
- * rather than as a branch in front of one, which is what keeps "newest wins" a
- * single rule instead of two that can disagree.
- */
 export function nextCut(clearedAt: number | null, batch: readonly StoredEvent[]): number | null {
   let cut = clearedAt;
   for (const stored of batch) {
@@ -769,95 +244,23 @@ export function nextCut(clearedAt: number | null, batch: readonly StoredEvent[])
   return cut;
 }
 
-/** What to do about a session's command list, given what is held and what the daemon says. */
 export type CommandsPlan = "fetch" | "drop" | "defer" | "current";
 
-/**
- * The command-list cache rule, as a pure function.
- *
- * Out here rather than inline in `ensureCommands` for the reason `keys.ts` and
- * `commands.ts` are out here: `webcheck` has no daemon to drive, and every one of
- * these four answers fails *silently*. Three of them were written as prose in a
- * docblock, contradicted by the code underneath, and nothing could tell.
- *
- * - `drop` — the daemon says 0 or says nothing. Both mean no agent has published,
- *   so anything held is a *dead* agent's list and is deleted rather than merely
- *   left unfetched. Returning with it intact is what kept a restarted daemon's
- *   composer offering the previous agent's commands.
- * - `defer` — a request is already out. The caller records the wanted revision and
- *   re-drives when it lands; dropping the call outright strands the client on a
- *   superseded list for ever, because the effect that calls this is keyed on the
- *   revision and will not fire again.
- * - `current` — what is held matches. `!==`, never `>`: a restart puts the number
- *   back to 0 while a client still holds 5, and 5 is the stale one.
- */
-/**
- * `holdConfig`, plus the half of the memory that outlives this tab.
- *
- * One function rather than two call sites doing it by hand, because the two are
- * the same decision read in two directions and they must not drift: what a
- * *running* agent published is written down, and what a reload has no other copy
- * of is read back. Both write sites for `heldConfig` go through here.
- *
- * ⚠ **The read is a fallback and never an override.** `holdConfig` already answers
- * correctly whenever this tab has seen the agent — live set, or its own memory of
- * one — and that answer is newer than anything on disk by construction. Storage is
- * consulted only where it answers `undefined`, which is exactly the state a reload
- * leaves and the one the strip drew three dashes in.
- *
- * The write is deliberately *after* the fallback rather than instead of it, so a
- * memory restored from storage is not immediately written back as though this tab
- * had seen it: `rememberConfig` ignores an empty set, and a restored one is not
- * empty, so without that ordering the timestamp would refresh on every poll of a
- * session nobody is looking at and the LRU would stop meaning "recently seen".
- */
+/** Storage is a fallback where holdConfig answers undefined, never an override. */
 function rememberHeld(key: SessionKey, held: AgentConfig | undefined): AgentConfig | undefined {
   if (held === undefined || held.options.length === 0) return rememberedConfig(key);
   rememberConfig(key, held);
   return held;
 }
 
-/**
- * The controls to keep across a window in which there is no agent to publish any.
- *
- * The daemon empties `agentConfig` the moment the agent goes — "the controls
- * belong to the live agent, so they go with it" — and a session restored from
- * disk starts empty for the same reason. Both are right about the *daemon*: those
- * describe what an agent will accept right now. What they leave behind on screen
- * is a composer whose whole row of controls blinks out of existence for the
- * length of a restart, which is every deploy, every auto-resume, and now every
- * time somebody changes ultracode.
- *
- * **The live agent always wins, including when it publishes nothing**, which is
- * the arm that does the work: without `hasLiveAgent` this could not tell an agent
- * that genuinely has no controls from a session that has no agent, and would pin
- * a dead set of chips on a running session for ever.
- *
- * Not recovered from the transcript's `agent_config` event, which is the tempting
- * source: that copy is pre-`snapshotConfig`, so it is undeduped and carries none
- * of the daemon's own additions. The rule here is the one the config bar already
- * lives by — state comes from the snapshot, only prose comes from the log.
- */
+/** The live agent always wins, even publishing nothing; the held set shows only while no agent is live. */
 export function holdConfig(
   held: AgentConfig | undefined,
   session: Pick<SessionSnapshot, "status" | "agentConfig">,
 ): AgentConfig | undefined {
   const live = session.agentConfig;
   if ((live?.options.length ?? 0) > 0) {
-    /*
-     * Merged by id rather than replaced, which is the second thing this memory
-     * is for. An agent drops a control when the *model* stops offering it —
-     * measured: claude builds the effort list from the current model's
-     * `supportedEffortLevels`, so choosing Haiku deletes the effort option
-     * outright — and a strip that simply loses a button leaves the row a
-     * different shape than it was a moment ago, with nothing saying why. Keeping
-     * the last version of every control ever seen is what lets `drawnControls`
-     * draw the slot and mark it unavailable.
-     *
-     * Live always wins for a control that is still there; order follows the live
-     * set, so a control the agent has stopped publishing sits after the ones it
-     * still does rather than holding a place in the middle.
-     */
+    // Merged by id: a control the model dropped (claude's effort list follows `supportedEffortLevels`) is kept and drawn unavailable.
     const byId = new Map((live?.options ?? []).map((option) => [option.id, option]));
     const dropped = (held?.options ?? []).filter((option) => !byId.has(option.id));
     if (dropped.length === 0) return live;
@@ -867,147 +270,21 @@ export function holdConfig(
   return held;
 }
 
-/**
- * The parked permissions this client holds a **whole-record** copy of.
- *
- * Pulled out of {@link unreduceSnapshot} and named, because it is the whole of
- * how that function tells the daemon's ingest clamp from the socket frame's
- * ladder, and because being able to say *which* rows is what made the property
- * checkable at all.
- *
- * `reduced` absent means the snapshot *is* the whole record — the 4s poll,
- * `GET /sessions/:id`, or a socket frame that fitted and was therefore
- * byte-identical to what the daemon built — so every row on one qualifies, and a
- * `{truncated}` stand-in on such a row can only be the ingest clamp.
- *
- * `reduced` present means the snapshot came out of {@link unreduceSnapshot},
- * which wrote the set it had.
- *
- * ⚠ **`?? []` is the floor and it is deliberately the pessimistic one.** It is
- * reached by a `reduced` this client did not write — a daemon frame stored by
- * some path that does not merge, or a build older than the field — and it costs
- * the *recoverable* sentence, never a false claim of permanence.
- */
 function onRecordPermissions(held: SessionSnapshot): Set<string> {
   if (held.reduced === undefined) return new Set(held.pendingPermissions.map((row) => row.permissionId));
   return new Set(held.reduced.onRecord ?? []);
 }
 
-/**
- * A snapshot frame the daemon's ladder had to cut, put back together from the row
- * this client already holds.
- *
- * ⚠ **The poll's snapshot and the socket's snapshot are written into the same
- * `row.snapshot`, and only one of the two is the whole record.** `GET /sessions`
- * serves every parked request with its payloads; a `hello`/`snapshot` frame past
- * the daemon's `CONTROL_MAX_BYTES` is a *lossy projection* of it —
- * `fitSnapshotFrame`'s first rung replaces every surviving permission's
- * `rawInput` and `content` with the `{truncated, bytes}` stand-in, and its second
- * halves the two parked lists until the frame fits. Writing that over a fuller
- * row is how the approval count, `SessionView`'s *more waiting* line and
- * `PermissionCard`'s *"Part of this request was too large to keep"* banner came
- * to alternate twice a poll interval, each flip re-arming the effect that fires
- * `store.loadAll`. `wire.ts`'s `waitingCount` learned to read `reduced` and that
- * fixed the count; this is the other half, and without it the rows and the
- * payloads still alternate.
- *
- * **Absent means whole**, so an ordinary frame and an older daemon's frame take
- * the first line out of here and nothing below runs for them. The contract when
- * it is present:
- *
- *  - **A frame carrying `reduced` may not shrink either parked list.** Rows are
- *    topped up from the held record, capped at `reduced.pendingPermissions` /
- *    `reduced.pendingElicitations`, which are the daemon's own **true** lengths
- *    at the moment the frame was built.
- *  - **A stand-in never overwrites a payload this client already has.** Where the
- *    held row carries the real `rawInput` or `content`, it survives the frame.
- *
- * ⚠ **The top-up is bounded by `raisedAt` and that bound is the whole of its
- * safety.** The ladder cuts a *prefix* — both lists are `[...map.values()]` in
- * insertion order and `raisedAt` is stamped at insertion — so the frame is
- * authoritative for everything up to its last row and silent only past it. A held
- * row inside that range and absent from the frame was **answered**, and putting
- * it back would park a card over a request that is already settled, which is a
- * far worse failure than under-counting. So only held rows strictly newer than
- * the last row the frame carried are candidates. A frame carrying no rows at all
- * cannot happen — the halving rung floors at one each (`while (keep > 1)`) — and
- * is written as "every held row is a candidate" rather than left to `-Infinity`
- * by accident.
- *
- * **`reduced.blobs` is rewritten rather than carried through, and that is what
- * keeps the card's sentence honest.** A `{truncated}` blob has two possible
- * origins and they want opposite sentences: the daemon's own 8 KiB ingest clamp
- * (`MAX_PERMISSION_BLOB_BYTES`), which is on the HTTP record too and is therefore
- * the honest *"too large to keep"*, and this frame's ladder, which is not — the
- * record has it whole.
- *
- * ⚠ **Nothing on the wire separates the two, the `bytes` count included.** Both
- * are `clampBlob`'s stand-in. The ladder runs `clampBlob(pending.rawInput, 0)`
- * over a value the ingest clamp has *already* replaced, so an ingest-clamped row
- * reaches this client as a stand-in whose `bytes` is the size of the previous
- * stand-in — around thirty — which is exactly what the ladder makes of a
- * genuinely small payload. So the origin is not read off the row; it is
- * reconstructed from where this client has seen the row before, which is what
- * {@link onRecordPermissions} answers.
- *
- * **The discriminator is a per-row fact, and it is carried forward on
- * `reduced.onRecord`.** A snapshot with **no** `reduced` is the whole record —
- * that field's own contract — so every permission on one has been seen off the
- * record, and a stand-in on such a row can only be the ingest clamp. A reduced
- * frame teaches this client nothing new about any row, so the merge carries the
- * previous set forward, narrowed to the rows still parked. `blobs` leaves here
- * meaning: **at least one permission on this snapshot carries a stand-in on a row
- * this client has no record copy of.**
- *
- * ⚠ **The set has to be carried rather than re-derived from `held`, and that is
- * the defect this replaced.** It asked whether the row was in
- * `held.pendingPermissions` at all — but `held` is the row a *previous* merge
- * wrote, so a row first seen on a reduced frame counted as held by the very next
- * reduced frame. Measured by driving this function twice over two identical
- * reduced frames: `blobs` true, then false, with the same input and the payload
- * still only on the machine — so the card swapped its alternation for the
- * *permanent* sentence about something `GET /sessions/:id` still held whole. Two
- * frames land between two polls routinely, snapshot frames being watch-driven,
- * and `setSessionMeta` re-folds a row's own snapshot through `onSnapshot`, so
- * pinning or dragging a session was enough to trigger it on the spot.
- *
- * ⚠ **This is a reconstruction of a fact the daemon holds and does not send.**
- * `fitSnapshotFrame` knows which stand-ins it created and there is no field on the
- * frame saying so; until there is, what this cannot decide is a row this client
- * has never had a record copy of. Such a row is reported as still fetchable,
- * which is the conservative direction — the poll is about to settle it — and is
- * wrong for exactly one case, an *ingest-clamped* request raised since the last
- * poll, for as long as it takes that poll to land.
- *
- * ⚠ It is a property of the *snapshot* and not of one request, and
- * `PermissionCard` reads it for the single request it is drawing. With a mixture
- * — one row with no record copy beside an ingest-clamped one — every card on that
- * session takes the "not fetched yet" sentence until the poll lands. That is the
- * conservative direction on purpose: the sentence it replaces claims permanence
- * about something a poll is about to fix.
- */
+/** Never shrinks a parked list or lets a stand-in replace a held payload; tops up only rows newer than the frame's last. */
 export function unreduceSnapshot(next: SessionSnapshot, held: SessionSnapshot | undefined): SessionSnapshot {
   const reduced = next.reduced;
-  // The ordinary path, and it is the overwhelming majority of frames: nothing was
-  // cut, so there is nothing to put back and the frame is the answer.
   if (reduced === undefined) return next;
-  // Nothing held, or held for some other session — a row keyed by machine and id
-  // cannot normally disagree, and a merge across two sessions would be the worst
-  // possible way to find out that it had.
   if (held === undefined || held.id !== next.id) return next;
 
   const heldPermissions = new Map(held.pendingPermissions.map((row) => [row.permissionId, row]));
   const onFrame = new Set(next.pendingPermissions.map((row) => row.permissionId));
   const onRecord = onRecordPermissions(held);
 
-  /*
-   * `null`/`undefined` is not a payload and neither is a stand-in, so neither may
-   * be promoted over the frame's copy. `clampBlob` returns a nullish value
-   * unchanged — "jsonSize of any non-nullish value is at least 1, so the bound
-   * always bites" — which is why a held `null` beside a frame stand-in would be a
-   * contradiction rather than a recovery, and is refused here instead of being
-   * reasoned about at the call site.
-   */
   const whole = (value: unknown): boolean => value !== null && value !== undefined && !isTruncationMarker(value);
 
   const repaired: PendingPermissionSnapshot[] = next.pendingPermissions.map((pending) => {
@@ -1042,19 +319,8 @@ export function unreduceSnapshot(next: SessionSnapshot, held: SessionSnapshot | 
     ...next,
     pendingPermissions: permissions,
     pendingElicitations: questions,
-    /*
-     * The counts stay the daemon's, because they are its claim about a list it
-     * holds and this client's top-up can only ever reach what it happened to have
-     * seen. `waitingCount`'s `Math.max` is then a no-op wherever the top-up was
-     * complete and still the honest floor wherever it was not.
-     */
     reduced: {
       ...reduced,
-      /*
-       * Narrowed to the rows still parked, which is what bounds it: a permission
-       * id is minted once and an answered row never comes back, so the set
-       * shrinks with the list instead of growing for the life of the session.
-       */
       onRecord: permissions.map((row) => row.permissionId).filter((id) => onRecord.has(id)),
       blobs:
         reduced.blobs &&
@@ -1078,191 +344,50 @@ export function commandsPlan(
   return "fetch";
 }
 
-/**
- * One session's slash commands, and how many the daemon had to cut.
- *
- * The pair travels together rather than the list alone, because `dropped` is the
- * whole reason the daemon counts instead of silently trimming — a picker offering
- * less than the agent supports, with nothing saying so, is the failure both
- * `AgentCommands` in `events.ts` and `toCommands` in `session.ts` name by hand.
- */
 export interface AgentCommandList {
   commands: readonly AgentCommand[];
   dropped: number;
 }
 
-/** How often the setup flow asks the host whether the daemon is up yet. */
 const SETUP_POLL_MS = 1_000;
 
-/**
- * How long a daemon is given to enroll before the screen stops promising it will.
- *
- * ⚠ **Derived, not guessed — and it was a guess until it was measured.** On a
- * 2026 MacBook, with the bundled runtime and a spawn matching the supervisor's:
- * the daemon is listening 0.311 s after launch on a cold `tsx` cache and 0.20 s
- * warm, answering `/health` ~0.02 s later. Its own startup is therefore noise.
- * What can actually take time is the one control-plane round trip, and `enroll()`
- * bounds that itself at 15 s before giving up — so nothing here can legitimately
- * run longer than that plus a start. The rest is margin for a cold page cache,
- * which is unmeasured.
- */
 const SETUP_SETTLE_MS = 30_000;
 
-/** How often it looks after {@link SETUP_SETTLE_MS} has passed and it is still up in the air. */
 const SETUP_SLOW_POLL_MS = 5_000;
 
-/**
- * When the screen stops watching altogether.
- *
- * ⚠ **There is a slow phase because stopping at the fast deadline was a wrong
- * answer rather than a late one**: a daemon that came up a second afterwards left
- * the notice saying it had failed, with nothing still watching to take that back.
- */
 const SETUP_GIVE_UP_MS = 5 * 60_000;
 
-/**
- * Said when this server's own env file on this computer names another server, or
- * cannot be read.
- *
- * ⚠ **Not "the settings on this computer" any more, and the old sentence was the
- * bug.** It was written when `~/.reemoat` was the only slot, so a Mac whose
- * launchd daemon served one server told somebody signing in to a second one to
- * move `~/.reemoat/daemon.env` aside — which strands the first server's database
- * rather than setting anything up. Every server has a folder of its own now
- * (Q7.148), so the only file this can be about is one in *this* server's folder
- * that somebody edited by hand, and moving that folder aside is the remedy that
- * costs nobody else anything.
- */
 const FOREIGN_ENV_DETAIL =
   "The daemon settings Reemoat keeps on this computer for this server name a different server, or could not be read, " +
   "so they were left alone. Moving this server's folder in ~/.reemoat/servers aside lets Reemoat set this computer up here again.";
 
-/**
- * Said when a daemon for this server is running here as a machine this account cannot see.
- *
- * ⚠ **This used to be silence**, and silence here is a computer that never becomes
- * a machine with nothing saying why. When the machine is in this account's list,
- * adopting it without a word is right; when it is not, this account cannot reach
- * it and must not start a second daemon over its database either.
- *
- * ⚠ **Rarer since every account became a machine of its own, and what still
- * reaches it changed.** Each account on a server now has a daemon root of its own
- * — the first one on a server keeps the per-server root, every other one gets
- * `servers/<server>@<userId>` — and ownership of a root is recorded rather than
- * inferred, so a sign-out no longer hands one account's running child to the next
- * account to sign in, and removing an account stops its daemon (Q7.149). Two
- * statuses still reach this:
- *
- *   - `foreign` in the per-server root: a daemon this app did not start —
- *     `deploy/install.sh`'s, or one run by hand — enrolled as a machine this
- *     account cannot see. `install.sh` knows nothing of accounts and never writes to
- *     an `@<userId>` root, so this is its territory alone.
- *   - `running` where the root's ownership was attributed to the wrong account:
- *     the first launch after this computer began to hold accounts, where the root
- *     was enrolled by somebody other than the person the kept sign-in turned out to
- *     be. The host moves a root only on proof, so this is the case proof could not
- *     yet be had for.
- *
- * ⚠ **The first sentence is quoted elsewhere and is kept word for word**; only the
- * remedy moved, from "sign in with the account that set it up" — which on this
- * computer now means *switch to it, or add it* — to exactly that.
- *
- * ⚠ **Never for a `stranger`** — a daemon that says it enrolled with another
- * control plane. The legacy root is shared by every daemon started without
- * `REEMOAT_HOME`, so the one announced there can be another fleet's, and "for this
- * server" plus a remedy about this server's accounts would both be false.
- */
+/** Never for a `stranger`; the first sentence is quoted in docs/NATIVE.md (Q7.149). */
 const FOREIGN_DAEMON_DETAIL =
   "A Reemoat daemon for this server is already running on this computer, as a machine this account cannot see, " +
   "so Reemoat left it alone. The account that set it up can use it — switch to it, or add it, from the menu — " +
   "or its owner can share it with you.";
 
-/** Said when another daemon holds this server's root on this computer and ours could not start. */
 const ANOTHER_DAEMON_DETAIL =
   "Another Reemoat daemon for this server is already running on this computer, so the one Reemoat started could not. " +
   "It is reachable, but it belongs to a different machine — stop it, or use that machine instead.";
 
-/** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
 const SLOW_START_DETAIL = "The daemon on this computer has not finished starting yet.";
 
-/**
- * Where the evidence is, appended to every failure that has any.
- *
- * ⚠ **The half of the 2026-09-15 change that keeps it from being a regression.**
- * The rail used to carry the daemon's own output; taking it away and saying
- * nothing would re-create exactly the failure `SetupNotice` was added to prevent —
- * a cause sitting in a string nothing renders, which cost a whole round trip to
- * diagnose on the first real run. So the listing moved and a pointer to it stayed.
- *
- * One string rather than a clause per arm: three arms need it, and three copies of
- * a screen's name is three things to forget when the screen is renamed.
- */
 const LOGS_POINTER = "Settings → Logs has what it printed.";
 
-/** Said when a daemon this app started came up and then stopped. */
 const DAEMON_STOPPED_DETAIL = `The daemon Reemoat started on this computer stopped. ${LOGS_POINTER}`;
 
-/**
- * {@link ANOTHER_DAEMON_DETAIL}, when the daemon holding the root is a `stranger` —
- * one that says it enrolled with a different control plane.
- *
- * Its own sentence rather than a neutral rewording of that one, because both of
- * that one's claims are false here: another fleet's machine is not one this
- * account can use instead, and nothing says it is what stopped ours. The legacy
- * root keeps its port, so it may be, and that is as far as the evidence goes — so
- * this says what is known, points at the log, which has the reason, and offers
- * the other daemon only as a *may*.
- */
 const STRANGER_DAEMON_DETAIL =
   `${DAEMON_STOPPED_DETAIL} ` +
   "A Reemoat daemon for a different server is running here too, and stopping it may let this one start.";
 
-/**
- * Said when it is neither up nor gone after {@link SETUP_GIVE_UP_MS}.
- *
- * Distinct from {@link SLOW_START_DETAIL}, which is drawn while something is still
- * watching. This is drawn by the arm that has stopped watching, so it may not say
- * "not finished yet" — nothing is going to come back and take that sentence away.
- */
 const GAVE_UP_DETAIL = `The daemon on this computer did not finish starting. ${LOGS_POINTER}`;
 
-/**
- * A control-plane label for this computer, from whatever name it has.
- *
- * ⚠ **A second copy of somebody else's validation rule, and it is deliberately the
- * loose half.** `MACHINE_LABEL` on the control plane is
- * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, and this does not re-implement it — it
- * *shapes toward* it and lets the server refuse. The difference matters: a strict
- * copy here would drift the day that regex changes and would start refusing names
- * the server accepts, from a client that cannot see why. What this guarantees is
- * only that a plausible name goes out rather than `Rends’s MacBook Pro`.
- *
- * `null` in, `"computer"` out — a name is required and there is nothing to build
- * one from. It will collide on the second such machine, which is what the caller's
- * one retry is for.
- *
- * ⚠ **`.slice(0, 64)` is the last step, which is what makes the caller's retry
- * suffix a trap.** `machineLabelFor(`${sixtyFourChars}-2`)` answers the original
- * sixty-four characters, so a retry that appends and re-shapes re-posts the name
- * that just collided. {@link AppStore.createForThisComputer} slices to 61 first,
- * and `webcheck` pins the boundary.
- *
- * ⚠ **It is not the only copy of this rule in the tree, and the other one is
- * shell.** `deploy/bootstrap.sh`'s `sanitize_label` names a machine after
- * `uname -n` for the one-line installer, and the two do not agree character for
- * character: this strips a trailing `.local` upstream (`commands.rs`'s
- * `host_name`), `uname -n` does not, and only this one collapses runs of hyphens.
- * The same computer set up by the app and by the installer can therefore be
- * spelled two ways — which is a *collision* rather than a correctness bug, since
- * both are valid labels and the second is refused with `409 machine_exists`.
- */
+/** Shapes toward the control plane's `MACHINE_LABEL` and lets it refuse; slices to 64 last. */
 export function machineLabelFor(hostName: string | null): string {
   const shaped = (hostName ?? "")
     .normalize("NFKD")
-    // Anything outside the label alphabet becomes a hyphen rather than vanishing,
-    // so `Ann's Mac` and `Anns Mac` stay different machines.
     .replace(/[^A-Za-z0-9._-]+/g, "-")
-    // A label must start with a letter or a digit.
     .replace(/^[^A-Za-z0-9]+/, "")
     .replace(/-{2,}/g, "-")
     .replace(/[-._]+$/, "")
@@ -1270,38 +395,7 @@ export function machineLabelFor(hostName: string | null): string {
   return shaped.length > 0 ? shaped : "computer";
 }
 
-/**
- * Which machine this computer is, once the announce file has answered again.
- *
- * `known` is what the store holds — the claim it was seeded with, or an earlier
- * answer — `answer` is what `localDaemon()` just said, and `held` whether this
- * account has a machine by that id. Three rules, each a way the rail used to
- * rename and reorder itself with nobody touching it:
- *
- *   1. **Nothing found keeps what is known.** `host_local_daemon` answers only a
- *      daemon that passes `/health` inside its probe, so a daemon restarting, or
- *      busy for a quarter of a second at a wake, read as *no daemon here* — and
- *      `local` went back to the host name, in name order, until the next wake.
- *      Which computer this is does not change because a socket was slow; that is
- *      Q7.139's own line that identity and reachability are two questions.
- *   2. **A different id replaces it — where this account holds that machine.**
- *      The live read is the authority when it names one of ours: it is the daemon
- *      running here now, and a claim can lag it.
- *   3. **An id this account does not hold never displaces one it might.** The
- *      host answers the first live daemon across *two* roots, this server's and
- *      then `~/.reemoat`, and the second can be a daemon for another fleet — so
- *      on a computer carrying one, whenever this server's own daemon is down
- *      (every cold launch, since the app stops it at quit) the answer is a machine
- *      no row here has. Taken, it would move `local` off this computer's row onto
- *      none. With nothing known it is taken anyway: it matches no row, which is
- *      exactly what `null` draws.
- *
- * ⚠ **So nothing ever clears it, and that needs no clause of its own.** A stale
- * id — a machine revoked, or another fleet's — matches no row, so it draws what
- * `null` would. An id names a machine rather than an account, so a sign-in on
- * the same page after an expiry inherits an answer that is still true; and a
- * server change reloads the page, which is the only way a different fleet begins.
- */
+/** Identity is not reachability (Q7.139): a missed probe never clears it, and an unheld machine never displaces one. */
 export function localMachineAfter(
   known: MachineId | null,
   answer: MachineId | null,
@@ -1312,211 +406,31 @@ export function localMachineAfter(
   return known;
 }
 
-/**
- * How far setting this computer up has got, for the one screen that draws it.
- *
- * Three states and no more: it is running, it failed, or there is nothing to say.
- *
- * ⚠ **`said` is a sentence and never a listing — owner's call, 2026-09-15.** It
- * was `detail`, and what it carried was a *mixture*: four arms put an
- * app-authored remedy in it, and three put the daemon's own last two hundred
- * lines, which the rail then drew verbatim in a `<pre>`. Program output in the
- * one place somebody is reading prose. The output moved to Settings → Logs
- * ({@link LogsSection}) and what is left here is one sentence per failure, each
- * of which names where the evidence went when there is any.
- *
- * ⚠ **The sentence may still be multi-line, and that is not a listing.** One
- * producer — the host's `managed_unit_detail` — ends with the command that clears
- * the state it describes, indented on its own line, because a remedy somebody
- * retypes is useless reflowed into a paragraph. That is a *remedy*, bounded at two
- * lines and written by this fleet; the rule being kept is that a ring of somebody
- * else's output does not ride this field.
- */
 export interface SetupState {
   step: "creating" | "starting" | "failed";
   said: string | null;
 }
 
 export interface AppState {
-  /**
-   * `"signed_out"` rather than `"needs_key"`: it names the state, and the remedy
-   * is no longer a key somebody pastes.
-   */
   phase: "signed_out" | "loading" | "ready";
-  /**
-   * What the native shell answered about itself, or `null`.
-   *
-   * **`null` in a browser and for ever**, which is what makes the server picker
-   * structurally unreachable in the web build: there is no flag to set, no route to
-   * type and no env var to flip — the field is non-null only where a Tauri global
-   * was injected before the first script ran.
-   *
-   * Read where the shell changes what is drawn, and nowhere it changes a rule:
-   * `App.tsx`'s picker arm, the drawer's account panel (a browser keeps its plain
-   * head), and the setup flow that makes this computer a machine. **It is this
-   * window's account's**, re-read from `nativeBoot()` at every bootstrap rather
-   * than kept from the first answer — a sign-in in this document binds the window
-   * to an account, and the payload `hostReady` settled with is from before that.
-   */
   host: NativeBoot | null;
-  /**
-   * Whether somebody has asked to change which control plane this talks to.
-   *
-   * **`false` in a browser for ever**, exactly as {@link AppState.host} is `null`
-   * there: the server *is* the origin that served the page, so there is nothing
-   * to change and no control that offers to.
-   *
-   * State rather than a route, which is `ChooseServer`'s whole argument — a
-   * `Route` arm would be parsed by the web build too, offering a screen that can
-   * do nothing there, and would take a silent new arm in three switches. It lives
-   * here rather than in the component because the sign-in screen is where it is
-   * set and `App.tsx` is where it is read.
-   *
-   * ⚠ **One entrance now, where there were two.** Settings → Account's *Change*
-   * is gone: an account is a server and a person, so repointing a signed-in window
-   * would quietly make it a different account, and another server is another
-   * account, added from the menu (Q3.643). What is left is ‹ Server on the sign-in
-   * screen, drawn only on a window nobody has signed in to yet — the one kind whose
-   * server may still move, and the only kind the host lets move (Q5.120).
-   */
   pickingServer: boolean;
-  /**
-   * Which machine, if any, is the computer this app is running on.
-   *
-   * ⚠ **Drawn, never stored.** The machine's control-plane label is the ordinary
-   * host name, because that row is read by a phone, by a second computer and by
-   * anybody holding a grant — and "local" is false on every one of those screens.
-   * Which row you are *sitting at* is true of exactly one client, so it is
-   * answered here, per client, from the announce file the daemon on this computer
-   * wrote. {@link AppStore.createForThisComputer} carries the reversal that made
-   * this field necessary.
-   *
-   * **Six readers, one rule each.** Settings → Machines marks the row `this
-   * device`; `sessionGroups` calls it `local` (`machineDisplayName`) and puts it
-   * first until somebody drags it (`orderMachines`); a row under All and a
-   * session's header name it through `machineDisplayName` too; New session draws
-   * this computer's own folder panel for it. `sessionGroups` keys its memo on this
-   * field, since it is patched on its own and replaces neither `sessions` nor
-   * `machines`.
-   *
-   * ⚠ **Seeded, then sticky — because every one of those readers draws a *name*
-   * and a *place*, and both used to move by themselves.** Seeded at launch from
-   * {@link NativeBoot.claimed}, the machine this app created for this server,
-   * which needs no daemon: the app's own is stopped at quit, so the announce file
-   * is gone on every cold launch. Then replaced by what the announce file says
-   * ({@link localMachineAfter}), and never cleared by a read that finds nothing —
-   * a `/health` that misses its probe is a daemon restarting, not a computer that
-   * stopped being this one. Only a different id replaces it. A stale id costs
-   * nothing: one this account does not hold matches no row.
-   *
-   * ⚠ **The announce file rather than `route.kind === "local"`.** The route is a
-   * preference `setLocalOff` can switch off, so a badge keyed on it would vanish
-   * from the machine somebody is sitting at the moment they chose the relay.
-   * Identity and reachability are not the same read.
-   *
-   * **`null` in a browser and for ever**, the same structurally dead arm as
-   * {@link AppState.host}: `localDaemon()` answers `null` with no shell.
-   */
+  /** Drawn, never stored: seeded from `NativeBoot.claimed`, then sticky. Null in a browser. */
   localMachineId: MachineId | null;
   me: Me | null;
   machines: MachineState[];
-  /**
-   * Each machine's browse roots, for {@link displayCwd}.
-   *
-   * Absent until that machine's first listing lands, and empty for one that could
-   * not answer — both of which draw a path exactly as it was drawn before.
-   */
   rootsByMachine: ReadonlyMap<MachineId, readonly string[]>;
-  /**
-   * What is installed on each machine, or an empty list for one that has not
-   * answered — including a daemon too old to have the route at all.
-   *
-   * Held here rather than fetched by the screens that draw it, because three of
-   * them do: the machine's settings screen, the launcher in the rail's footer,
-   * and a session's menu. Three independent fetches of the same list would mean
-   * three different answers on screen at once whenever one of them was stale.
-   */
   pluginsByMachine: ReadonlyMap<MachineId, readonly PluginSummary[]>;
   sessions: SessionRow[];
-  /**
-   * The same rows, keyed.
-   *
-   * `sessions` is for rendering a list; this is for answering "the row for this
-   * key", which `SessionView` asks three times per render and which was three
-   * linear scans over an array that holds every session from every machine.
-   */
   rowsByKey: ReadonlyMap<SessionKey, SessionRow>;
-  /**
-   * Machines whose session list has landed at least once this page load.
-   *
-   * The difference between "this session is not on that daemon" and "we have not
-   * asked yet", which nothing could tell apart before: `SessionView` reads
-   * `rowsByKey` and, finding nothing, said the session was missing — on a cold
-   * reload straight onto a session URL that is the *ordinary* first second, since
-   * `bootstrap` promotes to `phase: "ready"` on the machine list and the session
-   * list is three round trips further on (token, route probe, `GET /sessions`).
-   *
-   * A set rather than a field on `MachineState` because it is a fact about what
-   * *this store* has fetched, not about the machine — `MachineConnection` would
-   * have to be told, and it is the wrong owner. Dropped with the machine in
-   * `dropMachine`, so a re-granted machine is unknown again rather than
-   * confidently empty.
-   */
+  /** Tells not-on-that-daemon from not-asked-yet. */
   listed: ReadonlySet<MachineId>;
   transcripts: ReadonlyMap<SessionKey, Transcript>;
-  /**
-   * What each session's agent publishes as slash commands.
-   *
-   * Fetched per session rather than carried on the snapshot, and only for a
-   * session somebody has opened — see `SessionSnapshot.commandsRevision`. A
-   * missing entry means "not fetched", which the composer draws exactly as it
-   * draws an empty list: no menu.
-   *
-   * `dropped` is carried through rather than discarded on arrival. The daemon
-   * counts it precisely so a picker does not silently offer less than the agent
-   * supports (`events.ts`'s `AgentCommands`, `session.ts`'s `toCommands`), and a
-   * client that reads only `commands` makes that counter prove nothing.
-   */
   commands: ReadonlyMap<SessionKey, AgentCommandList>;
-  /** The control plane itself failed. Not fatal while cached tokens are alive. */
-  /**
-   * Setting this computer up as a machine, when the app is the thing doing it.
-   *
-   * `null` everywhere else and for ever — in a browser, on a computer that already
-   * has a daemon, and once one is running. It is a fact about *what this store has
-   * done*, which is why it lives here rather than on a `MachineState`: there is no
-   * machine yet to hang it on, and that is precisely the state it describes.
-   *
-   * ⚠ **Deliberately not `cpError`.** A control-plane outage is the app being
-   * unusable; failing to set a machine up is one affordance not working while
-   * everything else — other machines, other sessions — is fine. Writing this into
-   * `cpError` would put the whole app on the spinner for it, which is the failure
-   * `bootstrap`'s own catch arm already argues against at length.
-   */
+  /** Never written to `cpError`, which would take over the whole app. */
   setup: SetupState | null;
   cpError: string | null;
-  /**
-   * What this instance allows, or `null` while it is unknown.
-   *
-   * `null` is a first-class state rather than a loading placeholder: a control
-   * plane rolled back past the release that added `/v1/instance` answers 404,
-   * and that is **not an outage** and must not draw one. `gate.ts`'s predicates
-   * each answer for `null`, and they answer it in opposite directions on
-   * purpose — see `gateOffer` and `adminMayInvite`.
-   */
   config: InstanceConfig | null;
-  /**
-   * Why the app signed you out while you were using it, or `null`.
-   *
-   * Split out of `cpError`, which it used to share. `cpError` is the amber
-   * "running on tokens already issued" banner `Home` and `AppShell` draw; a dead
-   * credential wrote a completely different sentence into the same field and the
-   * gate read it back. There are three of those sentences — expired, revoked,
-   * disabled — and none of them is a control-plane outage.
-   *
-   * Never set by a sign-in somebody *submitted*: `SignIn` holds that error itself,
-   * beside the field it is about.
-   */
   authError: string | null;
   resuming: boolean;
   lastResumeAt: number | null;
@@ -1536,15 +450,7 @@ const EMPTY_TRANSCRIPT: Transcript = {
 class AppStore implements StreamSink {
   private listeners = new Set<() => void>();
   private snapshot: AppState = {
-    /*
-     * ⚠ **`nativeHydrating()` is what stops a flash of the sign-in form.**
-     *
-     * In the native shell the credential comes out of the OS keyring, which is
-     * async, so at this line there is genuinely no answer yet — and the honest
-     * value for "no answer yet" is the one this app already draws a spinner for.
-     * Without the conjunct every native launch shows the sign-in screen for a frame
-     * and then replaces it, which reads as having been signed out.
-     */
+    // The keyring answer is async, so a native launch starts loading instead of flashing sign-in.
     phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
     setup: null,
     host: null,
@@ -1568,66 +474,23 @@ class AppStore implements StreamSink {
 
   private connections = new Map<MachineId, MachineConnection>();
   private daemons = new Map<MachineId, DaemonClient>();
-  /** See {@link AppState.listed}. */
   private listed = new Set<MachineId>();
   private rows = new Map<SessionKey, SessionRow>();
   private transcripts = new Map<SessionKey, Transcript>();
-  /**
-   * Which *life* of a transcript a history run belongs to.
-   *
-   * `loadingHistory` is a field on the transcript, so the two places that
-   * **replace** a transcript rather than update it — `openSession`'s
-   * `keepHeld: false` and `onGap`'s restart arm — reset the latch to
-   * `EMPTY_TRANSCRIPT`'s `false` under a run that is parked on `fillWindow`, and
-   * both then call `loadAll` on their next line. The guard reads `false`, a
-   * second loop starts, and from there both loops read the same `loadedFrom`
-   * before either writes one: they fetch the same window and prepend it twice.
-   * Measured against this store — a `lagged{backlog}` landing while the open's
-   * own `loadAll` was in flight gave 10 000 held events of which 2 500 were
-   * duplicates, out of seq order.
-   *
-   * So a replacement bumps this, a run captures it, and a run whose generation
-   * has moved abandons what it fetched instead of prepending it onto a
-   * transcript that is not the one it was reading.
-   */
+  /** Bumped when a transcript is replaced; a history run whose generation moved discards its fetch. */
   private transcriptGen = new Map<SessionKey, number>();
   private streams = new Map<SessionKey, SessionStream>();
-  /** Most-recently-viewed last. The LRU that bounds live sockets. */
   private streamOrder: SessionKey[] = [];
   private nextProbeAt = new Map<MachineId, number>();
-  /** Blocked sessions whose context has already been fetched. */
   private primed = new Set<SessionKey>();
-  /**
-   * The command list per session, filed under the revision it was fetched at.
-   *
-   * The revision is what makes this a cache rather than a one-shot: claude
-   * republishes mid-session as skills are discovered, so a client that fetched
-   * once and kept it for ever would be right on kimi and wrong on claude.
-   */
   private commandLists = new Map<SessionKey, { revision: number; commands: AgentCommand[]; dropped: number }>();
   private commandsInFlight = new Set<SessionKey>();
-  /**
-   * A revision that arrived while a fetch was already out, to chase afterwards.
-   *
-   * The in-flight guard drops such a call, and the effect that produced it is
-   * keyed on the revision — so without this the drop is permanent. Newest wins;
-   * there is no queue, because only the latest list is worth having.
-   */
   private commandsWanted = new Map<SessionKey, number>();
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private resumeInFlight: Promise<void> | null = null;
   private resumeQueued = false;
-  /**
-   * Bumped by every resume. Work tagged with an older epoch is discarded when it
-   * returns, so a slow probe from before a network change cannot overwrite the
-   * answer from after it.
-   */
   private epoch = 0;
-
-  /* ---------------------------------------------------------------- *
-   * React glue
-   * ---------------------------------------------------------------- */
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -1636,59 +499,9 @@ class AppStore implements StreamSink {
 
   getSnapshot = (): AppState => this.snapshot;
 
-  /*
-   * Three cached derivations, invalidated by what actually changed.
-   *
-   * `emit` used to rebuild all three unconditionally, and it is called once per
-   * streamed event: a single text delta from one session on one machine therefore
-   * rebuilt the machine list, materialised every session row from every machine
-   * (retention is 200 per machine), and cloned the whole transcripts Map. During a
-   * talking turn that is tens of times a second on a phone, and because each
-   * rebuild produced fresh array identities, every consumer downstream was
-   * invalidated whether or not its own data had moved.
-   *
-   * `null` means "rebuild on next read". `emit()` still invalidates everything, so
-   * every existing caller keeps its exact semantics; the hot paths call
-   * `emitTranscripts()` instead, which is the only thing they actually change.
-   */
-  /**
-   * Where each daemon says its sessions live — `REEMOAT_ROOTS`, one fetch each.
-   *
-   * The prefix `displayCwd` cuts off a working directory, so a pinned row reads
-   * `~/2026-07-tare-reemoat` rather than `…/rends/2026-07-tare-reemoat`. Held per
-   * machine because it is a fact about that host, and here rather than on
-   * `MachineConnection` because it is display state with no bearing on reaching
-   * anything: a machine whose roots never land is drawn exactly as it was before
-   * this existed.
-   *
-   * The **key** is what makes it once-only, so a machine whose `/fs/roots` fails
-   * is not re-asked on every four-second poll: an empty array is written on
-   * failure and the entry then exists. What that costs is a daemon that was
-   * unreachable at exactly the wrong moment keeping absolute paths until the tab
-   * reloads, which is a worse label rather than a wrong one — and the alternative
-   * is a request per machine per poll for a value that cannot change.
-   */
   private readonly rootsByMachine = new Map<MachineId, readonly string[]>();
 
-  /**
-   * Position writes that have not been answered yet, per session.
-   *
-   * The rail is derived from `sessions`, and the four-second poll replaces that
-   * array whole — so without this a row dropped into place springs back under the
-   * finger and lands again when the answer arrives. Applied at **both** places a
-   * row is written, the poll and `onSnapshot`, because a socket frame is as able
-   * to carry the pre-write value as a listing is.
-   *
-   * ⚠ **The overlay lives exactly as long as a request does, and that is the whole
-   * of the concurrency argument.** `MachineAgentsSection` needs two sequence
-   * counters for its strip because it holds a *local list* that a stale answer can
-   * repaint; here there is no second copy — the daemon's snapshot is the row — so
-   * once nothing is in flight the truth is whatever the daemon last said, whether
-   * the last write succeeded or was refused. What makes that sound is that writes
-   * for one session are **chained**: `POST /sessions/:id/meta` assigns rather than
-   * merges, so two in flight over a relay could otherwise be applied either way
-   * round and the loser would be the one this client believed had won.
-   */
+  // Chained per session, because meta assigns rather than merges.
   private readonly metaWrites = new Map<
     SessionKey,
     { patch: { pinned?: boolean; rank?: number | null }; inFlight: number; queue: Promise<unknown> }
@@ -1701,7 +514,6 @@ class AppStore implements StreamSink {
   private transcriptsCache: ReadonlyMap<SessionKey, Transcript> | null = null;
   private commandsCache: ReadonlyMap<SessionKey, AgentCommandList> | null = null;
 
-  /** Everything may have changed. The safe default, and what most callers want. */
   private emit(): void {
     this.machinesCache = null;
     this.sessionsCache = null;
@@ -1712,14 +524,6 @@ class AppStore implements StreamSink {
     this.publish();
   }
 
-  /**
-   * Only a transcript changed — no machine, no session row.
-   *
-   * This is the per-event path. Keeping the machine and session arrays at their
-   * existing identities is the whole point: `Home`'s memoised derivations and the
-   * machine list then do not recompute when a session nobody is looking at emits a
-   * line of text.
-   */
   private emitTranscripts(): void {
     this.transcriptsCache = null;
     this.publish();
@@ -1753,59 +557,14 @@ class AppStore implements StreamSink {
     this.emit();
   }
 
-  /* ---------------------------------------------------------------- *
-   * Bootstrap
-   * ---------------------------------------------------------------- */
-
   async bootstrap(): Promise<void> {
-    /*
-     * **Above the credential check, and that placement is the whole of it.**
-     *
-     * The early return below is exactly the path that leads to `SignIn`, so a
-     * `loadConfig` underneath it would never run for the one screen that needs
-     * it — the signed-out screen decides whether to offer "Create an account"
-     * and "Forgot password?" from this. This is the single most likely line in
-     * the file to be tidied into the wrong place, which is why it is asserted
-     * behaviourally rather than only commented.
-     *
-     * Fire-and-forget: nothing here waits on it, and the screen renders its
-     * links from `null` until it lands.
-     */
+    // Above the credential check: the signed-out screen needs config for its links.
     void this.loadConfig();
 
-    /*
-     * **After `loadConfig` and before the credential check, and both halves of that
-     * placement matter.**
-     *
-     * After, because the ⚠ above is about `loadConfig` being the first statement and
-     * that is still true — and because `loadConfig` is safe to fire before a server
-     * is known: with none chosen the host refuses the call, and this method's own
-     * bare catch is already the right behaviour for that.
-     *
-     * Before, because the early return below is the path that leads to `SignIn`, and
-     * in the shell the credential that decides it has not been read yet. `await`ed
-     * rather than raced: it is one IPC round trip, it is the only thing between a
-     * launch and knowing whether somebody is signed in, and in a browser it is an
-     * already-resolved `null`.
-     */
     const boot = await hostReady;
     if (boot !== null) {
       cp.adoptHydratedCredential(boot.credential);
-      /*
-       * **The live snapshot, never the first answer.** `hostReady` settled once, at
-       * import; a sign-in in this document has since bound the window to an account
-       * (`bindNativeCredential`), and this bootstrap is the one that follows it — so
-       * the account, its name and its device are the snapshot's, not the payload's.
-       */
       this.patch({ host: nativeBoot() ?? boot });
-      /*
-       * **Which computer this is, from the boot payload, before anything asks a
-       * daemon.** The live read below cannot answer on a cold launch — the app
-       * stopped its own daemon at quit and starts it again only after the list is
-       * drawn — so without this the first paint drew this computer under its host
-       * name, in name order, and renamed and moved it once `setUpThisComputer`
-       * had it running. The claim is on disk and needs nothing to be listening.
-       */
       this.seedLocalMachine(boot.claimed);
     }
 
@@ -1818,40 +577,11 @@ class AppStore implements StreamSink {
     try {
       const [me, machines] = await Promise.all([
         cp.me(),
-        /*
-         * **Tolerant of the wall, and only of the wall.**
-         *
-         * An account that owes a password change is refused every route below
-         * THE SECOND LINE, and this listing is one of them. Left to reject, the
-         * `Promise.all` sends the whole bootstrap into the catch below, which
-         * keeps `phase: "loading"` and sets `cpError` — so somebody who simply
-         * has to choose a password sees a spinner and an outage banner instead
-         * of the screen that fixes it.
-         *
-         * Keyed on the code and never the status, `authFailure`'s rule: a bare
-         * `403 forbidden` is `requireAdmin`'s and is a genuine failure here.
-         *
-         * Sequencing `me` first would also work and is worse: it puts a second
-         * round trip on the cold-start path, which `runResume` explicitly argues
-         * against.
-         */
+        // Only the password wall is tolerated, keyed on the code, so the screen that fixes it can draw.
         cp.machines().catch((error: unknown) => {
           if (ApiError.isApiError(error) && error.code === "password_change_required") return [];
           throw error;
         }),
-        /*
-         * **Which computer this is, live, before the first paint of the rail** —
-         * beside the two round trips rather than after them, so it costs no time.
-         * The seed above covers a daemon this app created; this covers one it did
-         * not — an `install.sh` or launchd daemon already up, which carries no
-         * claim — and, read only in `runResume`, that one landed *after*
-         * `phase: "ready"` had drawn it under its host name, in name order. It
-         * never rejects, and a miss leaves the seed where it is
-         * ({@link localMachineAfter}). `runResume` asks again, for a daemon that
-         * starts after the app. What it answers is weighed again once the
-         * listing beside it has landed (`weighLocalMachine`, below), since on a
-         * cold launch "a machine of ours" has no list to mean until then.
-         */
         this.refreshLocalMachine(),
       ]);
       for (const record of machines) {
@@ -1863,7 +593,6 @@ class AppStore implements StreamSink {
           this.connections.set(id, new MachineConnection(record, () => this.emit()));
         }
       }
-      // Machines whose grant was revoked while we were running.
       for (const id of [...this.connections.keys()]) {
         if (!machines.some((m) => m.id === id)) this.dropMachine(id);
       }
@@ -1871,94 +600,17 @@ class AppStore implements StreamSink {
         if (!this.daemons.has(id)) this.daemons.set(id, new DaemonClient(connection));
       }
       this.registryKnown = true;
-      // The live answer again, now that "a machine of ours" has a list to mean.
       this.weighLocalMachine();
       this.patch({ phase: "ready", me, cpError: null, authError: null });
     } catch (error) {
-      /*
-       * `cpFetch` has already cleared the credential and called `signedOut` for a
-       * failure that means one — this is the *arrival* of that same rejection, and
-       * all it has to do is stop.
-       *
-       * It used to be `status === 401 || status === 403`, here, and that test was
-       * correct only because the browser never called an admin route. It does now:
-       * `requireAdmin` answers `403 forbidden` to every non-admin, so under the old
-       * test opening the Users section would have signed a non-admin out of the
-       * whole app. `authFailure` keys on the code for exactly that reason.
-       */
+      // `authFailure` keys on the code: a non-admin's 403 is not a sign-out.
       if (authFailure(error) !== null) return;
-      /*
-       * The control plane is unreachable, and **the app is drawn anyway** — with
-       * the machines it already knows, or none.
-       *
-       * ⚠ **It used to stay on the loading screen when no machine was known**,
-       * which is every cold start: a spinner and a sentence, and no drawer. With
-       * several accounts on one computer that made one server's outage lock
-       * every other account out — the one way to another account is the menu,
-       * and the menu is part of the shell (owner's report, 2026-09-23). So the
-       * outage is a line under the conversation's title and a notice above the
-       * list, never a screen of its own, and `tick` re-lists the registry every
-       * four seconds while no machine is known, whatever the phase. `me` stays
-       * null until then — `visibleSections` fails closed on it — and
-       * `runResume` asks for it the moment the listing answers.
-       */
+      // An outage still draws the app, so the menu reaches other accounts.
       this.patch({ phase: "ready", cpError: describe(error) });
     }
 
-    /*
-     * ⚠ **Here, and the placement is three constraints at once.**
-     *
-     * *After* the `try`, because a throw inside it lands in the catch above, which
-     * sets `cpError` — and a machine failing to set up would then be drawn as the
-     * control plane being unreachable, under every conversation's title. (It used
-     * to put the whole app back on the spinner, before an outage stopped being a
-     * screen of its own.)
-     *
-     * *After* `phase: "ready"`, so the app is usable while this runs. It talks to
-     * the control plane and then waits on a daemon starting; none of that is
-     * something to hold a first paint behind.
-     *
-     * *Before* `resume("bootstrap")`, so a machine created here is in the registry
-     * by the time the first resume runs rather than four seconds later.
-     */
-    /*
-     * Ask the host to prove whose account this window is, where it owes a proof.
-     *
-     * ⚠ **First of the three, and the order is the host's, not a preference.**
-     * Confirming a kept sign-in is what moves its device id and key under the
-     * account it turns out to be, and records whose the daemon root is — so a
-     * registration before it would describe the device of nobody in particular,
-     * and a setup before it would start a database whose owner nobody has proved.
-     * After the `try`, for `beginSetUp`'s reason below: it is bookkeeping, and it
-     * never touches `phase`.
-     *
-     * `true` means this document is leaving — the account it held turned out to
-     * be one already added here — and nothing below may run for a window that is
-     * about to be closed or reloaded onto another account.
-     */
+    // Host order: confirm the account, register the device, then set up. True means this document is leaving.
     if (await this.confirmAccount()) return;
-    /*
-     * Make sure this installation is registered, if it is one.
-     *
-     * ⚠ **After the `try`, for `beginSetUp`'s reason verbatim.** Inside it, any
-     * refusal — a full device cap, a network blip, a shell that could not
-     * describe itself — throws into the catch above, which with no connections
-     * forces `phase` back to `"loading"`: an account with no machines yet would
-     * get a spinner and an outage banner because a *bookkeeping* call failed.
-     *
-     * ⚠ **And its own catch, which is what makes that placement sufficient.**
-     * `beginSetUp` is awaited and can throw; a rejection here would reach the same
-     * place by a different route.
-     *
-     * ⚠ **This is how every native sign-in is bound now, not only a restored
-     * one.** `login` used to bind a device in the request that signed in; in the
-     * shell that request cannot know which account it is for, so it names none
-     * (its own block says why), and the bootstrap that follows it in the same
-     * document registers here — before `beginSetUp`, `startPolling` and `resume`,
-     * so before anything mints a capability. The same path is still the one for a
-     * session restored from storage, and the retry for a first registration that
-     * failed.
-     */
     await this.ensureDevice();
 
     await this.beginSetUp();
@@ -1967,67 +619,22 @@ class AppStore implements StreamSink {
     await this.resume("bootstrap");
   }
 
-  /**
-   * Register this installation with the control plane, once per sign-in, where it
-   * is not bound to this one.
-   *
-   * ⚠ **"Has an id" stopped being enough.** In the shell a device id is an
-   * account's, known before the sign-in that uses it — so the id alone says which
-   * row to *offer*, and {@link cp.deviceBound} says whether the control plane has
-   * bound that row to the session this page now holds. A browser registers none and
-   * reads as bound, so this is the check it always was there.
-   *
-   * Silent on every failure. What a refusal costs is one unregistered launch: the
-   * app works, the sessions list simply describes this client through its
-   * `User-Agent` rather than by name, and the next start asks again — because the
-   * bound flag stays `false`.
-   *
-   * ⚠ **`password_change_required` is not a failure here and must not become
-   * one.** The route is registered *above* the control plane's second gate so an
-   * admin-created account can reach it — but a control plane that has not been
-   * updated answers 403, and this client has to keep working against one.
-   * `cp.machines()` makes the identical allowance in `bootstrap` above.
-   */
   private async ensureDevice(): Promise<void> {
     if (cp.currentDevice() !== null && cp.deviceBound()) return;
     try {
       await cp.registerDevice();
     } catch {
-      // Bookkeeping. A device is how somebody *recognises* this client in a list;
-      // nothing in the app depends on having one.
+      // Bookkeeping: nothing depends on having a device.
     }
   }
 
-  /**
-   * Have the host prove whose account this window is, where a proof is owed.
-   * `true` when this document is leaving and the bootstrap must stop.
-   *
-   * **The host does the proving; this only says when.** `confirmDue` in `slot.ts`
-   * decides that — a kept sign-in from before this computer held accounts, or a
-   * cached name the control plane no longer gives — and the host then reads the
-   * kept credential itself, asks `GET /v1/me` with it, and moves what it can prove
-   * under the account that answer names (Q1.651). The page passes nothing.
-   *
-   * ⚠ **`existing` is a sign-out, and a narrower one than {@link AppStore.signOut}.**
-   * It means the kept sign-in belongs to an account that was already added on this
-   * computer, in its own window: this window is a second copy of it. So its session
-   * is revoked (`cp.logout`, which also erases the kept credential) and the window
-   * is taken off the list — and the remembered controls are deliberately **not**
-   * swept: `forgetAllConfig` is about leaving a browser to whoever comes next, and
-   * nobody is leaving here; the same person's other window is still open on them.
-   * A refused forget still reloads, onto a sign-in, which is signed out either way.
-   *
-   * Every other failure is swallowed: this is bookkeeping, the window reads as it
-   * did, and the host asks again at the next launch while the proof is still owed.
-   */
+  /** The host proves the account (Q1.651); `existing` signs out but keeps remembered controls. */
   private async confirmAccount(): Promise<boolean> {
     if (!confirmDue(nativeBoot(), this.snapshot.me)) return false;
     let answer: NativeBound;
     try {
       answer = await confirmNativeAccount();
     } catch {
-      // Unreachable control plane, or a host that would not say. Nothing moved,
-      // and `legacy` stays `true` in the next launch's payload, which asks again.
       return false;
     }
     if (answer.outcome === "existing") {
@@ -2040,28 +647,9 @@ class AppStore implements StreamSink {
     return false;
   }
 
-  /**
-   * The setup run in flight, so two bootstraps cannot both buy a machine.
-   *
-   * ⚠ **Released when it settles, never latched.** A flag set once per process
-   * also makes `retry()` a no-op for setup: somebody whose control plane was down
-   * fixes their network, presses Retry, and nothing happens until they restart the
-   * app. Concurrency is the only thing that needs guarding here — the flow is
-   * idempotent against its own result, since a second run sees the machine the
-   * first one made and adopts it.
-   */
+  /** Released on settle, so Retry can run setup again. */
   private settingUp: Promise<void> | null = null;
 
-  /**
-   * Whether `GET /v1/machines` has answered at least once in this document.
-   *
-   * ⚠ **Not `phase === "ready"`, which it used to be read off.** An unreachable
-   * control plane no longer keeps the app on the loading screen — it draws the
-   * shell, because a spinner with no drawer left every other account on this
-   * computer out of reach — so "ready" now includes "the registry has never been
-   * read". What setup needs to know is the second thing: without the list, this
-   * computer's own daemon would be described as a machine this account cannot see.
-   */
   private registryKnown = false;
 
   private beginSetUp(): Promise<void> {
@@ -2071,80 +659,16 @@ class AppStore implements StreamSink {
     return this.settingUp;
   }
 
-  /**
-   * Make this computer a machine, if it is not one and this app can do it.
-   *
-   * **The whole of "the daemon stops being a thing you install".** Everything it
-   * needs already existed separately: the control plane hands back a machine, a
-   * grant and a single-use code in one answer; the host process can write the env
-   * file and start the daemon; and the daemon announces itself when it is up. This
-   * is the twenty lines that put them in a row.
-   *
-   * ⚠ **It never throws and never reports through `cpError`.** Every arm below
-   * either returns or lands in the one catch, which writes `setup` and nothing
-   * else. A person whose account is full, or whose daemon will not start, still has
-   * a working app pointed at every other machine they have.
-   */
+  /** Never throws and never writes `cpError`: every failure lands in `setup`. */
   private async setUpThisComputer(): Promise<void> {
-    /*
-     * `null` in a browser, for ever — this is the native shell's `host_boot`
-     * answer. Gated on the shell rather than on `machines.length === 0` on
-     * purpose: a fleet-size gate would also be true in the browser, where there is
-     * no host to ask and nothing to start.
-     */
     const boot = this.snapshot.host;
     if (boot === null) return;
 
     try {
       const state = await daemonState();
-      // No bridge, or a build carrying no payload: the relay is the only route,
-      // exactly as it was before any of this existed.
       if (state === null || state.status === "unsupported") return;
-      /*
-       * ⚠ **`foreign` is a reason to stop, not a reason to try harder — and it is
-       * no longer a reason to say nothing.** A daemon has announced itself in *this
-       * server's* root that this app did not start — the shell installer's, most
-       * likely. Starting a second would be refused by `claimDaemonLock` against one
-       * database, and creating a second machine for one computer would spend a
-       * quota slot on a machine nobody asked for.
-       *
-       * The host used to read `~/.reemoat` whoever it belonged to, so a daemon for
-       * a *different* server read as this one's `foreign` and the setup returned
-       * here without a word. It reads this server's root now (Q7.148) — this
-       * *account's*, where a second account on one server has a root of its own
-       * (Q7.149) — and there are three answers. A machine in this account's list is adopted silently —
-       * the store already holds a connection to it. One that is not is a daemon
-       * this account cannot reach, and that is a sentence rather than silence.
-       *
-       * ⚠ **And a `stranger` is silence, because this server's root is not always
-       * this server's daemon.** The legacy root is every daemon's that was started
-       * without `REEMOAT_HOME`, and its announcement is last-writer-wins, so the
-       * daemon there can be a `pnpm daemon` from a checkout enrolled with another
-       * control plane. The host compares the control plane the daemon announced
-       * with this server's; one that differs is another fleet's machine, about
-       * which "for this server" and a remedy about this server's accounts would
-       * both be false. Silence, not adoption: the host still says `foreign` rather
-       * than `absent`, so nothing below starts a second daemon over a database
-       * this server's own unit may be holding.
-       *
-       * ⚠ **`running` owes the same answer.** It was reached by a sign-out, which
-       * reloaded the page and left the host and its children up, so the next
-       * account on this server found the child the last one enrolled. That door is
-       * closed now — each account has a root of its own, its ownership is recorded,
-       * and taking an account off this computer stops its daemon (Q7.149) — and
-       * what is left is a root attributed to the wrong account on the first launch
-       * after this computer began to hold accounts, before a proof could be had
-       * ({@link FOREIGN_DAEMON_DETAIL} lists both). Only here, in the first read:
-       * the settle loop's `running` is the happy path, where a control plane that
-       * blinked between the spawn and the poll would draw a failure over a daemon
-       * that came up fine.
-       *
-       * ⚠ **Only once the machine list is in hand.** `bootstrap`'s catch leaves no
-       * connections when the control plane could not be reached, and this runs
-       * anyway, so without the guard somebody's *own* daemon would be described as
-       * a machine they cannot see. The guard reads the snapshot rather than the
-       * error field, which this method may never touch.
-       */
+      // A stranger is silent, our own machine is adopted, anything else is a sentence (Q7.148, Q7.149).
+      // Only with the machine list in hand, or our own daemon would read as one we cannot see.
       if (state.status === "foreign" || state.status === "running") {
         if (state.stranger) return;
         if (this.snapshot.phase !== "ready") return;
@@ -2155,42 +679,11 @@ class AppStore implements StreamSink {
       }
       if (state.status !== "absent" && state.status !== "exited") return;
 
-      /*
-       * ⚠ **A file naming another fleet is reported and left strictly alone.** The
-       * host refuses to write over it too; this arm exists so the refusal is a
-       * sentence on the screen rather than a thrown string, and so no machine is
-       * bought for a computer this app is not going to be able to start.
-       *
-       * ⚠ **Rare now, where it used to be the ordinary case.** The file is this
-       * server's own — `~/.reemoat/daemon.env` only when it names this server, a
-       * folder under `~/.reemoat/servers` otherwise — so another server's daemon
-       * on this computer no longer reaches this arm at all. What does is a file in
-       * this server's folder edited by hand, or one that cannot be read.
-       */
       if (state.config === DAEMON_CONFIG.elsewhere) {
         this.patch({ setup: { step: "failed", said: FOREIGN_ENV_DETAIL } });
         return;
       }
 
-      /*
-       * What this app already spent a machine on, for this server. Re-minting
-       * against it is how a code that expired before the daemon redeemed it gets
-       * replaced without buying a second machine — the window is real, an
-       * enrollment code lives an hour.
-       *
-       * ⚠ **Asked before adoption, and that ordering is the fix.** Measured
-       * 2026-09-15: this branch ran, minted a fresh code, and the host then skipped
-       * the write and started the daemon on the *old* file's dead code — a machine
-       * bought at 15:15:54 and a `409 code_unusable` one second later. A claim
-       * means the file is this app's to refresh; adoption is for a file that is
-       * not.
-       */
-
-      /*
-       * Adoption: something already configured a daemon here for this server —
-       * `deploy/install.sh`, or this app before a restart — and the machine it
-       * enrolled as already exists. Start it and buy nothing.
-       */
       if (state.config === DAEMON_CONFIG.here) {
         this.patch({ setup: { step: "starting", said: null } });
         await startLocalDaemon("", "");
@@ -2198,41 +691,14 @@ class AppStore implements StreamSink {
         return;
       }
 
-      /*
-       * ⚠ **A daemon already running for this server, in a root this app did not
-       * give it — adopted, and nothing bought or re-minted.** The host looks in
-       * this server's root, and that misses a daemon on the legacy database whose
-       * env file lives somewhere else: `REEMOAT_ENV_FILE` under
-       * `deploy/run-daemon.sh`, a checkout's `.env` exported by hand before
-       * `pnpm daemon` — which reads no env file of its own — or a `daemon.env`
-       * moved aside while its daemon ran.
-       * Each answers `absent` above, and without this the flow would buy a second
-       * machine for this computer — or, holding a claim, re-mint and re-enroll the
-       * same machine into a fresh database, rotating the tunnel key out from under
-       * the daemon that is serving it. `localDaemon()` reads this server's
-       * announcement and then `~/.reemoat`'s, and a machine this account already
-       * has a connection to is the proof; another fleet's machine id is not in the
-       * list and falls through. Q7.148.
-       */
+      // A daemon already running for this server: adopt it, never buy or re-mint (Q7.148).
       const here = await localDaemon();
       if (here !== null && this.connections.has(machineId(here.machineId))) return;
 
-      /*
-       * Nothing configured here, but a machine was already bought for this server
-       * — the app was quit between `POST /v1/machines` and the daemon redeeming
-       * its code. Re-mint against it rather than buying a second.
-       */
       if (state.claimed !== null) {
         if ((await this.remintFor(state.claimed)) !== "dead") return;
-        // Only a *refusal* falls through: the machine is gone or switched off, and
-        // re-minting at it for ever would be worse than making a new one.
       }
 
-      /*
-       * The ceiling, asked before the request rather than discovered as a 409.
-       * `mayAddMachine` is the same predicate the three screens that offer this use
-       * — this is a fourth door onto one rule, and it must not invent a second.
-       */
       if (!mayAddMachine(this.snapshot.me)) return;
 
       this.patch({ setup: { step: "creating", said: null } });
@@ -2241,21 +707,7 @@ class AppStore implements StreamSink {
 
       this.patch({ setup: { step: "starting", said: null } });
       await startLocalDaemon(created.enrollment.code, created.machine.id);
-      /*
-       * The row is a fact now — the control plane answered 201 — so this is the
-       * store catching up rather than drawing ahead of an answer. `machinesChanged`
-       * rather than `resume` alone, because creating a machine also changes how
-       * many of them you may have, and that is read off `me`.
-       */
       await this.machinesChanged("machine-added");
-      /*
-       * ⚠ **The machine just created is this computer, and it is said now rather
-       * than when its daemon first answers.** It is in `connections` from the
-       * listing above, so it is weighed like a live answer — replacing a claim for
-       * a machine since revoked, or an unknown. Left to `settleDaemon`, the new tile
-       * was drawn under the host name, in name order, until the child announced
-       * itself — and a drag in that window stored it at its name position.
-       */
       this.weighLocalMachine(machineId(created.machine.id));
       await this.settleDaemon(created.machine.id);
     } catch (error) {
@@ -2263,23 +715,7 @@ class AppStore implements StreamSink {
     }
   }
 
-  /**
-   * Watch the daemon this app just started until it is up, or is not going to be.
-   *
-   * ⚠ **The half that was missing, and its absence is why the failure was
-   * invisible.** `startLocalDaemon` resolving means a process was *spawned*;
-   * everything that can go wrong afterwards — a refused enrollment code, a
-   * certificate the daemon cannot verify, a database a newer daemon migrated —
-   * happens seconds later in a child whose output goes to a ring buffer nobody was
-   * reading. Measured 2026-09-15: the child died in under a second and the screen
-   * said nothing at all, because `setup` had already been cleared.
-   *
-   * One retry, and it is deliberately **not** conditional on what the log says.
-   * Matching `code_unusable` in a tail would be a fourth reader of a string the
-   * daemon is free to reword; re-minting costs no quota and the retry is bounded
-   * at one, so "it exited and we hold a machine" is both simpler and more robust
-   * than any pattern.
-   */
+  /** Retries once on a refused code, never by reading the daemon's log. */
   private async settleDaemon(claim: string | null, retried = false): Promise<void> {
     const slowFrom = Date.now() + SETUP_SETTLE_MS;
     const giveUpAt = Date.now() + SETUP_GIVE_UP_MS;
@@ -2287,77 +723,21 @@ class AppStore implements StreamSink {
     for (;;) {
       await sleep(Date.now() < slowFrom ? SETUP_POLL_MS : SETUP_SLOW_POLL_MS);
       const state = await daemonState();
-      // The bridge went away mid-poll. Nothing true can be said, so say nothing.
       if (state === null) return;
       if (state.status === "running") {
         this.patch({ setup: null });
         await this.machinesChanged("machine-added");
         return;
       }
-      /*
-       * ⚠ **`foreign` is not success here, however much it looks like one.** It
-       * means a daemon is up that this app did not start — so the child it *did*
-       * start is gone, and the machine this flow was setting up never enrolled.
-       * Counting it as success cleared the notice and left somebody with a machine
-       * that exists on the control plane and nowhere else. The concrete way in is
-       * the one measured on this Mac: a leftover `deploy/install.sh` LaunchAgent
-       * holding `reemoat.db`, so our child loses `claimDaemonLock` and dies while
-       * its daemon stays up and announced.
-       *
-       * ⚠ **The LaunchAgent is the macOS instance of this, not the whole of it.**
-       * `managed_unit` in `daemon.rs` looks in `~/.config/systemd/user` as well,
-       * so the same failure arrives on Linux through a user unit — and
-       * `managed_unit_detail` already answers it with `systemctl --user disable
-       * --now`. The sentence below names neither, deliberately.
-       *
-       * ⚠ **A `stranger` gets a sentence of its own, not silence.** Unlike the
-       * first read in `setUpThisComputer`, this one is watching a child this app
-       * started, and that child is gone — which is a failure whoever else is
-       * announced. What changes is the daemon it can blame: another fleet's is not
-       * "for this server" and not a machine to use instead.
-       */
+      // Here `foreign` means our child lost to another daemon and never enrolled.
       if (state.status === "foreign") {
         const said = state.stranger ? STRANGER_DAEMON_DETAIL : ANOTHER_DAEMON_DETAIL;
         this.patch({ setup: { step: "failed", said } });
         return;
       }
       if (state.status === "exited") {
-        /*
-         * ⚠ **A fresh code is the answer to exactly one exit, and guessing cost a
-         * quota slot per failure.** Retrying on the *fact* of an exit was right
-         * while an exit was all the daemon said; it now says which, so `2` — a held
-         * database lock, a missing token, a database a newer daemon migrated —
-         * stops being answered with a mint that re-enrolls the machine over a
-         * problem no code can touch. Still no reading of the log: this is the
-         * process's own status, not its words.
-         */
-        /*
-         * ⚠ **The one failure whose remedy is a switch rather than a wait — on
-         * one platform.** The *classification* is errno-based and therefore
-         * platform-neutral (`localNetworkBlocked`, `src/enroll.ts`), so this exit
-         * arrives on any Unix; the *remedy* below has been measured on exactly
-         * one, which is why `platform.ts` chooses the sentence and only its macOS
-         * arm names an operating system.
-         *
-         * Measured 2026-09-15 on macOS 15: the daemon is a child of this app, so
-         * this app is the responsible process for Local Network Privacy — and
-         * until that is granted, a connect to a control plane on a private subnet
-         * fails with `EHOSTUNREACH` while the same address answers `ping` and
-         * `curl` from a terminal a second later. Nothing in the daemon's own words
-         * says "permission", so the sentence has to come from here — and the errno
-         * and the address, which are the evidence, are in Settings → Logs with
-         * everything else it printed rather than appended to this sentence.
-         */
+        // Only a refused-code exit is something a fresh code can fix.
         if (state.exitCode === DAEMON_EXIT.localNetworkBlocked) {
-          /*
-           * ⚠ **The sentence is chosen by platform because the classifier is
-           * not.** `localNetworkBlocked` in `src/enroll.ts` keys on an errno to a
-           * private address, so this exit arrives on any Unix — while the string
-           * that used to be here named macOS's Local Network Privacy pane
-           * unconditionally, which on a Linux box behind a firewall is a remedy
-           * pointing at a screen that does not exist. `platform.ts` holds all
-           * four arms and the argument for why only one of them names an OS.
-           */
           const said = `${localNetworkDetail(hostPlatform(this.snapshot.host?.platform))} ${LOGS_POINTER}`;
           this.patch({ setup: { step: "failed", said } });
           return;
@@ -2365,32 +745,14 @@ class AppStore implements StreamSink {
         if (!retried && state.exitCode === DAEMON_EXIT.codeRefused) {
           const machine = claim ?? state.claimed;
           if (machine !== null) {
-            /*
-             * `later` returns rather than falling through: `remintFor` has already
-             * written why the control plane could not be reached, and falling
-             * through would overwrite it with the daemon's own last words.
-             */
             const again = await this.remintFor(machine);
             if (again !== "dead") return;
           }
-          /*
-           * No live claim, and settings that have provably failed to start. This is
-           * the original bug in its pure form — a half-finished `deploy/install.sh`
-           * install whose code is dead, on a computer this app has never bought a
-           * machine for. At most one machine is ever bought this way: the claim it
-           * writes is what the next launch re-mints against.
-           */
           if (await this.provisionOver()) return;
         }
         this.patch({ setup: { step: "failed", said: DAEMON_STOPPED_DETAIL } });
         return;
       }
-      /*
-       * ⚠ **Slower, rather than stopping.** Giving up at the fast deadline left the
-       * notice saying `failed` over a daemon that came up a second later, with
-       * nothing watching to take it back. The poll widens instead, so a slow start
-       * costs patience rather than a wrong answer.
-       */
       if (Date.now() >= giveUpAt) {
         this.patch({ setup: { step: "failed", said: GAVE_UP_DETAIL } });
         return;
@@ -2402,16 +764,6 @@ class AppStore implements StreamSink {
     }
   }
 
-  /**
-   * Buy a machine and write over settings that have proved they cannot start.
-   *
-   * `false` where nothing was tried — no shell to ask, or the account is at its
-   * ceiling — so the caller reports the daemon's own reason instead.
-   *
-   * The write is `env_rewritten`, so an existing file keeps every key this app
-   * does not own: a private CA path, a custom `REEMOAT_HOST`/`REEMOAT_PORT`, and
-   * the installer's own prose all survive being re-pointed at a new machine.
-   */
   private async provisionOver(): Promise<boolean> {
     const boot = this.snapshot.host;
     if (boot === null || !mayAddMachine(this.snapshot.me)) return false;
@@ -2421,46 +773,18 @@ class AppStore implements StreamSink {
     this.patch({ setup: { step: "starting", said: null } });
     await startLocalDaemon(created.enrollment.code, created.machine.id);
     await this.machinesChanged("machine-added");
-    // This computer, from now: see `setUpThisComputer`'s create arm.
     this.weighLocalMachine(machineId(created.machine.id));
     await this.settleDaemon(created.machine.id, true);
     return true;
   }
 
-  /**
-   * A fresh code for a machine this app already created. `true` if it was used.
-   *
-   * `false` means the claim is not worth keeping — the machine was retired, or its
-   * owner is over the limit — and the caller should create a new one instead of
-   * re-minting at a row that will refuse for ever.
-   *
-   * ⚠ **Only the mint is caught.** A blanket `try` around the start as well read a
-   * *host* refusal — "that file belongs to another server" — as "this machine is
-   * gone", and fell through to buying another one. A failure to start is the
-   * caller's to report, not this function's to swallow.
-   */
+  /** `dead` only on a named refusal; `later` after reporting any other failure. */
   private async remintFor(machineId: string): Promise<"used" | "dead" | "later"> {
     let again;
     try {
       again = await cp.mintEnrollment(machineId);
     } catch (error) {
-      /*
-       * ⚠ **Only a refusal means the claim is dead, and the distinction is a
-       * permanent quota slot.** A blanket `false` here read "the wifi dropped" as
-       * "that machine is gone" and fell through to buying another — for a computer
-       * that already had one, on the one failure most likely to be transient. A
-       * machine row is counted with no revoked filter, so that slot never comes
-       * back.
-       */
-      /*
-       * ⚠ **Dead is the *named* refusal, and everything else is `later`.** The
-       * first version had this the other way round — anything that was not a
-       * transport failure meant "that machine is gone" — so a 401 on an expired
-       * session, a 403 about the limit, or any 5xx bought a second machine for a
-       * machine that is alive and well. Nothing returns that slot but a person
-       * noticing and revoking it, so the default has to be the one that spends
-       * nothing.
-       */
+      // Anything but a named refusal would spend a permanent machine slot on a live machine.
       const gone =
         ApiError.isApiError(error) && (error.code === "machine_not_found" || error.code === "machine_revoked");
       if (gone) return "dead";
@@ -2474,60 +798,14 @@ class AppStore implements StreamSink {
     return "used";
   }
 
-  /**
-   * Create the machine, naming it after this computer.
-   *
-   * ⚠ **The name is the part that fails on the second computer, not the first.**
-   * A control-plane label is refused when the account can already *see* one
-   * spelled the same, compared case-insensitively — so two machines both called
-   * `macbook` collide even though nobody typed either. The host name is what
-   * distinguishes them, and where there is none this asks for nothing clever:
-   * `machineLabelFor(null)` answers `computer`, and the one retry below suffixes
-   * whatever the base turned out to be.
-   *
-   * ⚠ **Two callers, and the second is the one where a collision is likely.**
-   * {@link AppStore.setUpThisComputer} reaches here on a computer with no daemon
-   * settings at all; {@link AppStore.provisionOver} reaches here for a computer
-   * whose settings have proved they cannot start — which is exactly the computer
-   * most likely to already own a machine row under this same host name.
-   */
   private async createForThisComputer(boot: NativeBoot): Promise<CreatedMachine | null> {
-    /*
-     * ⚠ **The ordinary host name — an owner's call, 2026-09-15, reversing one
-     * taken the same day.**
-     *
-     * The first answer was the literal `local`, on the argument that the one
-     * machine this app sets up is by definition the computer somebody is sitting
-     * at. What that missed is **who else reads the label.** It is not local to the
-     * account: it is the row a phone sees, the row a second computer sees, and the
-     * row somebody holding a grant on this machine sees — and to every one of them
-     * `local` names a computer that is somewhere else. A fact true of exactly one
-     * client may not be stored on a row every client reads. `localRoute.ts` states
-     * that rule for *reachability*; this is the same rule for *naming*.
-     *
-     * So the label is what this computer is called, and **"local" is drawn rather
-     * than stored** — off the claim and then the announce file, on the machine the app is actually
-     * running on, through {@link AppState.localMachineId}: as `local` on the home
-     * screen (`machineDisplayName`) and as a `this device` badge in Settings →
-     * Machines, where the real label is managed. Neither can be wrong on anybody
-     * else's screen.
-     */
+    // The host name, never `local`: every client reads this label.
     const base = machineLabelFor(boot.hostName);
     try {
       return await cp.createMachine(base);
     } catch (error) {
-      /*
-       * One retry, with a suffix, and then it stops. A loop here would spend a
-       * permanent machine slot per attempt against a name rule it cannot see.
-       */
       if (!ApiError.isApiError(error) || error.code !== "machine_exists") throw error;
-      /*
-       * ⚠ **Sliced to 61 before the suffix, because {@link machineLabelFor}
-       * truncates *last*.** Without the slice a maximal host name re-shapes back to
-       * itself, and the retry posts the name that has just collided — a wasted
-       * round trip and a failure that reads as the server's rather than as a
-       * second computer with the same name. `webcheck` pins the boundary.
-       */
+      // Sliced first because machineLabelFor truncates last (webcheck pins it).
       const named = machineLabelFor(`${base.slice(0, 61)}-2`);
       if (named === base) throw error;
       return await cp.createMachine(named);
@@ -2542,22 +820,11 @@ class AppStore implements StreamSink {
     }
     this.connections.delete(id);
     this.daemons.delete(id);
-    // Unknown again rather than confidently empty: a machine that comes back is
-    // one nothing has listed yet, and saying otherwise would put "that session is
-    // not on this daemon" on screen for the whole of its first poll.
     this.listed.delete(id);
     this.nextProbeAt.delete(id);
   }
 
-  /**
-   * What this instance allows, for the screen that has no credential yet.
-   *
-   * **The catch is bare and that is load-bearing.** A control plane rolled back
-   * past the release that added `/v1/instance` answers 404, which `readJson`
-   * turns into an `ApiError`. That is not an outage: drawing `cpError` for it
-   * would put an alarming banner on a working sign-in screen. `config` stays
-   * `null`, which every predicate that reads it answers for.
-   */
+  /** Bare catch: an old control plane's 404 is not an outage. */
   private async loadConfig(): Promise<void> {
     try {
       this.patch({ config: await cp.instanceConfig() });
@@ -2566,40 +833,10 @@ class AppStore implements StreamSink {
     }
   }
 
-  /**
-   * Re-read the instance configuration now, because an admin just changed it.
-   *
-   * **This is the caller the gate on `runResume` claims exists.** That gate skips
-   * the refresh unless `config === null`, justified by "when an admin changes it
-   * the Server settings screen patches `config` from its own authoritative
-   * answer" — and no such patch was ever written. `ServerSection` kept the answer
-   * in component state, so configuring SMTP left `state.config.email` false until
-   * a full page reload, and `adminMayInvite` — which fails closed — went on
-   * hiding the address field on Settings → Users. The admin configures mail and
-   * the product carries on saying it has none.
-   *
-   * A re-read rather than a projection of what the settings screen holds: that
-   * screen's answer is the *admin* shape (`{settings, mail, registration}`) and
-   * this is the *public* one, so mapping between them here would put the
-   * precedence rule in a second place. One extra request, only when somebody
-   * presses Save on the one screen that can change it.
-   */
   async refreshConfig(): Promise<void> {
     await this.loadConfig();
   }
 
-  /**
-   * Sign in. Rejects rather than reporting — `SignIn` shows its own error, beside
-   * the field it is about.
-   *
-   * ⚠ **One answer is not a failure and not this window's either.** In the shell
-   * the host may say the account was already on this computer
-   * (`cp.AccountAlreadyOpen`) — added before, in a window of its own. The sign-in
-   * then belongs there, so this window goes to it rather than becoming a second
-   * copy: a pending one is discarded by being left, and on a platform with one
-   * window the host rebinds it and asks for a reload. Every other rejection,
-   * including `WrongAccount`, is the screen's to draw.
-   */
   async login(name: string, password: string): Promise<void> {
     let me: Me;
     try {
@@ -2613,346 +850,85 @@ class AppStore implements StreamSink {
     await this.bootstrap();
   }
 
-  /**
-   * Show another account on this computer: the one named, or with `null` the one
-   * shown before this.
-   *
-   * ⚠ **No `detachSession` here, and `ChooseServer` has one — the difference is
-   * the whole design.** A document is one account for its whole life. Where the
-   * host can show another account it shows another *window*, and this page stays
-   * alive and hidden with its session, sockets and poll intact, which is what makes
-   * a switch instant and keeps an agent in the account left behind running and
-   * reachable. Where it cannot, it rebinds this window and rotates the document's
-   * generation, so anything this page still sends after the switch — a late poll,
-   * a fire-and-forget clear — is refused rather than landing on the account that
-   * replaced it (Q5.120). Detaching would strand the hidden page with no
-   * credential in the first case and guard nothing in the second.
-   *
-   * **It reloads only when told**, and with `replace`, never `assign`: the
-   * document left behind is another account's, and Back must not bring it back to
-   * be refused. The page never branches on which of the two the host did.
-   */
+  /** No `detachSession`: the host either shows another window, and this page stays live, or rebinds this one, whose rotated generation refuses late calls (Q5.120). */
   async switchAccount(account: string | null): Promise<void> {
     const moved = await switchNativeAccount(account);
     if (moved.reload) window.location.replace("/");
   }
 
-  /** Cancel, wherever an account's own screens offer it: back to the one before. */
   switchBack(): Promise<void> {
     return this.switchAccount(null);
   }
 
-  /**
-   * Begin a sign-in for another account.
-   *
-   * **No state for it here, and none is needed.** On either platform the host
-   * answers with a fresh document: a new window nobody has signed in to, shown in
-   * front of this one, or this window rebound and reloaded as one. That document
-   * starts where every first run starts — the server step, then the sign-in — so
-   * there is no "adding" phase to draw, and nothing in this page to tidy when the
-   * person changes their mind and presses Cancel. Refused at ten accounts.
-   */
   async addAccount(): Promise<void> {
     const moved = await addNativeAccount();
     if (moved.reload) window.location.replace("/");
   }
 
-  /**
-   * Take this window's account off this computer.
-   *
-   * Remove account, on the sign-in screen of an account that has been signed out
-   * — so there is no session left to revoke, and the remembered controls were
-   * already swept by the sign-out that brought this screen up. The host erases
-   * what the keyring holds, stops the account's daemon and shows the account
-   * before it, or a sign-in to the same server where none is left. One tap, no
-   * confirmation: nothing is lost that signing in again does not restore, because
-   * the device id, its key and the daemon's root are kept (Q7.149).
-   */
+  /** One tap, no confirmation: the device id, key and daemon root are kept, so signing in again restores everything (Q7.149). */
   async forgetAccount(): Promise<void> {
     const moved = await forgetNativeAccount();
     if (moved.reload) window.location.replace("/");
   }
 
-  /*
-   * `adoptSession` lived here and moved to `gateStore.ts` with its two callers —
-   * `Register`'s no-mail arm and `ResetPassword`, both in `Gate.tsx`.
-   *
-   * A session minted by a confirmation, a password reset or a registration on an
-   * instance with no mail arrives on a **gate** address, which `dist` does not
-   * serve and cannot reach: those nine addresses are the control plane's own, out
-   * of `dist-gate`. Nothing else in the tree called it, so keeping it here would
-   * leave a callerless export describing a capability this bundle does not have —
-   * which is the exact situation the `useApiKey` tombstone below was written
-   * about.
-   *
-   * ⚠ **What must not be lost with it**, because it is about `login` rather than
-   * about the method that moved: `login` has the same latent hole the moved
-   * docblock named — it does not drop connections before adopting a new
-   * credential — and it is safe only because `SignIn` is reachable only from
-   * `phase: "signed_out"`, which `handleSignedOut` reaches only after dropping
-   * every one of them. Nothing but that ordering enforces it.
-   */
+  // The browser has no API-key sign-in (no `useApiKey`), yet `pickStored` and `readStoredCredential` must still adopt a stored `rk_` so a deploy does not sign old tabs out.
 
-  /*
-   * `useApiKey` lived here and is deleted with the field that fed it.
-   *
-   * The sign-in screen no longer takes an `rk_`, so this had no caller — and a
-   * callerless export describing a capability the product does not have is the
-   * exact situation `myKeys`/`revokeMyKey` were in before this change, and the
-   * reason they were finally wired up rather than left.
-   *
-   * **What is kept is the reading half**: `pickStored` and `readStoredCredential`
-   * still adopt a stored `rk_`, because a tab that was open before this deploy is
-   * holding one and a deploy must not sign the fleet out. `callerAuth` takes it
-   * unchanged, and `cpctl` is the way in for an account that has only a key.
-   */
-
-  /**
-   * Re-read `/v1/me`, and nothing else.
-   *
-   * **The one request its callers actually wanted.** Settings → Account called
-   * `resume("password-changed")` to pick up `hasPassword` after setting a first
-   * password — and `runResume` re-lists *machines*; `cp.me()` is called from
-   * `bootstrap` alone. So the flag never moved: the form stayed in its
-   * first-time shape with no current-password box, and the next submit answered
-   * `400 currentPassword is required` about a field that was not on screen. It
-   * also spent a full per-machine wake — token refresh, route re-probe, session
-   * re-list, socket reconnect — for one boolean, which is not what that
-   * method's "one request" comment meant.
-   *
-   * A transport failure is swallowed: `me` is already held and stale-by-one-field
-   * beats blanking the account screen. A failure that means the credential is
-   * finished has already signed this tab out inside `cpFetch`, so there is
-   * nothing left here to decide.
-   */
   async refreshMe(): Promise<void> {
     try {
       const me = await cp.me();
       this.patch({ me });
     } catch {
-      // See above. Deliberately empty: every outcome worth acting on has been
-      // acted on before this catch is reached.
+      // Deliberately empty: a finished credential has already signed this tab out inside `cpFetch`.
     }
   }
 
-  /**
-   * The first answer to which machine this computer is, and it needs no daemon.
-   *
-   * {@link NativeBoot.claimed}: the machine this app created for this server.
-   * **It fills an unknown and never replaces a known id** — the seed is what disk
-   * remembers, and anything already held came from a later read. `null` (a
-   * browser, a computer this app has not set up, a daemon it adopted rather than
-   * created) leaves the live read as the only answer, exactly as before.
-   */
   private seedLocalMachine(claimed: string | null): void {
     if (!claimed || this.snapshot.localMachineId !== null) return;
     this.patch({ localMachineId: machineId(claimed) });
   }
 
-  /**
-   * Re-read which machine this computer is, from the daemon's own announce file.
-   *
-   * ⚠ **A memo, where {@link localBaseFor} deliberately refuses one — and what
-   * the answer is *for* is the whole difference.** Routing must find a daemon
-   * that started after the app, on a laptop where both come up at login, so it
-   * re-reads per route resolution. A name may be one wake late: what it costs to
-   * be stale is a rail that calls this computer by its host name, in name order,
-   * and a row that does not say "this device", until the next resume — and what a
-   * per-render IPC read would cost is a file read per paint of a list.
-   *
-   * ⚠ **What it answers is merged, never assigned** — {@link localMachineAfter}
-   * through {@link AppStore.weighLocalMachine}: nothing found keeps what is known,
-   * and only a different machine of ours replaces it. Assigned, a `/health` that
-   * missed its probe put the host name and the name order back on a rail nobody
-   * had touched.
-   *
-   * Called twice: inside `bootstrap`'s listing wait, for a daemon already up, and
-   * first thing in {@link AppStore.runResume}, the funnel every wake, every
-   * machine mutation and the bootstrap promotion pass through. Best-effort and
-   * silent: `localDaemon` swallows its own refusals and answers `null`.
-   */
+  /** Merged through `localMachineAfter`, never assigned, so a missed probe cannot undo a known answer. */
   private async refreshLocalMachine(): Promise<void> {
     const found = await localDaemon();
     this.announcedMachine = found === null ? null : machineId(found.machineId);
     this.weighLocalMachine();
   }
 
-  /**
-   * What the announce file said at the last read, before it was weighed.
-   *
-   * Kept because *"a machine of ours"* is a question about a list, and both reads
-   * are made before that list is current: `bootstrap`'s beside the listing that
-   * fills it, `runResume`'s ahead of the re-list. A machine this app has just
-   * created is in neither — so without a second weighing, a claim for a machine
-   * since switched off would outrank the daemon that replaced it until the next
-   * wake. `null` after a read that found nothing, which weighs as nothing.
-   */
   private announcedMachine: MachineId | null = null;
 
-  /**
-   * Merge the last live answer into {@link AppState.localMachineId}, against the
-   * machines held now. After each read, and again after each listing lands.
-   */
   private weighLocalMachine(answer: MachineId | null = this.announcedMachine): void {
     const known = this.snapshot.localMachineId;
     const id = localMachineAfter(known, answer, (one) => this.connections.has(one));
     if (id !== known) this.patch({ localMachineId: id });
   }
 
-  /**
-   * The fleet changed **and** what this account is allowed changed.
-   *
-   * Two facts, one call, because `runResume` re-lists machines and refreshes
-   * `me` only on a `loading → ready` promotion — so adding or retiring a machine
-   * moved `machineCount`, which is the number the limit is enforced against, and
-   * nothing re-read it. The visible symptom is the add form still drawn on the
-   * screen that just consumed the last slot: a control that is not true in the
-   * state it is drawn in.
-   *
-   * A named method rather than two calls at each site, because there will be a
-   * third mutation site one day and a name is what the next author reaches for —
-   * and because it makes "no creation path goes through `resume` alone" a thing
-   * `webcheck` can read off the file.
-   */
+  /** Also refreshes `me`: the machine limit is counted there, and `resume` alone does not re-read it. */
   async machinesChanged(reason: string): Promise<void> {
     await Promise.all([this.resume(reason), this.refreshMe()]);
   }
 
-  /**
-   * A machine this account has just retired, dropped from the list at once.
-   *
-   * **Not optimistic**: the revoke has answered 200 and the control plane will
-   * never list it again, so this is the store catching up with a fact rather
-   * than drawing one ahead of the answer. Without it the machines list drew the
-   * retired row until `machinesChanged`'s re-list landed, a round trip later
-   * (review D9). `dropMachine` is exactly what a re-list does for a revoked
-   * grant; `emit` rather than `publish`, because the machine array's identity
-   * has to change for the list to notice. The re-list still follows, from the
-   * caller, for the count the limit is enforced against.
-   */
   forgetMachine(id: MachineId): void {
     this.dropMachine(id);
     this.emit();
   }
 
-  /**
-   * Re-decide *how* to reach a machine, without disturbing anything else.
-   *
-   * Settings' "This device" row calls it when somebody switches the loopback path
-   * on or off, so the change lands on the next request rather than on the next
-   * wake. Deliberately not {@link forgetMachine}, which drops the connection, the
-   * token and every session row with it — a routing preference is not a reason to
-   * throw away a minted token or repaint the screen.
-   *
-   * Nothing in flight is disturbed: `SessionStream` re-resolves the route per
-   * connection, so an open socket keeps running on the path it opened on until it
-   * rotates or drops.
-   */
   forgetMachineRoute(id: MachineId): void {
     this.connections.get(id)?.forgetRoute();
   }
 
-  /**
-   * The app signed you out without being asked. Registered on `cp.onSignedOut`.
-   *
-   * Connections are dropped rather than left behind: signing back in *as somebody
-   * else* in the same tab would otherwise paint the previous user's fleet for a
-   * frame, and every one of them holds a token minted from a credential that is
-   * now gone.
-   *
-   * In the shell the account stays on this computer's list — an involuntary
-   * sign-out is not a decision to remove it — and the `clearSession` that brought
-   * this here is also what tells the host it is signed out, so the other accounts'
-   * drawers draw it that way. Its sign-in screen then offers the two ways off it
-   * that a listed account has: back to another, or Remove account.
-   */
   handleSignedOut(failure: AuthFailure): void {
     this.stopPolling();
     for (const id of [...this.connections.keys()]) this.dropMachine(id);
-    /*
-     * ⚠ **One failure asks for a second act, and only one.** `device_revoked`
-     * means the *installation* was retired, not merely the session, so the stored
-     * device id is finished and has to go — otherwise the next sign-in offers a
-     * dead id, the server hands back a fresh device by its adopt-or-register
-     * rule, and this app quietly registers a new one on every launch while
-     * presenting an id nothing will ever adopt.
-     *
-     * Every other failure here leaves it alone, deliberately. Signing out is not
-     * a statement about the computer, and `session_revoked` — which is what the
-     * per-user session cap produces — leaves the device perfectly valid; giving
-     * the id up there would spend a device slot every time somebody signed in on
-     * an eleventh browser.
-     */
+    // Only `device_revoked` gives up the device id; any other sign-out keeps it.
     if (failure === "device_revoked") cp.forgetDevice();
-    /*
-     * ⚠ **Both ways out, not only the deliberate one.** `signOut()` below swept
-     * the remembered controls and this path did not, so an expired or revoked
-     * session left them for whoever signed in next — which is the disclosure the
-     * sweep exists to prevent, and that argument is about the *browser* rather
-     * than about which verb ended the session. `configMemory`'s own docblock
-     * states it as "Everything, on sign-out"; this is the other sign-out.
-     */
+    // Both sign-out paths sweep remembered controls.
     forgetAllConfig();
     this.patch({ phase: "signed_out", me: null, cpError: null, authError: signedOutText(failure) });
   }
 
-  /**
-   * Sign out, server-side first, then reload.
-   *
-   * This method existed since this file was written and was never called —
-   * Settings did `cp.clearApiKey()` and `window.location.href = "/"` instead. The
-   * reload argument in that comment survives and is why the in-memory unwind here
-   * is *deleted* rather than fixed: every machine's token, route memo and socket
-   * was derived from this credential, unwinding them individually is a longer list
-   * than it looks, and the reload path is exercised on every page load while the
-   * unwind never ran once.
-   *
-   * What is new is the order. `DELETE /v1/me/sessions/current` has to land before
-   * the navigation, or the session stays valid on the control plane for its whole
-   * lifetime and the only thing that changed is that this tab forgot it. Its
-   * failure is swallowed inside `cp.logout`: a control plane that is down must not
-   * be able to trap somebody in an app they are trying to leave.
-   *
-   * **One harmless race, named so nobody fixes it.** Signing out of a session
-   * that has *already* expired makes `cpFetch` answer `401 session_expired`,
-   * which fires the signed-out handler — so `handleSignedOut` runs mid-logout,
-   * drops every connection and patches `authError` with "Your session expired".
-   * That state is then discarded a line later by the reload, which is the whole
-   * point of reloading. Nothing needs to suppress it: the two paths agree about
-   * the outcome and disagree only about how much work they do to reach it.
-   *
-   * ⚠ **In the shell, signing out also takes the account off this computer.** The
-   * session is revoked and the keyring entry erased as before, and then the host is
-   * asked to forget the account: its daemon is stopped and not started again at
-   * launch, it leaves the list, and the account shown before it is shown instead —
-   * or, where none is left, a sign-in to the same server, which is what signing out
-   * of the only account always led to. **Its device id, key and daemon root are
-   * kept**, so signing in again as the same person reuses the same device row and
-   * the same machine (Q7.149). A refused forget still reloads: this window is
-   * signed out whatever the host said, and a sign-in is what a reload draws.
-   *
-   * The browser arm is untouched and still a plain navigation — there is no list
-   * of accounts in a browser, and one origin is one sign-in.
-   */
+  /** Revokes server-side before reloading; the shell keeps the device and daemon root (Q7.149). */
   async signOut(): Promise<void> {
     await cp.logout();
-    /*
-     * The remembered controls go with the credential that was reading them.
-     *
-     * They are not secret — a model name and an effort level — but they are a
-     * record of what somebody was doing, keyed by session, and leaving them for
-     * whoever signs in next on this browser is the one way a per-tab convenience
-     * becomes a disclosure. Before the reload, so the next paint has no copy.
-     *
-     * Not in `cp.logout`'s `finally`: that clears the *credential*, which is its
-     * subject, and this is the app's own cache of what it drew.
-     *
-     * ⚠ **In the shell every account's window shares one storage origin**, so this
-     * also sweeps the other accounts' remembered controls on this computer. A
-     * convenience lost rather than a disclosure made — the sweep only ever deletes
-     * — and recorded as a known limit until the keys are namespaced per account
-     * (Q7.149).
-     */
     forgetAllConfig();
     if (this.snapshot.host === null) {
       window.location.href = "/";
@@ -2962,56 +938,18 @@ class AppStore implements StreamSink {
     if (moved.reload) window.location.replace("/");
   }
 
-  /**
-   * Open the screen that says which control plane this installation talks to.
-   *
-   * One caller now, the sign-in screen's ‹ Server, on a window nobody has signed
-   * in to. There were two: Settings → Account offered it to somebody already
-   * signed in, and that is gone, because an account *is* a server and a person —
-   * repointing a signed-in window would quietly make it another account — and the
-   * host refuses a server change for anything but a pending window (Q5.120).
-   * Another server is another account, from the menu (Q3.643). Before either
-   * existed there was exactly one way to reach `ChooseServer` —
-   * `state.host.server === null` — so a server that had been chosen **could not be
-   * changed from inside the app at all**, and the only remedy was deleting the
-   * shell's config file by hand; ‹ Server is what still answers that, for the
-   * window where it can be true.
-   *
-   * **Nothing is torn down here, and that is what makes Cancel honest.** The poll
-   * keeps running, the sockets stay up, the transcript stays where it was; this
-   * only decides which screen is drawn. Everything is given up at the moment of
-   * *adoption*, immediately before the reload, which is `ChooseServer`'s own
-   * argument applied to a second entrance.
-   */
   pickServer(): void {
     this.patch({ pickingServer: true });
   }
 
-  /** Back to whatever was on screen. See {@link AppStore.pickServer}. */
   cancelServerPick(): void {
     this.patch({ pickingServer: false });
   }
 
-  /* ---------------------------------------------------------------- *
-   * The resume path
-   * ---------------------------------------------------------------- */
-
-  /**
-   * Wake up: refresh tokens, re-probe routes, re-list sessions, reconnect sockets.
-   *
-   * Four steps for N machines, and every one of them can fail. This is the single
-   * place they happen, deliberately — the alternative is retry logic in a dozen
-   * hooks, where the ordering between "the token is stale" and "the socket is
-   * dead" is decided by whichever effect happens to fire first.
-   *
-   * Machines run concurrently and independently. `allSettled`, never a barrier:
-   * a machine that is switched off must not delay the one that is not.
-   */
+  /** Machines run independently: an unreachable one never delays the rest. */
   async resume(reason: string): Promise<void> {
     if (this.resumeInFlight !== null) {
-      // Coalesce. A phone unlocking fires visibilitychange, pageshow and online
-      // within a few milliseconds of each other, and running the sequence three
-      // times over would mint three tokens per machine to no purpose.
+      // Coalesce: one unlock fires several wake events.
       this.resumeQueued = true;
       return this.resumeInFlight;
     }
@@ -3031,19 +969,8 @@ class AppStore implements StreamSink {
     const epoch = ++this.epoch;
     this.patch({ resuming: true });
 
-    // Which computer this is, before anything that draws a machine list. One
-    // file read over IPC in the shell, and a synchronous `null` in a browser.
     await this.refreshLocalMachine();
 
-    /*
-     * The registry may have changed while we were asleep — a machine added, a
-     * grant revoked. Best-effort: its failure must not stop the rest.
-     *
-     * Skipped on the bootstrap call, which has just fetched it. Two sequential
-     * `GET /v1/machines` on every cold start put a wasted round trip on the
-     * critical path before the first session list could render, because the
-     * per-machine work below is gated behind this.
-     */
     if (cp.currentCredential() !== null && reason !== "bootstrap") {
       try {
         const machines = await cp.machines();
@@ -3061,76 +988,18 @@ class AppStore implements StreamSink {
           for (const id of [...this.connections.keys()]) {
             if (!machines.some((m) => m.id === id)) this.dropMachine(id);
           }
-          // The read above was weighed against the list before this one: a machine
-          // created since — the daemon that just came up — is only ours from here.
           this.weighLocalMachine();
-          /*
-           * And leave the loading screen, which nothing else here could.
-           *
-           * `phase` is written by `bootstrap` alone, and `bootstrap` runs once at
-           * page load. So a tab opened while the control plane was down recovered
-           * everything else on this path — connections, daemons, tokens, the
-           * session poll — and went on rendering `App`'s bare spinner for ever,
-           * with the `cpError` this same patch clears so it no longer even said
-           * why. The only escape was a manual reload, and no wake trigger helped:
-           * `resume.ts` lands here too.
-           *
-           * Promoted on the listing having **succeeded**, not on it having
-           * returned rows — which is `bootstrap`'s *success* arm and deliberately
-           * not its *catch* arm. Those answer different questions: the catch is
-           * weighing what is salvageable from a fetch that failed, and machines
-           * already in hand is the salvage. Here the fetch resolved, so the
-           * registry is known, and an account that legitimately owns none has a
-           * perfectly usable app — Settings → Machines is the screen it is
-           * supposed to be looking at.
-           *
-           * Read as one rule with the catch, `connections.size > 0` stranded
-           * exactly the account most likely to need this: a fresh sign-in, or one
-           * whose machines were all revoked, whose tab happened to load while the
-           * control plane was down. It stayed on `App`'s bare spinner for ever,
-           * without even the `cpError` this same patch clears to say why, and the
-           * one screen that would have fixed it was behind the spinner. Worse than
-           * a stalemate, because `tick`'s retry gate is `connections.size === 0 &&
-           * phase === "loading"`: with the phase pinned there and no machines, the
-           * escape hatch became a `GET /v1/machines` every four seconds for ever,
-           * which is the poll that gate's own comment exists to prevent.
-           *
-           * Only ever *upwards* from `loading`, so a tab that was signed out while
-           * this request was in flight is not dragged back into the fleet. `me` is
-           * then refreshed rather than left null: `bootstrap`'s catch already
-           * reaches "ready with no `me`" and `visibleSections` fails closed on it,
-           * so promoting without asking would quietly cost an admin the Users
-           * section until they reloaded.
-           */
+          // A successful listing leaves loading even with no machines; only ever upwards.
           const promote = this.snapshot.phase === "loading";
           const firstListing = !this.registryKnown;
           this.registryKnown = true;
           this.patch(promote ? { cpError: null, phase: "ready" } : { cpError: null });
-          /*
-           * `me` too wherever it is missing, not only on a promotion: an outage at
-           * launch now draws the shell with no `me`, so the promotion this used to
-           * ride on no longer happens.
-           */
           if (promote || this.snapshot.me === null) void this.refreshMe();
-          /*
-           * And setting this computer up, which waited for the list: `bootstrap`
-           * ran it once, during the outage, and it returned where it needed a
-           * registry it did not have. `beginSetUp` coalesces with a run in flight.
-           */
           if (firstListing) void this.beginSetUp();
-          /*
-           * And the instance config, **only if it is still unknown**.
-           *
-           * A tab that woke on the `cp-retry` path may never have had a working
-           * `/v1/instance`. Re-reading it every wake would be a poll nobody
-           * asked for: this is instance configuration, not telemetry, and when
-           * an admin changes it the Server settings screen patches `config`
-           * from its own authoritative answer.
-           */
+          // Only while unknown: settings screens re-read it through refreshConfig.
           if (this.snapshot.config === null) void this.loadConfig();
         }
       } catch (error) {
-        // Cached tokens may well still be valid. Keep going.
         this.patch({ cpError: describe(error) });
       }
     }
@@ -3145,19 +1014,13 @@ class AppStore implements StreamSink {
   private async resumeMachine(connection: MachineConnection, epoch: number): Promise<void> {
     const id = connection.id;
 
-    // 1. A token, refreshed if it is near expiry. A control-plane outage with a
-    //    still-valid cached token is survivable and `ensureToken` says so.
     try {
       await connection.ensureToken();
     } catch {
-      // Recorded on the machine's own state; the other machines are unaffected.
       return;
     }
     if (epoch !== this.epoch) return;
 
-    // 2. Re-probe. What we last believed about reachability was true of a network
-    //    we may have left, and only a transport-level fact can invalidate it —
-    //    which a sleep is.
     connection.forgetRoute();
     const route = await connection.resolveRoute();
     if (epoch !== this.epoch) return;
@@ -3166,34 +1029,15 @@ class AppStore implements StreamSink {
       return;
     }
 
-    // 3. Re-list. This is what corrects the blocked indicator without replaying
-    //    a single event.
     await this.refreshMachineSessions(connection, epoch);
     if (epoch !== this.epoch) return;
 
-    // 4. Reconnect every live stream on this machine, from its own cursor.
     for (const stream of this.streams.values()) {
       if (stream.ref.machineId === id) stream.reconnect();
     }
   }
 
-  /* ---------------------------------------------------------------- *
-   * Polling
-   * ---------------------------------------------------------------- */
-
-  /**
-   * One poll round, on demand.
-   *
-   * The cheap half of `resume()`: it re-lists sessions on machines that are
-   * already reachable and does nothing else. No control-plane round trip, no
-   * token minting, no route re-probe, no socket churn, and no `resuming` flag —
-   * so it does not flash a spinner or rebuild anything that has not moved.
-   *
-   * This exists because coming back to a tab was running the *full* sequence.
-   * A tab you switched away from for four seconds has not lost its tokens, its
-   * routes or its sockets, and re-deriving all of them made the whole interface
-   * visibly reload every time — see `resume.ts`.
-   */
+  /** The cheap half of resume: re-lists sessions on reachable machines and nothing else. */
   poll(): Promise<void> {
     return this.tick();
   }
@@ -3211,47 +1055,12 @@ class AppStore implements StreamSink {
     this.pollTimer = null;
   }
 
-  /**
-   * One poll round.
-   *
-   * The aggregate list — including which sessions are blocked — comes from here
-   * rather than from sockets. A WebSocket per session across every machine would
-   * be dozens of sockets on a phone; `GET /sessions` is one request per machine
-   * and `blocked` is derived server-side on every read, so the list is correct
-   * without replaying anything.
-   */
   private async tick(): Promise<void> {
     const epoch = this.epoch;
 
-    /*
-     * A control plane that was unreachable at startup gets retried here.
-     *
-     * The loading screen says "Retrying", and until this existed nothing did: the
-     * only code that re-read the registry was `resume()`, which fires on waking,
-     * not on a timer. So a phone that opened the app while the control plane was
-     * down sat on a spinner claiming to retry until the user happened to background
-     * the tab or change networks. The poll is already running, and the machine list
-     * is the one thing missing, so this is where it belongs.
-     *
-     * Gated on holding no machines at all — with any machine known, the per-machine
-     * loop below is the retry, and re-listing the registry every four seconds for
-     * ever would be a poll nobody asked for.
-     */
+    // With no machine known, re-list the registry: startup outage, or a first machine added by its installer.
     if (this.connections.size === 0) {
-      /*
-       * **And an empty fleet that is `ready` is re-listed too, for a newer
-       * reason.** The first machine used to be added from this tab — a name typed
-       * into Settings → Machines, and `machinesChanged` re-read the registry on
-       * the spot. That form is gone: a machine is added by running the one-line
-       * installer *on the machine*, from a terminal this tab knows nothing about,
-       * so the only way it can appear here is by asking again. Four seconds is
-       * the poll's own cadence, the request is one `GET /v1/machines` against a
-       * registry that answers from memory, and the state is transient by
-       * construction. `refreshMe` follows the first machine landing, because the
-       * count the machine limit is enforced against lives on `me`.
-       */
-      // Through `resume`, not `runResume`, so it coalesces with a wake that lands
-      // in the same tick rather than racing it and minting twice.
+      // Through `resume`, so it coalesces with a wake instead of minting twice.
       await this.resume(this.snapshot.phase === "loading" ? "cp-retry" : "awaiting-first-machine");
       if (this.connections.size > 0 && epoch === this.epoch) await this.refreshMe();
       return;
@@ -3267,7 +1076,6 @@ class AppStore implements StreamSink {
           connection.forgetRoute();
           const route = await connection.resolveRoute();
           if (route === null) return;
-          // It came back on its own. Reattach anything that was streaming on it.
           for (const stream of this.streams.values()) {
             if (stream.ref.machineId === connection.id) stream.reconnect();
           }
@@ -3277,56 +1085,32 @@ class AppStore implements StreamSink {
     );
   }
 
-  /**
-   * Read one machine's browse roots, once, and never fail loudly.
-   *
-   * `GET /fs/roots` is a config array and an in-memory list of recent cwds — no
-   * filesystem work at all — so this is the cheapest request this client makes.
-   * It is still fired rather than awaited: the session list is what the screen is
-   * waiting for, and a row drawn with an absolute path for one more frame is not
-   * worth delaying it.
-   */
   private async fetchRoots(id: MachineId): Promise<void> {
     const daemon = this.daemons.get(id);
     if (daemon === undefined) return;
-    // Written first so a slow answer cannot be asked for twice by the next poll.
     this.rootsByMachine.set(id, []);
     try {
       const listing = await daemon.roots();
       this.rootsByMachine.set(id, listing.roots);
       this.emit();
     } catch {
-      // Left empty, which `displayCwd` reads as "no prefix anybody agreed on" and
-      // answers with the rendering every row had before this existed.
+      // Left empty: rows draw absolute paths.
     }
   }
 
-  /**
-   * Read one machine's plugins, once, and never fail loudly.
-   *
-   * The `catch` is doing real work here rather than being tidy: a daemon that
-   * predates plugins answers a bare `404` on this route, and that is the **normal
-   * state of the fleet** between a control-plane deploy and whenever each owner
-   * next runs `deploy.sh`. An empty list is exactly right for it — every screen
-   * that reads this draws nothing for a machine with no plugins, which is what a
-   * daemon without the feature has.
-   */
   private async fetchPlugins(id: MachineId): Promise<void> {
     const daemon = this.daemons.get(id);
     if (daemon === undefined) return;
-    // Written first so a slow answer cannot be asked for twice by the next poll.
     this.pluginsByMachine.set(id, []);
     try {
       const listing = await daemon.plugins();
       this.pluginsByMachine.set(id, listing.plugins);
       this.emit();
     } catch {
-      // Left empty. See the docblock: an old daemon and a machine with nothing
-      // installed are the same thing to every reader of this map.
+      // Left empty: same as a daemon with nothing installed.
     }
   }
 
-  /** Ask this machine for its plugins again. The install screen calls it; the poll does not. */
   refreshPlugins(id: MachineId): void {
     this.pluginsByMachine.delete(id);
     void this.fetchPlugins(id);
@@ -3341,25 +1125,13 @@ class AppStore implements StreamSink {
       listed = await daemon.listSessions(SESSION_LIST_LIMIT);
     } catch (error) {
       if (!ApiError.isApiError(error)) {
-        // Transport: the machine went away. `request` has already marked it.
         this.emit();
       }
       return;
     }
     if (epoch !== this.epoch) return;
-    /*
-     * This machine has now answered a session list, so "no row for that key" is a
-     * statement about the daemon rather than about how far this page load has
-     * got. `SessionView` is the only reader — see `missingRowReason`.
-     */
     this.listed.add(connection.id);
-    // Once per machine, and never again: `REEMOAT_ROOTS` is read at startup and
-    // cannot change under a running daemon. See `fetchRoots`.
     if (!this.rootsByMachine.has(connection.id)) void this.fetchRoots(connection.id);
-    // Once per machine as well, and **not** on the poll: what is installed changes
-    // only when somebody installs something, and the screen that does that
-    // refreshes this itself. Polling it would put a request per machine every four
-    // seconds behind a list nobody is watching change.
     if (!this.pluginsByMachine.has(connection.id)) void this.fetchPlugins(connection.id);
 
     const name = connection.state().name;
@@ -3381,18 +1153,7 @@ class AppStore implements StreamSink {
         });
     }
 
-    /*
-     * Sessions this daemon no longer lists.
-     *
-     * Only when the answer was the *whole* list. With `truncated` the rows beyond
-     * the window are absent because they were not asked for, not because they are
-     * gone — pruning on that would close the socket and discard the transcript of
-     * whatever the user is looking at the moment their fleet grows past the limit.
-     *
-     * An older daemon sends neither field; `!== true` reads that as "not
-     * truncated", which is correct because such a daemon also ignored the limit
-     * and really did return everything.
-     */
+    // Prune only a whole list: under `truncated` an absent row was not asked for.
     if (listed.truncated !== true) {
       for (const key of this.rows.keys()) {
         const row = this.rows.get(key);
@@ -3413,67 +1174,16 @@ class AppStore implements StreamSink {
     }
   }
 
-  /**
-   * Open the sockets that were asked for before their session list existed.
-   *
-   * The other half of `openSession`'s refusal. Somebody reloading straight onto a
-   * session URL asks for that stream while `refreshMachineSessions` is still in
-   * flight; `openSession` records the key on `streamOrder` and declines rather
-   * than attaching at `since=0`. This is what finishes the job, and it is the only
-   * thing that does — the view's effect is keyed on the machine and session ids,
-   * which never change, so it never fires again.
-   *
-   * Here rather than in `resumeMachine` because this is the one place `rows` is
-   * filled, and *both* paths that fill it — the wake sequence and the four-second
-   * poll — run through it. So a machine that was asleep when you opened the tab is
-   * covered by the same line, with no second rule about which path attaches.
-   *
-   * `rows.get(key)` is checked again rather than assumed: the list that just
-   * landed may not contain this session at all (it is bounded at
-   * `SESSION_LIST_LIMIT`), and attaching without a row is the exact thing being
-   * avoided.
-   *
-   * Nothing about the socket budget changes. `streamOrder` holds at most
-   * `MAX_LIVE_STREAMS` keys and `openSession` still evicts past it, so this can
-   * only restore a stream the LRU already wanted open.
-   *
-   * **It resumes history as well as sockets, and that is what makes a short
-   * transcript heal itself.** `loadAll` gives up when its retries are spent, and
-   * nothing used to call it again: the view's effect never re-fires and the loop
-   * above skipped every key that already had a stream, so one request dropped
-   * during a reload left the conversation empty for the life of the tab, with a
-   * button asking the reader to do by hand what the client had abandoned. Calling
-   * it here puts the recovery on the same schedule as everything else — this runs
-   * only after a session list came back, so a machine that is down is never asked,
-   * and it comes back on the poll that follows the machine doing so.
-   *
-   * It is free when there is nothing to do: `loadAll` asks `loadStop` *before* it
-   * takes the latch, so a fully-paged, cut, or ceiling-full transcript costs one
-   * map read and emits nothing. Three sockets at most, so three loops at most.
-   */
+  /** Opens sockets asked for before their list landed, and re-drives loadAll so a short transcript heals. */
   private attachWanted(id: MachineId): void {
-    // Over a copy: `openSession` rewrites `streamOrder` on every call.
     for (const key of [...this.streamOrder]) {
       const row = this.rows.get(key);
       if (row === undefined || row.ref.machineId !== id) continue;
-      // `openSession` calls `loadAll` itself, so the two arms do not compound.
       if (this.streams.has(key)) void this.loadAll(row.ref);
       else this.openSession(row.ref);
     }
   }
 
-  /**
-   * Fetch just enough history to name the command a blocked session is waiting on.
-   *
-   * The permission itself carries only a title, so the command has to be joined
-   * from the `tool_call` event — and without this the list would show that title
-   * alone until the session was opened, which is one tap too late for the screen
-   * whose entire job is "what needs me".
-   *
-   * One small page, once per blocked session. Blocked sessions are few by
-   * definition, so this is a handful of requests at most, and it doubles as a
-   * warm transcript when the session is opened.
-   */
   private async primeBlocked(ref: SessionRef, snapshot: SessionSnapshot): Promise<void> {
     const key = keyOf(ref);
     if (this.transcripts.has(key) || this.primed.has(key)) return;
@@ -3485,16 +1195,7 @@ class AppStore implements StreamSink {
     try {
       const page = await daemon.events(ref.sessionId, since, PRIME_WINDOW);
       if (this.transcripts.has(key)) return;
-      /*
-       * ⚠ **Through `replaceTranscript`, because this is the path that creates most
-       * transcripts and it used to write the map directly.** `MAX_HELD_TRANSCRIPTS`
-       * is applied in `trimTranscripts`, which only `replaceTranscript` calls — so
-       * with a bare `this.transcripts.set` here the cap was never consulted on the
-       * one path that runs for *every blocked session on every four-second poll*.
-       * The map grew to the blocked-session count and the new bound's own docblock
-       * ("a tab left open all day cannot accumulate without bound") was false on
-       * exactly the path that accumulates.
-       */
+      // Through replaceTranscript, so MAX_HELD_TRANSCRIPTS applies here too.
       this.replaceTranscript(key, {
         ...EMPTY_TRANSCRIPT,
         events: page.events,
@@ -3504,34 +1205,11 @@ class AppStore implements StreamSink {
       });
       this.emit();
     } catch {
-      // Not fatal in the slightest: the card falls back to the title, which is
-      // what it would have shown anyway. Allow a later attempt.
       this.primed.delete(key);
     }
   }
 
-  /**
-   * Fetch this session's slash commands, if what we hold is not current.
-   *
-   * Called from the composer on the open session and nowhere else. The list is
-   * off the snapshot precisely so it is not paid for sixty times a poll, and
-   * fetching it for every row here would put that cost straight back.
-   *
-   * The comparison is `!==` and not `>`. A daemon restart puts the revision back
-   * to 0 while this client still holds 5, and the honest response is to drop what
-   * we have: the agent that published it is gone. `0` and `undefined` both mean
-   * the agent has never published — so that branch **deletes** rather than merely
-   * declining to fetch. Returning with the entry intact was the whole rule stated
-   * and then not done: after a daemon restart the composer went on offering the
-   * previous agent's list, which is exactly the outcome this paragraph claims to
-   * prevent.
-   *
-   * The in-flight guard drops a call rather than queueing it, so the revision it
-   * was dropped for has to be remembered — see `commandsWanted`. Without that, a
-   * bump from 5 to 6 during the fetch for 5 is lost for good: the effect that
-   * calls this is keyed on the revision, so it never runs again, and on an agent
-   * that never republishes (kimi) the client holds a superseded list for ever.
-   */
+  /** Revisions compare by inequality: a daemon restart resets them to 0. */
   ensureCommands(ref: SessionRef, revision: number | undefined): void {
     const key = keyOf(ref);
     const plan = commandsPlan(this.commandLists.get(key)?.revision, revision, this.commandsInFlight.has(key));
@@ -3542,10 +1220,6 @@ class AppStore implements StreamSink {
       return;
     }
     if (plan === "defer") {
-      // Not queued, just recorded: the newest wanted revision is the only one
-      // worth chasing, and `finally` re-drives from it. The `undefined` arm is
-      // unreachable — `commandsPlan` answers `drop` for it — and is written out
-      // because the compiler cannot see that through the return value.
       if (revision !== undefined) this.commandsWanted.set(key, revision);
       return;
     }
@@ -3557,19 +1231,14 @@ class AppStore implements StreamSink {
     void daemon
       .commands(ref.sessionId)
       .then((page) => {
-        // Nothing is filed against a session that has since been forgotten.
-        // `forgetSession` deletes these maps, and a request already in the air
-        // would otherwise resurrect the entry with nothing left to remove it.
+        // A late answer must not resurrect a forgotten session.
         if (!this.rows.has(key)) return;
-        // The daemon's own revision, not the one we asked at: the list may have
-        // moved while this was in flight, and filing it under the stale number
-        // would leave the next check believing it is current.
+        // The daemon's revision, which may have moved in flight.
         this.commandLists.set(key, { revision: page.revision, commands: page.commands, dropped: page.dropped });
         this.emit();
       })
       .catch(() => {
-        // Not fatal: the menu simply does not open, which is what it would do
-        // anyway with nothing to show. Allow a later attempt.
+        // Not fatal; allow a later attempt.
       })
       .finally(() => {
         this.commandsInFlight.delete(key);
@@ -3580,35 +1249,7 @@ class AppStore implements StreamSink {
       });
   }
 
-  /* ---------------------------------------------------------------- *
-   * Streams
-   * ---------------------------------------------------------------- */
-
-  /**
-   * Attach to a session, evicting the least recently viewed if we are at the cap.
-   *
-   * Attaching at `snapshot.lastSeq` rather than 0: the transcript is filled by
-   * paging backwards on demand, so opening a session with ten thousand events
-   * behind it costs one small page rather than the entire log arriving in a
-   * single synchronous block.
-   *
-   * Which is why **a stream is never opened without the row that says where to
-   * attach.** `lastSeq` comes from the session list, and the list arrives after
-   * the machines do: `bootstrap()` sets `phase: "ready"` as soon as it has
-   * connections, `SessionView` mounts on that, and its effect ran while
-   * `refreshMachineSessions` was still in flight. With no row the cursor fell
-   * back to `0` — measured 2026-08-01 against a stub daemon, a hard reload
-   * straight onto a session URL opened its socket with `since=0` where the same
-   * session reached by tapping it opened with `since=3`. `since=0` asks the
-   * daemon to replay the entire log, which `StreamConnection.attach` queues in
-   * one synchronous block against a bound sized for exactly that not to happen —
-   * so every reload on a phone paid for the whole transcript twice over.
-   *
-   * Returning here costs nothing visible: with no row `SessionView` is drawing
-   * "that session is not on this daemon" anyway, because it reads the same map.
-   * The intent is already recorded — `streamOrder` above is written before this —
-   * and `attachWanted` opens it the moment the list lands.
-   */
+  /** Never attaches without the row's `lastSeq`; attachWanted opens it once the list lands. */
   openSession(ref: SessionRef): void {
     const key = keyOf(ref);
     this.streamOrder = [...this.streamOrder.filter((k) => k !== key), key];
@@ -3618,61 +1259,18 @@ class AppStore implements StreamSink {
       if (connection === undefined) return;
       const row = this.rows.get(key);
       if (row === undefined) return;
-      /*
-       * Re-opening a session the socket LRU evicted must not silently skip what
-       * it missed — see `reattachSince`, which is the whole of that rule and is
-       * out there so `webcheck` can pin its boundary against the daemon's own
-       * `ATTACH_REPLAY_MAX` rather than against this client's window.
-       *
-       * **The dropped branch used to invent a gap, and it was the source of a
-       * message that was simply untrue.** When the daemon had moved further than
-       * we hold, this recorded `{from: heldLast + 1, to: daemonLast, reason:
-       * "evicted"}` — which `EventList` drew as "N events not shown (beyond
-       * retention)". Nothing had been evicted; the client had declined to fetch
-       * them and then reported its own decision as data loss, in the one tone
-       * reserved for a conversation that really does have a hole in it. So
-       * `keepHeld: false` drops what is held and `loadAll` pages the history back
-       * in contiguously: the cost is refetching, and a real gap is now only ever
-       * one the *daemon* reports in `lagged`.
-       */
       const { since, keepHeld } = reattachSince(
         this.transcripts.get(key)?.events.at(-1)?.seq ?? null,
         row.snapshot.lastSeq,
       );
       if (!keepHeld) this.replaceTranscript(key, { ...EMPTY_TRANSCRIPT, loadedFrom: since + 1, gaps: [] });
 
-      /*
-       * `since` is the attach point, whole, with nothing added here.
-       *
-       * It used to be `Math.max(since, heldLast)`, because `reattachSince`'s
-       * "held ahead of the row" arm answered the row's poll-stale number and the
-       * caller was where that got raised to the held tail. Two copies of one
-       * rule, and the wrong one was the assertable one: `webcheck` could only ask
-       * the pure function, which answered a seq the socket never sent. The
-       * correction is inside the function now — see the arm — so this line stays
-       * a use rather than becoming a second decision.
-       */
       const stream = new SessionStream(ref, connection, this, since);
       this.streams.set(key, stream);
       stream.start();
     }
 
-    /*
-     * **Outside the branch above, so history resumes on every open.**
-     *
-     * It used to sit inside `if (!this.streams.has(key))`, which meant the one and
-     * only attempt to load a conversation happened when its socket was created. A
-     * run that stopped short — a failed page, a transcript dropped mid-flight, the
-     * per-run budget — left the session permanently short of its own history, and
-     * the only way back was an LRU eviction that happened to close the socket.
-     *
-     * `loadAll` is a no-op when there is nothing to fetch (`loadStop` answers
-     * `start_of_log` before any request) and a no-op while one is already running,
-     * so the ordinary case costs nothing and the broken case heals itself the next
-     * time somebody opens the session.
-     *
-     * Not awaited: the tail is on screen immediately and the rest fills in above it.
-     */
+    // Outside the branch, so history resumes on every open.
     void this.loadAll(ref);
 
     while (this.streamOrder.length > MAX_LIVE_STREAMS) {
@@ -3690,10 +1288,6 @@ class AppStore implements StreamSink {
     this.streamOrder = this.streamOrder.filter((k) => k !== key);
   }
 
-  /* ---------------------------------------------------------------- *
-   * StreamSink
-   * ---------------------------------------------------------------- */
-
   onEvents(ref: SessionRef, events: StoredEvent[]): void {
     const key = keyOf(ref);
     const current = this.transcripts.get(key) ?? EMPTY_TRANSCRIPT;
@@ -3701,27 +1295,7 @@ class AppStore implements StreamSink {
     let loadedFrom = current.loadedFrom;
     let heldBytes = current.heldBytes + sizeOfEvents(events);
     if (heldBytes > MAX_TRANSCRIPT_BYTES) {
-      /*
-       * Drop the oldest until it fits, and remember where the memory window now
-       * starts so the loader can page them back rather than pretending they never
-       * were.
-       *
-       * **By bytes, walking from the oldest, because the ceiling is bytes.** It used
-       * to slice a fixed number of events off the front, which is one `slice` — this
-       * is a loop, and it is still cheap for the two reasons that matter: it only
-       * runs at all once a tab is genuinely full, and it walks only as far as it has
-       * to (one event's worth per arriving event, in the steady state). `sizeOfEvent`
-       * is memoised on identity, so every step is a map read.
-       *
-       * Subtracting what *left* rather than re-measuring what stayed is the same
-       * discipline: this is the socket's own path, and re-measuring a hundred
-       * thousand events per arriving token is tens of milliseconds a token.
-       *
-       * `keep` cannot run past the end: `heldBytes` counts exactly what `merged`
-       * holds, so it reaches the ceiling before the array does. The bound on the
-       * loop is written anyway, because a drift between those two would otherwise
-       * be an empty transcript rather than a wrong number.
-       */
+      // By bytes from the oldest, subtracting what left rather than re-measuring.
       let keep = 0;
       while (keep < merged.length && heldBytes > MAX_TRANSCRIPT_BYTES) {
         heldBytes -= sizeOfEvent(merged[keep]!);
@@ -3734,84 +1308,27 @@ class AppStore implements StreamSink {
       loadedFrom = Math.min(loadedFrom, merged[0]?.seq ?? loadedFrom);
     }
 
-    // A `/clear` arriving live cuts the transcript the same way one found by
-    // paging does, and `nextCut` is that rule — out of here so `webcheck` can
-    // assert it, since which side of the socket a cut came from is precisely what
-    // the reader must not be able to tell.
     const clearedAt = nextCut(current.clearedAt, events);
 
     this.transcripts.set(key, { ...current, events: merged, heldBytes, loadedFrom, clearedAt });
-    /*
-     * The message somebody sent is now in the log, so the copy drawn for them
-     * while it was in flight goes.
-     *
-     * **Here rather than in an effect on `Composer`**, which is where it used to
-     * be and which could only ever settle the session on screen: this runs for
-     * every socket, so a message sent into one conversation and left behind is
-     * still tidied up when its own `prompt` event lands. A no-op when nothing is
-     * outstanding, which is the ordinary case tens of times a second — one map
-     * read on a path that already does several.
-     */
     settleEcho(key, merged.at(-1)?.seq ?? 0);
-    // Transcript only. This is the per-event path — the one that runs tens of
-    // times a second during a turn — and it touches no machine and no session row.
     this.emitTranscripts();
   }
 
   onSnapshot(ref: SessionRef, session: SessionSnapshot): void {
     const key = keyOf(ref);
     const existing = this.rows.get(key);
-    /*
-     * The clock anchor is the poll's, carried forward rather than re-read here.
-     *
-     * ⚠ This wrote `daemonNow: Date.now(), fetchedAt: Date.now()` and said "a
-     * snapshot frame carries no clock, so anchor to ours — it is correct at this
-     * instant by construction". The first half is still true and the conclusion
-     * never was. Substitute `daemonNow === fetchedAt === T` into `elapsedSince`:
-     * `(T - at) + (now - T)` is `now - at`, which is precisely the browser-clock
-     * subtraction the two-term form exists to avoid. It would be correct only if
-     * `at` were a browser timestamp, and it never is — every call site passes
-     * `turnStartedAt` or `raisedAt`, both stamped by the daemon (`wire.ts`). And
-     * this runs on every socket open and rotation (`stream.ts`) and on every action
-     * that folds a returned snapshot in, `/prompt` included — i.e. at the instant a
-     * turn starts, when `turnStartedAt` is newest and the foot is about to draw it.
-     * So a phone whose clock had drifted drew the drift right there, on the one row
-     * somebody was watching, while the polled rows beside it were right.
-     *
-     * Keeping the poll's pair is correct rather than a stale-data compromise: the
-     * pair records an *offset* between two clocks, not a moment. That is what the
-     * second term is for — `daemonNow - fetchedAt` means the same thing however far
-     * `now` has moved past it, so an old anchor is as good as a fresh one and only
-     * a new reading of the daemon's clock, which is the next poll, can better it.
-     *
-     * With no row there is no reading to keep, and this is the honest bound: a
-     * session created from this tab reaches here from `POST /sessions` before any
-     * list has come back. Both halves then fall back to ours, which is the old
-     * arithmetic and is wrong by the whole offset between the two clocks — for at
-     * most one visible poll (`POLL_INTERVAL_MS`), which overwrites the pair with a
-     * real one. One `Date.now()` feeds both, because two reads a millisecond apart
-     * would invent an offset of their own.
-     */
+    // Keep the poll's clock pair: it records an offset, and anchoring to ours would draw the drift.
     const unanchored = Date.now();
     this.rows.set(key, {
       key,
       ref,
       machineName: existing?.machineName ?? this.connections.get(ref.machineId)?.state().name ?? "",
-      /*
-       * ⚠ **Through `unreduceSnapshot` first**, because a socket frame is not
-       * always the whole record and the row it is about to replace may be. Its
-       * docblock is the contract; what it prevents here is the frame's reduced
-       * copy of the parked lists — and the emptied payloads on them — clobbering
-       * the poll's fuller one twice a poll interval. A no-op on every frame the
-       * daemon did not have to cut, which is almost all of them.
-       */
+      // Through unreduceSnapshot, so a cut frame never clobbers the poll's fuller lists.
       snapshot: mergeOptimistic(unreduceSnapshot(session, existing?.snapshot), this.metaWrites.get(key)?.patch),
       heldConfig: rememberHeld(key, holdConfig(existing?.heldConfig, session)),
       daemonNow: existing?.daemonNow ?? unanchored,
       fetchedAt: existing?.fetchedAt ?? unanchored,
-      // Kept from the row the poll built. A snapshot frame does not carry the
-      // mapping, and dropping it here would make every path on the open session
-      // flip back to its host form the moment the agent said anything.
     });
     const transcript = this.transcripts.get(key);
     if (transcript !== undefined) {
@@ -3825,20 +1342,6 @@ class AppStore implements StreamSink {
     const key = keyOf(ref);
     const current = this.transcripts.get(key) ?? EMPTY_TRANSCRIPT;
 
-    /*
-     * Which of the daemon's three lagged reasons is a loss, and which is only a
-     * refusal to replay, is `gapPlan` — out of here so `webcheck` can assert all
-     * three, since a regression restores the false "N events not shown (beyond
-     * retention)" banner over a conversation that is perfectly intact.
-     *
-     * The comment that used to be here said the skipped range "sits immediately
-     * below `loadedFrom` by construction", which is true only for a fresh attach
-     * onto an empty transcript. Re-attaching with events already held is the
-     * ordinary case — `SessionStream.reconnect` re-opens at `lastAppliedSeq` with
-     * no clamp — so any wake after more than `ATTACH_REPLAY_MAX` events lands here
-     * holding a transcript that ends far below `from`, which is why the answer is
-     * to restart at the far side rather than to page backwards from where we are.
-     */
     const plan = gapPlan(reason, to);
     if (plan.kind === "restart") {
       this.replaceTranscript(key, { ...EMPTY_TRANSCRIPT, loadedFrom: plan.loadedFrom });
@@ -3864,196 +1367,57 @@ class AppStore implements StreamSink {
     this.emit();
   }
 
-  /**
-   * Drop every trace of one session.
-   *
-   * A helper rather than three copies, because there were three copies and all
-   * three had drifted the same way: each deleted `rows` and `transcripts` and none
-   * of them touched `primed`. That set only ever grew, and — worse than the memory
-   * — a session whose transcript had been dropped could never be re-primed, so a
-   * re-blocked session showed its bare title with no command under it for ever.
-   *
-   * Anything else added per session belongs here too. That is the point of it.
-   */
+  /** Anything else added per session belongs here too. */
   private forgetSession(key: SessionKey): void {
     this.closeStream(key);
     this.rows.delete(key);
     this.replaceTranscript(key, null);
     this.primed.delete(key);
-    /*
-     * ⚠ **`transcriptGen` is deliberately NOT deleted here, and it is the one
-     * per-session map that must not be.** It was, briefly, on the reasoning that a
-     * session which is gone has no page in flight — but the three guards that read
-     * it (`(this.transcriptGen.get(key) ?? 0) !== gen`) exist precisely because
-     * `forgetSession` *cannot* cancel an awaited page. Deleting the entry makes the
-     * counter restart at 0, so a key that comes back — a session re-listed after a
-     * poll, the same id on a re-created worktree — reissues generation 1, and a page
-     * captured at generation 1 in that key's previous life matches the guard and is
-     * committed into the new transcript. Monotonic for the life of the tab is the
-     * property; the map holds a string and a number per session ever touched, which
-     * is the cheaper half of that trade by a wide margin.
-     */
+    // transcriptGen is kept: it must stay monotonic per key, or a stale page passes the guard.
     this.commandLists.delete(key);
     this.commandsInFlight.delete(key);
     this.commandsWanted.delete(key);
-    // Not just bookkeeping: this **aborts uploads still in flight**. `onVanished`
-    // reaches here, and a session the daemon says is gone must stop having 25 MiB
-    // pushed at it over somebody's uplink.
+    // Also aborts uploads still in flight.
     forgetAttachments(key);
-    // And the message that was on its way to it. There is nothing left to draw it
-    // in and no event that can ever settle it.
     clearEcho(key);
-    // And which finished rows this reader had cleared. There is nothing left to
-    // hide: the rows themselves are the daemon's, and this session has none.
     forgetHiddenFinished(key);
     forgetAsks(key);
-    // Anything optimistically drawn for a session that is gone. Every entry is
-    // also released when its own request settles, so this is about the window in
-    // between rather than about a leak.
     forgetChoices(key);
   }
 
-  /* ---------------------------------------------------------------- *
-   * History
-   * ---------------------------------------------------------------- */
-
-  /**
-   * Page backwards until there is nothing left worth having.
-   *
-   * `since` is exclusive and the server answers ascending, so reaching *older*
-   * events means asking from a point before the window we hold. The page is
-   * capped at 5000 events or 768 KiB, whichever comes first — so a short page is not
-   * the end of history and the next request has to key off the last seq received.
-   *
-   * **A loop, and that is the change.** It used to fetch exactly one page, and
-   * `openSession` called it exactly once, so opening a session left you holding
-   * the last 200 events with a button under them. Anything longer than a morning's
-   * work therefore started several taps from its own beginning, and the 4774-event
-   * session on this machine started twenty-four. A conversation is read from the
-   * top; it should arrive that way.
-   *
-   * **Five ways it stops**, and the count is worth keeping here because an earlier
-   * version of this docblock said "three" and omitted the only one of them that is
-   * a budget — which is the one a reader comes here to find, since it is what makes
-   * the "did not load" button appear on a long conversation. Four of them are
-   * `loadStop`, in the order it asks them; the fifth is a window that could not be
-   * filled, which is `fillWindow`'s `closed` and cannot be known until one has been
-   * tried. Both are documented at those functions rather than restated here, so
-   * there is one copy of each rule and `webcheck` reaches it.
-   *
-   * Started with `void` from `openSession` *after* the socket, so the tail is on
-   * screen while this runs and the history fills in above it.
-   */
-  /**
-   * Page the conversation in, and **keep it in** — this is what makes a transcript
-   * always loaded rather than usually loaded.
-   *
-   * Idempotent and cheap: with nothing left to fetch, `loadStop` answers
-   * `start_of_log` before a single request goes out. So the right thing to do
-   * with it is call it whenever there is any reason to think history might be
-   * short, which is what `openSession` now does unconditionally.
-   */
   async loadAll(ref: SessionRef): Promise<void> {
     const key = keyOf(ref);
     if (this.transcripts.get(key)?.loadingHistory === true) return;
     const daemon = this.daemons.get(ref.machineId);
     if (daemon === undefined) return;
-    /*
-     * **Asked before the latch is set, and that is what makes the 4s re-drive
-     * free.** `attachWanted` calls this for every open session on every poll, so
-     * the fully-paged case has to cost one map read and emit nothing — setting
-     * `loadingHistory` and clearing it again would be two `emitTranscripts()`, i.e.
-     * two full-transcript re-renders per open session, for ever.
-     */
+    // Before the latch, so the per-poll re-drive costs one map read and no emit.
     if (stopFor(this.transcripts.get(key)) !== null) return;
-    /** The life of the transcript this run belongs to — see `transcriptGen`. */
     const gen = this.transcriptGen.get(key) ?? 0;
 
     this.setTranscript(key, (held) => ({ ...held, loadingHistory: true }));
     this.emitTranscripts();
 
-    /*
-     * **A yield point, not a budget** — see `loadStop`, which no longer has an arm
-     * for this. `MAX_AUTO_HISTORY` used to stop the run and leave the rest of the
-     * conversation behind a button; now it is how often the loop hands the main
-     * thread back. What is being paced is not the network (every window already
-     * awaits a round trip) but `emitTranscripts()` re-rendering a transcript that
-     * has just grown by 500 rows. Keeping the constant as the chunk means every
-     * session under it behaves exactly as it did before this change.
-     */
     let fetched = 0;
     let lastYield = 0;
     try {
       for (;;) {
         const current = this.transcripts.get(key);
         if (current === undefined) return;
-        // Three of the four ways this stops, in one place so the order is a rule
-        // rather than a sequence of `break`s — see `loadStop`. The fourth is the
-        // window below not closing.
         if (stopFor(current) !== null) break;
 
-        /*
-         * One window, filled forwards and closed completely before anything is
-         * prepended — see `fillWindow` for why the page's *first* event is not
-         * where `loadedFrom` may be anchored. Named `filled` rather than `window`
-         * because this module runs in a browser, where that is a global.
-         *
-         * **The budget is `HISTORY_PAGE`, which makes it non-binding by
-         * construction, and that is the point.** A window spans exactly
-         * `HISTORY_PAGE` seqs (`fillWindow` starts its cursor at
-         * `max(0, top - HISTORY_PAGE)` and filters to `> cursor && <= top`), so it
-         * can never yield more than that many events however the daemon's 768 KiB
-         * byte cap chops the pages up — which means this budget can never be the
-         * thing that ends a window. It used to be `MAX_AUTO_HISTORY - fetched`,
-         * and every 5000th event that expression went to zero *mid-window*: the
-         * block was then discarded whole by the `!closed` arm below, so the run
-         * paid for a page it threw away and reported the loss as a button. What is
-         * left of `!closed` is the one thing it was always documented to mean —
-         * the daemon cannot go further back.
-         */
+        // `HISTORY_PAGE` never binds inside a window. Named `filled`: `window` is a global.
         const filled = await fillWindow(
           async (since) => {
             for (let attempt = 0; ; attempt += 1) {
               try {
                 const page = await daemon.events(ref.sessionId, since, HISTORY_PAGE);
-                /*
-                 * The session was closed or forgotten while this page was in
-                 * flight.
-                 *
-                 * Answering with nothing rather than throwing: `fillWindow` reads
-                 * an empty answer as "there is no next `since` to ask from" and
-                 * ends the window, and the `latest === undefined` check below then
-                 * returns without committing anything. So a transcript nobody
-                 * holds stops being paged after exactly one more in-flight
-                 * request, which is what the check inside the old inline loop
-                 * bought, with no second way out of a loop that lives in another
-                 * module now.
-                 */
                 if (this.transcripts.get(key) === undefined) return { events: [], firstSeq: page.firstSeq };
                 return page;
               } catch (error) {
-                /*
-                 * **The retry is here rather than around `fillWindow`, and the
-                 * difference is a whole window's work.** `fillWindow` holds the
-                 * block it has accumulated and the cursor it has reached in local
-                 * state; retrying from out there would throw both away and refill
-                 * the window from its floor. Retrying the one request that failed
-                 * resumes at the `since` it was already asking from.
-                 *
-                 * On exhaustion this **rethrows**, and must: answering with an
-                 * empty page instead would let `fillWindow` end the window
-                 * normally and write `page.firstSeq` into `daemonFirstSeq` — a
-                 * floor from a request that never succeeded, which `loadStop`
-                 * would then read as `start_of_log` and stop paging this session
-                 * for good.
-                 */
+                // Retried per request to keep the window's progress; rethrows, since an empty page would fake a floor.
                 const wait = historyRetry(attempt, error);
                 if (wait === null) throw error;
                 await sleep(wait);
-                // Woken into a different life: the transcript was replaced while
-                // this was waiting, so the page it is about belongs to a
-                // conversation nobody is holding. Same test the loop makes after
-                // every window, for the same reason.
                 if ((this.transcriptGen.get(key) ?? 0) !== gen) throw error;
               }
             }
@@ -4065,37 +1429,16 @@ class AppStore implements StreamSink {
 
         const latest = this.transcripts.get(key);
         if (latest === undefined) return;
-        // The transcript was thrown away and started again while this window was
-        // in flight — the block belongs to the previous life and prepending it
-        // would splice two conversations together. Whoever replaced it has its
-        // own run; this one is done.
+        // Replaced mid-window: the block belongs to the previous life.
         if ((this.transcriptGen.get(key) ?? 0) !== gen) return;
-        /*
-         * The window could not be closed — prepending a half-filled one is the
-         * hole `fillWindow` exists to prevent, so the fetch is discarded and
-         * `loadedFrom` stays put.
-         *
-         * With the budget non-binding (see above) this now has exactly one cause:
-         * a page came back with nothing usable, i.e. the daemon's own floor is
-         * above this window. That is a real end rather than a pause, and the
-         * `daemonFirstSeq` written here is what tells `loadStop` so — the next
-         * re-drive reads `loadedFrom <= max(1, daemonFirstSeq)` and returns before
-         * asking for anything. `EventList` draws the same fact as the legacy
-         * "the start of this conversation is gone" line.
-         */
+        // Unclosed means the daemon's floor is above this window: record it and prepend nothing.
         if (!filled.closed) {
-          // `??`: `null` is "no page answered", which must not be written down as
-          // a floor of zero — `EventList` reads that as the start of the
-          // conversation being gone.
           this.setTranscript(key, (held) => ({ ...held, daemonFirstSeq: filled.firstSeq ?? held.daemonFirstSeq }));
           this.emitTranscripts();
           break;
         }
         const block = filled.block;
 
-        // Newest first, so a session cleared twice stops at the most recent cut.
-        // Only what this window brought is searched: an older marker already found
-        // is the one we are stopped at, and one below it is two conversations ago.
         let cleared = latest.clearedAt;
         for (let i = block.length - 1; i >= 0; i -= 1) {
           const stored = block[i];
@@ -4115,55 +1458,16 @@ class AppStore implements StreamSink {
         });
         this.emitTranscripts();
 
-        /*
-         * Hand the main thread back every `MAX_AUTO_HISTORY` events.
-         *
-         * `setTimeout` and deliberately not `requestIdleCallback`: `webcheck`
-         * drives this module under `tsx` in node, where that global does not
-         * exist, and Safari only shipped it in 17.4. A zero-delay macrotask is
-         * enough — it lets a paint and a queued touch event in between chunks,
-         * which is all this is for.
-         */
+        // setTimeout: requestIdleCallback is absent under node and before Safari 17.4.
         if (fetched - lastYield >= MAX_AUTO_HISTORY) {
           lastYield = fetched;
           await sleep(0);
         }
       }
     } catch {
-      /*
-       * Whatever landed before the failure is kept and drawn, and the run is over
-       * — `historyRetry` has already spent its schedule on anything transient, so
-       * reaching here means either the daemon answered a refusal or the network
-       * did not come back inside it.
-       *
-       * **This used to be the end of the story**, and that was the defect: nothing
-       * re-drove `loadAll`, so one dropped request left the conversation empty for
-       * the life of the tab and the reader was offered a button to do by hand what
-       * the client had simply given up on. `attachWanted` calls this again on the
-       * next poll that a session list survives.
-       */
+      // Keep what landed; attachWanted re-drives this on the next poll.
     } finally {
-      /*
-       * **`finally`, and this was three plain statements after the `catch`.**
-       *
-       * `loadingHistory` is a latch that makes the next call a no-op, and the
-       * loop above returns early in two places — a transcript dropped while a
-       * page was in flight, at lines that read `if (current === undefined)
-       * return`. A `return` inside the `try` skipped straight past the reset, so
-       * the latch stuck **on, permanently**: every later `loadAll` for that
-       * session returned at its first line, for the life of the tab, and the
-       * conversation never loaded again. Its only symptom is an empty transcript
-       * that will not fill, which is exactly what was reported — a session of
-       * 1989 events drawing "No events yet." beside an approval whose tool call
-       * it therefore could not find either.
-       *
-       * Nothing else in this file resets it, so there is no second way out.
-       *
-       * Guarded on the generation for the mirror of the reason the check above
-       * is: past a replacement the latch on the *new* transcript belongs to the
-       * run that replacement started, and clearing it here would let a third
-       * loop in behind this one.
-       */
+      // In `finally`, or an early return leaves the latch on; guarded so a replacement keeps its own latch.
       if ((this.transcriptGen.get(key) ?? 0) === gen) {
         this.setTranscript(key, (held) => ({ ...held, loadingHistory: false }));
         this.emitTranscripts();
@@ -4171,29 +1475,13 @@ class AppStore implements StreamSink {
     }
   }
 
-  /*
-   * **There is no `revealBeforeClear` and there must not be one again.** It was
-   * the only control that ever grew a transcript by hand — a button at the head
-   * offering to fetch the conversation above the agent's own `/clear` — and it is
-   * gone on the owner's word: what the agent has been told to forget is not
-   * something this client offers to read back. `loadStop` therefore stops at
-   * `clearedAt` unconditionally, and `Transcript` carries one field rather than a
-   * pair. The events are still on the daemon; `pnpm client` still prints them.
-   */
-
-  /** Read-modify-write on a transcript that may have been dropped under us. */
   private setTranscript(key: SessionKey, update: (held: Transcript) => Transcript): void {
     const held = this.transcripts.get(key);
     if (held === undefined) return;
     this.transcripts.set(key, update(held));
   }
 
-  /**
-   * Throw a transcript away and start another, which is not the same act as
-   * updating one — see `transcriptGen`. Every site that discards what is held
-   * goes through here, so an in-flight `loadAll` cannot prepend a block it
-   * fetched for the previous life onto the new one.
-   */
+  /** Every discard goes through here, so an in-flight loadAll cannot prepend into the new life. */
   private replaceTranscript(key: SessionKey, next: Transcript | null): void {
     this.transcriptGen.set(key, (this.transcriptGen.get(key) ?? 0) + 1);
     if (next === null) this.transcripts.delete(key);
@@ -4203,94 +1491,29 @@ class AppStore implements StreamSink {
     }
   }
 
-  /**
-   * Keep the number of *retained* conversations bounded.
-   *
-   * ⚠ **`MAX_TRANSCRIPT_BYTES` is documented as "the tab's only ceiling" and it
-   * is not one — it is per session.** Nothing ever dropped a transcript, so
-   * opening N conversations in one tab retained N of them, each entitled to 16
-   * MiB, on a device the whole product is aimed at. The byte ceiling bounds how
-   * much of *one* conversation is held; this bounds how many are held at once,
-   * and the two together are what the sentence claimed.
-   *
-   * **A stream is never evicted, and that is what makes this safe.** Anything in
-   * `streamOrder` is open or recently open — at most `MAX_LIVE_STREAMS` of them —
-   * so the conversation on screen and the ones still arriving cannot be the ones
-   * dropped. What goes is the tail of somewhere you navigated through, and it
-   * costs a re-fetch on the way back, which is the same cost a cold open already
-   * pays.
-   *
-   * Eviction order is insertion order over `transcripts`, which is a `Map` and
-   * therefore ordered by first write. That is "least recently *arrived at*"
-   * rather than a true LRU, and it is deliberate: a true LRU needs a read hook
-   * the store does not have, and would buy nothing here because the only entries
-   * eligible at all are ones with no live stream.
-   *
-   * The cap is generous on purpose. This is a leak bound, not a memory budget:
-   * the number that matters is that it is finite.
-   */
+  /** Never evicts a streamed conversation; insertion order. */
   private trimTranscripts(just: SessionKey): void {
     if (this.transcripts.size <= MAX_HELD_TRANSCRIPTS) return;
     const live = new Set(this.streamOrder);
     for (const key of [...this.transcripts.keys()]) {
       if (this.transcripts.size <= MAX_HELD_TRANSCRIPTS) return;
       if (key === just || live.has(key) || this.streams.has(key)) continue;
-      // Not `replaceTranscript`: that calls back into here, and the generation
-      // bump is wanted so a page still in flight for this key is discarded.
       this.transcriptGen.set(key, (this.transcriptGen.get(key) ?? 0) + 1);
       this.transcripts.delete(key);
-      /*
-       * ⚠ **`primed` goes with it, and forgetting that is a bug this file has
-       * already had once.** `primeBlocked` opens with `if (this.transcripts.has(key)
-       * || this.primed.has(key)) return;`, so a key dropped from one set and left in
-       * the other can never be primed again — the blocked row keeps its bare title
-       * with no command under it, for the life of the tab. `forgetSession`'s docblock
-       * is where that was written down the first time; this is the second route to
-       * the same state, and eviction order makes it the *likely* one, since a primed
-       * window is written on the first `refreshMachineSessions` and this Map evicts
-       * in insertion order.
-       */
+      // `primed` goes with it, or this row can never be primed again.
       this.primed.delete(key);
     }
   }
-
-  /* ---------------------------------------------------------------- *
-   * Actions
-   * ---------------------------------------------------------------- */
 
   daemonFor(id: MachineId): DaemonClient | undefined {
     return this.daemons.get(id);
   }
 
-  /** Fold an action's returned snapshot straight into the list, so the UI moves now. */
   applySnapshot(ref: SessionRef, session: SessionSnapshot): void {
     this.onSnapshot(ref, session);
   }
 
-  /**
-   * Rename a session, pin it, or move it — the one write path for all three.
-   *
-   * It is here rather than in `SessionMenu` because two callers need it now and
-   * they need different halves: the kebab writes one field on a tap, and a drag
-   * writes a position several times a second and must not have any of them
-   * reordered. Both need the same three things — the row drawn where it was put
-   * before the daemon answers, the answer folded in when it comes, and a refusal
-   * that puts back what the daemon actually holds rather than what was on screen
-   * one edit ago.
-   *
-   * ⚠ **It reports through a callback and never draws anything itself.** `toast`
-   * lives in a `.tsx` under `ui/`, and `webcheck` imports this module with a
-   * two-field `document` — so a store that reached for it would move a driver's
-   * failure from an assertion to a module-evaluation crash. It is also the wrong
-   * direction: `store.ts` is under every screen here.
-   *
-   * Answers whether the write was **issued**, not whether it succeeded. `false`
-   * means the machine is not reachable and nothing was sent, which is the one
-   * outcome the caller has to describe in its own words — *what did not take*,
-   * "so the pin was not changed", "so the row was not moved". A bare fact about
-   * the fleet leaves the reader working out for themselves whether the thing they
-   * just tapped landed.
-   */
+  /** Drawn now, errors through `report`; returns whether the write was issued. */
   setSessionMeta(
     ref: SessionRef,
     patch: { title?: string | null; pinned?: boolean; rank?: number | null },
@@ -4300,29 +1523,18 @@ class AppStore implements StreamSink {
     if (daemon === undefined) return false;
     const key = keyOf(ref);
     const held = this.metaWrites.get(key);
-    /*
-     * The overlay is the *accumulated* patch, so a second drop before the first
-     * has answered draws the second rather than blinking through the first. Only
-     * the position half is overlaid: a title is drawn from the same snapshot but
-     * nothing about it moves a row, so an optimistic name would be this client
-     * claiming something it has not been told.
-     */
+    // Position only: an optimistic title would claim what the daemon has not said.
     const entry = held ?? { patch: {}, inFlight: 0, queue: Promise.resolve() };
     if (patch.pinned !== undefined) entry.patch.pinned = patch.pinned;
     if (patch.rank !== undefined) entry.patch.rank = patch.rank;
     entry.inFlight += 1;
     this.metaWrites.set(key, entry);
-    // Re-fold the row it is about, so the overlay is on screen this frame rather
-    // than at the next poll.
     const current = this.rows.get(key);
     if (current !== undefined) this.onSnapshot(ref, current.snapshot);
 
     const settle = (): void => {
       entry.inFlight -= 1;
-      // Nothing else outstanding, so the daemon's own answer is the truth — which
-      // is what a refusal must fall back to as well. Dropping the overlay here is
-      // what makes the failure path "restore what the daemon last confirmed"
-      // rather than "restore what was on screen one edit ago".
+      // Nothing outstanding: the daemon's answer is the truth, after a refusal too.
       if (entry.inFlight <= 0) this.metaWrites.delete(key);
     };
     entry.queue = entry.queue.then(async () => {
@@ -4332,8 +1544,6 @@ class AppStore implements StreamSink {
         this.applySnapshot(ref, result.session);
       } catch (cause: unknown) {
         settle();
-        // The row is already back to what the daemon holds; the sentence says the
-        // act did not take, which is the half a reader cannot see for themselves.
         report(errorText(cause));
         void this.resume("action-failed");
       }
@@ -4341,29 +1551,10 @@ class AppStore implements StreamSink {
     return true;
   }
 
-  /**
-   * `POST /sessions/:id/prompt` has answered, and named the seq the message
-   * landed at.
-   *
-   * Two things, and the second is why this is a store method rather than a call
-   * into `echo.ts` from the composer. First the sentinel seq is replaced by the
-   * real one, so the ordinary case — the event still on its way — settles when it
-   * arrives. Then the echo is settled against the log **now**, because the
-   * opposite order is common rather than exotic: `/prompt` is on the 90-second
-   * slow-route budget and resumes a terminal session before it answers, while the
-   * `prompt` event comes down a socket that is waiting for nothing. When the
-   * event wins the race, `onEvents` has already compared it against
-   * `MAX_SAFE_INTEGER` and quite correctly kept the echo — and without this line
-   * nothing would ever look again, so a message would sit doubled at the foot of
-   * the conversation until the next event happened to arrive.
-   *
-   * Reading the transcript from `this` rather than from a closure is the other
-   * half: the caller's `state` is whatever it rendered with, which on a
-   * ninety-second round trip is not what the log holds.
-   */
-  promptLanded(ref: SessionRef, seq: number): void {
+  /** Settles against the log now, since the prompt event often wins the race. */
+  promptLanded(ref: SessionRef, sent: PendingEcho, seq: number): void {
     const key = keyOf(ref);
-    landEcho(key, seq);
+    landEcho(key, sent, seq);
     settleEcho(key, this.transcripts.get(key)?.events.at(-1)?.seq ?? 0);
   }
 
@@ -4371,72 +1562,15 @@ class AppStore implements StreamSink {
 
 export const store = new AppStore();
 
-/*
- * The one way `cp.ts` reaches back into the store.
- *
- * Registered here rather than in the constructor because `cp.ts` is imported *by*
- * this module — the dependency runs one way and always has — so the handler has to
- * be installed from outside the class, after both modules exist. What it carries
- * is the only thing `cp.ts` knows that the store cannot work out for itself: that
- * a request came back saying this credential is finished.
- */
 cp.onSignedOut((failure) => store.handleSignedOut(failure));
 
-/*
- * And the one way `ui/SignIn.tsx` reaches this store without naming it.
- *
- * That screen is drawn by both bundles — it is the sign-in form the app shows
- * when there is no credential, and the one `Gate` shows on a mailed link that
- * needs a session — so it names `SignInAuth` and the bundle decides which
- * store answers. Registered from this tail rather than from `main.tsx` because
- * `dist` has exactly one store and nothing in it has ever had an opinion about
- * which; the gate wires its own from its entry point, where the answer is not
- * unambiguous. See `signInAuth.ts`.
- */
 provideSignInAuth(store);
 
-/** Sessions needing a human, oldest wait first, across every machine. */
-/**
- * The three lists `Home` renders, plus the per-machine session counts.
- *
- * Derived in **one pass over `state.sessions`** and memoised on its identity.
- * Every part of that matters:
- *
- *   - Three separate exported selectors meant three full filters and three sorts
- *     per render, and `Home` called all of them unmemoised, so a streamed text
- *     delta re-derived the whole fleet.
- *   - The blocked comparator called `Math.min(...spread)` from *inside* the sort,
- *     so the key was recomputed O(n log n) times instead of once — and spreading a
- *     pending-permission array into `Math.min` is also how a very long one would
- *     blow the argument limit.
- *   - The machine counts were `sessions.filter(...)` nested inside
- *     `machines.map(...)`, which is O(machines × sessions).
- *
- * Memoised on `state.sessions` by identity, which is exactly right now that
- * `emit` only replaces that array when a row actually changed: a transcript event
- * leaves it alone and this whole derivation is skipped.
- */
 export interface SessionLists {
   blocked: SessionRow[];
   active: SessionRow[];
   ended: SessionRow[];
-  /**
-   * Sessions **still alive** per machine, not sessions ever created.
-   *
-   * It counted every row, so a machine whose only two sessions had both ended
-   * hours ago read "2 sess" beside a green dot — which says the machine is busy
-   * when nothing is running on it at all. Terminal rows are still in the list and
-   * still reachable under the Ended filter; they are simply not what "how much is
-   * happening here" means.
-   *
-   * A session the daemon is bringing back after a restart *is* counted, which is
-   * `countsAsLive` rather than `!isTerminal`: from the reader's seat it is one of
-   * their live conversations that happens to be a few seconds from having an
-   * agent again, and dropping it out of the count for the length of a deploy
-   * would make the fleet look emptier than it is at exactly the moment somebody
-   * checks on it. A *stalled* one is not counted — nothing is running, and that
-   * is the point of it being a separate question from which list it lands in.
-   */
+  /** `countsAsLive`: a restarting session counts, a stalled one does not. */
   countByMachine: ReadonlyMap<MachineId, number>;
 }
 
@@ -4456,41 +1590,17 @@ export function sessionLists(state: AppState): SessionLists {
       countByMachine.set(row.ref.machineId, (countByMachine.get(row.ref.machineId) ?? 0) + 1);
     }
 
-    // **This is the single line that carries questions into the whole fleet
-    // view.** `machineSubline`, the collapsed-section `blockedCount` and the "an
-    // approval cannot be hidden" property all read `blockedCount`, which reads
-    // `sessionGroups`, which reads this — so they need no edit of their own. That
-    // is the argument for the predicate rather than a happy accident.
     if (needsHuman(row.snapshot)) {
-      // Still computed once per row rather than once per comparison, and still a
-      // fold rather than a spread, so the number waiting cannot matter.
       blocked.push({ row, oldest: oldestWait(row.snapshot) });
     } else if (showsAsEnded(row.snapshot)) {
-      // `showsAsEnded` and not `isTerminal`: a session the daemon ended is not
-      // one *anybody* ended, so it stays in Active, where it keeps the place its
-      // reader gave it. Ended means somebody decided it was over.
+      // `showsAsEnded`: Ended means somebody decided it was over.
       ended.push(row);
     } else {
       active.push(row);
     }
   }
 
-  /*
-   * **`blocked` is sorted and the other two are not, and the asymmetry is the
-   * whole of what this function decides now.**
-   *
-   * Oldest wait first, because `Sheet`'s `WaitingHere` takes `waiting[0]` and
-   * means *the one that has been waiting longest* — a queue question, and the only
-   * order here that any surface still reads.
-   *
-   * `active` and `ended` used to sort most-recent-first, and that was the rail's
-   * display order: a list that rearranged itself on the four-second poll while
-   * somebody was reading it. The rail's order belongs to its reader now
-   * (`orderSessions` in `sessionOrder.ts`, applied where `groups.ts` produces the
-   * rows), so these two are **memberships rather than orders** and sorting them
-   * would be arithmetic nothing looks at. Which bucket a row lands in is still
-   * exactly as load-bearing as it was.
-   */
+  // Only `blocked` is sorted; the rest are memberships ordered by `orderSessions`.
   blocked.sort((a, b) => a.oldest - b.oldest);
 
   listsCache = { blocked: blocked.map((entry) => entry.row), active, ended, countByMachine };
@@ -4498,158 +1608,39 @@ export function sessionLists(state: AppState): SessionLists {
   return listsCache;
 }
 
-/** One machine's own sessions, in the order its section draws them. */
 export interface MachineGroup {
   id: MachineId;
-  /**
-   * What the home screen calls this machine — {@link machineDisplayName}, so
-   * `local` on the one this client runs beside and the stored label on every
-   * other. **A display name, never a label**: nothing that writes to the control
-   * plane may read it, and `MachineState.name` is still the real one.
-   */
+  /** A display name, never a label to write back. */
   name: string;
   reach: MachineState["reach"];
   offlineReason: MachineState["offlineReason"];
   route: MachineState["route"];
   tokenDegraded: boolean;
-  /**
-   * Past its owner's machine limit.
-   *
-   * On the group rather than only on `MachineState` because this is the one
-   * place the rail can say *why* a selected machine has no sessions to list —
-   * "no sessions here yet" is false for a machine that has plenty and cannot be
-   * reached to enumerate them.
-   */
   overLimit: boolean;
-  /**
-   * Its owner has been banned.
-   *
-   * Carried beside `overLimit` rather than folded into it, for the reason the
-   * two codes are separate everywhere else in this app: the **remedies differ**,
-   * so a rail that named the limit for a banned owner's machine would send the
-   * reader to retire hardware that retiring will not bring back.
-   *
-   * It arrived a release late, and the gap was exactly the false claim
-   * `overLimit` was put here to stop: `machine.ts`'s `switchedOff()` refuses a
-   * token for *both* reasons, so a banned owner's machine cannot list its
-   * sessions either — and with only `overLimit` on the group the rail fell
-   * through to "No sessions here yet." over a machine holding a dozen
-   * conversations.
-   */
+  /** Separate from overLimit: the remedies differ. */
   ownerDisabled: boolean;
-  /**
-   * This machine's live rows, as a membership rather than as an order.
-   *
-   * ⚠ **It said "blocked first, then most-recent first", and neither half is true
-   * any more.** What a reader sees is `orderSessions` applied where `groups.ts`
-   * produces the rows, so the sequence here decides nothing — the loops in
-   * `sessionGroups` fill this in bucket order only because `blockedCount` is
-   * counted off what `place` returned, which is Q3.12's rule and unrelated to
-   * sequence.
-   *
-   * ⚠ **And pinned rows are *not* here.** Pinning moves rather than copies
-   * (Q3.11), so `place` files them into `pinned` and answers `null`. The
-   * paragraph this replaces described the era when it copied, down to a
-   * `liveCount` defect that era fixed. The `liveCount` disagreement that does
-   * survive is the opposite one and is recorded rather than fixed: that count
-   * comes from `countByMachine`, which counts a pinned session as live, so a
-   * machine whose only live session is pinned reads "1 live" over a section that
-   * draws it one group higher up.
-   */
+  /** A membership, not an order (Q3.12); pinned rows are not here (Q3.11). */
   active: SessionRow[];
   ended: SessionRow[];
-  /** Sessions still alive here — the same quantity `countByMachine` reports. */
   liveCount: number;
-  /**
-   * How many rows under this header are waiting on a human.
-   *
-   * The header renders it, and that is what makes grouping safe. Blocked sessions
-   * are no longer lifted into a zone of their own, so without a count on the
-   * header a collapsed section could hide an approval — which is the one failure
-   * this screen exists to prevent.
-   */
+  /** So a collapsed section can never hide an approval. */
   blockedCount: number;
 }
 
 export interface SessionGroups {
-  /**
-   * Pinned sessions, across the whole fleet, as one group above the machines.
-   *
-   * Gathered here rather than sorted to the top of each section, and drawn under
-   * the machine tab the session is on — `pinnedFor` in `groups.ts` cuts this list
-   * by `ListView.machine`, since a section drawn identically on every tab read as
-   * the pins having been copied to each machine.
-   *
-   * **A copy, not a move.** Every row here is also under its own machine in
-   * `groups` (or in `orphans`). Pinning is a second way to reach a session, not a
-   * relocation — see `place` in `sessionGroups`.
-   */
+  /** Moved here, not copied: not also in `groups` or `orphans`. */
   pinned: SessionRow[];
   groups: MachineGroup[];
-  /** Rows whose machine is no longer granted. Visible, because losing one silently is worse. */
   orphans: SessionRow[];
 }
 
 let groupsForSessions: SessionRow[] | null = null;
 let groupsForMachines: MachineState[] | null = null;
-/**
- * The machine order the cache was built under.
- *
- * `-1` cannot collide with a real version, which is one fewer thing to hold in
- * your head than relying on `groupsCache !== null` to cover the first call.
- */
 let groupsForOrder = -1;
-/**
- * Which machine the cache was built believing is this computer.
- *
- * The fourth input, and it moves off the poll too: {@link AppState.localMachineId}
- * is patched on its own — seeded from the boot payload's claim, then replaced
- * when the announce file names a different machine of ours — so it replaces
- * neither `sessions` nor `machines`.
- */
 let groupsForLocal: MachineId | null = null;
 let groupsCache: SessionGroups | null = null;
 
-/**
- * The fleet as a pinned group above one section per machine.
- *
- * **Blocked sessions stay in their machine's section**, marked, rather than being
- * lifted into a separate zone as they were. `CLAUDE.md` said sessions from every
- * machine land in one list with blocked ones first regardless of machine, and that
- * is now expressed differently rather than abandoned: blocked rows sort first
- * *inside* their section, they carry a marker on the row, and every section header
- * carries `blockedCount` — so a collapsed machine still says out loud that
- * something under it is waiting. The property that matters is "an approval cannot
- * be hidden", and a badge on a closed section keeps it.
- *
- * Built on `sessionLists` rather than replacing it: that function's shape is
- * pinned by `webcheck`, and this is additive.
- *
- * Memoised on the identity of **both** `sessions` and `machines`, since a group
- * carries machine state too. `emitTranscripts` replaces neither, so a streamed
- * event still costs nothing — the same property `sessionLists` defends.
- *
- * **Groups are ordered by name until a reader drags one — this computer's own
- * machine first — and never by reachability.** `reach` flickers, and a list that
- * reorders itself while a thumb is already travelling toward a row is the one
- * failure this app cannot have — a *stored* order is allowed for exactly that
- * reason, since it moves when somebody moves it and at no other moment, and so is
- * which computer this is, which moves when its daemon does. `machineOrder.ts` is
- * the merge and `machine-gestures.md` is the rule; an order derived from anything
- * the poll moves is still banned outright.
- *
- * ⚠ **Which is why the order's version is in the guard above.** The memo is keyed
- * on the identity of `sessions` and `machines`, and a reorder replaces neither —
- * so without it a drop repaints nothing until the four-second poll happens to hand
- * over a new `machines` array, which reads as a drag that does nothing for four
- * seconds and then jumps. It is the third input.
- *
- * ⚠ **And `localMachineId` is the fourth, for the same reason.** It decides a
- * group's `name` (`local`) and its place (first until somebody drags it), and it
- * is patched on its own — at launch from the claim, and at a `runResume` when a
- * daemon names another machine of ours — so without it in the guard the rail went
- * on drawing the old answer until the poll happened to replace `machines`.
- */
+/** Memoised on sessions, machines, order version and localMachineId; never ordered by reachability. */
 export function sessionGroups(state: AppState): SessionGroups {
   if (
     groupsForSessions === state.sessions &&
@@ -4664,9 +1655,6 @@ export function sessionGroups(state: AppState): SessionGroups {
   const lists = sessionLists(state);
   const byId = new Map<MachineId, MachineGroup>();
 
-  // Every granted machine gets a section, including one with no sessions at all —
-  // that is what gives it a "new session here" button, and what lets the old
-  // bottom-of-the-page `Machines` list be deleted rather than merely moved.
   for (const machine of state.machines) {
     byId.set(machine.id, {
       id: machine.id,
@@ -4686,34 +1674,7 @@ export function sessionGroups(state: AppState): SessionGroups {
 
   const pinned: SessionRow[] = [];
   const orphans: SessionRow[] = [];
-  /**
-   * The group this row was filed under, or `null` if it has no machine here.
-   *
-   * **Pinning moves rather than copies**, and the difference is the whole of it.
-   *
-   * ⚠ This has now been argued both ways and the reversal is the load-bearing
-   * part. It copied, on the reasoning that lifting a row out "reads as a shortcut
-   * removing the thing it is a shortcut to" — pin the session you are working in
-   * and it leaves the folder you have been finding it in all day. What that
-   * missed is what the rail actually looks like when it happens: the Pinned
-   * section sits directly above the folders, on the same screen, at the same
-   * time. So the row was not in two *places*, it was on screen twice, a few
-   * hundred pixels apart, identical — and a bookmark whose entire job is "this
-   * one, not the other forty" was drawing itself as two of the forty.
-   *
-   * What the old shape was protecting is still real and is answered instead by
-   * `showPath`: the pinned row draws where it lives, which is what the copy under
-   * its folder used to say. One row, and it says both things.
-   *
-   * Three consequences, and all three are the shape this had before the copy:
-   * `place` answers `null`, so `blockedCount` does not count a row its header no
-   * longer draws; a pinned row whose machine is gone is in `pinned` only, rather
-   * than in `pinned` and `orphans`; and `visibleRows` in `groups.ts` deduplicates
-   * for a reason that no longer occurs. **That dedup stays** — it is two lines,
-   * `keyboard.ts` locates the caret by key and a second entry would make `j`
-   * teleport rather than step, and the day some new section reintroduces the
-   * copy is exactly the day nobody remembers to put it back.
-   */
+  // Pinning moves rather than copies.
   const place = (row: SessionRow, into: "active" | "ended"): MachineGroup | null => {
     if (row.snapshot.pinned === true) {
       pinned.push(row);
@@ -4721,10 +1682,6 @@ export function sessionGroups(state: AppState): SessionGroups {
     }
     const group = byId.get(row.ref.machineId);
     if (group === undefined) {
-      // A row with nowhere to live. `orphansFor` draws these under "No longer
-      // granted", and a *pinned* one never reaches here — it is already in
-      // `pinned`, and `pinnedFor` draws a pin with no tab on every tab, which is
-      // this section's own rule.
       orphans.push(row);
       return null;
     }
@@ -4732,38 +1689,14 @@ export function sessionGroups(state: AppState): SessionGroups {
     return group;
   };
 
-  // Blocked first so they lead their section, then everything else live, then the
-  // terminal rows. `sessionLists` has already sorted each of the three.
   for (const row of lists.blocked) {
-    /*
-     * Counted off what `place` *did*, and it is load-bearing again.
-     *
-     * A folder header's "N waiting" is a count of the rows under **that header**,
-     * and both things `place` declines to file — a pinned row and an orphan — are
-     * drawn somewhere else entirely. Incrementing from
-     * `byId.get(row.ref.machineId)` instead would make a header read "1 waiting"
-     * over a section containing no waiting row, which is the defect this line was
-     * written for the first time.
-     *
-     * Nothing is hidden by not counting it. `waitingFloor` in `groups.ts` works
-     * by **subtraction** — everything blocked, minus everything this view draws —
-     * and it draws `pinnedFor`, so a blocked pinned row is on screen either as
-     * itself or in the floor's own count. That property is asserted over every
-     * filter, tab and needle rather than left to this comment.
-     */
+    // Counted off what `place` filed, never a row the header does not draw.
     const filed = place(row, "active");
     if (filed !== null) filed.blockedCount += 1;
   }
   for (const row of lists.active) place(row, "active");
   for (const row of lists.ended) place(row, "ended");
 
-  /*
-   * The name sort **stays**, and is `orderMachines`' `natural`: it is the position
-   * of every machine nobody has dragged, and deleting it would leave such a
-   * machine with no order at all rather than with a stored one. `first` is this
-   * computer's machine, which leads until a drag stores it somewhere — so where
-   * `local` would have sorted among the names is never drawn.
-   */
   const groups = orderMachines(
     [...byId.values()].sort((a, b) => a.name.localeCompare(b.name)),
     machineOrder(),
@@ -4778,24 +1711,11 @@ export function sessionGroups(state: AppState): SessionGroups {
   return groupsCache;
 }
 
-/** A machine as the home screen draws it: the record, and what the rail calls it. */
 export interface DrawnMachine {
   machine: MachineState;
-  /** {@link MachineGroup.name} — `local` for this computer's own. Never a label to write back. */
   name: string;
 }
 
-/**
- * The fleet in the rail's order and under the rail's names, for a screen that
- * needs the `MachineState` itself rather than its group.
- *
- * New session is the reader. It listed `state.machines` — the control plane's
- * order — and took the first reachable one as its default, so the rail could
- * lead with `local` while the picker opened under it named the host and defaulted
- * to some other machine. Read through {@link sessionGroups}, the picker, its
- * default and the strip are one answer, and the rule behind all three stays in
- * `machineOrder.ts` rather than being re-derived at a second call site.
- */
 export function machinesAsDrawn(state: AppState): DrawnMachine[] {
   const byId = new Map(state.machines.map((machine) => [machine.id, machine] as const));
   return sessionGroups(state).groups.flatMap((group) => {
@@ -4804,18 +1724,7 @@ export function machinesAsDrawn(state: AppState): DrawnMachine[] {
   });
 }
 
-/**
- * Milliseconds since a daemon-clock timestamp.
- *
- * Anchored to the daemon's own clock at fetch time and extended by our own
- * elapsed time since. A phone that slept has a clock that may have jumped; this
- * is wrong by at most the age of the row, rather than by the drift.
- *
- * `now` is a parameter with a default rather than a bare `Date.now()` so that
- * `webcheck` can pin it: the whole point of the arithmetic is that the two clocks
- * disagree, and a function that reads one of them internally can only be asserted
- * against itself.
- */
+/** Wrong by the row's age, not the clock drift; `now` is injectable for webcheck. */
 export function elapsedSince(row: SessionRow, at: number, now: number = Date.now()): number {
   return row.daemonNow - at + (now - row.fetchedAt);
 }

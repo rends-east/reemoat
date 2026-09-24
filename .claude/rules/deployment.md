@@ -283,7 +283,8 @@ daemon.** `.github/workflows/deploy.yml` calls `deploy/deploy.sh --ref <sha>
 on `workflow_dispatch` and nothing else, refusing a commit whose `check` run is
 not green and **refusing to deploy a daemon**. **The workflow file decides
 nothing**: every decision is in `deploy/ci-deploy.sh`, driven by `deploycheck`
-through the `SSH` and `GH` seams. The ssh itself is unmeasured. Q7.94.
+through the `SSH` and `GH` seams. The host key is pinned from the `DEPLOY_KNOWN_HOSTS`
+secret, never scanned; the ssh itself is unmeasured. Q7.94.
 
 **A release is a tag push, and `release.yml` decides nothing either.** Everything
 is in `deploy/ci-release.sh`, five verbs — `plan`, `image`, `manifest`, `app`, `publish`
@@ -404,8 +405,8 @@ merges, and each machine still takes it through `deploy.sh`.
 `REEMOAT_CP_IMAGE` is the one variable: a registry-qualified ref pulls, a bare one
 builds, `cp_image_source` derives it and `REEMOAT_CP_SOURCE` overrides. There is
 nothing left to "not mix" — one resolver in `lib.sh` answers for `compose.sh`,
-`deploy.sh` and `cp_image_fingerprint` alike, and `deploycheck` asserts no script
-holds a second copy of the default. That was not tidiness: two copies meant a pull
+`deploy.sh`, `cp_image_fingerprint` and the id `install.sh` prints alike, and
+`deploycheck` asserts no script, `lib.sh` included, holds a second copy of the default. That was not tidiness: two copies meant a pull
 could move the digest while the fingerprint inspected a different name, report
 **"unchanged"**, and recreate nothing — a green deploy of bytes that were not
 running. ⚠ And the env-file recipe `deploy/README.md` carried from the day the
@@ -422,7 +423,7 @@ untouched, because that function inspects the *local* image either way.
 |---|---|
 | `deploy/lib.sh` | The **only** place that knows one machine from another: `service_backend`, `compose_service` (so no verb writes a compose service name by hand), where the tools are, what a unit is called, where it lives and how one is rendered and reloaded, `service_origin` and `health_probe_path` |
 | `deploy/install.sh` | One-time setup for **one** service. A wizard on a terminal, a plain installer without one |
-| `deploy/ci-deploy.sh` | What a runner does before `deploy.sh`: the secrets it must have, the daemon it may not touch, the CI verdict it will not go around. A script rather than YAML so `deploycheck` can drive every branch, through `SSH` and `GH` as seams |
+| `deploy/ci-deploy.sh` | What a runner does before `deploy.sh`: the secrets it must have, the host key it pins rather than scans, the daemon it may not touch, the CI verdict it will not go around. A script rather than YAML so `deploycheck` can drive every branch, through `SSH` and `GH` as seams |
 | `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, the labels it derives rather than writes, and the app artifacts it names. Five verbs, five seams, and every gate re-run by each |
 | `deploy/ci-freshness.sh` | What a runner does once a week to say how stale the adapter pins are: the pins read off `package.json` by shape, three registry questions per adapter through `NPM_VIEW`, and five outcomes with the exit code each earns written in its header — behind reports, unpublished refuses, unreachable is its own code. Driven by `deploycheck` with no network |
 | `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop. On the daemon it runs `deploy/agents.sh` **before** deciding the restart, with the source read off the env file, every prune withheld and **`--refresh-only`** — so an update moves the copies a machine already has and installs nothing new, which is what stops a harness added to this repository appearing on every machine in the fleet; a script that did not finish is a line on stderr, never a failed deploy |

@@ -32,17 +32,7 @@ import { resolveTunnelKey } from "../keys.js";
 import { machineStanding } from "../quota.js";
 import { RelayTunnel, type TunnelRegistry } from "./registry.js";
 
-/**
- * Where a daemon dials in.
- *
- * One WebSocket per daemon, held open for as long as the daemon lives, carrying
- * an HTTP/2 session. Every browser connection to that daemon is one h2 CONNECT
- * stream inside it.
- *
- * The direction is the whole point: the daemon dials *out*, so nothing needs to
- * be reachable on the customer's network. The relay is the h2 client even though
- * it is the TCP server, because it is the relay that opens streams.
- */
+// Where a daemon dials out to: one WebSocket per daemon carrying HTTP/2, with the relay as h2 client because it opens the streams.
 
 export interface TunnelEndpointOptions {
   db: DatabaseSync;
@@ -58,30 +48,14 @@ export interface TunnelEndpoint {
 export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndpoint {
   const { db, registry } = options;
   const onEvent = options.onEvent ?? ((): void => {});
-  /*
-   * `maxPayload` is the one inbound bound in this file, and everything else that
-   * looks like one is above the ws layer — see `MAX_TUNNEL_MESSAGE_BYTES`. Left
-   * unset, `ws` defaults to 100 MiB per message and a daemon that never sets FIN
-   * parks that much in a process holding every tunnel in the fleet.
-   */
+  // The one inbound bound at the ws layer; unset, ws allows 100 MiB per message.
   const wss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
     maxPayload: MAX_TUNNEL_MESSAGE_BYTES,
   });
 
-  /*
-   * Tell the daemon what was agreed, on the 101 itself.
-   *
-   * `ws` writes the handshake response, and this event is the one place a header
-   * can be added to it. Recomputed from the request rather than carried out of
-   * `handleUpgrade` in a variable: this fires once per handshake with that
-   * handshake's request, so recomputing is exact, and threading state between the
-   * two would be a map keyed on a socket for no gain.
-   *
-   * A daemon that ignores it is not broken — with one version in existence the
-   * answer is always the number it offered. It matters at two.
-   */
+  // The agreed version rides the 101 itself; this event is the only place ws lets a header be added.
   wss.on("headers", (headers, request) => {
     const offered = request.headers[TUNNEL_VERSION_HEADER];
     const agreed = negotiateProtocolVersion(
@@ -92,36 +66,8 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
 
   return {
     handleUpgrade(req, socket, head) {
-      /*
-       * Authenticated *before* the handshake completes, not after.
-       *
-       * A caller with no credential never gets a WebSocket at all, so there is no
-       * window in which an unauthenticated peer holds a live socket on this
-       * process. It also means the failure is an ordinary HTTP status the daemon
-       * can log plainly, rather than a close code it has to have a table for.
-       * The 4xxx close codes are for conditions that arise *after* a tunnel is
-       * established, where a status line is no longer available.
-       */
-      /*
-       * The protocol version, negotiated rather than matched.
-       *
-       * ⚠ This was `String(version) !== String(RELAY_PROTOCOL_VERSION)`, and that
-       * one line made every future protocol bump a **flag day**: a relay moved to
-       * v2 refused every v1 daemon in the fleet, and the relay is the only way in,
-       * so refusing them is not degradation, it is the fleet switched off until
-       * the last laptop is updated by hand. `negotiateProtocolVersion` takes the
-       * newest both ends know instead — so a daemon ahead of this relay is
-       * negotiated down and keeps working, and one behind keeps working until the
-       * floor is deliberately raised past it.
-       *
-       * A missing header is read as v1 — `PRE_NEGOTIATION_PROTOCOL_VERSION`, the
-       * literal, and **not** `RELAY_PROTOCOL_MIN_VERSION`. Only a daemon that
-       * predates this header omits it, and that daemon speaks v1 by definition;
-       * the floor is a number this build moves. They are equal today and diverge
-       * at exactly the moment the floor is raised, which is the moment a
-       * pre-header daemon must be refused rather than promoted to a version it
-       * has never heard of. See that constant's docblock.
-       */
+      // Authenticated before the handshake, so an unauthenticated peer never holds a socket and a refusal is a plain HTTP status.
+      // Negotiated, not matched, so a protocol bump is no flag day. A missing header is PRE_NEGOTIATION_PROTOCOL_VERSION, never the moving floor.
       const version = req.headers[TUNNEL_VERSION_HEADER];
       const offered = version === undefined ? PRE_NEGOTIATION_PROTOCOL_VERSION : Number(version);
       const agreed = negotiateProtocolVersion(offered);
@@ -140,48 +86,16 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
         return refuse(socket, 401, "Unauthorized");
       }
 
-      /*
-       * The machine id comes out of this lookup. It is never read from the
-       * request, because there is nothing in the request to read it from — no
-       * header, no query parameter, no handshake field names a machine. A daemon
-       * that wants to be machine B has to hold machine B's credential.
-       */
+      // The machine id is an output of the credential lookup; nothing in the request names a machine.
       const machineId = resolveTunnelKey(db, presented);
       if (machineId === null) {
         onEvent("tunnel_rejected", "unknown or revoked tunnel credential");
         return refuse(socket, 401, "Unauthorized");
       }
 
-      /*
-       * Over its owner's machine limit, so it does not get a tunnel.
-       *
-       * Checked here rather than inside `resolveTunnelKey`, whose whole claim is
-       * the paragraph above — the machine id is an *output* of that function and
-       * nothing in the request names a machine. Folding a settings read and two
-       * joins into it would dilute the one sentence it exists to make.
-       *
-       * **Refused rather than allowed to hold a tunnel that carries nothing**,
-       * and the deciding reason is that `relayOnline` would otherwise be a lie.
-       * That field is read by `POST /v1/tokens` and by `GET /v1/machines`, so a
-       * machine holding a tunnel and answering 403 to every proxied request
-       * presents as *online and broken* — indistinguishable from a bug in the
-       * relay or the daemon. Refused at dial it is `relayOnline: false`, which
-       * every client already draws and explains, plus `overLimit: true`, which
-       * is what turns "asleep" into "switched off, and here is why".
-       *
-       * The daemon's own 1s→30s full-jitter backoff then becomes the recovery
-       * mechanism rather than a cost: raise the limit and it reappears with
-       * nobody touching the host. That is the difference between this and a
-       * revoke, and it is why suspension can be reversible at all.
-       *
-       * 403 rather than 401 so the daemon's log distinguishes it — 401 means the
-       * credential is wrong, which invites a re-enrollment that would not help.
-       */
+      // Over the limit or owner disabled: refused at dial, 403 not 401, so relayOnline stays truthful and the daemon's backoff restores it once lifted.
       const standing = machineStanding(db, machineId);
       if (standing !== null && (standing.over || standing.ownerDisabled)) {
-        // Both gates, one refusal: a daemon has nothing to do differently about
-        // them, and the distinction is for the *person*, who reads it on a
-        // screen rather than in this log line.
         onEvent(
           "tunnel_rejected",
           standing.ownerDisabled
@@ -191,31 +105,7 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
         return refuse(socket, 403, "Forbidden");
       }
 
-      /*
-       * What build just dialled in, recorded against the machine.
-       *
-       * Best-effort and wrapped, like every other write on this path: this is the
-       * inventory a staged rollout is planned from, and losing a row costs a stale
-       * answer to "what is out there", where throwing would cost the tunnel. It is
-       * written here — after the credential resolved a machine id, before the
-       * handshake completes — so a refused dial records nothing.
-       */
-      /*
-       * The machine's own static, pinned on the first dial that announces one.
-       *
-       * ⚠ **A disagreement refuses the dial, and every other outcome must not.**
-       * The pin is what an app is told to expect, so a silent adoption would make
-       * the app's check decorative. But a database that will not answer is not a
-       * disagreement: `SQLITE_BUSY` against the 250 ms timeout these two processes
-       * share must cost one stale row rather than a machine's reachability, which
-       * is the rule the writes below already follow. So the refusal is reached
-       * only by an announcement this service can prove is different — never by a
-       * failure to look.
-       *
-       * Failing open here is safe rather than merely convenient: a stale pin makes
-       * the *app's* handshake fail visibly, because it holds a key the daemon
-       * cannot answer on. What it cannot do is let somebody read a session.
-       */
+      // Only a proven key mismatch refuses the dial; a failed lookup fails open, since a stale pin only breaks the app's handshake visibly.
       const announcedKey = parseMachineKey(req.headers[MACHINE_KEY_HEADER]);
       if (announcedKey !== null) {
         let pin: MachineKeyPin = "unchanged";
@@ -234,9 +124,6 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
       recordDaemonBuild(db, machineId, {
         daemonVersion: readDaemonVersionHeader(req.headers[DAEMON_VERSION_HEADER]),
         protocolVersion: agreed,
-        // Refused to `null`, never to a refused dial: an unreadable inventory is
-        // a machine that "did not say", and the tunnel it is riding is the only
-        // way to reach that machine at all.
         agentClis: readAgentClisHeader(req.headers[AGENT_CLIS_HEADER]),
         at: Date.now(),
       });
@@ -252,16 +139,8 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
     },
   };
 
-  /**
-   * `protocolVersion` is what this handshake **negotiated**, not what this build
-   * speaks. It is carried rather than recomputed because it is the number every
-   * stream down this tunnel must be stamped with, and the daemon refuses any
-   * stream that disagrees with what it was told on the 101.
-   */
+  // protocolVersion is the negotiated one: every stream is stamped with it, and the daemon refuses a stream that disagrees.
   function attach(ws: WebSocket, machineId: string, protocolVersion: number): void {
-    // Binary, no compression: this carries h2 frames, which are already framed
-    // and mostly incompressible. perMessageDeflate would add CPU and latency to
-    // every event for nothing.
     ws.binaryType = "nodebuffer";
 
     const duplex = createWebSocketStream(ws);
@@ -271,31 +150,17 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
     const session = h2connect("http://tunnel", {
       createConnection: () => duplex,
       settings: {
-        // Our receive window per stream — this is the flow control for the
-        // daemon-to-browser direction, which is the one that carries event
-        // streams and therefore the one that matters. Credit is granted on
-        // consumption, so a browser that stops reading stops the daemon writing.
+        // Per-stream receive window for the daemon-to-browser direction; credit is granted on consumption.
         initialWindowSize: STREAM_WINDOW_BYTES,
         maxConcurrentStreams: MAX_CONCURRENT_STREAMS,
       },
     });
 
-    /*
-     * The connection-level window, which is separate from the per-stream ones and
-     * defaults to 64 KiB.
-     *
-     * Left at the default it becomes the real bottleneck: it is shared by every
-     * stream on the tunnel, and it too is only replenished on consumption, so a
-     * few stalled browsers would hold it all and slow the healthy ones. Sized as
-     * `CONNECTION_WINDOW_BYTES / STREAM_WINDOW_BYTES` fully-stalled streams before
-     * they can affect anyone else — and the daemon's own slow-consumer collapse
-     * fires long before that.
-     */
+    // The connection window defaults to 64 KiB and is shared by every stream, so a few stalled browsers would starve the rest.
     try {
       session.setLocalWindowSize(CONNECTION_WINDOW_BYTES);
     } catch {
-      // Older Node, or a session that died during setup. The per-stream windows
-      // still apply; this is a widening, not a correctness requirement.
+      // Older Node, or a session that died in setup; the per-stream windows still apply.
     }
 
     const tunnel = new RelayTunnel(machineId, Date.now(), protocolVersion, session, (code, reason) => {
@@ -308,9 +173,7 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
 
     let misses = 0;
     const heartbeat = setInterval(() => {
-      // The tunnel socket's safety valve. Per-stream and connection windows
-      // should make this unreachable; if it is reached, something upstream is
-      // wrong and an unbounded socket buffer is the worst way to find out.
+      // Safety valve: the flow-control windows should make this unreachable.
       if (ws.bufferedAmount > MAX_TUNNEL_BUFFERED_BYTES) {
         onEvent("tunnel_backpressure", `${machineId} buffered ${ws.bufferedAmount}`);
         tunnel.close(CLOSE_TUNNEL_BACKPRESSURE, "tunnel backpressure");
@@ -352,7 +215,6 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
   }
 }
 
-/** Refuse an upgrade with a plain HTTP status, before any WebSocket exists. */
 function refuse(socket: Duplex, status: number, message: string): void {
   try {
     socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);

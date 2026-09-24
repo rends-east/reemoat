@@ -2,45 +2,16 @@ import type { DatabaseSync } from "node:sqlite";
 import { hashCredential, newEmailToken, newId } from "./keys.js";
 import { foldEmail } from "./mail/address.js";
 
-/**
- * The address on an account, and the single-use links that prove or reset it.
- *
- * Two tables, one file, because they are one question: an address is only worth
- * anything once somebody has proved they read mail at it, and the proof is a
- * token that has to name the address it was minted for.
- */
-
-/** A link that proves an address. Long, because people read mail hours later. */
 export const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
-/**
- * A link that takes over an account. Short, deliberately.
- *
- * One hour rather than a day: it is the only token here that replaces a
- * credential, and the person asking for it is sitting at the screen when they
- * ask. `enrollment_codes` picked the same number for the same reason.
- */
+/** Short: the only token here that replaces a credential, and the person asking is at the screen. */
 export const RESET_TTL_MS = 60 * 60 * 1000;
 
-/**
- * An invitation is a reset against an account that has never had a password.
- *
- * Longer than a reset because nobody is waiting at a screen — an admin created
- * the account and the person may be asleep — and shorter than forever because it
- * is still a link that hands somebody an account.
- */
 export const INVITE_TTL_MS = 48 * 60 * 60 * 1000;
 
 export type TokenPurpose = "verify" | "reset";
 
-/**
- * Why a token stopped being usable.
- *
- * A **required** argument wherever a burn happens, never a default inside the
- * function, for `UserCodeBurnReason`'s reason: `used_from` is the only forensic
- * trail there is, and a burn recorded under the wrong reason is indistinguishable
- * from one that never happened.
- */
+/** Required at every burn: used_from is the only forensic trail. */
 export type TokenBurnReason =
   | "superseded"
   | "password_changed"
@@ -64,14 +35,7 @@ export function emailOf(db: DatabaseSync, userId: string): EmailRow | null {
   };
 }
 
-/**
- * Who has *proved* this address, if anybody.
- *
- * Reads `verified_at IS NOT NULL` rather than the address alone, and that is the
- * whole of the anti-squatting rule expressed as a query: an unverified claim
- * reserves nothing, so it must not answer this question. The partial unique
- * index in `schema.sql` is the same sentence expressed as a constraint.
- */
+/** Only a proved address has an owner; an unverified claim reserves nothing. */
 export function verifiedOwnerOf(db: DatabaseSync, emailFolded: string): string | null {
   const row = db
     .prepare("SELECT user_id FROM user_emails WHERE email_folded = ? AND verified_at IS NOT NULL")
@@ -79,13 +43,7 @@ export function verifiedOwnerOf(db: DatabaseSync, emailFolded: string): string |
   return row === undefined ? null : String(row["user_id"]);
 }
 
-/**
- * Write an address onto an account, unverified.
- *
- * Overwrites, because there is one address per account. The caller is
- * responsible for having told the *old* address first — the notice cannot be
- * sent afterwards, since the row it names is gone.
- */
+/** One address per account, overwritten unverified. Notify the old address before calling this. */
 export function setEmail(db: DatabaseSync, userId: string, email: string, now = Date.now()): void {
   db.prepare(
     "INSERT INTO user_emails (user_id, email, email_folded, verified_at, updated_at) VALUES (?, ?, ?, NULL, ?) " +
@@ -94,14 +52,7 @@ export function setEmail(db: DatabaseSync, userId: string, email: string, now = 
   ).run(userId, email, foldEmail(email), now);
 }
 
-/**
- * Mark the address on an account proved.
- *
- * Throws on the partial unique index when somebody else has already proved the
- * same address — which is the intended outcome, not an error to smooth over:
- * two accounts may hold the same unverified claim and exactly one may prove it.
- * The caller maps that to `409 email_taken`.
- */
+/** Throws on the partial unique index when another account already proved this address; the caller answers 409 email_taken. */
 export function markVerified(db: DatabaseSync, userId: string, emailFolded: string, now = Date.now()): boolean {
   const changed = db
     .prepare("UPDATE user_emails SET verified_at = ?, updated_at = ? WHERE user_id = ? AND email_folded = ?")
@@ -109,23 +60,12 @@ export function markVerified(db: DatabaseSync, userId: string, emailFolded: stri
   return Number(changed.changes) === 1;
 }
 
-/* ------------------------------------------------------------------ *
- * Tokens
- * ------------------------------------------------------------------ */
-
 export interface MintedToken {
   token: string;
   expiresAt: number;
 }
 
-/**
- * A fresh link, and the death of any earlier one for the same purpose.
- *
- * `mintEnrollmentCode`'s rule, and for its reason: one live credential at a
- * time, so a message intercepted earlier stops working the moment somebody asks
- * for another. Both statements are in one transaction because a supersede that
- * committed without its replacement would leave an account with no way in.
- */
+/** Supersedes any earlier link for the same purpose in the same transaction, so at most one is live. */
 export function mintEmailToken(
   db: DatabaseSync,
   userId: string,
@@ -161,14 +101,7 @@ export interface TokenRow {
   emailFolded: string;
 }
 
-/**
- * Look a token up **without** spending it.
- *
- * Read and claim are two calls on purpose. `POST /v1/reset` has to check the
- * new password's policy *before* it burns anything: burning first means
- * somebody who typed a short password needs a whole new email, which is the
- * kind of dead end that makes people give up on a recovery flow.
- */
+/** Does not spend the token, so POST /v1/reset can check the password policy before burning it. */
 export function readEmailToken(db: DatabaseSync, token: string, now = Date.now()): TokenRow | null {
   const row = db
     .prepare(
@@ -185,13 +118,7 @@ export function readEmailToken(db: DatabaseSync, token: string, now = Date.now()
   };
 }
 
-/**
- * Spend it, once.
- *
- * A conditional `UPDATE` then `changes === 1` — `enrollment_codes`' template, so
- * single-use is a property of the database rather than of application logic that
- * could be raced by two taps on a phone.
- */
+/** Single-use through a conditional UPDATE, so two taps cannot both spend it. */
 export function claimEmailToken(db: DatabaseSync, token: string, from: string, now = Date.now()): boolean {
   const claimed = db
     .prepare(
@@ -202,17 +129,7 @@ export function claimEmailToken(db: DatabaseSync, token: string, from: string, n
   return Number(claimed.changes) === 1;
 }
 
-/**
- * Retire every live link for an account.
- *
- * Called by a password change, an address change, `disable` and `delete`.
- * **`disable` is the one worth naming**, and for `burnUserCodes`' exact reason:
- * `POST /v1/reset` sits above THE LINE, has no caller at all, and asks only
- * whether a token is unused and unexpired — so without this sweep a banned
- * account could redeem a link it was mailed minutes earlier. The route
- * re-reads `disabled_at` as well; two independent answers, because a sweep is a
- * thing somebody can forget to call.
- */
+/** Includes disable: POST /v1/reset has no caller, and would otherwise redeem a link mailed to a banned account. */
 export function burnEmailTokens(
   db: DatabaseSync,
   userId: string,
@@ -234,13 +151,11 @@ export function burnEmailTokens(
   return Number(changed.changes);
 }
 
-/** Everything a deleted account leaves behind here. Called inside the sweep. */
 export function deleteEmailState(db: DatabaseSync, userId: string): void {
   db.prepare("DELETE FROM user_email_tokens WHERE user_id = ?").run(userId);
   db.prepare("DELETE FROM user_emails WHERE user_id = ?").run(userId);
 }
 
-/** Expired rows, swept at startup beside `pruneSessions`. */
 export function pruneEmailTokens(db: DatabaseSync, now = Date.now()): number {
   const changed = db.prepare("DELETE FROM user_email_tokens WHERE expires_at < ?").run(now - VERIFY_TTL_MS);
   return Number(changed.changes);

@@ -1,35 +1,7 @@
 import type { LegalDocument } from "../legal";
 import { OPERATOR } from "./operator";
 
-/**
- * The Privacy Policy. Structure and tone are adapted from the 37signals privacy
- * policy under CC BY 4.0; what it *says* is read off this system rather than off
- * that template, which is why the list of what is held names actual tables.
- *
- * ⚠ **Two claims in this document are only true because of code, and a change
- * to that code makes this document false.** Both are worth knowing before you
- * touch them:
- *
- *   1. *"What stays on your machine."* True because session state lives in
- *      SQLite on the operator's own machine. ⚠ It is **qualified** in the prose
- *      rather than absolute, and the qualification is load-bearing: the relay
- *      terminates TLS and can see what a session carries (`SECURITY.md`, and
- *      `src/relay/protocol.ts`), so this section may not claim end-to-end
- *      encryption. A feature that uploaded transcripts for search, or a
- *      server-side index, breaks the unqualified half first.
- *   2. *"No analytics and no third-party scripts."* True because the control
- *      plane's `Content-Security-Policy` is `script-src 'self'` — a third-party
- *      script cannot load even if somebody adds the tag. Widening that header
- *      makes this paragraph a false statement to a regulator, not just a
- *      regression.
- *
- * ⚠ **`OPERATOR.mailProvider` is named in two places below and is a required
- * field**, both read by somebody deciding whether to trust this service with an
- * address. It lives in `operator.ts` rather than here because it is a fact about
- * the party rather than about the prose, which is what puts it under
- * `operatorIncomplete` — and that is now a *runtime* gate: while it is unfilled
- * this instance publishes no documents at all, rather than publishing a TODO.
- */
+/** The no-analytics section holds only while the control plane's CSP allows same-origin scripts alone; widening it makes this document false. */
 
 export const PRIVACY_EN: LegalDocument = {
   doc: "privacy",

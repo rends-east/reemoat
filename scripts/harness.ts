@@ -24,10 +24,7 @@ async function main(): Promise<number> {
       prompt: { type: "string" },
       json: { type: "boolean", default: false },
       raw: { type: "boolean", default: false },
-      // `allowNegative` is what makes the documented `--no-logs` actually parse.
-      // Without it `parseArgs` rejects the flag outright under `strict`, so the
-      // one spelling the usage text has always advertised was the one spelling
-      // that could not be used.
+      // allowNegative is what lets the documented --no-logs parse under strict.
       logs: { type: "boolean", default: true },
       help: { type: "boolean", default: false },
     },
@@ -39,9 +36,7 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  // The built-ins only, and that is honest rather than a shortfall: this driver
-  // builds a bare `Session` with no store, so there is no `plugins` table to read
-  // a contributed harness out of and nothing that could resolve one.
+  // Built-ins only: a bare Session has no store to resolve a plugin harness from.
   if (!values.agent || !isBuiltinAgentId(values.agent)) {
     console.error(`error: --agent must be one of ${AGENT_IDS.join(", ")}\n\n${USAGE}`);
     return 2;
@@ -54,23 +49,7 @@ async function main(): Promise<number> {
   const cwd = resolve(values.cwd ?? process.cwd());
   const printer = values.json ? jsonPrinter() : prettyPrinter(values.logs);
 
-  /*
-   * A resolver that prints the question and declines it.
-   *
-   * Its presence is what declares `clientCapabilities.elicitation.form`, and that
-   * is what stops claude's adapter putting `AskUserQuestion` into
-   * `disallowedTools` — so without this line the tool is not in the model's
-   * toolset and no measurement of it is possible from here at all.
-   *
-   * It **declines** rather than answering: `decline` is the action that means
-   * "the person skipped", so the tool runs with empty answers and the turn
-   * carries on, which is what a non-interactive driver wants. Answering would
-   * mean inventing somebody's opinion.
-   *
-   * The form is printed as the projection rather than as the raw schema, because
-   * the projection is what every other layer sees and the caps it applies are
-   * exactly what wants measuring.
-   */
+  // Having a resolver declares elicitation support, without which claude's adapter disallows AskUserQuestion; it declines rather than invent an answer.
   const session = await Session.start({
     agent: values.agent,
     cwd,
@@ -88,39 +67,19 @@ async function main(): Promise<number> {
     },
   });
 
-  // Every notification exactly as the agent sent it, tagged so that
-  // `--raw --json` stays one parseable NDJSON stream: a raw line is the only
-  // one with a `_raw` key, and a normalized event never has one.
-  //
-  // This is the instrument for questions the normalized union cannot answer,
-  // because answering them is what it is *for* — `_meta` is an agent-shaped
-  // blob and `session.ts` projects a few fields out of it rather than carrying
-  // it. Reading an adapter's `dist/` is not a substitute; the relay note
-  // already records that inspection was not enough.
-  //
-  // Subscribed after `Session.start`, so anything the agent volunteers during
-  // the handshake or `session/new` is not seen here. Everything inside a turn
-  // is, which is what this exists for.
+  // Tagged _raw so --raw --json stays one NDJSON stream; subscribed after start, so handshake updates are not seen.
   const offRaw = values.raw
     ? session.onRawUpdate((notification) => {
         process.stdout.write(`${JSON.stringify({ _raw: notification })}\n`);
       })
     : () => {};
 
-  // The controls never reach the event iterator below — `Session` holds them and
-  // announces them out of band, because its queue only drains inside a turn.
-  // Printing them here is what keeps this driver honest about the daemon's
-  // actual behaviour: a change that broke the subscription would otherwise show
-  // up first on somebody's phone.
   printer.print({ type: "agent_config", ...session.agentConfig });
   const offConfig = session.onConfigChanged((config) => {
     printer.print({ type: "agent_config", ...config });
   });
 
-  // Context usage the same way, and for a stronger version of the same reason: it
-  // is announced out of band *and* never enters the log at all, so this driver is
-  // the only place outside a browser where a broken subscription is visible.
-  // Read-once-then-subscribe, because between turns there is no next update.
+  // Read once, then subscribed: usage is out of band, and between turns there is no next update.
   const initialUsage = session.contextUsage;
   if (initialUsage !== null) {
     printer.print({ type: "context_usage", used: initialUsage.used, size: initialUsage.size });
@@ -157,14 +116,7 @@ async function main(): Promise<number> {
   return interrupted ? 130 : exitCode;
 }
 
-/**
- * What the printers accept.
- *
- * Deliberately wider than `SessionEvent`: context usage is *not* a wire event and
- * must not be given a shape that suggests it is. It rides the snapshot on the real
- * daemon, and there is no snapshot here — so it is announced to this driver
- * directly, under a name (`context_usage`) that exists only in this file.
- */
+/** Wider than SessionEvent: context_usage is not a wire event and exists only in this file. */
 type Printable = SessionEvent | { type: "context_usage"; used: number; size: number };
 
 interface Printer {
@@ -188,14 +140,7 @@ function prettyPrinter(showLogs: boolean): Printer {
 
   const start = Date.now();
   const counts = new Map<string, number>();
-  /**
-   * Which call each call ran inside, built as events arrive.
-   *
-   * A parent that has not been seen renders at depth 0 rather than being held
-   * back — the same degradation the browser makes, demonstrated here rather than
-   * merely described, because the daemon deliberately never reorders or buffers
-   * to build a tree.
-   */
+  /** An unseen parent renders at depth 0, as in the browser; the daemon never reorders to build a tree. */
   const parents = new Map<string, string | null>();
   const depthOf = (id: string): number => {
     let depth = 0;
@@ -231,9 +176,7 @@ function prettyPrinter(showLogs: boolean): Printer {
           break;
         }
         case "context_usage": {
-          // Printed as the percentage a client draws, because that is what the
-          // registry's fan-out rule is keyed on — a driver reporting raw tokens
-          // would show churn no client could ever see.
+          // A percentage, because that is what clients draw and what the registry's fan-out is keyed on.
           const pct = event.size > 0 ? `${Math.round((event.used / event.size) * 100)}%` : "?";
           line(dim(`  ▦ context ${event.used}/${event.size > 0 ? event.size : "unknown"} (${pct})`));
           break;
@@ -277,9 +220,7 @@ function prettyPrinter(showLogs: boolean): Printer {
         case "tool_call_update": {
           const pad = "  ".repeat(depthOf(event.toolCallId));
           if (event.status) line(dim(`${pad}   ↳ ${event.status}${event.title ? ` · ${event.title}` : ""}`));
-          // The output the daemon used to throw away. Clipped to a few lines here
-          // because this is a progress view, not a terminal — but printed at all,
-          // so "did the tool actually say anything" is answerable without a browser.
+          // Clipped to a few lines: this is a progress view, not a terminal.
           for (const block of event.content ?? []) {
             for (const outLine of block.split("\n").slice(0, 6)) {
               if (outLine.length > 0) line(dim(`     ${outLine.slice(0, 160)}`));

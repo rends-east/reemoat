@@ -15,25 +15,7 @@ import {
   type SystemContribution,
 } from "./protocol.js";
 
-/**
- * `plugin.json`, read the way everything else in this tree reads somebody's JSON:
- * by hand, field by field, with a sentence per refusal.
- *
- * **Pure, and it takes text rather than a path.** That is not tidiness — it is
- * what makes every refusal below reachable from `daemoncheck` with no filesystem
- * at all, which matters because the refusals are the whole value of this file. A
- * validator whose error paths are only reachable by building a real archive is a
- * validator whose error paths are not driven.
- *
- * No zod, like everything else here.
- *
- * The posture throughout is **refuse rather than repair**. A manifest is written
- * once by a person and read forever by a machine, so a field this daemon quietly
- * fixed is a field whose author never learns it was wrong — and the fix is a
- * guess about somebody's intent made at install time on a machine nobody is
- * sitting in front of. The one exception is *absence*: an optional field left out
- * has an obvious meaning and gets it.
- */
+// plugin.json, parsed from text so daemoncheck reaches every refusal. Refuse rather than repair; only an absent optional field gets a default.
 
 export type ManifestRefusalCode =
   | "manifest_unreadable"
@@ -45,105 +27,28 @@ export type ManifestOutcome =
   | { ok: true; manifest: PluginManifest }
   | { ok: false; code: ManifestRefusalCode; message: string };
 
-/*
- * ⚠ **Every bound below is exported for `daemoncheck` and for nothing else —
- * there is no caller.** Nothing outside this file compares a manifest against
- * these. What there was instead was a driver spelling them out again,
- * `"x".repeat(201)` and the string `"name must be 1–64"`, so each number was
- * written down three times — in the comparison, in the refusal sentence, and in
- * the fixture — and moving it moved one of the three. A driver that copies a
- * bound is a driver that goes on asserting the old one, which is why `envNameFor`
- * is pure: `relaycheck` loops over `SETTING_KEYS` instead of listing them.
- *
- * ⚠ **The driver interpolates them now, and that closes the wide gap by opening a
- * narrow one.** Both sides of a derived fixture move together, so a bound that
- * changes value is **invisible** to every case built on it — which is the whole
- * point, and is also why derivation alone is not the assertion. The one failure it
- * cannot see is a comparison that drifts off its own constant by one, so
- * `daemoncheck` sweeps all six at *exactly* their ceiling as well: every existing
- * case is one character past a bound, and a validator refusing one character early
- * passes every one of them silently.
- */
+// The bounds are exported only so daemoncheck derives its fixtures from them.
 
-/**
- * How many contributions one plugin may declare.
- *
- * Not a resource bound — these cost nothing to hold. They are a bound on what a
- * plugin may put on *somebody's screen*: eight rows in a session's kebab menu is
- * already more than that menu has ever held, and a plugin able to declare forty
- * would be a plugin able to make the menu unusable for everything else on it.
- */
+/** Bounds what a plugin may put on screen, not a resource. */
 export const MAX_ACTIONS = 8;
 /** How many hosts `net.fetch` may be pointed at. A plugin talks to a service, not to the web. */
 export const MAX_NET_HOSTS = 8;
 
-/** How long the name shown wherever this plugin is listed may be. */
 export const MAX_NAME_CHARS = 64;
 
-/** How long the sentence under that name may be. A line on a row, not a README. */
 export const MAX_DESCRIPTION_CHARS = 200;
 
-/**
- * How long each of the two titles may be — and they are two constants at one
- * value on purpose.
- *
- * ⚠ **A screen title and an action title are different subjects that agree on
- * 40 by coincidence of what fits.** One is drawn once, at the head of a plugin's
- * own page; the other is a row in a session's kebab menu, beside Resume and Stop
- * and beside whatever a second installed plugin called its own — which is the
- * width that is actually under pressure, and `plugin-ui.md` records a single
- * string wrapping that 208px panel to two lines and moving Stop by however long
- * an author's title was. Written as the literal `40` in both places, tightening
- * the menu row is one edit that silently leaves the page alone, and nothing
- * anywhere says the two were ever one decision.
- */
+/** Two constants at one value on purpose: the page title and the menu-row title are separate decisions. */
 export const MAX_SCREEN_TITLE_CHARS = 40;
 export const MAX_ACTION_TITLE_CHARS = 40;
 
-/**
- * How many harnesses and systems one plugin may add.
- *
- * ⚠ **A resource bound, unlike {@link MAX_ACTIONS} one field up, and the two must
- * not be reasoned about together.** An action costs a row in a menu. A *harness*
- * costs a **process** every time `GET /agents/capabilities` is read — that route
- * fans over every harness with `Promise.all` under `MAX_CONCURRENT_ASKS` of 2, and
- * the built-ins already take 2531 ms overlapped (measured 2026-08-28 over the
- * four there were then; per harness 627–2260 ms). So the sweep is roughly
- * `(N + 5) / 2 × 1.3 s` — grok is the fifth and was not in that run, but it is a
- * process like the rest — and the builder opens that route on every visit.
- *
- * ⚠ **And the cost is not only the wait.** A sweep holds both ask slots for its
- * whole length, while `model.complete` and `model.list` deliberately do *not*
- * queue — `MAX_CONCURRENT_ASKS` is a refusal `docs/PLUGINS.md` publishes to plugin
- * authors. So for as long as anybody has the builder open, every plugin model call
- * on the machine answers `model_busy`, and a documented refusal becomes
- * indistinguishable from a broken machine.
- *
- * The per-machine ceilings are `PluginHost`'s, because only it knows what else is
- * installed; these are the per-plugin halves. Two is not a guess about how many
- * harnesses a plugin wants — it is one, plus room for a plugin that ships a CLI
- * under two names — and eight systems is `MAX_NET_HOSTS` beside it.
- */
+/** A resource bound: each harness costs a process on every capabilities sweep. The per-machine ceilings are PluginHost's. */
 export const MAX_PLUGIN_HARNESSES = 2;
 export const MAX_PLUGIN_SYSTEMS = 8;
 
-/**
- * How long a contributed harness's or system's name may be.
- *
- * Half {@link MAX_NAME_CHARS}, because this one is drawn on a 96px tile beside a
- * glyph rather than on a full-width settings row — and unlike a plugin's own name
- * it is substituted into refusal sentences (`<harness> cannot run <model>.`) that
- * have to stay one line on a phone.
- */
 export const MAX_CONTRIBUTED_NAME_CHARS = 32;
 
-/**
- * Bounds on the argv this daemon will **spawn**.
- *
- * ⚠ {@link MAX_ACTIONS}' "not a resource bound, they cost nothing to hold"
- * argument does not reach here and must not be borrowed: every string below
- * becomes a member of a real `execve` argument vector, as this uid.
- */
+/** Every string here becomes a real execve argument, run as this uid. */
 export const MAX_HARNESS_ARGS = 8;
 export const MAX_HARNESS_ARG_CHARS = 64;
 
@@ -151,22 +56,13 @@ export const MAX_HARNESS_ARG_CHARS = 64;
 export const MAX_HARNESS_ENV_NAMES = 4;
 export const MAX_ROUTED_MODEL_ENV = 4;
 
-/** How long the sentence shown when a contributed harness refuses a session may be. */
 export const MAX_AUTH_HINT_CHARS = 400;
 
-/**
- * How many models one contributed system may write down, and how long each may be.
- *
- * The id bound is `MAX_MODEL_CHARS` on the routes, restated rather than imported
- * because `server.ts` is not a dependency of this file; the two are compared by
- * `daemoncheck` rather than by a shared constant, for the same reason the archive
- * limits are.
- */
+/** The id bound restates MAX_MODEL_CHARS from the routes; daemoncheck compares the two. */
 export const MAX_SYSTEM_MODELS = 64;
 export const MAX_SYSTEM_MODEL_ID_CHARS = 256;
 export const MAX_SYSTEM_MODEL_NAME_CHARS = 64;
 
-/** How long a contributed system's base URL may be. */
 export const MAX_BASE_URL_CHARS = 200;
 
 const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -174,69 +70,14 @@ const VERSION = /^\d+\.\d+\.\d+$/;
 /** A hostname, lower-case, no scheme, no port, no path. */
 const HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
-/**
- * An address wearing a hostname's shape.
- *
- * ⚠ `HOST` alone accepts `127.0.0.1` — three dots and four labels of digits is a
- * perfectly well-formed name by that pattern, which is how an address literal
- * walked past a check whose refusal string already said "and not an address".
- * The test is the **last** label being all digits, which is the rule that makes a
- * numeric top-level domain impossible and excludes every dotted-quad exactly.
- * IPv6 needs nothing: `HOST` has no colon in it.
- *
- * Refused so that the allowlist somebody approves is a list of *names*. It is not
- * an SSRF defence and `LOCAL_HOST` says why in full.
- */
+/** HOST alone accepts a dotted quad; an all-digit last label is an address. */
 const ADDRESS = /\.\d+$/;
 
-/**
- * Names that resolve to this machine or to a cloud instance's own metadata.
- *
- * ⚠ **This is a spelling check, not an SSRF defence, and the difference is worth
- * stating because the stronger claim is the one somebody will assume.** A
- * hostname somebody controls can resolve to `127.0.0.1` or to `169.254.169.254`
- * whatever this list says, and re-resolving after the check is the classic
- * rebinding race. What this actually stops is a plugin *declaring* an obviously
- * local target and an operator approving it without reading — which is a
- * mistake, and mistakes are what the scope list is for.
- *
- * The real answer is the one `SECURITY.md` gives: the plugin is a child process
- * running as this uid and can open its own socket to anything. `net.fetch` exists
- * so that a plugin which stays inside the API is *auditable*, not so that one
- * which leaves it is stopped.
- */
+/** A spelling check, not an SSRF defence: the plugin runs as this uid and can open any socket. */
 const LOCAL_HOST = /(^|\.)(localhost|local|internal|localdomain)$/;
 
 export function parseManifest(text: string, options: { presenting?: boolean } = {}): ManifestOutcome {
-  /*
-   * ⚠ **Strict when a person is about to agree to this, looser when a row already
-   * on disk is being loaded — and the split exists because this function is not
-   * only an install-time validator.**
-   *
-   * `SqlitePluginRecordStore.toRecord` re-parses `manifest_json` on **every read**,
-   * and a row this build cannot validate is skipped: `list` omits it, `get`
-   * answers `null`. So every refusal added here is applied *retroactively* to
-   * plugins that are already installed, and a manifest that was legal the day it
-   * was installed makes the plugin silently vanish on the next daemon start,
-   * taking its contributed agents and providers with it. Measured on the refusals
-   * added with the contributed-agent work: `CONTROL_CHARS` is `\p{Cc}\p{Cf}`, and
-   * U+200D is `Cf` — so a harness named "👨‍💻 Dev Helper", an ordinary emoji ZWJ
-   * sequence, stops loading.
-   *
-   * **What `presenting: false` relaxes is exactly the refusals that protect a
-   * screen, because at read time no screen is being drawn.** The install-approval
-   * card is where a name carrying U+202E does its damage; a row being loaded is
-   * past that. Two authoring-hygiene checks go with them for the same reason —
-   * they describe a manifest that is badly written rather than one that is unsafe
-   * to run.
-   *
-   * **What stays strict in both is everything that bounds what the plugin can
-   * *do*:** `RESERVED_ENV_LOADERS`, `STRUCTURAL_HEADERS`, the metadata-service
-   * hosts, the single-label host and the scheme. At read the question is not
-   * "would this be accepted today" but "is it safe to load", and for those the
-   * honest answer is still no — a plugin refused on one of them reaches
-   * `onDegraded` with the reason, which is the only channel `openStores` has.
-   */
+  // presenting false (a stored row being reloaded) relaxes only the refusals that protect a screen; everything bounding what the plugin can do stays strict.
   const presenting = options.presenting ?? true;
   let raw: unknown;
   try {
@@ -264,17 +105,6 @@ export function parseManifest(text: string, options: { presenting?: boolean } = 
   if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_NAME_CHARS) {
     return invalid(`name must be 1–${MAX_NAME_CHARS} characters`);
   }
-  /*
-   * ⚠ **The heading of the install-approval card, and it was the one field
-   * {@link CONTROL_CHARS} did not guard.** That constant's own docblock says
-   * "every field this guards is drawn on the install-approval card" and gives
-   * U+202E hiding the rest of a line as the reason — and then the two most
-   * prominent things on that card, `PluginConsent`'s `manifest.name` heading and
-   * the `manifest.description` under it, went unguarded while the contributed
-   * harness names below them were checked. A harness may not be *called* `claude`
-   * (`RESERVED_COMMANDS`) and that is worth little while the plugin above it can
-   * be `Claude Code` followed by an override.
-   */
   if (presenting && CONTROL_CHARS.test(name)) {
     return invalid("name may not carry control or formatting characters");
   }
@@ -312,8 +142,6 @@ export function parseManifest(text: string, options: { presenting?: boolean } = 
   ) {
     return invalid(`description must be a string of at most ${MAX_DESCRIPTION_CHARS} characters`);
   }
-  // The subtitle on the same card, for the same reason — and with 200 characters
-  // to work in, an invented second line is the cheaper of the two spoofs.
   if (presenting && typeof description === "string" && CONTROL_CHARS.test(description)) {
     return invalid("description may not carry control or formatting characters");
   }
@@ -353,11 +181,6 @@ function readScopes(raw: unknown): PluginScope[] | string {
   for (const entry of raw) {
     if (typeof entry !== "string") return "every scope must be a string";
     const found = PLUGIN_SCOPES.find((scope) => scope === entry);
-    // Named in the refusal, because the whole list is short and somebody who
-    // mistyped one wants to see the ones they could have meant. Never a count in
-    // the prose: a number written here is falsified by the next scope added and
-    // by nothing else, while the refusal interpolates `PLUGIN_SCOPES` and cannot
-    // be wrong about how many there are.
     if (found === undefined) return `unknown scope ${JSON.stringify(entry)}; the scopes are ${PLUGIN_SCOPES.join(", ")}`;
     if (out.includes(found)) return `scope ${JSON.stringify(entry)} is listed twice`;
     out.push(found);
@@ -365,14 +188,10 @@ function readScopes(raw: unknown): PluginScope[] | string {
   return out;
 }
 
-/** One sentence, two ways to reach it: `net` absent entirely, and `net` present but empty. */
 const NET_NEEDS_HOSTS = 'the "net" scope needs a net list naming the hosts it reaches';
 
 function readNet(raw: unknown, scopes: readonly PluginScope[]): string[] | string {
   if (raw === undefined || raw === null) {
-    // Declaring `net` and listing nothing is refused rather than treated as "any
-    // host": a scope whose allowlist is empty reads, to whoever is approving the
-    // install, as a plugin that talks to nowhere. It has to say where.
     return scopes.includes("net") ? NET_NEEDS_HOSTS : [];
   }
   if (!Array.isArray(raw)) return "net must be an array of host names";
@@ -395,17 +214,7 @@ function readNet(raw: unknown, scopes: readonly PluginScope[]): string[] | strin
   return out;
 }
 
-/**
- * The api rung below which a contribution point is refused rather than dropped.
- *
- * ⚠ **This exists because "an older daemon ignores an unknown field" is the wrong
- * model for a contribution, and following it would ship plugins that install and
- * do nothing.** The reader below takes the keys it knows and leaves the rest, so
- * without this test a manifest declaring `4` with a `harnesses` block is accepted
- * everywhere and contributes nowhere — and there is no degraded half of the
- * feature left running, because the harness *is* the plugin. Exported so
- * `daemoncheck` drives the boundary rather than the value.
- */
+/** Below this api a contributions block is refused rather than ignored, since the harness is the plugin. */
 export const CONTRIBUTION_API = 5;
 
 function readContributions(
@@ -415,9 +224,6 @@ function readContributions(
   presenting: boolean,
 ): PluginContributions | string {
   if (raw === undefined || raw === null) {
-    // Absence is the one thing repaired rather than refused, per this file's
-    // opening rule — and it has to answer the two new keys as well, or a plugin
-    // that writes no `contributes` at all becomes a shape nothing else can read.
     return declaredNothing(scopes);
   }
   if (typeof raw !== "object" || Array.isArray(raw)) return "contributes must be an object";
@@ -444,23 +250,7 @@ function readContributions(
   const hooks = readHooks(source["hooks"]);
   if (typeof hooks === "string") return hooks;
 
-  /*
-   * ⚠ **Refused above the readers rather than inside them**, so the sentence names
-   * the api rather than whichever field happened to be looked at first. Both keys
-   * are tested even though only one may be present: a manifest declaring the wrong
-   * rung is wrong about the rung, not about the block.
-   *
-   * ⚠ **On a *non-empty* block, and that is what keeps this function idempotent
-   * over its own output.** `parseManifest` normalises an absent `contributes` into
-   * one carrying `harnesses: []` and `systems: []`, and
-   * `SqlitePluginRecordStore.toRecord` re-validates `manifest_json` through here on
-   * **every read** — so a presence test would refuse, on the second read, every
-   * plugin this function had itself accepted on the first, and every already
-   * installed plugin would vanish from `list()` at the next daemon start. Measured:
-   * it took out the whole plugin lifecycle section before anything else noticed.
-   * A block that is present and empty declares nothing anyway, so there is nothing
-   * the rung could be protecting.
-   */
+  // Tests a non-empty block, not presence: stored manifests are re-validated on every read with empty arrays normalised in.
   const adds = (key: string): boolean => {
     const value = source[key];
     return Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null;
@@ -478,22 +268,13 @@ function readContributions(
   return { screen, settings, actions, hooks, harnesses, systems };
 }
 
-/** What `contributes` absent means, which still has to answer the scope gate. */
 function declaredNothing(scopes: readonly PluginScope[]): PluginContributions | string {
   const missing = SCOPE_NEEDS_BLOCK.find((one) => scopes.includes(one.scope));
   if (missing !== undefined) return missing.sentence;
   return { screen: null, settings: false, actions: [], hooks: [], harnesses: [], systems: [] };
 }
 
-/*
- * ⚠ **Each of the two is a biconditional, and both halves are the `net` rule.**
- * A scope with an empty block reads, to whoever is approving the install, as a
- * plugin that adds nothing — so it has to say what. A block with no scope is the
- * other direction and matters more: the scope list is the only place the consent
- * screen puts a capability that a *browser older than this daemon* can still
- * render, so a contribution smuggled in under no scope is one that older client
- * cannot mention at all.
- */
+// Biconditional, like net: a block with no scope would be invisible to an older consent screen.
 const SCOPE_NEEDS_BLOCK: readonly { scope: PluginScope; sentence: string }[] = [
   { scope: "harness", sentence: 'the "harness" scope needs contributes.harnesses to name the agents it adds' },
   { scope: "system", sentence: 'the "system" scope needs contributes.systems to name the providers it adds' },
@@ -540,49 +321,18 @@ function readHooks(raw: unknown): PluginHook[] | string {
 }
 
 
-/* ── Contributed harnesses and systems ───────────────────────────────────── */
-
-/**
- * The id this daemon uses for something a plugin added.
- *
- * ⚠ **Namespaced, and the colon is doing three jobs rather than one.** A built-in
- * id is `[a-z0-9-]+` with no separator, so `<pluginId>:<localId>` cannot collide
- * with `claude` or `openrouter` **by construction** rather than by a check that
- * somebody has to remember to run; two plugins cannot collide with each other,
- * since `plugins.id` is a primary key; and — the load-bearing one — the shape is
- * recognisable *without a registry*, which is what lets `fromRow` accept a
- * persisted row naming a harness whose plugin is switched off, instead of dropping
- * somebody's conversation for the length of an outage.
- *
- * An author never writes it. A manifest names local ids and this is applied on the
- * way out, in `contributions.ts`.
- */
+/** The colon keeps a contributed id from colliding with a built-in and makes its shape recognisable with no registry. */
 export function contributedId(pluginId: string, localId: string): string {
   return `${pluginId}:${localId}`;
 }
 
-/**
- * Whether this *could* be an id a plugin contributed — a shape test, never a
- * membership test.
- *
- * ⚠ **The distinction is the whole reason this is exported, and getting it
- * backwards costs conversations.** Membership is asked where nothing has been
- * created yet — `POST /sessions`, `POST /custom-agents` — so a refusal is free and
- * a worktree is never made for a harness that cannot run. Shape is asked where the
- * row *is* the memory: `fromRow` and `readCustomAgent` run at boot, before
- * anything is on screen, and a membership test there would delete every session on
- * a harness whose plugin somebody had switched off an hour ago. That asymmetry is
- * `custom_agents.harness` (validated) against `agent_strip.ref` (never validated),
- * applied to the case that sits between them: `resolveAgent` refuses at launch,
- * with a sentence, and the conversation is still there when the plugin comes back.
- */
+/** A shape test, never membership: a stored row must survive its plugin being switched off. */
 export function isContributedId(id: string): boolean {
   const cut = id.indexOf(":");
   if (cut <= 0 || cut === id.length - 1) return false;
   return ID.test(id.slice(0, cut)) && ID.test(id.slice(cut + 1));
 }
 
-/** A variable name a CLI could plausibly read. */
 const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 /** A program name, not a path: no slash, no backslash, no `..`. */
@@ -594,21 +344,7 @@ const HEADER_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 /** What may precede a secret in a header value, with at most one trailing space. */
 const HEADER_PREFIX = /^[A-Za-z0-9._~+/-]{0,32} ?$/;
 
-/**
- * Field names that decide how a request is *framed* rather than who is asking.
- *
- * ⚠ **{@link HEADER_NAME} is a well-formedness test, and well-formed is not the
- * question here.** The daemon builds `{[name]: prefix + secret}` and hands the
- * pair straight to the routing call, so this field's whole meaning is "how this
- * system's key is sent". A manifest naming `content-length` or `transfer-encoding`
- * is not naming a credential header at all — it is deciding the framing of a
- * request whose body it does not control, out of a value the operator pasted.
- *
- * `fetch` treats most of these as forbidden and drops them, which is why this is
- * belt rather than the only lock — but which adapter the daemon uses is not a
- * fact this file can see, and "the client we happen to use ignores it" is a
- * thinner guarantee than not accepting it.
- */
+/** Framing headers, refused although fetch drops most of them: the value is built from a pasted secret. */
 const STRUCTURAL_HEADERS: readonly string[] = [
   "host",
   "content-length",
@@ -623,48 +359,10 @@ const STRUCTURAL_HEADERS: readonly string[] = [
   "cookie",
 ];
 
-/**
- * Characters that change what a string *looks like* rather than what it says.
- *
- * ⚠ **Every field this guards is drawn on the install-approval card**, which is
- * the one screen whose whole job is "here is what you are agreeing to". U+202E
- * reverses the rendering of everything after it; a newline invents a second line
- * the manifest never claimed; ESC opens an ANSI sequence in `pluginctl`'s output.
- * A harness may not be *named* `claude` — {@link RESERVED_COMMANDS} — and that
- * rule is worth little while the `name` beside it can be `Claude Code` followed
- * by a control character that hides the rest.
- *
- * `\p{Cc}\p{Cf}` and not `\p{C}`, matching `premium/src/email.ts`'s choice for the
- * same reason: `\p{C}` also matches `Cn`, unassigned, and would refuse a name
- * containing a codepoint this Node's tables do not know yet.
- *
- * NUL earns its place twice over: `manifest` is a `jsonb` column and PostgreSQL
- * cannot represent `U+0000` in one, so a name carrying it passes every validator
- * here and then fails at `INSERT` as an unmapped 500.
- */
+/** Refused on everything the install-approval card draws. Cc and Cf rather than C, so unassigned codepoints still pass. */
 const CONTROL_CHARS = /[\p{Cc}\p{Cf}]/u;
 
-/**
- * Variables that decide which code runs, rather than which service answers.
- *
- * ⚠ **This list is about *shape*, not about ownership, and that distinction is
- * why there is no companion list of vendor credentials.** A slot named `PATH` or
- * `LD_PRELOAD` is not a credential at all: nothing a person could paste into it
- * is a secret, and what it changes is which binary the spawn resolves. That is
- * true of every plugin, so it can be refused outright.
- *
- * ⚠ **A vendor's credential name cannot be refused the same way, and trying was a
- * mistake worth recording.** `GEMINI_API_KEY` on a contributed harness is either
- * a plugin adding real Gemini support — the *primary* use of this whole feature,
- * and the daemon's own fixture — or a plugin phishing for a Gemini key, and the
- * variable name is identical in both. Nothing here can tell them apart. What
- * separates them is whether the operator sees the slot before approving it,
- * which is `pluginctl`'s job and not this function's.
- *
- * {@link RESERVED_ENV_NAMES} stays narrow for the same reason: it names the
- * credentials of agents this daemon *already ships*, where a claim collides with
- * a secret the machine already holds.
- */
+/** Variables that choose which code runs. A vendor's credential name cannot be refused this way. */
 const RESERVED_ENV_LOADERS: readonly string[] = [
   "PATH",
   "HOME",
@@ -684,69 +382,10 @@ const RESERVED_ENV_LOADERS: readonly string[] = [
   "RUBYOPT",
 ];
 
-/**
- * Programs a contributed harness may not name.
- *
- * ⚠ **Not tidiness: naming `claude` here would let a plugin drive the operator's
- * own signed-in CLI**, with its credentials, under a row the consent screen
- * labels with the plugin's name — and the person approving it would be reading a
- * command line that is true and a heading that is a lie. `script` is on the list
- * because it is what `hostLoginArgs` allocates a pty with.
- */
+/** A plugin may not drive the operator's own signed-in CLI; script is what the login pty uses. */
 const RESERVED_COMMANDS: readonly string[] = [...AGENT_IDS.map((id) => AGENT_LOGIN[id].command), "script"];
 
-/**
- * Variable names a manifest may not claim.
- *
- * Three sets, and they are three different failures:
- *
- *   - **`SESSION_SCOPED_ENV`** — `LocalRuntime.launch` spreads the routed-model
- *     environment *last*, so a manifest naming `CLAUDE_CODE_SESSION_ID` would
- *     restore exactly the variable `agentEnv()` had just deleted, and
- *     `CODEX_SANDBOX_NETWORK_DISABLED` would take the network away from an agent
- *     nobody had confined.
- *   - **every built-in's credential slot, and every system's `keyEnv`** — this is
- *     the sharpest one and it is not hygiene. `envNames` decides which variable
- *     names a *person* is invited to paste a secret into, under a card headed with
- *     the plugin's own name. `CLAUDE_CODE_OAUTH_TOKEN` there is a phishing box.
- *   - **every built-in's `executableEnv`** — `resolveLoginBinary` reads it for
- *     every agent, so a manifest naming `CLAUDE_CODE_EXECUTABLE` would redirect
- *     which binary somebody else's login drives.
- *
- * `REEMOAT_*` is tested separately, as a prefix, for `DAEMON_ENV_PREFIX`'s own
- * reason: the failure mode of a list is the variable nobody thought of.
- *
- * ⚠ **This list, and {@link RESERVED_COMMANDS} above it, make `parseManifest`
- * depend on the built-in tables — and `SqlitePluginRecordStore.toRecord` runs this
- * function over every stored manifest on every read.** So the release that adds a
- * fifth built-in reading `GEMINI_API_KEY` makes a plugin that had claimed that slot
- * unreadable, and at the next daemon start it drops out of `records.list()`
- * entirely: its harness leaves every catalogue and its sessions refuse. Two things
- * bound the damage rather than one. `doRemove` sweeps credentials by **prefix**, so
- * an uninstall still reaches its keys with no manifest at all; and nothing is
- * deleted by the drop itself — the row, the tree and the data all stay, and the
- * plugin comes back the moment its manifest is readable again. What is owed on the
- * day a built-in is added is a look at what the fleet has installed, which is the
- * same look `RELEASING.md` already asks for before a floor is raised.
- *
- * ⚠ **And there is a *second* `parseManifest`, in the plugin catalogue, which
- * cannot follow this list at all — which makes the spread above the one thing here
- * that drifts with no declaration changing on either side.** That service mirrors
- * this file by hand and has no `src/acp` to spread from, so it can only hold a
- * literal. The failure is quiet in both directions and lands on somebody else: the
- * day a fifth built-in is added that reads `GEMINI_API_KEY`, this list grows by
- * derivation, the catalogue's does not, and it happily publishes a plugin claiming
- * that slot — which every daemon then refuses at install, about a plugin the market
- * said was fine.
- *
- * Deriving is still right *here*: a literal would drift against `AGENT_LOGIN` in
- * this same repository, which is the nearer and likelier mistake. What the
- * derivation costs is that the check has to live where both sides are visible, and
- * it does — the catalogue's own driver imports these two `acp` modules directly and
- * compares in both directions, degrading to a printed skip where this repository is
- * not checked out beside it. Adding a built-in agent is therefore a change in two
- * repositories, and this paragraph is the only place that says so.
- */
+/** Derived from the built-in tables, so a new built-in can make a stored plugin unreadable; the plugin catalogue's hand-kept copy must follow. */
 const RESERVED_ENV_NAMES: readonly string[] = [
   ...SESSION_SCOPED_ENV,
   ...AGENT_IDS.flatMap((id) => AGENT_LOGIN[id].envNames),
@@ -818,21 +457,7 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[], presenting:
       argv.push(arg);
     }
     if (argv.length > MAX_HARNESS_ARGS) return `harness ${JSON.stringify(id)} may pass at most ${MAX_HARNESS_ARGS} arguments`;
-    /*
-     * ⚠ **The whole argv, because checking only `argv[0]` made the rule above true
-     * of one word rather than of the command line.** `{"command": "env", "args":
-     * ["claude"]}` and `{"command": "sh", "args": ["-c", "exec claude"]}` both walk
-     * past a check on the program name and spawn the operator's *signed-in* CLI,
-     * with its credentials, under a row the consent screen labels with the plugin's
-     * name — which is verbatim what `RESERVED_COMMANDS` says it exists to prevent.
-     *
-     * ⚠ **Word by word rather than by substring**, so `--profile=codex` is left
-     * alone: this is about a program being *invoked*, and a flag that happens to
-     * contain a name is not that. It cannot be complete — nothing here can stop a
-     * wrapper that spells the name some other way — which is why the argv is on the
-     * consent card in full and in `consentGap`. What it closes is the one shape a
-     * reader of that card would not think to look for.
-     */
+    // Every argv word, not only the command: env or sh -c could otherwise invoke a reserved CLI.
     const reserved = argv.flatMap((one) => one.split(/[\s=]+/)).find((word) => RESERVED_COMMANDS.includes(word));
     if (reserved !== undefined) {
       return `harness ${JSON.stringify(id)} may not pass ${JSON.stringify(reserved)} as an argument: this machine already runs that program as an agent of its own`;
@@ -848,9 +473,7 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[], presenting:
     );
     if (typeof routedModelEnv === "string") return routedModelEnv;
 
-    // Authoring hygiene rather than a bound on what the plugin may do: the model
-    // id overwriting the key is the plugin's own breakage, so a row already on disk
-    // is loaded and left to it. See `parseManifest`'s note on the two modes.
+    // Authoring hygiene only, so a stored row is not refused for it.
     const collision = presenting ? routedModelEnv.find((name) => envNames.includes(name)) : undefined;
     if (collision !== undefined) {
       return `harness ${JSON.stringify(id)} names ${JSON.stringify(collision)} as both a credential slot and a routed-model variable, and the model id would overwrite the key`;
@@ -881,58 +504,25 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[], presenting:
   return out;
 }
 
-/**
- * Addresses that are never an inference endpoint, whatever scheme they wear.
- *
- * ⚠ **Refused under `https` as well as under `http`, unlike everything else in
- * {@link isPrivateHost}.** `169.254.169.254` and its IPv6 sibling are cloud
- * instance metadata — the classic target — and a base URL pointed at one is not a
- * self-hosted model somebody stood up, it is a request for this daemon to sign a
- * call to its own host's credentials service with a key the operator pasted.
- * Nothing legitimate is lost: the whole of `169.254/16` is link-local.
- */
+/** Refused under https too: instance metadata is never an inference endpoint. */
 function isMetadataHost(host: string): boolean {
   const four = ipv4(host);
   if (four !== null) {
     if (four[0] === 169 && four[1] === 254) return true;
-    // ⚠ **The two clouds that did not use link-local.** Alibaba answers metadata
-    // on 100.100.100.200 and Oracle on 192.0.0.192 — both routable addresses, so
-    // neither is caught by the 169.254/16 arm above and neither is private.
+    // Alibaba and Oracle serve metadata on routable addresses.
     if (four[0] === 100 && four[1] === 100 && four[2] === 100 && four[3] === 200) return true;
     if (four[0] === 192 && four[1] === 0 && four[2] === 0 && four[3] === 192) return true;
     return false;
   }
-  /*
-   * ⚠ **By name as well, and the names are the arm that was missing.** GCP's
-   * metadata service is `metadata.google.internal`, which resolves to
-   * `169.254.169.254` — and `isPrivateHost` below returns `true` for *anything*
-   * ending `.internal`, so without this line the `http` allowance and the metadata
-   * refusal both failed on the same string: a manifest could point a base URL at
-   * the host's own credentials service, in the clear, and be accepted. This file
-   * already disagreed with itself about it — `LOCAL_HOST` refuses `internal` in a
-   * `net` allowlist on exactly those grounds.
-   */
+  // By name too: isPrivateHost accepts any .internal, GCP's metadata name included.
   const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   if (METADATA_NAMES.has(bare) || bare.endsWith(".metadata.google.internal")) return true;
-  /*
-   * And the IPv4-mapped spelling of the address, which `URL` serialises as
-   * `[::ffff:a9fe:a9fe]` rather than as a dotted quad — so `ipv4` above answers
-   * `null` for it and the numeric arm never sees it.
-   */
+  // The IPv4-mapped IPv6 spelling, which ipv4 does not parse.
   return bare === "fd00:ec2::254" || bare.startsWith("::ffff:a9fe:") || bare.startsWith("::ffff:169.254.");
 }
 
-/**
- * Names that are an instance metadata service rather than a model.
- *
- * A spelling check like {@link LOCAL_HOST} and not an SSRF defence — a hostname
- * somebody controls resolves wherever they like. What it stops is a manifest
- * *declaring* one of the two names anybody would actually reach for, on a screen
- * where an operator is being asked to approve an endpoint.
- */
 const METADATA_NAMES = new Set(["metadata", "metadata.google.internal", "metadata.goog"]);
 
-/** The four octets of a dotted-quad, or `null` for anything else. */
 function ipv4(host: string): [number, number, number, number] | null {
   const parts = host.split(".");
   if (parts.length !== 4) return null;
@@ -946,23 +536,7 @@ function ipv4(host: string): [number, number, number, number] | null {
   return [out[0]!, out[1]!, out[2]!, out[3]!];
 }
 
-/**
- * Whether this host is on the machine or on its own network.
- *
- * ⚠ **This is the opposite decision from `LOCAL_HOST` and `ADDRESS` forty lines
- * up, in the same file, and the difference is which key is at stake.** Those two
- * refuse a local target in a plugin's `net` allowlist, where the request is one the
- * **plugin's own process** composes and a local address is a mistake somebody is
- * approving without reading. A system's `baseUrl` is where the **operator's own
- * pasted key** goes to a model they chose by name — and a private address there is
- * the one case where they plainly mean it, because Ollama, vLLM and LM Studio are
- * exactly this and nothing else in the product reaches them.
- *
- * It is still not an SSRF defence and could not be: a name somebody controls
- * resolves wherever they like, and re-resolving after the check is the rebinding
- * race. What it decides is narrower and honest — whether `http` is allowed at all,
- * which is a question about *this operator's own network* rather than about trust.
- */
+/** Decides only whether http is allowed for a baseUrl, where a private model endpoint is legitimate. Not an SSRF defence. */
 function isPrivateHost(host: string): boolean {
   if (host === "localhost" || host.endsWith(".localhost")) return true;
   if (host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".home.arpa")) return true;
@@ -975,13 +549,7 @@ function isPrivateHost(host: string): boolean {
     // 169.254/16 is deliberately absent: link-local is refused outright above.
     return false;
   }
-  /*
-   * ⚠ **`URL.hostname` keeps the brackets on an IPv6 literal** — measured:
-   * `new URL("http://[::1]:8080/").hostname` is `"[::1]"`, not `"::1"` — so a
-   * comparison written against the bare form silently matches nothing and every
-   * IPv6 loopback falls through to "not private", i.e. `http` refused for the one
-   * address that is most obviously local.
-   */
+  // URL.hostname keeps the brackets on an IPv6 literal.
   const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   if (bare === "::1") return true;
   if (/^f[cd][0-9a-f]{2}:/.test(bare)) return true;
@@ -989,14 +557,7 @@ function isPrivateHost(host: string): boolean {
   return false;
 }
 
-/**
- * A base URL, normalised — or a sentence.
- *
- * `https` anywhere; `http` **only** to somewhere {@link isPrivateHost} recognises,
- * because a key sent in the clear across a network this daemon cannot characterise
- * is not a trade anybody can consent to from a phone. The consent screen draws that
- * case on its own line.
- */
+/** https anywhere; http only to a host isPrivateHost recognises. */
 function readBaseUrl(raw: unknown, what: string, presenting: boolean): string | null | string[] {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_BASE_URL_CHARS) {
@@ -1010,46 +571,21 @@ function readBaseUrl(raw: unknown, what: string, presenting: boolean): string | 
   }
   if (url.username !== "" || url.password !== "") return [`${what} baseUrl may not carry a user name or a password`];
   if (url.hash !== "" || url.search !== "") return [`${what} baseUrl may not carry a query or a fragment`];
-  /*
-   * ⚠ **The root label comes off before anything looks at the name.** `URL` strips
-   * a trailing dot from a dotted quad but keeps it on a named host — measured:
-   * `new URL("https://metadata.google.internal./").hostname` keeps the dot. Both
-   * predicates below test the name by equality or by suffix, so one character
-   * defeated the whole name arm of `isMetadataHost` and, in the other direction,
-   * made `ollama.internal.` fail to register as private.
-   */
+  // Strip the root label: URL keeps a trailing dot on a named host, which defeats the suffix tests.
   const host = url.hostname.toLowerCase().replace(/\.+$/, "");
-  // The scheme first, so a `file:` or a `ws:` is refused for what it is rather than
-  // for having no host — those URLs parse to an empty authority.
+  // Scheme first: file: and ws: parse to an empty authority.
   if (url.protocol !== "http:" && url.protocol !== "https:") return [`${what} baseUrl must be https`];
   if (isMetadataHost(host)) return [`${what} baseUrl names this host's own metadata service`];
-  /*
-   * ⚠ **A name with no dot in it is not a public host, whatever the scheme.**
-   * `readNet` already refuses one for a plugin's *own* requests through `HOST`;
-   * this field is where the operator's pasted key is sent, and it was the looser
-   * of the two. A single label resolves through whatever search domain this host
-   * carries. `isPrivateHost` is the exemption, so `localhost`, an address literal
-   * and `.local`/`.internal` — the shapes Ollama, vLLM and LM Studio use — stay.
-   */
+  // A single label resolves through the search domain, so it is refused unless private.
   if (!host.includes(".") && !isPrivateHost(host)) {
     return [`${what} baseUrl must name a host with a dot in it, or this machine`];
   }
   if (url.protocol === "http:" && !isPrivateHost(host)) {
     return [`${what} baseUrl must be https, unless it names this machine or your own network`];
   }
-  // Normalised here rather than at every reader: what is compared by `consentGap`
-  // and what is stored have to be the same string, or the alarm cries wolf on a
-  // trailing slash.
+  // Normalised once, so consentGap and storage compare the same string.
   const normalised = url.origin + url.pathname.replace(/\/+$/, "");
-  /*
-   * ⚠ **Bounded again, because normalising can make it longer.** The test at the
-   * top reads the raw string; percent-encoding expands one non-ASCII codepoint into
-   * as many as nine characters, so a 168-character accented path was accepted and
-   * stored at 343 — then refused on the next read of the stored manifest.
-   */
-  // Authoring hygiene, not a fence — the address is already bounded raw at the top
-  // of this function, and this catches the expansion. A row on disk that grew past
-  // it when it was stored is loaded rather than made to vanish.
+  // Bounded again, since percent-encoding lengthens it; a stored row past it is still loaded.
   if (presenting && normalised.length > MAX_BASE_URL_CHARS) {
     return [`${what} baseUrl is longer than ${MAX_BASE_URL_CHARS} characters once normalised`];
   }
@@ -1089,12 +625,7 @@ function readSystems(
     }
     if (presenting && CONTROL_CHARS.test(name)) return `${what} name may not carry control or formatting characters`;
 
-    /*
-     * ⚠ **The closed pair, never ACP's open union.** `SystemApiType` is documented
-     * as the subset this daemon knows how to *configure*; a manifest naming
-     * `"vertex"` would pass `routing.supported.includes` for claude and reach
-     * `providers/set` as a shape nothing here has ever driven.
-     */
+    // Only the closed pair this daemon knows how to configure, never ACP's open union.
     const apiType = one["apiType"];
     if (apiType !== "anthropic" && apiType !== "openai") {
       return `${what} apiType must be "anthropic" or "openai"`;
@@ -1115,12 +646,7 @@ function readSystems(
       if (typeof authHeaderRaw !== "object" || Array.isArray(authHeaderRaw)) return `${what} authHeader must be an object`;
       const header = authHeaderRaw as Record<string, unknown>;
       const headerName = header["name"];
-      /*
-       * ⚠ **`routingHeaders` builds `{[name]: prefix + secret}` and hands it
-       * straight to `providers/set`.** A CR or an LF in either half is header
-       * injection into whatever the adapter does with the pair, so both are
-       * allow-listed rather than merely length-bounded.
-       */
+      // Both halves go straight into a header, so they are allow-listed against CR/LF injection.
       if (typeof headerName !== "string" || !HEADER_NAME.test(headerName)) {
         return `${what} authHeader.name must be a lower-case header name, like authorization`;
       }
@@ -1153,10 +679,6 @@ function readSystems(
     if (typeof keyEnvRead === "string") return keyEnvRead;
     const keyEnv = keyEnvRead[0] ?? null;
 
-    /*
-     * The four rules that keep a row from being a control nobody can spend, each
-     * of which `daemoncheck` already sweeps the built-in table for.
-     */
     if (baseUrl === null && nativeHarness === null) {
       return `${what} has no baseUrl, so it needs a nativeHarness — otherwise nothing on this machine could ever reach it`;
     }
@@ -1175,15 +697,7 @@ function readSystems(
     if (keyEnv !== null && nativeHarness === null) {
       return `${what} keyEnv names a variable its own harness reads, so it needs a nativeHarness`;
     }
-    /*
-     * ⚠ **And it has to be a variable that harness actually reads**, which is the
-     * property `daemoncheck` already sweeps the built-in table for. `keyEnv` is
-     * what lets `systemSecretFor` answer "there is a key for this system" from the
-     * *harness's* credential store — one account, one box — so a name the harness
-     * never declared makes that borrow silently impossible and puts an empty
-     * second box under a second heading, which is the exact trap that field exists
-     * to close.
-     */
+    // keyEnv must be a variable that harness declares, or systemSecretFor cannot borrow its key.
     if (keyEnv !== null && !(harnesses.find((one) => one.id === nativeHarness)?.envNames.includes(keyEnv) ?? false)) {
       return `${what} keyEnv names ${JSON.stringify(keyEnv)}, which harness ${JSON.stringify(nativeHarness)} does not read`;
     }
@@ -1207,16 +721,7 @@ function readSystems(
   return out;
 }
 
-/**
- * A harness id this same plugin contributes, `null`, or a refusal.
- *
- * ⚠ **Only its own, and this is where the "two spellings are the same models"
- * assertion is refused.** A contributed system naming a *built-in* would put
- * "Sign in to Claude Code" under a heading its author chose — and, through
- * `nativeModelPrefix`, would assert that a vendor's two model lists relate, which
- * is exactly the equivalence Q3.488 refuses to make without evidence nothing here
- * could have.
- */
+/** Only this plugin's own harnesses: naming a built-in would assert an equivalence Q3.488 refuses. */
 function readOwnHarness(raw: unknown, own: readonly string[], what: string): string | null | { error: string } {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "string") return { error: `${what} must be the id of a harness this plugin adds` };

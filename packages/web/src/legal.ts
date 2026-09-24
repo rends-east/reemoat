@@ -1,66 +1,17 @@
-/**
- * The documents this instance is bound by, and every rule about their URLs.
- *
- * Here rather than in `router.ts` for the reason `gate.ts` states at length:
- * that module reads `window.location` and installs a `popstate` listener **in
- * its module body**, so `webcheck` throws on import before a single case runs.
- * A rule the driver cannot reach is a rule nothing asserts.
- *
- * ## Why these are not gate screens
- *
- * They look like the gate family — no credential, no shell, one card of prose —
- * and they are deliberately not in it. `gate.ts` defines that family as *"the
- * screens somebody reaches **before there is a credential**"*, and a policy is
- * read before **and** after; `depthOf`'s gate arm argues those screens are *"the
- * sign-in form with different fields"*, which a policy is not; and `GateCard` is
- * `max-w-sm`, a **form** measure, where a document wants `COLUMN`, the app's
- * only reading measure. Q3.598.
- *
- * ## ⚠ These are one operator's terms, and a fork must replace them
- *
- * This is AGPL-3.0-only software, so somebody else can and will run this build.
- * The prose below describes **this software's behaviour** and is true of any
- * deployment; {@link OPERATOR} is one particular sole proprietor in one
- * jurisdiction and is **not**. Serving these documents unchanged from your own
- * control plane tells your users they have a contract with somebody who has
- * never heard of them, and collects their agreement to it under a button they
- * pressed to sign up.
- *
- * The shape of the warning is `SOURCE_URL`'s in `packages/control-plane/src/
- * app.ts` — compiled in, with the instruction to change it stated where the
- * value is. The distinction from that constant, and why the party is not an
- * environment variable, is Q1.638.
- */
+// Legal documents and their URL rules, outside router.ts so webcheck can import them; deliberately not gate screens (Q3.598).
+// OPERATOR is one operator's party, which a fork must replace (Q1.638).
 
 export { OPERATOR, operatorIncomplete, legalPublishable } from "./legal/operator";
 
-/** One document. The address is the id; the words are {@link legalTitle}'s. */
 export type LegalDoc = "terms" | "acceptable-use" | "privacy";
 
 export const LEGAL_DOCS: readonly LegalDoc[] = ["terms", "acceptable-use", "privacy"];
 
-/**
- * The languages a document can be written in, and the ones it **is**.
- *
- * ⚠ **English is the only one written, and the axis is the seam for a second.**
- * {@link LEGAL_LANGS} is what exists; `LegalLang` is what may. Adding a language
- * is a second value in the table and a control on the screen — never a
- * localisation layer, which this app has never had and must not grow here.
- */
 export type LegalLang = "en" | "ka";
 
 export const LEGAL_LANGS: readonly LegalLang[] = ["en"];
 
-/**
- * One paragraph-sized thing, and there are four kinds because policy prose has
- * four.
- *
- * ⚠ **There is no `{ kind: "link"; href }` and there must not be.** An href
- * chosen by whoever writes the prose, rendered at this origin, is the sink
- * `Markdown.tsx` refuses by disabling `rehype-raw`. The only outbound links in
- * this whole feature are the two on a {@link LegalCredit}, which the renderer
- * builds itself, and the one `mailto:` a `contact` block carries.
- */
+/** No link block by design: an author-chosen href rendered at this origin is an injection sink. */
 export type LegalBlock =
   | { kind: "para"; text: string }
   | { kind: "list"; items: readonly string[] }
@@ -70,23 +21,13 @@ export type LegalBlock =
   | { kind: "contact"; text: string; email: string };
 
 export interface LegalSection {
-  /**
-   * Lower-case and hyphenated, and stable once published: it is the fragment
-   * somebody cites back at you in a dispute.
-   */
+  // Stable once published: it is the fragment people cite.
   id: string;
   heading: string;
   blocks: readonly LegalBlock[];
 }
 
-/**
- * Where a document's text was adapted from.
- *
- * ⚠ **CC BY 4.0 is a condition, not a courtesy.** The attribution has to appear
- * where the work is read, so it is rendered on the page rather than only filed
- * in `THIRD-PARTY.md`. A credit line lost to a tidy-up is a licence breach that
- * reads as housekeeping, which is why `webcheck` asserts every field of it.
- */
+/** Rendered on the page because CC BY requires the credit where the work is read; webcheck asserts every field. */
 export interface LegalCredit {
   work: string;
   author: string;
@@ -105,20 +46,12 @@ export interface LegalDocument {
   credits: readonly LegalCredit[];
 }
 
-/**
- * The document a path names, or `null` for every other path.
- *
- * Takes segments rather than a pathname so it composes with `router.ts`'s own
- * split, and matched **exactly**, so the case a URL happens to arrive in never
- * decides what is rendered — `parseGateScreen`'s rule, and the same code.
- */
 export function parseLegalDoc(segments: readonly (string | undefined)[]): LegalDoc | null {
   const first = segments[0];
   if (first === undefined) return null;
   return LEGAL_DOCS.find((doc) => doc === first) ?? null;
 }
 
-/** Whole-segment, the `isOverlayPath` rule: `/termsish` is not `/terms`. */
 export function isLegalPath(pathname: string): boolean {
   return parseLegalDoc(pathname.split("/").filter((part) => part.length > 0)) !== null;
 }
@@ -127,14 +60,6 @@ export function legalPath(doc: LegalDoc): string {
   return `/${doc}`;
 }
 
-/**
- * The words a document is called by.
- *
- * ⚠ **The address is an acronym and the title is not**, which is `sheetTitle`'s
- * standing rule: a link written down last week has to keep opening the screen,
- * and a reader who has never met the acronym must not be shown one. Every
- * control that names a document reads this rather than typing the words again.
- */
 export function legalTitle(doc: LegalDoc): string {
   switch (doc) {
     case "terms":
@@ -146,30 +71,7 @@ export function legalTitle(doc: LegalDoc): string {
   }
 }
 
-/**
- * What the control that leaves a document is called, **in the app**.
- *
- * Named after where it goes rather than "Back", which is `Header`'s rule: there
- * is no history here, only a fixed destination, and a signed-in reader is not
- * going to a sign-in screen.
- *
- * ⚠ **Both answers name screens that exist only in the app bundle, and that
- * stopped being the whole world.** `packages/web` builds twice off two entry
- * points, and the second bundle — the gate, which the control plane serves —
- * draws these documents too: it is where a mail client lands and where the
- * sign-up form's consent box links to. It carries no sign-in form (`Gate`
- * renders `SignIn` on one branch, `/verify` with no session) and no machine
- * list, so on that surface this function has no true answer and returned a
- * confident wrong one — "Back to sign in" over a control that went to the
- * handoff, at the foot of a document somebody had been linked to.
- *
- * It is left answering for the app rather than grown a third arm, because a
- * boolean cannot carry three roots and the third one is not a property of the
- * reader: it is a property of **which bundle is running**, which this module
- * cannot see. `LegalScreen` takes an `upLabel` for that caller, and `GateApp`
- * hands it `HANDOFF_LABEL` — the same words its own footers use, so the one
- * destination on that origin has one name.
- */
+/** Answers for the app bundle only; the gate bundle passes its own upLabel to LegalScreen. */
 export function legalUpLabel(signedIn: boolean): string {
   return signedIn ? "Back to your machines" : "Back to sign in";
 }

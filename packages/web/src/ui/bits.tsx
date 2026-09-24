@@ -22,287 +22,28 @@ import {
   type SessionSnapshot,
 } from "../wire";
 import { LAYER, useDismissible } from "./overlay";
-/*
- * `Toast.tsx` imports {@link Icon} from here, so this is a cycle, and a benign
- * one: both sides reach into the other only from inside a function body —
- * `toast()` from {@link TwoStep}'s default failure arm, `Icon` from the toast's
- * render — and neither module body reads the other at evaluation time. It is
- * here rather than passed in by every caller because "a failed act is a toast
- * saying why" is the answer at thirteen of fourteen confirmations, and a default
- * that twelve callers restate is not a default.
- */
+// Toast.tsx imports Icon from here; the cycle is benign because each side reads the other only inside function bodies.
 import { toast } from "./Toast";
 
-/**
- * The primitive set.
- *
- * Deliberately small and deliberately not a component library: every one of
- * these exists because the same eight Tailwind classes were being retyped in
- * three files and drifting. Anything that needs a prop for every visual decision
- * belongs in the screen that uses it, not here.
- *
- * **The picker rule.** A control whose option count can exceed about five is a
- * {@link Dropdown}. The reason is layout rather than taste: an unbounded wrap of
- * buttons reflows the page every time the set changes size — the fleet gaining a
- * machine, an agent going offline — and on a phone it pushes the fields below it
- * off the screen. There was a `Chip` row here for the fixed-set case; the filter
- * row it served became a `Dropdown`, and nothing has needed one since.
- *
- * One deliberate exception, written down so it is not "fixed" later: the answer
- * rows on `AskCard`, which is where both a permission's options and a question's
- * live. Every option there must be visible at once, and hiding "reject" behind a
- * popover would be a safety regression on the one screen in this app where that
- * matters.
- *
- * **Interaction.** Every interactive element gets hover feedback with a
- * *background* and not only a colour — a 15px glyph changing from `text-muted` to
- * `text-fg` on a dark surface is close to invisible, which is why nothing here
- * looked pressable. Focus is one global `:focus-visible` rule in `index.css`
- * rather than per component, because per-component focus styling is how the fifth
- * copy of a control ends up with none.
- *
- * **One radius, and a circle is a mark rather than a control.** Everything that
- * can be pressed is `rounded-md`, which is what the textarea and every attachment
- * chip already were — the pills in the composer's own control row were the only
- * round things in the composer, so the row that is *part* of it did not look like
- * it. What stays circular is `StatusDot`, `Dot`, `Spinner` and `Skeleton`'s
- * placeholders: those are marks rather than controls, and a two-pixel radius on an
- * eight-pixel dot is a smudge.
- *
- * **Two controls are exceptions and both are named here rather than discovered.**
- * `tabPill`, and the composer's send slot — Send, Stop and the two spinner boxes,
- * through `IconButton`'s `shape` prop. A filled square holding an arrow is the
- * shape a *stop* control has, in the one slot where Stop genuinely appears a
- * second later; the circle is what every phone chat client draws there and what
- * keeps the two readings apart. The exception is bounded by being a prop with one
- * call site rather than a class anybody can pass.
- *
- * **Two ways to reach 44px, and which is right is a question about neighbours.**
- * A control that owns its row — {@link Dropdown}'s full-width trigger, a form
- * field — grows its *box* on a coarse pointer: the vertical space is free and a
- * taller target is an easier one to read. A control in a dense row of controls —
- * the composer's strip, a list row's kebab — keeps its box and grows a
- * transparent `::after`, because that strip sits above a soft keyboard where
- * height is paid for out of the transcript, and because `gap-1.5` neighbours mean
- * a symmetric inset would put one control's target on another's face. Both are
- * 44px; only one of them reflows.
- *
- * ⚠ **Both are now `[@media(pointer:coarse)]:`, and the second one had to become
- * so because a grown target grows *hover* with it.** A generated box is rendered
- * as a child of its originating element, so `:hover` matches the element while
- * the pointer is anywhere in the pad — hit-testing reach and hover reach are one
- * rectangle by construction, and no CSS separates them. Reported off the ✕ in the
- * background-tasks head, where `sm`'s 10px pad fills a `min-h-11` band: the
- * pointer entered the row and the glyph lit up 10px before it was reached, faded
- * in over `.tap`'s 120ms so that it read as *already* highlighted rather than as
- * a mis-aim. The old docblocks priced this growth as costing "no layout anywhere"
- * and stopped there; its hover cost was written down nowhere in this repository.
- *
- * What makes the repair free rather than a trade is that the two needs never
- * coexist: Tailwind wraps every `hover:` utility in `@media (hover: hover)`, so
- * the leak exists only where a mouse does, and the pad is only ever needed where
- * a thumb does. A fine pointer now gets exactly the ink — 24px for `sm`, which is
- * still above WCAG 2.5.8's 24×24 minimum — and a hover that starts at the edge of
- * what is drawn. A coarse pointer is untouched at 44px.
- */
+// Tap-target pads exist only under a coarse pointer: a pad that grows hit-testing grows hover with it.
 
-/**
- * 32px of ink reaching a 44px target, **vertically only**.
- *
- * Exported because the composer's control row is built from two different
- * primitives — `ICON_BUTTON_SIZE.chip` here for the paperclip, `CHIP` in
- * `AgentConfigBar` for the pills and the one square button — and they sit in one
- * row. Written out twice they were byte-identical and had to stay that way by
- * hand, which is two different tap targets in one row the first time somebody
- * tunes one of them.
- *
- * Both halves of the asymmetry are measured rather than tidy. Up is 4px because
- * the textarea's own bottom edge is 6px above — the row's `mt-1.5`, which is why
- * that gap may not be tightened without re-reading this. Down is 8px, which lands
- * in the composer box's `pb-1.5` and 2px past its border into the bar's own
- * padding: nothing there is pressable, which is the whole of the licence.
- *
- * Vertical only, and that is the whole reason it is not `-inset-2.5`: these sit
- * `gap-1.5` apart, so a symmetric inset would put one control's target over its
- * neighbour's *face* — and the neighbour changes the model.
- *
- * ⚠ **Every class here carries `[@media(pointer:coarse)]:`, and dropping the
- * prefix from any one of them puts the hover leak back.** The argument is in this
- * file's own top docblock: the pad and the hover ground are one rectangle, so the
- * pad may only exist where hover does not. It is written out five times rather
- * than composed from a constant because Tailwind scans source for whole class
- * names — a prefix built by interpolation emits nothing at all, silently, and the
- * target simply stops existing on a phone.
- */
+/** Every class keeps the coarse-pointer prefix and is written out whole, since Tailwind cannot see an interpolated class. */
 export const TAP_GROW_Y =
   "[@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:-top-1 [@media(pointer:coarse)]:after:-bottom-2 [@media(pointer:coarse)]:after:content-['']";
 
-/**
- * The conversation's own column: centred, with room either side.
- *
- * The transcript, the composer and the ask card were each full-bleed, so on a
- * desktop a one-line reply ran the whole width of a 1600px window and the eye had
- * to travel back across all of it for the next line. A measure that wide is not a
- * style preference; it is the thing every reading surface bounds and this one did
- * not.
- *
- * It is a shared constant rather than a copy per surface because they all have to
- * be the *same* width or the card and the composer stop lining up with the text
- * they belong to — which is visible immediately and was the complaint. Seven call
- * sites: the transcript, the composer, the shared ask-card frame, a legal
- * document, and in `SessionView` a load skeleton and two banners.
- *
- * ⚠ **There is no breakpoint here, and this sentence used to say there was.** It
- * is a `max-w`, so it simply stops binding once the pane is narrower than the
- * number — and that width moves every time the number is tuned. Below it the
- * column is full width with the padding the caller already had, so a phone is
- * untouched by any change to it. `Bubble`'s docblock carries the same correction
- * from the other side, where the moving edge actually shows.
- *
- * ⚠ **`45rem` — 720px — fitted to a reference by *proportion*, not by pixels.**
- * The stock `3xl` step (48rem) read too wide, `× 0.85` took it to 40.8, `+7%`
- * brought it back to 43.66, and then the shape wanted was named by pointing at a
- * screenshot of another product's conversation. In that screenshot the text
- * column fills **56.9% of the pane beside the rail**; 45rem puts this one at
- * 57.0% of the same pane.
- *
- * ⚠ **The pass before this one matched the screenshot's *pixels* and was wrong,
- * which is the whole reason the sentence above says proportion.** It read the
- * reference's measure as 927px, inferred a 1:1 capture from its line spacing, and
- * set 60rem — landing within a pixel of that number and looking nothing like the
- * reference, because the two captures were at different zoom. Measured on the
- * result, the column filled **76%** of its pane against the reference's 56.9%. A
- * pixel count off a screenshot carries the capture's scale with it; the fraction
- * of the pane and the ratios inside it do not. **Fit those.**
- *
- * ⚠ **`Bubble`'s cap is not a fraction of this, and the decoupling is the thing
- * to know before touching either number.** For one pass both moved by a single
- * factor and the cap held at exactly three quarters of the column, and two
- * docblocks leaned on that ratio as though it were a rule. It was arithmetic. The
- * cap is 26rem now, fitted to the same screenshot's message-to-measure ratio
- * rather than to this number, and **nothing in the build or the drivers relates
- * the two**. `Bubble`'s docblock carries the current pair and is the only place
- * the pixel arithmetic lives.
- *
- * ⚠ **Both step names above are written without their utility prefix on
- * purpose.** Tailwind's scanner reads this file as text, not as code, and it does
- * not know a comment from a class attribute — spelling the old utility out here
- * put a dead rule for the retired step straight back into the built stylesheet,
- * for a width nothing renders. Measured twice: once when this docblock first
- * named it, and again when the sentence *explaining* that named it a second time.
- * `webcheck`'s own sweeps strip comments before matching, for the same reason
- * from the other side.
- *
- * Deliberately not applied to the scroll box itself: the scrollbar belongs at the
- * edge of the window, not at the edge of the text, and `scroll-stable` is
- * measuring that box.
- */
 export const COLUMN = "mx-auto w-full max-w-[45rem]";
 
-/**
- * A text field's chrome, once.
- *
- * `SignIn` and the password form under Settings → Account are the same control
- * one screen apart, and they had already drifted: `py-3` on the sign-in screen
- * against `py-2` in the settings form. That is not cosmetic here. `index.css`
- * forces `font-size: max(16px, 1em)` on every input under a coarse pointer —
- * the rule that stops iOS zooming the page on focus — so with a 16px face those
- * two are roughly 47px and 39px tall, which puts the *same field* on either side
- * of the 44px tap minimum depending on which screen you reached it from.
- *
- * **That was first settled by keeping `py-3`, and it is settled by `min-h` now.**
- * Padding only ever reached 44px *via* whatever line-height the type scale
- * happened to give that font size — two numbers in two files multiplying out to a
- * height nothing stated. The floor is written down instead, and the resting
- * height with it.
- *
- * Layout is deliberately **not** in here. Width, margin and `block` legitimately
- * differ — a full-width form field, a `max-w-sm` one, a `flex-1` one sitting
- * beside a Button — and folding one caller's layout into the shared string is
- * exactly how the next caller writes a fourth copy to get out of it.
- *
- * **`focus:border-accent` was deleted rather than recoloured, and that is a fix
- * rather than a consequence of the palette.** A text control matches
- * `:focus-visible` on *every* focus, including a touch — that is what the
- * selector means for an input, unlike a button — so the global ring in
- * `index.css` was already firing on every tap into a field, and this drew a
- * second indicator inside it. One tap, two marks, saying the same thing. The ring
- * is the indicator.
- *
- * The resting border is `edge-strong` and not `edge`, for the reason stated at
- * the token: this box has no fill of its own to identify it, so its boundary is
- * the control, and a boundary that identifies a control is held at 3:1.
- */
-/**
- * A search box, glyph-inset and complete.
- *
- * ⚠ **A whole string rather than `` `${FIELD} pl-8` ``, and that is the trap
- * {@link FIELD} documents.** Tailwind emits every utility at equal specificity, so
- * `px-3` and `pl-8` race by stylesheet order and the loser is whichever the build
- * happens to emit second. The caller draws the magnifier as an absolutely
- * positioned `pointer-events-none` span in a `relative` wrapper.
- *
- * `bg-surface` because a control is drawn in the colour of what it sits on, and
- * everything using this sits on a sheet. The rail's own search box is the same
- * shape at `bg-ink` and is deliberately not this constant.
- */
+/** A complete string rather than FIELD plus a left padding, which would race FIELD's own padding by stylesheet order. */
 export const SEARCH_FIELD =
   "min-h-9 w-full rounded-md border border-edge-strong bg-surface py-2 pr-2.5 pl-8 text-sm outline-none [@media(pointer:coarse)]:min-h-11";
 
 export const FIELD =
   "min-h-9 rounded-md border border-edge-strong bg-surface px-3 text-sm leading-5 outline-none [@media(pointer:coarse)]:min-h-11";
 
-/*
- * ⚠ **Never compose this with a vertical padding, and there is no way to make one
- * work.** Tailwind emits every utility at equal specificity, so the winner is
- * whichever comes later *in the generated stylesheet* rather than in the class
- * attribute. Measured on this bundle: `.py-3` is emitted after `.py-2`, so
- * `` `${FIELD} py-2` `` silently kept the taller box — no error, and the code
- * reading as though it had worked. Two controls meant to line up differed by 10px
- * through a review that said they did not.
- *
- * That is the same trap `Button` documents for a size passed through `className`,
- * and it is why the height above is `min-h` and there is no `py-*` in the string:
- * with none in here, there is nothing for a caller's to lose an argument to. A
- * caller needing a different height states `min-h-*`, one utility against one,
- * which behaves the way it reads.
- */
+// Never compose FIELD with a vertical padding: equal-specificity utilities race by stylesheet order, so state a min height instead.
 
-/**
- * What a link looks like — the *only* thing in this palette that says "this
- * moves you somewhere".
- *
- * With the accent colour gone there is no hue left to mark one, and weight is
- * already spent (a blocked row's title is semibold). What is left is the
- * underline, so it is drawn rather than saved for hover: a navigation nobody can
- * see is a navigation nobody takes, which is exactly what the sign-in screen's
- * two doors were as bare `text-muted` — present, correct, and read as prose.
- *
- * `decoration-edge-strong` and not the text colour, for the reason that token
- * exists: a rule at full strength under every link turns a paragraph into a
- * fence, and this has to sit inside agent output as well as under a form. Hover
- * takes it to `fg`, which is the whole of the affordance.
- *
- * **No fill, ever** — `bg-fg` is the affirmative action inside a decision, and a
- * navigation is not one. `tap` is added by the caller, because an `<a>` does not
- * need it and a `<button>` does.
- */
 export const LINK = "text-fg underline decoration-edge-strong decoration-1 underline-offset-2 hover:decoration-fg";
 
-/**
- * Compact durations. A phone glance needs "2m", not "2 minutes ago".
- *
- * **Under a minute is `<1m`, and it used to be a live second count.** This is
- * drawn on every row of the session list, which re-renders on the four-second
- * poll, so a fresh session sat there counting — `4s`, `8s`, `12s` — which is a
- * clock, and a clock is a thing the eye returns to. Nobody was reading it: the
- * question a row answers is *how long ago*, and at this resolution the honest
- * answers are "just now" and a number of minutes. It also stops the column
- * changing width three times in the first minute.
- *
- * `<1m` rather than "now", because the row beside it says `2m`, `1h`, `3d` — one
- * vocabulary, and `<1m` is the same sentence with the same unit.
- */
 export function shortDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) return "<1m";
@@ -314,50 +55,12 @@ export function shortDuration(ms: number): string {
 }
 
 
-/**
- * Re-exported so the six call sites that had it from here keep their import.
- *
- * It lives in `paths.ts` now, beside `relativeTo` and {@link displayCwd} — the
- * two functions that decide what a path *is* rather than how a row draws one.
- */
 export { shortPath };
 
-/**
- * What to call a session: its name, or a fallback built from where it works.
- *
- * One function because there are three call sites — the rail, the phone list and
- * the session header — and three copies of a fallback rule is exactly the
- * divergence class this file keeps being extended to fix.
- *
- * `title` is `undefined` from an older daemon and `null` when nobody has named it;
- * both mean the same thing here. Trimmed and length-checked rather than merely
- * null-checked, because a title of `" "` would render as a blank row, which is
- * worse than a path.
- *
- * **Never rendered through `Markdown`.** This is text a person typed; putting it
- * through a markdown renderer would make `[x](y)` a link and `_x_` italic in a
- * session header. Plain string, `truncate`.
- */
+/** The session's name, else its folder; plain text, never rendered through Markdown. */
 export function sessionLabel(
   row: { snapshot: { title?: string | null; workspace: { requestedCwd: string } } },
-  /**
-   * The daemon's browse roots, so an unnamed session is called `~/thing` rather
-   * than `…/rends/thing`.
-   *
-   * Defaulted rather than required, and the default is the honest one: a caller
-   * with no roots to hand — an older daemon, a machine that has not answered
-   * `/fs/roots`, a driver — gets exactly the label this drew before roots
-   * existed. See `displayCwd`.
-   *
-   * ⚠ **`folderLabel`, not `displayCwd`: no `~/` on a name.** An unnamed session
-   * *is* called after its directory, and a name is a name — the marker saying
-   * which root it hangs off is path grammar, and this is the string that goes in
-   * a rail row and a header where a person is scanning for a word. It also has to
-   * match: `SessionLine` suppresses the subline when it would repeat the title,
-   * by comparing the two strings, and a title reading `~/thing` beside a subline
-   * reading `thing` draws one folder twice — which is the exact defect that
-   * comparison was added to prevent.
-   */
+  // folderLabel, not displayCwd: SessionLine compares this with its subline to avoid drawing one folder twice.
   roots: readonly string[] = [],
 ): string {
   const title = row.snapshot.title?.trim();
@@ -365,18 +68,6 @@ export function sessionLabel(
   return folderLabel(row.snapshot.workspace.requestedCwd, roots);
 }
 
-/**
- * What a row is doing, in the vocabulary the dot actually has.
- *
- * A separate type from `SessionStatus`, and that is the correction rather than
- * an indirection for its own sake: the dot used to be a
- * `Record<SessionStatus, string>`, and a session interrupted by a *graceful*
- * restart arrives as `exited` — the same key a session somebody stopped arrives
- * under. So the warn-toned `interrupted` treatment was on the branch an ordinary
- * deploy never took, and the branch it did take drew "nothing is happening"
- * over a conversation that was about to come back. The reason is on `exit`, so
- * the tone has to be derived from the whole session.
- */
 export type StatusTone =
   | "blocked"
   | "running"
@@ -405,97 +96,32 @@ export function statusTone(
         return "idle";
     }
   }
-  /*
-   * ⚠ **A released agent reads as `idle`, deliberately — and this line is what
-   * makes that true rather than the accident it looks like.**
-   *
-   * Without it a parked session takes the `ended` arm below, which is the one
-   * word it may not carry: nobody ended it. Nothing in the type system says so —
-   * both the `default:` above and the ternary below are total over
-   * `SessionStatus`, so a new member lands silently in whichever it reaches
-   * first, and here that is the wrong one.
-   *
-   * `idle` rather than a tone of its own, which is what this had for a draft.
-   * From the reader's side the two states are the same fact — *nothing is
-   * happening and you can type into it* — and whether a process happens to be
-   * resident is not something they can act on or should have to think about. A
-   * mark of its own turned an implementation detail into a state somebody has to
-   * interpret, and the only thing it could have explained is a 1.3s wait that the
-   * composer's own spinner already covers.
-   */
+  // A parked agent reads as idle, never ended; this must run before the terminal arms below.
   if (isParked(session as SessionSnapshot)) return "idle";
   if (resumeStalled(session as SessionSnapshot)) return "stalled";
   if (waitingForDaemon(session as SessionSnapshot)) return "waiting";
   return session.status === "failed" ? "failed" : "ended";
 }
 
-/**
- * Nine states, no colour, and four axes to spend.
- *
- * A mark this size has exactly four properties a glance can read: **filled or
- * hollow**, **ringed or not**, **moving or still**, and **round or a shape**. The
- * palette used to spend hue on this and now cannot, so each of the nine is
- * assigned a combination rather than a colour, and two of them additionally spend
- * something that is not on the dot at all — see the row, which carries weight, and
- * the folder header, which carries a count.
- *
- * The pairing that matters most is `blocked` against `running`, because those are
- * the two loudest and they were previously amber against blue:
- *
- * * `blocked` is **filled with a permanent ring**, static. `ring-*` is a
- *   box-shadow, so it costs no layout, and it is ~3× the area of an ordinary dot.
- *   Static on purpose — `prefers-reduced-motion` deletes motion outright, so
- *   motion can never be what carries the one state somebody has to act on.
- * * `running` is **filled with an animated ring growing from zero**. Under reduced
- *   motion that collapses to a plain filled dot with no ring, which is still not
- *   `blocked`. The dark palette could not manage that without the hue.
- *
- * `failed` and `stalled` are the one **shape** change in the set, and they earn it:
- * the docblock above already says that state is "worth finding without opening
- * anything", and at 10px a glyph is the strongest non-colour cue there is — it
- * survives greyscale, reduced motion and a phone in sunlight together.
- */
+// Nine tones on four non-colour axes (fill, ring, motion, shape); blocked stays static so reduced motion cannot erase it.
 const TONE_DOT: Record<StatusTone, string> = {
   blocked: "bg-fg ring-[3px] ring-fg/25",
   // `text-*` beside `bg-*` because the keyframe's ring is `currentColor` — one
   // animation, inked by whoever uses it.
   running: "bg-fg text-fg animate-blink",
-  // **Not `running`'s blink**, which this table reserves two lines below for
-  // "work actually happening" — and starting is precisely when none is. It is the
-  // same sentence as `waiting` read from the live side (an agent is being put in
-  // front of this conversation, nobody is deciding anything and nothing is being
-  // asked of you), so it gets the same hollow pulse. It shared the loud one for as
-  // long as starting meant "a session you just created", where a blink was at
-  // least about something you were watching for; a settings change that restarts
-  // the agent made it announce, for about a second, that an idle session was
-  // working.
   starting: "border border-edge-strong bg-transparent animate-pulse",
-  // Hollow, and that is the encoding rather than a lighter shade of the same
-  // thing: this session is on its way *out*, so the mark is an outline of one.
-  // The gentle `animate-pulse` stays — it is moving, but it is not asking for
-  // anything, and the loud blink is reserved for work actually happening.
   stopping: "border border-edge-strong bg-transparent animate-pulse",
-  // The same treatment for the same sentence read the other way round: the daemon
-  // is bringing this one back. Nobody decides it, so it gets no emphasis.
   waiting: "border border-edge-strong bg-transparent animate-pulse",
-  // Hollow and still. The honest drawing of "nothing is happening" — and now
-  // genuinely distinct from the two states above, which it was not when all three
-  // were a flat fill in slightly different greys.
   idle: "border border-edge-strong bg-transparent",
   ended: "border border-edge-strong bg-transparent",
-  // Unused for these two: `StatusDot` draws a glyph instead. Kept as entries so
-  // the record stays exhaustive over `StatusTone` and adding a tone is a compile
-  // error here, which is the property this table exists to have.
   failed: "",
   stalled: "",
 };
 
-/** The two tones drawn as a shape rather than a dot. */
 function drawnAsGlyph(tone: StatusTone): boolean {
   return tone === "failed" || tone === "stalled";
 }
 
-/** What a screen reader hears, since the dot says nothing at all to one. */
 const TONE_TEXT: Record<StatusTone, string> = {
   blocked: "waiting for you",
   running: "running",
@@ -508,57 +134,9 @@ const TONE_TEXT: Record<StatusTone, string> = {
   stalled: "could not reconnect",
 };
 
-/**
- * A session's status as one dot, in three states a glance can tell apart.
- *
- * It replaces the words `idle` / `running` / `blocked` that used to sit beside
- * every session name. Two problems with those, and the second is the real one.
- * They cost the width a name needs on a 390px screen, and — because they are
- * ordinary text at ordinary weight — they read as *part of the row's content*
- * rather than as its state, so a list of eight sessions was eight lines each
- * ending in a word you had to actually read.
- *
- * The vocabulary is Claude Code's, and it is three states rather than eight:
- *
- * * **blinking** — the agent is working. Motion is the only thing on a list that
- *   is legible from across a desk, and it is spent on this one sentence rather
- *   than on anything else in this app. `animate-blink` and not Tailwind's
- *   `animate-pulse`: at 8px a two-second fade to half opacity reads as a static,
- *   slightly dim dot. See the keyframe in `index.css` for why it also glows
- *   rather than only fading.
- *
- *   It used to be one decision in two places: `WorkingDot` drew the same dot at
- *   the foot of a transcript, off the same keyframe and the same eight pixels.
- *   That is gone — the transcript's working row is `WorkingMark` in `ui/Mark.tsx`
- *   with a keyframe of its own — so `animate-blink` has exactly one user, which is
- *   what the driver asserts and why a stray second one would be worth catching.
- * * **bright, with a halo** — it is waiting for *you*. Deliberately the loudest
- *   thing a row can carry, and the ring is what makes it distinguishable from
- *   the pulsing state at a glance rather than only by colour, which is what a
- *   red/green pair asks of somebody who cannot see the difference. It is also,
- *   now, the *only* mark a blocked row carries: the warning triangle that used to
- *   sit in front of it is gone, for a layout reason rather than a legibility one.
- * * **dim** — nothing is happening. Idle, ended and stopped are all this: from
- *   the far side of a list they are one fact ("not now"), and the exact word is
- *   in the session's own header when it matters.
- *
- * `failed` keeps its own colour, because that one is not "not now" — it is a
- * thing that went wrong and is worth finding without opening anything.
- *
- * The status word is still on the row for a screen reader (`sr-only`), which is
- * the one reader for whom the dot says nothing at all.
- */
 export function StatusDot({ session }: { session: SessionSnapshot }): ReactNode {
-  // An unrecognised status from a newer daemon lands on `idle` through
-  // `statusTone`'s default rather than drawing nothing — this file is a mirror
-  // of the daemon's vocabulary and is allowed to be behind it, and a missing dot
-  // would misalign the name beside it.
   const tone = statusTone(session);
   return (
-    // A fixed 10px box with the mark centred in it, rather than the mark being
-    // the box. `failed` is a glyph and the rest are 8px dots, and without a
-    // reserved slot the two would sit the name beside them two pixels apart —
-    // which is the "nothing in a row mounts sideways" rule at its smallest scale.
     <span
       className="inline-flex h-2.5 w-2.5 shrink-0 items-center justify-center"
       title={TONE_TEXT[tone]}
@@ -573,30 +151,7 @@ export function StatusDot({ session }: { session: SessionSnapshot }): ReactNode 
   );
 }
 
-/*
- * `WorkingDot` was here, and it is `WorkingMark` in `ui/Mark.tsx` now.
- *
- * It was `TONE_DOT.running` reused, so the transcript's "working" row and a
- * running row in the rail were one object that could not drift. The transcript's
- * end of that is the product's mark blinking as three dots; the rail keeps the
- * dot, which is the right mark at 8px in a list. Named here rather than deleted
- * quietly, because "the same dot, one screen deeper" is an argument this file
- * makes twice above and a reader should find out where the second half went.
- */
-
-/**
- * A machine's reachability, and anything else with the same three answers.
- *
- * Three tones rather than four, and the merge is a named loss. `ok`/`warn`/`off`/
- * `busy` were four *colours*; with the hue gone, `warn` and `off` would both be a
- * hollow static dot, i.e. two names rendering identically — which is worse than
- * three names, because the fourth would look maintained while saying nothing.
- *
- * The concrete casualty is `StreamDot`: it used to draw `connecting` (blue) apart
- * from `waiting` (amber), a backoff retry against a first connect. They are one
- * `pending` now. `SessionView` says which in words directly beside it, which is
- * where that distinction actually belonged — it was never legible at 8px anyway.
- */
+/** Three tones only, so StreamDot draws a first connect and a backoff retry alike as pending. */
 export function Dot({ tone }: { tone: "on" | "pending" | "off" }): ReactNode {
   const style =
     tone === "on"
@@ -607,18 +162,6 @@ export function Dot({ tone }: { tone: "on" | "pending" | "off" }): ReactNode {
   return <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${style}`} />;
 }
 
-/**
- * A short fact about the row it sits on.
- *
- * Five tones became two, and the reduction is honest rather than lossy: every
- * non-plain use in this app — `admin`, `this device`, `disabled`, `no password`,
- * `not enrolled`, `N waiting` — meant the same thing, which is "this one is not
- * like the others". That is emphasis, and emphasis is weight.
- *
- * `strong` deliberately does not get a border or a heavier fill. A badge sits
- * inside a row that already has both, and a third box there reads as a control
- * somebody can press.
- */
 export function Badge({
   children,
   tone = "plain",
@@ -634,68 +177,17 @@ export function Badge({
   );
 }
 
-/**
- * The twelve faces this app draws, and why they are a list rather than one glyph.
- *
- * There is no avatar anywhere on this wire — `Me` is `{id, name, isAdmin, via,
- * hasPassword}` — so the account has no picture and never will. A single letter in
- * a box was the honest answer and it read as a placeholder; a face reads as a
- * person, which is what the box is standing in for.
- *
- * ⚠ **Deterministic, never `Math.random()`.** The face is derived from the name,
- * so it is the same on every render, every reload and every device — a picture that
- * changed when the list polled would be the one thing on this screen that moves for
- * no reason, and it would make the avatar useless as a thing to recognise. Pure and
- * exported so `webcheck` can assert exactly that.
- *
- * **No zero-width-joiner sequences and no variation selectors in the list.** Those
- * render as two glyphs, or as a black-and-white silhouette, on whichever platform
- * has not shipped the pair — and a broken face is worse than a letter. Every entry
- * here is a single code point.
- */
+// Derived from the name, never random, and every entry is a single code point (no joiners or variation selectors).
 const FACES = ["🧑", "👩", "👨", "🧔", "👱", "🧓", "🤠", "🦸", "🧙", "🧚", "👮", "👷"] as const;
 
 export function personEmoji(name: string | null): string {
   const seed = name?.trim() ?? "";
   if (seed === "") return FACES[0];
-  // A plain sum of code points. It does not need to be a good hash — it needs to
-  // be the *same* hash next time, and to spread a dozen names over a dozen faces.
   let total = 0;
   for (const ch of seed) total += ch.codePointAt(0) ?? 0;
   return FACES[total % FACES.length] ?? FACES[0];
 }
 
-/**
- * A rounded square with a mark in it, standing in for a picture that does not exist.
- *
- * Two callers want two different marks and two different sizes, which is why both
- * are props rather than two components: the shape, the radius and the centring are
- * the thing being shared, and a second copy of them is how the account's box and a
- * machine's box drift apart by two pixels.
- *
- * The **account** takes `glyph` — a face from `personEmoji` — at `md`, because it is
- * the one picture on the screen and Telegram-shaped drawers open with a real avatar
- * rather than a chip. A **machine** takes the default at `sm`: a machine is not a
- * person, so it keeps its initial, and `sm` is the size the rail's tiles were built
- * around.
- *
- * **`lg` is the same person at the head of the drawer, and `row` in the account
- * list under it**, where the shell lists several: the one at the top — who this
- * window *is* — is drawn larger than the rows beneath it, as every multi-account
- * client draws it, and the rows are smaller than the browser's `md` head so a list
- * of them reads as a list rather than a column of heads (the owner's call,
- * 2026-09-24, both sizes brought down on seeing the first build). `text-xl` is the
- * scale's top step, so no arbitrary size is spent on a glyph. Still two subjects,
- * not four: a person is round at every size, and a machine is square.
- *
- * The first *grapheme*, not the first char: a name starting with an emoji or a
- * combining pair renders half a character under `name[0]`, and `[...name]` is the
- * one spelling that iterates code points rather than UTF-16 units.
- *
- * **The geometry is the primitive's and the tone is the caller's.** Neither caller
- * wants the same fill — identity is at rest, while a machine tile spends `raised` at
- * two strengths to say which one is selected — so the fill arrives as `className`.
- */
 export function Monogram({
   name,
   glyph,
@@ -703,19 +195,11 @@ export function Monogram({
   className = "",
 }: {
   name: string | null;
-  /** Drawn instead of the initial. The account's face; a machine has none. */
   glyph?: string;
   size?: "sm" | "row" | "md" | "lg";
   className?: string;
 }): ReactNode {
   const letter = name === null ? "" : [...name.trim()][0]?.toUpperCase() ?? "";
-  /*
-   * The radius travels with the size because it is really travelling with the
-   * *subject*: `md` and `lg` are a person and are round, the way an avatar is
-   * everywhere; `sm` is a machine and keeps the rounded square, which is the shape
-   * the rail's folders are drawn in. One prop rather than two, because there is no
-   * caller that wants a round machine or a square person.
-   */
   const box =
     size === "lg"
       ? "h-12 w-12 rounded-full text-xl"
@@ -734,140 +218,20 @@ export function Monogram({
   );
 }
 
-/**
- * Why a machine has no route, in the words shown to a person.
- *
- * This used to name which of two paths a machine was reached on, because "direct
- * stays primary" was a claim worth making visible. There is one path now, so what
- * is left is the ways it can fail — and the property this table is held to is the
- * one that survives every addition: **every member of `OfflineReason` has an
- * entry here, and each entry names a different thing to do about it.** The type
- * is the census, `Record<NonNullable<OfflineReason>, string>` is what makes a new
- * member a compile error rather than a blank badge, and `webcheck` sweeps
- * `Object.keys` over this object so that a member which is merely *spelled* is
- * not mistaken for one that says something.
- *
- * ⚠ **No count and no list in this sentence, and that is a correction rather than
- * a style.** It first said "the four ways it can fail" while the table held
- * seven. The repair replaced the number with an enumeration — "a daemon that is
- * not dialling in, a token this client could not mint, a machine nobody enrolled,
- * a control plane that is itself down, and the two key states below" — which was
- * stale again one entry later, naming six of eight and silently dropping
- * `over_limit` and `owner_disabled`. Both failures are the same failure: a
- * restatement of the table's contents sitting above the table has to be re-read
- * on every addition, and nothing fails when it is not. `docs/DECISIONS.md`'s
- * entry count is asserted rather than written down for this reason; a number — or
- * a list — in prose is the one kind of claim nothing checks.
- */
+/** Every OfflineReason member has an entry, and each names a different thing to do. */
 export const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   no_route: "unreachable",
   no_token: "no token",
   not_enrolled: "not enrolled",
   cp_unreachable: "control plane unreachable",
-  // Not a reachability failure but a reachability *consequence* — the tunnel is
-  // refused at dial. One entry here buys the machine row's subline and
-  // {@link NotReachable}'s "not reachable right now — …" line with no edit to
-  // either, which is what this table is for.
   over_limit: "over the machine limit",
   owner_disabled: "its owner is disabled",
-  /*
-   * The one entry that is not about the network, and it has to read as an
-   * instruction rather than as a fault. Everything else in this table is a state
-   * somebody waits out; this one is a daemon that has never announced the key an
-   * encrypted channel is opened to, and it is cleared by updating that machine —
-   * on the next dial, with no re-enrollment.
-   */
   no_machine_key: "needs a newer daemon",
-  /*
-   * ⚠ **The twin of the line above, pointed at this computer instead — and the
-   * only entry in this table whose subject is not the machine the row names.**
-   * The daemon is fine and the tunnel is up; what is missing is the device key
-   * *this installation* is supposed to hold, so every machine on the account
-   * draws this sentence at once and none of them is at fault. It says *this
-   * device* for that reason, and carrying its own subject is the whole of what a
-   * substituted phrase can do about the repetition: the sentence is drawn per
-   * machine row and by {@link NotReachable} on four screens, and a phrase naming
-   * the row it sits on would read as an accusation against a machine that is
-   * working.
-   *
-   * It is an instruction for `no_machine_key`'s reason, and a sharper one: the
-   * state it replaces read "no token", which sends somebody to look at a sign-in
-   * that is working.
-   *
-   * ⚠ **And it read "sign in again on this device", which named an act that
-   * cannot terminate.** A sign-in re-sends the key this shell already holds —
-   * `POST /v1/login` carries `boot.devicePublicKey`, exactly as `registerDevice`
-   * does — and the Authority's `readDeviceInput` nulls a `publicKey` it cannot
-   * parse while **keeping** the registration, so the row goes on reporting
-   * `hasKey: false` and the same refused bytes arrive again on every attempt.
-   * What leaves the state is a *new* key, which only the shell can make: the
-   * Re-key control `DevicesSection` draws on the row wearing the `no key` badge.
-   *
-   * ⚠ **This is never drawn in a browser, and the paragraph here used to concede
-   * that it was** — *"a tab holds no keyring, so it finds the screen and no
-   * control on it"* — and then argue the dead end was worth it. There is no dead
-   * end to trade against: two independent guards each close it on their own.
-   *
-   * `POST /v1/tokens` raises `device_key_required` only where `caller.deviceId
-   * !== null`, and a browser sign-in carries no device at all — `cp.ts`'s
-   * `describeDevice()` answers `null` outside the shell, so `POST /v1/login`
-   * sends none and no session is ever bound to a row. A tab is therefore minted
-   * an *unbound* capability rather than refused, and `machine.ts` keys this
-   * reason on that one code and nothing else. The page-side miss does not arrive
-   * either: `e2ee.ts`'s `dial()` throws a plain `Error` for a missing static,
-   * which `probe` swallows, so a browser's permanent state is `no_route`.
-   * (Reachable only by moving a shell's device-bound session token into a tab's
-   * storage by hand — the shell reads its credential from the boot payload and
-   * never from `localStorage`, and no screen in this app offers the paste.)
-   *
-   * So the only *client* that ever draws it — on any of the screens named above —
-   * is a shell whose own row is keyless, which is exactly where `DevicesSection`
-   * draws the Re-key control this sentence sends somebody to. That is what lets
-   * one entry serve, in the one table whose rule is that each entry names a
-   * different thing to do.
-   */
+  // About this device, not the row's machine: only a keyless shell reaches it, and Re-key under Devices clears it.
   no_device_key: "re-key this device under Settings → Devices",
 };
 
-/**
- * A machine's reachability as a phrase, for a sentence somebody else is writing.
- *
- * ⚠ **The `unknown` arm was the bare string `"…"`, and every caller puts this
- * *inside* a sentence.** `MachineSystemsSection`, `MachineAgentsSection`,
- * `MachineSection` and `AgentBuilder` all compose `` `${machine.name} is not
- * reachable right now — ${reachText(…)}` ``, and `MachineSystemsSection` closes
- * with a bare `"."` where no system is named — so for the two or three seconds
- * before the first probe answers the screen read **"laptop is not reachable right
- * now — …."** — an ellipsis where the reason goes, under a claim that had not been
- * measured. An ellipsis is a *pause*; on its own it is not a phrase and cannot be
- * substituted into one.
- *
- * ⚠ **That list said `MachineSystemsSection`, `MachinePluginsSection` and
- * `MachineAgentsSection`, and it was wrong in both directions.**
- * `MachinePluginsSection` draws no reachability line at all any more — its one
- * caller, `MachineSection`, replaced all three of its lists with a single
- * sentence, and `webcheck` pins that section as saying neither half — while
- * `MachineSection` itself and `AgentBuilder` had joined the set with this docblock
- * still naming three screens, one of which had left. The set is four, and
- * `webcheck`'s `REACH_SCREENS` is the copy that has to agree with this one. They
- * compose nothing themselves any more: the sentence is {@link NotReachable}'s,
- * written once below, and the four are the screens that branch on the partition
- * and mount it on the arm that has measured a failure.
- *
- * "not checked yet" is the honest replacement, and it stays useful in the two
- * places that legitimately reach it: the machine row's subline, where it joins
- * `lastSeenText` as `not checked yet · seen 3m ago`, and `NewSession`'s
- * `unusableReason`, where it is why a machine cannot be started on *right now*.
- *
- * ⚠ **It is not a licence to keep drawing "is not reachable" over it.** That
- * sentence belongs to `daemonRead(reach) === "unreachable"` alone — the partition
- * in `machine.ts` exists so a screen branches on the state rather than papering
- * over it with a phrase that reads plausibly in the wrong sentence, which is
- * exactly how the ellipsis survived.
- *
- * `probing…` keeps its ellipsis because it is not a bare one: there is a word in
- * front of it, and it is the truthful trailing-off of a measurement in flight.
- */
+/** A phrase for inside a sentence, so unknown reads as words, never a bare ellipsis. */
 export function reachText(reach: Reach, reason: OfflineReason): string {
   if (reach === "online") return "online";
   if (reach === "probing") return "probing…";
@@ -875,28 +239,7 @@ export function reachText(reach: Reach, reason: OfflineReason): string {
   return reason === null ? "unreachable" : OFFLINE_TEXT[reason];
 }
 
-/**
- * The line a screen draws where a machine's lists would be, when the daemon was
- * asked and did not answer.
- *
- * One component rather than four transcriptions. `MachineSection`,
- * `MachineSystemsSection`, `MachineAgentsSection` and `AgentBuilder` each
- * hand-composed `` `${machine.name} is not reachable right now — ${reachText(…)}` ``
- * on their `daemonRead(reach) === "unreachable"` arm — four places for
- * {@link reachText}'s substitution rule to be broken one at a time and four for
- * the wording to drift (review D7). `webcheck`'s `REACH_SCREENS` still names the
- * four, because what it asserts of them is the *branch* — this inside
- * `<Empty failed>`, the wait inside a plain `Empty` — and a branch is the
- * screen's own; what it asserts of this file is that the words live here and
- * nowhere in those four.
- *
- * The sentence only, never the `Empty` around it: `AgentBuilder` adds an
- * `action`, and the ending differs — three screens close with a full stop and
- * the builder with a clause saying what cannot happen on the machine — so `tail`
- * is the ending and the full stop is its default. This is the one arm that has
- * earned the words "not reachable"; {@link reachText}'s docblock is why they may
- * not be drawn over any other value of `reach`.
- */
+/** The one place the "not reachable" sentence is composed; webcheck's REACH_SCREENS are the screens that mount it. */
 export function NotReachable({
   machine,
   tail = ".",
@@ -913,19 +256,6 @@ export function NotReachable({
 }
 
 
-/**
- * Why the daemon could not bring a session back, in the words shown to a person.
- *
- * The same shape as `OFFLINE_TEXT` above and for the same reason: these are the
- * distinct things somebody can *do something about*, and the daemon's own code
- * is the one vocabulary both the automatic and the manual path answer with —
- * `describeResumeFailure` in `registry.ts` is where they are minted.
- *
- * An unknown code **falls open**: the daemon's own message, and a retry offered.
- * That is `wire.ts`'s rule for this whole mirror — a client that is behind the
- * daemon must degrade to passing its words through, not to refusing an action
- * that might well work.
- */
 export function resumeFailureText(
   code: string,
   message: string,
@@ -937,9 +267,6 @@ export function resumeFailureText(
       return "there is no agent conversation to reconnect to";
     case "resume_unsupported":
       return `${agent} cannot reattach to an earlier conversation`;
-    // Deliberately about the *agent's* memory rather than about this session:
-    // the transcript on this side is intact and still readable, which is the
-    // half a reader is most likely to fear for.
     case "agent_forgot_session":
       return `${agent} no longer has this conversation — the transcript here is intact`;
     case "workspace_missing":
@@ -957,94 +284,28 @@ export function resumeFailureText(
   }
 }
 
-/**
- * Whether offering a Resume button would be honest.
- *
- * Only the two that cannot ever work are refused. `workspace_missing` is
- * retryable on purpose — the folder can be put back, and a person who has just
- * done that should not have to find another door.
- */
+/** False only for codes a retry can never fix; workspace_missing stays retryable because the folder can be put back. */
 export function resumeRetryable(code: string): boolean {
   return (
     code !== "no_agent_session_id" &&
     code !== "resume_unsupported" &&
-    // The agent has told us the conversation is gone. Offering a button that
-    // spawns an agent to be told the same thing is worse than offering none —
-    // it is the daemon's own reason for never trying again, drawn as a promise.
     code !== "agent_forgot_session"
   );
 }
 
-/**
- * The one line under a session's transcript explaining why it is not running.
- *
- * Pure and here rather than inline in `SessionView`, because the copy rules are
- * the part worth asserting: `webcheck` states that a session the daemon
- * interrupted says neither the word "ended" nor any raw `ExitReason` token, and
- * that a stopped one still says exactly what it always did.
- *
- * `detail` and `agentConfirmedDead` are printed for an ended session and
- * **suppressed** for an interrupted one. That asymmetry is deliberate: both are
- * daemon plumbing, and "(agent not confirmed dead)" under a routine deploy is
- * alarming, meaningless to the reader, and about a process that is being
- * replaced anyway. On a session somebody stopped it is the difference between
- * "stopped" and "probably orphaned", which is worth their knowing.
- */
-/**
- * A line under the transcript, and the one thing to do about it.
- *
- * `action` rather than a `retry` boolean, because the remedies are mutually
- * exclusive and a second boolean beside the first could claim both at once — a
- * state that means nothing and would draw two buttons. `null` is the ordinary
- * case: most notices are a fact with nothing to press.
- */
 export interface SessionNotice {
   tone: "quiet" | "warn";
   text: string;
-  /**
-   * `reconnect` re-runs the resume this daemon gave up on. `sign_in` goes to the
-   * agent's own screen on this machine — the conversation is not broken, nobody
-   * is signed in to the thing that answers it.
-   */
   action: "reconnect" | "sign_in" | null;
 }
 
-/**
- * How a conversation ended, in words rather than in the daemon's identifier.
- *
- * ⚠ This line drew `ended: ${session.exit.reason}` — `ended: agent_exited`,
- * `ended: start_timeout` — which is a wire enum printed at somebody who is
- * looking at their own conversation to find out what happened to it. `TONE_TEXT`
- * one screen up is this app's one human-facing status vocabulary and had no
- * counterpart for the reason a session is over; this is it.
- *
- * `agent_signed_out` is deliberately **not** here. It is answered above, as a
- * whole sentence with a button beside it, because it is the one exit with a
- * remedy — and a row in this table would be a second, worse answer competing with
- * that one.
- *
- * The three daemon reasons are not here either, for the structural reason rather
- * than a stylistic one: `waitingForDaemon` catches every one of them above, so a
- * value from `DAEMON_EXIT_REASONS` cannot reach this line. They are left out
- * rather than written down wrong.
- *
- * **The unknown arm keeps the identifier**, like every other place in this client
- * that meets a wire value it does not know: a newer daemon's reason is drawn as
- * itself — legible, and never a guess about what it meant.
- */
+// agent_signed_out and the daemon exit reasons are answered before this table; an unknown reason is drawn as itself.
 const EXIT_TEXT: Partial<Record<ExitReason, string>> = {
   stopped: "you stopped this conversation",
   agent_exited: "the agent exited",
   start_failed: "the agent could not be started",
   start_timeout: "the agent did not start in time",
   agent_kill_failed: "the agent could not be stopped",
-  /*
-   * Unreachable from `sessionNotice`, which returns `null` for a parked session
-   * before it gets here — and kept anyway, because this map is `Partial`, so a
-   * missing entry is not a compile error but the string `ended: parked` appearing
-   * the day somebody adds a second caller. "ended" is the one word this state may
-   * not carry.
-   */
   parked: "the agent was released after a quiet spell",
 };
 
@@ -1058,39 +319,12 @@ export function sessionNotice(
   machineName: string,
 ): SessionNotice | null {
   if (session.exit === null) return null;
-  /*
-   * ⚠ **A released agent says nothing at all, and the `return null` is load-bearing
-   * rather than a missing case.**
-   *
-   * Deleting this arm does not remove the notice — it moves it. Every path below
-   * falls through to the catch-all at the foot of this function, which draws
-   * `exitText(reason)`, so a parked session would announce itself in the same
-   * shape and tone as a conversation that ended. That is precisely backwards.
-   *
-   * Nothing is wrong, nothing is pending, and there is nothing to act on: the
-   * agent was released because the session was quiet, and the message box below
-   * — which is never taken away — is the whole of the remedy. This had a
-   * sentence for a draft ("the agent was released after a quiet spell…") and the
-   * sentence was the defect: it made a person read about, and decide something
-   * about, a piece of housekeeping they cannot influence and are not paying for.
-   */
+  // A parked session draws no notice; without this it would fall through to the exit-text catch-all.
   if (isParked(session)) return null;
   if (resumeStalled(session)) {
     const error = session.resume?.error;
     const code = error?.code ?? "no_agent_session_id";
-    /*
-     * **This is where "sign in" is earned, and it is the only place.**
-     *
-     * `agent_auth_required` means the daemon *tried* — spawned the CLI, asked it
-     * to reopen the conversation, and was refused — so "not signed in" here is a
-     * measurement rather than a memory. The exit-reason branch below used to make
-     * the same claim off a row that could not know, which is how somebody whose
-     * CLI had refreshed its own token was sent to a screen they were already
-     * signed in to.
-     *
-     * Retrying is still the right answer for every other failure, and offering
-     * both would be the two-remedies-at-once this type has one field to prevent.
-     */
+    // The only place "sign in" is earned: the daemon tried to resume and was refused.
     return {
       tone: "warn",
       text: `could not reconnect the agent — ${resumeFailureText(code, error?.message ?? "", agent, machineName)}`,
@@ -1099,17 +333,7 @@ export function sessionNotice(
     };
   }
   if (waitingForDaemon(session)) {
-    /*
-     * **A wait with a reason says the reason.** The daemon defers a session whose
-     * harness has no CLI on the machine yet — `waiting`, no attempt spent, and
-     * the refusal on the snapshot — because its installer is already scheduled
-     * and the session comes back when the install lands. Drawn as the plain
-     * restart line, that read as a reconnect in progress for the whole wait:
-     * minutes at best, and for good on a machine whose updates are off. So the
-     * one waiting state that carries an error draws it — the short sentence
-     * `resumeFailureText` already has for the code, never `error.message`, which
-     * is the daemon's paragraph naming a script to run.
-     */
+    // A deferred wait (no CLI yet, no attempt spent) shows the short reason, never the daemon's message.
     const deferred =
       session.resume?.state === "waiting" && session.resume.attempts === 0 && session.resume.error?.code === "agent_unavailable";
     return {
@@ -1122,35 +346,7 @@ export function sessionNotice(
       action: null,
     };
   }
-  /*
-   * **The one exit with a remedy, so it gets a sentence rather than its name.**
-   *
-   * Every other reason here is either self-explanatory (`stopped`) or something
-   * nobody can act on from this screen. This one ended the conversation *because
-   * a credential went away*, and printing `ended: agent_signed_out` would withhold
-   * the only useful half of what the daemon said.
-   *
-   * ⚠ **It said "nobody is signed in to claude on <machine>. Sign in and this
-   * conversation comes back." Both halves could be false at once, and were.**
-   *
-   * This is a record of something that happened, drawn in the present tense.
-   * Nothing re-checks it: the row keeps its exit reason for ever, and the daemon's
-   * own login probe — which is live, three seconds fresh, and was reporting
-   * `loggedIn: true` throughout — is not consulted here or anywhere near here. So
-   * an expired OAuth token that the CLI then refreshed on its own left this
-   * sentence asserting the opposite of the truth. And the promise was not kept
-   * either: `reloadCredentials` is the only thing that reverses this reason, and
-   * every one of its callers is an in-app credential *write*, so signing in from
-   * a terminal — or the CLI refreshing itself — reached none of them. The button
-   * went to a screen where you were already signed in.
-   *
-   * So the sentence is about the past, which is the only thing this row knows,
-   * and the action is **Reconnect** — `POST /sessions/:id/resume`, which calls
-   * `managed.resume()` with no `autoResumable` gate and has always been able to
-   * bring these back. It was simply never offered here. Signing in is still one
-   * tap away on the machine's own screen, and is no longer the only way out of a
-   * state a person cannot otherwise leave.
-   */
+  // The exit is history, not a live login state, so the remedy is Reconnect rather than Sign in.
   if (session.exit.reason === "agent_signed_out") {
     return {
       tone: "quiet",
@@ -1172,142 +368,42 @@ export function Spinner(): ReactNode {
   );
 }
 
-/**
- * The sentence a pane draws when it has no rows — and, now, the difference
- * between having none and not having been able to ask.
- *
- * ⚠ **One `<p>` was serving at least eight materially different states.** A list
- * that is genuinely empty (`Nothing installed on this machine.`), a search that
- * matched nothing, a machine that has been revoked, a read that *failed*
- * (`Could not read this machine's agents.`), a catalogue host that could not be
- * reached, an offline notice. All of them arrived as centred grey text with
- * nothing to press — so a failure that a tap would fix was drawn identically to
- * an emptiness nobody can act on, and from a dead machine's systems screen the
- * one way out led to a screen showing the same sentence again.
- *
- * **The partition is absence against failure, and it is a claim about the
- * world rather than about the wording.** An *absence* is a true, settled answer:
- * this list is empty, that machine is not yours any more, nothing matches what
- * you typed. A *failure* is the absence of an answer: something was asked and did
- * not come back. Only the second one can be retried, and only the second one is
- * an event.
- *
- * That is why exactly one of them is announced. `role="status"` makes this a
- * live region, and a genuinely empty list is a **state** a reader has already
- * been told about by the thing they just did — narrowing a filter, opening a
- * fresh machine — so announcing "nothing here" on every keystroke is noise in
- * the one channel that cannot be skimmed. A failure is something that *happened*,
- * with nothing else on screen to say so, which is the definition of what a live
- * region is for. `Toast` draws the same line one notch louder: an error there is
- * `role="alert"` because it is transient and 8 seconds from being gone, while
- * this stays on screen until somebody acts, so `status` is enough.
- *
- * A failure also changes the **drawing**, not only the text: it takes the leading
- * `AlertTriangle` this app already uses for a failure in `Toast` and in
- * `EventList`'s transcript notice, and its sentence sits at `text-fg` rather than
- * `text-muted`. The glyph is doing the work for the reason `TONE_DOT` gives at
- * the other end of the scale — a shape survives greyscale, reduced motion and a
- * phone in sunlight, and this palette has no hue left to spend.
- *
- * `action` is a `ReactNode` rather than a label and a callback, because the
- * remedies are not one shape: a {@link Button} that re-runs a read, a `<Link>`
- * back to a list that still exists, an `IconButton` row. It is drawn under the
- * sentence with real spacing and centred under it, and it is available to an
- * absence too — "No machines yet" has an obvious next move, and having one does
- * not make it a failure.
- *
- * ⚠ **The plain case returns byte-identically to what it always did**, by
- * early-returning rather than by a container that happens to collapse to the
- * same thing. **32 of the 55 call sites** pass text and nothing else, and this
- * primitive is drawn in list bodies, sheet panes and the transcript — so
- * "probably the same box" is not good enough, and a structural change to all of
- * them belongs to whoever is looking at those screens.
- *
- * ⚠ That count read *"roughly forty"* and had not been taken. Counted over
- * `packages/web/src` with comments stripped: **55** call sites, of which **32**
- * are written `<Empty>` with no props at all and **23** carry `failed`, `action`
- * or both. All 23 arrived with the release that added those props, because before
- * it there was no second branch to reach — which is exactly the movement a round
- * figure cannot record, forty having been a fair description of the whole set and
- * a poor one of this half. Stated as a count so the next reader retakes it rather
- * than inherits it.
- */
+/** Absence against failure: only a failure is a live region and carries the warning glyph. */
 export function Empty({
   children,
-  /**
-   * This is the absence of an *answer*, not an answer of "none".
-   *
-   * A boolean rather than a `kind` union, and that is not the shortcut it looks
-   * like next to {@link SessionNotice}'s `action`: that one is a union because
-   * its remedies are mutually exclusive, so a second boolean beside the first
-   * could claim both at once and draw two buttons. Here there are exactly two
-   * states and they are complementary, so a boolean *is* the two-way partition —
-   * there is no third value for it to fail to express, and no pair to disagree.
-   */
   failed = false,
-  /** The one thing to do about it, drawn under the sentence. */
   action,
 }: {
   children: ReactNode;
   failed?: boolean;
   action?: ReactNode;
 }): ReactNode {
-  // Unchanged, deliberately and provably: same element, same classes, same
-  // whitespace. See the ⚠ above — the call sites that pass only text are not
-  // part of this change.
   if (!failed && action === undefined) {
     return <p className="px-4 py-6 text-center text-sm text-muted">{children}</p>;
   }
   return (
-    // `status` only on the failure, which is the whole partition in one
-    // attribute. `undefined` rather than `"presentation"` or an empty string:
-    // React omits the attribute entirely, so an absence is an ordinary `<div>`
-    // and no assistive technology is watching it.
     <div role={failed ? "status" : undefined} className="px-4 py-6">
       <p
         className={
           failed
-            ? // `items-start` so the triangle sits on the *first* line rather
-              // than in the middle of a sentence that wraps, and
-              // `justify-center` so a short one still lands in the middle of the
-              // pane like every other `Empty`. A wrapping one fills the width and
-              // reads as glyph-then-paragraph, which is what `Toast` and the
-              // transcript notice already look like.
+            ?
               "flex items-start justify-center gap-1.5 text-sm text-fg"
             : "text-center text-sm text-muted"
         }
       >
         {failed && (
-          // `text-muted` on the glyph, against `text-fg` on the words: the mark
-          // says *which kind* of nothing this is and the sentence says what
-          // happened, so a triangle louder than the text it introduces would
-          // invert that. `mt-0.5` is the nudge `Toast` already gives a 14px
-          // glyph sitting beside a line of text.
           <Icon as={AlertTriangle} size={14} className="mt-0.5 text-muted" />
         )}
         <span>{children}</span>
       </p>
-      {/* `mt-3` rather than a margin on whatever the caller passed: a remedy that
-          is 12px under the sentence reads as part of it, and a caller cannot
-          reliably add that margin from outside — see {@link FIELD} for why
-          appending a utility to a shared string does not work here. */}
       {action !== undefined && <div className="mt-3 flex justify-center">{action}</div>}
     </div>
   );
 }
 
-/**
- * A placeholder row with the shape of the thing that is coming.
- *
- * A bare centred spinner says the app is busy; this says what it is busy with,
- * and stops the page jumping when the real rows arrive.
- */
 export function Skeleton({ rows = 3 }: { rows?: number }): ReactNode {
   return (
     <div aria-hidden="true">
-      {/* No separator: rows in this app are held apart by whitespace now, and a
-          skeleton that draws rules the real rows do not have makes the list jump
-          the moment it loads. */}
       {Array.from({ length: rows }, (_, index) => (
         <div key={index} className="flex items-center gap-2 px-4 py-3.5">
           <div className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-edge" />
@@ -1321,38 +417,7 @@ export function Skeleton({ rows = 3 }: { rows?: number }): ReactNode {
   );
 }
 
-/**
- * One row's worth of "not read yet", for a list whose expected length is 0–1.
- *
- * A sibling of {@link Skeleton} rather than `rows={1}` on it, and the difference
- * is the shape it stands in for. That one is a *session* row — a status dot and
- * two lines at `px-4 py-3.5` — and the four settings lists that draw this are
- * none of those things: a device and a person are each a `min-h-11` row with a
- * title and a short subline; a key is a `KeyTable` row, `py-2` around its cells
- * with no `min-h` of its own, so the 44px here stands in front of whatever that
- * comes to (unmeasured); and a machine's row is `min-h-14`. Standing the
- * session shape in front of them made the list jump on arrival, which is the
- * one thing a placeholder is for preventing (Q3.548) — and so did standing an
- * 11 in front of the 14: a 12px jump on the one list that carries a dot, a
- * badge and a subline (review D9, fixed in E10). `tall` is that one row's
- * height, asked for by the machines list only; the primitive takes a height and
- * still no count.
- *
- * ⚠ **Exactly one row, and the primitive takes no count on purpose.** The
- * settings lists this is for commonly hold zero or one thing — your keys, your
- * other devices, the people on a personal instance — so three placeholder rows
- * collapsing to "No keys yet." is a two-row layout shift that implied two items
- * that never existed. One row collapsing to one sentence is a paint. `webcheck`
- * pins the absence of a `rows` prop and that no settings list draws two.
- *
- * `aria-busy` on the wrapper is the accessible half: it is the *list* that is
- * busy, and the bar inside is decoration a screen reader has no use for, hence
- * `aria-hidden` on that alone. No sentence — "reading your sessions…" and its
- * siblings said what the shape already says.
- *
- * `bg-raised/50` is the transcript's own fill for "the shape of something
- * arriving" ({@link TranscriptSkeleton}), at the width of a short title.
- */
+/** Exactly one row and no count, since these lists usually hold zero or one item (Q3.548). */
 export function SkeletonRow({ tall = false }: { tall?: boolean } = {}): ReactNode {
   return (
     <div aria-busy="true" className={`flex ${tall ? "min-h-14" : "min-h-11"} items-center`}>
@@ -1361,34 +426,7 @@ export function SkeletonRow({ tall = false }: { tall?: boolean } = {}): ReactNod
   );
 }
 
-/**
- * The shape of a conversation that has not arrived yet.
- *
- * A sibling of {@link Skeleton} rather than a `rows` variant of it: that one is a
- * *list row* — a status dot and two lines, at its own `px-4 py-3.5` — and a
- * transcript is neither of those things. Reusing it would also double the `px-4`
- * the transcript's column already carries.
- *
- * **It exists because "nothing" was being drawn as an answer.** On a cold reload
- * the socket replays no history at all (`reattachSince` attaches at the tail), so
- * the whole conversation arrives over HTTP a moment later — and the transcript
- * drew nothing in the meantime, on the strength of a measurement taken over a
- * LAN. Over a relay from a phone that gap is seconds, and what stayed on screen
- * was the one line that does not come from the transcript: `working…`, alone, on
- * a session with hundreds of messages in it.
- *
- * The alternation is the point — an agent paragraph, then a right-aligned block
- * where your own message goes — so the swap to real content is a paint rather than
- * a re-layout. `bg-raised` for the message you wrote and `bg-raised/50` for
- * everything else is the transcript's own ranking (see `index.css`), so this reads
- * as the shapes it stands in for instead of as generic grey.
- *
- * ⚠ No `animation-delay` trick to hide the sub-100ms case. Under
- * `prefers-reduced-motion` this app collapses every animation to a single 0.01ms
- * iteration with no `fill-mode`, so an element started at `opacity-0` would run
- * its cycle and revert — permanently invisible for exactly the people least able
- * to afford a blank screen.
- */
+/** No animation-delay to hide the fast case: under reduced motion an element starting at zero opacity would stay invisible. */
 export function TranscriptSkeleton(): ReactNode {
   const bar = (width: string, tone = "bg-raised/50"): ReactNode => (
     <div className={`h-3.5 ${width} animate-pulse rounded-sm ${tone}`} />
@@ -1413,164 +451,18 @@ export function TranscriptSkeleton(): ReactNode {
 export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
 
 /**
- * Four tones, and one rule that binds them together across the whole app.
- *
- * **A `bg-fg` fill is only ever the reversible option.** That generalises the rule
- * `AskCard` already lives by — "the refusal alone on the left, the reversible
- * approval filled on the right" — to every row of buttons anywhere here. Its
- * consequence is the part worth stating out loud, because it looks backwards: a
- * destructive button is **never** the filled one, so in a two-step confirmation
- * the only button that *may* take the fill is **Cancel** — and none does:
- * {@link TwoStep} draws it `plain`, on the argument written there, and `webcheck`
- * sweeps the settings screens for a filled Cancel.
- *
- * Without that rule "filled" would mean *the safe default* on the ask card and
- * *the irreversible one* in settings, which is worse than encoding nothing —
- * somebody would learn the wrong one first.
- *
- * `destructive` therefore reads as an outlined button, and on its own it is not
- * enough. It is never reached directly: {@link DangerButton} is the only door, and
- * it requires a glyph.
- */
-/**
- * ⚠ **Disabled dims the ink and keeps the box, and on an outlined tone the box is
- * the whole control.**
- *
- * `disabled:opacity-40` used to ride the base string for all four, and on an
- * outlined button that is not a dimming — it is a *deletion*. `--color-edge-strong`
- * is held at ≥3:1 precisely because a control drawn in the colour of what it sits
- * on has its border as its **only** identification, and 40% of that is ~1.2:1: the
- * hairline `index.css` forbids for exactly this job. So a disabled `plain` button
- * had no boundary at all, and the moment one became live it read as having *grown*
- * — reported in those words, off a strip of four where three are inert most of the
- * time. Nothing about the box ever changed: `min-h-11 px-3` in both states, and
- * `opacity` cannot move layout.
- *
- * ⚠ **That fix replaced the opacity with `disabled:border-edge`, which is the same
- * deletion spelled as a token.** #E3E1DD on `surface` measures 1.31:1 — the value
- * the paragraph above calls a hairline, arrived at on purpose the second time. The
- * button it cost the most is the agent builder's **Add agent**: it is disabled for
- * the whole of a three-screen flow and becomes pressable on the last tap, so for
- * that entire flow the thing the screen is aiming at had no fill, faint type and no
- * boundary — a static caption sitting where a button goes. The boundary stays at
- * `edge-strong` on both outlined tones now and only the *label* dims, which is what
- * "dims the ink and keeps the box" was meant to say in the first place.
- *
- * `destructive` gives up its hue along with its label, and takes the same
- * `edge-strong` box rather than keeping its own: `border-danger/45` is
- * `--color-danger` #7e362b at 45% over `surface` #ffffff, which composites to
- * #C5A5A0 and measures **2.27:1** — so it was never the identification either.
- *
- * ⚠ That number read **2.11:1** here from the day this paragraph was written, and
- * the correction is arithmetic rather than a reversal: 2.27 is still well under the
- * 3:1 WCAG 1.4.11 asks of a non-text control with no fill of its own, which is the
- * whole of what the sentence above rests on. Recomputed per channel —
- * `0.45·126 + 0.55·255 = 197`, `0.45·54 + 140.25 = 165`, `0.45·43 + 140.25 = 160`
- * — then through the sRGB relative-luminance formula against white. What identifies
- * that tone is {@link DangerButton}'s required glyph and the `text-danger` label,
- * and a disabled row has stopped claiming both. A control that cannot act must not
- * be the one red thing in a view.
- *
- * ⚠ **{@link ChoiceRow} and the agent tile in `NewSession.tsx` do the opposite —
- * they hand the boundary back when disabled — and that is one rule read on two
- * shapes rather than two rules.** A button here is a lone control: nothing beside
- * it is pressable, so the only question its border answers is *is there a control
- * here at all*, and the `Add agent` flow above is the measurement of answering it
- * wrong. A row in a picker is one of a run of siblings that differ only in whether
- * they can be taken, so its border is answering *which of these can I press* —
- * there the strong edge on a refused row claims something false, and WCAG 1.4.11
- * exempts an inactive component from the 3:1 that would otherwise require it. The
- * split has a second half that points the same way: those rows carry their own
- * refusal as a subline and a button carries none, which is why `opacity` merely
- * erased a boundary here and would have erased a *reason* there.
- *
- * `primary` and `ghost` keep the opacity, because neither has a boundary to lose —
- * one is a fill and the other is bare text.
- *
- * `disabled:bg-surface` is untouched and is the one clause here that is not about
- * the boundary: `:hover` still matches a disabled `<button>`, so the ground has to
- * be held under a pointer that is going to get nothing.
+ * Disabled dims the ink and keeps the box: border-danger/45 measures only 2.27:1 on surface,
+ * so the outlined tones keep edge-strong when disabled and only primary and ghost use opacity.
  */
 const BUTTON_TONE: Record<ButtonTone, string> = {
   primary: "bg-fg text-ink hover:bg-fg/85 disabled:opacity-40",
-  // Hover moves the *fill*, not the border. See `--color-edge-strong` in
-  // `index.css`: the gap between the two line weights is now large enough that
-  // swapping them on hover is a louder change than the press itself.
   plain: "border border-edge-strong bg-surface text-fg hover:bg-raised disabled:bg-surface disabled:text-faint",
   destructive:
     "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10 disabled:border-edge-strong disabled:bg-surface disabled:text-faint",
   ghost: "text-muted hover:bg-raised hover:text-fg disabled:opacity-40",
 };
 
-/**
- * The two sizes a button comes in, as a **prop rather than a `className`**, and
- * that is a correctness fix rather than an ergonomic one.
- *
- * `className` is appended to the base string, which makes it look as though a
- * caller can pass `min-h-9 px-2` and get a smaller button. It cannot: Tailwind
- * emits every utility into one stylesheet at equal specificity, so what wins is
- * the order **in the sheet**, not the order in the attribute — and `min-h-11`
- * sorts after `min-h-9`. Measured on the shipped CSS, a button written
- * `className="min-h-9 px-2 text-xs"` reported `min-height: 44px` and
- * `padding-left: 12px`: only the non-conflicting `text-xs` took effect. The
- * failure is silent in both directions, which is what makes it worth a prop —
- * the caller reads their own source and sees a request that was never refused.
- *
- * `md` is 44px, the platform tap minimum, and it stays the default on **every**
- * tone rather than only the primary one — the deny button is the one somebody is
- * most likely to be aiming at carefully.
- *
- * ⚠ **`sm` was reserved for one shape, the reservation expired, and it carries a
- * coarse-pointer floor now.** This entry read *"`sm` is for the one shape that has
- * earned it: a confirmation that has replaced the controls on a settings row, so
- * it is the only thing on that row and has nothing adjacent to mis-hit"* — and on
- * that premise it was 36px with no floor of any kind. It is on **46** `Button` call
- * sites, and **15** of them are the exact opposite of the shape it was reserved
- * for: they sit inside an {@link Empty}'s `action`, where the button is the only
- * thing on an otherwise empty pane — seven in `AgentBuilder`, two each in
- * `AgentsPanel`, `PluginScreen` and `PluginSettings`, and the *All machines* door
- * on `MachineSystemsSection` and `MachineAgentsSection`. A reservation stated in a
- * docblock and enforced by nothing is not a reservation.
- *
- * Most of them arrived alongside {@link Empty}'s `action`, in the same change that
- * **deleted** `ICON_BUTTON_SIZE.md` — 36px, the default, no growth mechanism —
- * whose argument was that *the call site that thinks about its target least got
- * the one size that was wrong*. That argument
- * applies here word for word, so the fix is in the primitive rather than at 46 call
- * sites, which is the leverage {@link Empty} was given one screen up. A handful of
- * callers had already written `[@media(pointer:coarse)]:min-h-11` into their own
- * `className` by hand — which is the shape of a defect nothing can fix for you, and
- * is why this is not left to them. Those are redundant rather than wrong now, and
- * `webcheck` already spells that exact escape as `COARSE_FLOOR`, so it keeps
- * passing on the ones that still carry it.
- *
- * ⚠ **The floor sits in the same class string as the height it has to beat, so it
- * is only a floor if the sheet emits it later — measured, not assumed.** Measured
- * on the built bundle, `packages/web/dist/assets/index-*.css`, 57263 bytes:
- * `.min-h-9{…}` is written at byte 15133, among the unprefixed utilities; the
- * `@media (pointer:coarse){…}` block opens at 46531 and holds
- * `.[@media(pointer:coarse)]:min-h-11{min-height:calc(var(--spacing) * 11)}` at
- * 46700. Both selectors are a single class, `(0,1,0)`, and a media query adds
- * **no** specificity, so the later rule wins and a finger gets 44px. A fine
- * pointer never matches that query, so `sm` looks exactly as it did.
- *
- * The stylesheet came back **byte-identical** to the build before this change,
- * down to the content hash — `FIELD`, `SEARCH_FIELD` and the call sites that wrote
- * it by hand had already put that class in the sheet — which is the other half of
- * the measurement: no new rule was emitted, so nothing about the order above is a
- * position this change happened to land in.
- *
- * ⚠ One thing the same measurement corrects, because this file states the trap in
- * two shorthands and only one of them survives it. {@link menuRow} says Tailwind v4
- * emits **alphabetically**, and for a *word* scale that holds — `.items-center`
- * before `.items-start`, which is the defect it records. A **numeric** scale is
- * emitted in numeric order instead: `.min-h-8`, `.min-h-9`, `.min-h-10`,
- * `.min-h-11` in that sequence, and `.h-9` (14077) before `.h-11` (14153). So
- * "alphabetical" predicts the wrong winner exactly where two numbers straddle ten,
- * which is where every tap-target argument in this file lives. That is the second
- * reason the floor is written as the variant rather than as a bare `min-h-11`: the
- * variant block's position does not depend on which two numbers are racing.
- */
+/** Size is a prop, not a className, because equal-specificity utilities race by stylesheet order; sm keeps a 44px coarse-pointer floor. */
 const BUTTON_SIZE = {
   md: "min-h-11 px-3 text-sm",
   sm: "min-h-9 px-2.5 text-xs [@media(pointer:coarse)]:min-h-11",
@@ -1599,16 +491,7 @@ export function Button({
   title?: string;
   className?: string;
   ariaLabel?: string;
-  /**
-   * Take focus when drawn.
-   *
-   * For one screen, and the reason is a disabled field: `ChooseServer` opens on the
-   * build's suggested server *locked*, and a disabled input takes no focus — so no
-   * keystroke from it can reach the form, and Enter would submit nothing. Continue
-   * takes the focus instead while the field is locked, which is what keeps "type
-   * nothing, press Enter" the whole of the first screen. Forwarded rather than
-   * reached for with a ref, because this primitive forwards none.
-   */
+  /** For ChooseServer, whose locked field cannot take focus. */
   autoFocus?: boolean;
 }): ReactNode {
   return (
@@ -1626,26 +509,7 @@ export function Button({
   );
 }
 
-/**
- * The only door to the destructive look, and the glyph is why it exists.
- *
- * With one colour left in the palette and a rule that a destructive control is
- * never the filled one, `tone="destructive"` on its own is an outlined button
- * among outlined buttons — on `UsersSection`'s row there are five, and exactly one
- * of them deletes a person. A leading glyph is the strongest cue left at 13px,
- * because it is a *shape* difference rather than a value one.
- *
- * "Must lead with an icon" cannot be expressed as a type on `children`, so it is
- * expressed as a component that takes the icon as a required prop instead.
- * `webcheck` asserts that `tone="danger"` appears nowhere under `src/ui/`, which
- * is what keeps this the only door rather than the polite one.
- *
- * It is **not** the whole answer, and the other two halves are elsewhere by
- * necessity: the two-step confirmation with Cancel last (the property that was
- * actually measured — a second tap on a laggy connection lands on the undo), and
- * the rule at {@link BUTTON_TONE} that the only button in that pair which may be
- * filled is Cancel — a licence {@link TwoStep} declines.
- */
+/** The only door to the destructive tone; its required glyph is what identifies it. */
 export function DangerButton({
   icon,
   children,
@@ -1663,15 +527,9 @@ export function DangerButton({
   disabled?: boolean;
   title?: string;
   className?: string;
-  /** Forwarded as `Button`'s: a confirming Revoke whose visible text is the bare verb names its key here. */
   ariaLabel?: string;
 }): ReactNode {
   return (
-    // `size` is forwarded rather than left to `className`, for the reason
-    // {@link BUTTON_SIZE} gives: a size passed as a utility class is silently
-    // dropped, and this is one half of a confirming pair — a Delete that stayed
-    // 44px beside a Cancel that shrank would break the ordering rule by making
-    // the two answers different shapes.
     <Button tone="destructive" size={size} onClick={onClick} disabled={disabled} title={title} className={className} ariaLabel={ariaLabel}>
       <Icon as={icon} size={13} />
       {children}
@@ -1679,46 +537,14 @@ export function DangerButton({
   );
 }
 
-/** The glyph a destructive control leads with — {@link DangerButton}'s own type, named once. */
 export type DangerIcon = ComponentType<{ size?: number | string; className?: string; "aria-hidden"?: boolean }>;
 
-/**
- * The act button of a {@link TwoStep}: its verb, and whether it takes the
- * destructive look.
- *
- * `danger` **requires** the glyph, the way {@link DangerButton} does, and it is a
- * union rather than two optional fields so that "must lead with an icon" is a
- * compile error rather than a sentence. `ariaLabel` is forwarded to the button
- * for the one confirmation whose visible verb has no subject of its own — a
- * key's `Revoke`, whose prefix is a sibling span rather than its name (review
- * D18).
- */
+/** danger requires the glyph as a union, so a missing icon is a compile error. */
 export type TwoStepAct =
   | { label: string; danger: true; icon: DangerIcon; ariaLabel?: string }
   | { label: string; danger?: false; icon?: undefined; ariaLabel?: string };
 
-/**
- * What a confirmed act does to the question that asked it — the half of
- * {@link TwoStep} that has no markup, so a driver can run it with a promise it
- * controls.
- *
- * Two acts, told apart by what the caller returned:
- *
- * - **A promise** is a request this primitive owns the wait for. `setBusy(true)`
- *   before anything else; on the 200, `setBusy(false)` and then `disarm` — and
- *   **only** then, because the question standing until the server has answered
- *   is what "nothing is drawn optimistically" means for a confirmation
- *   (`web-shell.md`). A rejection calls `fail` and leaves the question exactly
- *   where it was, so the person can retry or cancel beside the toast that says
- *   why; a confirmation that closed on a failure would invite a second tap at
- *   the pixels the act just left.
- * - **Nothing** (`void`) is an act whose pending state belongs to somebody else
- *   — a strip row whose parent holds the `DELETE`, a plugin row whose subline is
- *   already saying `Removing…` — so the question closes on the tap and the
- *   caller draws whatever comes next. `disarm` and the act land in the same
- *   handler, which React batches into one render, so the order between them is
- *   not observable and is not promised.
- */
+/** A promise keeps the question open until it resolves and leaves it standing on rejection; void closes it on the tap. */
 export function twoStepAct(
   outcome: Promise<unknown> | void,
   hooks: { setBusy: (busy: boolean) => void; disarm: () => void; fail: (cause: unknown) => void },
@@ -1740,85 +566,12 @@ export function twoStepAct(
   );
 }
 
-/**
- * The one box {@link TwoStep} draws in both arms — the class string the layout
- * property rests on, named once.
- *
- * Exported for `MachineLimitPanel` alone, whose resting state is a form of four
- * controls rather than one and so draws its own box under two `TwoStep`s that
- * mount armed with no `rest`. It spelled the string by hand, and a property
- * that must hold on every site and is re-derived on one is a property nothing
- * asserts (Q3.552) — the reason the primitive exists, reproduced one file over.
- * The alignment and the caller's `className` are appended after it.
- */
+/** Exported for MachineLimitPanel, which draws the box itself (Q3.552). */
 export const TWO_STEP_BOX = "flex flex-wrap items-center gap-2";
 
 /**
- * The two-step confirmation, in one place.
- *
- * ⚠ **This shipped as thirteen hand-rolled copies, and the property they all had
- * to hold was pinned in two of them** (review D6, 2026-09-05; Q3.552). Each was a
- * `useState(false)` whose first tap swapped a control for a question, an act
- * button and a Cancel, and each re-derived the layout rule by hand — which is
- * how two of them (`SystemsPanel`, `AgentsPanel`) came to centre what the others
- * pack, and how a Cancel once shipped filled. The rule lives here now and nowhere
- * else, which is the whole reason this component exists; it is deliberately not
- * a component library's "confirm dialog".
- *
- * **What it guarantees** (`web-shell.md`, Q3.218):
- *
- * - **One box, rendered in both arms.** The container below is the same element
- *   with the same class string whether or not the question is showing, so the
- *   last child of the confirming arm occupies the pixels the resting control had.
- *   `.tap` removes the double-tap delay, so a second tap aimed at a control that
- *   looked inert lands on the undo rather than on the irreversible half. That is
- *   the safety property, and it is a geometry rather than a sentence about one.
- *   The string is {@link TWO_STEP_BOX}, exported for the one site whose resting
- *   state is a form rather than a control (`MachineLimitPanel`) and draws the
- *   box itself.
- * - **The act, then Cancel, and Cancel last** in DOM order — never the other way.
- * - **Cancel is `plain`, never `primary`.** {@link BUTTON_TONE}'s rule says the
- *   filled button in this pair would be Cancel, and every shipped confirmation
- *   declines the fill: on a row about deleting something the undo must not be
- *   the loudest object on the screen. It is disabled while the act is in flight.
- * - **Busy is owned here** for a promise-returning act — both answers disabled,
- *   a {@link Spinner} in the act's label, the question closed only on the 200 —
- *   and a failure is `onFailure`, defaulting to a toast with `errorText`'s
- *   sentence. See {@link twoStepAct}. ⚠ **It is the question's pair alone.** A
- *   caller whose other controls share a flag with this act — a field's Reset
- *   above the fleet limit, the SMTP form's Save and Resets, `KeyOnly`'s key
- *   form, `AgentBuilder`'s Save — holds that flag around the promise it hands
- *   over and passes it back as `disabled`, so the lock is one and reads both
- *   ways; handed a bare promise, three of those greyed nothing of the caller's
- *   for the length of a confirmed act and a second write could go out on the
- *   same key (E7's review).
- * - **The question names its subject** (Q3.545) — and that is the caller's to
- *   compose, which is why `question` is a node and not a verb this primitive
- *   would fill in. A `consequence` is drawn under it, muted, inside the same
- *   span, and nowhere at rest.
- *
- * **What it deliberately does not own.** The **arming state**: `armed`/`onArm`
- * are controlled, because the flag is per row (Q3.218 — these lists re-render
- * on a poll), because a kebab-armed row arms from a menu item that is not in
- * this box, and because two callers read it for their own paint (a row that
- * stacks while confirming, a consequence drawn below the box). The caller's
- * `setConfirming(true)` is synchronous, which the geometry above depends on.
- * The **resting control**: `rest` is the caller's `Button` or `DangerButton`,
- * whose tone at rest is a decision this primitive has no business making
- * (`danger` on the first tap is the sign-out's, and not the retire's). And the
- * **subject**, above.
- *
- * `align`: unset packs question and answers from the start; `"end"` lets the
- * question grow so the answers sit where a row's kebab did; `"center"` puts the
- * question on a line of its own, centred, so the resting button's own centre
- * falls in the gap between the two answers — the shape two sites measured their
- * way to and keep. `disabled` refuses the act alone (a write already out, a
- * machine gone) and leaves Cancel live — deliberately, where the hand-rolled
- * copies greyed both on the caller's flag: a Cancel only disarms, so nothing it
- * does can collide with the write the caller is waiting on, and the way back
- * stays under a thumb for exactly as long as the way forward is refused. `lead`
- * is drawn first in both arms — a badge that is a fact about the state, not
- * part of the question. `className` is appended to the one box.
+ * One box in both arms, the act then Cancel, and Cancel never filled; busy is owned here for a promise-returning act (Q3.218, Q3.552).
+ * Arming is controlled by the caller because the flag is per row on a polled list.
  */
 export function TwoStep({
   armed,
@@ -1890,266 +643,31 @@ export function TwoStep({
   );
 }
 
-/*
- * The surface vocabulary the overlay layer is built from.
- *
- * Material only — radius, border, fill, shadow, padding. **No `z-index` here**:
- * the layering decision lives in `ui/overlay.ts` as one ordered table, because an
- * ordering that is spread across the files it orders is one nothing can assert and
- * everybody is free to reverse. `Sheet` composes the two.
- *
- * The panel is a **bottom sheet on a phone and a centred card above `sm`**, in one
- * class string, decided by CSS. It leaves a sliver of the app visible above it,
- * which is what says "over" rather than "instead of" — and doubles as the
- * tap-to-close target. `dvh` and not `vh` for `AppShell`'s own reason: with a
- * collapsing mobile toolbar those are different numbers.
- *
- * **`h-`, not `max-h-`, and that is the whole of "a pop-up never changes size".**
- * With a ceiling and no floor the panel was content-sized — measured on this exact
- * chain at 155px, 475px and 492px for two, twelve and eighty lines of body — so
- * every step through the settings list resized the window it was drawn in, under a
- * pointer already aimed at the next row. A dialog that moves while you read it is
- * the one thing a dialog must not do, and the size is not information: it is a
- * side effect of which section happened to be shortest. The head and the foot are
- * `shrink-0` and the body is `flex-1`, so a definite height lands where it should
- * whether or not a caller passes a footer.
- */
+// A fixed height rather than a max height, so a pop-up never resizes between screens; layering lives in overlay.ts.
 export const SHEET_PANEL =
   "pb-safe animate-sheet sm:animate-rise relative flex h-[92dvh] min-h-0 w-full flex-col overflow-hidden rounded-t-2xl border-t border-edge bg-surface shadow-2xl sm:h-[min(44rem,88dvh)] sm:max-w-2xl sm:rounded-2xl sm:border sm:pb-0";
-/** Title left, waiting count and ✕ right. 56px, and it never scrolls. */
 export const SHEET_HEAD =
   "flex min-h-14 shrink-0 items-center gap-2 border-b border-edge px-4 sm:px-5";
-/**
- * The box between a sheet's head and its foot: a flex column that clips, and
- * carries no padding of its own.
- *
- * **`flex flex-col` is the load-bearing half and it was missing**, which is why no
- * pop-up in this app scrolled at all. Both callers write `min-h-0 flex-1` on their
- * top child — Settings for its rail-beside-section row, `NewSession` for the
- * column ending in the folder list — and in a *block* container those two
- * properties do nothing. So every intended inner scroller sized to its own content
- * instead, and had no scroll range: measured, `scrollHeight === clientHeight` at
- * 2592px inside a 433px viewport.
- *
- * The second half is why that did not merely fall back to scrolling *this* box.
- * Those dead containers still carried `overscroll-contain`, and Chrome ends the
- * scroll chain at a container with `overscroll-behavior: contain` **even when it
- * has nothing to scroll** — so the pointer was always over a descendant that
- * refused to pass the wheel on to the one element that could move. Measured on the
- * shipped structure: the same wheel gesture moved 400px with `overscroll-contain`
- * removed and 0px with it present. Giving this box a flex context fixes both at
- * once, because the children become real scrollers and their `overscroll-contain`
- * becomes true rather than merely stated.
- *
- * ⚠ **This box never scrolls, and it pads nothing: `overflow-hidden`, no `px-`,
- * no `py-`. Every pop-up scrolls in a child of its own** — {@link SHEET_SCROLL},
- * or the settings and market panes' own scroller — and that child carries the
- * padding. It was `overflow-y-auto` with `px-4 py-5 sm:px-5`, the scroller of last
- * resort, and every screen inside it reached the padding edge with `-mx-4 -my-5`
- * so that a rail's border and a screen's action bar could touch the panel's edge.
- * Reported 2026-09-06 from a desktop: a horizontal bar along the foot of the
- * settings pop-up and a vertical one down its right edge, on an Account screen
- * that fit. A scroll container's scrollable overflow includes its own end padding
- * *beyond* the content's far edge (CSS Overflow 3, and current engines follow it),
- * so a child that ends exactly at the padding edge overflows by exactly one
- * padding — 16–20px of scroll range in each axis that nothing could ever show,
- * drawn as a bar wherever `pointer: fine` holds, since `index.css` opts every box
- * out of macOS's overlay bars with `scrollbar-width: thin`. Hiding the bar
- * (`overflow-x-hidden`, `no-scrollbar`) keeps the range a wheel can still move;
- * padding here with screens that do not cancel it stops a rail 16px short of the
- * edge. The remedy is structural: a box that is not a scroll container has no
- * scrollable overflow and can draw no bar, and every pop-up already scrolled in a
- * child of its own. Q3.553.
- *
- * **`bg-surface` is what makes the section slide legible, and its absence was the
- * whole of "the previous screen's text is still there".** This box carries the
- * `view-transition-name` the horizontal slide moves, and a named element is
- * *lifted out of its ancestor's snapshot* — so with the fill left to the panel,
- * both snapshots were transparent images of nothing but glyphs. Measured
- * mid-flight at 390px: the arriving section's fields and the leaving list's rows
- * were both fully legible, drawn on top of one another over the panel's own fill.
- * A slide needs the pane that arrives to *cover* the one it replaces, which is a
- * property of the element rather than of the animation. Same colour as the panel
- * behind it, so nothing about the sheet at rest changes.
- *
- * That is `AppShell`'s rule for the rail and the pane — every surface paints its
- * own ground, none falls through — reaching the one box that had been getting
- * away with it because nothing had ever moved it before.
- */
+/** Must be a flex column that clips, never scrolls or pads, and paints its own ground for the section slide (Q3.553). */
 export const SHEET_BODY = "flex min-h-0 flex-1 flex-col overflow-hidden bg-surface";
-/** Actions right, Cancel last — see {@link BUTTON_TONE}. */
 export const SHEET_FOOT =
   "flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-edge px-4 py-3.5 sm:px-5";
 
-/**
- * One screen inside a sheet whose screens have their own action bars.
- *
- * ⚠ **The bar goes *inside* `SHEET_BODY` rather than in `Sheet`'s `footer`, and
- * that is what stops a pop-up resizing between its own screens.** `SHEET_PANEL`
- * is a definite height, so the panel never moves — but the body is what is left
- * after the head *and the footer*, and a footer that only some screens carry
- * makes the body two different heights. The body is the box the section slide
- * animates: `view-transition-name: sheet-body` hangs off it, and a group whose
- * old and new boxes differ morphs between them. Measured at 390px going from New
- * session (footer) to New agent (none): the pane's top edge travelled 57px
- * *downwards* over the 220ms slide, which reads as the screen you were on
- * collapsing rather than leaving sideways.
- *
- * With the bar in here the body's box is identical on every screen of the sheet,
- * the group has nothing to morph, and the bar slides with the screen it belongs
- * to — which is also the truthful animation, since the action *is* part of the
- * screen. `Sheet`'s `footer` stays for the pop-ups with one screen. Q3.472.
- *
- * No negative margin, because there is nothing to cancel: `SHEET_BODY` carries no
- * padding, so the bar reaches both edges by sitting in it, and the padding a
- * screen wants is on {@link SHEET_SCROLL}, the part of it that scrolls. It was
- * `-mx-4 -my-5 … sm:-mx-5` against a body that padded and scrolled, and that pair
- * is what drew a bar over a screen that fit — see `SHEET_BODY`, Q3.553.
- */
+/** A screen's action bar goes inside the body, not in Sheet's footer, so the body is one height on every screen (Q3.472). */
 export const SHEET_SCREEN = "flex min-h-0 flex-1 flex-col";
-/**
- * The scrolling half of a {@link SHEET_SCREEN}: everything above the bar, and the
- * one box in the screen that pads, since neither the screen nor `SHEET_BODY` does.
- */
 export const SHEET_SCROLL =
   "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-5";
-/**
- * The small anchored popover's chrome.
- *
- * Distinct from {@link MENU_PANEL} in exactly one way — no `max-h`/scroll — because
- * this holds a handful of fixed rows rather than a list, and a scrollbar on a
- * three-row menu is a claim there is more.
- */
 export const POPOVER = "rounded-lg border border-edge bg-surface p-1.5 shadow-lg";
 
-/**
- * Three sizes, and **every one of them reaches 44px under a finger**. That is the
- * property this table now has and did not.
- *
- * ⚠ *Under a finger* is the half of that sentence this table did not use to have
- * to say. `sm` and `nav` grow with a pseudo-element and `chip` with
- * {@link TAP_GROW_Y}, and all three are `[@media(pointer:coarse)]:` now, because a
- * pad that extends hit-testing extends `:hover` with it and there is no CSS that
- * separates the two. A mouse gets the ink and nothing more; the top of this file
- * carries the measurement and the reason it costs nothing.
- *
- * They get there by three different mechanisms because the neighbours differ, and
- * the argument for which is right where is in the file's own docblock at the top
- * ("Two ways to reach 44px…"). `sm` is 24px of ink inside a symmetric transparent
- * `::after`; `chip` is 32px inside a vertical-only one; `lg` is 44px of box. The
- * one thing they no longer differ on is whether they clear the floor at all.
- *
- * ⚠ **There was a fourth, `md` — `h-9 w-9`, 36px, with no growth mechanism of any
- * kind — and it was the *default*.** So omitting the prop yielded the one entry
- * that missed the platform tap minimum, which is the worst possible thing for a
- * default to do: the call sites that thought least about their target got the
- * only size that was wrong. `webcheck` wrote the finding down in those words —
- * **"routed through the primitive" was never the same thing as "44px"** — after
- * its old sweep had skipped every `IconButton` call site on exactly that premise.
- *
- * It is deleted rather than resized, and the difference matters: resizing it to
- * `h-11` would have silently moved every layout that had settled around a 36px
- * box, while deleting it makes each of those call sites name what it wants. The
- * `md` name is gone for good — a size that reappears under a name a reader
- * remembers as 36px is worse than no size at all.
- */
+// sm, chip and nav grow to 44px only under a coarse pointer; lg is a 44px box everywhere.
 const ICON_BUTTON_SIZE = {
-  /**
-   * 24px of ink, 44px of target.
-   *
-   * The box has to stay small — this is the kebab on a list row, and a menu
-   * button that visually outweighs the row it sits on is the thing `sm` exists
-   * to prevent. But 24px is well under the 44px named on `lg` below, and this
-   * particular 24px sits directly beside the row's own navigate target, which
-   * is the classic mis-tap pair: you aim at the menu and open the session.
-   *
-   * So the tap area is grown with a transparent `::after` rather than by growing
-   * the box. `-inset-2.5` is 10px on each side — 24 + 20 = 44 — and because it is
-   * a positioned pseudo-element it costs no layout anywhere, so nothing reflows
-   * and the alternative (a coarse-pointer size bump) does not have to be right
-   * in three different row densities.
-   *
-   * ⚠ **The pad is a thumb's, and this entry is where that was found out.** It
-   * was unconditional, and the ✕ in the background-tasks head sits in a
-   * `min-h-11` band where 24px of ink centred leaves exactly 10px above and
-   * below — so the pad filled the head's whole height and the glyph lit while the
-   * pointer was still on the title beside it. `[@media(pointer:coarse)]:` is what
-   * keeps the 44px for the thumb it was measured for and gives a mouse the 24px
-   * it can actually aim at. The top of this file has the mechanism.
-   */
   sm: "relative h-6 w-6 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-2.5 [@media(pointer:coarse)]:after:content-['']",
-  /**
-   * 32px of ink, 44px of target — the whole of the composer's control row.
-   *
-   * It exists because the paperclip was the deleted `md`, 36px, which made it the
-   * one control in that row that was not the height of the pills beside it — the
-   * measurement that survives its entry. Send and Stop take it too now, so the
-   * row is one height from end to end and the filled circle is the same box as
-   * the chips rather than a third larger than them. Grown the same way `sm` is, and
-   * **vertically only**, which is the difference between the two: these sit
-   * `gap-1.5` apart, so a symmetric `-inset-2.5` would put this button's target
-   * over the mode chip's *face*, and the chip beside it changes the model.
-   *
-   * Both halves of the asymmetry are measured rather than tidy, and
-   * {@link TAP_GROW_Y} carries them: 4px up into the row's own `mt-1.5`, 8px down
-   * into the composer box's bottom padding and past its border, where nothing is
-   * pressable.
-   */
   chip: `relative h-8 w-8 ${TAP_GROW_Y}`,
-  /**
-   * 32px of ink, 44px of target, grown **symmetrically** — a head row's own
-   * leading or trailing control.
-   *
-   * The ◀ and the ✕ in a pop-up's head were `sm`, so a 12px glyph in 24px of ink
-   * was the way out of every settings screen, every plugin screen and the agent
-   * builder. Reported as hard to see rather than hard to hit, which is exactly
-   * what it was: the target had been 44px all along.
-   *
-   * **32px rather than `lg`'s 44px**, and the reason is weight rather than height:
-   * `SHEET_HEAD` is `min-h-14` with no vertical padding, so a 44px box does not
-   * reach that row's floor, let alone raise it — the docblock on `Sheet`'s chevron
-   * said it would and was wrong for four releases. What 44px of ink *would* do is
-   * put the largest object in the head beside a 28px title line, on a control
-   * nobody is looking for until they want it. 32px is also `WaitingHere`'s own
-   * height in that same row, so the head is one size from end to end.
-   *
-   * **Symmetric, unlike `chip`, and that is a fact about neighbours rather than a
-   * preference.** These sit alone at the end of a `gap-2` row, so 6px a side lands
-   * in the gap with 2px to spare; `chip` may not do that because the mode chip is
-   * 6px away and changes the model. And `sm`'s 10px cannot serve here for the same
-   * reason in reverse — it is 2px onto whatever shares the row.
-   *
-   * ⚠ **One per row edge.** Two of these adjacent at zero gap overlap by 12px of
-   * invisible target, which is a mis-tap with nothing on screen explaining it.
-   */
+  // One per row edge: two adjacent overlap by 12px of invisible target.
   nav: "relative h-8 w-8 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-1.5 [@media(pointer:coarse)]:after:content-['']",
-  /**
-   * 44px of box — the platform tap minimum reached the plain way.
-   *
-   * ⚠ This used to read "the composer's send button, and nothing smaller", and
-   * the composer's send button is `chip` now: 44px of *filled black* was the
-   * loudest object in the box and was asked to come down. What the sentence was
-   * protecting is unharmed — `chip` reaches the same 44px of target through
-   * `TAP_GROW_Y` — and what it was really warning against was the deleted `md`,
-   * which reached 36px and stopped. Every entry in this table clears the floor;
-   * which of them a slot wants is a question about weight.
-   */
   lg: "h-11 w-11",
 } as const;
 
-/**
- * The glyph each box holds, as a table rather than as a ternary.
- *
- * ⚠ **It was `size === "sm" ? 12 : size === "chip" ? 14 : 16`, and the fourth
- * entry would have taken its 16 by falling off the end of that chain rather than
- * by anybody choosing it.** Here 16 happened to be right; the next size added is
- * the one where a silent default is a 16px glyph in a 24px box. Keyed on the size
- * table itself, so an entry with no glyph is a compile error — the same move
- * {@link ICON_BUTTON_TONE} makes one line down.
- *
- * At least 4px of ink margin a side in every row, which is what keeps a glyph
- * from touching the hover ground it sits on; `webcheck` holds the arithmetic.
- */
 const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
   sm: 12,
   chip: 14,
@@ -2158,36 +676,13 @@ const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
 };
 
 const ICON_BUTTON_TONE: Record<ButtonTone, string> = {
-  // A *background* on hover, not just a colour. That is the whole point of this
-  // primitive existing: the hand-rolled copies it replaces changed a 15px glyph
-  // from `text-muted` to `text-fg`, which at phone size is very nearly invisible
-  // — so it was never clear what could be pressed. It matters more on paper than
-  // it did on the dark ground, because the values are closer together here.
   ghost: "text-muted hover:bg-raised hover:text-fg",
   primary: "bg-fg text-ink hover:bg-fg/85",
   plain: "border border-edge-strong bg-surface text-fg hover:bg-raised",
   destructive: "text-danger hover:bg-danger/10",
 };
 
-/**
- * A square button that is only an icon.
- *
- * Existed four times as a copied class string — `Header`, `SessionBrowser`, `NewSession`,
- * `SessionView` — none of which had focus styling and all of which had
- * colour-only hover. `label` is **required** rather than optional so the fifth
- * copy cannot be the one that ships with no accessible name; it becomes both
- * `aria-label` and, unless overridden, the tooltip.
- *
- * ⚠ **`size` is required for the same reason, and it took the same failure to
- * get there.** It defaulted to `md`, and `md` was the one entry in
- * {@link ICON_BUTTON_SIZE} that never reached 44px — so the argument `label`
- * makes about an accessible name held word for word about a tap target: the call
- * site that thinks about it least is the one a default has to be right for, and
- * this one was wrong precisely there. `webcheck` had to keep a list of the call
- * sites that omitted it, which is the shape of a defect nothing can fix for you.
- * Now there is no size a caller can get without naming, and no name that misses
- * the floor — the two halves of the same fix, and neither works alone.
- */
+/** label and size are both required, so no call site ships without a name or below the 44px floor. */
 export function IconButton({
   icon,
   label,
@@ -2207,53 +702,13 @@ export function IconButton({
   label: string;
   onClick?: () => void;
   tone?: ButtonTone;
-  /** Required, and not defaulted. See the ⚠ on this component. */
   size: keyof typeof ICON_BUTTON_SIZE;
-  /**
-   * `round` swaps this button's radius for a circle, and it is a **prop rather
-   * than a `className`** for a mechanical reason: Tailwind emits every utility at
-   * the same specificity inside one layer, so a `rounded-full` passed in would
-   * beat or lose to the `rounded-md` below by emission order rather than by
-   * intent. The same trap {@link ICON_BUTTON_SIZE} carries a ⚠ about.
-   *
-   * ⚠ **It is also an exception to this file's radius rule**, which reserves a
-   * circle for a *mark* — `StatusDot`, `Dot`, `Spinner` — and gives everything
-   * pressable `rounded-md`, with `tabPill` the one documented exception. There is
-   * a second now: the composer's send control, where a filled circle holding an
-   * arrow is the shape every phone chat client draws and a filled square reads as
-   * a stop button. It is deliberately narrow — one call site, one slot, and the
-   * three other things that occupy that slot (Stop and the two spinners) take it
-   * too, so the slot does not change shape under a thumb.
-   */
+  /** A prop rather than a className because radius utilities would race by emission order; only the composer's send slot is round. */
   shape?: "square" | "round";
   disabled?: boolean;
   /** Renders as `aria-pressed`. Omit for buttons that are not a toggle. */
   active?: boolean;
-  /**
-   * Renders as `aria-expanded`. Omit for buttons that do not disclose anything.
-   *
-   * Distinct from {@link active} and not a second spelling of it: `aria-pressed` is
-   * a two-state control that stays pressed, `aria-expanded` is a control that
-   * reveals a region. `AskCard`'s collapse is the second, and it arrived here
-   * carrying that attribute on a hand-rolled `<button>` — so the choice was to add
-   * this or to lose it in the move to the primitive, and losing an attribute is not
-   * a thing a refactor gets to do quietly.
-   */
   expanded?: boolean;
-  /**
-   * Renders as `aria-haspopup`. Omit for buttons that open nothing.
-   *
-   * Here for the reason {@link expanded} gives one paragraph up, applied a second
-   * time: `SessionBrowser`'s filter and `ProfileMenu`'s help were hand-rolled
-   * `h-9 w-9` buttons carrying `aria-haspopup="menu"`, and routing them through
-   * this primitive would otherwise have dropped it. Both call sites had already
-   * written the loss down as a ⚠ rather than hiding it, which is what made it
-   * findable — the attribute is cheaper to add than the note was to write.
-   *
-   * `aria-expanded` says a region is open; this says what kind of thing opens.
-   * A trigger normally wants both, and the two are independent: `AskCard`'s
-   * collapse discloses a region and pops up nothing.
-   */
   haspopup?: "menu" | "listbox" | "dialog";
   title?: string;
   type?: "button" | "submit";
@@ -2273,15 +728,11 @@ export function IconButton({
         shape === "round" ? "rounded-full" : "rounded-md"
       } disabled:pointer-events-none disabled:opacity-40 ${ICON_BUTTON_SIZE[size]} ${ICON_BUTTON_TONE[tone]} ${className}`}
     >
-      {/* The glyph comes down with the box: a 16px paperclip in a 32px square
-          reads as a bigger control than the 11–13px glyphs on the chips beside
-          it, which is the mismatch `chip` exists to remove. */}
       <Icon as={icon} size={ICON_BUTTON_GLYPH[size]} />
     </button>
   );
 }
 
-/** A lucide icon at the one size this app uses, so no caller picks its own. */
 export function Icon({
   as: Component,
   size = 14,
@@ -2295,34 +746,8 @@ export function Icon({
 }
 
 /**
- * A fold, so a fold in this app opens one way.
- *
- * ⚠ **Its own comment claimed that and it was not true, from the day it was
- * written.** It lived in `PluginConsent.tsx`, private, and said the grid
- * animation existed "so a fold in this app opens one way" — while `MarketEntry`
- * drew a native `<details>`/`<summary>` about 200px further down *the same
- * screen*, with an instant snap instead of a 200ms open and a disclosure triangle
- * the platform supplies rather than the chevron this one rotates. Two folds, one
- * card, two behaviours. A claim about how an app behaves cannot be kept by a
- * function nobody outside one file can reach, which is the whole reason this
- * moved rather than being copied.
- *
- * **A `<button>` and a `grid-template-rows` transition rather than `<details>`,
- * and both halves are load-bearing.** `<details>` keeps its open state nowhere
- * but the DOM, so nothing in React owns it: it survives exactly as long as the
- * element does, and every remount — a changed `key`, a branch above it swapping
- * — closes a fold somebody opened, for a reason that had nothing to do with the
- * fold. Holding it in `useState` is what makes it survive the re-renders these
- * screens drive themselves. And `<details>` cannot be animated: the content is
- * display-swapped, so there is no height to interpolate. The grid trick is the
- * one way to animate to `auto` height — the row goes `0fr → 1fr` and the overflow
- * is hidden by the child, so the content is never measured and never reflows the
- * page.
- *
- * `inert` on the collapsed half, not `hidden`, because a `0fr` grid row still
- * *contains* focusable children at zero height — without it, tabbing walks
- * straight into a fold that is closed, and a screen reader reads a list somebody
- * has not opened.
+ * A button with a grid-rows transition rather than details, so React owns the open state and the height can animate;
+ * inert keeps a closed fold out of the tab order.
  */
 export function Disclosure({
   label,
@@ -2330,40 +755,10 @@ export function Disclosure({
   first,
   defaultOpen = false,
 }: {
-  /**
-   * The closed line — what somebody is agreeing to open.
-   *
-   * A `ReactNode` rather than a string, because `MarketEntry`'s fold heads its
-   * own settings section and wants {@link SETTINGS_HEADING} type on the words
-   * while `PluginConsent`'s is body copy. The wrapper below is `text-fg`, which a
-   * node carrying its own `text-*` overrides the ordinary way — a colour applied
-   * to an element always beats one inherited from its parent, so this is not the
-   * Tailwind ordering trap {@link FIELD} documents.
-   */
   label: ReactNode;
   children: ReactNode;
-  /**
-   * Whether this is the first fold in a stack of them.
-   *
-   * Layout, and normally the caller's business — but this one is *between* two
-   * siblings rather than around one, so a caller cannot express it without
-   * knowing which of them is drawing the gap. `PluginConsent` passes `first={false}`
-   * flat: the blast-radius sentence is drawn above the fold unconditionally now, so
-   * something always precedes it and the old `!names` — which asked whether the card
-   * had drawn a heading — can no longer be false.
-   */
   first: boolean;
-  /**
-   * Whether it starts open.
-   *
-   * ⚠ **Read once, at mount, and changing it later does nothing** — it seeds
-   * `useState` and the fold is uncontrolled from then on, which is the point: a
-   * prop that reopened a fold somebody had just closed would be worse than no
-   * prop. Named for React's own `defaultValue`/`defaultChecked` convention so
-   * that is what a reader expects rather than something they have to discover.
-   *
-   * Defaults to closed, so no existing caller changes.
-   */
+  /** Read once at mount; the fold is uncontrolled after that. */
   defaultOpen?: boolean;
 }): ReactNode {
   const [open, setOpen] = useState(defaultOpen);
@@ -2397,79 +792,20 @@ export function Disclosure({
   );
 }
 
-/*
- * The menu's chrome, named once.
- *
- * There are two listboxes in this app that cannot be the same *component* —
- * `Dropdown` owns its own open state and renders a trigger button, while the
- * composer's command menu is opened by the text and never takes focus — and a
- * third inside `AgentConfigBar`, whose trigger has to render inside a pill. What
- * they must not differ in is how a menu *looks*, and three files agreeing on a
- * class list by copy is how two files start differing in only three words.
- *
- * Width, placement and any tighter height cap stay with the caller, because those
- * are the parts that legitimately differ: a control's menu is 15rem beside its
- * chip, the composer's is as wide as the composer, and only the composer's has to
- * fit above a soft keyboard.
- *
- * All three are wired up. They were not — `AgentConfigBar` went on hand-writing
- * the same class list with a row two-thirds the height, so the drift this comment
- * describes had already happened underneath it.
- */
 export const MENU_PANEL = `${LAYER.menu} max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
 
-/**
- * The tallest a menu panel can be, stated once and read rather than guessed.
- *
- * `max-h-72` above is 18rem. Everything that decides whether a menu fits has to
- * agree with the class that actually caps it, and the two ways this went wrong are
- * both live in this repository's history: a constant somebody picked by eye (240,
- * which was neither the cap nor any real panel's height), and the same question
- * answered twice in two files.
- */
+/** Must match MENU_PANEL's 18rem height cap. */
 export const MENU_MAX_PX = 288;
 
-/**
- * Which way a menu anchored to this trigger should open.
- *
- * ⚠ **The bound is the nearest *scrolling* ancestor, not the viewport, and that is
- * the whole of why this exists.** A menu panel is absolutely positioned, and
- * `SessionBrowser`'s own scroller comment already states the fact this rests on:
- * *a positioned descendant is part of the scrollable overflow region*. So a panel
- * that overflows the box it is inside does not merely hang out of it — it grows
- * that box's scroll extent, and a scrollbar appears down the side of the rail the
- * moment somebody taps a kebab. Measured against `window.innerHeight` instead, the
- * answer is "plenty of room" while the scroller it is actually inside ends two
- * hundred pixels higher up. That was the bug: the rail's list and the settings
- * pane are both `overflow-y-auto`, and both grew a bar on open.
- *
- * Upward has no such failure and that asymmetry is not luck: scrollable overflow
- * extends only past the block-end edge, so a panel above its trigger is clipped at
- * worst and never scrolled to. Which is why the answer is a direction rather than a
- * size, and why "does it fit below" is the only question asked.
- *
- * **One-shot, read at the tap and discarded.** Not a layout effect measuring the
- * panel after it mounts — that is exact and costs a second pass on every open — and
- * emphatically not a breakpoint held in state, which `AppShell` forbids because a
- * resized window cannot correct one. A measurement that is wrong is wrong for one
- * open. {@link MENU_MAX_PX} is deliberately the *cap* rather than a panel's real
- * height, so a two-item menu near the bottom opens upward when it would have fitted
- * — the cheaper of the two errors by a long way.
- */
+/** Bounded by the nearest scrolling ancestor, not the viewport, because an overflowing panel grows that scroller. */
 export function menuPlacement(trigger: Element | null, needed: number = MENU_MAX_PX): "up" | "down" {
   if (trigger === null) return "down";
   const rect = trigger.getBoundingClientRect();
   let floor = window.innerHeight;
   for (let node = trigger.parentElement; node !== null; node = node.parentElement) {
-    // `documentElement` and `body` are the viewport's own scrollers and are
-    // already what the fallback means; walking into them would answer the same
-    // thing twice and, for `body`, with a rect that is the content height rather
-    // than the window.
     if (node === document.body || node === document.documentElement) break;
     const overflow = window.getComputedStyle(node).overflowY;
-    // `overlay` is WebKit's, and it scrolls exactly like `auto` — it only paints
-    // differently. Leaving it out would miss the one engine this app runs in
-    // inside the native shell.
+    // overlay is WebKit's and scrolls exactly like auto.
     if (overflow === "auto" || overflow === "scroll" || overflow === "overlay") {
       floor = Math.min(floor, node.getBoundingClientRect().bottom);
       break;
@@ -2477,152 +813,26 @@ export function menuPlacement(trigger: Element | null, needed: number = MENU_MAX
   }
   return floor - rect.bottom < needed ? "up" : "down";
 }
-/**
- * One row in a menu: 44px, and its cross-axis alignment stated rather than
- * defaulted.
- *
- * ⚠ **A function rather than a constant, because a constant could not be
- * overridden and seven call sites believed it could.** This was
- * `MENU_ROW = "… items-start …"`, and the four rows in `ProfileMenu`, the filter
- * in `SessionBrowser`, `RowAction` below and the plugin row in `MachineInstalls`
- * all wrote `` `${MENU_ROW} items-center` `` — including {@link RowAction}, whose
- * own docblock said so in words. **None of them won.** Tailwind v4 emits its
- * utilities in alphabetical order, so `.items-center` is printed *before*
- * `.items-start` in the stylesheet and the constant outranks the append no matter
- * which way round the class string reads. Order inside a `class` attribute
- * decides nothing; order inside the generated CSS decides everything.
- *
- * What that looked like: a 14px icon pinned to the top of a `text-xs` line box
- * while the glyphs beside it start a half-leading plus the ascender/cap-height
- * gap lower — reported as "the text sits slightly below the icons to its left".
- *
- * Two values and no default, which is the whole point of the pair. `start` is for
- * a row that can carry a description under its label — `Dropdown`'s rows,
- * `CommandMenu`'s, `AgentConfigBar`'s — and each of those pads its leading glyph
- * with `mt-0.5` to match. `center` is for a row that is one line. Leaving
- * `items-*` off altogether was the other candidate and is worse: flex defaults to
- * `stretch`, which stretches the icon rather than aligning it, so a call site that
- * forgot would fail in a way nobody reads as forgetting.
- *
- * `webcheck` sweeps every call site of every exported class-string constant for
- * an appended utility from a family the constant already sets, which is the
- * mechanism this comment cannot be.
- */
+/** Alignment is an argument because an appended alignment utility loses to the base one by stylesheet order. */
 export function menuRow(align: "start" | "center"): string {
-  /*
-   * Both class names written out, never `items-${align}`. Tailwind extracts
-   * candidates by scanning source *text*, so an interpolated utility is a rule it
-   * never generates — and the failure is silent, since flex would then fall back
-   * to `stretch` and the icon would grow instead of moving.
-   */
+  // Both class names written out: Tailwind never generates an interpolated utility.
   const cross = align === "center" ? "items-center" : "items-start";
   return `tap flex min-h-11 w-full ${cross} gap-2 rounded-md px-2.5 py-3 text-left text-xs`;
 }
-/**
- * The caps heading *inside a popover*, and the only one of the three that carries
- * its own padding.
- *
- * The same type as {@link SETTINGS_HEADING} at one tone quieter — `text-faint`
- * rather than `text-muted` — because a menu's heading sits on `MENU_PANEL` above
- * rows that are themselves the content; on a settings screen the heading is the
- * loudest thing in its band. The padding is here rather than at the caller for the
- * opposite reason to {@link SETTINGS_HEADING}'s: every popover heading in the app
- * wants the same `px-2.5` as the rows under it, and a heading that did not share
- * that left edge is the one arrangement worth preventing.
- *
- * ⚠ It had no docblock at all for four releases and was documented only *by
- * reference*, from {@link SETTINGS_HEADING} and from three call sites — which is
- * how the caps idiom came to be written out by hand instead. Measured for Q5.115
- * on 2026-09-08: the trio `uppercase` + `tracking-wider` + `font-semibold` appears
- * **fifteen times across thirteen files**, and **nine** of those sites used none
- * of the three constants that already owned it. The count is Q5.115's rather than
- * restated here, for the reason the rule gives one file over.
- */
+/** The caps idiom (uppercase, tracking-wider, font-semibold) belongs to these constants and FIELD_LABEL; webcheck's census lists every hand-written copy (Q5.115). */
 export const MENU_HEADING =
   "px-2.5 py-1.5 text-2xs font-semibold tracking-wider text-faint uppercase";
 
-/**
- * The app's section heading — a named band of anything, not only of settings.
- *
- * Written out **fourteen times** across five files before this, and the string
- * itself had not yet drifted — what had drifted is everything around it.
- * `AccountSection` and `ServerSection` put the heading inside a
- * `<section className="mt-8 border-t border-edge pt-5">`; `MachinesSection` and
- * `UsersSection` hung an `mt-6` on the `<h2>` itself and drew no rule at all;
- * `AgentsPanel` used the same type on a `<div>` and therefore has no headings.
- * So five sections of one screen were separated by three different amounts of
- * nothing, which is most of why this screen reads as unfinished.
- *
- * Two constants rather than one, because the pair **is** the rule: the *first*
- * section on a screen takes {@link SETTINGS_HEADING} alone — a rule above the
- * first thing on a page is a line under the title — and every section after it
- * takes {@link SETTINGS_SECTION} too. That asymmetry is why a single combined
- * string would be wrong at exactly one call site per file, which is how a
- * hand-written `mt-6` got there in the first place.
- *
- * Deliberately **not** {@link MENU_HEADING}, which is the same type at
- * `text-faint` with popover padding, and not the nav's heading either, which
- * composes this with `px-4 pt-4 pb-1` so it shares a left edge with its rows.
- * Layout stays with the caller, for the reason {@link FIELD} gives.
- *
- * **The name is narrower than the reach and stays that way.** It also heads a
- * field on the gate and the sign-in screen, a column on a plugin's view and a
- * table in the key list — seven call sites that had written the string out by
- * hand. Renaming it to match would break the citation `docs/DECISIONS.md` makes
- * of this symbol, which `docscheck` asserts; the sentence is cheaper than the
- * churn. `.claude/rules/web-typography.md` is where the three of these are
- * distinguished, and the distinction is a *colour*, never a size.
- */
+/** The first section on a screen takes this alone; later ones add SETTINGS_SECTION. */
 export const SETTINGS_HEADING = "text-2xs font-semibold tracking-wider text-muted uppercase";
-/** A settings section below the first: the gap, the rule, and the gap under it. */
 export const SETTINGS_SECTION = "mt-8 border-t border-edge pt-5";
 
-/**
- * A tab in a strip of them.
- *
- * ⚠ **The same pill the machine bar in the rail draws, and it is one function so
- * it stays that way.** That component argues the palette decision at length and
- * it is not repeated here, only the conclusion: a selected tab is `bg-raised`,
- * because `raised` means *state* in this app and `bg-fg` means the affirmative
- * action inside a decision — a near-black pill for "you are looking at this" was
- * the loudest object on a page whose whole palette sits within 1.22:1. And an
- * unselected tab keeps `raised/50` rather than nothing, or a strip of two reads
- * as one tab and one label, with the only cue that the strip is a strip existing
- * where you already are.
- *
- * A function rather than two constants because the pair *is* the rule: the two
- * states are only meaningful against each other, and two exported strings is an
- * invitation to use one of them somewhere the other never appears.
- *
- * `min-h-8` is 32px and deliberately below the 44px floor, which the rail's own
- * pills already are: this is navigation between two views of the same pop-up, not
- * a control that answers anything. `webcheck`'s 44px sweep covers the three cards
- * where a mis-tap *decides* something, and this is not one of them.
- */
 export function tabPill(selected: boolean): string {
   return `tap flex min-h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs whitespace-nowrap ${
     selected ? "bg-raised font-medium text-fg" : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
   }`;
 }
 
-/**
- * One row in a pop-up's left rail — a settings section, a market tab.
- *
- * ⚠ **The row is shared and the list is not, and the split is where the drift
- * actually is.** What two rails must agree on is height, padding, the active wash
- * and the chevron: they sit one tap apart inside sheets that look the same, so a
- * 2px difference reads as two apps. What they must *not* share is which rows
- * exist — for settings that is `navRows(me)`, a function precisely because
- * computing it in JSX draws a **Server** heading over nothing for a non-admin, and
- * a generalised list component would hand that obligation back to the caller.
- *
- * `blurb` is optional because a market tab is a word: a second line of prose under
- * "Market" would be a caption for a noun.
- *
- * `bg-raised` for the active row is `raised`'s one meaning — state, the tab you are
- * on, the toggle that is on — and never `bg-fg`, which is the affirmative action
- * inside a decision and would make a navigation row the loudest thing on screen.
- */
 export function RailRow({
   title,
   blurb,
@@ -2650,85 +860,7 @@ export function RailRow({
   );
 }
 
-/**
- * The row this app draws wherever something is chosen or opened.
- *
- * ⚠ **There are six of it, and three of those are byte-identical to each other.**
- * `ChooseRow` and `PickRow` in `AgentBuilder.tsx` and the system row in
- * `SystemsPanel.tsx` are the three this was extracted from. `AgentsPanel`'s agent
- * row, `MachinesSection`'s machine row and `InstalledList`'s plugin row are the same
- * `min-h-14 w-full items-center gap-3 rounded-lg border border-edge bg-surface px-3
- * py-2.5 text-left hover:border-edge-strong` typed out again, and they are named
- * here so the remainder is a known one rather than a grep somebody has to think to
- * run. Two of those three put a {@link Badge} *inside* the title line, which
- * `title: string` cannot express — so they wait for the prop that would let them,
- * rather than this carrying a prop nothing calls yet.
- *
- * The three it does cover had already drifted exactly where drift shows: `gap-3`
- * against `gap-2.5`, a subline at `text-muted` on one against `text-faint` on the
- * other two, and one title of the three at `font-medium`. That is `SearchBox`'s
- * argument one screen over, verbatim — a copy is a second chance to be wrong the
- * next time a rule is applied to it — and the rule that arrived next was the
- * disabled treatment below, which would otherwise have had to land three times and
- * be right three times.
- *
- * **A live row's boundary is `edge-strong`, and it is the whole of what says the
- * row is a control.** These sit in {@link SHEET_BODY}, which is `bg-surface`, so a
- * live unselected row is a white control on a white ground — the job `index.css`
- * holds that token at ≥3:1 for (4.40:1 here) and says outright that `edge` (1.31:1)
- * may never do. It was `border-edge` with `hover:border-edge-strong` over the top,
- * which breaks that rule twice in one class string: a hairline as the
- * identification, and a hover that jumps #E3E1DD → #7B7873, louder than the press it
- * accompanies. Hover moves the **fill**, and so does selection, so the box a pointer
- * travels over is one shape from first paint to last.
- *
- * ⚠ **A disabled row hands that boundary back, and the sweep that put `edge-strong`
- * on every state is what made this necessary to write down.** Reported off the
- * harness picker in `AgentBuilder`: two refused rows were indistinguishable from the
- * one pressable row, because the strong border *is* this app's signal "you can press
- * this" and the sweep applied it unconditionally. What was left to tell them apart
- * was a title one step quieter and a hover a phone does not have.
- *
- * WCAG 1.4.11 settles it in the same direction rather than against it. It asks 3:1
- * of "visual information required to identify user interface components and states,
- * **except for inactive components** or where the appearance of the component is
- * determined by the user agent and not modified by the author" — so an inert row is
- * exactly the case the floor exempts, and `edge-strong` on a greyed row is not
- * merely unneeded but actively false. `edge` measures 1.31:1 against `surface` and
- * 1.07:1 against a *selected* disabled row's own `bg-raised`; both are fine, because
- * neither is identifying anything. The box does not move — `border` and `rounded-lg`
- * are unconditional — so nothing reads as having grown when a row goes live, which
- * is the failure {@link BUTTON_TONE} measured when it tried `disabled:opacity-40`
- * on an outlined control.
- *
- * ⚠ **Disabled dims the ink upwards, and there is no opacity anywhere on this row.**
- * It was `disabled:opacity-40`, which composites the whole control — the subline
- * included, and on these rows the subline *is the refusal*: why this harness cannot
- * run that model, or which system has no key on this machine. Measured over
- * `surface` (#FFFFFF), `--color-faint` at 40% is #C2BFB9 = 1.83:1 and `--color-fg`
- * at 40% is 2.51:1 — against a token whose floor exists precisely because almost
- * every use of it is 12px. A refusal has to be **more** legible than the label it
- * refuses, never less. So the title steps down to `muted` (7.75:1), the glyph to
- * `faint`, and the subline stays exactly where it was (6.23:1 on `surface`, 5.09:1
- * inside a selected row).
- *
- * Those two paragraphs are one treatment: a handed-back boundary, a quieter title,
- * and a refusal left at full strength. **Three signals for one state**, which is the
- * count `AskCard`'s `CHOSEN` argues for on the rows a person answers with and the
- * count the rail spends on a waiting session — and it is three because with the
- * palette monochrome there is no hue left to spend on a fourth.
- *
- * ⚠ **A row can be selected *and* disabled**, and `AgentBuilder`'s two pickers both
- * reach it: a preset restored from a machine that no longer has that harness, or a
- * model whose system has since lost its key. The fill and the check stay — those
- * say *which one is chosen*, which is still true — and the boundary is decided by
- * `disabled` first, so a chosen row that cannot be acted on does not claim it can.
- *
- * `selected` is left `undefined` where nothing is being chosen, which is
- * {@link IconButton}'s `active` idiom and carries the same two consequences: no
- * `aria-pressed`, and no reserved check slot. Reserving one on a list that has no
- * selection is a column of empty space down the end of every row.
- */
+/** A disabled row hands back the strong border and dims its title and glyph, never the subline, which carries the refusal. */
 export function ChoiceRow({
   glyph,
   title,
@@ -2739,25 +871,12 @@ export function ChoiceRow({
   disabled = false,
   onClick,
 }: {
-  /** Drawn before the label — a harness's mark, and nothing that is a control. */
   glyph?: ReactNode;
   title: string;
-  /**
-   * The title is a prompt rather than an answer — `Choose` — so it is drawn at the
-   * same `muted` a disabled row's title takes. There is no third step to spend on
-   * telling those two apart: the subline under it is already `faint`, and a title
-   * quieter than its own subline inverts the row.
-   */
   placeholder?: boolean;
   subline?: string | null;
-  /**
-   * Whatever hangs off the end and is not the check: a chevron on a row that opens
-   * a screen, a {@link Badge} on one that carries a state, the harness marks on a
-   * model. It is drawn *before* the check slot, so becoming the answer never
-   * displaces it.
-   */
   trailing?: ReactNode;
-  /** Omit where nothing is being chosen. See the docblock. */
+  /** Omit where nothing is being chosen: no aria-pressed and no check slot. */
   selected?: boolean;
   disabled?: boolean;
   onClick: () => void;
@@ -2768,23 +887,7 @@ export function ChoiceRow({
       disabled={disabled}
       onClick={onClick}
       aria-pressed={selected}
-      /*
-       * ⚠ **`:hover` still matches a disabled `<button>`**, so the hover fill is
-       * granted by state rather than taken back by a `disabled:` variant — which
-       * would also have to know what a *selected* row's ground is, and would
-       * repaint it `bg-surface` under a pointer. Three states, one expression.
-       *
-       * The border is asked `disabled` before `selected` for the reason in the
-       * docblock: a row that is both is chosen and still cannot be pressed, so the
-       * fill stays and the boundary goes.
-       *
-       * ⚠ `border` is written into **both** arms rather than hoisted out in front
-       * of them. Hoisting it reads better and costs the one property this pair is
-       * about: `webcheck` reads this file off disk — no type can hold a class
-       * string — and asks for the literal `border border-edge-strong`, which a
-       * hoisted `border` splits in two. The width never varies, so the two arms
-       * cannot disagree about it.
-       */
+      // Hover is granted by state, since hover still matches a disabled button; border sits in both arms because webcheck matches each literal.
       className={`tap press flex min-h-14 w-full items-center gap-2.5 rounded-lg ${
         disabled ? "border border-edge" : "border border-edge-strong"
       } px-3 text-left ${
@@ -2808,9 +911,6 @@ export function ChoiceRow({
       </span>
       {trailing}
       {selected !== undefined && (
-        // Reserved rather than conditional, so a row does not move when it becomes
-        // the answer — which is the whole of why the check has a slot of its own
-        // instead of being another `trailing`.
         <span className="inline-flex w-4 shrink-0 justify-center text-fg">
           {selected && <Icon as={Check} size={14} />}
         </span>
@@ -2819,36 +919,7 @@ export function ChoiceRow({
   );
 }
 
-/**
- * One act inside a settings row's kebab.
- *
- * Promoted out of `UsersSection` when `MachinesSection` grew a kebab of its own,
- * rather than copied: a second hand-written copy is how one of the two loses
- * `role="menuitem"`, or picks a slightly different danger wash, and nothing
- * anywhere says they were meant to match. A menu act is one line, so it asks
- * {@link menuRow} for `center`; a `Dropdown` row, which can carry a description
- * under its label, asks for `start`. ⚠ This sentence used to say "overrides it to
- * `items-center`", and the override did not work for a year — see `menuRow`.
- *
- * **`danger` is a tone here and not a {@link DangerButton}, deliberately.** That
- * component's "must lead with a glyph" rule is about a *button among buttons* —
- * on a settings row there were five outlined buttons and exactly one deleted
- * something. A menu is a list of words in which one of them is the only red
- * thing, which is a stronger signal than a 13px icon; icons on some items and
- * not others would also put the labels on two left edges. It is the same
- * `text-danger` over a `danger/15` hover that `SessionMenu`'s own destructive
- * item uses. The irreversible half is unchanged and lives on the row: this opens
- * the two-step confirmation, it never performs the act.
- *
- * In `UsersSection` it replaced `ToggleDisabled`, which existed to give Disable a
- * `Ban` glyph and Enable an ordinary button — a distinction a menu draws with one
- * word.
- *
- * **`disabled` keeps the row and dims the label**, for the reason `PluginsPanel`'s
- * Open row gives: a control that vanishes is one somebody goes looking for, and a
- * row that says why it will not act is the answer. `focusableRows` already skips
- * a `:disabled` button, so it is not a stop on the way to one either.
- */
+/** Opens the two-step confirmation and never performs the act; danger is a tone here, not a DangerButton. */
 export function RowAction({
   label,
   onClick,
@@ -2874,39 +945,11 @@ export function RowAction({
   );
 }
 
-/**
- * The rows a panel can move focus between: its own enabled buttons, in document
- * order.
- *
- * A live DOM query on every keystroke rather than a registry of refs, and that is
- * the choice that keeps this usable by {@link Menu}, whose children are a caller's
- * render prop and therefore unknowable from here. It is also correct where a
- * registry is merely convenient: the set changes as a list filters, and a query
- * cannot go stale between a row unmounting and a ref being cleaned up.
- *
- * `:disabled` is excluded because a control that will not act must not be a stop on
- * the way to one, which is the same sentence `index.css` writes about the pointer
- * cursor.
- */
 function focusableRows(panel: HTMLElement): HTMLElement[] {
   return Array.from(panel.querySelectorAll<HTMLElement>("button:not(:disabled)"));
 }
 
-/**
- * Bring a row into view by scrolling **only the panel**.
- *
- * `.focus()` on its own runs the spec's "scroll an element into view" up the whole
- * containing-block chain rather than stopping at the nearest scroller. Both popups
- * here are `absolute` children of a box that is routinely inside `SHEET_BODY`
- * (`overflow-y-auto`), and an absolutely-positioned panel still contributes to that
- * box's scroll height — so revealing a row deep in a `max-h-72` list scrolled the
- * *sheet* as well, moving the form under the pointer at the moment of opening.
- *
- * Rectangles rather than `offsetTop`, deliberately: `offsetTop` is measured from
- * `offsetParent`, which is the panel only while no caller wraps its rows in a
- * positioned element — and `Menu` takes a render prop, so that is a promise this
- * file cannot make. Rect deltas are the same arithmetic with nothing to get wrong.
- */
+/** Scrolls only the panel, since focus alone would also scroll the enclosing sheet. */
 function revealWithin(panel: HTMLElement, row: HTMLElement): void {
   const rowBox = row.getBoundingClientRect();
   const panelBox = panel.getBoundingClientRect();
@@ -2914,67 +957,7 @@ function revealWithin(panel: HTMLElement, row: HTMLElement): void {
   else if (rowBox.bottom > panelBox.bottom) panel.scrollTop += rowBox.bottom - panelBox.bottom;
 }
 
-/**
- * Arrow keys inside a panel that has already claimed a widget role.
- *
- * ⚠ **This exists because the roles were drawn and never implemented.** `Menu`
- * renders `role="menu"`, `Dropdown` renders `role="listbox"` with `role="option"`
- * and `aria-selected` on every row, and a grep for `ArrowDown` across the whole of
- * `packages/web` returned one hit, in the composer's own slash menu. So a screen
- * reader announced "listbox, 8 options" and then not one arrow key moved anything.
- * A widget role is a promise about behaviour; drawing one and not keeping it is
- * worse than drawing a `<div>`, because it is the announcement that makes a
- * keyboard user go looking for a control that is not there.
- *
- * **The listener is on the panel and never on `window`, and that is what keeps it
- * out of everybody else's way.** Focus is moved into the panel when it opens, so an
- * element handler is all that is needed — and this app has exactly two global
- * keydown listeners on purpose (`overlay.ts`'s single Escape arbiter and
- * `AskCard`'s digit shortcuts), each of which had to reason about the other. A
- * third would have had to reason about both. Escape is not read here at all: it
- * belongs to `overlay.ts`, which knows whether a sheet has opened over this menu
- * since, and `listNavKey` returns `null` for it so the key travels there untouched.
- *
- * **Focus goes to the selected row, not the first**, so opening a control you have
- * already set puts the keyboard on the value you are changing rather than at the
- * top of a list you then have to walk. `aria-selected` is the test, which is why
- * this works for `Dropdown` and degrades to "first row" for `Menu`, where nothing
- * is selected because nothing is a value.
- *
- * **The panel itself is focusable (`tabIndex={-1}`) and is the fallback**, which is
- * two fixes in one line. A panel whose rows are a caller's prose — `ProfileMenu`'s
- * `HelpButton` is one — would otherwise never take focus at all, so it announced
- * `role="menu"` and still answered no key. And because the handler is
- * element-scoped, focus *leaving* the rows is the same as the widget going dead:
- * the focused row can unmount under a poll (`NewSession`'s machine list, a
- * conditional row in `UsersSection`), the browser drops focus to `<body>`, and from
- * there no arrow key can reach this handler to get back in. With the panel holding
- * focus, `rows.indexOf` answers -1 and `nextOptionIndex` takes the near end — which
- * is what that arm was written for and, until this line, could not be reached from
- * here at all.
- *
- * **And it hands focus back.** Without the cleanup, closing the panel drops focus to
- * `<body>` and a keyboard user is returned to the top of the document, which in this
- * app means the rail. Two details, both borrowed from `Sheet`, which solved this
- * first and whose version this now matches: the restore is guarded on `isConnected`
- * because the trigger routinely does not survive a poll, falling back to
- * `document.body` rather than throwing away the intent; and it is
- * `{preventScroll: true}`, because the outside-`pointerdown` that closes a panel is
- * also what the *start of a touch scroll* looks like — finger down, panel closes, a
- * task later the passive cleanup scrolls the sheet back to the trigger, fighting the
- * scroll the reader just began.
- *
- * ⚠ The `contains` arm of that guard is **all but dead and is kept rather than
- * trusted**: React runs a passive cleanup after the mutation phase, so the panel is
- * already detached and the browser has already reset `document.activeElement` to
- * `<body>` — the arm that actually fires is the `body` one. It stays because it is
- * the correct question to ask and costs nothing, but do not read it as the guard
- * doing the work.
- *
- * Not applied to `AgentConfigBar`'s hand-rolled panels, which build their own
- * markup from `MENU_PANEL` rather than going through either component here. Named
- * so it is a known remainder rather than an oversight.
- */
+/** Arrow keys on the panel element, never on window; Escape belongs to overlay.ts, and focus returns to the trigger on close. */
 function useListKeys(open: boolean): {
   panelRef: RefObject<HTMLDivElement | null>;
   onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
@@ -3006,9 +989,7 @@ function useListKeys(open: boolean): {
   return {
     panelRef,
     onKeyDown: (event: ReactKeyboardEvent<HTMLElement>): void => {
-      // Built by hand rather than passed through, because `isComposing` lives on
-      // the *native* event and the synthetic one does not carry it — and an arrow
-      // key mid-composition is how an IME walks its own candidate list.
+      // Built by hand: isComposing lives only on the native event.
       const action = listNavKey({
         key: event.key,
         shiftKey: event.shiftKey,
@@ -3023,42 +1004,16 @@ function useListKeys(open: boolean): {
       const rows = focusableRows(panel);
       const at = nextOptionIndex(action, rows.indexOf(document.activeElement as HTMLElement), rows.length);
       if (at === null) return;
-      // Only once something will actually move: an unhandled Home in a panel
-      // should still scroll whatever contains it.
       event.preventDefault();
       const row = rows[at];
       if (row === undefined) return;
-      // Same `preventScroll` + `revealWithin` pair as the open path, and for the
-      // same reason: following focus down a list must move the list, never the
-      // sheet the list happens to be sitting in.
       row.focus({ preventScroll: true });
       revealWithin(panel, row);
     },
   };
 }
 
-/**
- * A panel anchored to the thing that opened it.
- *
- * The fourth copy of "anchored panel + outside-pointerdown + Escape" in this
- * package, promoted rather than written again — `Dropdown`, `SessionMenu` and
- * `AgentConfigBar`'s overflow each own a version, and they cannot be one component
- * because their triggers are genuinely different (a full-width button, a kebab, a
- * pill). What they must not differ in is the behaviour, and three files agreeing
- * by copy is how two of them start differing in three words.
- *
- * **It does not portal, and that is the point.** `Sheet` portals because `fixed`
- * has to mean the viewport; this is `absolute` against its trigger's `relative`
- * wrapper, which is the only way to anchor something *without measuring the
- * viewport* — and measuring it is breakpoint-state-in-JavaScript wearing a hat.
- * `placement` and `align` are props; the primitive never measures, and `Dropdown`'s
- * docblock says what a caller may measure on the tap.
- *
- * The caller is responsible for one thing: no ancestor between the trigger and the
- * scroll container may clip. That is why `AppShell`'s rail moved its `overflow` to
- * an inner box — a footer popover inside an `overflow-y-auto` aside is a popover
- * with its top half cut off.
- */
+/** A panel anchored to its trigger: absolute and never portalled, so no ancestor between trigger and scroller may clip. */
 export function Menu({
   trigger,
   children,
@@ -3067,7 +1022,6 @@ export function Menu({
   className = "",
   panelClassName = "",
 }: {
-  /** Rendered inside the anchor, given the open state so it can show it. */
   trigger: (open: boolean, toggle: () => void) => ReactNode;
   children: (close: () => void) => ReactNode;
   placement?: "up" | "down";
@@ -3112,57 +1066,18 @@ export function Menu({
   );
 }
 
-/**
- * One item in a {@link Dropdown}.
- *
- * `group` is a heading rendered above the first item that carries it, so a list
- * that arrives grouped (ACP's model picker does) keeps its structure.
- */
 export interface DropdownItem<T> {
   value: T;
   label: string;
-  /**
-   * The second line, and on a {@link disabled} item it is **the refusal** — every
-   * caller that passes both passes the reason here. It is drawn at full
-   * `text-faint` in every state for that reason; see the row's own comment.
-   */
+  /** On a disabled item this is the refusal, so it stays at full strength. */
   description?: string | null;
   group?: string | null;
-  /**
-   * Unusable, and still listed. Filtering an item out answers "where did my laptop
-   * go" with silence, which is `MachinePicker`'s rule and `AgentStrip`'s after it —
-   * so an item that arrives `disabled` owes a {@link description} saying why.
-   */
+  /** Unusable but still listed; a disabled item owes a description saying why. */
   disabled?: boolean;
-  /** Drawn before the label. For a machine's reachability dot, and the like. */
   adornment?: ReactNode;
 }
 
-/**
- * The one popover picker.
- *
- * Promoted out of `AgentConfigBar`, which had the only good one: outside-pointerdown
- * dismissal (not blur — the menu is made of buttons, and blur fires before the
- * click that chose one lands), the full listbox ARIA set, group headings, check
- * marks and per-row descriptions. Everything else that needed to pick one of many
- * was reimplementing some subset of that, or — in the two machine pickers — was an
- * unbounded wrap of buttons with no hover state at all.
- *
- * **The rule this exists to serve:** a control whose option count can exceed about
- * five is a dropdown; a fixed set of five or fewer is chips. An unbounded wrap
- * reflows the page every time the fleet changes size, and on a phone it pushes the
- * fields below it off the screen. The deliberate exception is `PermissionCard`,
- * where every option must be visible at once — hiding "reject" behind a popover is
- * a safety regression on the one screen where that matters.
- *
- * `placement` is a prop, and the primitive itself never measures. A caller may
- * decide it from where the trigger is **at the moment of the tap** — `UsersSection`
- * reads the row's rect against the viewport and hands the answer in — because a
- * kebab near the bottom of a sheet used to open downward off the screen by its
- * *index*. That is a one-shot geometry read, discarded on close, and not the thing
- * `AppShell` forbids: a breakpoint held in JavaScript state, which a resized window
- * cannot correct. A measurement that is wrong is wrong for one open.
- */
+/** The one popover picker, for any control whose option count can exceed about five; placement is the caller's, read at the tap. */
 export function Dropdown<T extends string>({
   items,
   value,
@@ -3179,9 +1094,7 @@ export function Dropdown<T extends string>({
   items: readonly DropdownItem<T>[];
   value: T | null;
   onChange: (value: T) => void;
-  /** What the closed button shows. A node, so a caller can put a dot or a badge in it. */
   trigger: ReactNode;
-  /** Small uppercase label above the list, naming what is being chosen. */
   heading?: string;
   placement?: "up" | "down";
   disabled?: boolean;
@@ -3194,18 +1107,7 @@ export function Dropdown<T extends string>({
   const boxRef = useRef<HTMLDivElement | null>(null);
   const { panelRef, onKeyDown } = useListKeys(open);
 
-  /*
-   * Escape goes through the one arbiter now; the outside press stays here.
-   *
-   * They are different gestures with different correctness arguments, and only
-   * one of them can collide with anything. An outside `pointerdown` is scoped by
-   * construction — it asks whether the press landed inside *this* box — and it is
-   * deliberately not `blur`, because the menu is made of buttons and blur fires
-   * before the click that chose one lands. Escape is global, and a keyboard user
-   * who opened this has no "outside" to press, so it has to be handled; that is
-   * exactly why it belongs to `overlay.ts`, which knows whether a sheet has opened
-   * over this menu since.
-   */
+  // Escape goes through overlay.ts; only the outside press is handled here.
   useDismissible("menu", () => setOpen(false), open);
 
   useEffect(() => {
@@ -3226,17 +1128,7 @@ export function Dropdown<T extends string>({
         title={title}
         aria-haspopup="listbox"
         aria-expanded={open}
-        // 32px is a comfortable pill on a desktop and under the 44px platform
-        // minimum on a phone, so the two are stated separately rather than one
-        // being made to cover both. In CSS and not in JavaScript, because
-        // `AppShell` is explicit that this app holds no breakpoint state — a
-        // media query cannot disagree with the window it is in.
-        //
-        // The disabled arm dims the label and nothing else, for the reason
-        // {@link BUTTON_TONE} argues at length: this trigger is `bg-surface` on a
-        // `bg-surface` sheet, so its border is the whole of what says a control is
-        // there, and `disabled:border-edge` took that to 1.31:1 — the third copy of
-        // that deletion, on the one control in this file that is also a value.
+        // The disabled trigger dims its label only: its border is all that marks it as a control.
         className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:text-faint [@media(pointer:coarse)]:min-h-11"
       >
         {trigger}
@@ -3271,55 +1163,7 @@ export function Dropdown<T extends string>({
                     setOpen(false);
                     if (!selected) onChange(item.value);
                   }}
-                  // `min-h-11` is the same 44px every other menu row in this app
-                  // uses, and it is not gated on a coarse pointer the way the
-                  // trigger above is: `SessionMenu`'s items are the same shape and
-                  // one of them is `Stop`, so there is exactly one menu-row height
-                  // rather than one per file. `py-3` sizes the single-line case to
-                  // almost exactly that on its own, so a row with a description
-                  // grows rather than the short ones looking top-heavy.
-                  // Selection is weight, not colour, and the reserved 12px `Check`
-                  // slot below was already doing most of the work — the accent
-                  // text was a second mark for the same fact.
-                  //
-                  // ⚠ **No opacity, and this row was the last control in this file
-                  // still spending one.** It was `disabled:opacity-40
-                  // disabled:hover:bg-transparent`, which composites the row whole
-                  // — `item.description` with it, and on the live caller that
-                  // description *is* the refusal: `MachinePicker` in
-                  // `NewSession.tsx` passes `unusableReason(machine)` as the
-                  // description and `why !== null` as `disabled`, so an offline or
-                  // read-only machine drew its **name** at 2.51:1 (13px) and the
-                  // whole of **why it cannot be reached** at 1.83:1 (12px) over
-                  // this panel's own `bg-surface` (#ffffff), against a 4.5:1 floor
-                  // — and this menu is the only place a non-selected machine's
-                  // reason appears anywhere in the app. `BUTTON_TONE.ghost`'s
-                  // opacity exemption does not reach here: it is conditioned on a
-                  // control with no boundary to lose *and no subline to
-                  // composite*, and this row has one. So the same three steps
-                  // {@link ChoiceRow} takes — the label down to `text-muted`
-                  // (7.75:1), the description left exactly where it was at
-                  // `text-faint` (6.23:1), and nothing at all on the row itself.
-                  //
-                  // ⚠ **`:hover` still matches a disabled `<button>`**, so the fill
-                  // is granted by state rather than taken back with a `disabled:`
-                  // variant — `ChoiceRow`'s expression, for `ChoiceRow`'s reason,
-                  // and one fewer utility racing another in the sheet.
-                  //
-                  // ⚠ **`ChoiceRow`'s other half — hand the boundary back when the
-                  // row is inert — has nothing to do here, and that is checked
-                  // rather than overlooked.** `menuRow` draws no border in *either*
-                  // state: what identifies a row inside this panel is the panel's
-                  // own `MENU_PANEL` box and the 44px of hover fill, so there is no
-                  // `edge-strong` on a refused row claiming a pressability it does
-                  // not have, and adding one to the live rows would be a new
-                  // decoration rather than an identification. A future sweep that
-                  // borders menu rows owes the disabled arm the same `edge` this
-                  // file gives {@link ChoiceRow}. The three signals here are the
-                  // ones the row already has: the label down a step, the refusal
-                  // that {@link DropdownItem.disabled} obliges a caller to pass,
-                  // and the caller's own `adornment` — `MachinePicker`'s `Dot` at
-                  // `off`, which is a shape a phone can read with no pointer.
+                  // No opacity when disabled: the description is the refusal and must stay legible, and hover is granted by state.
                   className={`${menuRow("start")} text-fg ${unavailable ? "" : "hover:bg-raised"} ${
                     selected ? "font-medium" : ""
                   }`}
@@ -3327,11 +1171,6 @@ export function Dropdown<T extends string>({
                   <span className="mt-0.5 w-3 shrink-0">{selected && <Icon as={Check} size={11} />}</span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
-                      {/* The adornment is left alone deliberately. `MachinePicker`
-                          passes a `Dot`, which is a *state mark* drawn from its own
-                          tokens rather than from `currentColor` — dimming it would
-                          take the one thing on the row already saying "off" down
-                          with the label. */}
                       {item.adornment}
                       <span className={`min-w-0 truncate ${unavailable ? "text-muted" : ""}`}>
                         {item.label}

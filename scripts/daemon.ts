@@ -45,49 +45,11 @@ import { PluginHost } from "../src/plugins/host.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
 
-/*
- * 7887, not 7777.
- *
- * 7777 is occupied on the development machine by a Plane container stack that
- * restarts itself, so the no-configuration path used to dial another service
- * entirely — which fails as a puzzling protocol error rather than as a refused
- * connection. `.env.example` has always said 7887; this is the default catching up
- * with it.
- */
 const DEFAULT_PORT = 7887;
 
-/**
- * How many filesystem calls may be in flight at once.
- *
- * libuv's threadpool is **4** by default and every `node:fs/promises` call in
- * this process draws from it. That is a thin budget for a daemon whose routes are
- * almost entirely filesystem work, and a dangerous one next to a call that never
- * returns: a hard NFS mount whose server has paused blocks inside the kernel,
- * cannot be interrupted, and keeps its slot for the life of the process. Four
- * such calls and *every* later `await` on `fs` here queues for ever, while
- * `/health`, which touches no files, goes on reporting the daemon up.
- * `src/browse.ts` and `src/stall.ts` bound how often that cost is paid; this is
- * what makes the budget large enough to absorb it.
- *
- * **Set in two places, and the belt is here while the braces are in the shell.**
- * libuv reads the variable once, lazily, when the first piece of work reaches the
- * pool. In ESM every `import` above is evaluated before this statement runs, so
- * this only works while nothing in that graph touches the threadpool during
- * loading — measured 2026-08-03 against the real import list, 16 concurrent
- * `pbkdf2` jobs take ~150ms with this assignment and ~240ms with the pool forced
- * to 4, i.e. it is taking effect today. That is a property of the current imports
- * rather than a guarantee, and it fails silently: one future dependency that
- * reads a file asynchronously at load time latches the pool at 4 and nothing
- * says so.
- *
- * So `deploy/run-daemon.sh` and the `daemon` script in `package.json` also export
- * it before `node` starts, which is the only placement that cannot be outrun, and
- * {@link threadpoolNote} reports what the process actually ended up with. Only
- * when unset, because an operator who has tuned it has a reason.
- */
+// libuv reads this once, lazily, so it must be set before any threadpool work; the shell exports it too, the only placement that cannot be outrun.
 process.env["UV_THREADPOOL_SIZE"] ??= "64";
 
-/** What the pool actually is, printed at startup because a silent 4 is the failure. */
 function threadpoolNote(): string {
   const configured = (process.env["UV_THREADPOOL_SIZE"] ?? "").trim();
   const size = Number(configured);
@@ -98,61 +60,20 @@ function threadpoolNote(): string {
   );
 }
 
-/**
- * Loopback, and this is the line that makes "the relay is the only entrance"
- * true rather than merely intended.
- *
- * It was `0.0.0.0` so a Tailnet address worked without extra configuration, back
- * when a browser reached a daemon directly. It does not: every request arrives
- * down a tunnel this daemon dialled out, and the relay splices each CONNECT to a
- * fresh loopback connection here. Nothing outside ever addresses this listener.
- *
- * Clearing a machine's address in the registry was never the lever on its own —
- * the daemon went on listening on every interface regardless, and a client that
- * had already memoised a direct route went on using it. This is.
- *
- * The port stays known and stays 7887 by default, because `pnpm client`,
- * `pnpm harness` and `deploy/lib.sh`'s `/health` probe all reach it from *this*
- * machine, where loopback is the point rather than the obstacle. `REEMOAT_PORT=0`
- * is still supported for a daemon that is only ever served by the relay — and it
- * is what the desktop app passes every daemon it runs for a server *other* than
- * the one `~/.reemoat/daemon.env` names, because a second daemon on 7887 would
- * lose the bind and the announcement carries whatever port the kernel chose. The
- * one on `~/.reemoat` keeps 7887, for the three callers above (Q7.148).
- */
+// Loopback: every request arrives down the relay tunnel, spliced to a fresh loopback connection. Port 0 suits a relay-only daemon (Q7.148).
 const DEFAULT_HOST = "127.0.0.1";
 const SHUTDOWN_HARD_LIMIT_MS = 25_000;
 
-/**
- * The control plane refused the enrollment code: single-use, expired or unknown.
- *
- * A fresh code is the remedy, and it is the **only** failure here for which that
- * is true — which is why it has a code of its own rather than sharing `2` with
- * every other reason this process gives up.
- */
+/** The enrollment code was refused: the only failure a fresh code fixes. */
 const EXIT_CODE_REFUSED = 3;
 
 /** The control plane could not be reached or did not answer. Wait, do not re-mint. */
 const EXIT_CONTROL_PLANE_UNREACHABLE = 4;
 
-/**
- * The operating system refused a connection to an address on this network.
- *
- * Its own code because its remedy is its own: nothing is down and no amount of
- * waiting helps — somebody has to grant a permission. See `localNetworkBlocked`.
- */
+/** The OS refused a connection on this network: nothing is down, somebody has to grant a permission. See localNetworkBlocked. */
 const EXIT_LOCAL_NETWORK_BLOCKED = 5;
 
-/**
- * The directory every default below is derived from: `REEMOAT_HOME`, else
- * `~/.reemoat`.
- *
- * The database, the worktrees, the uploads, the plugins, the ask directory and the
- * announcement all sit inside it unless their own variable says otherwise — so a
- * second daemon on this account is one variable rather than six. The desktop app
- * sets it for every daemon it starts, one root per server (Q7.148); a daemon
- * started any other way gets `~/.reemoat` and nothing about it moved.
- */
+// Every default below derives from this root; the desktop app sets one per server.
 let stateHome: string;
 try {
   stateHome = resolveStateRoot(process.env["REEMOAT_HOME"]);
@@ -163,12 +84,6 @@ try {
 const DEFAULT_DB = join(stateHome, "reemoat.db");
 const DAY_MS = 86_400_000;
 
-/**
- * How this daemon decides who is asking.
- *
- * `shared_secret` is the default and the whole single-machine story: one
- * secret, no control plane, exactly as it worked before any of this existed.
- */
 const authMode = resolveAuthMode(process.env["REEMOAT_AUTH"]);
 
 const token = process.env["REEMOAT_TOKEN"];
@@ -182,33 +97,11 @@ if (authMode !== "signed" && (!token || token.length === 0)) {
   process.exit(2);
 }
 if (authMode === "signed" && token && token.length > 0) {
-  // Not fatal, but it must not be believed to be a way in. A leftover secret in
-  // a shell profile is exactly how somebody ends up thinking the daemon is
-  // reachable two ways when it is reachable one.
   console.error(
     "warning: REEMOAT_AUTH=signed, so REEMOAT_TOKEN is ignored — the shared secret is not accepted.",
   );
 }
 
-/*
- * `0` is allowed, and means "let the kernel pick a free one".
- *
- * This used to reject it (`port < 1`), which made a scenario the relay was
- * deliberately hardened for unreachable through the one variable that names it:
- * `RelayTunnel.start` is called from inside the listening callback precisely so
- * it learns the port actually bound rather than the configured value, and a
- * `localAddress` of port 0 is treated as "could not tell" and refuses to dial.
- * All of that defends against an ephemeral port that this check forbade.
- *
- * A port is the one host-global resource a daemon holds, and `0` is genuinely
- * usable now: the relay routes by the verified `aud` claim and splices each
- * CONNECT to a fresh loopback connection here, so nothing outside ever addresses
- * this listener and the port need not be known.
- *
- * The default stays 7887 anyway, because the things that *do* address it are on
- * this machine: `pnpm client` under the shared secret, and the deploy script's
- * `/health` probe.
- */
 const port = Number.parseInt(process.env["REEMOAT_PORT"] ?? String(DEFAULT_PORT), 10);
 if (!Number.isInteger(port) || port < 0 || port > 65535) {
   console.error(`REEMOAT_PORT must be a valid port, or 0 to be assigned one, got "${process.env["REEMOAT_PORT"]}"`);
@@ -216,28 +109,8 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 }
 const host = process.env["REEMOAT_HOST"] ?? DEFAULT_HOST;
 
-/*
- * Where the directory picker starts.
- *
- * `REEMOAT_ROOTS` is back, and it is a *narrowing of the listing* rather than a
- * boundary — the agent runs as this user and can reach anything they can, so a
- * narrower root is about not scrolling past `/Library`, not about safety. Unset,
- * the picker starts at this user's home.
- */
 const roots = resolveRoots(process.env["REEMOAT_ROOTS"]);
 
-/*
- * Settings that used to mean something, warned about rather than swallowed.
- *
- * The rule this follows was written for `REEMOAT_ROOTS` when it was the one
- * being retired, and it applies unchanged in the other direction: silently
- * dropping a setting somebody wrote on purpose is how a boundary ends up
- * somewhere other than where they think it is.
- *
- * `REEMOAT_USER_ROOT` gets its own line because its value names a directory that
- * holds real sessions and worktrees, written by a daemon that no longer reads
- * there. "Ignored" is not enough to say about that one.
- */
 if ((process.env["REEMOAT_USER_ROOT"] ?? "").trim().length > 0) {
   console.error(
     "warning: REEMOAT_USER_ROOT is set and no longer does anything.\n" +
@@ -265,36 +138,21 @@ const instanceId = `i_${randomBytes(4).toString("hex")}`;
 const startedAt = Date.now();
 const dbPath = resolveDbPath(process.env["REEMOAT_DB"]);
 
-// Strict at startup, degrading at runtime. Silently falling back to a memory
-// store after the operator asked for durability is the kind of thing you find
-// out about at the worst possible moment.
+// Strict at startup: never fall back to a memory store after durability was asked for.
 let stores: StoreBundle;
 try {
   stores = openStores({
     path: dbPath,
     instanceId,
-    // The same numbers as before. They now bound retention on disk rather than a
-    // ring in memory, and they must stay under the outbound queue bound in
-    // server.ts — see the note there. Tunable mostly so the eviction path — the
-    // one case where "no gaps" degrades to "here is exactly what you lost" — can
-    // be exercised without generating tens of thousands of events.
+    // These must stay under the outbound queue bound in server.ts.
     maxEventsPerSession: positiveInt(process.env["REEMOAT_LOG_EVENTS"]),
     maxBytesPerSession: positiveInt(process.env["REEMOAT_LOG_BYTES"]),
     retainSessionsMs: (positiveInt(process.env["REEMOAT_SESSION_TTL_DAYS"]) ?? 7) * DAY_MS,
     maxSessions: positiveInt(process.env["REEMOAT_MAX_SESSIONS"]),
     minSessions: positiveInt(process.env["REEMOAT_MIN_SESSIONS"]),
-    // Nothing in src/ prints. This is the only way an operator hears that a store
-    // stopped answering — the disk refusing writes, or a row this build cannot read.
-    // ⚠ **One sink, four subjects now**: the event log, a session row, a stored key
-    // and an assembled agent. Each store's own message names its own subject, so the
-    // prefix may not name one — it read "the log is now lossy" over a dropped preset.
+    // Each store's message names its own subject, so this prefix must not name one.
     onDegraded: (detail) => console.error(`store degraded: ${detail}`),
-    // What the startup prune deleted, by id, on its own line and on stdout with
-    // the other facts about this boot — it is the store doing what it was told,
-    // not the store degrading, and a sentence beginning "store degraded" over a
-    // routine deletion would read as a fault. Said only when something went: on
-    // 2026-09-04 a restart deleted five of six live conversations and the journal
-    // held nothing but `restored 1 session(s)`, which is the silence this ends.
+    // A routine prune is reported on stdout, never as a degradation.
     onPruned: (detail) => console.log(`store: ${detail}`),
   });
 } catch (error) {
@@ -305,61 +163,20 @@ try {
   process.exit(2);
 }
 
-/*
- * The X25519 static this machine answers on, generated on first start and kept
- * for ever after.
- *
- * Here rather than inside `openStores` for the reason every other startup fact is
- * here: nothing in `src/` prints, and this is the line an operator compares by eye
- * against what `cpctl admin fleet` shows for the same machine. It is the only
- * check anybody has on the pin, and it is offered as a **display rather than an
- * enforcement** — saying otherwise would be claiming a property nothing holds.
- *
- * Before the server serves and before the tunnel dials, because the dial
- * announces it.
- */
+// Printed for comparison against cpctl admin fleet; before serving and dialling, since the dial announces it.
 const machineKey = ensureMachineKey(stores.machineKeys);
 console.log(`machine key: ${machineKey.kth}`);
 
-/*
- * The reverse of the enrollment check further down, and it has to read the store
- * to make it.
- *
- * `machineId` below is null under `shared_secret` — that mode never establishes
- * an identity — so the daemon had no way to notice it was ignoring one. Asking
- * the store directly is the whole point: the row is there whatever mode this is.
- * `enrollmentIgnored` owns the rule and `authcheck` asserts it; here it is only
- * printed, with the other startup warnings.
- */
 const enrollmentWarning = enrollmentIgnored(process.env["REEMOAT_AUTH"], stores.identity.load());
 if (enrollmentWarning !== null) console.error(`warning: ${enrollmentWarning}`);
 
-/*
- * Identity, and the verifier built from it.
- *
- * Runs after the store is open — the identity lives in the same database — and
- * before the server serves, because a daemon that cannot establish who it is
- * must not start answering requests about it.
- */
-/**
- * Identity, and whatever came with it.
- *
- * Returned rather than assigned to module-level state from inside the function,
- * so "was this daemon enrolled, and did it get a relay" is answered by one value
- * a reader can follow instead of by two variables mutated out of sight.
- */
 interface AuthSetup {
   verifier: TokenVerifier;
   /** `null` under the shared secret, which has no machine and no control plane. */
   machineId: string | null;
   /** Both halves of a usable relay, or `null`. */
   relay: { relayUrl: string; tunnelKey: string } | null;
-  /**
-   * The control plane the stored identity enrolled with, for the announcement
-   * alone — `null` under the shared secret, and for an identity that recorded
-   * none. Not `REEMOAT_CONTROL_PLANE`: that is read on the enrollment path only,
-   * and a daemon whose file was edited since still belongs to the fleet it joined.
-   */
+  /** The control plane the stored identity enrolled with, for the announcement only; not REEMOAT_CONTROL_PLANE, which only enrollment reads. */
   controlPlane: string | null;
 }
 
@@ -387,21 +204,7 @@ try {
 
 const pluginRoot = expandHome(process.env["REEMOAT_PLUGIN_ROOT"] ?? join(stateHome, "plugins"));
 
-/*
- * **Three** remover trees now, and no two of them may nest.
- *
- * `removeWorkspace` guards the codebase's original `rm` with
- * `containedIn(root, worktreeRoot)`, the upload sweep guards the second with the
- * mirror of that, and `PluginHost.discard` guards the third the same way. If any
- * root sits at or under another, one remover can reach into another's tree and
- * none of the guards means what it says any more — a worktree removal could take
- * somebody's staged files, an uninstall could take a checkout. Refused at startup,
- * where it is a loop, rather than discovered at the moment something is deleted.
- *
- * ⚠ The rule did not change when the third arrived; its *arity* did. Written as a
- * pairwise loop over a named list for exactly that reason: a fourth tree is one
- * entry here rather than three more `if`s somebody has to remember to write.
- */
+// No two remover trees may nest, or one remover can reach into another's tree.
 const REMOVER_TREES: readonly { name: string; path: string }[] = [
   { name: "REEMOAT_UPLOAD_ROOT", path: uploadRoot },
   { name: "REEMOAT_WORKTREE_ROOT", path: workspacePolicy.worktreeRoot },
@@ -428,77 +231,21 @@ try {
   process.exit(2);
 }
 
-/*
- * Staged files belonging to sessions the startup prune just deleted.
- *
- * The rows went with them inside `prune`'s own transaction; only the directories
- * are left, and only this side knows where they are. Fire-and-forget because it
- * is housekeeping — nothing serves these paths any more, so nothing waits on it.
- */
 if (stores.prunedSessions.length > 0) {
   void uploads.forgetSessions(stores.prunedSessions);
 }
 
-/**
- * What plugins add to this machine's two tables.
- *
- * ⚠ **Built here — immediately after `openStores`, and *before* the runtime, the
- * registry and `restore()` — for a reason stronger than the one that puts
- * `setCustomAgents` above `restore()`.** `restore()` rebuilds every persisted
- * session, and a `ManagedSession`'s `assembled` getter reads `custom_agents`
- * through a validator that **drops** a row it cannot resolve. With contributions
- * unknown at that moment, every preset built on a plugin's harness would be
- * dropped and every session on one would come back demoted to the bare harness it
- * was started with — a different vendor, with nothing on screen saying so — and
- * `autoResume` fires inside that window.
- *
- * Nothing is started to build it: `stores.plugins.list()` already re-validates
- * each `manifest_json` through `parseManifest` on the way out, so this is a read
- * of rows that are already there. `PluginHost` opens much later, after restore,
- * and keeps this current from then on.
- *
- * ⚠ **`REEMOAT_PLUGINS=0` makes it empty, and that is what the switch means.**
- * The rows stay in the database — the switch is documented as *"an operator who
- * does not want somebody else's code running as this user should not have to
- * uninstall anything"* — and a contributed harness **is** a program this daemon
- * spawns. Listing one on a machine that has switched plugins off would be the
- * switch not meaning what it says.
- */
+// Built before the runtime, registry and restore: with contributions unknown, restore would drop every preset on a plugin's harness.
 const pluginsEnabled = process.env["REEMOAT_PLUGINS"] !== "0";
-/*
- * ⚠ **Switched off means every row is *disabled*, not that the rows are gone.**
- * Handing an empty list would make `harnessState` answer `unknown` for a harness
- * that is plainly installed, so `POST /sessions` would say `400 invalid_agent` —
- * *your request is wrong* — about a request that was correct until somebody set
- * this variable. `disabled` is the whole reason that answer is three-valued: it
- * names a switch rather than blaming a caller.
- */
+// Switched off means every row disabled, not gone: an empty list would make session creation blame a correct request.
 const contributions = new Contributions(
   stores.plugins.list().map((one) => (pluginsEnabled ? one : { ...one, enabled: false })),
 );
 
-/*
- * Where agents run: as children of this daemon, as this user.
- *
- * There used to be a paragraph here explaining that there was deliberately no
- * switch back to this, because "a flag that turns the sandbox off is a flag that
- * will be off somewhere". That was true of the product it described. This one is
- * a personal tool: the agent runs with your credentials on your files, exactly
- * as it would if you had started it in a terminal, and the honest place to say so
- * is `CLAUDE.md`'s "What is not confined" rather than a flag nobody sets.
- */
 const runtime = new LocalRuntime({
-  // The user's own pasted credential, read at launch rather than captured, so
-  // replacing a token takes effect on the next session without a restart.
+  // Read at launch rather than captured, so a replaced token applies to the next session.
   secrets: (agent) => stores.credentials.envFor(agent),
-  // And the key for a *system*, read the same way. Kept apart from `secrets`
-  // because the destinations are different: that one is merged into an
-  // environment, this one becomes a header on `providers/set` and must never
-  // reach one — an agent can print its own environment into a transcript.
-  // Through `systemSecretFor` rather than off the store, so this and the
-  // `keySet` on `GET /systems` cannot come to disagree about whether a key
-  // exists — the disagreement being a pairing the picker offers and the start
-  // refuses.
+  // Kept apart from secrets: this becomes a provider header and must never reach an agent's environment.
   systemSecret: (system) =>
     systemSecretFor(
       system,
@@ -506,42 +253,16 @@ const runtime = new LocalRuntime({
       (agent: AgentId) => stores.credentials.envFor(agent),
       contributions,
     ),
-  // What this machine offers beyond what this repository ships. Read at every
-  // launch through the object rather than captured as a list, so a plugin
-  // installed while a session slept is offering its harness by the time that
-  // session resumes.
   machine: contributions,
-  // Nothing in src/ prints. A login that cannot be driven is the one an operator
-  // most needs to hear about, because the button for it is on a screen.
   onWarning: (detail: string) => console.error(`runtime: ${detail}`),
 });
 
-/**
- * Interactive agent logins.
- *
- * Constructed here rather than inside the registry because it is not part of a
- * session's lifecycle: it runs before there is a session, and often instead of
- * one failing.
- */
 const agentLogins = new AgentLoginRuns({
   runtime,
   onWarning: (detail: string) => console.error(`agent login: ${detail}`),
 });
 
-/**
- * Where a plugin's one-shot model request runs.
- *
- * Constructed beside `agentLogins` and not inside the registry, for its reason
- * doubled: this is not part of a session's lifecycle, and it must not be part of
- * the registry's *anything* — see `agentask.ts`'s header for why a bare `Session`
- * rather than a hidden `ManagedSession` is what makes the whole thing safe.
- *
- * ⚠ **The `cwd` is an empty directory this daemon owns**, created beside the
- * plugin root rather than borrowed from a session. `session/new` requires one and
- * whatever it gets is where the agent may look, so handing it somebody's working
- * copy would give a plugin holding only the `model` scope an agent reading a tree
- * that scope says nothing about.
- */
+// The cwd is an empty directory this daemon owns: whatever the agent gets is where it may look.
 const askRoot = expandHome(process.env["REEMOAT_ASK_ROOT"] ?? join(stateHome, "ask"));
 mkdirSync(askRoot, { recursive: true, mode: 0o700 });
 const agentAsks = new AgentAskRuns({ runtime, cwd: askRoot });
@@ -552,155 +273,36 @@ const registry = new SessionRegistry(
   workspacePolicy,
   runtime,
   uploads,
-  // The sixth argument, and it was written and then not passed: `SessionLog`'s
-  // fan-out guard evicts a listener that threw, the listeners are live
-  // WebSockets, and with nothing here that socket stops receiving events for the
-  // rest of its life with nothing anywhere saying so. Same shape as `runtime`'s
-  // and `agentLogins`' above, for the same reason — nothing in `src/` prints.
   (detail: string) => console.error(`session: ${detail}`),
 );
-/*
- * How an assembled agent's id becomes a harness, a system and a model.
- *
- * ⚠ **Before `restore()`, and that ordering is the whole reason the registry
- * takes a setter rather than a constructor argument.** `restore()` rebuilds every
- * persisted session, and a session started as "Claude Code on Kimi K2" that came
- * back before this was set would resume on a bare harness — same conversation,
- * different vendor, nothing on screen saying so.
- *
- * Read at every launch rather than snapshotted, so editing a preset changes what
- * its sessions come back as without a daemon restart.
- *
- * ⚠ **The whole row goes back, the harness included, and the harness is the one
- * field nothing downstream *uses*.** `PATCH /custom-agents/:id` accepts a change
- * of harness and weighs it against the body it was handed, which says nothing
- * about the sessions already running on that preset; a session's own harness is
- * immutable, because the agent process is spawned from it. So
- * `ManagedSession.assembled` compares the two and falls back to the bare harness
- * when they disagree, and it can only do that if this hands it the harness to
- * compare.
- */
-/*
- * Before `restore()`, for `setCustomAgents`' reason and a stronger one — see
- * {@link contributions}, which is where the argument is written out.
- */
+// Before restore, or a preset's sessions resume on the bare harness; the harness goes back so ManagedSession.assembled can spot a changed preset.
 registry.setMachineCatalogue(contributions);
 registry.setCustomAgents((id) => {
   const one = stores.customAgents.get(id);
   return one === null ? null : { harness: one.harness, system: one.system, model: one.model };
 });
-// Before the server serves, and only ever after openStores claimed the daemon
-// lock: the orphan reaping in here would otherwise SIGKILL a live daemon's agents.
+// Only after openStores claimed the daemon lock: orphan reaping would otherwise SIGKILL a live daemon's agents.
 const restored = registry.restore({ reapOrphans: process.env["REEMOAT_REAP_ORPHANS"] !== "0" });
-// The other half of what this daemon does about processes it did not start in
-// this life. Read here rather than in `src/`, which touches no environment.
 const autoResume = process.env["REEMOAT_AUTO_RESUME"] !== "0";
 registry.setAutoResume(autoResume);
-/*
- * Whether an agent may ask a person a question.
- *
- * Read here for the same reason as the line above — nothing in `src/` touches the
- * environment — and it is a *thunk* on the other side, because `restore()` has
- * already run by this point and a boolean captured at construction would be stale
- * for every session it brought back.
- *
- * Turning it off withdraws a tool rather than a piece of UI: measured against
- * claude-agent-acp 0.63.0, declaring `elicitation.form` is what stops
- * `AskUserQuestion` being put in `disallowedTools`. Which is why the switch
- * exists at all — on a machine nobody is watching, a session that used to finish
- * now parks on a human until the turn is swept.
- */
 const elicitation = process.env["REEMOAT_ELICITATION"] !== "0";
 registry.setElicitation(elicitation);
-/*
- * Whether a claude session nobody has decided about asks for ultracode.
- *
- * Read here for the same reason as the two above, and it is a thunk on the other
- * side for the stronger version of the same argument: `restore()` has already run,
- * and this is the setting whose whole point is that it applies to the sessions
- * this daemon just brought back.
- *
- * Opt-in rather than default-on. It is a real change to how the agent works —
- * highest effort and every turn planned as a workflow — so a machine that wants it
- * says so, and any session can still overrule it from the effort menu.
- */
 const ultracode = process.env["REEMOAT_CLAUDE_ULTRACODE"] === "1";
 registry.setUltracode(ultracode);
 
-/*
- * How many sessions may run at once, and how fast new ones may be made.
- *
- * Read here rather than in `registry.ts` like everything else on this screen, and
- * overridable because the defaults are backstops rather than opinions: a machine
- * that really does drive fifty agents should say so, and one shared with somebody
- * whose scripts are new should be able to say the opposite.
- *
- * What they exist for is in `MAX_LIVE_SESSIONS`'s own docblock — the short
- * version is that `create()` had no bound at all and the only thing counting
- * sessions was a *deletion*, so a loop on a shared machine took the owner's
- * transcripts with it at the next restart.
- */
 registry.setSessionLimits({
   live: boundedInt(process.env["REEMOAT_MAX_LIVE_SESSIONS"], MAX_LIVE_SESSIONS),
   burst: boundedInt(process.env["REEMOAT_SESSION_CREATE_BURST"], SESSION_CREATE_BURST),
   refillMs: boundedInt(process.env["REEMOAT_SESSION_CREATE_REFILL_MS"], SESSION_CREATE_REFILL_MS),
-  /*
-   * Minutes on the outside, milliseconds within — the one unit conversion in
-   * this file, and it is here because thirty minutes is a thing an operator has
-   * an opinion about and 1 800 000 is not.
-   *
-   * `boundedInt` treats a non-integer or a negative as "unset" and falls back to
-   * the default, so `0` is the *only* way to switch parking off and it is an
-   * explicit one. That matters more than usual here: parking is on by default, so
-   * a typo that silently disabled it would leave a machine holding every agent it
-   * ever started with nothing saying why.
-   */
+  // 0 is the only way to switch parking off: boundedInt treats a non-integer or a negative as unset.
   idleParkMs:
     boundedInt(process.env["REEMOAT_IDLE_PARK_MINUTES"], IDLE_PARK_MS / 60_000) * 60_000,
-  /*
-   * And the other threshold on the same clock: how long a turn may say nothing
-   * before this daemon stops waiting for it.
-   *
-   * Minutes on the outside for the reason above, and `0` the only way off for the
-   * reason above — sharper here, because what a typo would switch off is the only
-   * thing that can clear a `status: "running"` nothing else in the process can
-   * reach. `TURN_SILENCE_MS` carries why it is three hours, measured against a
-   * real turn on the machine that reported the bug, and why it is not derived
-   * from the park threshold.
-   */
   turnSilenceMs:
     boundedInt(process.env["REEMOAT_TURN_SILENCE_MINUTES"], TURN_SILENCE_MS / 60_000) * 60_000,
 });
-/*
- * And what somebody set on the settings screen, which **overrides** the line
- * above.
- *
- * After `setSessionLimits`, because that is what it overrides and reading them in
- * the other order would leave the env value winning until the first save. The
- * daemon's *config* is still env only — this is the narrow class of setting whose
- * owner is the person using the machine rather than the one who provisioned it.
- *
- * ⚠ **The screen does not say which of the two is in force, and that is settled
- * rather than missing.** It said so for one round, off a `source` on the wire;
- * the owner removed the line as noise about env files on a screen that mentions
- * none, and the field went with it. So the number drawn there is simply the one
- * that applies, and the way back to `REEMOAT_IDLE_PARK_MINUTES` is typing it.
- * See `MachineSettingsView`. Q2.225.
- */
+// After setSessionLimits, because what the settings screen stores overrides the env values (Q2.225).
 registry.setMachineSettingsStore(stores.machineSettings);
 
-/**
- * Letting go of the agents nobody is using.
- *
- * Started after `setSessionLimits`, which is where the threshold it reads was
- * put, and after `restore()` — a sweep that ran before the registry held its
- * sessions would find nothing and arm again a minute later, which is harmless but
- * reads as a bug the first time somebody follows it.
- *
- * The `enabled` thunk asks the registry rather than re-reading the environment,
- * so there is exactly one place the threshold lives and `0` means the same thing
- * to both halves: no sweep, and no eviction on a wake either.
- */
 const idleParking = IdleParking.start({
   park: () => registry.parkIdleSessions(),
   enabled: () => registry.idleParkEnabled,
@@ -709,11 +311,6 @@ const idleParking = IdleParking.start({
       `parked ${ids.length} idle session(s), agent(s) released: ${ids.join(", ")}`,
     );
   },
-  /*
-   * The second sweep on the same clock, with its own switch for the reason
-   * `turnSilenceEnabled` states: switching parking off is not a request to leave
-   * a session claiming to be working for ever.
-   */
   reap: () => registry.abandonWedgedTurns(),
   reapEnabled: () => registry.turnSilenceEnabled,
   onAbandoned: (ids) => {
@@ -723,79 +320,19 @@ const idleParking = IdleParking.start({
   },
 });
 
-// Every spelling of "no" the `mode:` note below accepts; `deploycheck` reads this
-// list off the source so `deploy.sh` honours the same ones.
+// deploycheck reads this list off the source so deploy.sh honours the same spellings.
 const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no", "never"]);
 
-/**
- * Keeping the agent CLIs current, because not one of them does it itself.
- *
- * Constructed here rather than inside the registry for `agentLogins`' reason: it is
- * not part of a session's lifecycle. It needs the registry all the same — the answer
- * to "may this binary be replaced right now" is a question about live agents, and
- * this is the only screen holding both that and the runtime.
- *
- * ⚠ **`agentHandle` and not merely `terminal`.** What must not be taken away is a
- * build a *process* is executing; a session that is idle with no agent is holding
- * nothing. An `interrupted` session — one carried over from before a restart — has
- * an exit record, so it is terminal and is *not* named here: the daemon that ran
- * its agent killed it on the way out, and nothing is on that build any more. What
- * this names is only a live process. The script decides what each name means:
- * Q4.113.
- */
-/**
- * Everything that has to forget what it knew about a harness whose binary moved,
- * when this daemon is the one that moved it.
- *
- * ⚠ **One function and two callers, because the list is an *order* rather than a
- * set and a second copy would drift out of it.** The daily refresh and an install
- * somebody pressed both change which build is on disk, and the block below was
- * written out inside `onUpdated` when `onUpdated` was the only caller.
- *
- * ⚠ **No longer the only route by which a moved binary is noticed.** A build that
- * moved without this daemon — the CLI's own updater, another daemon on the same
- * home directory, a `deploy.sh` refresh — is caught at its next use by the file
- * check `LocalRuntime.agentCli` and `AgentAskRuns.capabilities` make on every hit
- * (Q6.112). This stays because it is immediate, and because it reaches what that
- * check cannot: `findOnPath`'s memo, and the sessions waiting on `resumeInterrupted`.
- *
- * `agent` narrows it where the caller knows: an install is about one harness, a
- * refresh may have moved any of them.
- */
+// Shared by the daily refresh and a pressed install, because the invalidations are an order a second copy would drift from.
 const afterAgentsChanged = (agent?: string): void => {
-  // Or the daemon's *report* names the build it resolved before this ran until the
-  // next use weighs the held path's file and finds it moved: the spawn already runs
-  // the new one, because the held path is the symlink the script repointed — see
-  // `LocalRuntime.agentCli`. This is also what clears `findOnPath`'s 30s miss,
-  // which is why every verdict about "is it there now" has to come after it rather
-  // than before.
+  // First: it clears the findOnPath miss, so every later is-it-there verdict must follow it.
   runtime.forgetAvailability();
-  /*
-   * And the capability cache, which `forgetAvailability` cannot reach: it holds
-   * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
-   * picker opened just before the run would name the old build over the old list
-   * for ten minutes after the binary moved — the exact pairing `cli` rides that
-   * route to keep honest. A hit now weighs that `cli` against `agentCli` (Q6.112),
-   * which catches the move by itself wherever the version moved with it; this is
-   * the immediate half, and the one that also holds where it did not.
-   */
+  // The capability cache, which forgetAvailability cannot reach, holds the model list with the build that published it.
   agentAsks.forget(agent);
-  /*
-   * And the sessions that were waiting for exactly this: a harness with no CLI
-   * on the machine costs a resume no attempt (`agent_missing`), so the pass is
-   * run again now that one may have arrived. Queued behind a boot pass still in
-   * flight, by `autoResume` itself.
-   */
   resumeInterrupted(agent === undefined ? "after the agent update" : `after installing ${agent}`);
 };
 
-/**
- * Who may run `deploy/agents.sh`, between the two things in this process that do.
- *
- * The script's own `mkdir` lock catches an orphan a previous daemon left behind;
- * this catches the two runs *this* daemon starts, which that lock can only answer
- * with `exit 0` and a warning. Neither subsumes the other.
- */
+// Serialises this daemon's own runs of deploy/agents.sh; the script's lock catches an orphan from a previous daemon.
 const agentScriptGate = new AgentScriptGate();
 
 const agentUpdates = AgentUpdates.start({
@@ -810,51 +347,16 @@ const agentUpdates = AgentUpdates.start({
   ],
   onWarning: (detail: string) => console.error(`agent update: ${detail}`),
   onUpdated: (report: string | null) => {
-    // Said even when nothing moved: a daily run of three vendors' installers with
-    // no line in the log was measured as invisible, and the script's own notes
-    // are the only record of which build each harness is on now.
     console.log(`agent update: ran deploy/agents.sh${report === null ? "" : `\n${report.replace(/^/gm, "    ")}`}`);
     afterAgentsChanged();
   },
-  /*
-   * On by default, and that is the decision rather than an oversight: the whole
-   * requirement is that somebody who ran one install script never thinks about this
-   * again, and a switch defaulting off is a switch nobody finds. Off is for a
-   * machine with no outbound network, or one whose CLIs somebody else manages — and
-   * every spelling `worktreeMode` takes for "no" switches it off, because the
-   * sibling switches in `.env.example` teach `0` and a `0` that left a `curl | bash`
-   * running would be the wrong surprise.
-   */
   mode: AGENT_UPDATES_OFF.has((process.env["REEMOAT_AGENT_UPDATES"] ?? "").trim().toLowerCase()) ? "off" : "daily",
-  // Where the script gets the CLIs from; the spelling rule lives beside the
-  // updater so a driver can hold it, and an unknown value is said here rather
-  // than obeyed.
   source: agentSourceFrom(process.env["REEMOAT_AGENT_SOURCE"], (detail: string) => console.error(`agent update: ${detail}`)),
-  // Which of claude's release channels the fleet follows, the same way: read
-  // once here, warned about here, and passed to the script on every run — the
-  // env file is what decides, not the script's default (Q4.115).
+  // The env file decides the channel, not the script's default (Q4.115).
   channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], (detail: string) => console.error(`agent update: ${detail}`)),
 });
 
-/**
- * Putting a harness on this machine, because somebody asked for it.
- *
- * ⚠ **The gate is shared with the updater and an install wins it**, which is the
- * one ordering decision between them: somebody is watching this, and the daily
- * refresh's work will still be there in a day.
- *
- * ⚠ **`verify` is what decides whether the install worked, and it runs *after*
- * `afterAgentsChanged`.** `deploy/agents.sh` exits 0 having printed `install
- * failed; this machine has no copy of it until the next run` — it must, because
- * three of its four callers contract it never fails — so the exit code answers
- * nothing. Asking the machine is the answer, and asking it before the caches are
- * dropped reads `findOnPath`'s 30-second miss and calls a successful install a
- * failure.
- *
- * ⚠ **Switched off by the same variable the updater reads**, because they are one
- * posture: a machine whose CLIs somebody else manages does not want a button that
- * downloads one either, and `installable` folds that in so no such button is drawn.
- */
+// verify runs after afterAgentsChanged, or it reads findOnPath's cached miss and reports a successful install as failed.
 const agentInstalls =
   AGENT_UPDATES_OFF.has((process.env["REEMOAT_AGENT_UPDATES"] ?? "").trim().toLowerCase())
     ? undefined
@@ -867,21 +369,7 @@ const agentInstalls =
         channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], () => {}),
       });
 
-/*
- * Plugins, if this machine wants them.
- *
- * `REEMOAT_PLUGINS=0` is a real switch rather than a courtesy: a plugin is
- * somebody else's code running as this user, and an operator who does not want
- * that on a particular host should not have to uninstall anything to say so. With
- * it off the routes answer `503` — the shape `credentials`, `logins` and
- * `uploads` already use — instead of reporting an empty list, because "there are
- * none" and "this daemon does not do that" are different answers.
- *
- * Opened **after** the registry has restored, so `PluginHost.open` sees every
- * session this daemon already knows about and a hook does not have to be told
- * about them one at a time. Not awaited into the listener: a plugin that will not
- * start must not hold up a boot `deploy.sh` is polling `/health` for.
- */
+// Opened after restore so the host sees every restored session; plugin starts are not awaited.
 let pluginHost: PluginHost | null = null;
 if (pluginsEnabled) {
   try {
@@ -897,29 +385,9 @@ if (pluginsEnabled) {
         ask: agentAsks,
       },
       onWarning: (detail: string) => console.error(`plugins: ${detail}`),
-      // Kept current from here on: every install, update, remove and enable runs
-      // under the host's own single-writer gate, so this is the only thing that
-      // ever writes to the object built above.
       contributions,
-      /*
-       * Where an uninstalled plugin's secrets are swept from. Both tables, because
-       * a contributed harness's pasted key and a contributed provider's key are
-       * the same namespaced id in two different stores, and neither is touched by
-       * `prune()`.
-       */
       secrets: {
-        /*
-         * Swept off the *stores* rather than off the manifest, which is the
-         * difference between removing what a version declared and removing what is
-         * actually there. Two rows this cannot miss and a manifest-driven sweep
-         * would: a slot an earlier release of the plugin declared and this one does
-         * not, and every row belonging to a plugin whose manifest this build cannot
-         * re-validate at all — which is exactly the row `doRemove` is reachable for.
-         *
-         * ⚠ **`systemCredentials.list()` and not a key-by-key guess**, because that
-         * listing is itself shape-validated: a contributed id survives it, which is
-         * what makes this reachable at all.
-         */
+        // Swept off the stores rather than the manifest, so rows an earlier version declared or an unparseable manifest owns go too.
         forgetPrefix: (prefix) => {
           for (const row of stores.credentials.list()) {
             if (row.agent.startsWith(prefix)) stores.credentials.remove(row.agent, row.envName);
@@ -931,9 +399,7 @@ if (pluginsEnabled) {
       },
     });
   } catch (error) {
-    // Not fatal, and deliberately so: a plugin root that cannot be made is a
-    // reason to run without plugins, never a reason to leave somebody's sessions
-    // unreachable on a machine nobody is sitting in front of.
+    // Not fatal: running without plugins beats leaving sessions unreachable.
     console.error(`plugins: cannot open ${pluginRoot}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -960,21 +426,6 @@ const { app, injectWebSocket } = createApp({
   plugins: pluginHost,
 });
 
-/*
- * The relay tunnel, which is the only way in.
- *
- * `REEMOAT_RELAY=0` used to opt out of it and serve the direct path only. There
- * is no direct path: this daemon binds loopback and the registry records no
- * address, so opting out of the relay is opting out of being reachable at all —
- * not a configuration, a broken install. The variable is gone rather than
- * ignored, and a value left in an old environment file is warned about below.
- *
- * The cost, stated where it will be read: this daemon holds a permanent outbound
- * connection to its control plane, and an outage there now costs *all*
- * reachability where it used to cost nothing. What it still does not cost is
- * anything running: verification is entirely local, the tunnel is never *asked*
- * anything, and a session in flight neither notices nor stops.
- */
 if ((process.env["REEMOAT_RELAY"] ?? "").trim().length > 0) {
   console.error(
     "warning: REEMOAT_RELAY is set and no longer does anything.\n" +
@@ -990,8 +441,6 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(
     `worktrees: ${workspacePolicy.defaultMode === "never" ? "disabled" : workspacePolicy.worktreeRoot}`,
   );
-  // Printed because it is the only way to find out *before* tapping the wizard
-  // that this daemon will decline it. The paste box always works either way.
   console.log(
     `agent login: ${
       runtime.loginSupported ? "available" : "unavailable (no `script` on PATH) — paste a token instead"
@@ -1000,9 +449,6 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`state: ${dbPath}`);
   console.log(threadpoolNote());
   console.log(`auth: ${authMode}${machineId === null ? "" : ` (machine ${machineId})`}`);
-  // Printed because it changes what the *agent* can do rather than what a client
-  // draws: off, claude is not given `AskUserQuestion` at all, and somebody
-  // wondering why it never asks should be able to see that here.
   console.log(`questions: ${elicitation ? "agents may ask" : "off (REEMOAT_ELICITATION=0)"}`);
   if (restored.restored > 0) {
     console.log(
@@ -1011,42 +457,15 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
         (restored.reaped > 0 ? `, ${restored.reaped} orphaned agent(s) killed` : ""),
     );
   }
-  /*
-   * Inside the listening callback, not after `serve` returns.
-   *
-   * `serve` hands back the server before the bind has completed, so
-   * `server.address()` is `null` at every synchronous point after it —
-   * measured, on every host form including a literal IP. Dialling from out
-   * there meant `localAddress` always took its configured-value fallback,
-   * which is right by luck for a fixed port and wrong for `REEMOAT_PORT=0`:
-   * the tunnel would connect and then splice every stream to port 0.
-   *
-   * Nothing about the daemon coming up depends on the relay answering — this
-   * runs once the server is already serving, and `RelayTunnel.start` returns
-   * immediately and dials in the background.
-   */
+  // Inside the listening callback: the bound address is unknown until the bind completes, which REEMOAT_PORT=0 depends on.
   const local = localAddress(info, host, port);
   startRelayTunnel(local);
   announceLocally(local);
 });
 
-/**
- * Tell a client on this computer where to find this daemon.
- *
- * Only where there is an identity to name and a mode that accepts a token for it:
- * a `shared_secret` daemon has no machine id, and announcing one would offer the
- * app a route whose every request is refused. `src/announce.ts` carries why this
- * is a file rather than a well-known port.
- *
- * Nothing depends on it. A failure is one line and a fleet that reaches this
- * machine the way every other client does — through the relay.
- */
 function announceLocally(local: { host: string; port: number }): void {
   if (machineId === null || authMode === "shared_secret") return;
   if (local.port === 0) {
-    // `localAddress` answers 0 for "could not tell", which is the same state that
-    // stops the tunnel dialling. An announced port of 0 is an address nothing can
-    // connect to, so say nothing rather than something wrong.
     return;
   }
   try {
@@ -1067,20 +486,6 @@ function announceLocally(local: { host: string; port: number }): void {
     console.error(`local: could not announce this daemon (${describe(error)}); clients will use the relay`);
   }
 }
-/*
- * A refused bind is a configuration mistake, so it reads like one.
- *
- * Without this the process died on a raw `EADDRINUSE` stack trace, which is the
- * odd one out: every other startup refusal above — no `REEMOAT_TOKEN`, an
- * unparseable `REEMOAT_PORT` — prints what is wrong and what to do about it and
- * exits 2. Less likely than it was — there is one daemon per host now rather
- * than one per OS user — but a port is still the only host-global resource a
- * daemon holds, and something else on the box may already have this one.
- *
- * The advice differs by routing policy, so the message gives both halves: a
- * machine reachable directly needs a stable port that matches its `baseUrl`, and
- * a relay-only machine does not need a chosen port at all.
- */
 server.on("error", (error: NodeJS.ErrnoException) => {
   if (error.code === "EADDRINUSE") {
     console.error(
@@ -1103,45 +508,20 @@ server.on("error", (error: NodeJS.ErrnoException) => {
     );
     process.exit(2);
   }
-  // Anything else is not a known misconfiguration, and guessing at advice would
-  // be worse than the stack trace.
   throw error;
 });
 
 injectWebSocket(server as unknown as Server);
 
-/*
- * Put agents back on the sessions the last daemon ended, and do not wait for it.
- *
- * `void` and out here, after the listener and outside its callback, because the
- * pass starts one agent per interrupted session and `deploy.sh` waits on
- * `/health` for 30 seconds before calling the deploy failed. A boot that sat
- * behind even two ACP handshakes would report a healthy daemon as a failed
- * update; a boot that sat behind twenty would be a timeout every time.
- *
- * Nothing here awaits it and nothing depends on it: a session it misses is one
- * the prompt route resumes the moment somebody types, which is the same code by
- * a different door.
- */
+// Not awaited: deploy.sh gives /health 30 seconds, and the pass starts one agent per interrupted session.
 resumeInterrupted("at boot");
 
-/**
- * One pass of the registry's auto-resume, with its outcomes on the log.
- *
- * A function because it has three callers now: boot, the completion of every
- * agent refresh, and the completion of an install somebody pressed — the last
- * being what brings back a session whose harness had no CLI on the machine when
- * the first ran (`agent_missing`, which spends no attempt). `autoResume` queues a
- * second pass behind a first still in flight.
- */
 function resumeInterrupted(when: string): void {
   void registry
     .autoResume({
       enabled: autoResume,
       onOutcome: (outcome) => {
-        // Only the ends, not the attempts. A crash-looping agent would otherwise
-        // fill the log with the same sentence three times per session per boot,
-        // and the interesting line is the one that says it stopped trying.
+        // Only the ends: a crash-looping agent would otherwise log every attempt.
         if (outcome.result === "resumed" || outcome.result === "failed") return;
         console.error(
           `auto-resume ${outcome.sessionId}: ${outcome.result}` +
@@ -1159,48 +539,14 @@ function resumeInterrupted(when: string): void {
             ? `, ${report.deferred} waiting for an agent CLI — install it under Settings → Agents`
             : ""),
       );
-      /*
-       * ⚠ **This used to call `agentUpdates.nudge()`, and that stopped meaning
-       * anything when the timer became a refresher.** The nudge existed to pull
-       * the five-minute first run forward when a resume pass found a harness with
-       * no CLI on the machine: the install those sessions needed was already
-       * scheduled, so running it now closed the loop. A `--refresh-only` run
-       * installs nothing, so honouring the nudge would be a subprocess, a log
-       * line and a cache flush that cannot possibly repair what the pass
-       * reported — every boot, on exactly the machines that are already missing
-       * something.
-       *
-       * What closes the loop now is a person: `deferResume` keeps those sessions
-       * waiting with no attempt spent, the line above names where to go, and
-       * `AgentInstallRuns` runs `resumeInterrupted` itself when an install
-       * finishes. The `missing` counter that fed the nudge went with it —
-       * `report.deferred` is what decides whether that clause is printed, and
-       * always was.
-       */
     })
     .catch((error: unknown) => {
-      // The pass swallows per-session failures itself, so reaching here means the
-      // loop broke rather than a resume did. Say so and carry on: the daemon is
-      // serving, and every session it did not reach is still resumable by hand.
       console.error(`auto-resume ${when}: ${error instanceof Error ? error.message : String(error)}`);
     });
 }
 
 function startRelayTunnel(local: { host: string; port: number }): void {
   if (enrolledRelay === null) {
-    /*
-     * No relay to dial, and whether that is fine depends on which mode this is.
-     *
-     * Under the shared secret it is the ordinary, healthy state: there is no
-     * control plane, nothing enrolled, and `pnpm client` reaches this daemon on
-     * loopback. Warning there would print a scary paragraph on a correct start.
-     *
-     * Under `signed` it is not fine at all — this daemon enrolled, binds
-     * loopback, and has no tunnel, so nothing can reach it and there is no other
-     * door to try. That used to be a survivable state because the direct path
-     * existed; it is now the whole failure, and it is invisible from here unless
-     * it is said.
-     */
     if (machineId !== null) {
       console.error(
         "this machine enrolled but has no relay to dial, so nothing can reach it.\n" +
@@ -1212,8 +558,6 @@ function startRelayTunnel(local: { host: string; port: number }): void {
     return;
   }
   if (local.port === 0) {
-    // Only reachable if the listening callback reported no usable port. Dialling
-    // a relay that would splice every stream to port 0 is worse than not dialling.
     console.error(
       "relay: could not determine the port this daemon bound to, so there is nowhere to splice\n" +
         "  tunnelled streams to. Set an explicit REEMOAT_PORT. Continuing without a tunnel.",
@@ -1225,51 +569,15 @@ function startRelayTunnel(local: { host: string; port: number }): void {
     relayUrl: enrolledRelay.relayUrl,
     tunnelKey: enrolledRelay.tunnelKey,
     local,
-    // What this machine would launch, announced on every dial and read back by
-    // `cpctl admin fleet`. Off the same `agentCli` a session resolves through, so
-    // the report names the build a launch would get; the daily update above
-    // clears that cache but does not redial — see `AGENT_CLIS_HEADER`.
     agentClis: () => announcedAgentClis(runtime),
-    // The static an app authenticates this machine by, as this daemon booted
-    // holding it.
-    //
-    // ⚠ **"Read once here rather than per dial: unlike the CLI inventory beside
-    // it, this does not move under a running daemon" is what this said, and the
-    // `rotateMachineKey` block below falsified the second half of it.** A 409
-    // makes the tunnel announce a *different* key on its next dial, so the
-    // announced key does move under a running daemon — this value is only the
-    // first one, and the tunnel stops reading it after that.
-    //
-    // What survives is the reason it is a value rather than a function like
-    // `agentClis`: nothing ever asks this daemon to re-read a key, because there
-    // is no second answer to read. The replacement is *handed* to the tunnel by
-    // the rotation instead, which is a different mechanism from re-reading and is
-    // why the two options beside each other are shaped differently. See
-    // `ensureMachineKey`, and the `rotateMachineKey` block below, which has said
-    // this from the other side since the rotation landed.
+    // A value, not a function: a key rotation hands the tunnel its replacement.
     machineKey: machineKey.publicKey,
-    // The private half, for terminating an encrypted stream. It never leaves this
-    // process — the relay carries ciphertext it cannot read, and this is the only
-    // thing that can open it.
+    // Never leaves this process: the relay carries ciphertext it cannot read.
     staticKey: localStaticKey(new Uint8Array(Buffer.from(machineKey.privateKey, "base64url"))),
-    // What to announce if the control plane says the pair above is not what it
-    // pinned. On a machine holding one key this answers `null` on its first call
-    // and changes nothing; on one that lost the two-daemon startup race it is how
-    // the guess `migrateMachineKeysToOneLive` had to make stops being final. See
-    // `machineKeyRotation`.
-    //
-    // ⚠ This is the one thing that makes `machineKey` above stale, so the
-    // ordering `buildVerifier` already has is load-bearing now: enrollment runs
-    // and finishes before the listener exists, and this runs from inside the
-    // listening callback. Move an `enroll()` after the dial and it would post the
-    // key this daemon booted on rather than the one it is announcing, pinning the
-    // wrong half of the pair with `setMachineKey`, which compares nothing.
+    // Enrollment must finish before the listener exists, or it would pin the key booted on rather than the one announced.
 
     rotateMachineKey: machineKeyRotation(stores.machineKeys, machineKey),
-    // Every relayed request is checked here, against the key the handshake
-    // authenticated, exactly as it is checked at the HTTP gate.
     verifier,
-    // Nothing in src/ prints; this is where the words come out.
     onEvent: (kind, detail) => {
       if (kind === "connected") console.log(`relay: tunnel up (${detail})`);
       else if (kind === "rejected") console.error(`relay: ${detail}`);
@@ -1280,20 +588,7 @@ function startRelayTunnel(local: { host: string; port: number }): void {
   console.log(`relay: dialing ${enrolledRelay.relayUrl} (local ${local.host}:${local.port})`);
 }
 
-/**
- * Where to splice tunnelled streams to.
- *
- * The bound address rather than the configured one, because the configured host
- * is a *bind* address: `0.0.0.0` means "every interface", and connecting to it is
- * not portable. `::` gets the same treatment. The port comes from the same place,
- * which is what makes `REEMOAT_PORT=0` work — and it only works because this is
- * called from the listening callback, where the bind has actually happened.
- *
- * The configured-value fallback stays for the case where the callback reports
- * something with no usable address at all. `port: 0` out of here means "could
- * not tell", and `startRelayTunnel` refuses to dial on it rather than splicing
- * every stream to a port nobody can connect to.
- */
+/** The bound address rather than the configured bind address; port 0 means could not tell, and the tunnel then refuses to dial. */
 function localAddress(info: unknown, configuredHost: string, configuredPort: number): { host: string; port: number } {
   if (typeof info === "object" && info !== null && "port" in info) {
     const bound = info as { address?: string; port: number; family?: string };
@@ -1306,32 +601,12 @@ function localAddress(info: unknown, configuredHost: string, configuredPort: num
   return { host: wildcard ? "127.0.0.1" : configuredHost, port: configuredPort };
 }
 
-/**
- * A crashed daemon orphans every agent it owns, so a stray rejection is reported
- * rather than fatal. The paths that matter are already guarded individually.
- */
+/** A crashed daemon orphans every agent it owns, so a stray rejection is reported rather than fatal. */
 process.on("unhandledRejection", (reason) => {
   console.error("unhandled rejection:", reason);
 });
 
-/**
- * The same argument for the synchronous half, and it is not symmetry for its own
- * sake: the asymmetry cost a permanent crash loop once.
- *
- * A relay URL with an unspecial scheme (`htps://…`, which `new URL` accepts)
- * threw out of `new WebSocket` in `RelayTunnel.dial` on a path outside its own
- * `try`. With a rejection handler here and no exception handler, that reached
- * the default one: the process printed its whole startup banner and died, under
- * a unit with `KeepAlive`/`RunAtLoad`, so every restart re-ran `restore()` and
- * auto-resume and spawned agents that were killed seconds later. The scheme is
- * checked at the source now — `src/relay/tunnel.ts` records why that check is a
- * comparison rather than an assignment — and this is the backstop for the next
- * one, since the failure mode is "a daemon that owns live agents exits" either
- * way.
- *
- * A backstop, not a licence. It is deliberately the same shape as the relay's own
- * (`packages/control-plane/src/relay/main.ts`), which has carried one all along.
- */
+/** The synchronous backstop: a daemon that owns live agents must not exit on a stray throw. */
 process.on("uncaughtException", (error) => {
   console.error("uncaught exception (continuing):", error);
 });
@@ -1340,7 +615,6 @@ let shuttingDown = false;
 
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) {
-    // Second signal: the operator is out of patience, and so are we.
     console.error(`${signal} again — exiting immediately`);
     process.exit(130);
   }
@@ -1355,60 +629,26 @@ async function shutdown(signal: string): Promise<void> {
   }, SHUTDOWN_HARD_LIMIT_MS);
   hard.unref();
 
-  // First, and before the tunnel: a stopped daemon that is still advertising a
-  // loopback address costs the next local probe a refused connection. Cheap and
-  // synchronous; a daemon that never announced is a no-op, and so is a file some
-  // other daemon on this root wrote since — the removal is keyed on this
-  // process's own `instanceId`, so a stop can no longer take the winner's file.
+  // First: a stale announcement costs the next local probe; keyed on instanceId so it never removes another daemon's file.
   try {
     removeAnnounce(instanceId, stateHome);
   } catch {
-    // A crash leaves it behind anyway, so nothing may depend on this running —
-    // see `removeAnnounce`. Not worth a line of output during a shutdown.
+    // A crash leaves it behind anyway, so nothing may depend on this running.
   }
-  // Before the sessions, so the relay stops handing this daemon new work while it
-  // is winding down. A tunnel closing is routine — clients fail over or retry.
+  // Before the sessions, so the relay stops handing this daemon new work.
   await tunnel?.stop();
   server.close();
-  // A login in flight is a pty process nobody will ever type into again once
-  // this daemon is gone. Stopped before the sessions because it is cheap and
-  // unconditional, and because it is not on the 20s session budget.
   await agentLogins.shutdown();
-  /*
-   * ⚠ **A run in flight is deliberately not killed**, which is `AgentUpdates`'
-   * argument verbatim: it writes outside this repository, into the vendors' own
-   * directories, and a SIGKILL partway through an `npm i -g` leaves a tree the
-   * next run has to repair. What this stops is the sweep and any new run.
-   */
+  // A run in flight is not killed: a SIGKILL partway through an npm install leaves a tree the next run must repair.
   agentInstalls?.shutdown();
-  // Disarms the schedule; a run already in flight is deliberately left alone rather
-  // than killed — see `AgentUpdates.doShutdown`.
   await agentUpdates.shutdown();
-  // Beside the updater and for the same reason: it only disarms a timer. A sweep
-  // in flight is stopping sessions that the session shutdown below stops anyway,
-  // and `parkIdleSessions` checks `shuttingDown` between sessions so the overlap
-  // is one session wide.
   await idleParking.shutdown();
-  /*
-   * ⚠ **Before the plugin host, and that ordering is the whole of this line.** A
-   * model ask is started *by* a plugin, so draining the host first would leave
-   * the host gone and the agent it asked for still being spawned — and nothing
-   * downstream would ever collect it, because `agentask.ts` is the only thing
-   * that holds these. Same reason `agentLogins` goes before the sessions: it is
-   * cheap, unconditional, and not on the 20s session budget.
-   */
+  // Before the plugin host: an ask is started by a plugin, and nothing else would collect its agent.
   await agentAsks.shutdown();
-  // Before the sessions, because a plugin's hooks are driven by session events
-  // and stopping the sessions first would spend the shutdown budget delivering
-  // exit notices to children that are about to be killed anyway.
   await pluginHost?.shutdown();
-  // Only stops the sweep timer. Staged files are deliberately left on disk —
-  // they outlive a restart by design, which is the whole reason the index is on
-  // disk rather than in memory.
   await uploads.shutdown();
   await registry.shutdown();
-  // After shutdown, not before: stopping a session writes its exit record, and
-  // that write has to land before the database goes away.
+  // After registry shutdown: stopping a session writes its exit record.
   stores.close();
   clearTimeout(hard);
   console.error("stopped");
@@ -1420,14 +660,7 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 type AuthMode = "shared_secret" | "signed" | "both";
 
-/**
- * `both` is a migration and break-glass mode, not a destination.
- *
- * Under it the shared secret still opens everything, bypassing every grant and
- * every scope the control plane issued. It exists because enrolling a daemon
- * you reach over the network is exactly the moment you can lock yourself out
- * of it, and having no way back in is worse than having a documented one.
- */
+/** both is a migration and break-glass mode: the shared secret still bypasses every grant and scope. */
 function resolveAuthMode(value: string | undefined): AuthMode {
   const raw = (value ?? "shared_secret").trim().toLowerCase();
   if (raw === "" || raw === "shared_secret" || raw === "secret") return "shared_secret";
@@ -1437,28 +670,16 @@ function resolveAuthMode(value: string | undefined): AuthMode {
   process.exit(2);
 }
 
-/**
- * Establishes this machine's identity, enrolling first if it has to.
- *
- * The enrollment call is made when there is a code and it is not the code
- * already redeemed. That single comparison covers every restart case without a
- * flag anyone can set wrongly: same code, no network call; new code,
- * re-enrollment; no code with an identity already on disk, no network call at
- * all — which is what lets a daemon start with its control plane switched off.
- */
+/** Enrolls only when a code is set and differs from the one already redeemed. */
 async function buildVerifier(): Promise<AuthSetup> {
   const shared = token && token.length > 0 ? new SharedSecretVerifier(token) : null;
 
   if (authMode === "shared_secret") {
     if (shared === null) {
-      // Unreachable: the check at the top of this file already exits. Written
-      // out rather than asserted so that if that check ever moves, this fails
-      // closed instead of constructing a daemon with no credential at all.
+      // Unreachable while the top-of-file check exits; written out so it fails closed if that check moves.
       console.error("REEMOAT_TOKEN is required for REEMOAT_AUTH=shared_secret.");
       process.exit(2);
     }
-    // No control plane in this mode, so no relay either: there is nobody to have
-    // issued a tunnel credential and nowhere to present one.
     return { verifier: shared, machineId: null, relay: null, controlPlane: null };
   }
 
@@ -1466,10 +687,6 @@ async function buildVerifier(): Promise<AuthSetup> {
   const code = (process.env["REEMOAT_ENROLL_CODE"] ?? "").trim();
 
   if (dbPath === ":memory:") {
-    // Worth saying before it happens rather than after. The identity lives in
-    // the database, so an in-memory one enrolls on every boot — and enrollment
-    // codes are single-use, so the *second* boot fails with a code rejection
-    // that looks like a control-plane problem and is not one.
     console.error(
       "warning: REEMOAT_DB=:memory: cannot persist this machine's identity.\n" +
         "  Every restart re-enrolls, and enrollment codes are single-use, so the next\n" +
@@ -1481,8 +698,6 @@ async function buildVerifier(): Promise<AuthSetup> {
   try {
     identity = stores.identity.load();
   } catch (error) {
-    // Refusing to start beats silently re-enrolling or, worse, coming up with
-    // no identity and rejecting tokens that were fine a minute ago.
     console.error(`could not read this machine's stored identity: ${describe(error)}`);
     process.exit(2);
   }
@@ -1500,24 +715,7 @@ async function buildVerifier(): Promise<AuthSetup> {
     }
     console.log(`enrolling with ${controlPlane}…`);
     try {
-      /*
-       * ⚠ **`machineKey` is what makes the re-pin reachable at all, and without it
-       * the whole recovery story is inert.**
-       *
-       * `machinekeys.ts` argues trust-on-first-use on the grounds that
-       * "re-enrollment is the way back" from a pinned key that no longer matches,
-       * and `setMachineKey` calls itself "the one place a pin is replaced ... the
-       * rotation story". Both were true of the route and false of the fleet: the
-       * control plane reads `body["machineKey"]` and this — the only `enroll()`
-       * call site in the tree — posted `{ code }` alone, so `announcedKey` was
-       * always `null` and `setMachineKey` never ran in production. A daemon that
-       * lost `~/.reemoat/reemoat.db` generated a new key, was refused at every dial
-       * with 409 for ever, and no `cpctl` verb could clear the pin.
-       *
-       * `ensureMachineKey` runs at the top of this file, so the key exists before
-       * anything here can enroll with it. The ordering is the load-bearing half:
-       * announcing a key generated *after* enrollment would pin the wrong one.
-       */
+      // Announces the machine key generated before enrollment; announcing a later one would pin the wrong key.
       const result = await enroll({ controlPlane, code, machineKey: machineKey.publicKey });
       identity = {
         machineId: result.machineId,
@@ -1538,21 +736,6 @@ async function buildVerifier(): Promise<AuthSetup> {
       const rejected = error instanceof EnrollError && error.code === "code_rejected";
       const hint = rejected ? "\n  Enrollment codes are single-use and expire. Ask for a fresh one." : "";
       console.error(`enrollment failed: ${describe(error)}${hint}`);
-      /*
-       * ⚠ **Three exits rather than one, so a supervisor can tell what to do
-       * next.** Everything here used to be `2`, which is also the code for a
-       * missing token, an unreadable identity, a database a newer daemon migrated
-       * and a lock another daemon holds — so a parent watching this process could
-       * only know that it failed. Reemoat.app is such a parent now, and the
-       * difference decides whether it mints a fresh code (which is pointless and
-       * re-enrolls the machine when the real problem was a held lock) or reports
-       * what happened.
-       *
-       * The alternative was reading these words, and a supervisor that greps its
-       * child's log is one rewording away from silently doing nothing. Nothing in
-       * `deploy/` branches on the code — launchd and systemd see only non-zero —
-       * so this adds a signal without changing what any existing unit does.
-       */
       process.exit(
         rejected
           ? EXIT_CODE_REFUSED
@@ -1575,12 +758,7 @@ async function buildVerifier(): Promise<AuthSetup> {
     process.exit(2);
   }
 
-  /*
-   * A relay is only usable with both halves: somewhere to dial and something to
-   * prove identity with. One without the other is a control plane that changed
-   * shape between this daemon's enrollment and now, and the honest response is to
-   * behave as though there is no relay rather than to dial one anonymously.
-   */
+  // A relay needs both halves; with only one, behave as if there is none rather than dial anonymously.
   const relay =
     identity.relayUrl !== null && identity.tunnelKey !== null
       ? { relayUrl: identity.relayUrl, tunnelKey: identity.tunnelKey }
@@ -1588,9 +766,6 @@ async function buildVerifier(): Promise<AuthSetup> {
 
   const signed = new SignedTokenVerifier({
     identity,
-    // Nothing in src/ prints. This callback is the only way an operator hears
-    // that tokens are being refused because this machine's clock has drifted —
-    // the failure that otherwise presents as "auth mysteriously broke".
     onSuspectedClockSkew: (detail) => console.error(`clock skew: ${detail}`),
   });
   if (signed.keyCount === 0) {
@@ -1631,13 +806,7 @@ function positiveInt(value: string | undefined): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-/**
- * Whether a new session gets its own worktree.
- *
- * `auto` — the default — makes one whenever the cwd is a git repository with at
- * least one commit, and runs in the directory itself otherwise. `never` turns the
- * feature off daemon-wide.
- */
+/** auto makes a worktree when the cwd is a git repository with a commit; never turns worktrees off. */
 function worktreeMode(value: string | undefined): WorktreePolicy {
   const raw = (value ?? "auto").trim().toLowerCase();
   if (raw === "never" || raw === "0" || raw === "off" || raw === "false") return "never";
@@ -1645,13 +814,7 @@ function worktreeMode(value: string | undefined): WorktreePolicy {
   return "auto";
 }
 
-/**
- * Where durable state lives.
- *
- * Deliberately not relative to the cwd: the daemon's state would then depend on
- * which terminal you launched it from, which is the same class of surprise the
- * agent env scrubbing in `acp/agents.ts` already defends against.
- */
+/** Never relative to the cwd, so state does not depend on the launching terminal. */
 function resolveDbPath(value: string | undefined): string {
   const raw = (value ?? "").trim();
   if (raw.length === 0) return DEFAULT_DB;

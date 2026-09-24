@@ -25,6 +25,26 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Security
+
+- **Continuous deployment no longer trusts the deploy host's key on first use.** `deploy/ci-deploy.sh` pins the new `DEPLOY_KNOWN_HOSTS` secret with `StrictHostKeyChecking=yes` and refuses to deploy without it. Add the secret before the next dispatch: the host's keys as `ssh-keyscan -H <DEPLOY_HOST>` prints them, checked against the host's own fingerprints.
+
+### Fixed
+
+- `install.sh` printed the id of the default control-plane image rather than the one `REEMOAT_CP_IMAGE` in `control-plane.env` named.
+- A control plane whose `mail.public_url` is its own origin no longer warns that it serves no browser UI: it serves `/confirm`, `/reset` and `/verify` from the gate bundle. The warning remains for a control plane running without that bundle.
+- A mail failure from TLS or the socket is stored truncated and stripped of CR/LF, as SMTP replies already were, so it can no longer stretch or split the Email settings banner.
+- The login throttle key no longer cuts the tail of a long address when the name is a maximal email address: its ceiling is derived from the longest key any builder writes.
+- **"Use another account" appears on the forced password change again.** It was never drawn there, so someone with several accounts could only sign out.
+- A message sent while an earlier send on the same session was still in flight could have its echo cleared early by the earlier one's late answer or refusal.
+- The server log view keeps following new lines while you are at the bottom, however many lines one refresh adds. It now opens on the newest line.
+- A tool call whose only argument is its content (`content`, `text`, `new_string`) is shown with that content rather than as a call with no input.
+- A one-shot agent ask (a capability or model read) keeps its concurrency slot until the agent process has actually exited, and daemon shutdown waits for it; the slot used to free during the agent's teardown.
+- The idle sweep's wedged-turn reap runs even when parking an idle session throws in the same tick.
+- Raising `REEMOAT_SESSION_CREATE_BURST` takes effect at once instead of leaving the old ceiling in place until the bucket refilled; lowering it still clamps.
+- An unreachable machine no longer flickers into view every 15 seconds while it is re-checked: a re-check keeps the last answer until the new one arrives.
+- The app no longer gives up on a slow request before the machine's own budget for it runs out. Each slow route waits for its daemon's budget plus 30 seconds (a new session up to 215s, a prompt 150s, an agent capability read 290s) instead of a flat 90s, which drew a healthy machine as unreachable.
+
 ## [0.11.0] - 2026-09-23
 
 ### Added

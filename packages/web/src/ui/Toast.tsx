@@ -4,21 +4,6 @@ import { createPortal } from "react-dom";
 import { Icon } from "./bits";
 import { LAYER } from "./overlay";
 
-/**
- * Transient messages, out of the way of the thing they are about.
- *
- * These used to be inline `<p className="text-danger">` strings inside the
- * composer, the permission card and the session header. Three problems with
- * that: the message shifted the layout of a form somebody was mid-way through
- * using, it was invisible if the failing control had scrolled off, and it
- * survived only as long as that component was mounted — so an error from an
- * action that navigated away was never seen at all.
- *
- * An external store rather than context, for the same reason `store.ts` is one:
- * these are raised from promise callbacks that are not inside a render, and a
- * `useState` setter reachable only through a hook is awkward to call from there.
- */
-
 export type ToastTone = "error" | "ok";
 
 export interface Toast {
@@ -43,8 +28,7 @@ function announce(): void {
 
 export function toast(tone: ToastTone, text: string): void {
   const id = nextId++;
-  // Deduplicated by text: a failing poll can raise the same message every few
-  // seconds, and a stack of eight identical toasts hides everything else.
+  // Deduplicated by text, so a failing poll cannot stack identical toasts.
   toasts = [...toasts.filter((existing) => existing.text !== text), { id, tone, text }].slice(-3);
   announce();
   setTimeout(() => dismiss(id), AUTO_DISMISS_MS[tone]);
@@ -66,37 +50,10 @@ export function ToastHost(): ReactNode {
     () => toasts,
   );
 
-  /*
-   * Portaled to `document.body`, and both halves of that are required rather than
-   * tidy.
-   *
-   * **`inert`.** `overlay.ts` puts `inert` on `#root` while a sheet is open, which
-   * is what gives focus containment and background inertness in one attribute
-   * instead of a hand-rolled focus trap. `ToastHost` is rendered inside `App`,
-   * inside `#root` — so left there it would go `aria-hidden` and untappable
-   * exactly when it is most needed, since a sheet is where most of this app's
-   * failures are reported from.
-   *
-   * **`fixed`.** `position: fixed` only means "the viewport" while no ancestor
-   * carries `filter`, `backdrop-filter`, `transform`, `perspective` or `contain`,
-   * and this app is one hop from a `backdrop-blur` almost everywhere.
-   *
-   * The z moves up a step with it: every action inside the settings sheet reports
-   * failure through `toast()`, and a toast painted *under* the sheet that raised
-   * it is an error message nobody can read.
-   *
-   * **The stack is mounted unconditionally and only its contents swap**, which is
-   * the one arrangement that reliably announces: a `role="status"` inserted into
-   * the DOM in the same paint as its content is commonly not spoken at all,
-   * VoiceOver on iOS included — and this app is used from a phone. `EventList`
-   * records the same measurement about its own live region. It costs nothing
-   * while empty: the box is `pointer-events-none`, so the padding it holds open
-   * over the composer swallows no tap.
-   */
+  // Portaled to body: overlay.ts makes #root inert while a sheet is open, and an ancestor's backdrop-filter would break fixed.
+  // The status region stays mounted and only its contents swap, since a region inserted with its content is often not announced.
   return createPortal(
-    // `pointer-events-none` on the stack and `auto` on each toast: this sits
-    // over the composer, and a toast must not swallow a tap aimed at the input
-    // underneath the gap between them.
+    // The stack ignores pointers and each toast takes them, so the gaps never swallow a tap on the composer.
     <div
       className={`pb-safe pointer-events-none fixed inset-x-0 bottom-0 ${LAYER.toast} flex flex-col items-center gap-2 px-3 pb-3`}
       role="status"
@@ -105,11 +62,7 @@ export function ToastHost(): ReactNode {
       {current.map((entry) => (
         <div
           key={entry.id}
-          // A failure is its own live region, above the polite one it sits in: a
-          // toast is how every action in this app reports that it did not
-          // happen, and "polite" means a screen reader may hold it until the
-          // reader has finished whatever they are doing — by which time the 8s
-          // dismissal has taken it away.
+          // Errors are alerts: a polite announcement may be held past the dismissal timeout.
           role={entry.tone === "error" ? "alert" : undefined}
           className={`pointer-events-auto flex w-full max-w-md items-start gap-2 rounded-lg border px-3 py-2.5 text-xs shadow-lg backdrop-blur ${
             entry.tone === "error"
@@ -121,18 +74,7 @@ export function ToastHost(): ReactNode {
           <span className="min-w-0 flex-1 wrap-anywhere">{entry.text}</span>
           <button
             onClick={() => dismiss(entry.id)}
-            // 24px of glyph, 44px of target — the same transparent `::after`
-            // trick `IconButton`'s `sm` size uses, and for the same reason: a
-            // toast has to stay a thin strip over the composer, so the target
-            // cannot be bought with layout. It matters more here than it looks:
-            // this button sits over the composer, and a miss lands in the text
-            // field of a message somebody is part-way through writing.
-            //
-            // ⚠ And it is gated on a coarse pointer for the reason `sm` now is:
-            // the pad grows `:hover` with the target, so on a mouse the glyph
-            // brightened 10px before the pointer reached it. Same mechanism,
-            // same repair, copied here because this square never went through
-            // the primitive.
+            // A coarse-pointer-only pad gives a 44px target without layout; on a mouse it would grow the hover area ahead of the glyph.
             className="tap relative -mt-0.5 -mr-1 flex h-6 w-6 items-center justify-center rounded-sm opacity-70 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-2.5 [@media(pointer:coarse)]:after:content-[''] hover:opacity-100"
             aria-label="Dismiss"
           >

@@ -21,15 +21,6 @@ import {
 } from "./git.js";
 import { describeError } from "./http.js";
 
-/**
- * Per-session git worktrees.
- *
- * Two agents pointed at one repository fight over one index and one HEAD. A
- * linked worktree gives each its own of both, which is why parallel sessions
- * work at all — that part is git's guarantee, not ours. What is ours is not
- * fighting it, and never destroying work on the way out.
- */
-
 export const DEFAULT_BRANCH_PREFIX = "reemoat";
 const BRANCH_SUFFIX_ATTEMPTS = 10;
 
@@ -37,18 +28,13 @@ export interface RepoInfo {
   isRepo: boolean;
   bare: boolean;
   insideWorkTree: boolean;
-  /** Absolute `$GIT_DIR`. Differs from `commonDir` exactly when we are in a linked worktree. */
   gitDir: string | null;
-  /** Absolute `$GIT_COMMON_DIR`. The repository's identity. */
   commonDir: string | null;
-  /** This checkout's root. Null when bare. */
   toplevel: string | null;
   /** The main worktree — where `worktree add`/`remove`/`prune` have to run. */
   mainRoot: string | null;
   linked: boolean;
-  /** Null when HEAD is unborn: the repo has no commits and cannot be branched from. */
   headCommit: string | null;
-  /** Null when HEAD is detached. */
   headBranch: string | null;
   dirty: { tracked: number; untracked: number } | null;
 }
@@ -100,31 +86,12 @@ export interface WorktreeEntry {
 export interface WorkspaceStatus {
   mode: SessionWorkspace["mode"];
   root: string;
-  /**
-   * Does the directory still exist, or could we not tell?
-   *
-   * `null` is a real answer and not a placeholder. This was a `boolean` filled by
-   * `existsSync`, which has no way to say "the path is on a network mount that
-   * has stopped replying" — and for a `plain` session this path is the `cwd` the
-   * caller chose, so that case is ordinary rather than exotic. Reporting it as
-   * `false` told somebody their work had been deleted. Same three-answer shape as
-   * `Liveness` and an agent's `loggedIn`, for the same reason.
-   */
+  /** `null` means could not tell (a stalled mount), never deleted; `registered` is three-valued the same way. */
   exists: boolean | null;
-  /**
-   * Does `worktree list` still know about it, or could we not tell?
-   *
-   * Three-valued for the same reason `exists` above is: deciding it needs
-   * `realpath` on the paths **git** reported, which are by construction paths
-   * this daemon did not create, and `samePath` answers `null` when one of them
-   * sits on a mount that has stopped replying. Reporting that as `false` would
-   * say a registered worktree had been forgotten.
-   */
   registered: boolean | null;
   branch: string | null;
   baseCommit: string | null;
   headCommit: string | null;
-  /** Commits made in this worktree since it branched. */
   commitsAhead: number | null;
   hasRemote: boolean;
   /** Commits reachable from HEAD but from no remote-tracking ref. Null with no remotes. */
@@ -133,16 +100,7 @@ export interface WorkspaceStatus {
   locked: boolean;
 }
 
-/**
- * Why a removal did not happen. Every one of these is cured by `force`.
- *
- * The last two are the third answer, and they are refusals rather than a shrug
- * for the same reason `exists` above is three-valued: **a count we could not take
- * is not a count of zero.** `count()` and `countStatus` collapse a timeout, a
- * non-zero exit, oversized output and a parse failure into one `null`, and a
- * caller reading that as "nothing to lose" is how `--delete-branch` came to run
- * `git branch -D` over commits that existed nowhere else.
- */
+/** Why a removal did not happen; `force` cures every one, and a count we could not take is never read as zero. */
 export type RemoveRefusal =
   | { code: "dirty"; message: string; tracked: number; untracked: number; ignored: number }
   | { code: "unpushed_commits"; message: string; count: number; hasRemote: boolean }
@@ -159,13 +117,10 @@ export interface CreateWorkspaceOptions {
   /** Absolute, already through `resolveCwd`. */
   cwd: string;
   sessionId: string;
-  /** `auto` makes a worktree when it can, `require` insists, `never` opts out. */
   policy: "auto" | "require" | "never";
   worktreeRoot: string;
   branchPrefix: string;
-  /** Client-supplied. Sanitized and validated by git, never trusted. */
   branchHint?: string | null;
-  /** Where git runs. Host paths in and out; see `GitExec`. */
   runner: GitExec;
 }
 
@@ -174,31 +129,7 @@ export interface CreateWorkspaceResult {
   warnings: WorkspaceWarning[];
 }
 
-/* ------------------------------------------------------------------------- *
- * Configuration
- * ------------------------------------------------------------------------- */
-
-/**
- * Where per-session worktrees are created.
- *
- * Outside every repository on purpose. Inside one, each worktree would show up
- * as an untracked entry in the *parent's* own changes API and sit in the path of
- * `git clean -xfd`; beside one, we would be writing into a directory we do not
- * own and may not be able to write to. The default is dot-prefixed, so
- * `GET /fs/list` already hides it from the directory picker.
- *
- * Dot-prefixed because it is `worktrees` inside the state root, which is
- * `~/.reemoat` unless `REEMOAT_HOME` names another — one per server, when the
- * desktop app runs the daemon (`resolveStateRoot`, Q7.148), and dot-prefixed
- * whenever the app chose it. ⚠ **An undotted `REEMOAT_HOME` set by hand is not
- * hidden**: refusing `~` itself is all `resolveStateRoot` does, so the picker
- * offers that root's `worktrees` like any folder — the operator's choice, as an
- * undotted `REEMOAT_WORKTREE_ROOT` always was. `root` defaults to the
- * unset answer, so the registry's own fallback and every driver get the path they
- * always did. `resolveUploadRoot` takes the same second argument for the same
- * reason, and the two stay siblings under one root, which is what keeps
- * `REMOVER_TREES` from nesting.
- */
+/** Outside every repository, or each worktree shows as untracked in the parent; defaults to `worktrees` under the state root (Q7.148). */
 export function resolveWorktreeRoot(spec: string | undefined, root: string = resolveStateRoot(undefined)): string {
   const raw = (spec ?? "").trim();
   if (raw.length === 0) return join(root, "worktrees");
@@ -219,10 +150,6 @@ function repoKey(mainRoot: string, commonDir: string): string {
   return `${base || "repo"}-${hash}`;
 }
 
-/* ------------------------------------------------------------------------- *
- * Inspection
- * ------------------------------------------------------------------------- */
-
 export async function inspectRepo(dir: string, runner: GitExec): Promise<RepoInfo> {
   const empty: RepoInfo = {
     isRepo: false,
@@ -238,9 +165,7 @@ export async function inspectRepo(dir: string, runner: GitExec): Promise<RepoInf
     dirty: null,
   };
 
-  // Deliberately separate from the call below. `rev-parse --show-toplevel` dies
-  // in a bare repo ("this operation must be run in a work tree"), so a combined
-  // invocation would report a perfectly usable bare repo as "not a repo".
+  // Separate from the call below: `--show-toplevel` dies in a bare repo, which would then read as not a repo.
   let bare = false;
   let insideWorkTree = false;
   try {
@@ -266,8 +191,6 @@ export async function inspectRepo(dir: string, runner: GitExec): Promise<RepoInf
   const commonDir = paths[1] ?? null;
   const toplevel = bare || !paths[2] ? null : paths[2];
 
-  // `--path-format=absolute` matters: without it `--git-common-dir` answers with a
-  // relative ".git", which silently resolves against the wrong directory later.
   const headCommit = await optional(
     runner.run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { ...structural(dir), okExitCodes: [0, 1] }),
   );
@@ -314,8 +237,7 @@ export async function listWorktrees(dir: string, runner: GitExec): Promise<Workt
     current = null;
   };
 
-  // With -z each attribute is NUL-terminated and the blank line that separates
-  // records becomes an empty token.
+  // With -z the blank line between records becomes an empty token.
   for (const token of splitNul(run.stdout)) {
     const line = token.toString("utf8");
     if (line.length === 0) {
@@ -330,7 +252,6 @@ export async function listWorktrees(dir: string, runner: GitExec): Promise<Workt
       case "worktree":
         flush();
         current = {
-          // The agent's side, like everything else git prints.
           path: value,
           head: null,
           branch: null,
@@ -370,10 +291,6 @@ export async function listWorktrees(dir: string, runner: GitExec): Promise<Workt
   return out;
 }
 
-/* ------------------------------------------------------------------------- *
- * Creation
- * ------------------------------------------------------------------------- */
-
 export async function createWorkspace(options: CreateWorkspaceOptions): Promise<CreateWorkspaceResult> {
   const warnings: WorkspaceWarning[] = [];
   const { runner } = options;
@@ -397,8 +314,7 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
         "this is a bare repository, so there is no working tree for an agent to run in",
       );
     }
-    // A plain session on a git repo still records the base commit, so the changes
-    // API has exactly one code path rather than two.
+    // A plain session on a repo still records the base commit, so the changes API has one code path.
     return {
       workspace: {
         mode: "plain",
@@ -439,8 +355,6 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
     return plain("not_a_repo");
   }
   if (info.headCommit === null) {
-    // `git worktree add` needs a commit to branch from. Reported as its own case
-    // rather than surfacing a raw git failure.
     if (options.policy === "require") {
       throw new WorktreeError(
         "unborn_head",
@@ -475,9 +389,7 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
     });
   }
 
-  // The whole point of a worktree is that it starts from a *commit*, so anything
-  // uncommitted here is not in it. Warn loudly; never refuse — refusing would
-  // make the common case (a dirty checkout) unusable.
+  // Warn, never refuse: a dirty checkout is the common case.
   if (info.dirty && info.dirty.tracked + info.dirty.untracked > 0) {
     warnings.push({
       code: "dirty_source",
@@ -499,29 +411,13 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
     );
   }
 
-  // Checked before the checkout, not only before the `rm`.
-  //
-  // `removeWorkspace` has always asserted containment before it will delete
-  // anything; creation asserted nothing, and the asymmetry was the bug. This is
-  // **self-protection** rather than a boundary: the agent runs as this user and
-  // can write under the worktree root regardless, so what the check guards is the
-  // one `rmSync` in this codebase, not the agent. `repoKey` is
-  // `<basename>-<sha256(commonDir)[0:8]>` — computable
-  // by an agent that has seen its own worktree's gitfile. Replacing that one
-  // directory with a symlink redirected the next session's checkout anywhere the
-  // daemon could write. `existsSync(root)` never caught it, because the leaf is
-  // a fresh session id.
-  //
-  // `lstat` rather than `atOrUnder` for the parent: the question is whether this
-  // component *is* a link, and a resolving check would follow it and answer
-  // about the target.
+  // Refuse a symlinked repo directory before the checkout: repoKey is guessable, and a link would redirect the checkout the guarded rmSync later deletes.
   if (existsSync(repoDir)) {
     let link = false;
     try {
       link = lstatSync(repoDir).isSymbolicLink();
     } catch {
-      // Vanished between the two calls. The containment check below still runs,
-      // and `worktree add` will fail honestly if it is genuinely unusable.
+      // Vanished between the calls; the containment check below still runs.
     }
     if (link) {
       throw new WorktreeError(
@@ -531,29 +427,7 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
       );
     }
   }
-  /*
-   * Both sides in **one namespace**, which `containedIn` cannot manage here.
-   *
-   * That helper resolves each side and falls back to the literal string when
-   * `realpath` throws — right where a path is merely not created yet, and wrong
-   * when only *one* of the two is in that state, which is exactly this call. The
-   * leaf is a fresh session id, so it always throws and is compared as written,
-   * while the root beside it resolves fully. On any host whose worktree root
-   * traverses a symlink — `/tmp` on macOS, `~/.reemoat` moved onto another disk
-   * with a link left behind — the two answers are in different namespaces, the
-   * prefix test fails, and **every** session creation is refused with an error
-   * accusing the daemon's own configured root of being outside itself. The same
-   * defect `browse.ts` already fixed, which `resolveWorktreeRoot` never adopted.
-   *
-   * So the deepest component that *exists* is resolved, and the components that
-   * do not exist yet are appended to that answer. `relative`/`join` rather than
-   * `slice`, because a root with a trailing separator would otherwise splice two
-   * path components into one.
-   *
-   * Still synchronous, and still allowed to be: these are the daemon's own
-   * directories, which is the exception `stall.ts` states — nothing here is a
-   * path a caller named.
-   */
+  // Resolve the deepest existing component and append the rest, so both sides share one namespace under a symlinked root.
   const anchor = existsSync(repoDir) ? repoDir : options.worktreeRoot;
   const candidate = join(realpathQuiet(anchor), relative(anchor, root));
   if (!containedInResolved(candidate, realpathQuiet(options.worktreeRoot))) {
@@ -565,15 +439,12 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
   }
 
   const branch = await pickBranch(options, repoRoot, warnings, runner);
-  // Resolved to a sha before the add, never the string "HEAD": that closes the
-  // race where the source checkout's HEAD moves between here and the checkout,
-  // and makes baseCommit provably the commit this tree started from.
+  // A sha, never HEAD: the source checkout's HEAD may move before the add.
   const baseCommit = info.headCommit;
 
   try {
     await runner.run(
-      // --no-track/--no-guess-remote so behaviour does not depend on the user's
-      // worktree.guessRemote or branch.autoSetupMerge.
+      // Independent of the user's worktree.guessRemote and branch.autoSetupMerge.
       ["worktree", "add", "--no-track", "--no-guess-remote", "-b", branch, "--", root, baseCommit],
       { dir: repoRoot, timeoutMs: GIT_TIMEOUT_MUTATE_MS, maxBytes: GIT_MAX_LIST_BYTES },
     );
@@ -581,10 +452,7 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
     throw classifyAddFailure(error, branch, options.branchPrefix, root);
   }
 
-  // Re-checked against the real filesystem now that the directory exists. The
-  // test above is about the path we were going to use; this one is about the
-  // tree that actually got created, and only `realpath` can tell us a component
-  // was a link all along.
+  // Re-checked once created: only realpath can reveal a component that was a link all along.
   if (!containedIn(root, options.worktreeRoot)) {
     throw new WorktreeError(
       "outside_worktree_root",
@@ -606,14 +474,6 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
   };
 }
 
-/**
- * Picks a branch name nothing else is using.
- *
- * Session ids are eight random hex characters, so the default collides only if a
- * previous session with the same id left its branch behind. A client-supplied
- * name is the case that really collides, and it gets a bounded suffix search
- * rather than either silently adopting someone else's branch or spinning.
- */
 async function pickBranch(
   options: CreateWorkspaceOptions,
   repoRoot: string,
@@ -688,17 +548,10 @@ function classifyAddFailure(error: unknown, branch: string, prefix: string, root
   return asWorktreeError(error);
 }
 
-/* ------------------------------------------------------------------------- *
- * Status and removal
- * ------------------------------------------------------------------------- */
-
 export async function inspectWorkspace(workspace: SessionWorkspace, runner: GitExec): Promise<WorkspaceStatus> {
   const base: WorkspaceStatus = {
     mode: workspace.mode,
     root: workspace.root,
-    // Bounded and remembered, never `existsSync`: see `stall.ts`. Synchronously
-    // this call stopped the event loop for the whole daemon whenever the
-    // session's directory sat on a mount that had stopped answering.
     exists: await probeExists(workspace.root),
     registered: false,
     branch: workspace.git?.branch ?? null,
@@ -713,11 +566,7 @@ export async function inspectWorkspace(workspace: SessionWorkspace, runner: GitE
   if (workspace.mode !== "worktree" || !workspace.git) return base;
 
   const entries = await listWorktrees(workspace.git.repoRoot, runner).catch(() => [] as WorktreeEntry[]);
-  // Sequentially rather than a `find` over a `Promise.all`, because every probe
-  // costs a libuv threadpool slot and the match usually lands on the literal
-  // comparison in `samePath` without touching the filesystem at all. A candidate
-  // that did not answer is remembered as unknown rather than skipped: if none of
-  // the others matches, "not registered" is a claim we have no basis for.
+  // Sequential, since the literal match usually costs no probe; an unanswered candidate leaves `registered` unknown.
   let entry: WorktreeEntry | undefined;
   let unknownCandidate = false;
   for (const candidate of entries) {
@@ -730,26 +579,13 @@ export async function inspectWorkspace(workspace: SessionWorkspace, runner: GitE
   }
   base.registered = entry !== undefined ? true : unknownCandidate ? null : false;
   base.locked = entry?.locked ?? false;
-  // `!== true`, so "could not tell" takes the same path as "gone": both mean we
-  // must not go on to run git *inside* that directory, and both leave the branch
-  // and its commits perfectly countable from `repoRoot`, which is ours and local.
+  // Could-not-tell takes the gone path: never run git inside it, and the branch is still countable from repoRoot.
   if (base.exists !== true) {
-    // The checkout is gone but the branch is not, and the commits on it are still
-    // in the object database. Counting them from `repoRoot` is what keeps the
-    // unpushed-commits refusal answerable here — without it `removeWorkspace`
-    // reaches `branch -D` with `null` for both counts and nothing to refuse on,
-    // which is how a `--delete-branch` on a directory somebody already `rm`ed
-    // destroys the only copy of that work.
     await countFromRepo(base, workspace.git, runner);
     return base;
   }
 
-  // Everything below is best-effort on purpose. The directory can exist and yet
-  // no longer be a usable worktree — the repo moved, the admin dir was pruned out
-  // of band, the `.git` file is stale — and `rev-parse` then exits 128 rather
-  // than the 1 we tolerate. Letting that throw would take `GET .../workspace` and
-  // `DELETE .../workspace?force=1` down with it, so the one state the recovery
-  // path exists for would be the one state it cannot recover from.
+  // Best-effort: a directory that is no longer a usable worktree must not break the routes that exist to recover it.
   base.headCommit = await optional(
     runner.run(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], {
       ...structural(workspace.root),
@@ -766,24 +602,14 @@ export async function inspectWorkspace(workspace: SessionWorkspace, runner: GitE
     .catch(() => []);
   base.hasRemote = remotes.length > 0;
   if (base.hasRemote) {
-    // Reachability from *any* remote-tracking ref, which is the real "would I
-    // lose this" question. Never `@{upstream}` — that throws when unset, which is
-    // exactly the case we most need an answer for.
+    // Reachable from no remote-tracking ref; never @{upstream}, which throws when unset.
     base.unpushed = await count(workspace.root, ["rev-list", "--count", "HEAD", "--not", "--remotes"], runner);
   }
 
   return base;
 }
 
-/**
- * Fills in the commit counts from the main worktree, for a checkout that is gone.
- *
- * Everything here is best-effort for the same reason the in-worktree path is: a
- * branch that no longer exists is a legitimate answer, not a failure. But the
- * counts are left `null` only when we genuinely could not tell, never as a side
- * effect of the directory being missing — a `null` here reads as "cannot tell"
- * to `removeWorkspace`, which is the one place it must not silently mean "zero".
- */
+/** For a checkout that is gone; `null` counts mean could-not-tell to removeWorkspace, never zero. */
 async function countFromRepo(
   base: WorkspaceStatus,
   git: NonNullable<SessionWorkspace["git"]>,
@@ -810,10 +636,8 @@ async function countFromRepo(
 }
 
 export interface RemoveWorkspaceOptions {
-  /** Where git runs. Host paths in and out; see `GitExec`. */
   runner: GitExec;
   workspace: SessionWorkspace;
-  /** For the containment assertion before any filesystem removal. */
   worktreeRoot: string;
   force: boolean;
   deleteBranch: boolean;
@@ -821,8 +645,6 @@ export interface RemoveWorkspaceOptions {
 
 export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<RemoveWorkspaceResult> {
   const { workspace, runner } = options;
-  // A plain session runs in a directory the client chose. We did not create it
-  // and we will not remove it.
   if (workspace.mode !== "worktree" || !workspace.git) {
     return { kind: "not_applicable", reason: "plain_directory" };
   }
@@ -843,14 +665,7 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
         ignored: dirty.ignored,
       });
     }
-    // The directory is there and `git status` did not answer, which is a
-    // different sentence from "it is clean" — and the one that used to be read as
-    // it. `countStatus` returns `null` for a 15s timeout on a large tree and for a
-    // stale `.git` gitfile alike, so the refusal above silently did not fire and
-    // the guarded `rmSync` below deleted work nobody had been told about.
-    // `exists !== true` is deliberately not this case: there is nothing there to
-    // hold changes, and refusing would make the state this path exists to clean
-    // up the one it cannot.
+    // Present but git status did not answer is not clean: refuse rather than let the guarded rm delete it.
     if (status.exists === true && status.dirty === null) {
       refusals.push({
         code: "counts_unknown",
@@ -861,16 +676,9 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
     if (status.locked) {
       refusals.push({ code: "locked", message: `${workspace.root} is locked` });
     }
-    // Only a concern when the branch is going away with the worktree: removing a
-    // worktree on its own never loses a commit.
     if (options.deleteBranch) {
       const orphaned = status.hasRemote ? status.unpushed : status.commitsAhead;
-      // `?? 0` here was the whole defect: `count()` answers `null` for a timed-out
-      // `rev-list`, a 128 from a stale gitfile and an unparseable number alike, so
-      // "could not tell" became "nothing to lose" and `branch -D` ran over commits
-      // that exist in no other ref and on no remote. Gated on the branch actually
-      // being at risk, because a branch we did not create is never deleted below
-      // and refusing on its behalf would be a refusal that changes nothing.
+      // `null` is could-not-tell, never zero; gated on createdBranch because no other branch is deleted below.
       if (orphaned === null && workspace.git.createdBranch && workspace.git.branch) {
         refusals.push({
           code: "counts_unknown",
@@ -908,30 +716,10 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
   } catch (error) {
     removeError = error;
     warnings.push(describeError(error));
-    // Fall through: the prune below handles the case where the directory was
-    // already gone, and the guarded rm handles a partial removal.
+    // Fall through: the prune handles an already-gone directory and the guarded rm a partial removal.
   }
 
-  /*
-   * **git refusing is not a partial removal, and the fall-through above treated
-   * it as one.** `git worktree remove` without `--force` declines when the tree
-   * holds modified or untracked files; that failure was pushed onto `warnings`
-   * and execution carried straight on to the guarded `rmSync(recursive, force)`,
-   * which deleted exactly the work git had just declined to delete — and the
-   * route answered `200 {removed: true}`. So a caller who deliberately did not
-   * pass `force` got the forced behaviour, with the refusal reduced to a warning
-   * nobody had to read.
-   *
-   * Recognised by git's own stderr rather than by the failure existing at all,
-   * on the same reasoning as `classifyAddFailure`: every *other* way this call
-   * can fail — a stale gitfile, an unregistered directory, half-written admin
-   * metadata — is precisely what the guarded rm and the prune are there to clean
-   * up, and refusing on those would make the recovery path unreachable in the one
-   * state it exists for.
-   *
-   * Returning here skips the prune, which has nothing to do: a worktree git has
-   * just declined to remove is by definition still registered and still present.
-   */
+  // git declining a tree that holds work is a refusal, not a partial removal; every other failure falls through to the rm and prune.
   if (removeError !== null && !options.force) {
     const stderr = removeError instanceof GitError ? removeError.stderr : "";
     if (/contains modified or untracked files|use --force/i.test(stderr)) {
@@ -949,11 +737,7 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
     }
   }
 
-  // Three answers, and the third one must not delete anything. `null` is "the
-  // filesystem did not reply in time", which is precisely when guessing is worst:
-  // the guarded `rm` below is the only one in this codebase, and running it
-  // against a path we could not even stat is the opposite of the caution every
-  // other line here is written with.
+  // `null` must not delete: never run the rm on a path we could not stat.
   const present = await probeExists(workspace.root);
   if (present === null) {
     warnings.push(
@@ -961,8 +745,7 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
     );
   }
   if (present === true) {
-    // Only ever inside the root we manage. We never delete a directory we did not
-    // create, whatever a stale record claims.
+    // Only inside the managed root: never delete a directory we did not create.
     if (containedIn(workspace.root, options.worktreeRoot)) {
       try {
         rmSync(workspace.root, { recursive: true, force: true });
@@ -976,10 +759,6 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
     }
   }
 
-  // Unconditional, on every path including the ones that already failed. This is
-  // what makes "leaves no stale git metadata" true rather than hoped-for: it
-  // covers a directory deleted out of band, a `worktree add` we SIGKILLed on
-  // timeout leaving half-written metadata, and a `remove` that bailed part-way.
   let pruned = false;
   try {
     await runner.run(["worktree", "prune", "--expire=now"], {
@@ -1006,9 +785,6 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
   if (stillRegistered) {
     warnings.push(`${workspace.root} is still registered as a worktree`);
   } else if (unknownRemaining) {
-    // "Could not tell" gets its own sentence rather than silence: a path that did
-    // not answer is exactly when a stale registration is most likely, and the
-    // caller reads these warnings to decide whether to look.
     warnings.push(`could not tell whether ${workspace.root} is still registered as a worktree`);
   }
 
@@ -1016,9 +792,7 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
   // Never a branch we did not create: that is where somebody else's commits live.
   if (options.deleteBranch && workspace.git.createdBranch && workspace.git.branch) {
     try {
-      // -D rather than -d: we have already made the unpushed decision above with
-      // better information than -d has, and -d would refuse a branch merged into
-      // baseCommit but not into whatever the main checkout happens to be on.
+      // -D, not -d: the unpushed check above already decided, and -d would judge against the main checkout's branch.
       await runner.run(["branch", "-D", "--", workspace.git.branch], {
         dir: repoRoot,
         timeoutMs: GIT_TIMEOUT_STRUCTURAL_MS,
@@ -1033,15 +807,10 @@ export async function removeWorkspace(options: RemoveWorkspaceOptions): Promise<
   return { kind: "removed", branchDeleted, pruned, warnings };
 }
 
-/* ------------------------------------------------------------------------- *
- * Helpers
- * ------------------------------------------------------------------------- */
-
 function structural(dir: string): { dir: string; timeoutMs: number; maxBytes: number } {
   return { dir, timeoutMs: GIT_TIMEOUT_STRUCTURAL_MS, maxBytes: GIT_MAX_STRUCTURAL_BYTES };
 }
 
-/** Counts porcelain-v2 records without parsing them. */
 async function countStatus(
   dir: string,
   includeIgnored: boolean,
@@ -1076,8 +845,6 @@ async function count(dir: string, args: readonly string[], runner: GitExec): Pro
     const value = Number.parseInt(textOf(await runner.run(args, structural(dir))), 10);
     return Number.isInteger(value) ? value : null;
   } catch {
-    // A missing ref or an unborn branch is an answer of "cannot tell", not a
-    // failure worth aborting the whole inspection for.
     return null;
   }
 }
@@ -1093,55 +860,21 @@ async function safeInspect(dir: string, runner: GitExec): Promise<RepoInfo | nul
   try {
     return await inspectRepo(dir, runner);
   } catch {
-    // Callers that reach here already have a non-git answer to fall back on.
     return null;
   }
 }
 
-/**
- * `realpath`, falling back to the path as written.
- *
- * The same rule `paths.ts` states for `resolved()`, kept local because the one
- * caller needs the two halves *separately* — resolve the ancestor that exists,
- * then rebuild the leaf on top of it — which a helper that resolves whole paths
- * cannot express.
- */
 function realpathQuiet(path: string): string {
   try {
     return realpathSync(path);
   } catch {
-    // Not created yet, or a component that is not a directory. Compared as
-    // written, which is what the caller wants for a path it is about to make.
     return path;
   }
 }
 
-/**
- * Are these two paths the same directory — **with "could not tell" as a real
- * third answer**?
- *
- * This was `realpathSync(a) === realpathSync(b)`, and `a` is the one path in this
- * file that this daemon certainly did **not** create: it comes out of `git
- * worktree list` on the caller's own repository, so `git worktree add ~/nas/x`
- * on a mount whose server then pauses made an uninterruptible event-loop stop out
- * of `GET /sessions/:id/workspace` and `DELETE .../workspace` alike — every
- * session, every socket and `/health` with it, at 0% CPU. That is the invariant
- * `stall.ts` exists for, and `GET /worktrees` in `server.ts` had already fixed
- * the byte-identical pattern with the same probe.
- *
- * The literal comparison stays first, so the ordinary case — git printing back
- * exactly the path we asked it to create — costs no filesystem call at all.
- *
- * `missing` is `false`, which is what the `catch` this replaced answered and is
- * right: a path with nothing at it is not the same directory as one that exists.
- * `null` is the answer that did not exist before — the filesystem did not reply —
- * and it is emphatically not `false`. Both callers take it as "could not tell",
- * the same distinction `count()` and `exists` already carry in this file.
- */
+/** Same directory, or `null` when a path git reported did not answer (never false); the literal match costs no probe. */
 async function samePath(a: string, b: string): Promise<boolean | null> {
   if (a === b) return true;
-  // `a` first: it is the untrusted one, so a stalled mount is answered without
-  // spending a second probe on the path we do own.
   const left = await probeRealpath(a);
   if (left === null) return null;
   const right = await probeRealpath(b);

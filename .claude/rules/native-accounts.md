@@ -284,4 +284,4 @@ launch.
 | `web/src/native.ts` | the Boot fields, the header, the wrappers, the stale reload |
 | `web/src/slot.ts` | `slotOf`, `signInExits`, `confirmDue`, `serverLabel` — pure, driven |
 | `web/src/ui/backAccount.ts`, `UseAnotherAccount.tsx` | the live `back`, and the way out of the forced password change — the one screen left with no drawer, since an unreachable server draws the shell (Q3.643) |
-| `web/scripts/webcheck.accounts-on-this-computer.ts` | the table, the bootstrap order, no detach on a switch, the sign-in's adoption rule |
+| `web/scripts/webcheck.accounts-on-this-computer.ts` | the table, the bootstrap order, no detach on a switch, the sign-in's adoption rule, and the forced password change's way out over every value `useBackAccount` answers |

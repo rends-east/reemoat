@@ -111,7 +111,8 @@ refused before it is resident. Q2.38.
   the *creating* origin, whose `localStorage` holds `reemoat.credential`, and this
   route serves **any regular file under a session's workspace**, so a rendered HTML or
   SVG executes on the daemon's own origin. Never `window.open(blobUrl)`, never
-  `target="_blank"` without `download`, never an `<iframe src=blobUrl>`. `daemoncheck`
+  a `blob:` URL behind `target="_blank"` (an object URL reaches an anchor only with
+  `download`; `webcheck` pins every `_blank` anchor), never an `<iframe src=blobUrl>`. `daemoncheck`
   pins the pair the query credential rests on: the 401 on `/files?…&token=` and the
   still-working handshake. Q5.71.
 - **Symlinks are never content-diffed.** `git diff --no-index` follows the link, so

@@ -1,30 +1,7 @@
-/**
- * A board, whose cards are this machine's sessions.
- *
- * This is the reference plugin for the four contribution points a plugin *draws*
- * or *is told about* — a screen, a settings pane, actions and hooks — and it
- * reaches nothing outside the machine, which is what lets `daemoncheck` drive the
- * whole of it. Read it beside `docs/PLUGINS.md` — everything here is in that
- * document, and everything in that document is here.
- *
- * ⚠ **It is no longer all six.** A harness and a provider are *declarations* the
- * daemon reads — no export, no view, nothing here to demonstrate them with — so
- * this file covers four of six and `plugin-contributions.md` covers the rest. A
- * plugin using all six would teach that they are one kind of thing, which they
- * are not.
- *
- * Plain JavaScript on purpose. The daemon happens to run under `tsx` today, so a
- * TypeScript `server.js` would also load; that is a measurement rather than a
- * promise, and a plugin must not depend on this daemon's toolchain.
- */
+// The reference plugin for screen, settings, actions and hooks; read it beside docs/PLUGINS.md.
+// Plain JavaScript on purpose: a plugin must not depend on the daemon's toolchain.
 
-/**
- * The columns, in order.
- *
- * Adding one is what `docs/PLUGINS.md` walks through as an update: bump the
- * version in `plugin.json`, add a column here, reinstall. The cards survive it,
- * because `plugin_data` is keyed on the plugin's id and never on its version.
- */
+// Adding a column is an update; cards survive it because plugin_data is keyed on the plugin id, not its version.
 const COLUMNS = [
   { id: "todo", title: "Todo" },
   { id: "doing", title: "Doing" },
@@ -33,7 +10,6 @@ const COLUMNS = [
 
 const CARD = "card:";
 
-/** The last two segments of a path, which is the part somebody recognises. */
 function shortPath(path) {
   if (typeof path !== "string" || path.length === 0) return null;
   const parts = path.split("/").filter((part) => part.length > 0);
@@ -43,43 +19,24 @@ const SETTINGS = "settings";
 
 async function settingsOf(ctx) {
   const held = await ctx.store.get(SETTINGS);
-  // A plugin's own defaults live in the plugin, never in the host: an unset value
-  // is "this has never been saved", and the plugin is the only thing that knows
-  // what that should mean.
+  // A plugin's defaults live in the plugin: unset means never saved.
   return { advanceOnTurn: held?.advanceOnTurn !== false };
 }
 
 async function cards(ctx) {
   const out = [];
-  /*
-   * One call per page, never one per card.
-   *
-   * This was `keys()` and then an awaited `get()` for each of them, which reads
-   * naturally and is a round trip to the daemon per card: at the 1000 keys a
-   * plugin may hold that is 2002 messages and 1000 sequential turns of the
-   * daemon's event loop, for a screen that asks to be re-read every five seconds
-   * and is also what `advance` and `forget` return. Measured beside `entries`:
-   * 20.9ms against 0.30ms for the same thousand cards.
-   *
-   * `more` is the host saying the page hit its byte budget rather than the end of
-   * the data, and the next page starts after the last key this one handed back —
-   * echoed rather than computed, because the order is the store's.
-   */
+  // One entries call per page, never a get per card. The next page starts after the last key returned.
   let after = "";
   for (;;) {
     const page = await ctx.store.entries(CARD, after);
     for (const entry of page.entries) {
       if (entry.value !== null) out.push({ ...entry.value, session: entry.key.slice(CARD.length) });
     }
-    // The length test is not redundant with `more`: a page that is empty and
-    // claims there is more would be a loop with no end, and a plugin is the wrong
-    // place to find out that the host stopped being able to promise otherwise.
+    // The length check stops an empty page that claims more from looping forever.
     if (!page.more || page.entries.length === 0) break;
     after = page.entries[page.entries.length - 1].key;
   }
-  // Newest first inside a column, which is the order somebody scanning a board
-  // wants. Ties broken on the session id so the list does not shuffle between
-  // reads — a board that reorders under a thumb is the one thing this must not do.
+  // Newest first, ties broken on the session id so the board never reorders under a thumb.
   return out.sort((a, b) => b.at - a.at || a.session.localeCompare(b.session));
 }
 
@@ -92,17 +49,12 @@ async function move(ctx, session, to) {
   return next;
 }
 
-/** The board. Named `screen`, which is the export the host calls for `contributes.screen`. */
+/** Named screen: the export the host calls for contributes.screen. */
 export async function screen(ctx) {
   const held = await cards(ctx);
   return {
     title: "Board",
-    /*
-     * Re-read while somebody is looking. The host floors this at two seconds and
-     * stops it when the tab goes to the background, so the number here is a
-     * preference rather than a promise — five is "a board that keeps up with an
-     * agent" without being a thing that flickers.
-     */
+    // The host floors this at two seconds and pauses it in a background tab.
     refreshMs: 5_000,
     blocks: [
       {
@@ -116,15 +68,9 @@ export async function screen(ctx) {
               title: card.title,
               subtitle: card.agent ?? null,
               badge: null,
-              // What the row *means*; the host picks the ink. A card in the last
-              // column is finished, and `ok` is the tone for that. Read off the
-              // end of `COLUMNS` rather than written as "done" so that it names
-              // the same column `session.ended` moves a card to, which is the end
-              // of the same list — one of the two written as a literal is how the
-              // mark and the move come to disagree.
+              // Read off the end of COLUMNS: the same column session.ended moves a card to.
               tone: card.column === COLUMNS[COLUMNS.length - 1].id ? "ok" : null,
-              // Tapping the card opens the session it is about. A destination
-              // this app has, never a URL — see docs/PLUGINS.md.
+              // A destination in this app, never a URL.
               open: { session: card.session },
               actions: [
                 { id: "advance", label: "Move on", tone: "plain", confirm: null },
@@ -144,8 +90,6 @@ export async function settings(ctx) {
   const held = await settingsOf(ctx);
   return {
     title: null,
-    // No `refreshMs`: this is a form somebody types into, and the host would not
-    // honour one here anyway. See `PluginSettings`.
     refreshMs: null,
     blocks: [
       {
@@ -169,8 +113,7 @@ export async function settings(ctx) {
 }
 
 export async function action(ctx, event) {
-  // `event.session` is set when the press came from a session's menu, `event.row`
-  // when it came from a row on this screen. Either names the same thing here.
+  // session when pressed from a session's menu, row when pressed on this screen.
   const session = event.session ?? event.row ?? null;
 
   if (event.action === "save") {
@@ -182,8 +125,7 @@ export async function action(ctx, event) {
 
   if (event.action === "forget") {
     await ctx.store.delete(CARD + session);
-    // Returning a view rather than a toast redraws the board under the press,
-    // which is what makes a row disappear rather than merely being reported gone.
+    // Returning a view redraws the board, so the row disappears.
     return screen(ctx);
   }
 
@@ -204,16 +146,11 @@ export async function hook(ctx, event) {
   if (session === undefined || session === null) return;
 
   if (event.hook === "session.created") {
-    // Only if there is no card, so the seeding a fresh install does — every
-    // session on the machine, announced at once — cannot overwrite a board
-    // somebody has already been moving cards around on.
+    // Only if there is no card, so a fresh install's seeding cannot overwrite a board already in use.
     const existing = await ctx.store.get(CARD + session.id);
     if (existing !== null) return;
     await ctx.store.set(CARD + session.id, {
-      // A session has no title until somebody has sent it something, so a card
-      // made at `session.created` falls back to where it is running — and to the
-      // last two segments of that, because the whole path is a temp directory
-      // three lines long on the machine this was written on.
+      // A new session has no title yet, so fall back to the tail of its workspace path.
       title: session.title ?? shortPath(session.workspace?.root) ?? session.id,
       agent: session.agent ?? null,
       column: "todo",
@@ -226,8 +163,7 @@ export async function hook(ctx, event) {
     const held = await settingsOf(ctx);
     if (!held.advanceOnTurn) return;
     const card = await ctx.store.get(CARD + session.id);
-    // Only out of the first column. A card somebody has moved to Done should not
-    // walk backwards because the agent said one more thing.
+    // Only out of the first column, so a finished card never walks backwards.
     if (card !== null && card.column === "todo") await move(ctx, session.id, "doing");
     return;
   }

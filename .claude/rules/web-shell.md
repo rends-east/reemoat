@@ -37,7 +37,7 @@ terminal session, none for a live one) plus `countsAsLive`, separate on purpose 
 a stalled row belongs in Active because a human must act, but must not inflate a
 count drawn beside a green dot. Every one keys on `exit.reason`, never `status`
 alone. Consequences: `StatusDot` goes through `statusTone`, and `POST
-/sessions/:id/prompt` joins `slowRoute`'s 90s budget unconditionally, because
+/sessions/:id/prompt` joins `slowRoute` unconditionally, because
 `request` sees only a method and a path.
 
 **A cancel is two more pure predicates in `wire.ts`.** `canCancelTurn` is
@@ -414,7 +414,7 @@ primitive adds `tap` itself and carries its own entry.
 
 | | |
 |---|---|
-| Web client | 3 live sockets (LRU), **16 MiB held per session, every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling) — no render window; the only cut is the newest `context_cleared`. History pages backwards at **5000** and does not stop until the log's start, that cut, or those bytes; a failed page retries over 37.5s and `attachWanted` re-drives a run that spends it. **60 sessions per machine per poll**, which is why pinned outranks live in the daemon's `listRank`. 4s list poll, 15s re-probe when unreachable, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those spawning a process — which get 90s, `/prompt` unconditionally, because a deadline keyed on session state would be state leaking into the transport. `POST /sessions/:id/cancel` is deliberately *not* one, and `webcheck` pins it absent rather than forgotten. **Every number here is also in `docs/DECISIONS.md`'s Bounds table, which is the copy to change.** Q3.226 |
+| Web client | 3 live sockets (LRU), **16 MiB held per session, every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling) — no render window; the only cut is the newest `context_cleared`. History pages backwards at **5000** and does not stop until the log's start, that cut, or those bytes; a failed page retries over 37.5s and `attachWanted` re-drives a run that spends it. **60 sessions per machine per poll**, which is why pinned outranks live in the daemon's `listRank`. 4s list poll, 15s re-probe when unreachable, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those spawning a process — which get their daemon chain + 30s, 90s at least, `/prompt` unconditionally, because a deadline keyed on session state would be state leaking into the transport. `POST /sessions/:id/cancel` is deliberately *not* one, and `webcheck` pins it absent rather than forgotten. **Every number here is also in `docs/DECISIONS.md`'s Bounds table, which is the copy to change.** Q3.226 |
 
 ## Known gotchas
 

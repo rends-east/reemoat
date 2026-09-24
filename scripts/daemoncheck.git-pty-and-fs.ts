@@ -3,24 +3,6 @@ import { gitArgs, gitEnv } from "../src/git.js";
 import { validateElicitationContent } from "../src/registry.js";
 import { check } from "./daemoncheck.env.js";
 
-/* ------------------------------------------------------------------ *
- * git no longer fences, and that has to fail loudly if it comes back
- * ------------------------------------------------------------------ */
-
-/*
- * The direct successor to `dockercheck`'s "the container runner deliberately
- * does not neutralise hooks", pointed the other way because the reason inverted.
- *
- * `GIT_NO_EXEC_CONFIG` and `GIT_CONFIG_GLOBAL=/dev/null` were confinement against
- * a repository on the other side of a trust boundary. There is no such boundary
- * now, and leaving them in place had a measured, silent cost: a blanked global
- * config disables `filter.lfs.smudge`, so `worktree add` checks out LFS pointer
- * files and the agent reads a spec URL where a binary should be.
- *
- * So this asserts an **absence**, exactly as the old rule did: somebody restoring
- * "just the hooks one, for safety" breaks a user's own repository with no error
- * anywhere, and should fail here instead.
- */
 process.stdout.write("\ngit runs with the user's own configuration\n");
 {
   const argv = gitArgs("/repo", ["worktree", "add", "--", "/repo/wt", "abc123"]);
@@ -35,13 +17,11 @@ process.stdout.write("\ngit runs with the user's own configuration\n");
   ]);
 
   const env = gitEnv();
-  // The two that mattered, by name. Restoring either one silently changes what a
-  // checkout produces: hooks stop running, and LFS content becomes pointer files.
+  // Blanking the user's global config silently turns LFS content into pointer files on checkout.
   check("the user's global config is not blanked", env["GIT_CONFIG_GLOBAL"], undefined);
   check("nor is the system config suppressed", env["GIT_CONFIG_NOSYSTEM"], undefined);
 
-  // Still an allowlist, and still for a reason — being launched from inside a
-  // hook or a `rebase --exec` must not retarget us at somebody else's repository.
+  // Still an allowlist: launched from a hook or a rebase exec, these must not retarget git at another repository.
   check(
     "no GIT_* name that retargets a command is passed through",
     ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"].filter(
@@ -49,86 +29,35 @@ process.stdout.write("\ngit runs with the user's own configuration\n");
     ),
     [],
   );
-  // What the user's own git legitimately needs, and what nothing may block on.
   check("HOME survives, so ~/.gitconfig is read", env["HOME"], process.env["HOME"]);
   check("and nothing may wait for a passphrase", env["GIT_TERMINAL_PROMPT"], "0");
 }
 
-/* ================================================================== *
- * Moved here from `scripts/dockercheck.ts` when the container runtime
- * was deleted. None of it was ever about Docker: it drives `sanitize`,
- * `readFrom`, a real `AcpClient` and a real `Session` over in-memory
- * pipes. Deleting that file without moving these would have removed the
- * only place any of them is asserted against itself rather than against
- * a copy of its own arithmetic.
- * ================================================================== */
-
 process.stdout.write("\npty output sanitising\n");
 {
-  // What `script` hands back is a terminal recording, and a `<pre>` is not a
-  // terminal. Stripping is the readable failure; the alternative is a pane full
-  // of `\x1b[2K`.
   const plain = sanitize("\x1b[2K\x1b[1Gopen https://claude.ai/oauth\n");
   check("escape sequences are stripped", plain.text, "open https://claude.ai/oauth\n");
   check("and nothing is held back when the chunk ends cleanly", plain.carry, "");
 
-  // A sequence split across a chunk boundary printed as literal text exactly
-  // once per boundary, which is both ugly and unreproducible.
   const split = sanitize("code: \x1b[3");
   check("a partial escape is carried rather than printed", split.text, "code: ");
   check("as the carry", split.carry, "\x1b[3");
   check("and completes on the next chunk", sanitize(`${split.carry}1mABCD`).text, "ABCD");
 
-  // `\r` means redraw. Honouring it properly needs a terminal emulator; dropping
-  // it concatenates every spinner frame into one line.
   check("a lone carriage return becomes a newline", sanitize("a\rb").text, "a\nb");
   check("and CRLF stays one newline", sanitize("a\r\nb").text, "a\nb");
 }
 
 process.stdout.write("\nwhere a login client's cursor lands\n");
 {
-  /*
-   * `readFrom` itself, not a model of it.
-   *
-   * `webcheck` has a section on this that defines its own copy of the arithmetic
-   * and asserts against that — useful for the *client's* rule (assign the cursor,
-   * never advance by `chunk.length`) and worthless as a guard on the daemon,
-   * because it would stay green with this function deleted. `packages/web` cannot
-   * import from `src/` — the two halves resolve modules differently, which is the
-   * same reason `wire.ts` is hand-mirrored — so the daemon half is asserted here.
-   *
-   * A login transcript is where a lost line is the one with the code in it, which
-   * is why the gap flag matters as much as the slice.
-   */
+  // Drives the daemon's own readFrom: webcheck's copy of the arithmetic would stay green with this function deleted.
   check("a fresh read returns the whole buffer", readFrom("open https://x", 0, 0).chunk, "open https://x");
   check("and reports no gap", readFrom("open https://x", 0, 0).gap, false);
   check("a read from the end returns nothing new", readFrom("open https://x", 0, 14).chunk, "");
   // Once the 64 KiB cap has trimmed the front, an old cursor is behind the window.
   check("a cursor behind the discarded prefix is a gap", readFrom("tail", 100, 40).gap, true);
   check("and is served the oldest output that survives", readFrom("tail", 100, 40).chunk, "tail");
-  /*
-   * ⚠ **`since === dropped` is the one value where `since < dropped` flips**, and
-   * the boundary is what the three cells above cannot see. A client whose cursor
-   * sits on the oldest surviving byte lost nothing, and telling it otherwise puts
-   * the transcript's "something is missing" notice over a transcript that is
-   * whole; one byte behind it, the notice is the truth. So the pair pins **where**
-   * the flip is and not merely that one exists.
-   *
-   * The reach was worked out by mutating this function rather than assumed, which
-   * matters because the obvious mutation is the one that proves least. Flipping to
-   * `since <= dropped` reddens the new `(100, 100)` cell *and* the pre-existing
-   * `(0, 0)` one — but `(0, 0)` is the case where nothing has been dropped at all,
-   * so on its own it says the flag is right when there is no window, never where a
-   * window's front is. The two cells with reach nothing else has are the
-   * neighbour's: a boundary moved one byte, `since < dropped - 1`, survives every
-   * older cell and fails only on `(100, 99).gap`, and dropping the `Math.max` so
-   * the slice takes a negative offset survives them too — `"tail".slice(-60)` is
-   * still `"tail"` — and fails only on `(100, 99).chunk`.
-   *
-   * Worth the lines now that the login run and the install run read through this
-   * one function rather than a copy each, which is the whole reason it was lifted
-   * out of `agentauth.ts`.
-   */
+  // since === dropped is where the gap flag flips; the (100,100) and (100,99) pairs pin the boundary itself.
   check("a cursor on the oldest surviving byte is not a gap", readFrom("tail", 100, 100).gap, false);
   check("and is served the whole of what survives", readFrom("tail", 100, 100).chunk, "tail");
   check("while one byte behind it is a gap", readFrom("tail", 100, 99).gap, true);
@@ -137,33 +66,13 @@ process.stdout.write("\nwhere a login client's cursor lands\n");
   check("and reads only what follows it", readFrom("tail", 100, 102).chunk, "il");
 }
 
-/* ------------------------------------------------------------------ *
- * The fs capability, enforced rather than announced
- * ------------------------------------------------------------------ */
-
-/**
- * The one property that makes the sandbox a sandbox.
- *
- * `session.ts` implements ACP's `fs/read_text_file` and `fs/write_text_file` by
- * calling `readFile`/`writeFile` **in the daemon's own process**, so a container
- * around the agent does not contain them. `SessionRuntime.clientFileIo` is how a
- * sandboxing runtime declines them — but declining is a *statement to a party we
- * do not trust*, and until it was enforced the handlers were registered
- * unconditionally and ran the request anyway. An agent that ignored the
- * advertised capability, or anything else in the tenant's container able to
- * write to the agent's stdout, had a write primitive running outside the sandbox.
- *
- * So this drives a real `AcpClient` over in-memory pipes with a fake agent on
- * the other end, completes the handshake, and then sends the request the agent
- * was told not to send. No Docker, no image, no network.
- */
+// A declined fs capability must be refused, not merely unadvertised: the handlers run in the daemon's own process.
 process.stdout.write("\nthe fs capability, enforced rather than announced\n");
 {
   const acp = await import("@agentclientprotocol/sdk");
   const { AcpClient } = await import("../src/acp/client.js");
   const { PassThrough } = await import("node:stream");
 
-  /** An `AgentProcess` that is two pipes and nothing else. */
   const fakeAgent = () => {
     const toAgent = new PassThrough();
     const toClient = new PassThrough();
@@ -201,7 +110,6 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     let refused = false;
     let elicitationRefused = false;
 
-    // The agent side: answer `initialize`, then send the forbidden request.
     let buffer = "";
     const replies: string[] = [];
     agent.toAgent.on("data", (chunk: Buffer) => {
@@ -223,7 +131,6 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
           );
           continue;
         }
-        // The client's answers to every probe we send below.
         if (typeof message["id"] === "number" && message["id"] >= 9001) replies.push(line);
       }
     });
@@ -231,10 +138,7 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     const client = await AcpClient.launch(
       { id: "kimi", displayName: "fake", command: "fake", args: [], env: {}, authHint: "" },
       agent.process as never,
-      // `authMethod: null` because this section's subject is the two capability
-      // flags. A non-null id would put an `authenticate` on the wire that the
-      // fake agent never answers, and the launch would sit on
-      // `AUTHENTICATE_TIMEOUT_MS` before every assertion below.
+      // No auth method: a real id sends an authenticate the fake agent never answers, stalling on AUTHENTICATE_TIMEOUT_MS.
       { ...options, authMethod: null },
     );
 
@@ -284,8 +188,7 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
       }
       return null;
     };
-    // -32601 is JSON-RPC's "method not found": indistinguishable from a client
-    // that never implemented it, which is exactly the intent.
+    // -32601 is "method not found": indistinguishable from a client that never implemented it, by intent.
     refused = answerTo(9001)?.["error"]?.code === -32601;
     elicitationRefused = answerTo(9002)?.["error"]?.code === -32601;
     const codeFor = (id: number): number | undefined => answerTo(id)?.["error"]?.code;
@@ -305,28 +208,10 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     readTextFile: true,
     writeTextFile: true,
   });
-  // Routed, so it reaches `session.ts` — this one has no session registered, so
-  // the refusal is `invalid_params` rather than `method_not_found`. What matters
-  // is that it is NOT the same refusal as above.
+  // Routed to session.ts, so refused as invalid_params (no session) and never as method_not_found.
   check("and does not refuse it as unimplemented", allowed.refused, false);
 
-  /*
-   * The elicitation capability, enforced the same way and for a sharper reason.
-   *
-   * Declaring `elicitation.form` is the one thing in this handshake that changes
-   * what the *model* does rather than what the client renders: measured against
-   * claude-agent-acp 0.63.0, `disallowedTools = elicitationSupport.form ? [] :
-   * ["AskUserQuestion"]`, so leaving it out strips claude's own ask-the-user tool
-   * before the CLI starts. That makes the gate worth having twice over — an
-   * operator can withdraw a tool, and an agent that ignores the answer gets the
-   * same `-32601` a client that never implemented it would send.
-   *
-   * The declined case is asserted as an **absence**, like the `_meta` pair below,
-   * because ACP has no `form: false`: `ElicitationCapabilities.form` is an
-   * empty-object marker, so omitting the key is the only way to say no and
-   * `{form: false}` would typecheck against the open `_meta` while meaning
-   * nothing.
-   */
+  // Declining is an absence: ACP has no form false, and without elicitation.form claude's adapter strips AskUserQuestion.
   check("a declining daemon advertises no elicitation capability at all", declined.caps["elicitation"], undefined);
   check("and refuses a question the agent asks anyway", declined.elicitationRefused, true);
   check("granting it advertises form mode", allowed.caps["elicitation"], { form: {} });
@@ -337,51 +222,12 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
   );
   check("and the question is not refused as unimplemented", allowed.elicitationRefused, false);
 
-  /*
-   * The three shapes that are refused even though the capability was granted.
-   *
-   * `-32602` is `invalid_params` and deliberately not `-32601`: the method *is*
-   * implemented, and answering "method not found" would tell the agent the whole
-   * capability is absent — a statement the next form request immediately
-   * contradicts.
-   *
-   * They are also errors rather than `{action: "decline"}`, which would be a lie:
-   * nobody declined. Measured against claude's adapter, the error is the kindest
-   * of the three anyway — it becomes `{behavior: "deny", message: "Could not
-   * present the question to the user."}` and the model carries on knowing why,
-   * where a decline tells it a person chose to skip.
-   */
+  // -32602, not -32601: the method exists. An error rather than a decline, because nobody declined.
   check("url mode is refused even when the capability is granted", allowed.codeFor(9003), -32602);
   check("so is a mode this client has never heard of", allowed.codeFor(9004), -32602);
   check("and so is a question scoped to a request rather than a session", allowed.codeFor(9005), -32602);
 
-  /*
-   * The subagent transcript, refused by not asking for it.
-   *
-   * `claude-agent-acp` gates a subagent's own text and thinking on
-   * `clientCapabilities._meta["subagent-transcript"] === true`; without it the
-   * SDK is passed `forwardSubagentText: false` and never emits them at all. So
-   * this daemon sees what a subagent *did* and what it *concluded*, and not what
-   * it said.
-   *
-   * That is a budget decision, not a trust one — saying so plainly, because
-   * reaching for the `fs` argument here would be dishonest: this grants the
-   * agent permission to talk more, not a write primitive in our process. The log
-   * is 5000 events / 8 MiB and eviction removes a *prefix*, so a second full
-   * conversation per delegate, three to five at a time, does not degrade into
-   * "less detail" — it evicts the operator's own prompt and the main agent's
-   * reply to make room for a delegate's monologue.
-   *
-   * Asserted as an *absence*, so switching it on has to be deliberate and fails
-   * loudly here rather than quietly doubling what a delegate costs.
-   *
-   * ⚠ **This was "no `_meta` at all" and is not any more.** That was the same
-   * assertion while this client declared nothing there; it stopped being one the
-   * moment `asyncTasks` was declared, and an absence test would have had to be
-   * deleted rather than narrowed — taking the subagent guarantee with it. So the
-   * bag is now asserted **whole**, which keeps the old claim (nothing else is in
-   * it) and adds the two below.
-   */
+  // Without subagent-transcript the adapter runs with forwardSubagentText off: a log budget choice, so the _meta bag is asserted whole.
   check("exactly one capability extension is advertised, and it is named", allowed.caps["_meta"], {
     jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } },
   });
@@ -391,23 +237,7 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     undefined,
   );
 
-  /*
-   * The two halves of the AIR declaration, each on its own row.
-   *
-   * **The version is not decoration.** The adapter's gate wants a finite integer
-   * at least 1 *and* the capability named in a list, and a declaration it refuses
-   * switches the whole lifecycle off with no error on any wire — no rejection, no
-   * log line, just a client that is never told about background work and a
-   * `parkable` clause that never fires. There is no second signal that would
-   * catch it, which is what makes asserting the object we send worth a row.
-   *
-   * **And `nativeSubagentSessions` is refused here too**, in the namespace that
-   * would carry it, because it is the obvious thing to add for symmetry with the
-   * capability beside it. Its two costs are the paragraph above (every subagent's
-   * text forwarded) and a worse one: a permission raised inside a subagent is then
-   * addressed to the child session id, which `AcpClient.route` answers
-   * `invalidParams` for — a subagent's approval dying on the floor.
-   */
+  // The adapter silently ignores an AIR declaration it refuses; nativeSubagentSessions stays out, or a subagent's permission is addressed to a child session id the client refuses.
   const air = (
     (allowed.caps["_meta"] as Record<string, unknown> | undefined)?.["jetbrains"] as
       | Record<string, unknown>
@@ -421,20 +251,6 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * What a form is allowed to be
- * ------------------------------------------------------------------ */
-
-/**
- * The projection, driven as a pure function.
- *
- * `toElicitationForm` is where an agent-chosen JSON Schema becomes the fixed
- * shape this system carries, and it is the only place the two rules that make
- * that safe are written: **structure is refused and prose is clipped**. Both
- * halves need driving, because each is silently wrong in a different direction —
- * a cap that clipped structure would deliver a form whose answer means something
- * else, and one that refused prose would refuse real forms over a long sentence.
- */
 process.stdout.write("\nwhat a form is allowed to be\n");
 {
   const { toElicitationForm, ElicitationRefusedError } = await import("../src/session.js");
@@ -448,8 +264,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     }
   };
 
-  // The measured AskUserQuestion shape, N=1: a titled single-select followed by
-  // the adapter's own free-text "Other" box.
+  // claude's AskUserQuestion shape: a titled single-select plus the adapter's own free-text "Other" box.
   const ask = toElicitationForm({
     type: "object",
     properties: {
@@ -486,29 +301,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     ],
   );
 
-  /*
-   * The same question from the other agent that asks one, N=1, measured
-   * 2026-08-07 against codex-acp 1.1.9.
-   *
-   * It arrives on `elicitation/create` like claude's — the adapters agree on the
-   * method and disagree on everything nameable. The keys are the model's
-   * (`license_choice`, not `question_0`), the free-text box is suffixed `__other`
-   * rather than `_custom`, and each property carries a `_meta.codex` block naming
-   * the question it belongs to.
-   *
-   * **Which is exactly why nothing here reads a field name.** Both projections
-   * come out identical in shape — a titled single-select and a free-text box —
-   * and a client that had keyed on `_custom` or on `__other` would render one
-   * agent's question and refuse the other's. The suffix is never parsed.
-   *
-   * ⚠ **One thing *is* read out of `_meta` now, and this comment used to say
-   * otherwise.** Both agents declare which question their free-text box answers —
-   * claude as `_askUserQuestionCustomAnswer`, codex as `codex.isOtherAnswer` — and
-   * both then use that text *instead of* the selection. `alternativeTo` is that
-   * one bit, projected to a scalar and asserted below on both shapes; the rest of
-   * `_meta` is still dropped on the floor. The difference from a suffix is the
-   * whole point: a declaration is the agent saying so.
-   */
+  // codex-acp's shape for the same question: different key names and _meta, same projection, since nothing here reads a field name.
   const codexAsk = toElicitationForm({
     type: "object",
     required: [],
@@ -548,22 +341,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     ],
   );
 
-  /*
-   * ⭐ **Which question a free-text box answers, off both agents' own
-   * declarations.**
-   *
-   * The box and the question are two answers to one question and the agent keeps
-   * one — measured, claude's `applyAskElicitationResponse` returns the custom
-   * answer without ever reading the selection, and codex's
-   * `convertUserInputResponse` does the same with `?? `. A client that cannot see
-   * the relation draws both as picked and sends both, which on a single-choice
-   * question is two filled circles; that is what was reported.
-   *
-   * Asserted on **both** shapes together, because the whole value of projecting it
-   * is that a card cannot tell them apart — and separately on codex's *question*,
-   * whose own `codex` block carries `isOther` and no `questionId` and must not
-   * come out pointing at anything.
-   */
+  // Both agents keep the free-text answer over the selection (claude's applyAskElicitationResponse, codex's convertUserInputResponse).
   check(
     "both agents' free-text boxes say which question they answer",
     [
@@ -575,11 +353,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
       [null, "license_choice"],
     ],
   );
-  /*
-   * And a pointer resolves or it goes: a key naming no field on this form, or
-   * naming its own, would reach the client as a control that clears nothing — or
-   * clears itself.
-   */
   const dangling = toElicitationForm({
     type: "object",
     properties: {
@@ -596,11 +369,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     },
   } as never);
   check("a pointer to nothing is dropped, and so is one to itself", dangling.fields.map((f) => f.alternativeTo), [null, null]);
-  /*
-   * The marker is read strictly: exactly `true`, beside a string. codex puts a
-   * `codex` block on the question as well, and an agent saying something this has
-   * not measured is an agent this says `null` about.
-   */
   const looseMarkers = toElicitationForm({
     type: "object",
     properties: {
@@ -612,9 +380,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
   } as never);
   check("a marker that is not exactly true, or names nothing, says nothing", looseMarkers.fields.map((f) => f.alternativeTo), [null, null, null, null]);
 
-  // `enum` and `oneOf` are one shape by the time anything reads them, so a client
-  // has one answer to "what is an option" and the daemon validates the reply
-  // against the same list it sent.
   const bare = toElicitationForm({
     type: "object",
     required: ["pick"],
@@ -639,8 +404,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     multi.fields[0]?.options,
   ], ["multi_select", 1, 2, [{ value: "eu", label: "Europe", description: null }]]);
 
-  // Never coerced: a non-string wire value is one the agent will not recognise
-  // coming back, so it is not an option at all rather than `String(42)`.
   const coerced = toElicitationForm({
     type: "object",
     properties: { n: { type: "string", oneOf: [{ const: 42, title: "forty-two" }, { const: "ok", title: "ok" }] } },
@@ -649,24 +412,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     { value: "ok", label: "ok", description: null },
   ]);
 
-  /*
-   * ⚠ **This asserted the opposite until 0.3.0: "prose is clipped rather than
-   * refused", at 512 / 100 / 300 characters for `message`, a title and a
-   * description.**
-   *
-   * What made those wrong is *where the question lives*. With several questions on
-   * one form the adapter puts each question in its field's `description` and leaves
-   * `message` as a preamble — so 300 was a cap on the sentence somebody is being
-   * asked to answer, and an option's `description` is the sentence explaining what
-   * one answer means. Measured against this machine's own log, one real option
-   * description was **318** characters and was being cut on screen. A question read
-   * half is a question answered wrongly, which is precisely the harm "structure is
-   * refused" exists to prevent, one field along.
-   *
-   * So the split runs between *structure* and *prose* rather than between refusing
-   * and clipping, and the byte backstop below is what bounds prose now — one
-   * whole-object number instead of three per-string ones.
-   */
   check("prose arrives whole rather than clipped", (() => {
     const long = toElicitationForm({
       type: "object",
@@ -687,9 +432,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
       field?.options?.[0]?.description === "d".repeat(1_000)
     );
   })(), true);
-  // An empty string and `null` are one absence to every reader, and `askTitle` in
-  // the web client falls through to its next source on `null` — so the half of
-  // `clipOrNull` that survived its budget is the half that had to.
+  // An empty string projects to null: the web client's askTitle falls through to its next source only on null.
   check("but an empty string is still an absence", (() => {
     const blank = toElicitationForm({
       type: "object",
@@ -703,11 +446,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
   });
   check("and so is a schema with nothing in it at all", toElicitationForm(null).fields.length, 0);
 
-  /*
-   * Every refusal names its cap in the message, because the agent is the only
-   * party that can act on it — `handleAskUserQuestion` turns the error into a
-   * `deny` the model reads.
-   */
+  // Every refusal names its cap: handleAskUserQuestion turns the error into a deny the model reads.
   const wideField: Record<string, unknown> = {};
   for (let i = 0; i < 40; i += 1) wideField[`f${i}`] = { type: "string" };
   check(
@@ -723,8 +462,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     })?.includes("24"),
     true,
   );
-  // Refused rather than clipped, for the reason a command's name is: this string
-  // goes back to the agent and has to round-trip exactly.
   check(
     "an option value too long to round-trip refuses it rather than being clipped",
     refusalFrom({
@@ -751,17 +488,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     true,
   );
 
-  /*
-   * **The string arm's twin, and the two must not disagree about what `[]` is.**
-   *
-   * A `string` field whose choices all get dropped — `enum: []`, or a `oneOf`
-   * whose every `const` is non-string — used to project `options: []`. The array
-   * arm refuses that shape; the string arm let it through, and then the two ends
-   * read it oppositely: the client draws a free-text box because `[].length > 0`
-   * is false, and `validateElicitationContent` refuses every value because
-   * `[] !== null` is true. Submit lit up and the route answered `400
-   * not_an_option` for anything the person could type.
-   */
+  // Empty options must project to null: the client draws free text on an empty list while validateElicitationContent refuses every value.
   check(
     "an empty enum on a string is free text, not a choice of nothing",
     toElicitationForm({ type: "object", properties: { a: { type: "string", enum: [] } } } as never).fields[0]?.options,
@@ -775,19 +502,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     } as never).fields[0]?.options,
     null,
   );
-  /*
-   * **The daemon's only check on what reaches an agent, driven directly.**
-   *
-   * Its docblock says it is module-scope and pure "so `daemoncheck` can drive
-   * every rule with no session", and no driver imported it — so it was reached
-   * only through the HTTP fixture, whose form is two `string` fields. Every
-   * number, boolean and multi-select arm was unreachable by any assertion.
-   *
-   * The `duplicate` rule is the sharpest of them, because it is deliberately the
-   * *inverse* of the client's: `elicitationAnswer` dedupes and `webcheck` pins
-   * that it does, while the daemon refuses. Somebody unifying the two would have
-   * changed only the half nothing watched.
-   */
   {
     const kinds = {
       fields: [
@@ -812,7 +526,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     check("false is a value, not an absence", codes({ b: false }), []);
     check("too few choices", codes({ m: ["us"] }), ["too_few"]);
     check("a choice the form never offered", codes({ m: ["us", "nz"] }), ["not_an_option"]);
-    // The inverse of the client's rule, and the reason this block exists.
+    // Inverse of the client's elicitationAnswer, which dedupes; webcheck pins that half.
     check("a repeated choice is refused here, where the client collapses it", codes({ m: ["us", "us"] }), ["duplicate"]);
     check("and a well-formed answer to every kind is accepted", codes({ n: 15, b: true, m: ["us", "eu"] }), []);
   }
@@ -825,8 +539,6 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     } as never).fields[0]?.options?.map((option) => option.value),
     ["ok"],
   );
-  // The backstop the per-item caps cannot be: they bound one string, this bounds
-  // a thousand of them.
   const heavy: Record<string, unknown> = {};
   for (let i = 0; i < 20; i += 1) {
     heavy[`f${i}`] = {
@@ -840,15 +552,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     refusalFrom({ type: "object", properties: heavy })?.includes("bytes"),
     true,
   );
-  /*
-   * ⚠ **The case the per-string caps used to catch, and the backstop is now the
-   * only thing that catches it.** With `MAX_ELICITATION_DESCRIPTION_CHARS` gone,
-   * one field can carry an arbitrarily long sentence — which is the point — so the
-   * assertion that matters is that *one* enormous string still meets the same 32
-   * KiB number a thousand small ones do. Without this, "prose arrives whole" above
-   * would be the only statement about prose in the file and the form would be
-   * unbounded in the direction nobody drives.
-   */
+  // With MAX_ELICITATION_DESCRIPTION_CHARS gone, the byte backstop is the only bound on one long string.
   check(
     "and one enormous string meets the same backstop the thousand small ones do",
     refusalFrom({
@@ -859,70 +563,21 @@ process.stdout.write("\nwhat a form is allowed to be\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * the one prose string on the elicitation path that is not on the form
- * ------------------------------------------------------------------ */
-
-/**
- * `elicitation_request.message`, and the bound that had gone missing under it.
- *
- * ⚠ **Its own section rather than a line in the one above, because it is bounded
- * by a different mechanism for a different reason.** Everything above is about
- * the *form*: structure refused, prose carried whole, one 32 KiB backstop over
- * the projected object. `message` is not a field of that object — `onElicitation`
- * carries it beside the form — so `MAX_ELICITATION_FORM_BYTES` never weighed it,
- * and between 0.3.0 (when `MAX_ELICITATION_MESSAGE_CHARS` was retired with the
- * other prose clips) and 0.9.1 it was bounded by **nothing in `src/`**.
- *
- * What that costs is not bytes, it is the permanent stall this release exists to
- * remove, reached by a second door. The string rides two things that cannot
- * shrink it:
- *
- *   - `truncateEvent` returns the `elicitation_request` arm **unchanged** — a
- *     truncated question is an unanswerable question — while
- *     `StreamConnection.flush` takes the first event of a batch whatever it
- *     weighs. One ~1 MiB question is therefore one WebSocket message past
- *     `MAX_SOCKET_MESSAGE_BYTES`, refused by `MessageAssembler`, and `stream.ts`
- *     reconnects with the cursor unchanged onto the same batch, for ever.
- *   - `PendingElicitationSnapshot.message` rides every `hello` frame, and
- *     `fitSnapshotFrame`'s halving rung floors at one row (`while (keep > 1)`
- *     does not run at `keep === 1`), so a single oversized question defeats every
- *     rung and the oversized control frame goes out anyway.
- *
- * ⚠ **Two assertions and not one, because this bound has two ways of being
- * absent and each is silent on its own.** A clip that does not cut is the obvious
- * one and the pure function below catches it. The other is a clip nothing calls —
- * which is exactly how this field came to be unbounded in the first place: the
- * *comments* went on saying "clipped at ingest in `session.ts`" for five releases
- * after the constant was deleted. So the second assertion is over `session.ts`'s
- * own source, **comment-stripped**, and it is a pair: the call site is there, and
- * the raw field is passed as a `message` **nowhere**. A positive match alone
- * would stay green beside a second, unclipped call site; the negative half is
- * what makes it a statement about the file rather than about one line.
- */
+// message rides beside the form, so the form's byte backstop never weighs it: bounded by its own clip, asserted here and at the call site.
 process.stdout.write("\nwhat an agent's question is allowed to say\n");
 {
   const { clipElicitationMessage } = await import("../src/session.js");
   const { readFileSync } = await import("node:fs");
 
-  // The measured shapes this must not touch: claude's adapter's own preamble, and
-  // the 318-character option description that got the 512-character clip retired.
   const preamble = "Please answer the following questions.";
   check("the preamble a real adapter sends arrives identically", clipElicitationMessage(preamble), preamble);
   const longest = "p".repeat(318);
   check("and so does the longest prose this machine's log has ever carried", clipElicitationMessage(longest), longest);
   check("a question right at the cap is untouched", clipElicitationMessage("q".repeat(4_096)).length, 4_096);
 
-  /*
-   * The cut itself, weighed the way the wire weighs it. `clip`'s budget is in
-   * UTF-16 code units and the ceiling downstream is UTF-8 bytes, so the
-   * assertion that matters is the byte length of the worst case this can produce
-   * — every unit an astral pair, which `Buffer.byteLength` charges at four.
-   */
+  // clip counts UTF-16 units while the frame ceiling is UTF-8 bytes, so weigh the all-astral worst case.
   const cut = clipElicitationMessage("z".repeat(1_000_000));
   check("one over it is cut rather than carried", cut.length <= 4_096, true);
-  // Visible rather than silent: `clip` leaves its own marker, which is the whole
-  // reason a clip is tolerable on a question at all.
   check("and says so where somebody reading it can see", cut.endsWith("]"), true);
   check("the marker names the truncation", cut.includes("truncated"), true);
   const astral = clipElicitationMessage("\u{1F600}".repeat(500_000));
@@ -931,22 +586,10 @@ process.stdout.write("\nwhat an agent's question is allowed to say\n");
     Buffer.byteLength(astral, "utf8") < 32 * 1024,
     true,
   );
-  // An absent `message` is an empty one. `ElicitationRequest.message` is typed
-  // `string` and is agent-supplied JSON at runtime, and
-  // `PendingElicitationSnapshot.message` declares itself always present.
+  // Typed as a string, but agent-supplied JSON at runtime.
   check("an agent that sends no message at all leaves no hole", clipElicitationMessage(undefined as never), "");
 
-  /*
-   * ⚠ **Comment-stripped, and the honest standing of that is: a defence, not a
-   * measured save.** Checked 2026-09-18 — neither string below occurs in a
-   * comment in `session.ts` today, so stripping changes nothing right now and
-   * saying otherwise would be this file claiming a catch it never made. It is
-   * here because *this* subject is a bound whose prose outlived it by five
-   * releases: the comments went on saying "clipped at ingest in `session.ts`"
-   * after the constant was deleted, and the natural repair for that — writing the
-   * call form into a docblock beside the code — is exactly what would make a raw
-   * regex green over a deleted call.
-   */
+  // Comment-stripped, so a docblock quoting the call cannot keep this green over a deleted call site.
   const sessionSrc = readFileSync(new URL("../src/session.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");

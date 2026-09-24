@@ -1,69 +1,6 @@
 #!/bin/sh
-# How far behind the registry the two ACP adapter pins are, as a script rather
-# than as YAML.
-#
-# The argument `ci-deploy.sh` opens with, applied to a third act: a workflow file
-# is exercised by pushing and watching, so anything in one that *decides*
-# something is a decision no driver can reach. `freshness.yml` is therefore a
-# checkout and one call, and every outcome below is driven by `deploycheck` with
-# no registry and no network, through three seams:
-#
-#   NPM_VIEW            — how the registry is asked. Invoked as
-#                         `$NPM_VIEW <package> <field...>` and word-split on
-#                         purpose, because the default is the two words
-#                         `npm view`. A stub in the driver answers canned
-#                         versions, so current, behind, unpublished, deprecated
-#                         and unreachable are each one case.
-#   FRESHNESS_ROOT      — the tree whose `package.json` the pins are read off.
-#                         Pointed at a synthetic manifest, which is how "the
-#                         report follows the pin" is asserted rather than assumed.
-#   FRESHNESS_MAX_BEHIND — the one number that turns "behind" from a report into
-#                         a refusal. Unset by default, and that default is the
-#                         decision this file exists to write down (below).
-#
-# **Why it exists at all.** `pnpm pincheck` asserts the two adapter pins agree
-# with each other and with what is installed, and deliberately does not say
-# whether a bump happened — it cannot, offline. Nothing anywhere compared a pin to
-# what the registry serves *now*, so a pin could sit for months behind an adapter
-# whose model list had changed shape underneath the daemon's own readers
-# (`dedupeAliasChoices` is the measured case: 0.63.0 and 0.73.0 describe
-# `default` differently, and the browser drew "Default (recommended)" on the one
-# it had not been read against). `renovate.json` proposes the bump; this is what
-# says, once a week, how stale the pin is whether or not anybody opened that
-# proposal.
-#
-# **What "behind" does: report, and never fail by default.** The outcome table,
-# each row a decision:
-#
-#   current      exit 0, one line per adapter.
-#   behind       exit 0, the line says by how many releases and what latest is,
-#                and the same row lands in the job summary when there is one.
-#                Not a failure, because a scheduled job that goes red every week
-#                for a pin somebody has chosen not to move yet is a red that
-#                teaches people to ignore red — and the check is worth having
-#                only while red is rare. `FRESHNESS_MAX_BEHIND=<n>` is the
-#                documented margin: set it, and being behind by more than n
-#                releases is a refusal (exit 2) naming the variable.
-#   deprecated   exit 0, reported. A deprecated version still installs, with a
-#                warning at `pnpm install`; it is the signal that usually precedes
-#                the next row, and worth a line before it becomes one.
-#   unpublished  exit 2. The pinned version is not in the registry's list any
-#                more, which means `pnpm install --frozen-lockfile` fails on the
-#                next machine the one-line installer sets up — a real break in
-#                the install path, and the one outcome here that is nobody's
-#                choice.
-#   unreachable  exit 3, a distinct code with a sentence, so a registry outage
-#                or a runner with no network reads as that and not as a verdict
-#                about the pin. Every other code here is a statement about the
-#                tree; this one is a statement about the run.
-#
-# **What a green run does not earn.** Nothing about whether the newer adapter
-# still publishes what this daemon's readers expect — that is what the bump
-# itself is measured against, adapter by adapter, before `package.json` moves.
-# This only says the question is due.
-#
-# Nothing here changes anything. It reads one file, asks the registry, prints,
-# and appends to `GITHUB_STEP_SUMMARY` when a runner provides one.
+# Reports how far the ACP adapter pins are behind the npm registry; NPM_VIEW and FRESHNESS_ROOT are deploycheck's seams, FRESHNESS_MAX_BEHIND an opt-in margin.
+# Exit 0 when current, behind or deprecated; 2 when a pin is unpublished or over the margin; 3 when the registry cannot be asked.
 set -eu
 
 NPM_VIEW=${NPM_VIEW:-npm view}
@@ -77,10 +14,7 @@ fail() {
   exit 2
 }
 
-# The registry could not be asked. Its own exit code, because "the pin is bad"
-# and "the network is down" are answers to different questions, and a scheduled
-# job that reported the second as the first would send somebody to edit a
-# manifest that is fine.
+# Its own exit code, so a network failure never reads as a verdict about the pin.
 unreachable() {
   echo "$@" >&2
   exit 3
@@ -96,19 +30,7 @@ case "$FRESHNESS_MAX_BEHIND" in
     [ -z "$FRESHNESS_MAX_BEHIND" ] || fail "refusing: FRESHNESS_MAX_BEHIND=\"$FRESHNESS_MAX_BEHIND\" is not a count of releases." ;;
 esac
 
-# ---------------------------------------------------------------------------
-# The pins, read off package.json rather than written down here.
-#
-# Every `@agentclientprotocol/*-acp` dependency is an adapter: that is the shape
-# `pincheck`'s `ADAPTERS` list has two entries of, and reading the shape rather
-# than copying the list is what keeps a third adapter from being pinned in one
-# place and checked in none. Read with `sed`, since a `ci-*` script depends on
-# nothing but a shell — `ci-release.sh` says the same about `json_field`.
-#
-# An empty read is a pattern that stopped matching and has to fail as loudly as
-# a stale pin: a check that silently found no adapters to compare would be green
-# for ever.
-# ---------------------------------------------------------------------------
+# Every @agentclientprotocol/*-acp dependency is an adapter, so a new one is checked with no list kept here.
 
 R=$FRESHNESS_ROOT
 manifest="$R/package.json"
@@ -124,10 +46,7 @@ pins=$(sed -n 's/^[[:space:]]*"\(@agentclientprotocol\/[^"]*-acp\)":[[:space:]]*
   or the adapters moved. Fix the pattern in deploy/ci-freshness.sh rather than
   the file."
 
-# ---------------------------------------------------------------------------
-# One adapter at a time. A here-document rather than a pipe into the loop, so
-# the loop runs in this shell and what it collects survives it.
-# ---------------------------------------------------------------------------
+# A here-document rather than a pipe, so the loop runs in this shell and its variables survive it.
 
 rows=""
 stale=""
@@ -136,8 +55,6 @@ over=""
 while read -r pkg pinned; do
   [ -n "$pkg" ] || continue
 
-  # A pin is exact or it is not a pin. `pincheck` asserts the same over the
-  # installed copy; here a range would make "behind" a question with no answer.
   case "$pinned" in
     *[!0-9.]* | "" | .* | *. | *..*)
       fail "refusing: $pkg is \"$pinned\" in $manifest, which is a range rather than a pin.
@@ -146,10 +63,7 @@ while read -r pkg pinned; do
   Comparing a range to the registry answers nothing." ;;
   esac
 
-  # The registry, three questions. Each failure is `unreachable` rather than
-  # `fail`: `npm view` exits non-zero for a missing *package* as well as for a
-  # dead network, and telling those apart from here would mean parsing npm's
-  # prose — so both read as "could not ask", with npm's own stderr under it.
+  # npm view fails alike for a missing package and a dead network, so every failure reads as unreachable.
   err=$(mktemp "${TMPDIR:-/tmp}/freshness.XXXXXX")
   # shellcheck disable=SC2086 -- NPM_VIEW is deliberately two words by default
   if ! latest=$($NPM_VIEW "$pkg" dist-tags.latest 2>"$err"); then
@@ -181,9 +95,7 @@ $msg"
   \`npm view $pkg dist-tags.latest\` printed nothing, which is not a version and
   not an error. Nothing is known about the pin either way."
 
-  # Published: the pinned version is in the registry's own list. Matched as the
-  # quoted JSON string with the dots escaped, so 0.63.0 cannot match 0x63x0 and
-  # 0.6.0 cannot match 0.63.0 by prefix.
+  # Matched as the quoted JSON string with dots escaped, so 0.6.0 cannot match 0.63.0 by prefix.
   quoted=$(printf '"%s"' "$pinned" | sed 's/\./\\./g')
   if ! printf '%s\n' "$versions" | grep -q "$quoted"; then
     stale="$stale $pkg@$pinned"
@@ -193,9 +105,7 @@ $msg"
     continue
   fi
 
-  # How far behind: every version the registry lists after the pinned one. npm
-  # lists them in ascending version order, so "after" is "later in the list" —
-  # prereleases included, which is why the word is releases and not versions.
+  # npm lists versions in ascending order, prereleases included, so this counts the releases after the pin.
   behind=$(printf '%s\n' "$versions" | sed -n "/$quoted/,\$p" | grep -c '"' || true)
   behind=$((behind - 1))
 
@@ -217,10 +127,6 @@ $msg"
 done <<EOF
 $pins
 EOF
-
-# ---------------------------------------------------------------------------
-# The summary, where there is one to write, and the verdict.
-# ---------------------------------------------------------------------------
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {

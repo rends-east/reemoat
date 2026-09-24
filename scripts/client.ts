@@ -9,12 +9,6 @@ import { WebSocket } from "ws";
 import type { ChangeSet, DiffResult } from "../src/changes.js";
 import { endedWithDaemon, type SessionEvent, type StoredEvent } from "../src/events.js";
 import type { PendingPermissionSnapshot, SessionSnapshot } from "../src/registry.js";
-// Imported rather than hand-declared at the call site, which is what it used to
-// be and how it fell a field behind: `loggedIn` was added to the daemon's answer
-// and this client kept printing a ✓ for an agent that is installed and signed
-// out. `packages/web` has to mirror these by hand — it cannot reach across the
-// package boundary — but this file can, so a drift that is invisible there is a
-// type error here.
 import type { AgentAvailability } from "../src/runtime/types.js";
 import { PLUGIN_LIMITS, unpackArchive } from "../src/archive.js";
 import { parseManifest } from "../src/plugins/manifest.js";
@@ -24,14 +18,7 @@ import type { WorkspaceStatus } from "../src/worktree.js";
 
 const STATIC_TOKEN = process.env["REEMOAT_TOKEN"] ?? "";
 
-/**
- * Control-plane mode.
- *
- * All three set, and this client asks the control plane for a short-lived token
- * for one machine, learns that machine's URL from the same answer, and renews
- * before it expires. None of them set, and it behaves exactly as it always did:
- * one long-lived `REEMOAT_TOKEN` against one `REEMOAT_URL`.
- */
+/** Control-plane mode: with all three set, a short-lived token for one machine is minted and renewed before it expires. */
 const CP_URL = (process.env["REEMOAT_CP_URL"] ?? "").trim();
 const CP_KEY = (process.env["REEMOAT_CP_KEY"] ?? "").trim();
 const MACHINE = (process.env["REEMOAT_MACHINE"] ?? "").trim();
@@ -40,33 +27,16 @@ const CP_MODE = CP_URL.length > 0 && CP_KEY.length > 0 && MACHINE.length > 0;
 // 7887 matches the daemon's own default. See `DEFAULT_PORT` in scripts/daemon.ts.
 const BASE_URL = process.env["REEMOAT_URL"] ?? "http://127.0.0.1:7887";
 
-/*
- * `REEMOAT_ROUTE` is gone, along with the choice it pinned.
- *
- * It selected between a direct URL and the relay, which was a real decision while
- * both existed. Against a control plane there is one path now — the tunnel the
- * daemon dialled out — and without one there is `REEMOAT_URL` on loopback. A
- * value left in an environment is warned about rather than ignored.
- */
 if ((process.env["REEMOAT_ROUTE"] ?? "").trim().length > 0) {
   warn("!! REEMOAT_ROUTE is set and no longer does anything: the relay is the only path");
 }
 
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 8_000;
-/**
- * After a `4003`: the daemon threw away queued events because we could not keep
- * up. Reconnecting immediately earns a second collapse, and the same number lives
- * in `packages/web/src/stream.ts` for the same reason.
- */
+/** After a 4003 the daemon has dropped queued events; reconnecting at once earns a second collapse. Same value in packages/web/src/stream.ts. */
 const SLOW_CONSUMER_BACKOFF_MS = 5_000;
 const TEXT_PREVIEW = 400;
-/**
- * Renew once this much of the token's life is left.
- *
- * Larger than the daemon's 60s clock leeway, so a renewal never depends on that
- * leeway having been the thing keeping the previous token alive.
- */
+/** Renew with this much life left: larger than the daemon's 60s clock leeway, so a renewal never depends on it. */
 const TOKEN_RENEW_MARGIN_MS = 90_000;
 
 const USAGE = `Reemoat client — drive the daemon from a terminal
@@ -151,12 +121,6 @@ class ApiError extends Error {
 let cachedToken: string | null = null;
 let cachedExpiry = 0;
 
-/**
- * The bearer to present, minting or renewing one if this is control-plane mode.
- *
- * In static mode this is just the environment variable, so nothing about the
- * old single-machine flow changes.
- */
 async function currentToken(force = false): Promise<string> {
   if (!CP_MODE) return STATIC_TOKEN;
   if (!force && cachedToken !== null && Date.now() < cachedExpiry - TOKEN_RENEW_MARGIN_MS) {
@@ -171,8 +135,6 @@ async function currentToken(force = false): Promise<string> {
       body: JSON.stringify({ machine: MACHINE }),
     });
   } catch (error) {
-    // Worth naming, because it is the one outage that does not stop a session:
-    // the daemon and the agent are fine, only issuance is down.
     if (cachedToken !== null) {
       warn(`!! could not reach the control plane (${describe(error)}); using the token already held`);
       return cachedToken;
@@ -192,8 +154,6 @@ async function currentToken(force = false): Promise<string> {
   };
   cachedToken = issued.token;
   cachedExpiry = issued.expiresAt;
-  // The registry's whole job on this path: tell the client where the machine is.
-  // An explicit REEMOAT_URL still wins, so a tunnel or an override stays usable.
   if (process.env["REEMOAT_URL"] === undefined) {
     routes = {
       relay: issued.machine?.relayOnline === true ? (issued.machine.relayUrl ?? null) : null,
@@ -203,18 +163,7 @@ async function currentToken(force = false): Promise<string> {
   return cachedToken;
 }
 
-/* ------------------------------------------------------------------ *
- * Choosing a route
- * ------------------------------------------------------------------ */
-
-/**
- * Where this machine can be reached, as the control plane last described it.
- *
- * `relay` is null both when there is no relay and when there is one the daemon is
- * not connected to, because for the purpose of reaching it those are now the same
- * thing: there is no second path to try. `relayConfigured` keeps them apart for
- * the error message, which is the one place the difference matters to a human.
- */
+// Only feeds the no-route message: relay is null with no relay or no tunnel, and relayConfigured tells those apart.
 let routes: { relay: string | null; relayConfigured: boolean } = {
   relay: null,
   relayConfigured: false,
@@ -222,83 +171,29 @@ let routes: { relay: string | null; relayConfigured: boolean } = {
 
 let chosenRoute: string | null = null;
 
-/**
- * Forget what we last believed about reachability, so the next call re-asks.
- *
- * Called when the machine stops answering — a dropped stream, a network error on
- * a request. It used to drop a *route memo* chosen between two candidates; what
- * it drops now is the belief that the machine is up, which is still worth having
- * because a daemon that lost its tunnel comes back the moment it re-dials.
- *
- * Deliberately *not* called on an HTTP error. A 401, a 404 or a 500 means the
- * request arrived and the daemon answered; re-probing there would turn every
- * application-level failure into a flap.
- */
+/** Not called on an HTTP error: the daemon answered, and re-probing would turn every application failure into a flap. */
 function forgetRoute(): void {
   if (process.env["REEMOAT_URL"] !== undefined) return;
   chosenRoute = null;
 }
 
-/**
- * Where to send requests: the relay, or `REEMOAT_URL` when there is no fleet.
- *
- * `/health` is the probe, and it carries the token: the relay authenticates
- * everything including `/health`, and an unauthenticated probe would be a free
- * oracle for which machines in the fleet are online.
- */
 async function resolveRoute(): Promise<string> {
   const route = await tryResolveRoute();
   if (route !== null) return route;
   fail(noRouteMessage());
 }
 
-/**
- * The same choice, but `null` instead of exiting when nothing answers.
- *
- * The attach loop needs this: a total outage there is a reason to back off and
- * try again, not a reason to kill a client that is holding a session's transcript
- * and its readline. A one-shot command has nothing to wait for, so `resolveRoute`
- * above turns the same `null` into one clear message and an exit.
- */
+/** Null instead of exiting, so the attach loop can back off rather than kill a client holding a transcript. */
 async function tryResolveRoute(): Promise<string | null> {
   if (chosenRoute !== null) return chosenRoute;
   if (process.env["REEMOAT_URL"] !== undefined) return (chosenRoute = BASE_URL);
   if (!CP_MODE) return (chosenRoute = BASE_URL);
 
-  /*
-   * ⚠ **The relay arm is gone, and this is the one thing Phase 5 took away from
-   * a person rather than giving them.**
-   *
-   * The relay carries encrypted channels only. Opening one needs an `X25519`
-   * device key and a capability the Authority bound to it with `cnf.jkt` — both
-   * of which the *app* has, because the shell holds a key in the operating
-   * system's keyring and every capability it mints names that key. This client
-   * has neither: `REEMOAT_TOKEN` is a long-lived bearer capability with no `cnf`
-   * at all, which is exactly what a device-bound channel exists to make
-   * worthless.
-   *
-   * So the honest answer is a refusal with a sentence, not a downgrade. Adding a
-   * plaintext path back for one CLI would put every prompt, diff and file in the
-   * fleet through the relay in the clear again — for whoever holds a token, which
-   * is precisely the threat the binding closes.
-   *
-   * What still works, unchanged, is every use this tool was actually built for:
-   * `REEMOAT_URL` against a daemon on this machine. `noRouteMessage` says which
-   * of the two situations somebody is in.
-   */
-  // Minted anyway, so `routes` is populated and the message below can be specific
-  // rather than guessing why there is no route.
+  // No relay arm: the relay carries only device-bound encrypted channels, and this client holds no device key.
   await currentToken();
   return null;
 }
 
-/**
- * Why there is no route, in the terms an operator can act on.
- *
- * Two distinguishable causes and they point at different things to go and look
- * at: a control plane with no relay is a configuration nobody finished, and a
- * machine with no tunnel is a daemon that is off or cannot dial out.
- */
 function noRouteMessage(): string {
   if (!routes.relayConfigured) {
     return `no route to ${MACHINE}: the control plane runs no relay, so nothing can reach it`;
@@ -306,10 +201,6 @@ function noRouteMessage(): string {
   if (routes.relay === null) {
     return `no route to ${MACHINE}: it has no tunnel connected to the relay`;
   }
-  /*
-   * The machine is reachable and this tool cannot reach it, which is a different
-   * sentence from every other failure here and has to say what to use instead.
-   */
   return (
     `no route to ${MACHINE}: its relay carries encrypted channels only, and this client holds no ` +
     `device key to open one. Use the Reemoat app for a remote machine, or set REEMOAT_URL to a ` +
@@ -317,20 +208,10 @@ function noRouteMessage(): string {
   );
 }
 
-/**
- * One request, with at most one retry.
- *
- * `firstAttempt` is the recursion guard for both retries below — an expired
- * token and a route that stopped answering — because both re-enter here and
- * neither may do so twice. One name rather than two, since "have we already
- * retried" is one fact and two flags could disagree about it.
- */
+/** firstAttempt guards both retries, an expired token and a dead route: neither may re-enter twice. */
 async function api<T>(path: string, init: RequestInit = {}, firstAttempt = true): Promise<T> {
   const base = await resolveRoute();
   const headers: Record<string, string> = { authorization: `Bearer ${await currentToken()}` };
-  // The caller's own headers, then the default. JSON is what every verb here
-  // sends bar one — `plugin install` posts an archive — and a body whose type is
-  // announced wrongly is a lie this client would be telling on every install.
   for (const [key, value] of Object.entries((init.headers ?? {}) as Record<string, string>)) {
     headers[key.toLowerCase()] = value;
   }
@@ -342,15 +223,6 @@ async function api<T>(path: string, init: RequestInit = {}, firstAttempt = true)
   try {
     response = await fetch(new URL(path, base), { ...init, headers });
   } catch (error) {
-    /*
-     * The machine stopped answering. Forget that and try once more, which turns
-     * a daemon that re-dialled its tunnel a second ago into one slow command
-     * rather than a failure.
-     *
-     * Only when a re-probe could pick something different: with an explicit
-     * `REEMOAT_URL` there is nothing to re-resolve, and retrying would just
-     * double the time it takes to report the same failure.
-     */
     if (firstAttempt && process.env["REEMOAT_URL"] === undefined) {
       forgetRoute();
       if ((await resolveRoute()) !== base) return api<T>(path, init, false);
@@ -367,9 +239,7 @@ async function api<T>(path: string, init: RequestInit = {}, firstAttempt = true)
     }
   }
   if (!response.ok) {
-    // One retry with a freshly minted token. A clock that drifted, or a request
-    // that sat behind a slow agent call for longer than the token had left,
-    // should cost a round trip rather than the command.
+    // One retry with a fresh token: a drifted clock should cost a round trip, not the command.
     const code = (body as { error?: { code?: string } } | null)?.error?.code;
     if (firstAttempt && CP_MODE && response.status === 401 && code === "token_expired") {
       await currentToken(true);
@@ -404,28 +274,12 @@ function fail(message: string): never {
 }
 
 let rlInstance: Interface | null = null;
-/**
- * Where `plugin.json` is, for the disclosure `plugin install` prints before it
- * sends anything.
- *
- * The two shapes the daemon accepts and no others: loose members, or exactly one
- * folder holding them — which is what somebody who compressed a directory
- * produces. Nothing deeper is searched, because nothing deeper is searched
- * on arrival either, and a preview that found a manifest the daemon will not is
- * worse than one that finds none.
- *
- * ⚠ **Restated rather than imported.** `findManifestRoot` is private to
- * `src/plugins/host.ts`, and a preview in a CLI is not a good enough reason for
- * that file to grow a public surface. Seven lines, and the shape it mirrors is
- * named here so the next person changing one finds the other.
- */
+/** Mirrors the private findManifestRoot in src/plugins/host.ts: plugin.json at the top or inside exactly one folder, nothing deeper. */
 async function manifestRoot(tree: string): Promise<string | null> {
   const there = async (at: string): Promise<boolean> => {
     try {
       return (await stat(join(at, "plugin.json"))).isFile();
     } catch {
-      // Absent, or a directory wearing the name. Either way there is no manifest
-      // at this level, which is the only question being asked.
       return false;
     }
   };
@@ -438,8 +292,6 @@ async function manifestRoot(tree: string): Promise<string | null> {
 }
 
 function rl(): Interface {
-  // Created lazily: an open readline holds stdin, which would stop commands that
-  // never ask a question from exiting on their own.
   rlInstance ??= createInterface({ input: process.stdin, output: process.stderr });
   return rlInstance;
 }
@@ -451,25 +303,16 @@ function closeReadline(): void {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/* ------------------------------------------------------------------ *
- * Rendering
- * ------------------------------------------------------------------ */
-
 function describeSession(session: SessionSnapshot): string {
   const parts = [
-    // A pin is a column of its own rather than a suffix, so the list stays aligned
-    // whether or not anything is pinned.
     session.pinned ? "*" : " ",
     session.id,
     session.agent.padEnd(6),
-    // 11, because "interrupted" is the longest status.
     session.status.padEnd(11),
     `seq ${session.lastSeq}`,
   ];
   if (session.turn !== null) parts.push(`turn ${session.turn}`);
-  // Only when the agent actually said. `size` is 0 for "reported occupancy but no
-  // window", which is the one value nothing may divide by — printing a percentage
-  // there would be inventing the denominator.
+  // size 0 means occupancy without a window; never divide by it.
   const usage = session.contextUsage;
   if (usage !== null && usage.size > 0) {
     parts.push(`ctx ${Math.round((usage.used / usage.size) * 100)}%`);
@@ -478,72 +321,20 @@ function describeSession(session: SessionSnapshot): string {
   return parts.join("  ");
 }
 
-/**
- * `GET /agent-auth`: availability, plus where each agent's credentials go.
- *
- * The availability half is imported; only this wrapper is declared here, because
- * `server.ts` assembles it inline and it has no exported name. `secret` is not in
- * it and there is no route that returns one — `set` is the whole answer a client
- * gets.
- */
 interface AgentAuthListing {
   loginSupported: boolean;
   agents: (AgentAvailability & {
     credentials: { envName: string; set: boolean; updatedAt: number | null }[];
-    // Narrower than `AgentLoginSupport` on purpose — this file reads two of its
-    // fields and a widening import would make it look like it read all four.
     login?: { supported: boolean; needsInput: boolean; blocked?: string | null };
   })[];
 }
 
-/**
- * One agent's line: installed, and signed in — which are two questions.
- *
- * This printed `✓`/`✗` from `available` alone, and `available` only ever meant
- * "the binary is on PATH". An installed but logged-out agent therefore read as
- * ready, and the person found out at `502 agent_auth_required`, after a container
- * start and a worktree. `loggedIn` is `boolean | null` for the same reason
- * {@link import("../src/runtime/types.js").Liveness} has three answers: claude
- * can say non-interactively and kimi cannot, so **`null` must never render as
- * signed out** — that would send somebody to a login they have already done.
- *
- * The hint is printed by the callers whenever there is one, not only when the
- * agent is missing: `container.ts` sets it to the agent's own `authHint` for
- * `loggedIn === false`, which is precisely the case that has something to say.
- */
-/**
- * What `GET /agents` actually answers, which is more than {@link AgentAvailability}.
- *
- * The route spreads `login` onto every row — `loginSupportOf` — and this file had
- * been typed against the runtime's shape rather than the route's, so the field was
- * there on the wire and invisible here.
- */
 type ListedAgent = AgentAvailability & {
   login?: { supported: boolean; needsInput: boolean; blocked?: string | null };
 };
 
 function describeAgent(agent: ListedAgent): string {
-  /*
-   * ⚠ **The same ladder the browser's `agentStance` walks, in the same order.**
-   * Read from the response rather than re-derived, because a fourth hand-rolled
-   * copy of it is what put the wrong word on the browser's own agent tiles for a
-   * release. Four rungs, and the order of the first three is the whole of it:
-   *
-   * - `available` is the adapter, and a harness that is not there cannot have
-   *   refused anything.
-   * - `lastStartRefusal` is a **measurement** — the daemon opened a session and
-   *   the agent declined — so it outranks both arms below, which describe an
-   *   *absence*. "no sign-in needed" printed over a harness that would not start
-   *   is the line this rung exists to stop.
-   * - `login.blocked` and not `hasLoginFlow`, because a harness a plugin added has
-   *   no row in `AGENT_LOGIN` to ask. `no_flow` is the one reason in that
-   *   vocabulary that is a fact about the agent rather than about the host.
-   *
-   * ⚠ **And here the words stay, where the browser's badge is `null`.** Q3.509
-   * deletes that badge because a chip beside a name is not where a sentence
-   * belongs and the settings card has one. This column *is* the sentence, so a
-   * blank one would read as a row that failed to print.
-   */
+  // The same ladder as the browser's agentStance, in the same order; here the words stay where the browser's badge is null (Q3.509).
   const [mark, state] = !agent.available
     ? ["✗", "not installed"]
     : agent.lastStartRefusal != null
@@ -558,15 +349,7 @@ function describeAgent(agent: ListedAgent): string {
   return `${mark} ${agent.id.padEnd(8)} ${agent.displayName.padEnd(18)} ${state}`;
 }
 
-/**
- * The agent's own controls, as the daemon last saw them.
- *
- * Read from the *snapshot* and never from the transcript, which is the same rule
- * the browser follows: these are state with one current version, and a restored
- * session has no live agent to have published them at all, so there may be nothing
- * in the log to fold. Shared by the read and the write so a `config` that sets
- * something prints it in the same shape it listed it.
- */
+/** Read from the snapshot, never the transcript: a restored session may have nothing in the log to fold. */
 function printAgentConfig(session: SessionSnapshot): void {
   const options = session.agentConfig.options;
   if (options.length === 0) {
@@ -574,9 +357,6 @@ function printAgentConfig(session: SessionSnapshot): void {
     return;
   }
   for (const option of options) {
-    // The category and not the id is what a reader should key on — the ids are
-    // not portable between agents (claude's `effort`, kimi's `thinking`), which
-    // is the whole reason `AgentConfigOption` carries one.
     out(`${option.id.padEnd(14)} ${String(option.value).padEnd(14)} [${option.category ?? "-"}]  ${option.name}`);
     for (const choice of option.choices) {
       out(`   ${choice.value === option.value ? "*" : " "} ${choice.value.padEnd(16)} ${choice.name}`);
@@ -584,15 +364,7 @@ function printAgentConfig(session: SessionSnapshot): void {
   }
 }
 
-/**
- * `true`/`false` become booleans; everything else stays the string it is.
- *
- * The daemon validates a boolean option against a real boolean and a select
- * against its own choice list, so argv has to be able to express both. A select
- * whose choice value is literally `"true"` would be misread here — no agent
- * publishes one, and the refusal would be the daemon's own `invalid_config_value`
- * rather than silence.
- */
+/** true and false become booleans; a select whose choice value is literally true would be misread. */
 function configValue(raw: string): string | boolean {
   return raw === "true" ? true : raw === "false" ? false : raw;
 }
@@ -612,9 +384,6 @@ function describeEvent(event: SessionEvent): string {
     case "session_started":
       return `session_started  ${event.agent}  ${event.agentInfo?.name ?? "?"}`;
     case "agent_config": {
-      // One line per knob, in the agent's own vocabulary — this is the reference
-      // implementation for the browser's picker, so it prints what the picker
-      // would draw rather than a summary of it.
       const knobs = event.options.map(
         (option) => `${option.id}=${String(option.value)}${option.category ? ` (${option.category})` : ""}`,
       );
@@ -629,8 +398,6 @@ function describeEvent(event: SessionEvent): string {
         event.mode === "worktree"
           ? `worktree  ${event.branch ?? "?"}  ${event.root}`
           : `plain  ${event.root}${event.plainReason ? `  (${event.plainReason})` : ""}`;
-      // Warnings are printed in full rather than clipped: `dirty_source` is the
-      // one line that explains why the agent cannot see work you know you have.
       const warnings = event.warnings.map((warning) => `\n     !! ${warning.message}`).join("");
       return `workspace  ${where}${warnings}`;
     }
@@ -649,8 +416,6 @@ function describeEvent(event: SessionEvent): string {
     case "elicitation_request":
       return `QUESTION  ${event.elicitationId}  ${clip(event.message)}`;
     case "elicitation_resolved":
-      // The answers are already rendered `label: value` pairs — the resolution is
-      // self-describing on purpose, so this needs no join back to the request.
       return `answered  ${event.elicitationId}  ${event.action}${
         event.answers === null || event.answers.length === 0
           ? ""
@@ -662,8 +427,6 @@ function describeEvent(event: SessionEvent): string {
       return `turn_end  ${event.stopReason}`;
     case "agent_log":
       return `log  ${clip(event.line, 160)}`;
-    // The boundary a clear leaves. Everything above it is still here and still
-    // readable; the agent simply no longer knows any of it.
     case "context_cleared":
       return "context cleared — the agent has forgotten everything above";
     case "other":
@@ -675,12 +438,6 @@ function describeEvent(event: SessionEvent): string {
   }
 }
 
-/**
- * Joins consecutive text chunks into one paragraph.
- *
- * The agent streams a few words at a time; one line per chunk is unreadable. The
- * seq of the first chunk is kept so the numbering stays visible.
- */
 class TextRun {
   private buffer = "";
   private firstSeq = 0;
@@ -702,10 +459,6 @@ class TextRun {
     this.buffer = "";
   }
 }
-
-/* ------------------------------------------------------------------ *
- * The interactive directory picker
- * ------------------------------------------------------------------ */
 
 interface DirEntry {
   name: string;
@@ -773,10 +526,6 @@ async function pickDirectory(): Promise<string> {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * Attach
- * ------------------------------------------------------------------ */
-
 interface AttachOptions {
   since: number;
   json: boolean;
@@ -787,16 +536,9 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
   let instanceId: string | null = null;
   let attempt = 0;
   let stop = false;
-  /** The most recent snapshot seen, from either a `hello` or a `snapshot` frame. */
   let latest: SessionSnapshot | null = null;
 
-  /**
-   * Reports a session that has ended, and says whether to stop attaching.
-   *
-   * Shared by `snapshot` and `caught_up` so the two cannot drift: a session that
-   * ends *while* we watch arrives as a snapshot, and one that had already ended
-   * before we attached is only ever visible in the hello frame.
-   */
+  /** Shared by snapshot and caught_up: a session that ended before attaching is only visible in the hello frame. */
   const reportIfEnded = (session: SessionSnapshot): boolean => {
     if (
       session.status !== "exited" &&
@@ -808,60 +550,24 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
     }
     if (stop) return false;
 
-    /*
-     * A parked session is one the daemon let go of for being quiet, and this
-     * client is the reason it happened: an attach that sits watching sends
-     * nothing, so `lastActivityAt` stops moving and the sweep takes it.
-     *
-     * ⚠ **Stays attached, and it is the one case where staying is not enough on
-     * its own.** Nothing is coming to reconnect this — `autoResumable` answers
-     * `parked` only on a prompt, by design — so a client that merely waited, the
-     * way it waits for a restart above, would wait for ever with a hopeful
-     * sentence on screen. So it says what actually brings it back, and keeps the
-     * socket, because the next `pnpm client prompt` on this session resumes it and
-     * the transcript then carries on here without a re-attach.
-     */
+    // Parked: nothing reconnects this until a prompt arrives, so say what brings it back and keep the socket.
     if (session.exit?.reason === "parked") {
       warn("\n── the agent was released after a quiet spell; the conversation is intact");
       warn(`   send a message and it comes back:  pnpm client prompt ${session.id} "…"   (^C to stop waiting)`);
       return false;
     }
 
-    /*
-     * A session the daemon ended is one it is bringing back, so **stay
-     * attached**.
-     *
-     * `endedWithDaemon` and never the status word, which is the correction this
-     * whole change turns on — and which this function is the place it would
-     * silently have been missed, since the three-way `!==` chain above is a
-     * hand-rolled copy of `isTerminal` and a graceful restart arrives as
-     * `exited`. Imported from `src/events.ts` as a value rather than reimplemented,
-     * which is exactly why this file imports from `src/` at all.
-     *
-     * The socket is already dead here — the daemon's process left — so what
-     * actually runs is the reconnect loop below, and when the auto-resume lands
-     * the `{type: "status", status: "starting"}` it appends arrives on the very
-     * next frame and the transcript simply carries on. That is the property
-     * being demonstrated, in the one client that can demonstrate it.
-     */
+    // endedWithDaemon, never the status word: a graceful restart arrives as exited, and the daemon is bringing the agent back.
     if (endedWithDaemon(session.exit) && session.resume?.state !== "failed") {
       warn("\n── the daemon went away; staying attached while it reconnects the agent");
-      // Said here rather than left implicit, because this branch waits and the
-      // one thing it cannot see is whether the daemon is going to do anything:
-      // `REEMOAT_AUTO_RESUME=0` produces exactly this state and no reconnection,
-      // and a client that sat there silently would look hung rather than patient.
       warn(`   if it does not come back:  pnpm client resume ${session.id}   (^C to stop waiting)`);
       return false;
     }
 
     warn(`\n── session ${session.status}${session.exit ? `: ${session.exit.reason}` : ""}`);
     if (session.resume?.state === "failed") {
-      // The daemon tried and gave up, so nobody is coming — say what it said and
-      // let the loop end rather than waiting on a reconnection that will not happen.
       warn(`   could not reattach an agent: ${session.resume.error?.message ?? "unknown"}`);
     }
-    // Terminal, but not necessarily over: a session that still holds the agent's
-    // own session id can be picked up where it left off.
     if (session.agentSessionId !== null) {
       warn(`   resume it with:  pnpm client resume ${session.id}`);
     }
@@ -903,7 +609,6 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
       answered.add(next.permissionId);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        // Someone else got there first, or this is a retry that already landed.
         warn(`   → already answered elsewhere`);
         answered.add(next.permissionId);
       } else {
@@ -916,20 +621,8 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
   };
 
   for (;;) {
-    // Minted per connection, so a reconnect after an expiry close carries a
-    // token that is actually valid rather than the one that was just refused.
     const streamToken = await currentToken();
-    /*
-     * Resolved per connection rather than once, so a reconnect after the direct
-     * path died lands on the relay instead of retrying a route that is gone.
-     * That only works because the loop below calls `forgetRoute` on every close
-     * that is not a token expiry — the memo alone would hand back the dead route
-     * for ever.
-     *
-     * `tryResolveRoute`, not `resolveRoute`: nothing answering right now is a
-     * reason to back off, not a reason to exit a client holding a live transcript
-     * and a readline. A one-shot command has nothing to wait for and still exits.
-     */
+    // tryResolveRoute: nothing answering is a reason to back off, not to exit a client holding a live transcript.
     const base = await tryResolveRoute();
     if (base === null) {
       attempt += 1;
@@ -968,11 +661,7 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
           case "hello": {
             const session = frame["session"] as SessionSnapshot;
             const seen = frame["instanceId"] as string;
-            // A restart used to be fatal here. It no longer is: the log and the
-            // sequence numbers are on disk, so the session comes back as
-            // `interrupted` and the cursor we are holding still means what it
-            // meant. Worth saying out loud, because the seq continuity across
-            // this line is the whole point of the daemon being durable.
+            // A restart is not fatal: the log and the sequence numbers are on disk, so the cursor still means what it meant.
             if (instanceId !== null && instanceId !== seen) {
               run.flush();
               warn(`\n!! the daemon restarted (${instanceId} → ${seen}); resuming from #${lastSeq}`);
@@ -995,8 +684,6 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
 
           case "events": {
             for (const stored of frame["events"] as StoredEvent[]) {
-              // The whole point of the sequence number. If this ever fires, the
-              // daemon broke its contract and silence would be worse than noise.
               if (stored.seq !== lastSeq + 1) {
                 run.flush();
                 fail(`GAP: expected #${lastSeq + 1}, received #${stored.seq}`);
@@ -1020,21 +707,7 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
             run.flush();
             const from = frame["from"] as number;
             const to = frame["to"] as number;
-            /*
-             * **Three reasons, and only two of them are losses.**
-             *
-             * `backlog` says the *socket* declined to replay this far — the daemon
-             * bounds an attach (`ATTACH_REPLAY_MAX`) rather than the history — and
-             * every one of those events is still on disk. This printed
-             * `!! lost N events … backlog` for it, which is untrue, and `attach`
-             * defaults to `--since 0`, so it fired on any session past the cap: a
-             * transcript that is completely intact reported as data loss, and
-             * `--json` silently emitting only the newest 2000 of it.
-             *
-             * Fetching the range here would mean a paging loop in what is meant to
-             * stay a thin reference client, so it says where the events are instead
-             * — and, above all, does not call them lost.
-             */
+            // backlog is not a loss: the socket declined to replay past ATTACH_REPLAY_MAX, and every event is still on disk.
             if (frame["reason"] === "backlog") {
               warn(
                 `\n-- ${frame["dropped"]} earlier events (seq ${from}..${to}) not replayed on this socket;` +
@@ -1043,8 +716,6 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
             } else {
               warn(`\n!! lost ${frame["dropped"]} events (seq ${from}..${to}) — ${frame["reason"]}`);
             }
-            // Advance past the range rather than asserting on it; the line above is
-            // the record of what was skipped and why.
             lastSeq = to;
             return;
           }
@@ -1060,12 +731,6 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
           case "caught_up":
             run.flush();
             warn(`   caught up at #${frame["seq"]}`);
-            // A session that was already terminal when we attached never changes
-            // state again, so no `snapshot` frame is ever coming and waiting for
-            // one waits forever. `caught_up` is the right place to notice: it
-            // means the backlog is fully delivered, so there is genuinely nothing
-            // more to receive. Persistence is what made this the common case —
-            // every restored session is terminal from the moment it comes back.
             if (latest && reportIfEnded(latest)) socket.close(1000, "session ended");
             return;
 
@@ -1081,11 +746,7 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
       return;
     }
 
-    // 4401 is the daemon telling us the token behind this socket has expired.
-    // That is a scheduled re-authentication, not a failure: renew immediately
-    // and reconnect without backoff, because backing off here would leave the
-    // stream dark for no reason. It is also the mechanism that bounds
-    // revocation for an attached client, so it must not be treated as noise.
+    // 4401 is a scheduled re-authentication: renew and reconnect without backoff. It also bounds revocation for an attached client.
     if (closedFor.startsWith("closed 4401")) {
       await currentToken(true);
       attempt = 0;
@@ -1093,16 +754,7 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
       continue;
     }
 
-    /*
-     * 4003 is the daemon dropping us for falling behind. It answered — loudly —
-     * so the route is not implicated and the memo stays.
-     *
-     * `packages/web/src/stream.ts` has always treated it this way and this file
-     * did not, which meant the two clients disagreed about the one condition where
-     * the daemon is provably reachable. Coming straight back also earns a third
-     * collapse, so this backs off before continuing; the cursor is at the head of
-     * the log anyway, so there is nothing to catch up on in a hurry.
-     */
+    // 4003: the daemon answered, so the route is not implicated; back off to avoid another collapse.
     if (closedFor.startsWith("closed 4003")) {
       attempt = 0;
       warn(`\n── dropped for falling behind; resuming from #${lastSeq} in ${SLOW_CONSUMER_BACKOFF_MS}ms`);
@@ -1110,19 +762,7 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
       continue;
     }
 
-    /*
-     * Anything else means the socket died for a reason the route is implicated
-     * in, so drop the memo and let the next loop re-probe.
-     *
-     * This is the whole reason `resolveRoute` is called per connection rather
-     * than once: a laptop that attached over the LAN and then moved to LTE has a
-     * dead direct URL and a live relay tunnel, and without this it would retry
-     * the dead one for ever. Direct is still probed first, so coming back onto
-     * the LAN returns to the direct path on the next reconnect.
-     *
-     * Deliberately after the 4401 and 4003 branches above: both are the daemon
-     * answering, and neither says anything at all about the route.
-     */
+    // Anything else implicates the route. After the 4401 and 4003 branches, which are the daemon answering.
     forgetRoute();
 
     attempt += 1;
@@ -1132,10 +772,6 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
     await sleep(jittered);
   }
 }
-
-/* ------------------------------------------------------------------ *
- * Commands
- * ------------------------------------------------------------------ */
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -1175,8 +811,6 @@ async function main(): Promise<void> {
         "   REEMOAT_CP_URL, REEMOAT_CP_KEY and REEMOAT_MACHINE.",
     );
   }
-  // Mint before dispatching, so a bad key or a missing grant is one clear error
-  // at the top rather than a confusing failure part-way through a command.
   if (CP_MODE) await currentToken();
 
   switch (command) {
@@ -1194,15 +828,6 @@ async function main(): Promise<void> {
     }
 
     case "agents": {
-      /*
-       * ⚠ **One sub-verb, and it is the only thing under `/agents` that writes.**
-       * A harness that refused to open a session loses its tile on New session, and
-       * for one with no sign-in wizard the remedy is off-screen entirely — run its
-       * own program once on the machine. Nothing about that reaches the daemon, so
-       * this is how a terminal says "I did that, look again". It is here rather
-       * than under `agentauth` because what somebody is re-checking is the agent
-       * they just listed, and the credential is not what changed.
-       */
       if (positionals[1] === "recheck") {
         const agent = positionals[2];
         if (agent === undefined) fail("usage: agents recheck <agent>");
@@ -1210,9 +835,6 @@ async function main(): Promise<void> {
           `/agent-auth/${encodeURIComponent(agent)}/recheck`,
           { method: "POST" },
         );
-        // The row the daemon now reports, never a claim of our own: the route
-        // answers with what its own lookup saw, and printing anything else would be
-        // this client deciding what a re-check found.
         if (answer.info) out(describeAgent(answer.info));
         else warn(`this machine has no agent called ${answer.agent}`);
         return;
@@ -1225,17 +847,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    /*
-     * Agent credentials, from a terminal.
-     *
-     * The paste-a-token half of the settings screen, and deliberately only that
-     * half. The wizard's four `/agent-auth/login*` routes are a polled transcript
-     * with a one-time code typed back into it, which wants a screen holding the
-     * run open rather than a command that exits — and a login code that is
-     * printed and lost is not recoverable. Everything else under `/agent-auth`
-     * is here, because a route only React can reach is a route nobody can bisect
-     * when it starts answering 400.
-     */
+    // Paste-a-token only: the login wizard wants a screen holding the run open, and a printed login code is lost.
     case "agentauth": {
       const agent = positionals[1];
       if (values.set !== undefined && values.clear !== undefined) {
@@ -1255,14 +867,7 @@ async function main(): Promise<void> {
             out(`    ${slot.envName.padEnd(26)} ${slot.set ? "set" : "unset"}`);
           }
           if (entry.login !== undefined && !entry.login.supported) {
-            // Per agent, and the daemon-wide line above cannot say this: an
-            // agent whose own CLI does not resolve used to get a button and then
-            // a 503.
-            //
-            // ⚠ **And `no_flow` is not that.** It printed "not available here" for
-            // every reason alike, which blames *this host* for an agent that has no
-            // sign-in anywhere — the same inversion `loginBlockedReason` puts
-            // `no_flow` first to prevent.
+            // no_flow is not a host limitation: that agent needs no sign-in anywhere.
             out(
               `    ${"login".padEnd(26)} ${
                 entry.login.blocked === "no_flow" ? "none needed" : "not available here"
@@ -1285,11 +890,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Off argv when it is given and off the terminal when it is not. A token
-      // passed as an argument is in the shell's history file and in `ps` for as
-      // long as the request takes, and this is a long-lived credential for
-      // somebody's model account — the one secret this client ever carries that
-      // is not already an environment variable.
+      // Prompted when not given: a token on argv lands in shell history and ps.
       const token = positionals[2] ?? (await rl().question(`${values.set}> `)).trim();
       const result = await api<{ saved: boolean; envName: string }>(
         `/agent-auth/${encodeURIComponent(agent)}`,
@@ -1303,9 +904,7 @@ async function main(): Promise<void> {
       const parent = positionals[1];
       const name = positionals[2];
       if (!parent || !name) fail("mkdir requires a parent path and a name");
-      // The daemon's own resolved path, not `parent/name`: the join happens
-      // inside the tenant's root and is containment-checked there, so echoing the
-      // argument back would print a path that may not be the one created.
+      // The daemon's resolved path, not parent/name: the join is containment-checked there.
       const created = await api<{ path: string }>("/fs/mkdir", {
         method: "POST",
         body: JSON.stringify({ parent, name }),
@@ -1330,7 +929,6 @@ async function main(): Promise<void> {
       const agent = values.agent;
       if (!agent) fail("new requires --agent");
       const cwd = values.cwd ?? (await pickDirectory());
-      // Omitted entirely unless asked, so the daemon's own default applies.
       const worktree = values["no-worktree"] ? false : values.worktree ? true : undefined;
       const { session } = await api<{ session: SessionSnapshot }>("/sessions", {
         method: "POST",
@@ -1372,14 +970,6 @@ async function main(): Promise<void> {
           queued?: boolean;
           position?: number;
         }>(`/sessions/${id}/prompt`, { method: "POST", body: JSON.stringify({ text }) });
-        /*
-         * Four landings, not two. A clear starts no turn — the daemon carries it
-         * out itself rather than forwarding it — so there is a seq to point at and
-         * nothing to wait for. The other two are this route's `202`s: a message
-         * *steered* into a turn already running names that turn, and a *queued* one
-         * carries no turn at all, which is why printing `turn ${result.turn}` for
-         * it read `turn undefined` against kimi and opencode.
-         */
         out(
           result.cleared === true
             ? `context cleared  seq ${result.seq}`
@@ -1391,8 +981,6 @@ async function main(): Promise<void> {
         );
       } catch (error) {
         if (error instanceof ApiError && error.status === 429) {
-          // The queue is full. Time does not fix it — somebody has to be answered
-          // — so this carries the limit rather than a retry-after.
           const limit = (error.body as { error?: { detail?: { limit?: number } } }).error?.detail?.limit;
           warn(limit === undefined ? error.message : `${error.message} (limit ${limit})`);
           process.exit(1);
@@ -1409,16 +997,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    /*
-     * Changing one of the agent's own controls.
-     *
-     * Both branches of `POST /sessions/:id/config`, because on the daemon they
-     * are genuinely different code paths: `{configId,value}` validates against
-     * the option's own choice list, `{modeId}` validates against ACP's legacy
-     * `modes` field that claude fills in and kimi does not. The browser only ever
-     * sends the first, so the second had no caller anywhere and no way to be
-     * bisected when it starts answering 400.
-     */
+    // Both branches of the config route: configId with a value, and the legacy modeId path the browser never sends.
     case "config": {
       const id = positionals[1];
       if (!id) fail("config requires a session id");
@@ -1439,10 +1018,6 @@ async function main(): Promise<void> {
         body = { configId: optionId, value: configValue(value) };
       }
 
-      // The daemon answers with its refreshed view rather than an echo, because
-      // setting the model rebuilds the available modes and can reset the current
-      // one — so what was asked for and what is now true differ often enough to
-      // matter. Printing the whole set is what makes that visible.
       const { session } = await api<{ session: SessionSnapshot }>(`/sessions/${id}/config`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -1470,22 +1045,7 @@ async function main(): Promise<void> {
         );
         out(`${result.outcome} ${result.optionId ?? ""} (${result.delivered})`);
       } catch (error) {
-        /*
-         * A repeated answer is a `409` carrying a *success*-shaped body —
-         * `{recorded, repeat: true, outcome, by}`, with no `error` key at all —
-         * because the answer really did land. Without this branch `describeError`
-         * found no message, fell back to the bare status, and this command
-         * printed `!! 409` and exited 1 for an approval the agent was already
-         * acting on. That is the commonest 409 there is: a retry after a timeout,
-         * or a phone that answered the same request first.
-         *
-         * The attach loop above and `packages/web`'s `PermissionCard` have always
-         * read it this way; this was the one caller that did not.
-         *
-         * Narrowed on `repeat`, not on the status: `permission_expired` is also a
-         * 409 and *is* an error envelope, and it means the answer was thrown away
-         * rather than recorded.
-         */
+        // A repeated answer is a 409 with a success-shaped body; narrowed on repeat, since permission_expired is a real error.
         if (error instanceof ApiError && error.status === 409) {
           const repeated = error.body as
             | { repeat?: boolean; outcome?: string; optionId?: string | null; by?: string }
@@ -1500,19 +1060,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    /*
-     * Answer a question the agent asked.
-     *
-     * `<key>=<value>` pairs rather than JSON, because this is a terminal and the
-     * shape is flat by construction — the daemon's projection has no nesting. A
-     * repeated key builds a list, which is how a multi-select is answered.
-     *
-     * **Nothing here answers on your behalf.** `attach`'s auto-answer loop
-     * deliberately does not learn about questions: `onPermission` can fall back
-     * to allow-once because that is a defensible default, and a question has no
-     * defensible default answer at all. The form is printed and that is where
-     * this stops.
-     */
     case "elicit": {
       const id = positionals[1];
       const elicitationId = positionals[2];
@@ -1557,9 +1104,7 @@ async function main(): Promise<void> {
         );
         out(`${result.action} (${result.delivered})`);
       } catch (error) {
-        // The same 409-is-success rule the permission arm above spells out, and
-        // narrowed on `repeat` for the same reason: `elicitation_expired` is also
-        // a 409 and *is* an error envelope.
+        // A 409 with repeat is success here too; elicitation_expired is also a 409 and is an error.
         if (error instanceof ApiError && error.status === 409) {
           const repeated = error.body as { repeat?: boolean; action?: string; by?: string } | null;
           if (repeated?.repeat === true) {
@@ -1596,7 +1141,6 @@ async function main(): Promise<void> {
             (flags ? `  [${flags}]` : ""),
         );
       }
-      // Loudly, because a silently short list reads exactly like a complete one.
       if (set.truncated) {
         warn(`!! truncated (${set.truncated.reason}, limit ${set.truncated.limit}) of ${set.total ?? "?"} total`);
       }
@@ -1610,8 +1154,7 @@ async function main(): Promise<void> {
       const query = new URLSearchParams({ path });
       if (values.base) query.set("base", values.base);
       const diff = await api<DiffResult>(`/sessions/${id}/changes/diff?${query}`);
-      // Header to stderr, patch to stdout, so `client diff <id> <path> | git apply`
-      // works — the same split the rest of this file already uses.
+      // Header to stderr, patch to stdout, so piping into git apply works.
       warn(`── ${diff.status}  ${diff.path}${diff.oldPath ? ` ← ${diff.oldPath}` : ""}  vs ${diff.base.slice(0, 8)}`);
       if (diff.kind === "symlink") {
         warn(`   symlink → ${diff.symlinkTarget ?? "?"} (never followed)`);
@@ -1633,10 +1176,7 @@ async function main(): Promise<void> {
       out(`${status.mode}  ${status.root}`);
       if (status.branch) out(`branch    ${status.branch}`);
       if (status.baseCommit) out(`base      ${status.baseCommit.slice(0, 12)}`);
-      // `?` for a `null`, the same way `entries` is printed two commands up:
-      // `exists` and `registered` are both three-answer, and a filesystem that
-      // did not answer within the probe's deadline is not the same claim as a
-      // worktree git has forgotten. Printing the bare `null` said it was.
+      // ? for null: a probe that timed out is not the same claim as a worktree git has forgotten.
       const tri = (value: boolean | null): string => (value === null ? "?" : String(value));
       out(`exists    ${tri(status.exists)}   registered ${tri(status.registered)}   locked ${status.locked}`);
       if (status.dirty) {
@@ -1656,8 +1196,6 @@ async function main(): Promise<void> {
       for (const plugin of plugins) {
         const state = plugin.enabled ? plugin.state : "off";
         out(`${plugin.id.padEnd(20)} ${plugin.version.padEnd(10)} ${state.padEnd(9)} ${plugin.name}`);
-        // The scopes on their own line, because they are the thing worth reading
-        // before anything else: this is what the plugin may reach on this machine.
         if (plugin.scopes.length > 0) out(`  scopes  ${plugin.scopes.join(", ")}`);
         if (plugin.net.length > 0) out(`  net     ${plugin.net.join(", ")}`);
         if (plugin.failure !== null) warn(`  !! ${plugin.failure}`);
@@ -1671,44 +1209,15 @@ async function main(): Promise<void> {
 
       if (action === "install") {
         if (!id) fail("plugin install requires a path to a .tar.gz or a .zip");
-        /*
-         * Read whole and sent as one body rather than streamed off disk.
-         *
-         * A plugin is bounded at 2 MiB on the wire, so this is a couple of
-         * megabytes at worst — and `fetch` with a `ReadableStream` body needs
-         * `duplex: "half"` and HTTP/2 all the way through, which is exactly the
-         * thing that fails differently against a relay than against a loopback
-         * daemon. The upload route streams because it carries 100 MiB; this one
-         * has no reason to.
-         */
+        // Sent whole, not streamed: a streamed fetch body needs half duplex and fails differently through a relay.
         const bytes = readFileSync(id);
 
-        /*
-         * ⚠ **What it asks for is read here, before anything is sent.**
-         *
-         * The scopes used to be printed from the *answer* — after the archive had
-         * been unpacked on the machine, the row written and the plugin started —
-         * with a comment arguing that was "the moment somebody is deciding". It
-         * was not: by then there was nothing left to decide. `SECURITY.md` says
-         * the blast radius is named *before* somebody consents to it, and this is
-         * one of the two places that has to be true.
-         *
-         * Read locally rather than asked of the daemon, because the manifest is
-         * inside the archive and the only reader that can run before the upload is
-         * this one. `unpackArchive` and `parseManifest` rather than a second
-         * reader: this is the same hardened path the daemon uses, spent on a
-         * temporary directory on the operator's own machine, under their own hand,
-         * and removed either way. The browser cannot do this — it may not import
-         * from `src/` — which is why `packages/web/src/pluginArchive.ts` exists and
-         * why the two are not shared.
-         */
+        // The manifest is read locally, with the daemon's own unpacker, before anything is sent: consent precedes the upload.
         const staging = await mkdtemp(join(tmpdir(), "reemoat-plugin-peek-"));
         let declared: PluginManifest | null = null;
         try {
           const unpacked = await unpackArchive({
             staging,
-            // Built directly rather than through `Blob`, which is a DOM type this
-            // package's lib does not carry.
             body: new ReadableStream<Uint8Array>({
               start(controller) {
                 controller.enqueue(new Uint8Array(bytes));
@@ -1725,9 +1234,7 @@ async function main(): Promise<void> {
             }
           }
         } catch {
-          // Unreadable here is not a refusal: the daemon is the authority and may
-          // well accept a shape this read did not survive. It only means nobody
-          // can be told what the plugin asks for, which the prompt below says.
+          // Unreadable here is not a refusal: the daemon is the authority, and the prompt below says nothing could be read.
         } finally {
           await rm(staging, { recursive: true, force: true });
         }
@@ -1739,29 +1246,12 @@ async function main(): Promise<void> {
           if (declared.description !== null) out(`  ${declared.description}`);
           out(`  it may:  ${declared.scopes.length > 0 ? declared.scopes.join(", ") : "(nothing)"}`);
           if (declared.net.length > 0) out(`  reach:   ${declared.net.join(", ")}`);
-          // Hooks beside the scopes rather than under contributions: a plugin
-          // declaring only hooks asks for no scopes and is still sent every
-          // session's title, agent and workspace, and every permission an agent
-          // raises. That belongs where somebody reading scopes will see it.
+          // Hooks beside the scopes: a hooks-only plugin asks for no scopes yet is told about every session.
           if (declared.contributes.hooks.length > 0) out(`  told of: ${declared.contributes.hooks.join(", ")}`);
-          /*
-           * ⚠ **Beside the scopes for the same reason hooks are, and the two
-           * largest things on this list.** A harness is a program this machine will
-           * run as its owner on every session started with it; a provider is a host
-           * a key pasted here is sent to. Drawn as the same strings the browser's
-           * card draws and the daemon's `consentGap` compares — one value, so a
-           * person reading this terminal and a person reading that screen are being
-           * shown the same thing.
-           */
           for (const line of addedLines(declared)) out(`  adds:    ${line}`);
         }
 
-        /*
-         * Asked only when somebody is there to answer. A CLI that blocked on a
-         * prompt would break every script that installs a plugin, so a
-         * non-interactive stdin proceeds — the disclosure above still happened, and
-         * `--yes` is how an interactive caller says the same thing on purpose.
-         */
+        // Asked only on a TTY: a blocking prompt would break scripted installs; --yes says the same on purpose.
         if (!values.yes && process.stdin.isTTY === true) {
           const said = (await rl().question("install it? [y/N]> ")).trim().toLowerCase();
           if (said !== "y" && said !== "yes") {
@@ -1786,15 +1276,7 @@ async function main(): Promise<void> {
 
       if (action === "remove") {
         if (!id) fail("plugin remove requires a plugin id");
-        /*
-         * ⚠ **The answer is read and not merely awaited, because this route stopped
-         * refusing.** `DELETE /plugins/:id` is on `isReplayable`'s whitelist, so a
-         * lost answer is re-sent — and the 404 it used to give the second time
-         * reported a removal that had *worked* as a failure. It answers
-         * `200 {removed}` either way now, `removed` being the only thing telling the
-         * two apart, which means a mistyped id no longer throws out here. Printing
-         * "removed" over it would be this command lying about the one thing it does.
-         */
+        // Read removed: the route is replayable and answers 200 either way.
         const { removed } = await api<{ removed: boolean }>(`/plugins/${encodeURIComponent(id)}`, {
           method: "DELETE",
         });
@@ -1841,10 +1323,7 @@ async function main(): Promise<void> {
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) {
           warn(`refused: ${error.message}`);
-          // Only when --force is actually the answer. `not_a_worktree` is a
-          // directory we did not create and will never remove, and `session_live`
-          // wants `stop` first — telling either of them to retry with --force
-          // sends the user round a loop that cannot terminate.
+          // Suggest --force only for workspace_dirty: for the other 409s it would send the user round a loop.
           const code = (error.body as { error?: { code?: string } } | null)?.error?.code;
           if (code === "workspace_dirty") warn(`   pass --force to remove it anyway`);
           process.exitCode = 1;
@@ -1855,14 +1334,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    /*
-     * Rename and pin, so `POST /sessions/:id/meta` is drivable without a browser.
-     *
-     * This file is the reference implementation the web client mirrors, and a
-     * route only reachable from React is a route nobody can bisect when it starts
-     * answering 400. An empty title clears it, which is what re-arms the daemon's
-     * derivation from the next prompt.
-     */
     case "title": {
       const id = positionals[1];
       if (!id) fail("title requires a session id");
@@ -1871,8 +1342,7 @@ async function main(): Promise<void> {
         method: "POST",
         body: JSON.stringify({ title: text.length === 0 ? null : text }),
       });
-      // The daemon's own value, not the argument: a title is normalized on the way
-      // in, so echoing what was typed would hide the clipping and the collapsing.
+      // The daemon's value, not the argument: a title is normalized on the way in.
       out(session.title ?? "(cleared)");
       return;
     }
@@ -1901,15 +1371,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    /*
-     * Stop the turn, not the session.
-     *
-     * A separate verb from `stop` rather than a flag on it, because the two have
-     * opposite costs and a flag invites the wrong one: `stop` kills the agent and
-     * ends the session, this leaves both exactly where they were. The two lines
-     * printed keep that distinction visible — the second says whether the agent
-     * had actually finished, which is an observation and not a promise.
-     */
+    // Stops the turn, not the session: stop kills the agent, this leaves both where they were.
     case "cancel": {
       const id = positionals[1];
       if (!id) fail("cancel requires a session id");

@@ -13,37 +13,15 @@ import type {
   PluginView,
 } from "./wire";
 
-/**
- * What a plugin is allowed to make this client draw, and what happens when it
- * sends something this client has never heard of.
- *
- * **Everything here fails open.** That is rule 2 of `.claude/rules/compatibility.md`
- * applied to a second wire: the web client ships inside the control plane's image
- * and a daemon updates when its owner runs `deploy.sh`, so *new client against old
- * daemon* is the normal state of the fleet — and a plugin is a third schedule
- * again, written by somebody neither of those releases coordinates with. A
- * narrowing that threw would take a whole screen away because one row carried a
- * field it did not recognise.
- *
- * The failure this posture exists to prevent is on record: `endedWithDaemon` asked
- * "is this a daemon reason?" and answered *no* for a reason it had never heard of,
- * which dropped the session into `showsAsEnded` and took the composer off screen
- * for a conversation that was coming back. So: an unknown block is dropped, an
- * unknown field kind becomes a text input, a missing string becomes an empty one,
- * and nothing anywhere throws.
- *
- * DOM-free on purpose, like `settings.ts` and `groups.ts`, so `webcheck` can
- * import it — a decision the driver cannot reach is a decision nothing asserts.
- */
+// Everything here fails open: an unknown block is dropped, an unknown field kind becomes a text input, and nothing throws.
+// DOM-free, so webcheck can import it.
 
 const FIELD_KINDS = ["text", "password", "number", "toggle", "select"] as const;
 
-/** A string, or the empty string. Never `undefined` reaching a `className`. */
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** A string, or `null`. The distinction is drawn: a subtitle that is absent is not one that is empty. */
 function optional(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -53,10 +31,7 @@ function rowAction(raw: unknown): PluginRowAction {
   return {
     id: text(source["id"]),
     label: text(source["label"]),
-    // Anything that is not the one word we act differently on is the ordinary
-    // tone. A plugin cannot make a button look harmless by misspelling
-    // "destructive"; it can only fail to make one look dangerous, which is the
-    // safe direction for this particular guess to be wrong in.
+    // Only the exact word is destructive, so a misspelling fails safe.
     tone: source["tone"] === "destructive" ? "destructive" : "plain",
     confirm: optional(source["confirm"]),
   };
@@ -64,15 +39,7 @@ function rowAction(raw: unknown): PluginRowAction {
 
 const TONES = ["ok", "warn", "danger"] as const;
 
-/**
- * Where a row goes, or `null`.
- *
- * ⚠ **The two known shapes and nothing else.** This is the field a plugin would
- * most like to put a URL in, and `{url: …}` lands here as `null` — a row that is
- * simply not tappable. The daemon narrows it too; this is the second of the two,
- * because `wire.ts` is a hand mirror and a client that trusted the daemon's
- * narrowing would be trusting a copy.
- */
+/** Only the two known shapes, so a URL is never tappable; narrowed here as well as on the daemon. */
 function open(raw: unknown): PluginOpen | null {
   if (raw === null || typeof raw !== "object") return null;
   const source = raw as { session?: unknown; screen?: unknown };
@@ -88,8 +55,7 @@ function row(raw: unknown): PluginRow {
     title: text(source["title"]),
     subtitle: optional(source["subtitle"]),
     badge: optional(source["badge"]),
-    // An unrecognised tone is no tone: a plugin can fail to mark something as
-    // wrong and cannot mark something wrong as fine.
+    // An unknown tone is no tone: a plugin can fail to warn, never mark something wrong as fine.
     tone: TONES.find((one) => one === source["tone"]) ?? null,
     open: open(source["open"]),
     actions: actions.map(rowAction),
@@ -99,28 +65,12 @@ function row(raw: unknown): PluginRow {
 function field(raw: unknown, surface: PluginSurface): PluginField {
   const source = (raw ?? {}) as Record<string, unknown>;
   const options = Array.isArray(source["options"]) ? source["options"] : [];
-  /*
-   * ⚠ **Three kinds on a settings pane, five on a screen**, and the narrowing is
-   * here as well as in the daemon because this is the side that knows. The daemon
-   * clamps the *view* it answers with, which is enough for a read — but a form's
-   * submit can answer with a redrawn pane, and it reaches the daemon as an action
-   * id that says nothing about which pane it came from. This component is drawing
-   * one, so it decides.
-   *
-   * Fail-open either way: an unsupported kind is a text box that still
-   * round-trips, never a dropped control. `password` narrowing to a visible box
-   * is the one that looks like a regression and is not — the value is kept in a
-   * plaintext column on the daemon, so the mask was an assurance nothing here can
-   * keep.
-   */
+  // Three kinds on a settings pane, five on a screen; narrowed here because a submit's redraw does not tell the daemon which pane it came from.
   const kinds: readonly PluginFieldKind[] = surface === "settings" ? PLUGIN_SETTINGS_FIELD_KINDS : FIELD_KINDS;
   const kind = kinds.find((one) => one === source["kind"]) ?? "text";
   return {
     key: text(source["key"]),
     label: text(source["label"]),
-    // An unknown kind draws a text input rather than nothing. The value still
-    // round-trips, so a field this client is too old to draw properly is still a
-    // field somebody can read and submit — which is the whole of failing open.
     kind,
     value: typeof source["value"] === "string" ? source["value"] : null,
     options: options.map((entry) => {
@@ -132,22 +82,10 @@ function field(raw: unknown, surface: PluginSurface): PluginField {
   };
 }
 
-/** One block, or `null` when this surface does not draw it. */
 export function readBlock(raw: unknown, surface: PluginSurface = "screen"): PluginBlock | null {
   const source = (raw ?? {}) as Record<string, unknown>;
   const rows = (value: unknown): PluginRow[] => (Array.isArray(value) ? value.map(row) : []);
-  /*
-   * ⚠ **A block this *surface* does not draw takes the same exit as a block this
-   * *client* does not know**, which is `null` and a shorter screen. One exit
-   * rather than two: a settings pane refusing a `list` and an old tab refusing a
-   * block from a newer daemon are the same event as far as this function's caller
-   * is concerned, and giving them separate paths is how one of them grows a
-   * placeholder row the other does not have.
-   *
-   * ⚠ **Defaulted to `screen`, the wider set.** A call site that has not been
-   * told which surface it is on keeps today's behaviour rather than silently
-   * deleting somebody's controls.
-   */
+  // A block this surface does not draw takes the same exit as an unknown one; the default is screen, the wider set.
   if (surface === "settings" && !PLUGIN_SETTINGS_BLOCK_TYPES.some((one) => one === source["type"])) return null;
   switch (source["type"]) {
     case "text":
@@ -176,10 +114,6 @@ export function readBlock(raw: unknown, surface: PluginSurface = "screen"): Plug
       };
     }
     default:
-      // Dropped, never drawn as a placeholder. A block from a plugin written
-      // against a newer client is something this one has no honest way to show,
-      // and an "unsupported block" row on every screen would be worse than the
-      // screen simply being shorter.
       return null;
   }
 }
@@ -190,34 +124,15 @@ export function readView(raw: unknown, surface: PluginSurface = "screen"): Plugi
   const refresh = source["refreshMs"];
   return {
     title: optional(source["title"]),
-    /*
-     * Re-clamped here, and not because the daemon's clamp is doubted.
-     * `PLUGIN_REFRESH_MIN_MS` is a *daemon* constant, and an old daemon whose
-     * floor was lower — or a field this client is reading from a build that
-     * predates the clamp — would otherwise set a timer this tab has to honour.
-     * A floor on the side that owns the timer is the only one that binds.
-     */
+    // Re-clamped: a floor binds only on the side that owns the timer.
     refreshMs: typeof refresh === "number" && Number.isFinite(refresh) && refresh > 0 ? Math.max(MIN_REFRESH_MS, refresh) : null,
     blocks: blocks.map((one) => readBlock(one, surface)).filter((block): block is PluginBlock => block !== null),
   };
 }
 
-/** The fastest this client will re-read a plugin's view, whatever it asked for. */
 export const MIN_REFRESH_MS = 2_000;
 
-/**
- * Where a row's `open` goes, as a destination rather than as a path.
- *
- * Returns what to navigate to rather than a path, so this module stays DOM-free
- * and the path builders stay in one place each — `sessionPath` in `router.ts` and
- * `pluginPath` below. A second copy of either would be a second thing to get
- * wrong about encoding.
- *
- * ⚠ **The machine is the caller's, and deliberately not an argument here.** A
- * plugin runs on one daemon and every destination it names is on that daemon, so
- * the id would be a parameter this function could only pass back out — which it
- * was, ignored behind a `void`, reading to the next person as if it did work.
- */
+/** A destination rather than a path, so this module stays DOM-free; the machine is the caller's. */
 export function pluginDestination(
   where: PluginOpen | null,
 ): { kind: "session"; sessionId: string } | { kind: "screen" } | null {
@@ -226,54 +141,16 @@ export function pluginDestination(
   return { kind: "session", sessionId: where.session };
 }
 
-/**
- * The form's own state, seeded from what the plugin sent.
- *
- * Separate from the field list because a form is edited and a view is redrawn:
- * the screen holds this and hands it back on submit, so a plugin does not have to
- * re-derive what somebody typed from a view it has not been sent yet.
- *
- * ⚠ **No prototype, because the key is a plugin's string and `clampField` only
- * *clips* it.** `out["__proto__"] = "x"` on an ordinary object reaches
- * `Object.prototype`'s setter, which ignores a non-object and creates no own
- * property at all — so the field reads back as `Object.prototype`, an object,
- * which `?? ""` does not catch and React refuses as a child. That throw reaches
- * `RootErrorBoundary` and blanks the origin holding `reemoat.credential`, taking
- * every live session stream with it, on nothing more than opening an installed
- * plugin's settings pane. `PluginConsent`'s `said` is the same defect answered at
- * the read; this answers it at the write, and {@link PluginView}'s read is
- * guarded too because the spread that edits this map re-introduces a prototype.
- */
+/** A null-prototype map: a plugin's key may be __proto__, which on a plain object would crash the render. */
 export function seedForm(fields: readonly PluginField[]): Record<string, string> {
   const out = Object.create(null) as Record<string, string>;
   for (const one of fields) {
-    // A toggle whose value the plugin left unset reads as off. Every field is a
-    // string on the wire, including a toggle, so there is one narrowing here and
-    // not five — see `PluginField.value`.
     out[one.key] = one.value ?? (one.kind === "toggle" ? "false" : "");
   }
   return out;
 }
 
-/**
- * What the machine says it installed, against what somebody was shown — and the
- * words for the difference, or `null` when there is none.
- *
- * ⚠ **The belt on the whole consent screen, and it exists because that screen has
- * now been wrong four separate ways.** `pluginArchive.ts` re-implements enough of
- * tar and zip to name the member the daemon will pick, and every time the two
- * spellings diverged the result was the same: a manifest declaring nothing drawn
- * under the plain "Install it" button while the machine installed one holding
- * every scope plus `permission.requested`. Each of the four was fixed in the
- * reader and pinned in `webcheck`; this is the half that does not depend on
- * having thought of the fifth.
- *
- * It compares only what the reader claims to know and the daemon actually
- * returns — the authority a plugin gets. Names and versions are deliberately not
- * compared: a manifest is free to say what it likes about itself, and the
- * question here is not "is this the file I picked" but "is this what I agreed
- * to give it".
- */
+/** Compares only the authority installed against what the consent screen showed; null when nothing was gained. */
 export function consentBroken(
   shown: { scopes: readonly string[]; net: readonly string[]; hooks: readonly string[]; adds: readonly string[] },
   installed: {
@@ -288,29 +165,10 @@ export function consentBroken(
 ): string | null {
   const gained = (theirs: readonly string[], ours: readonly string[]): string[] =>
     [...theirs].filter((one) => !ours.includes(one)).sort();
-  // Only what it *gained*. A plugin that ends up with less than the screen showed
-  // is not a broken consent — it is a manifest this reader read generously, which
-  // costs nobody anything.
   const scopes = gained(installed.scopes, shown.scopes);
   const net = gained(installed.net, shown.net);
   const hooks = gained(installed.contributes.hooks, shown.hooks);
-  /*
-   * ⚠ **The fourth comparison, and the two largest things on the list.** A harness
-   * is a program this machine will run as its owner, and a provider is where a
-   * pasted key is sent — so a row that came back holding one the screen did not
-   * draw is exactly what this function exists to catch, and it was the one gap the
-   * three above could not see.
-   *
-   * ⚠ **Optional on the installed side, and absent must mean *none*.** A daemon
-   * older than this tab sends no such field, and it also refuses a manifest that
-   * declares one, so "it did not say" and "there are none" really are the same
-   * fact there. Treating absence as *unknown* and refusing would take every
-   * install on every un-updated machine down over a field they cannot send.
-   *
-   * The line is rebuilt here rather than trusted off the row, so what is compared
-   * is what this app would have *drawn* — the same discipline the three above
-   * keep, and the reason `pluginArchive.ts` flattens to the same string.
-   */
+  // Absent on an older daemon means none, since it also refuses such manifests; the line is rebuilt as the screen drew it.
   const adds = gained(
     [
       ...(installed.contributes.harnesses ?? []).map(
@@ -331,26 +189,7 @@ export function consentBroken(
   return `That plugin asked for more than this screen showed: ${parts.join("; ")}. Remove it unless you know why.`;
 }
 
-/**
- * A broken consent, as something that can be thrown without losing its words.
- *
- * ⚠ **The one sentence on this whole screen that must never be replaced, and it
- * was being replaced.** {@link consentBroken} is raised on the fan-out paths by
- * throwing — which is right, because a thrown act lands the row on `failed` and
- * leaves the box unticked, and a ticked box for a plugin this screen has just
- * refused to trust is the one lie the consent step exists to prevent. But a plain
- * `Error` is not an `ApiError`, so {@link pluginFailure} answered its generic arm
- * — **"That did not work. Try again."** at the time, and a sentence about the
- * machine not answering now — which either way throws away the naming of which
- * scope was gained, and describes a failure that did not happen: the daemon
- * answered, and its answer is precisely what broke the consent. The
- * single-machine path in `PluginsPanel` does `toast("error", broken)` and shows
- * it verbatim, so the same check was disclosed in one flow and discarded in the
- * other.
- *
- * A class with a static guard rather than a bare `instanceof`, for
- * `ApiError.isApiError`'s reason one module over.
- */
+/** Thrown on fan-out paths so the row fails, and pluginFailure returns its words verbatim. */
 export class ConsentBrokenError extends Error {
   constructor(message: string) {
     super(message);
@@ -362,138 +201,29 @@ export class ConsentBrokenError extends Error {
   }
 }
 
-/**
- * What a plugin screen says when `store.daemonFor` answers nothing.
- *
- * ⚠ **One condition was drawing two contradictory sentences.** Every plugin
- * screen guards on the same `store.daemonFor(id) === undefined` before it sends
- * anything: `PluginsPanel` and `PluginScreen` said *"That machine is not
- * reachable right now."*, `MachineInstalls` and `PluginSettings` said *"That
- * machine is not in your list any more."* — a network diagnosis and an access
- * diagnosis, for one state, pointing at completely different remedies.
- *
- * **The access reading is the true one, so this is not merely the consistent
- * choice.** `store.ts` writes and deletes `daemons` in step with `connections` —
- * every connection is given a client on the listing, and `dropMachine` takes both
- * away together — and `state.machines` is that same map published. So this
- * answers `undefined` exactly when the machine is absent from the list on screen:
- * a grant revoked in another tab, or a machine retired. An **unreachable** machine
- * is the other thing entirely — it keeps its connection and its client and says so
- * through `machine.reach`, which is what `daemonRead` in `machine.ts` reads. The
- * reachability sentence therefore named a remedy (wait for it, wake the host) for
- * a state that waking the host does not change.
- *
- * The words are the ones five machine screens draw on the same fact —
- * `MachineSection`, `MachineSystemsSection`, `MachineAgentsSection`,
- * `MachinePluginsSection` and `AgentBuilder`, each on its own
- * `state.machines.find(…)` coming back empty. A constant rather than a sixth
- * transcription, so the plugin screens cannot drift from them or from each other.
- *
- * ⚠ **The paragraph above was written in the past tense about a wiring that had
- * not happened.** This shipped exported and imported by nothing — `grep` found one
- * hit, the definition — while `PluginsPanel` and `PluginScreen` went on
- * hand-writing the reachability sentence at all four of their `daemonFor` guards,
- * so the de-duplication described here existed only here. **A constant nothing
- * imports is not a de-duplication**, and it is worse than the sixth transcription
- * would have been: the reader who finds it stops looking. Both screens import it
- * now, which is what makes the rest of this docblock a description rather than a
- * plan. ⚠ **And the five machine screens went on transcribing it for a release
- * after that** — the right words, so drift waiting rather than a lie on screen,
- * but five copies a wording change here would not have reached (review D7). All
- * five import it now, and `webcheck` pins the import and the literal's absence
- * from each rather than the literal's presence, which is the assertion that had
- * let the copies stand. `MachineInstalls` and `PluginSettings` were the last
- * two transcriptions, a release after that again: they answer it as a row's
- * `message` when `daemonFor` comes back empty mid-act rather than draw it, so
- * `{MACHINE_GONE}` was never the shape there and the sweep did not reach them.
- * Both import it now, and the same pin holds them keyed on the shape each
- * screen uses. The one line that *names* the machine — `PluginSettings`'
- * excluded list, one entry per machine that left mid-act — is {@link machineGone}'s
- * rather than a hand-spelled variant with the name substituted in, which is the
- * last of the drift this constant is here to absorb: the pin over these files
- * reads the fragment the two share, so neither wording can be retyped.
- */
+/** For daemonFor answering nothing, which means the machine left the list, not that it is unreachable. */
 export const MACHINE_GONE = `${machineGone("That machine")}.`;
 
-/**
- * The same fact about a *named* machine, for a line that lists several.
- *
- * `PluginSettings` sums up which machines a fleet-wide save could not reach,
- * one per line with the machine's name as the subject, where {@link MACHINE_GONE}
- * has one subject and no name. One wording for both, so a change reaches the
- * named form too; the constant above is this function's answer for "That
- * machine", with the full stop a sentence on its own takes and a list item does
- * not. A `function` rather than a `const` arrow so the constant can be written
- * above it and still read first.
- */
 export function machineGone(subject: string): string {
   return `${subject} is not in your list any more`;
 }
 
-/** Which scope a `403 insufficient_scope` said it wanted, or `null` if it did not say. */
 function requiredScope(detail: unknown): string | null {
   if (detail === null || typeof detail !== "object") return null;
   const named = (detail as Record<string, unknown>)["required"];
   return typeof named === "string" && named.length > 0 ? named : null;
 }
 
-/**
- * A refusal from a plugin route, as a sentence.
- *
- * The shape `importFailure` established one screen over, and for its reasons: the
- * codes are a closed set this client knows, the sentence names the *remedy* rather
- * than restating the failure, and anything unrecognised falls through to the
- * message the daemon sent rather than to "something went wrong".
- */
+/** Codes map to a sentence naming the remedy; anything unknown falls through to the daemon's message. */
 export function pluginFailure(error: unknown): string {
-  /*
-   * ⚠ **Before the `ApiError` gate, because this one is ours rather than a
-   * daemon's.** See {@link ConsentBrokenError}: it carries the only sentence here
-   * that names what a plugin gained, and the generic arm below would replace it
-   * with an invitation to try the install again.
-   */
+  // Before the ApiError gate: its message names what the plugin gained.
   if (ConsentBrokenError.isConsentBroken(error)) return error.message;
-  /*
-   * ⚠ **Nothing came back at all, which is not a refusal and must not read like
-   * one.** This arm said "That did not work. Try again.", and `MachineInstalls` —
-   * the one place in this client that decides plugin retries — states why
-   * nothing but `plugin_busy` is retried: a `POST` is not replayable, a transport
-   * failure says nothing about whether the daemon acted, and it may be halfway
-   * through unpacking. So the sentence invited exactly the retry the code refuses
-   * to make, and a second install onto a machine that was already unpacking the
-   * first is how a `plugin_busy` and a half-written plugin directory arrive
-   * together.
-   *
-   * ⚠ **A read pays for a caution it does not need, and that is the trade rather
-   * than an oversight.** This takes an `unknown` and serves every plugin route —
-   * a view read, a row's action, an install — and a `TypeError` says which of
-   * them it was nowhere. Over-warning a refresh costs one sentence; under-warning
-   * a write costs a duplicate install, so the asymmetry is settled the safe way
-   * instead of guessed at. An *abort* never reaches here: both install paths test
-   * `controller.signal.aborted` first, because a deliberate cancellation is not a
-   * failure.
-   *
-   * `http.ts`'s `errorText` reaches the same conclusion about the same class of
-   * error and writes it in the lower case its own neighbours use; every sentence
-   * in this function is a capitalised one, so this is that reasoning in this
-   * function's voice rather than an import of its string.
-   */
+  // Nothing came back, so the machine may have acted: never invite a blind retry of a write.
   if (!(error instanceof ApiError)) {
     return "That machine did not answer, and whether it acted is not known. Check before trying again.";
   }
 
-  /*
-   * A daemon that predates plugins, recognised by the **shape of its refusal**
-   * rather than by its version.
-   *
-   * `parseBody` turns Hono's bare 404 — no envelope, so no code of this system's
-   * own — into `code === "http_404"`, and that is the whole test. Branching on
-   * `DAEMON_VERSION` is what compatibility rule 1 forbids: the version is a label,
-   * announced and read by nothing, and the moment a client behaves differently for
-   * 0.2.0 than for 0.3.0 every daemon in the fleet is back in lockstep with the
-   * weekly control-plane deploy. `importSupported()` is the same test one screen
-   * over.
-   */
+  // A daemon that predates plugins, recognised by its bare 404 rather than by its version.
   if (error.status === 404 && error.code === `http_${error.status}`) {
     return "This machine's daemon is too old for plugins. Update it and try again.";
   }
@@ -524,8 +254,6 @@ export function pluginFailure(error: unknown): string {
       return "That plugin has no server.js beside its plugin.json.";
     case "manifest_unreadable":
     case "manifest_invalid":
-      // The daemon's own sentence names the field, which is the only useful thing
-      // to say to whoever is holding the manifest.
       return error.message;
     case "plugin_api_too_old":
       return "That plugin is written for an older version of the plugin API.";
@@ -533,32 +261,13 @@ export function pluginFailure(error: unknown): string {
       return "That plugin needs a newer daemon than this machine is running.";
     case "plugin_start_failed":
       return `That plugin would not start, so nothing was changed. ${error.message}`;
-    /*
-     * ⚠ **The one refusal on the market path that is about *authority* rather
-     * than about machinery, so it says what to do about it.** The daemon parsed
-     * the manifest at the pinned commit and found it asking for more than the
-     * disclosure screen showed — and refused before starting the plugin, so
-     * nothing ran. The daemon's own sentence names which scope, host or hook was
-     * gained, which is the only useful thing to say, so it is carried through
-     * rather than replaced.
-     */
     case "plugin_consent_broken":
       return `That commit asks for more than this screen showed you, so nothing was installed. ${error.message}`;
-    /*
-     * A daemon too old to fetch a plugin for itself, recognised by the shape of
-     * its refusal exactly as a daemon with no plugins at all is: `POST
-     * /plugins/source` is a route it has never registered, so Hono answers a bare
-     * 404 and `parseBody` makes it `http_404`. The 404 arm at the top of this
-     * function catches that first and says "update it" — this arm is the
-     * *catalogue's* 404, which is a different fact with a different remedy.
-     */
     case "plugin_source_not_found":
       return "That plugin's code is not where the catalogue says it is. It may have been withdrawn.";
     case "plugin_source_unavailable":
       return "This machine could not fetch that plugin from GitHub. Try again in a moment.";
     case "plugin_source_invalid":
-      // The daemon names which of the two fields, and whether it was a tag where a
-      // commit belongs — which is the one somebody can act on.
       return error.message;
     case "plugin_timeout":
       return "That plugin did not answer in time.";
@@ -570,16 +279,7 @@ export function pluginFailure(error: unknown): string {
       return "That was more than this plugin can be sent in one go.";
     case "plugin_scope_denied":
       return "That plugin asked for something it did not declare, and was refused.";
-    /*
-     * ⚠ **Read off `required`, because four of these seven routes want
-     * `machine:admin` rather than `session:write`.** Both installs — the upload
-     * and the one from a commit — remove and the
-     * state switch are the admin ones, so a grant that really does hold
-     * `session:write` was being told it was read-only — a sentence naming the
-     * wrong permission is worse than one naming none, since the remedy it points
-     * at is not the one that would work. The daemon already sends which scope it
-     * wanted; `requireScope` puts it in the envelope's detail.
-     */
+    // Read off required, so the sentence names the permission that would actually work.
     case "insufficient_scope": {
       const required = requiredScope(error.detail);
       if (required === "machine:admin") return "Installing and removing plugins needs admin access to this machine.";
@@ -591,17 +291,11 @@ export function pluginFailure(error: unknown): string {
   }
 }
 
-/**
- * Whether a plugin is drawing anything right now.
- *
- * Both halves, because they fail differently and a screen that asks only one of
- * them draws an empty board for a plugin somebody switched off.
- */
+/** Both halves: a switched-off plugin must not draw an empty board. */
 export function pluginUsable(plugin: PluginSummary): boolean {
   return plugin.enabled && plugin.state !== "failed";
 }
 
-/** What a plugin's row says about its state, in words rather than in a colour. */
 export function pluginStateText(plugin: PluginSummary): string {
   if (!plugin.enabled) return "Switched off";
   switch (plugin.state) {
@@ -612,19 +306,14 @@ export function pluginStateText(plugin: PluginSummary): string {
     case "failed":
       return "Failed";
     default:
-      // Enabled and not running is a plugin between states — it has not been asked
-      // for anything yet. "Idle" rather than "Stopped", which would read as an
-      // instruction to do something about it.
       return "Idle";
   }
 }
 
-/** Which plugins offer a screen on this machine, in the order they are drawn. */
 export function screenPlugins(plugins: readonly PluginSummary[]): PluginSummary[] {
   return plugins.filter((plugin) => plugin.contributes.screen !== null && pluginUsable(plugin));
 }
 
-/** One action a plugin offers on a session's menu, with the plugin that offers it. */
 export interface PluginActionOffer {
   plugin: PluginSummary;
   actionId: string;
@@ -632,57 +321,14 @@ export interface PluginActionOffer {
 }
 
 /**
- * Whether this plugin offers settings anywhere in the fleet.
- *
- * ⚠ **Nothing draws a control from this any more, and it is kept for its two
- * rules rather than for its answer.** It gated the **gear**, which is gone
- * (Q3.468): the gear was the only route in and it asked no question about *which*
- * machines — the screen it opened picked one from a dropdown over
- * `installs.filter(contributes.settings)`, a set that is not the set the plugin is
- * on, and where that came to one it drew no control at all. The route now is the
- * machine table's **bulk bar**, over the machines somebody ticked, and the scope
- * rides the URL rather than a picker. So the live gate is `bulkEnabled`'s
- * `settings` arm over `settingsBlockFor` in `install.ts`, per machine and per
- * *reason*.
- *
- * ⚠ **Which means its headline rule is the opposite of the shipped one, and that
- * is the trap this docblock exists to disarm.** *Anywhere* was right for a control
- * that opened a screen picking one machine out of a set. Settings is a
- * **navigation** now — one screen, nothing to skip — so it is enabled only where
- * *every* selected machine can take it, or a selection of seven opens a screen
- * about a subset. Wiring this predicate back into that control would re-open
- * Q7.108 exactly as it was written.
- *
- * ⚠ **`enabled` is not consulted**, and *that* half survives the move intact —
- * `settingsBlockFor` does not consult it either. A plugin somebody switched off is
- * the commonest reason to open its settings, to fix whatever made them switch it
- * off, and a control that disappears when a thing stops working is a control they
- * go looking for. The pane itself reports whatever the daemon says about a stopped
- * plugin.
- *
- * ⚠ **And *anywhere, not everywhere* is still live one module over**, which is why
- * this is not simply deleted: `pane.ts` cites it by name for the machine whose
- * version has no `settings` at all — excluded rather than `divergent`, because a
- * fleet mid-update is the ordinary case and calling it a disagreement would refuse
- * the whole screen over a host with nothing to say.
- *
- * Takes a flat list rather than the store's map, so this stays a pure decision
- * `webcheck` can sweep. The caller flattens — when there is one.
+ * Superseded as a gate (Q3.468): the live one, settingsBlockFor, needs every machine, while this means anywhere (Q7.108).
+ * Kept because pane.ts relies on the anywhere rule; enabled is deliberately not consulted.
  */
 export function offersSettings(plugins: readonly PluginSummary[], pluginId: string): boolean {
   return plugins.some((one) => one.id === pluginId && one.contributes.settings);
 }
 
-/**
- * Which plugin actions belong on a session's menu.
- *
- * Flattened here rather than in the menu, so the two rules are in one place and
- * `webcheck` can hold them: only `on: "session"` actions — a `screen` action is
- * offered on the plugin's own screen and nowhere else — and only from a plugin
- * that is drawing at all, because a row that answers "that plugin is not running"
- * is worse than no row. Declaration order is kept: it is the order the plugin's
- * author wrote, and the menu has nothing better to sort by.
- */
+/** Only session actions, only from a usable plugin, in declaration order. */
 export function sessionActions(plugins: readonly PluginSummary[]): PluginActionOffer[] {
   const offers: PluginActionOffer[] = [];
   for (const plugin of plugins) {
@@ -695,19 +341,7 @@ export function sessionActions(plugins: readonly PluginSummary[]): PluginActionO
   return offers;
 }
 
-/**
- * `/p/:machineId/:pluginId`, and the reason it is not under `/settings`.
- *
- * ⚠ **A plugin's *settings* are not inside one machine either any more** —
- * Q3.468 moved them out to a screen of their own, scoped to the machines somebody
- * ticked on the machine table and carrying that scope in the URL
- * (`marketSettingsPath`). What survives is the distinction this path exists for,
- * and it was never about *which* screen settings sat on: settings are
- * configuration, answered once and then left alone. A plugin's **screen** is not —
- * it is a thing somebody opens to look at, several times a day, from a phone — and
- * however few taps the settings route now costs, that is not where a thing you
- * open daily belongs. Short, because it is typed and shared.
- */
+/** Short and outside settings: a plugin's screen is opened daily, its settings rarely (Q3.468). */
 export function pluginPath(machineId: MachineId, pluginId: string): string {
   return `/p/${encodeURIComponent(machineId)}/${encodeURIComponent(pluginId)}`;
 }

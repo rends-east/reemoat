@@ -5,29 +5,7 @@ import { labelFor } from "./agentConfig";
 import { choiceRuns, type ChoiceRow, type CommandEntry } from "./commands";
 import { Icon, MENU_HEADING, MENU_PANEL, menuRow, Spinner } from "./bits";
 
-/**
- * The composer's command menu.
- *
- * A sibling of `Dropdown` rather than an instance of it, and the difference is
- * not cosmetic: `Dropdown` owns its own open state and renders a trigger button,
- * while this one's openness is derived from the *text* and it must never take
- * focus — the caret has to stay in the textarea or an input method has nothing to
- * compose into. What it borrows is the chrome, by importing the same constants
- * rather than by copying a class list.
- *
- * **`bottom-full`, always, and never measured.** `Dropdown` says why: choosing a
- * direction by asking the window is breakpoint-state-in-JavaScript wearing a
- * different hat. A caret-following popup would break the same rule twice over —
- * it needs a mirror element and text metrics — and on a phone it would put the
- * panel under the thumb that is typing. Anchored to the composer's box instead —
- * its full width, flush with its own edges — above it, where the soft keyboard
- * cannot cover it.
- *
- * Both lists are drawn here and neither is computed here: `active` is an index
- * into whichever one is showing, and the arrow keys that move it live in the
- * textarea's own handler. Deriving the rows in two places is how the row the
- * keyboard is on stops being the row the eye is on.
- */
+/** Never takes focus and always opens above the composer's box; the caller computes the rows and moves the active index. */
 export function CommandMenu({
   entries,
   choices,
@@ -46,11 +24,9 @@ export function CommandMenu({
   choices: readonly ChoiceRow[] | null;
   active: number;
   stage: AgentConfigOption | null;
-  /** The value being applied, so the row that was pressed can say so. */
   busy: string | null;
   /** How many commands the daemon had to cut. Drawn, never silently swallowed. */
   dropped: number;
-  /** The textarea this menu belongs to, which a pointer-down must not treat as outside. */
   anchorRef: RefObject<HTMLTextAreaElement | null>;
   onHover: (index: number) => void;
   onChoose: (index: number) => void;
@@ -59,24 +35,7 @@ export function CommandMenu({
 }): ReactNode {
   const boxRef = useRef<HTMLDivElement | null>(null);
 
-  /*
-   * Outside-pointerdown dismissal, the same as every other menu here and for the
-   * same reason: the panel is made of buttons, and closing on blur would fire
-   * before the click that chose one landed.
-   *
-   * **The textarea is not outside.** It was, and that made repositioning the
-   * caret dismiss the menu — and while a control's choice list is up, `onDismiss`
-   * also drops the stage, after `completion` had already cleared the box. Tapping
-   * into your own draft threw the `/model` gesture away with nothing on screen to
-   * say so. Moving the caret out of the token already closes the menu on its own,
-   * through the query going null, which is the honest way for it to happen.
-   *
-   * No Escape listener, which is the one deliberate difference from `Dropdown`.
-   * Escape is handled on the textarea's own `onKeyDown` — it has to be, because
-   * that is also where the keystroke is stopped from reaching `useKeyboard`'s
-   * global blur, and two handlers racing for one key is how one of them wins on
-   * a platform nobody tested.
-   */
+  // The textarea is not outside: moving the caret must not drop a staged choice. Escape is handled on the textarea.
   useEffect(() => {
     const close = (event: Event): void => {
       const target = event.target as Node;
@@ -88,58 +47,21 @@ export function CommandMenu({
     return () => window.removeEventListener("pointerdown", close);
   }, [onDismiss, anchorRef]);
 
-  /*
-   * Keep the highlighted row on screen.
-   *
-   * The panel scrolls and the highlight is an index, not focus — so nothing moves
-   * the viewport on its own. Measured against the list this actually gets: the
-   * panel holds about five rows and claude publishes a hundred, so arrowing past
-   * the fifth moved a highlight nobody could see, and the wrap from last back to
-   * first left the scroll parked at the bottom.
-   *
-   * `block: "nearest"` because it is the one that does nothing when the row is
-   * already visible; anything else jerks the list on every keystroke.
-   */
+  // The highlight is an index, not focus, so nothing else scrolls it into view.
   useEffect(() => {
     boxRef.current?.querySelectorAll("[role=option]")[active]?.scrollIntoView({ block: "nearest" });
   }, [active, choices, entries]);
 
   return (
-    // The heading sits outside the listbox: a `listbox` may only contain options
-    // and groups, so a `<p>` in there is a stray node in the accessibility tree —
-    // and `aria-label` already carries the same words.
+    // The heading sits outside the listbox, which may hold only options and groups.
     <div
       ref={boxRef}
-      // `inset-x-0` rather than the `left-3 right-3` this carried: the panel is
-      // positioned against the composer's **box** now — that is where `relative`
-      // sits — and the box is already inset from the window by its wrapper, so a
-      // second 12px would draw a completion panel narrower than the field it
-      // completes.
       className={`absolute inset-x-0 bottom-full mb-1 ${MENU_PANEL} max-h-[min(18rem,50dvh)]`}
     >
-      {/* Through `labelFor`, not `stage.name`: this heading is one tap from the
-          `/effort` row that opened it, and on kimi the agent's own word for that
-          control is "Thinking". Two names for one thing, that close together, is
-          the inconsistency `labelFor` exists to close. */}
       {stage !== null && <p className={MENU_HEADING}>{labelFor(stage)}</p>}
       <div id="composer-command-menu" role="listbox" aria-label={stage === null ? "Commands" : labelFor(stage)}>
       {stage !== null && choices !== null ? (
         <>
-          {/*
-           * ⚠ **Grouped where the rows carry a heading, as `role="group"` rather
-           * than as the `<p>` this menu had to move its own heading out of the
-           * listbox to avoid.** The words go on the group's `aria-label` and the
-           * visible copy is `aria-hidden`: one heading, two renderings, neither a
-           * stray node.
-           *
-           * There is something to group only where the **agent** grouped its own
-           * list. A heading derived from opencode's repeated `OpenRouter/` prefix
-           * was drawn here for a release and is gone — see `ChoiceRow.group` — so
-           * in practice every row of every measured agent lands in one unwrapped
-           * run. Kept because the chip's own menu draws the same control the same
-           * way, and the two being drawn differently a keystroke apart is the
-           * defect this pair was reconciled to fix.
-           */}
           {choiceRuns(choices).map((run) => {
             const rows = run.items.map(({ choice, index }) => {
               const selected = stage.value === choice.value;
@@ -148,30 +70,12 @@ export function CommandMenu({
                 key={choice.value}
                 type="button"
                 role="option"
-                // Both branches carry ids now, and they share one namespace
-                // because only one branch is ever mounted. Without one here the
-                // textarea's `aria-activedescendant` had nothing to point at in
-                // the stage that changes the agent's model.
                 id={`composer-command-${index}`}
-                // Not a tab stop. The composite widget is the textarea; these are
-                // reached with the arrows and `aria-activedescendant`. Left
-                // focusable, Shift+Tab out of the box landed on the last row —
-                // where the arrow keys do nothing (that handler is on the
-                // textarea), Escape does nothing, and the only handler is
-                // `onMouseDown`, so Enter and Space do nothing either.
+                // Not a tab stop: the textarea is the composite widget, pointing here via aria-activedescendant.
                 tabIndex={-1}
                 aria-selected={index === active}
-                // The value actually in force, which `aria-selected` cannot say
-                // while it is carrying the highlight, and which the tick says
-                // only to people who can see it.
                 aria-current={selected}
-                // `preventDefault` on mousedown and the work on click — not the
-                // work on mousedown. The `preventDefault` is what stops focus
-                // leaving the textarea (the caret has to stay put or an input
-                // method has nothing to compose into); it does *not* cancel the
-                // click that follows. Acting on mousedown instead left `onClick`
-                // unbound, so activation that dispatches only a click — a screen
-                // reader's double-tap, `element.click()` — reached a dead row.
+                // preventDefault on mousedown keeps the caret in the textarea; the work is on click, so click-only activation still works.
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => onChooseValue(index)}
                 onMouseEnter={() => onHover(index)}
@@ -216,22 +120,12 @@ export function CommandMenu({
             tabIndex={-1}
             aria-selected={index === active}
             aria-current={entry.value !== null && entry.option?.value === entry.value}
-            // Same pair, same reason as the choices branch above.
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => onChoose(index)}
             onMouseEnter={() => onHover(index)}
-            // Highlighted by the keyboard's index rather than by `:hover`, so the
-            // row the arrows are on and the row Enter will take are the same one.
-            // `aria-selected` alone is invisible.
             className={`${menuRow("start")} text-fg ${index === active ? "bg-raised" : ""}`}
           >
             <span className="mt-0.5 w-3 shrink-0">
-              {/* Three states in one column, because there are three kinds of row.
-                  A tick means "this is what the control is set to already" — `/plan`
-                  when you are in plan mode — and without it that entry looks inert
-                  when it is in fact the answer. The sliders mark a control that is
-                  not a message; a published command gets nothing, because it is the
-                  ordinary case and an icon on every row is noise. */}
               {busy === entry.value && entry.value !== null ? (
                 <Spinner />
               ) : entry.value !== null && entry.option?.value === entry.value ? (
@@ -243,17 +137,10 @@ export function CommandMenu({
             <span className="min-w-0 flex-1">
               <span className="flex items-baseline gap-1.5">
                 <span className="min-w-0 truncate font-medium">/{entry.name}</span>
-                {/* ACP's hint is prose and is shown as prose. It is never inserted
-                    — see `completion` in `commands.ts` for why. */}
                 {entry.hint !== null && (
                   <span className="min-w-0 truncate text-2xs text-faint">{entry.hint}</span>
                 )}
               </span>
-              {/* Truncated in CSS, and that is what makes the byte cap in
-                  `toCommands` a bound on the *payload* rather than on the row.
-                  Measured, a skill's description can be a whole trigger paragraph
-                  — 1135 characters on this machine — and three wrapped lines per
-                  entry turns a hundred-command menu into a document. */}
               {entry.description.length > 0 && (
                 <span className="block truncate text-2xs text-faint">{entry.description}</span>
               )}
@@ -262,13 +149,6 @@ export function CommandMenu({
         ))
       )}
       </div>
-      {/* What the daemon had to cut, said out loud.
-          `toCommands` counts rather than silently trims for exactly this reason —
-          "a picker missing a row silently offers the agent less than it supports"
-          — and a client that reads only `commands` makes that counter prove
-          nothing. Quiet, one line, above nothing: the same treatment `placeNodes`
-          gives `omitted`. Only in the command list; a control's choices are never
-          cut. */}
       {stage === null && dropped > 0 && (
         <p className="px-2 py-1 text-2xs text-faint">
           {dropped} more the agent published are not shown

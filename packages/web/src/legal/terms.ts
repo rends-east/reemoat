@@ -1,19 +1,7 @@
 import type { LegalDocument } from "../legal";
 import { OPERATOR } from "./operator";
 
-/**
- * The Terms of Use, adapted from the 37signals open-source policies under
- * CC BY 4.0 — the credit is rendered on the page, which is where that licence
- * asks for it.
- *
- * ⚠ **Several clauses here read differently from the template they came from,
- * and the differences are the point.** An unqualified "AS IS", a blanket
- * exclusion of liability, termination "for any reason at any time", and
- * "continued use is acceptance" are the familiar SaaS phrasings, and every one of
- * them was written out of this document deliberately. Putting any of them back is
- * a change to what the document *says*, not a tidy-up of how it reads — it is a
- * conversation with the operator rather than an edit.
- */
+/** Adapted from 37signals' policies (CC BY 4.0, credited on the page); clauses that depart from the template do so on purpose. */
 export const TERMS_EN: LegalDocument = {
   doc: "terms",
   lang: "en",

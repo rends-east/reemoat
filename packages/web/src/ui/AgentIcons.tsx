@@ -1,27 +1,8 @@
 import type { ReactNode } from "react";
 import { isBuiltinAgentId, type AgentId } from "../wire";
 
-/*
- * A glyph per harness.
- *
- * ⚠ **Inline SVG, never an `<img>`** — `Mark.tsx`'s rule and its reasons apply
- * unchanged: the document's CSP is `img-src 'self' blob:`, so a `data:` URI is
- * refused outright, and a file would be a second request before the first paint
- * on a phone. (Plugin icons *are* `<img src>`, and that is the opposite trade for
- * the opposite reason: those bytes are somebody else's, and an SVG loaded as an
- * image runs no script.)
- *
- * ⚠ **Not vendor logos.** These are shapes of ours standing for four programs —
- * an asterisk, a chevron pair, a crescent, a bracket pair — drawn in one weight
- * so they read as one family at 20px on a strip. A real mark would be somebody's trademark
- * rendered in this app's monochrome palette at a size where it stops being
- * recognisable, which is worse than a shape that was never claiming to be one.
- *
- * `fill`/`stroke: currentColor`, so each takes the ink of whatever it sits in and
- * follows a picked tile into `font-medium text-fg` with no second token.
- */
+// Inline SVG, never an img (the CSP refuses data URIs); shapes of ours rather than vendor logos, inked with currentColor.
 
-/** Claude Code. An asterisk — the mark the CLI prints beside its own prompt. */
 function ClaudeGlyph({ size }: { size: number }): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
@@ -34,7 +15,6 @@ function ClaudeGlyph({ size }: { size: number }): ReactNode {
   );
 }
 
-/** Codex. A terminal chevron, which is what its own name is about. */
 function CodexGlyph({ size }: { size: number }): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
@@ -46,7 +26,6 @@ function CodexGlyph({ size }: { size: number }): ReactNode {
   );
 }
 
-/** Kimi CLI. A crescent. */
 function KimiGlyph({ size }: { size: number }): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
@@ -60,14 +39,6 @@ function KimiGlyph({ size }: { size: number }): ReactNode {
   );
 }
 
-/**
- * opencode. A bracket pair — a delimiter, at the one weight the others use.
- *
- * Chosen against the three already here rather than for itself: the asterisk is
- * radial, the chevron points, the crescent is a closed curve, and two upright
- * brackets are none of those at 20px. Not `{}`, which reads as the chevron's
- * cousin at this size and is a shape half the strip could claim.
- */
 function OpencodeGlyph({ size }: { size: number }): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
@@ -79,21 +50,6 @@ function OpencodeGlyph({ size }: { size: number }): ReactNode {
   );
 }
 
-/**
- * Grok. A rhombus — a closed angular figure, at the one weight the others use.
- *
- * Chosen against the four already here rather than for itself, which is the rule
- * this file keeps: the asterisk is radial, the chevron is an open pointer, the
- * crescent is a *curved* closed shape and the brackets are two uprights. A
- * four-sided closed outline is none of those at 20px, and it is the one gap left
- * in that set.
- *
- * ⚠ **Not an X, and that is the whole of why this is a rhombus.** The obvious
- * shape for this vendor is the one it actually uses as its mark, and every glyph
- * in this file is deliberately a shape *of ours* standing for a program whose mark
- * we may not draw. An X would also have read as the asterisk's cousin — both are
- * strokes crossing a centre — which is the test the other four were chosen by.
- */
 function GrokGlyph({ size }: { size: number }): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
@@ -108,32 +64,10 @@ function GrokGlyph({ size }: { size: number }): ReactNode {
   );
 }
 
-/**
- * A harness a plugin added, drawn as a monogram.
- *
- * ⚠ **A letter rather than a fifth shape, and the choice is the opposite of the
- * one made four functions up.** Those four are shapes *of ours* standing for
- * programs whose marks we may not use; there is exactly one of each and they read
- * as a family. A machine can hold eight contributed harnesses, and one generic
- * mark for all of them would put eight identical tiles on a strip whose titles
- * `truncate` at 96px — the row would say nothing about which is which, which is
- * the failure the four distinct shapes exist to prevent.
- *
- * ⚠ **Derived from `agent` alone, so this takes no second prop.** A contributed id
- * is `<pluginId>:<localId>` and the letter comes off the local half — which is
- * also what keeps it stable when a plugin is renamed in a market. A prop carrying
- * the label would be the honest alternative and is not free: `webcheck` pins the
- * exact JSX of two `<AgentGlyph agent={…} size={…} />` call sites, and a
- * three-prop element there is a rewrite of two regexes for a letter this already
- * has.
- *
- * A letter in this app's own weight is not a mark and cannot be mistaken for one,
- * which is the property the four shapes are careful about.
- */
+/** A plugin harness drawn as the first letter of its local id, so several contributed harnesses stay distinguishable. */
 function MonogramGlyph({ agent, size }: { agent: string; size: number }): ReactNode {
   const local = agent.slice(agent.indexOf(":") + 1);
-  // `Array.from` rather than `[0]`, so an id whose first character is outside the
-  // BMP draws that character rather than half of it.
+  // Array.from so a first character outside the BMP is drawn whole.
   const letter = (Array.from(local)[0] ?? "?").toUpperCase();
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
@@ -146,8 +80,6 @@ function MonogramGlyph({ agent, size }: { agent: string; size: number }): ReactN
         fill="currentColor"
         fontSize="11"
         fontWeight="500"
-        // The document's own stack, so the letter sits in the same family as the
-        // title beside it rather than in whatever the SVG default resolves to.
         fontFamily="inherit"
       >
         {letter}
@@ -156,23 +88,7 @@ function MonogramGlyph({ agent, size }: { agent: string; size: number }): ReactN
   );
 }
 
-/**
- * The harness's glyph.
- *
- * ⚠ **Exhaustive over the five this product *ships*, with no `default` arm** —
- * which is the rule every per-harness table in this fleet keeps: a sixth built-in
- * is a compile error here rather than a tile that silently draws nothing.
- * `wire.ts`'s `AGENT_IDS` is a hand mirror and is the one seam with no compiler
- * help, so this is one of the places that makes adding to it loud.
- *
- * ⚠ **The narrowing is what preserves that, and removing it would be silent.**
- * `AgentId` is a string now, because a machine may offer harnesses a plugin added
- * — and a `switch` over a string has no exhaustiveness to check, so writing this
- * without `isBuiltinAgentId` would have deleted the only mechanism in the fleet
- * that makes a new harness loud, while the docblock above went on claiming it. The
- * `never` arm is reached only from inside the narrowing, where it means what it
- * says.
- */
+/** Exhaustive over the five shipped harnesses inside the isBuiltinAgentId narrowing, so a new built-in is a compile error. */
 export function AgentGlyph({ agent, size = 20 }: { agent: AgentId; size?: number }): ReactNode {
   if (!isBuiltinAgentId(agent)) return <MonogramGlyph agent={agent} size={size} />;
   switch (agent) {
@@ -191,19 +107,7 @@ export function AgentGlyph({ agent, size = 20 }: { agent: AgentId; size?: number
   }
 }
 
-/**
- * The arm that makes the exhaustiveness above real.
- *
- * ⚠ **The docblock claimed a missing arm was a compile error and it was not**,
- * for four releases: this function answers `ReactNode`, `undefined` inhabits
- * `ReactNode`, and a `switch` that falls off the end returns exactly that. So a
- * fourth harness would have drawn a blank tile and compiled clean — the failure
- * the comment was written to prevent, undetectable by the thing it named.
- *
- * `never` is what actually holds it, and it has since been paid for: `grok` was
- * added to the union and this is one of the files that refused to compile until it
- * had an arm. A sixth harness fails here too, naming the union it was added to.
- */
+// The never parameter is what makes a missing arm a compile error.
 function unglyphed(agent: never): ReactNode {
   void agent;
   return null;

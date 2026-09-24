@@ -1,16 +1,4 @@
-/**
- * What each message says, as pure functions.
- *
- * No templating engine and no caller-supplied HTML: every value that reaches a
- * document goes through `esc`, and the only structure is a paragraph and a link.
- * These are transactional messages read once on a phone, so the plain-text part
- * is the real one and the HTML part exists so a client that refuses to show
- * plain text is not blank.
- *
- * **The link is always a full URL, never a bare code.** "Paste this into the
- * field" is a flow that fails on a phone, where the mail app and the browser are
- * different applications and the clipboard is the only bridge.
- */
+// Pure functions with no templating engine: every value that reaches HTML goes through esc. A link is always a full URL, never a bare code.
 
 export interface Template {
   subject: string;
@@ -26,12 +14,7 @@ function esc(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/**
- * The one HTML shape, so seven templates cannot become seven layouts.
- *
- * Inline styles because every mail client strips a `<style>` block, and a
- * system font stack because none of them will fetch a webfont.
- */
+// The one HTML shape. Inline styles and system fonts: mail clients strip style blocks and fetch no webfonts.
 function document(parts: { heading: string; paragraphs: string[]; action?: { label: string; url: string } }): string {
   const body = parts.paragraphs.map((line) => `    <p style="margin:0 0 16px">${line}</p>`).join("\n");
   const action =
@@ -40,18 +23,6 @@ function document(parts: { heading: string; paragraphs: string[]; action?: { lab
       : `\n    <p style="margin:24px 0"><a href="${esc(parts.action.url)}" ` +
         `style="display:inline-block;padding:12px 20px;border-radius:8px;` +
         `background:#111;color:#fff;text-decoration:none">${esc(parts.action.label)}</a></p>` +
-        /*
-         * One line in `document()` rather than seven in the templates, which is
-         * what this helper exists for: seven templates may not become seven
-         * layouts, and they may not become seven remedies either.
-         *
-         * The browser is the right destination and the only one named: the control
-         * plane serves the **gate** — these three addresses and the legal
-         * documents — even on a deployment that serves no app. If a mail client
-         * rewrites the URL and drops the `#` the token rides on, the page it lands
-         * on has a field for pasting the original, which is the remedy rather than
-         * a second address to name here.
-         */
         `\n    <p style="margin:0 0 16px;color:#666;font-size:13px">` +
         `If the button does not work, paste this into your browser:<br>` +
         `<span style="word-break:break-all">${esc(parts.action.url)}</span></p>`;
@@ -66,7 +37,6 @@ function document(parts: { heading: string; paragraphs: string[]; action?: { lab
   );
 }
 
-/** How a link's lifetime is said to somebody, rather than as a timestamp. */
 export function lifetimeText(ms: number): string {
   const minutes = Math.round(ms / 60_000);
   if (minutes < 60) return `${minutes} minutes`;
@@ -75,58 +45,14 @@ export function lifetimeText(ms: number): string {
   return `${Math.round(hours / 24)} days`;
 }
 
-/**
- * What these messages call the thing you have an account on.
- *
- * **The product's name and not the host, which is a reversal.** The host was in
- * every subject and every opening sentence, on the argument that a message read
- * out of context should say which server it is about. Measured against a real
- * inbox that reasoning inverted: `mail.public_url` is routinely a bare
- * `host:port`, mail clients auto-link anything that looks like one, and the
- * result was a message from a domain whose first line contained a clickable
- * `192.0.2.10:7888` — the exact shape of a phishing mail, sitting *above* the
- * link somebody is being asked to trust. Two links in a transactional message,
- * one of which goes nowhere useful, is one link too many.
- *
- * What is lost is real and small: somebody with accounts on two instances tells
- * them apart by the link rather than by the first line. The link has to be read
- * before it is opened anyway.
- */
-/*
- * Capitalised, because in a subject line this is a name and not a command.
- *
- * It reaches an inbox — "Confirm your Reemoat account" beside mail from banks and
- * airlines — where a lowercase word reads as a typo or as a package somebody is
- * being asked to install. The lowercase spelling is kept for identifiers only:
- * `REEMOAT_*`, `@reemoat/web`, `~/.reemoat`, the browser's storage keys and the
- * `reemoat-sub` header, none of which a person reads as prose.
- */
 const PRODUCT = "Reemoat";
 
 export interface LinkArgs {
-  /** The person's chosen login name, so a message is not addressed to nobody. */
   name: string;
   url: string;
   lifetime: string;
 }
 
-/**
- * Every link message is one instruction, one link, and one line about what
- * happens if it was not you.
- *
- * The long form said the same thing three times — what the link does, that the
- * account does not exist, that nothing was created — which is prose to read
- * rather than a button to press, in a message nobody reads twice.
- *
- * **The verb is "confirm", not "create", and the message and the page it opens
- * use the same word.** That the account does not exist yet is true and is an
- * implementation fact: somebody who signed up two minutes ago is doing the
- * ordinary thing every service asks, and telling them their account "does not
- * exist" reads as a failure report about the step they just completed. The fact
- * survives in exactly one place — the last line, addressed to somebody who did
- * *not* sign up, where "no account was created" is the reassurance that makes
- * ignoring the message the right move.
- */
 export function registrationConfirm(a: LinkArgs): Template {
   const heading = "Confirm your account";
   const paragraphs = [
@@ -145,14 +71,7 @@ export function registrationConfirm(a: LinkArgs): Template {
   };
 }
 
-/**
- * To the person who already owns an address somebody tried to register with.
- *
- * **It must not say the account's name.** The request that triggered it was
- * anonymous, so naming the account would turn this message into the address
- * oracle that answering with the same 200 exists to close — a stranger would
- * learn a login name by mailing it to its owner.
- */
+/** Must not name the account: the request was anonymous, so naming it would make this an address oracle. */
 export function registrationNotice(a: { instance: string; signInUrl: string; forgotUrl: string }): Template {
   const heading = "Somebody tried to sign up with your address";
   const paragraphs = [
@@ -192,21 +111,11 @@ export function passwordReset(a: LinkArgs): Template {
   };
 }
 
-/**
- * An account an admin created, which has no password at all.
- *
- * Its own words rather than `passwordReset`'s, even though it rides the same
- * token: "reset the password" is wrong for somebody who has never had one, and
- * the sentence that matters here — nobody else has ever known a password for
- * this account — is the whole reason the invitation path exists.
- */
 export function invitation(a: LinkArgs & { invitedBy: string }): Template {
   const heading = `You have a ${PRODUCT} account`;
   const paragraphs = [
     `${esc(a.invitedBy)} created the account <strong>${esc(a.name)}</strong> for you on ${PRODUCT}. ` +
       `Choose a password with this link.`,
-    // The one sentence that is not boilerplate: it is the whole reason an
-    // invitation exists rather than an admin handing over a password.
     `Nobody else has ever known a password for this account. The link is good for ${esc(a.lifetime)}.`,
   ];
   return {
@@ -240,14 +149,7 @@ export function emailVerify(a: LinkArgs): Template {
   };
 }
 
-/**
- * To the address being replaced, sent before the row is overwritten.
- *
- * The new address is named only by its domain. Somebody reading this may be
- * reading it because their account was taken, and printing the attacker's full
- * address into a mailbox is not information they can act on — but "it moved to
- * an address at a domain you do not recognise" is.
- */
+/** Names the new address by its domain only; the reader may be the victim of a takeover. */
 export function emailChanged(a: { instance: string; name: string; newDomain: string }): Template {
   const heading = "The address on your account changed";
   const paragraphs = [

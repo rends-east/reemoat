@@ -1,86 +1,16 @@
-/**
- * The daemon's wire vocabulary, mirrored.
- *
- * These are hand-copied from `src/events.ts` and `src/registry.ts` rather than
- * imported, and the reason is mechanical, not stylistic: `src/events.ts` imports
- * its ACP types from `@agentclientprotocol/sdk`, and `src/registry.ts` imports
- * `node:crypto` and `node:os`. Under pnpm's strict layout neither resolves from a
- * browser package, and pulling them in would drag the daemon's whole dependency
- * graph into a bundle that ships to a phone. The import direction would have been
- * legal — the control plane already reads `src/relay/protocol.ts` — but the
- * transitive closure is not.
- *
- * The cost is real and worth stating: **this file can drift.** It describes bytes
- * the daemon already sent, so drift shows up as a field that is `undefined` at
- * runtime rather than a type error at build time. Anything narrowing a union here
- * is therefore written to fail open — an unrecognised `type` renders as an
- * unknown event rather than throwing, and an unrecognised status renders as
- * itself.
- *
- * Copied from the daemon at the commit that introduced this package.
- */
+// Hand mirror of the daemon's wire types: importing src/ would pull node dependencies into the browser bundle.
+// It can drift, so every narrowing fails open, and a field added after the first release is optional.
 
-/* ------------------------------------------------------------------ *
- * Events — src/events.ts
- * ------------------------------------------------------------------ */
-
-/**
- * The five harnesses this product ships, mirrored as a **closed** union — because
- * that is what the daemon's `AGENT_IDS` is, and it stayed closed when `AgentId`
- * did not.
- *
- * `src/acp/agents.ts` still derives this tuple from five literals, `resolveAgent`
- * still switches over it with no `default` arm, and `AGENT_LOGIN` is still a
- * `Record` keyed on it. What changed is that a *machine* may now offer more than
- * this repository ships, so the list of what exists and the list of what is
- * built in are two different questions and this answers the second.
- *
- * ⚠ **Keeping this closed is not sentiment; three things on this side depend on
- * it.** `AGENT_LABEL` is a hand-written table `webcheck` reads as source text and
- * requires a row in for every member; `AgentGlyph` is an exhaustive `switch` whose
- * `never` arm is the only thing in the fleet that makes adding a harness loud; and
- * `startsBare`'s built-in arm is a literal. Every one of those would become
- * unsatisfiable — not merely weaker — against a list that grows at runtime.
- */
+/** Closed on purpose: AGENT_LABEL and AgentGlyph's exhaustive switch need a fixed list. */
 export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok"];
 export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok";
 
-/**
- * A harness id, which is a string.
- *
- * ⚠ **Widened, and the guard that used to stand behind it is *gone* rather than
- * loosened — which is the part worth reading.** `isAgentId` existed for one
- * caller: an id arriving off a URL, checked so that a stale link opened the agent
- * chooser instead of a screen whose every control answered 400. A shape test
- * cannot do that job any more, because a machine's harnesses are a fact about
- * which plugins are installed on it, so the check moved to where that fact is —
- * the listing this client already fetches. `AgentBuilder` seeds its harness from
- * `GET /agents` rather than from the address, and `parseSettingsRoute` carries the
- * id through to a daemon that refuses what it does not offer.
- *
- * ⚠ **A missing mirror edit is no longer a lie this type can tell**, which is the
- * one thing the old docblock worried about and the one thing that got better:
- * there is nothing here to fall out of step with, because the daemon's answer is
- * the list.
- */
 export type AgentId = string;
 
-/** Whether this is one of the five this product ships. Never "does this machine have it". */
 export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
 }
 
-/**
- * Mirrored as an **open** union, because that is what the daemon's is.
- *
- * `src/events.ts` declares `kind: ToolKind` from the ACP SDK, and that type ends
- * in `| string` — the generated zod validator is a `ZodCatch` over `ZodString`,
- * so an agent may send a kind nobody has heard of and the daemon will pass it
- * through. A closed nine-member union here was a lie about the wire in two
- * directions at once: it omitted `switch_mode`, which the schema does define, and
- * it claimed the set was closed when it is not. `(string & {})` keeps
- * autocomplete on the known members while still accepting the rest.
- */
 export type ToolKind =
   | "read"
   | "edit"
@@ -114,14 +44,6 @@ export interface SessionStartedEvent {
   agent: AgentId;
   sessionId: string;
   agentInfo: { name: string; version: string } | null;
-  /**
-   * ACP's legacy `modes` field, which claude fills in and kimi does not.
-   *
-   * Not the thing to render: kimi is not modeless, it publishes the same four
-   * modes through `configOptions` under `category: "mode"` instead. Draw from
-   * {@link AgentConfigEvent} / `SessionSnapshot.agentConfig`, which normalizes
-   * both.
-   */
   modes: AgentModes | null;
 }
 
@@ -129,41 +51,18 @@ export interface AgentConfigChoice {
   value: string;
   name: string;
   description: string | null;
-  /** The heading this value sits under, when the agent grouped its choices. */
   group: string | null;
 }
 
-/**
- * One knob the agent will let a client change: mode, model, reasoning effort.
- *
- * **Render from `category`, never from `id`.** The ids are not portable — claude
- * calls reasoning effort `effort` with values `default|low|…|max`, kimi calls it
- * `thinking` with values `off|…` — and a client keyed on the id draws one
- * agent's controls and none of the other's. ACP's own categories are `mode`,
- * `model`, `model_config` and `thought_level`; the spec says they are UX hints
- * that MUST NOT be required for correctness, so an unknown or absent one has to
- * render as a plain labelled control rather than disappear.
- */
+/** Render from category, never from id: ids differ between agents, and an unknown category still renders. */
 export interface AgentConfigOption {
   id: string;
   name: string;
   description: string | null;
   category: string | null;
   kind: "select" | "boolean";
-  /** A choice's `value` when `kind` is `"select"`, the toggle state otherwise. */
   value: string | boolean;
-  /** Empty for a boolean. */
   choices: AgentConfigChoice[];
-  /**
-   * Whether `choices` is a head rather than the whole list.
-   *
-   * Set only on the snapshot `GET /sessions` returns, where the daemon cuts a long
-   * model list to a bounded head — the selected choice always among it. Absent
-   * means the whole list, which is what an older daemon sends for every agent and
-   * what this one sends for every agent but opencode, whose published list is long
-   * enough to be cut in ordinary use. A screen wanting the rest reads
-   * `GET /sessions/:id`.
-   */
   truncated?: boolean;
 }
 
@@ -172,16 +71,6 @@ export interface AgentModes {
   available: { id: string; name: string; description: string | null }[];
 }
 
-/**
- * The complete control state — never a delta.
- *
- * The daemon merges ACP's partial `current_mode_update` against what it already
- * holds before sending this, precisely so a client does not need a reducer of
- * its own. Arrives on session start, whenever the *agent* changes something
- * itself (claude flips to `plan` from its own hook, and resets the mode when a
- * model switch makes the current one impossible), and after every accepted
- * config change.
- */
 export interface AgentConfig {
   modes: AgentModes | null;
   options: AgentConfigOption[];
@@ -191,50 +80,17 @@ export interface AgentConfigEvent extends AgentConfig {
   type: "agent_config";
 }
 
-/**
- * One command the agent will answer to a leading slash.
- *
- * ACP's entire argument surface for a command is `hint` — a string of prose, with
- * no schema, no enums and no completion. So `hint` is a placeholder to *show*,
- * never a template to insert: putting it in the box would send it to the model as
- * if somebody had typed it.
- *
- * Deliberately not part of {@link AgentConfig}, which means "what a caller may
- * change". A command is invoked, not set — and it is fetched from its own route
- * rather than carried on the snapshot, so it is not on {@link SessionSnapshot}
- * either. See `commandsRevision` there.
- */
 export interface AgentCommand {
-  /** Without the leading slash, as the agent published it. */
   name: string;
   description: string;
   hint: string | null;
 }
 
-/** Text arrives in chunks. Consecutive ones with the same role/thought are one run. */
 export interface TextEvent {
   type: "text";
   role: "agent" | "user";
   thought: boolean;
   text: string;
-  /**
-   * Which message this chunk belongs to, or `null` where nothing said.
-   *
-   * ACP's own boundary: *"A change in `messageId` indicates a new message has
-   * started."* A run in the transcript joins its parts with **no separator**,
-   * which is right for streamed tokens and wrong for whole messages — so this is
-   * what keeps twenty `**Task stopped by user:** …` lines from rendering as one
-   * paragraph of twenty run-together sentences.
-   *
-   * A `~`-prefixed value is one the **daemon** assigned, to a message an agent
-   * that otherwise numbers its messages sent without one. Nothing here needs to
-   * tell the two apart — this is compared for equality and never parsed — and the
-   * prefix exists so that a reader who does look can.
-   *
-   * Optional on the mirror, `cancelRequestedAt`'s rule: a daemon too old to send
-   * it leaves every chunk `undefined`, which compares equal and joins exactly as
-   * that daemon's transcript always did.
-   */
   messageId?: string | null;
 }
 
@@ -245,49 +101,12 @@ export interface ToolCallEvent {
   kind: ToolKind;
   status: ToolCallStatus;
   locations: FileLocation[];
-  /**
-   * The tool's arguments — where a shell command actually lives, and the only
-   * place a permission card can find one.
-   *
-   * May be the truncation stand-in `{truncated: true, bytes: number}` when the
-   * event exceeded the 128 KiB per-event cap.
-   */
+  // May be the truncation stand-in when the event exceeded the per-event cap.
   rawInput: unknown;
-  /**
-   * The tool call this one ran *inside*, when an agent said so.
-   *
-   * Three rules a client has to hold, and none of them is enforced by a type:
-   *
-   * 1. **A parent may not be present.** It can have been evicted below
-   *    `firstSeq`, or simply be older than this window. That is normal, not a
-   *    fault — a walk that assumes the parent is there draws an empty screen on
-   *    exactly the long sessions people care about. Render at top level instead.
-   * 2. **A child may arrive before its parent.** The daemon never reorders,
-   *    buffers or synthesises in order to build a tree, on purpose.
-   * 3. **Every traversal must be cycle-safe, and a depth constant is not
-   *    enough.** The daemon normalizes only self-reference; a longer cycle from
-   *    a broken agent is not detectable without state it refuses to keep, so two
-   *    mutually-parented calls are something a reader will be sent. A depth
-   *    limit says when to stop *climbing* and says nothing about how many hops a
-   *    walk may take — which is exactly how `ui/tail.ts` hung on a two-element
-   *    cycle while holding `MAX_DEPTH`. Carry a visited set per walk. `MAX_DEPTH`
-   *    bounds the indent; it does not bound the graph.
-   */
+  // A parent may be missing or arrive late, and cycles happen:
+  // every walk needs a visited set, since MAX_DEPTH bounds the indent, not the graph.
   parentToolCallId?: string | null;
-  /**
-   * The agent called this call a subagent spawn.
-   *
-   * What the agent *declared*, and read for exactly one thing: whether a call
-   * draws as a delegation. Layout is still decided by children — `ui/tail.ts`
-   * nests, counts steps and builds a running headline from those alone, which is
-   * the only rule that degrades correctly on an agent that says nothing.
-   *
-   * Measured 2026-08-01 — claude drops this flag on the spawn's own completing
-   * update, so a renderer that merged it last-wins would flicker off at the end
-   * of every subagent. `ui/tail.ts` reads it from the `tool_call` and never from
-   * an update, which is also why `session.ts` copies only the parent edge onto
-   * one: there is deliberately nothing on that side to merge.
-   */
+  // Read only from the tool_call: claude drops it on the completing update.
   subagent?: boolean;
 }
 
@@ -297,60 +116,18 @@ export interface ToolCallUpdateEvent {
   title: string | null;
   status: ToolCallStatus | null;
   locations: FileLocation[];
-  /**
-   * The arguments, when the agent filled them in here rather than on the call.
-   *
-   * Optional in this mirror, and every optional field in this file is optional for
-   * the same reason: an older daemon does not send it, and a mirror that declared
-   * it required would make `undefined` a lie the compiler helped tell.
-   */
   rawInput?: unknown;
-  /**
-   * What the tool said, as plain text blocks.
-   *
-   * `null` means the update carried none; `[]` would mean the tool answered with
-   * nothing, which is a different thing a client may legitimately say out loud.
-   */
   content?: string[] | null;
-  /**
-   * Images the tool handed back.
-   *
-   * Optional for the reason every optional here is: an older daemon rendered
-   * them as the literal string `[image]` and dropped the bytes. Read as
-   * `?? []` — a transcript from such a daemon shows what it always showed.
-   */
   images?: StoredFileRef[] | null;
-  /**
-   * See {@link ToolCallEvent.parentToolCallId} — same field, same three rules.
-   *
-   * Measured 2026-08-01 against claude-agent-acp 0.63.0: **4 of 10** and **5 of
-   * 14** of a child's updates omit this even though its `tool_call` carried it,
-   * because the `toolResponse`-bearing updates rebuild their metadata from the
-   * tool result and do not re-derive lineage. Absence here therefore means
-   * "this update did not say", never "top level".
-   */
+  // Absent means this update did not say, never top level.
   parentToolCallId?: string | null;
-  /**
-   * This call handed its work to something that outlives it.
-   *
-   * A backgrounded Bash call returns the moment the command detaches, so the card
-   * reaches `completed` while the command runs on — and ACP has no tool-call
-   * status for *still running elsewhere*, which is why the agent marks the update
-   * instead. A card reading this stops claiming the work is finished.
-   *
-   * Optional for this file's usual reason, and read as `?? false`: an older
-   * daemon never projected it, and `false` is exactly what such a transcript drew
-   * before. ⚠ **`false` means "nothing said so"**, never "this did not
-   * background anything" — three agents out of four never mark anything, so a
-   * client may not infer the absence of background work from it.
-   */
+  // False means nothing said so, never that nothing was backgrounded.
   backgrounded?: boolean;
 }
 
 export interface FileChangeEvent {
   type: "file_change";
   path: string;
-  /** `null` for a file the agent created — the common case, not an edge case. */
   oldText: string | null;
   newText: string;
   source: "diff" | "fs_write";
@@ -366,14 +143,6 @@ export interface PermissionRequestEvent {
   decision: string | null;
 }
 
-/**
- * Who settled a parked question — an approval or, now, an elicitation.
- *
- * Named for answers rather than permissions on the daemon side too, and mirrored
- * here under the same name deliberately: this file is hand-written against
- * `src/events.ts` and desynchronizes silently, so a member added there and not
- * here is a `by` string no client renders.
- */
 export type AnswerResolvedBy =
   | "client"
   | "agent_withdrew"
@@ -382,7 +151,6 @@ export type AnswerResolvedBy =
   | "turn_ended"
   | "pump_failed"
   | "no_turn"
-  /** Somebody stopped the turn while this was parked on them. See `cancelTurn`. */
   | "turn_cancelled";
 
 export interface PermissionResolvedEvent {
@@ -406,13 +174,6 @@ export interface PlanEvent {
   entries: PlanEntry[];
 }
 
-/**
- * One file that rode a prompt.
- *
- * No path and no URL, deliberately: a location is a fact about one daemon's disk
- * and the log outlives it. The download URL is rebuilt from `(sessionId,
- * uploadId)`, which are the two things that do not move.
- */
 export interface StoredFileRef {
   uploadId: string;
   name: string;
@@ -421,26 +182,18 @@ export interface StoredFileRef {
 }
 
 export interface PromptAttachmentRef extends StoredFileRef {
-  /** Whether the agent got the bytes, or only a link to them. */
   inlined: boolean;
 }
 
 export interface PromptEvent {
   type: "prompt";
   text: string;
-  /**
-   * Optional for the reason every optional in this file is: an older daemon does
-   * not send it. Read as `?? []` everywhere, so such a prompt renders exactly as
-   * it does today rather than as one with a broken chip.
-   */
   attachments?: PromptAttachmentRef[];
 }
 
-/** What `POST /sessions/:id/uploads` answers. */
 export interface UploadAccepted {
   upload: {
     uploadId: string;
-    /** What it was stored as. May be shorter than what was sent. */
     name: string;
     originalName: string;
     mime: string | null;
@@ -453,42 +206,9 @@ export interface UploadAccepted {
   };
 }
 
-/**
- * The two upload bounds this client enforces before asking.
- *
- * Mirrored from `src/uploads.ts` like everything else in this file, and they can
- * drift — the daemon is the one that decides, and its refusal is what a chip
- * shows. What these buy is that the common refusals happen at the picker instead
- * of after the whole file has crossed a phone's uplink — which is worth four
- * times what it was, this having been 25 MiB.
- *
- * The per-session byte budget is deliberately **not** here: this client cannot
- * know it across a reload, so tracking it would be wrong more often than useful.
- * Nor is the *rate* budget, for a stronger version of the same reason — it is
- * about the last five minutes of the daemon's life, which a tab that was asleep
- * for four of them cannot have an opinion about. Both arrive as refusals with the
- * daemon's own message.
- */
 export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 export const MAX_PROMPT_ATTACHMENTS = 10;
 
-/**
- * What `POST /fs/import` answers with when an archive became a folder.
- *
- * `path` is the whole point of the reply: it is what the picker moves to, so the
- * folder somebody just imported is the one their session starts in without them
- * having to find it in a list.
- */
-/**
- * What `PUT`/`DELETE /agent-auth/:agent` answer.
- *
- * `restarting` is how many conversations were relaunched to take the change —
- * secrets reach an agent only at spawn, so a token saved while one is running
- * would otherwise be a change that never arrives. **Optional**: a daemon
- * predating that behaviour omits it, and the client must read its absence as "it
- * did not say" rather than as zero, which is a different and much more alarming
- * sentence.
- */
 export interface CredentialWritten {
   saved?: boolean;
   removed?: boolean;
@@ -504,30 +224,9 @@ export interface ImportAccepted {
   };
 }
 
-/**
- * How large an archive this client will offer to send.
- *
- * Mirrored from `src/archive.ts`, and **deliberately a different number from
- * `MAX_UPLOAD_BYTES`** at both ends: that one bounds an attachment to a message,
- * this one bounds a whole project arriving. Checking it here only saves somebody
- * pushing a large file over a phone's uplink to be told no — the daemon is still
- * the one that decides.
- */
 export const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
 
-/**
- * The longest string answer the daemon will take, mirrored from
- * `MAX_ELICITATION_ANSWER_CHARS` in `src/registry.ts`.
- *
- * Here for the same reason the upload caps are, and for a sharper one: the
- * daemon applies this to **every** string field before it looks at the field's
- * own `maxLength`, and the field the adapter is most likely to leave unbounded is
- * its own free-text "Other" box. So without this the client's `max` check passed,
- * `canSubmit` said yes, and the POST came back `400 invalid_content` — which is
- * exactly the failure `canSend` exists to prevent one screen over, and which
- * `elicitation.ts` claims in its own docblock cannot happen because the value
- * enabling the button *is* the value being sent.
- */
+/** The daemon applies this to every string field before the field's own maxLength. */
 export const MAX_ANSWER_CHARS = 2048;
 
 export interface StatusEvent {
@@ -551,28 +250,10 @@ export interface WorkspaceEvent {
 
 export interface TurnEndEvent {
   type: "turn_end";
-  /**
-   * ACP's own reason, or the daemon's `agent_error` for a turn that ended in an
-   * `error` — see `TurnStopReason` in `src/events.ts`.
-   *
-   * `string` rather than the union on purpose, and this is the field the rule was
-   * written for: a daemon newer than this client sends a member nobody here has
-   * heard of, and `stopReasonText` answers the identifier with its underscores
-   * taken out rather than nothing. Widening the daemon's union is therefore not a
-   * breaking change in this direction.
-   */
   stopReason: string;
   usage: unknown;
 }
 
-/**
- * The agent's memory was reset, and this is where.
- *
- * The transcript above it is untouched and still readable: it is the daemon's
- * log rather than the agent's memory. What changed is that the agent past this
- * point knows none of it, which without the marker reads as a conversation that
- * inexplicably forgot itself.
- */
 export interface ContextClearedEvent {
   type: "context_cleared";
   agentSessionId: string;
@@ -623,16 +304,6 @@ export interface StoredEvent {
   readonly event: SessionEvent;
 }
 
-/* ------------------------------------------------------------------ *
- * Sessions — src/registry.ts
- * ------------------------------------------------------------------ */
-
-/**
- * Derived on the daemon on every read, never stored.
- *
- * `blocked` outranks `running` there, deliberately: it is the state a human has
- * to act on, and this whole UI is arranged around that one fact.
- */
 export type SessionStatus =
   | "starting"
   | "idle"
@@ -642,25 +313,12 @@ export type SessionStatus =
   | "exited"
   | "failed"
   | "interrupted"
-  /**
-   * The daemon let go of this session's agent because nobody was using it.
-   *
-   * Terminal in the same sense `interrupted` is — no process on the other end —
-   * and it must not be drawn like it. `interrupted` means something happened to
-   * the daemon and it is coming back on its own; this means nothing happened at
-   * all, the conversation is whole, and it comes back when you type into it. The
-   * one thing it may never read as is *ended*: nobody ended it.
-   */
   | "parked";
 
 export const TERMINAL_STATUSES: readonly SessionStatus[] = [
   "exited",
   "failed",
   "interrupted",
-  // Terminal because there is no agent to ask anything of — which is all
-  // `isTerminal` has ever meant here. What it does *not* decide is how the
-  // session is drawn: that is the four-way partition below, where `parked` is
-  // its own arm precisely so it lands in neither "coming back" nor "ended".
   "parked",
 ];
 
@@ -668,53 +326,14 @@ export function isTerminal(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
-/**
- * The statuses in which an agent process exists and can be asked something.
- *
- * The daemon's own derivation restated: `status` is `starting` while
- * `this.session === null`, `stopping` while the agent is being torn down, and
- * terminal after. So these three are exactly "there is something on the other
- * end", which is the question every answer about the agent's *controls* turns on.
- *
- * **`stopping` is excluded and that is load-bearing.** `doStop` touches — and
- * therefore fans a snapshot out to every attached client — both before and after
- * it empties `agentConfigState`, so a frame can legitimately arrive reading
- * `stopping` with no controls on it. Counting that as a live agent saying "I have
- * none" would throw away the memory this predicate exists to protect, on exactly
- * the path it exists for.
- */
+/** An agent process exists; stopping is excluded because a stopping frame may carry no controls. */
 export const AGENT_LIVE_STATUSES: readonly SessionStatus[] = ["idle", "running", "blocked"];
 
 export function hasLiveAgent(status: SessionStatus): boolean {
   return AGENT_LIVE_STATUSES.includes(status);
 }
 
-/**
- * A machine's own preferences. Hand-mirrored from `src/registry.ts`.
- *
- * The number and nothing else: this carried a `source` saying whether the value
- * was stored here or came from the machine's env file, and the line it fed was
- * removed as noise — the daemon's copy of this interface holds the argument.
- *
- * ⚠ **The name is the daemon's, and matching it is what makes this mirror
- * checked at all.** `webcheck.plugin-protocol.ts` guards every interface here
- * against the daemon's own by looking the *name* up in `src/`, and a name with no
- * counterpart hits its `continue` and is never compared. Its floor is a floor on
- * how many pairs were compared, so a pair that was skipped does not lower it —
- * which makes the miss invisible in both directions. This was `MachineSettings`
- * here while `registry.ts` already called it `MachineSettingsView`, and for that
- * whole span the sweep covered none of it. ⚠ **Checked rather than remembered,
- * because the first version of this sentence said "for one release" and that is
- * not what happened**: `git log --all -S'export interface MachineSettings {' --
- * packages/web/src/wire.ts` gives 29e38ff and 45ecb6e one day apart, both
- * ancestors of `v0.8.0`, and `git show v0.8.0:packages/web/src/wire.ts` already
- * carries the suffixed name — so no tag ever shipped the broken spelling and the
- * window was a day of `dev`. The docblock over that `continue` records the same
- * failure for three other types. Renaming either side without the other switches
- * the guard off silently.
- */
 export interface MachineSettingsView {
-  /** Minutes a conversation may sit untouched before its agent is shut down. `0` never does. */
   idleReleaseMinutes: number;
 }
 
@@ -724,121 +343,34 @@ export type ExitReason =
   | "start_failed"
   | "start_timeout"
   | "daemon_shutdown"
-  /** Legacy. The daemon no longer writes it; rows on disk still carry it. */
   | "agent_kill_failed"
   | "daemon_restarted"
-  /**
-   * The daemon took the agent away to reopen its conversation with something
-   * different asked of it, and is bringing it straight back — today, a change to
-   * claude's `ultracode`, which is read when a conversation is opened and has no
-   * live channel.
-   */
   | "config_changed"
-  /**
-   * Somebody signed this agent out, so the daemon ended its conversations.
-   *
-   * A person's decision, exactly like `stopped`, so it is deliberately **not** a
-   * daemon exit: nothing brings these back on its own. Signing in again does,
-   * because that is the same person reversing it.
-   */
   | "agent_signed_out"
-  /**
-   * The daemon released an idle agent and kept the conversation. Typing brings it
-   * back; nothing else does, and nothing else needs to.
-   */
   | "parked";
 
-/**
- * The exits that mean the daemon went away rather than that anybody decided.
- *
- * Mirrored from `src/events.ts` by hand, like everything else in this file, and
- * this one is worth the copy rather than being re-derived from `status`: it is
- * the rule the whole "a session reads as stopped only when you pressed Stop"
- * behaviour turns on, and the daemon uses the identical function to decide which
- * sessions it brings back.
- *
- * The exhaustive list, and why each of the others is out: `stopped` is a
- * human's decision — the point. `start_failed`/`start_timeout` never had a
- * conversation. `agent_exited` is the agent quitting under a daemon that never
- * went anywhere, so the *daemon* did not end it. `agent_kill_failed` is legacy
- * and ambiguous. `agent_signed_out` is a person to reverse it. And `parked` is in
- * neither this list nor `FINAL_EXIT_REASONS` — it is its own part, see `isParked`.
- *
- * **A copy is only worth having while it is the same copy**, and this one was
- * wrong for exactly one release: `config_changed` was added to `src/events.ts`
- * and not here, so a session the daemon was restarting on purpose answered
- * `showsAsEnded` — which used to take the composer off the screen, the one thing that
- * partition is supposed to make impossible for a session that is coming back.
- * `webcheck` now reads `src/events.ts` off disk and compares the two lists rather
- * than trusting the next person to remember.
- */
 export const DAEMON_EXIT_REASONS: readonly ExitReason[] = [
   "daemon_restarted",
   "daemon_shutdown",
   "config_changed",
 ];
 
-/**
- * The other half of the same partition: reasons a session is **not** coming back.
- *
- * Written out rather than derived, because it is what `endedWithDaemon` actually
- * tests — and the direction of that test is the whole point. `webcheck` asserts
- * that these two lists **plus `parked`** partition the daemon's union — three
- * parts, not two — so neither can silently fall behind.
- */
 export const FINAL_EXIT_REASONS: readonly ExitReason[] = [
   "stopped",
   "agent_exited",
   "start_failed",
   "start_timeout",
   "agent_kill_failed",
-  /*
-   * Final, because nothing brings it back on its own — the daemon's
-   * `autoResumable` answers `false` for it by name. Signing in again does, and
-   * that is a person acting rather than the session "coming back", which is the
-   * distinction this list is about.
-   */
   "agent_signed_out",
 ];
 
-/**
- * Did the *daemon* end this session, meaning it is coming back?
- *
- * ⚠ **Asked as "not final" rather than "is a daemon reason", and the inversion is
- * the entire safety property.** This used to be
- * `DAEMON_EXIT_REASONS.includes(exit.reason)`, so a reason the client had never
- * heard of answered `false` — the session fell out of `waitingForDaemon` into
- * `showsAsEnded`, which `Composer.tsx` used to early-return on, **taking the
- * composer off the screen for a conversation that is coming back**.
- *
- * `webcheck` compares both lists against `src/events.ts` off disk, which catches
- * that at build time — and cannot catch it at *runtime*, which is the case that
- * actually happens. `packages/web` ships inside the control plane's image, so a
- * weekly deploy hands a new client to everybody; a daemon is updated whenever its
- * owner gets to it, and a tab is reloaded whenever its owner gets to *that*. A
- * tab older than the daemon it is pointed at is therefore ordinary, not exotic,
- * and the exit reason is the one field where being behind was destructive.
- *
- * Read this way an unknown reason reads as "the daemon took it away", which is
- * wrong in the harmless direction: the row stays in Active with a composer on it,
- * and a send against a session that really did end answers an error the client
- * already draws. The other direction is a live session somebody cannot type into
- * with nothing on screen explaining why.
- */
+/** Asked as not final, so an unknown reason from a newer daemon reads as coming back, never as ended. */
 export function endedWithDaemon(exit: { reason: ExitReason } | null | undefined): boolean {
   if (exit === null || exit === undefined) return false;
   return !FINAL_EXIT_REASONS.includes(exit.reason);
 }
 
-/**
- * What the daemon's own resume pass is doing about a session.
- *
- * **Absent means "waiting", never "failed".** An older daemon sends nothing here
- * and never resumes anything, so reading absence as failure would put a red
- * banner on every ended session in the fleet; reading it as waiting is quietly
- * wrong about sessions that are not coming back, which is much the better
- * direction to be wrong in.
- */
+/** Absent means waiting, never failed. */
 export interface SessionResumeState {
   state: "waiting" | "running" | "failed";
   attempts: number;
@@ -846,18 +378,6 @@ export interface SessionResumeState {
   at: number;
 }
 
-/**
- * How the daemon last knew the agent, and how it would signal it.
- *
- * A one-arm union rather than a bare `number`, and the shape is kept rather than
- * flattened: the daemon's `toHandle` still has to answer "no handle at all",
- * which is a different fact from "pid 0". Nothing here renders it; it is
- * mirrored so the shape stays honest.
- *
- * Rows written by the multi-tenant daemon can still carry a `container` arm on
- * disk. Nothing produces one now and nothing here has to read it — the daemon
- * reports such a handle as one it will not signal.
- */
 export type AgentHandle = { kind: "local"; pid: number };
 
 export interface SessionExit {
@@ -865,15 +385,12 @@ export interface SessionExit {
   detail: string | null;
   at: number;
   agentHandle: AgentHandle | null;
-  /** `false` means "probably orphaned", which is worth saying out loud. */
   agentConfirmedDead: boolean;
 }
 
 export interface SessionWorkspace {
   mode: "worktree" | "plain";
-  /** Where the agent actually runs. For a worktree session this is ephemeral. */
   root: string;
-  /** What the human asked for. This is the one to show a human. */
   requestedCwd: string;
   git: {
     repoRoot: string;
@@ -888,59 +405,28 @@ export interface SessionWorkspace {
 
 export interface PendingPermissionSnapshot {
   permissionId: string;
-  /** Still the join key back to the `tool_call`, used as a fallback. */
   toolCallId: string | null;
   title: string;
   options: PermissionOptionSummary[];
   raisedAt: number;
-  /**
-   * The tool's arguments as sent with the request, bounded to 8 KiB.
-   *
-   * Usually the only copy: kimi emits its `tool_call` event with `rawInput: null`
-   * and the command appears for the first time on the permission request. May be
-   * the `{truncated: true, bytes}` stand-in.
-   */
   rawInput: unknown;
-  /** ACP content blocks — where an edit's diff lives. Bounded the same way. */
   content: unknown;
 }
 
-/**
- * A question the agent is waiting on.
- *
- * **The form is not here**, and that is the difference from a pending permission
- * rather than an oversight. A permission earns its 8 KiB on this record because a
- * blocked session has to be answerable *from the list*; a question is not — you
- * have to read the form and fill it in. So the snapshot says only that one is
- * waiting, and `GET /sessions/:id/elicitations/:id` serves the fields when a card
- * opens. Same arrangement the command list has, for the same reason.
- */
 export interface PendingElicitationSnapshot {
   elicitationId: string;
   toolCallId: string | null;
-  /** The agent's prompt. The one string a list row draws. */
   message: string;
-  /** Enough to size a skeleton while the form is in flight. Nothing decides on it. */
   fieldCount: number;
   raisedAt: number;
 }
 
-/** One choice on a form field, already normalized by the daemon. */
 export interface ElicitationOption {
   value: string;
   label: string;
   description: string | null;
 }
 
-/**
- * One field of a form, as the daemon projected it.
- *
- * Projected there rather than here: the raw ACP schema is an open union of
- * JSON-Schema fragments, and the daemon has to validate the reply against
- * something — validating against anything but what the client was shown would
- * refuse answers it invited. `pattern` is deliberately absent all the way down;
- * running an agent-chosen regex is a hazard wherever it happens.
- */
 export interface ElicitationField {
   key: string;
   kind: "string" | "number" | "integer" | "boolean" | "multi_select";
@@ -952,14 +438,6 @@ export interface ElicitationField {
   max: number | null;
   format: "email" | "uri" | "date" | "date-time" | null;
   default: string | number | boolean | string[] | null;
-  /**
-   * The key of the field this one is an alternative answer to, or `null`.
-   *
-   * Optional on the wire, because a daemon older than it simply does not send it —
-   * and `null` is what an agent that declares nothing already produces, so absent
-   * and "no" are the same state here rather than two. See `src/events.ts` for what
-   * declares it and why no key is ever parsed to find out.
-   */
   alternativeTo?: string | null;
 }
 
@@ -970,7 +448,6 @@ export interface ElicitationRequestEvent {
   message: string;
 }
 
-/** One answer, already rendered by the daemon so no client has to join. */
 export interface ElicitationAnswerSummary {
   key: string;
   label: string;
@@ -983,106 +460,26 @@ export interface ElicitationResolvedEvent {
   toolCallId: string | null;
   message: string;
   action: "accept" | "decline" | "cancel";
-  /** `null` for decline and cancel, which answer *about* the form, not within it. */
   answers: ElicitationAnswerSummary[] | null;
   by: AnswerResolvedBy;
 }
 
-/**
- * One message waiting for the agent, as the daemon reports it.
- *
- * Carries no text on purpose: the message is already a `prompt` event in the log
- * and `seq` is what points at it, so putting the body here would send the same
- * sentence on every frame until it was delivered.
- *
- * ⚠ **Named `QueuedPrompt` because `registry.ts` names it that**, and the name is
- * the only thing holding the drift guard on. `webcheck.plugin-protocol.ts` looks
- * each interface here up in `src/` **by name** and takes its `continue` when the
- * lookup misses, so a `…Snapshot` suffix would make this a mirror nothing
- * compares — and the floor cannot say so, because a skipped pair does not lower
- * `compared`, it merely fails to raise it.
- *
- * ⚠ **The suffixed spelling never shipped, and the sentence here used to say it
- * did.** `git log --all -S'QueuedPromptSnapshot'` is empty and every line of this
- * feature arrived in one commit, so the 51-against-52 reading this docblock used
- * to quote was taken in a working tree and is not a fact about any release. The
- * mechanism is the part worth keeping and it is re-takeable on demand: `npx tsx
- * packages/web/scripts/webcheck.plugin-protocol.ts` prints its own
- * `N interfaces` line, and a pair the `continue` skips is missing from that N
- * with nothing anywhere saying which one. Third time that `continue` had
- * swallowed a whole feature — the driver's own docblocks number them, and count
- * {@link BackgroundTask} below as the fourth. The rule is stated where the mirror
- * is declared.
- */
 export interface QueuedPrompt {
   id: string;
   seq: number;
   at: number;
 }
 
-/**
- * What a task is doing, in the five words the agent's own adapter uses.
- *
- * ⚠ **Mirrored, never re-derived, and the terminal three are the reason.**
- * `completed`, `failed` and `stopped` are over; `running` and `paused` are not.
- * The daemon decides which of those defers parking, so a second opinion here
- * about what "finished" means would draw a row the daemon is still holding an
- * agent for — or, worse, a finished row over work the daemon thinks is live.
- *
- * ⚠ **And that is a rule this file states rather than a property anything holds:
- * the split *is* copied by hand, in {@link taskFinished}, and nothing compares the
- * two copies.** The drift sweep in `webcheck.plugin-protocol.ts` reads
- * `src/acp/asynctasks.ts` — it was added there for `BackgroundTask` — but it
- * enumerates `export interface` only, so this alias and the three words below it
- * are invisible to it, and its count floor cannot notice what it never looked at.
- * `taskFinished` carries what would catch it.
- */
+/** Mirrored, never re-derived: which states are terminal is the daemon's decision. */
 export type AsyncTaskState = "running" | "paused" | "completed" | "failed" | "stopped";
 
-/** Per-task counters the agent reports. Numbers only. */
 export interface AsyncTaskUsage {
   totalTokens: number;
   toolUses: number;
   durationMs: number;
 }
 
-/**
- * One piece of background work, as the daemon holds it.
- *
- * ⚠ **Named `BackgroundTask` because `acp/asynctasks.ts` names it that**, under
- * the rule stated above `QueuedPrompt`: the drift guard looks each interface up in
- * `src/` **by name**, and a rename here makes this a mirror nothing compares while
- * the floor stays silent about it.
- *
- * ⚠ **`outputFilePath` is drawn nowhere in this app, and on one of the three
- * routes that carry this record it is not sent either — so `null` here means two
- * different things and the type cannot say which.** The daemon keeps the field:
- * `acp/asynctasks.ts` clips it at `MAX_ASYNC_TASK_PATH_CHARS` rather than dropping
- * it, on the argument that a field dropped at ingest because today's screen has no
- * use for it is a field that has silently stopped existing, and the path itself is
- * unreadable anyway — it names
- * `/private/tmp/claude-<uid>/…/tasks/<id>.output`, outside the workspace, which
- * `files-paths-git.md` containment refuses to open. That is why there is no detail
- * view to build and why the panel's footer says so in a sentence instead.
- *
- * Egress is where keeping it stopped being free. `ManagedSession.snapshot` in
- * `src/registry.ts` takes a `listing` option, and the one route that passes it —
- * `GET /sessions`, the polled many-session read — rewrites this field to `null` on
- * every task. The clip allows 1024 characters and `MAX_TRACKED_ASYNC_TASKS` is 32,
- * so that is a bound of ~32 KiB of paths *per session* on a response that repeats
- * every four seconds over a relay, for a value nothing draws; it is an upper bound
- * from the two constants rather than a frame anybody has seen. The WS `snapshot`
- * frame and `GET /sessions/:id` pass no `listing` and carry it whole.
- *
- * ⚠ **So a reader may not take `null` off the listing as an answer.** Off the
- * socket or off `GET /sessions/:id` it means *this task has no output file*; off
- * `GET /sessions` it means *this route does not carry one*. Nothing in
- * `packages/web` reads the field today, which is the only reason that is
- * survivable — a reader added later has to take its value from the socket or the
- * single-session read, never from the list. `snapshot`'s own docblock in
- * `src/registry.ts` is the other half of this sentence, and the two have to move
- * together: the cut is the daemon's and the consequence is this file's.
- */
+/** outputFilePath is nulled on the session listing, so null there means not carried: read it from the socket or the single-session route. */
 export interface BackgroundTask {
   id: string;
   name: string;
@@ -1097,79 +494,20 @@ export interface BackgroundTask {
   outputFilePath: string | null;
   toolCallId: string | null;
   startedAt: number;
-  /**
-   * When it reached a terminal state, or `null` while it runs — the daemon's clock.
-   *
-   * The agent sends no end time (the adapter drops the SDK's `end_time` and the
-   * final `usage`), so this is stamped at the terminal edge. It is what stops a
-   * finished card's elapsed time counting up for ever.
-   */
   endedAt: number | null;
 }
 
-/**
- * How much of a snapshot a frame is actually carrying. See
- * {@link SessionSnapshot.reduced}.
- *
- * The two counts are the **true** lengths of the daemon's own arrays — what
- * `GET /sessions/:id` would return — and not the lengths of the arrays beside
- * them on the frame, so `reduced.pendingPermissions > pendingPermissions.length`
- * is the readable form of "rows were cut". `blobs` says the frame emptied every
- * surviving permission's `rawInput` and `content`, which is the one thing that
- * looks identical to the agent's own payload having been over 8 KiB at ingest and
- * is the only one of the two that asking the route can fix.
- *
- * ⚠ **`blobs` is narrowed once this record reaches a row**, and the two readings
- * are set out at {@link SessionSnapshot.reduced}: what the daemon sends is what
- * the ladder emptied, what `store.ts` keeps is what this client could not put
- * back. Anything reading it off a `store` row is reading the second.
- *
- * Mirrored from `SnapshotReduction` in `src/registry.ts`; named as the daemon
- * names it, or the hand-mirror sweep never compares it. ⚠ **One field below is
- * not mirrored and never arrives from the daemon** — it is said so at the field
- * rather than left to be discovered.
- */
 export interface SnapshotReduction {
   pendingPermissions: number;
   pendingElicitations: number;
   blobs: boolean;
-  /**
-   * ⚠ **Written by `store.unreduceSnapshot`, never sent by any daemon.** The one
-   * field here with no counterpart in `src/registry.ts`. It lives on `reduced`
-   * rather than on the row because `reduced` is already the record that means two
-   * different things either side of that merge ({@link SessionSnapshot.reduced}),
-   * and because it is only ever read together with {@link blobs}.
-   *
-   * The parked permission ids this client holds a **whole-record** copy of, in
-   * the order they sit in `pendingPermissions`. A `{truncated, bytes}` stand-in
-   * on one of those was cut by the daemon's 8 KiB ingest clamp and nothing
-   * anywhere has more of it; a stand-in on a row absent from here may instead be
-   * the socket frame's ladder, and the record may still hold it whole. That is
-   * the distinction `blobs` and `PermissionCard`'s two sentences turn on, and it
-   * cannot be read off the row: the two stand-ins are byte-identical.
-   *
-   * Absent reads as empty, which draws the *recoverable* sentence — the
-   * conservative half, and the one a poll corrects within seconds.
-   */
+  // Client-only, written by store.unreduceSnapshot: the permission ids this client holds a whole record of.
   onRecord?: string[];
 }
 
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
-  /**
-   * The assembled agent this session was started as, or `null` for a bare
-   * harness.
-   *
-   * ⚠ **An id and nothing else** — not the name, not the system, not the model.
-   * Those belong to the preset, which can be edited, and a copy riding a
-   * snapshot fanned out per client on every output token is a copy that goes
-   * stale exactly where it would be read. This is the join key into
-   * `GET /custom-agents`, which the strip already fetches.
-   *
-   * Optional for this file's usual reason: a daemon older than this feature
-   * sends nothing, and `undefined` reads the same as `null` at every call site.
-   */
   customAgent?: string | null;
   cwd: string;
   workspace: SessionWorkspace;
@@ -1178,297 +516,61 @@ export interface SessionSnapshot {
   agentHandle: AgentHandle | null;
   turn: number | null;
   turnStartedAt: number | null;
-  /**
-   * When somebody asked this turn to stop, or `null`.
-   *
-   * Optional for the reason `pendingElicitations` is: an older daemon does not
-   * send it. Every reader goes through {@link cancelInFlight}, which is where the
-   * `?? null` lives, so `undefined` means "that daemon cannot say" and reads as no
-   * cancel outstanding — the state the control was in before any of this existed.
-   */
   cancelRequestedAt?: number | null;
-  /**
-   * Messages the daemon has taken and the agent has not been given yet.
-   *
-   * ⚠ **Usually empty on an agent that can be steered, never guaranteed empty.**
-   * The message normally goes straight into the running turn — but the daemon
-   * falls through to this queue whenever the steer itself fails: an agent that
-   * advertised `_session/steering` and then answered `unsupported`, or a
-   * `prompt_required` landing while a `/clear` or a restart is in flight. So read
-   * this array rather than inferring it from {@link midTurnDelivery}; that is what
-   * {@link queuedSeqs} does. `seq` names the `prompt` event
-   * the message already is, which is how the transcript finds the bubble to draw
-   * its line under without matching on text.
-   *
-   * Optional for `cancelRequestedAt`'s reason, and every reader goes through
-   * {@link queuedSeqs} so `undefined` behaves as `[]` in one place.
-   */
+  // Not always empty on a steerable agent: a failed steer falls back to this queue, so read it through queuedSeqs.
   queuedPrompts?: QueuedPrompt[];
-  /**
-   * Work the agent started that outlives the call that started it.
-   *
-   * Optional for `cancelRequestedAt`'s reason — an older daemon does not send it
-   * — and every reader goes through {@link backgroundTasksOf}, so `undefined`
-   * behaves as `[]` in one place and a daemon that cannot say draws exactly what
-   * it drew before any of this existed.
-   *
-   * ⚠ **Empty is not an answer on its own.** Read it with
-   * {@link reportsBackgroundTasks}: three agents out of four never report
-   * background work at all, so an empty list from kimi means *nobody asked* and
-   * an empty list from claude means *nothing is running*. Drawing the first as
-   * the second is the one way this panel can lie.
-   */
   backgroundTasks?: BackgroundTask[];
-  /**
-   * Whether this session's agent reports background work at all.
-   *
-   * ⚠ **Read, and it is what keeps the panel's empty state honest.** It travels
-   * `SessionView` → `EventList` → `TaskPanel`, which draws `No tasks currently
-   * running` when it is true and `This agent doesn't report background work` when
-   * it is false. That is the whole reason the field exists: the first sentence is
-   * a *claim*, and on three agents out of four it would simply be false — an empty
-   * list from kimi means *nobody asked*, not *nothing is running*. `WaitingFoot`
-   * is no longer the passive row this paragraph used to describe either; it is the
-   * control that opens that panel.
-   */
   reportsBackgroundTasks?: boolean;
-  /**
-   * What this session does with a message sent while a turn is running.
-   *
-   * ⚠ **Its absence is the whole compatibility story for sending mid-turn.** A
-   * daemon that does not send this field is one that still answers
-   * `409 turn_in_flight`, so {@link acceptsMidTurn} answers `false`, the composer
-   * keeps every gate it had, and Send stays refused while the agent works —
-   * exactly today's behaviour, degraded rather than broken. Nothing branches on a
-   * daemon *version* (`compatibility.md` rule 1); it branches on a capability the
-   * daemon states about itself.
-   *
-   * `null` while there is no agent to ask.
-   */
   midTurnDelivery?: "steer" | "queue" | null;
-  /** Not `lastActivity`, not `updatedAt`. The daemon calls it this. */
   lastEventAt: number | null;
   createdAt: number;
   firstSeq: number;
   lastSeq: number;
   dropped: number;
   pendingPermissions: PendingPermissionSnapshot[];
-  /**
-   * Questions the agent is waiting on.
-   *
-   * Optional because an older daemon does not send it, and every reader goes
-   * through {@link humanRequests} rather than touching it — which is what makes
-   * `undefined` behave as `[]` in one place instead of nine.
-   */
   pendingElicitations?: PendingElicitationSnapshot[];
-  /**
-   * What a socket frame had to leave out to fit under the wire ceiling.
-   *
-   * ⚠ **Absent means whole, and it is absent almost always.** The daemon sets it
-   * only on a `hello`/`snapshot` frame its `fitSnapshotFrame` ladder had to cut —
-   * past roughly 512 KiB of parked requests — and never on `GET /sessions` or
-   * `GET /sessions/:id`, which still serve the record whole. An older daemon
-   * sends nothing here and reads the same way, which is this file's usual
-   * degrade: every count below falls back to the array lengths, i.e. to exactly
-   * what this client did before the field existed.
-   *
-   * ⚠ **Why it has to be read at all.** `store.ts` writes the poll's snapshot and
-   * the frame's snapshot into the same `row.snapshot`. Without this field the two
-   * are indistinguishable — a halved list is a well-formed list — so the approval
-   * count, the `more` line and `PermissionCard`'s "Part of this request was too
-   * large to keep" banner alternated on every poll/frame swap, and each swap
-   * re-armed an effect that fires `store.loadAll`.
-   *
-   * ⚠ **This said "what it does not do is put the missing rows back: they are
-   * not on the frame", and that is now only half true.** They are not on the
-   * frame, and {@link waitingCount} is still the honest count of how many there
-   * are — but `store.unreduceSnapshot` puts back the rows and the payloads this
-   * client is *already holding* from the poll, which is what stopped a frame
-   * clobbering a fuller row. What no client can recover is a row it has never
-   * seen; that one is still one `GET /sessions/:id` away, and the 4s poll is what
-   * makes the request.
-   *
-   * `reduced` therefore means two slightly different things either side of that
-   * merge, and the difference is deliberate. **As the daemon sends it**, the
-   * counts are the record's true lengths, `blobs` says the ladder emptied every
-   * surviving payload, and {@link SnapshotReduction.onRecord} is absent. **As
-   * `store.ts` keeps it on a row**, the counts are unchanged, `onRecord` names the
-   * parked permissions this client holds a whole-record copy of, and `blobs` has
-   * been narrowed to *"a stand-in sits on a row this client has no record copy
-   * of"*. ⚠ **That is a reconstruction and not a fact off the wire** — the two
-   * stand-ins are byte-identical and the daemon sends nothing that separates
-   * them, so this is as close as `PermissionCard` can get to *"the record still
-   * has this payload"*, and it errs towards saying so.
-   */
+  // Absent means whole; set only on a socket frame the daemon cut, and its meaning narrows once store.ts merges it onto a row.
   reduced?: SnapshotReduction;
   exit: SessionExit | null;
-  /**
-   * The agent's controls, on the snapshot rather than only in the log.
-   *
-   * Load-bearing: the controls are state with one current version, and the log
-   * evicts a prefix — and a *restored* session has no live agent to have published
-   * them, so there may be nothing in the transcript to fold. Optional here because
-   * an older daemon does not send it.
-   */
   agentConfig?: AgentConfig;
-  /**
-   * Moves whenever the agent republishes its command list. `0` means it never has.
-   *
-   * The list itself is behind `GET /sessions/:id/commands` and deliberately not
-   * here: this record arrives for every session on every poll, and a command list
-   * is only wanted inside one composer. This is the number that says when to go
-   * and fetch it.
-   *
-   * **Refetch on `!==`, never on `>`.** A daemon restart puts this back to 0 while
-   * a client still holds 5, and the right response is to drop the cached list —
-   * the agent that published it is gone — not to conclude the daemon is behind.
-   * `undefined` (an older daemon) collapses to "no commands", the same as `0`.
-   */
+  // Refetch on any change, never only on increase: a daemon restart resets it to 0.
   commandsRevision?: number;
-  /**
-   * How full the model's context window is.
-   *
-   * `null` is a real answer — "cannot tell" — and `undefined` (an older daemon) is
-   * the same one, which is why the two collapse rather than being told apart. Kimi
-   * may never report it, and a restored session has no live agent to ask.
-   *
-   * `size` is 0 for "the agent reported occupancy but not a window". Nothing may
-   * divide by it and nothing may substitute a default: a percentage of a made-up
-   * denominator is a number somebody would plan around.
-   */
+  // size 0 means occupancy without a window: never divide by it or substitute a default.
   contextUsage?: { used: number; size: number; cost: { amount: number; currency: string } | null } | null;
-  /**
-   * What this session is called, or `null` if nobody has named it.
-   *
-   * Never `""` — the daemon distinguishes "never named" from "named", and a client
-   * needs that to know whether to draw its own fallback.
-   */
   title?: string | null;
-  /** Kept at the top of its group, and never dropped by a `?limit=` cut. */
   pinned?: boolean;
-  /**
-   * Where this session sits in the list, or `null` for wherever its age puts it.
-   *
-   * ⚠ **Three-valued, and `undefined` is the compatibility signal rather than a
-   * missing value.** A daemon that can store an order always sends the field, so
-   * an absent one names a daemon that cannot — and that machine's rows lose the
-   * drag and the Move items while everything else about them works. `null` is the
-   * ordinary answer from a daemon that can: nobody has moved this row.
-   *
-   * Nothing branches on `DAEMON_VERSION`; an old daemon is known by the shape of
-   * what it answers, which is `compatibility.md`'s rule 1. And the degradation is
-   * not a blank list — `effectiveRank` reads both absent and `null` as
-   * `createdAt`, so an old machine draws a stable, creation-ordered list rather
-   * than the recency shuffle it drew before.
-   */
   rank?: number | null;
-  /** Absent on an older daemon, and on every session it has no reason to resume. */
   resume?: SessionResumeState;
 }
 
-/**
- * Resumable is not a field on the snapshot — it is derived, here, from the two
- * that are. A terminal session that still holds the agent's own session id can be
- * put back on the same conversation.
- *
- * Still the question the manual Resume affordance asks, and deliberately wider
- * than the four below: a session somebody stopped on purpose is resumable, it
- * just is not one the daemon brings back on its own.
- */
 export function isResumable(session: SessionSnapshot): boolean {
   return isTerminal(session.status) && session.agentSessionId !== null;
 }
 
-/*
- * How a terminal session is presented, in five pure functions.
- *
- * The property that makes them assertable, and that `webcheck` states directly:
- * **for any terminal session exactly one of `isParked`, `waitingForDaemon`,
- * `resumeStalled` and `showsAsEnded` is true, and for a live session none of them
- * is.** They are a partition, not four independent tests, which is why they are
- * written here together rather than inlined at the call sites that need them.
- *
- * ⚠ **`isParked` is the newest arm and it had to go *first*, ahead of
- * `endedWithDaemon`.** That predicate is written as "not one of the final
- * reasons", so a reason it has never been told about answers `true` — the
- * fail-safe that keeps an old tab from taking the composer away from a live
- * conversation, and exactly the wrong answer for this one. Left to it, a parked
- * session would have drawn "reconnecting after a restart" under a daemon that was
- * doing nothing of the kind and would never have started. The order of the tests
- * below is the fix, and it is the whole of it.
- *
- * Every one of them keys on `exit.reason` and never on `status` alone. That is
- * the whole correction: `daemon_shutdown` — the ordinary deploy — used to derive
- * `exited`, and a client that asked `status === "interrupted"` would have been
- * right about a hard kill and wrong about every graceful restart there has ever
- * been. The daemon derives `interrupted` from the same predicate now, so the two
- * agree, but agreeing by construction is better than agreeing by coincidence.
- */
+// For a terminal session exactly one of isParked, waitingForDaemon, resumeStalled and showsAsEnded is true.
+// isParked is tested first, because endedWithDaemon reads an unknown reason as coming back.
 
-/**
- * The daemon let its agent go for being idle. Nothing is wrong and nothing is
- * happening; sending a message starts it again.
- *
- * Keyed on `exit.reason` like its siblings rather than on `status === "parked"`,
- * and for their reason: the reason is what the daemon *decided*, while the status
- * is derived from it, so a client that asks the derived question is one
- * derivation away from being wrong. Here the two happen to be one-to-one, which
- * makes asking the reason free rather than unnecessary.
- *
- * `agentSessionId === null` is deliberately not a case: parking requires one, so
- * a parked session without it did not come from this daemon and is better drawn
- * as stalled — which is where the ordering below leaves it.
- */
 export function isParked(session: SessionSnapshot): boolean {
   if (!isTerminal(session.status) || session.exit?.reason !== "parked") return false;
   return session.agentSessionId !== null;
 }
 
-/**
- * A session this daemon released, on a daemon that cannot put it back.
- *
- * ⚠ **The rollback door, and it is recognised by the *shape of the answer* rather
- * than by a version**, which is `compatibility.md`'s rule and the same trick the
- * import flow uses on an old daemon. A build that knows about parking derives
- * `status: "parked"` from the reason; one that predates it has no such member and
- * its `status` switch has a `default:` arm, so the pair arrives as `parked`
- * carried on `exited` — a combination no current daemon can produce.
- *
- * It matters because a rollback is somebody's break-glass. The older
- * `autoResumable` is a `switch` with no `default:` and no `parked` arm, so it
- * answers `undefined` — falsy on both triggers — and the transparent resume a
- * prompt performs never fires: every message answers `409 session_terminal`. The
- * conversation, its transcript and its worktree are all intact, and `POST
- * /sessions/:id/resume` still works, because that route calls `resume()` directly
- * rather than asking `autoResumable`. So the only thing missing is the control,
- * which this restores — and only in the state where a message would not do.
- */
 export function parkedByOlderDaemon(session: SessionSnapshot): boolean {
   return isParked(session) && session.status !== "parked";
 }
 
-/** The daemon ended it and is bringing it back. Draw it as ordinary. */
 export function waitingForDaemon(session: SessionSnapshot): boolean {
   if (isParked(session)) return false;
   if (!isTerminal(session.status) || !endedWithDaemon(session.exit)) return false;
   return session.agentSessionId !== null && session.resume?.state !== "failed";
 }
 
-/**
- * The daemon ended it and cannot bring it back. A human has to do something.
- *
- * `agentSessionId === null` lands here rather than in `showsAsEnded` on purpose:
- * the daemon still went away underneath somebody, and saying "ended" about it
- * would be answering a question they did not ask. There is simply nothing to
- * reattach to, which is what the copy says.
- */
 export function resumeStalled(session: SessionSnapshot): boolean {
   if (isParked(session)) return false;
   if (!isTerminal(session.status) || !endedWithDaemon(session.exit)) return false;
   return session.resume?.state === "failed" || session.agentSessionId === null;
 }
 
-/** It is over, and somebody meant it. The only case that loses its composer. */
 export function showsAsEnded(session: SessionSnapshot): boolean {
   return (
     isTerminal(session.status) &&
@@ -1478,182 +580,35 @@ export function showsAsEnded(session: SessionSnapshot): boolean {
   );
 }
 
-/**
- * The agent is working on your behalf, and nothing is waiting on you.
- *
- * Three clauses, and each is a state the other two get wrong:
- *
- *   `turn !== null`             — the field the composer already reads, so the
- *                                 placeholder and the transcript's indicator
- *                                 cannot disagree about the same moment.
- *   `!needsHuman(session)`      — a permission *or a question* is raised
- *                                 **mid-turn**, so `turn` stays set while the
- *                                 agent is in fact waiting on a human. Saying
- *                                 "working" there is simply false, and the card
- *                                 two rows down says the opposite at full size.
- *   `!isTerminal(status)`       — `turn` is cleared in a `finally`, which a daemon
- *                                 that dies mid-turn never reaches. A restored row
- *                                 must not blink for ever.
- *
- * The daemon's own `status === "running"` derivation, restated from the fields the
- * snapshot carries — blocked beats running, terminal beats both — so the two agree
- * by construction rather than by coincidence, which is what the note above this
- * block of predicates asks for.
- */
 export function showsWorking(session: SessionSnapshot): boolean {
   return session.turn !== null && !needsHuman(session) && !isTerminal(session.status);
 }
 
-/**
- * Whether anything this session started could still report back.
- *
- * The gate on the transcript's "waiting for N tasks" line, and it is a **sibling**
- * of `showsWorking` rather than a widening of it. Widening that one would have been
- * the natural-looking move and it is the trap: `showsWorking` is what refuses Send
- * (`Composer`'s `sendRefused`), so a session whose only way out is sending a message
- * would have had the control taken away in exactly the state the defect was reported
- * from. `canCancelTurn` must not follow it either — there is no turn, so `POST
- * /sessions/:id/cancel` answers `no_turn`, and an armed Stop there is a control that
- * provably does nothing.
- *
- * It deliberately **does not read `turn`**. That clause going false at `turn_end` is
- * the entire reason the line exists: the delegations are events in the log and
- * outlive the turn that started them.
- *
- * Two exclusions, both of them states in which a spawn can never complete:
- *
- *   terminal — the agent is gone, the interrupted turn is deliberately not re-sent,
- *     so every call it left `pending` stays that way. Without this, an ended session
- *     that once delegated reads "waiting for 1 task" for ever.
- *   `stopping` — somebody stopped the turn and the delegation is being killed rather
- *     than awaited. Not covered by `isTerminal`, for the reason `canCancelTurn`
- *     spells out one block down: `{status: "stopping", turn: 5}` persists for
- *     seconds.
- *
- * A **blocked** session still draws it, deliberately. The ask card is an `absolute`
- * region over the composer and does not collide with the transcript's foot, and
- * suppressing would blink the line out and back on every approval.
- *
- * ⚠ **This is half the gate, and it is the half that cannot see the permanent
- * case.** The terminal exclusion above closes only the arm that already resolves
- * itself: auto-resume takes the session back *out* of terminal, so it returns
- * `idle`, holding the same conversation and the same rows a dead agent left
- * `pending` — and every one of those clauses then reads true. No fact about
- * `status` can tell that apart from an agent legitimately working after
- * `turn_end`, because by the time anybody reads one the status is the honest
- * `idle`. What separates them is *which agent process* started the call, which is
- * a fact about the transcript: see `Tail.taskFloor`, the other half, which
- * `EventList` applies beside this one.
- */
+/** Ignores turn on purpose and must not gate Send or Stop; stale pending calls are Tail.taskFloor's half. */
 export function mayStillReport(session: SessionSnapshot): boolean {
   return !isTerminal(session.status) && session.status !== "stopping";
 }
 
-/**
- * There is a turn to stop, so the composer offers a way to stop it.
- *
- * Deliberately **wider than `showsWorking`** by exactly the blocked case, and
- * that difference is the point. A session parked on a question is one where a
- * person has already decided they want out often enough that answering the
- * question is beside the point — and the daemon takes the cancel there, sweeping
- * whatever is parked, so a control drawn on `showsWorking` alone would be missing
- * from the state it is most wanted in. The two predicates are `turn !== null &&
- * !isTerminal` with and without `!needsHuman`, which is why this is written from
- * the same fields rather than as `showsWorking(s) || needsHuman(s)`: that form
- * reads as an afterthought bolted on, and it is the base rule.
- *
- * It matches `POST /sessions/:id/cancel` answering `cancelled` rather than
- * `no_turn`, and not the button's *enabled* state — see {@link cancelInFlight},
- * which is a different question with a different answer.
- *
- * **`stopping` is excluded, and it is not covered by `isTerminal`.** The daemon
- * refuses on `terminal || stopRequested`, and `stopRequested` shows on the wire
- * as exactly this status — a live, non-terminal one with its own dot. It is not a
- * moment either: `turn` is cleared in `pump`'s `finally`, which cannot run until
- * the prompt generator unwinds inside `dispose()`, i.e. after a 5s cancel grace
- * and a 2s close. So a session somebody stopped mid-turn spends *seconds*
- * carrying `{status: "stopping", turn: 5}`, and a predicate reading `isTerminal`
- * alone drew an armed Stop across all of it, onto a guaranteed `409
- * session_terminal` and a red toast about a session that is already stopping.
- */
+/** Wider than showsWorking by the blocked case; stopping is excluded because it lingers for seconds with a turn set. */
 export function canCancelTurn(session: SessionSnapshot): boolean {
   return session.turn !== null && !isTerminal(session.status) && session.status !== "stopping";
 }
 
-/**
- * A change that restarts the agent would be refused right now.
- *
- * The daemon's own gate, read from the field it gates on: `setConfigOption` in
- * `registry.ts` answers `turn_in_flight` on `this.turn !== null`, and the route
- * turns that into `409`. One control needs the agent restarted to take effect —
- * ultracode — and this is what lets its row say so before the tap instead of
- * after it. Q3.429.
- *
- * **Deliberately neither of the two predicates that already read this field.**
- * `showsWorking` carries `!needsHuman`, so it goes false while a permission is
- * parked — and a parked request keeps the turn open, so a warning drawn off it
- * would go silent in one of the two states the daemon still refuses in.
- * `canCancelTurn` additionally drops `stopping` and terminal, which this does not
- * need to exclude and must not: there the daemon answers `session_terminal`
- * instead, a refusal that is *not* suppressed, and the strip is drawn `stale`
- * ahead of it anyway.
- */
+/** The daemon refuses a restarting change while a turn is set, even with a permission parked (Q3.429). */
 export function turnInFlight(session: SessionSnapshot): boolean {
   return session.turn !== null;
 }
 
-/**
- * Somebody has asked this turn to stop and the agent has not finished.
- *
- * Both clauses, because the daemon clears the pair together and a client reading
- * `cancelRequestedAt` alone would be trusting a field an older daemon does not
- * send at all — `?? null` is the whole migration, and it degrades to "no cancel
- * has been asked for", which is the honest reading of a snapshot that cannot say.
- *
- * What it is for is the *second* tap. The button must not spring back to an armed
- * Stop the moment the request returns, because the turn very often outlives the
- * answer — an agent mid-tool-call notices a cancel when it next looks — and a
- * control that looks untouched is one somebody presses again.
- */
 export function cancelInFlight(session: SessionSnapshot): boolean {
   return (session.cancelRequestedAt ?? null) !== null && canCancelTurn(session);
 }
 
-/**
- * Whether this daemon takes a message sent while the agent is working.
- *
- * ⚠ **The one gate in this file that reads a field an older daemon does not
- * send, and it is written to answer `false` for one.** That is not a degradation
- * to tolerate, it is the correct answer: a daemon without `midTurnDelivery`
- * refuses a mid-turn prompt with `409 turn_in_flight`, so a composer that offered
- * Send would be live onto a route that can only fail — the exact defect
- * `attach.ts` records having shipped once already.
- *
- * `null` — an agent that is away — is `false` too, and for a different reason
- * that arrives at the same place: there is nothing to steer and nothing to queue
- * behind, so a send goes down the ordinary path and the ordinary path is not
- * refused. Nothing is lost by saying no here.
- */
+/** False for a daemon that does not send midTurnDelivery: it refuses mid-turn prompts. */
 export function acceptsMidTurn(session: SessionSnapshot): boolean {
   const delivery = session.midTurnDelivery ?? null;
   return delivery === "steer" || delivery === "queue";
 }
 
-/**
- * The seqs of messages taken and not yet delivered.
- *
- * A `Set` because the transcript asks once per row, and the one place `undefined`
- * becomes `[]` — see {@link SessionSnapshot.queuedPrompts}. Called by
- * `SessionView`, which memoises the result: a non-empty queue builds a fresh
- * `Set`, and what it feeds is a **context**, so an unstable identity re-renders
- * every bubble in the conversation on every token.
- *
- * ⚠ **The empty answer is one shared value rather than a fresh `Set`**, and that
- * is the common case twice over: every session on a steerable agent, and every
- * session on a daemon too old to have a queue. It costs nothing to give it back
- * from here, and it makes "the identity only changes when the queue changes" true
- * of this function rather than only of the memo above it.
- */
 const NOTHING_WAITING: ReadonlySet<number> = new Set();
 
 export function queuedSeqs(session: SessionSnapshot): ReadonlySet<number> {
@@ -1661,86 +616,21 @@ export function queuedSeqs(session: SessionSnapshot): ReadonlySet<number> {
   return waiting.length === 0 ? NOTHING_WAITING : new Set(waiting.map((entry) => entry.seq));
 }
 
-/** The one place {@link SessionSnapshot.backgroundTasks} stops being optional. */
 const NO_BACKGROUND_TASKS: readonly BackgroundTask[] = [];
 
 export function backgroundTasksOf(session: SessionSnapshot): readonly BackgroundTask[] {
   return session.backgroundTasks ?? NO_BACKGROUND_TASKS;
 }
 
-/**
- * Whether this state means the work is over.
- *
- * The pair to {@link AsyncTaskState}, written here because a client asks it per
- * row and must give the daemon's answer: `parkable` defers on exactly the
- * complement of this set, so a client that disagreed would draw a finished row
- * over an agent the daemon is still holding.
- *
- * ⚠ **This list is a hand-written copy of `TERMINAL` in `src/acp/asynctasks.ts`,
- * and calling it a mirror is the honest description rather than a reassurance.**
- * `packages/web` may not import from `src/` — the standing reason this whole file
- * exists — so there is no way to *ask* the daemon which states are terminal, and
- * `isTerminalAsyncTaskState` is the function these three words are transcribed
- * from. Both docblocks name the risk in the same sentence (*"a hand-written list
- * of 'the finished ones' is exactly what goes out of step when a sixth word is
- * added"*) and neither one of them stops it: the two lists agree today because
- * somebody typed them the same, and a sixth state landing on the daemon's side as
- * non-terminal would leave this answering `false` for a state it has never heard
- * of — which is the safe direction — while a sixth *terminal* one would leave
- * every client here drawing running rows over work that is over.
- *
- * **What would catch it is a text comparison in
- * `packages/web/scripts/webcheck.plugin-protocol.ts`, and only that.** The
- * interface sweep in that file already reads `src/acp/asynctasks.ts`, but it
- * matches `export interface` and these are a `type` alias and a function body, so
- * both pass under it silently — a skipped pair does not lower the `compared`
- * floor, it merely fails to raise it, which is the `continue` that has now
- * swallowed four features. The assertion wanted is the one already written for
- * `PluginScope`: read both files off disk, take the quoted words out of
- * `export type AsyncTaskState =` on each side and require the two sets equal, then
- * take them out of `TERMINAL`'s declaration and out of this function's body and
- * require *those* equal. Until that exists, this comment is the guard.
- */
+/** A hand copy of TERMINAL in src/acp/asynctasks.ts that nothing compares: change both together. */
 export function taskFinished(state: AsyncTaskState): boolean {
   return state === "completed" || state === "failed" || state === "stopped";
 }
 
-/**
- * Something the agent is waiting on a person for — an approval, or a question.
- *
- * One shape for both, and `title` is whichever string a row should draw, so
- * nothing downstream branches on the kind just to find a label.
- */
 export type HumanRequest =
   | { kind: "permission"; raisedAt: number; title: string; permission: PendingPermissionSnapshot }
   | { kind: "elicitation"; raisedAt: number; title: string; elicitation: PendingElicitationSnapshot };
 
-/**
- * Everything waiting on a person here, oldest first.
- *
- * **This function exists so that the other nine places do not.** Every count,
- * sort, badge, dot and placeholder in this client was written against
- * `pendingPermissions.length` — nine call sites across five files — and a second
- * array beside it would have meant nine separate decisions about whether a
- * question counts. It is one decision, here.
- *
- * Oldest first because that is the order `sessionLists` sorts blocked rows in and
- * the order `SessionView` picks which card to draw: the thing that has been
- * waiting longest leads, and a permission does not win by being the older
- * feature.
- *
- * `pendingElicitations` is optional on the wire, so this is also the single place
- * an older daemon's `undefined` becomes `[]`.
- *
- * ⚠ **This one deliberately does **not** read {@link SessionSnapshot.reduced},
- * unlike {@link waitingCount}.** It returns rows, and the rows a reduced frame
- * left out are not on it to return — inventing a placeholder would put a card on
- * screen with no id to answer. What the daemon's ladder guarantees is that what
- * survives is a *prefix in `raisedAt` order*, so the first element here is still
- * the real oldest and `SessionView` still draws the right card; the count beside
- * it is `waitingCount`'s job, which is why that one is the function that had to
- * learn about the field.
- */
 export function humanRequests(session: SessionSnapshot): HumanRequest[] {
   const requests: HumanRequest[] = [];
   for (const permission of session.pendingPermissions) {
@@ -1762,54 +652,17 @@ export function humanRequests(session: SessionSnapshot): HumanRequest[] {
   return requests.sort((a, b) => a.raisedAt - b.raisedAt);
 }
 
-/** Whether anything is waiting on a person. Replaces `pendingPermissions.length > 0`. */
 export function needsHuman(session: SessionSnapshot): boolean {
   return waitingCount(session) > 0;
 }
 
-/**
- * How many. Replaces `pendingPermissions.length`.
- *
- * ⚠ **Counted off {@link SessionSnapshot.reduced} where the daemon set it, and
- * off the arrays otherwise** — the two are the same number on every snapshot but
- * a socket frame the daemon's ladder had to cut, and on one of those the arrays
- * are a *prefix*. Reading the arrays there made the count fall and rise on every
- * poll/frame alternation over an unchanged session: `SessionView` draws
- * `waitingCount(session) - 1` as its `more` line, so *4 more waiting* became *1
- * more waiting* and back, twice a poll interval.
- *
- * `Math.max` rather than the field outright, because the field is the daemon's
- * claim about a list this client also holds, and the two disagreeing in the other
- * direction — a count below what is actually on the record — would under-report
- * something visible. Whichever is larger is the honest floor.
- *
- * ⚠ **`waitingCount(session) === humanRequests(session).length` stopped being an
- * invariant the moment this function learned to read `reduced`, and the check
- * that asserted it went on passing because no fixture set the field.** That is
- * this repository's own commonest defect — a partition losing a case through a
- * new field rather than through a bad predicate — so it is recorded here as well
- * as repaired. `webcheck.elicitation-and-links.ts`'s "the predicates are a
- * partition" **refuses** `waitingCount(session) < humanRequests(session).length`
- * now — that expression is a clause of the `matrix.filter` that collects broken
- * rows, so what is asserted is its negation: the count may never be *fewer* than
- * the rows there are to draw. (Written the other way round here for one release,
- * which is a docblock quoting a driver's failure predicate as its property.) Its
- * matrix carries a row whose `reduced` is larger than its arrays, and a separate
- * positive check pins that row's pair outright, which is what makes the clause an
- * assertion rather than a formality.
- */
+/** Counted off reduced where set, since a cut frame's arrays are only a prefix; never fewer than humanRequests. */
 export function waitingCount(session: SessionSnapshot): number {
   const permissions = Math.max(session.pendingPermissions.length, session.reduced?.pendingPermissions ?? 0);
   const questions = Math.max(session.pendingElicitations?.length ?? 0, session.reduced?.pendingElicitations ?? 0);
   return permissions + questions;
 }
 
-/**
- * When the longest wait began, for the blocked sort.
- *
- * `Infinity` when nothing waits, so a caller can `Math.min` over rows without a
- * null check — which is what `sessionLists` was already hand-rolling a fold for.
- */
 export function oldestWait(session: SessionSnapshot): number {
   let oldest = Infinity;
   for (const permission of session.pendingPermissions) {
@@ -1821,24 +674,12 @@ export function oldestWait(session: SessionSnapshot): number {
   return oldest;
 }
 
-/**
- * Whether this counts toward "how much is happening on this machine".
- *
- * Deliberately not the same question as which list it belongs in. A stalled row
- * belongs in Active — somebody has to act on it — but must not inflate a count
- * drawn beside a green dot, because nothing is running.
- */
 export function countsAsLive(session: SessionSnapshot): boolean {
   return !isTerminal(session.status) || waitingForDaemon(session);
 }
 
-/* ------------------------------------------------------------------ *
- * Stream frames — src/server.ts, StreamConnection
- * ------------------------------------------------------------------ */
-
 export interface HelloFrame {
   type: "hello";
-  /** Changes when the daemon restarted. Non-fatal: seqs are durable on disk. */
   instanceId: string;
   session: SessionSnapshot;
   firstSeq: number;
@@ -1862,28 +703,7 @@ export interface CaughtUpFrame {
   seq: number;
 }
 
-/**
- * `from`/`to` are inclusive. Advance the cursor to `to`.
- *
- * **Three reasons, and only two of them are losses.** Reading them as one thing is
- * how a client draws a warning about a conversation that is perfectly intact.
- *
- *   `evicted`       — the daemon destroyed these. Since the per-session retention
- *                     window was removed it can only be a session an *older*
- *                     daemon truncated: the floors live on the session row and
- *                     survive, so those go on saying so honestly rather than
- *                     pretending to be whole. Gone for good.
- *   `slow_consumer` — this client could not keep up and the daemon dropped frames
- *                     rather than buffer without bound. Gone from this socket;
- *                     still on disk, so a page would recover them.
- *   `backlog`       — **not a loss.** The attach declined to replay this far
- *                     (`ATTACH_REPLAY_MAX` in `server.ts`), because a socket is a
- *                     live channel and draining an arbitrary amount of history
- *                     into it in one synchronous block is what the collapse path
- *                     exists to stop. Every one of these events is on disk and
- *                     `GET /sessions/:id/events` serves it. The correct response
- *                     is to page, and never to draw a hole.
- */
+/** Inclusive: advance the cursor to the upper bound. A backlog reason is not a loss: page it, never draw a hole. */
 export interface LaggedFrame {
   type: "lagged";
   from: number;
@@ -1900,19 +720,6 @@ export interface ErrorFrame {
 
 export type StreamFrame = HelloFrame | EventsFrame | SnapshotFrame | CaughtUpFrame | LaggedFrame | ErrorFrame;
 
-/* ------------------------------------------------------------------ *
- * HTTP payloads
- * ------------------------------------------------------------------ */
-
-/**
- * Liveness and a clock, and deliberately nothing else.
- *
- * It used to carry per-status session counts and how long the oldest blocked
- * session had been waiting. Those went when the daemon became multi-tenant: this
- * is its one unauthenticated route, and across tenants those numbers are a
- * readout of other people's work to anyone who can reach the port. Nothing here
- * ever read them — the list comes from `GET /sessions`, per machine.
- */
 export interface DaemonHealth {
   ok: boolean;
   instanceId: string;
@@ -1921,217 +728,44 @@ export interface DaemonHealth {
   shuttingDown: boolean;
   time: number;
   authMode: "shared_secret" | "signed" | "both";
-  /**
-   * What build the daemon is, and what tunnel protocol it speaks.
-   *
-   * Optional for this file's usual reason — a daemon older than these fields
-   * sends neither — and that absence is itself the useful answer: it means the
-   * machine is running something from before daemons reported a version at all.
-   *
-   * ⚠ **A label, not a gate.** Nothing in this client may branch on `version`.
-   * The reason is the whole shape of this project's releases: `packages/web`
-   * ships inside the control plane's image, so a weekly deploy hands every
-   * browser a client newer than most daemons in the fleet, and a client that
-   * behaves differently per daemon build would put every one of them back in
-   * lockstep with the control plane. What a client is allowed to do with it is
-   * *show* it — "this machine is on 0.1.0" is an operator's answer to why
-   * something looks different — and what it must keep doing is what this file
-   * already does everywhere else: read each field optionally and degrade.
-   */
+  // A label, never a gate: nothing may branch on the daemon version.
   version?: string;
   protocol?: number;
 }
 
-/**
- * One harness row as `GET /agents` answers it.
- *
- * ⚠ **Named `AgentAvailability` because that is what the daemon calls it, and the
- * name is load-bearing.** It was `AgentInfo`, and nothing compared the two sides
- * for it: `webcheck.plugin-protocol.ts` looks each mirror up **by name** in
- * `src/`, so a mirror under a different name hits the `continue` and is never
- * checked — the fourth occurrence of that, after `MachineSettings`/`MachineSettingsView`,
- * `CustomAgent`/`AgentRouting` and `QueuedPromptSnapshot`/`QueuedPrompt`. This was
- * the richest row on the wire to be uncompared, and `installable` was added to
- * both sides while the guard was blind to it. Renaming took the sweep from 63
- * interfaces to 64. A count floor cannot catch the next one — a skipped pair does
- * not lower `compared`, it fails to raise it — so the rule lives here, at the
- * declaration, where the check site structurally cannot state it: **before adding
- * any `export interface` to this file, grep `src/` for the daemon's own name and
- * use it.**
- */
+/** Named as the daemon names it, not AgentInfo: the drift check matches mirrors by name, so every interface here must use the daemon's own name. */
 export interface AgentAvailability {
   id: AgentId;
   displayName: string;
-  /**
-   * What the user's own Claude settings say a session should open in, and the file
-   * that says it — `null`/absent for the ordinary case, where nothing does.
-   *
-   * ⚠ **A provenance line, never a claim about the session.** This daemon sends no
-   * mode at `session/new`: the adapter reads `permissions.defaultMode` itself,
-   * merges project settings over it and normalises through an alias table of its
-   * own. So `value` is the string as written and the screen names the file rather
-   * than predicting an outcome — the mode chip is what says what a running session
-   * is actually in. It exists because somebody asked whether the daemon was
-   * switching sessions to `Bypass permissions`, and no screen could answer them.
-   *
-   * Only ever present on `claude`, and absent on an older daemon.
-   */
   settingsMode?: ClaudeSettingsMode | null;
   available: boolean;
-  /** The install or auth instruction when unavailable. Render it. */
   hint: string | null;
-  /**
-   * Whether the agent is authenticated, with `null` for "could not tell".
-   *
-   * Three answers, not two. `available` only ever meant "the binary is on PATH",
-   * so a logged-out agent reported `true` and the person found out at
-   * `502 agent_auth_required` after a container start and a worktree. Only some
-   * agents can answer this non-interactively (claude can, kimi cannot), and
-   * showing `null` as "logged out" would put a login wizard in front of somebody
-   * whose agent works. Absent on an older daemon, which is the same as `null`.
-   *
-   * ⚠ **A harness with no sign-in can never answer `false` here**, however often
-   * it has refused to start — that record is {@link AgentAvailability.lastStartRefusal},
-   * which is a different question and has a different reader.
-   */
+  // null means could not tell, which must never draw as logged out.
   loggedIn?: boolean | null;
-  /**
-   * The last time this harness refused to open a session, and what it said.
-   *
-   * ⚠ **An observation, and deliberately not a credential fact.** ACP's
-   * `auth_required` is answered by the *adapter*, and the daemon has measured the
-   * two disagreeing — a key the model's API accepted while the adapter went on
-   * refusing `session/new`. So this says "it would not start, at this time,
-   * configured this way" and claims nothing about a key. The daemon ages it out;
-   * a value on the wire is always live.
-   *
-   * `routed` is what stops one refusal condemning a pairing it never tested: a
-   * bare start refusing says nothing about one that runs on a system's own saved
-   * key, which is the signed-out Claude Code on OpenRouter this app documents as
-   * working. Only a refusal measured *while routed* is evidence about a preset.
-   *
-   * Absent on an older daemon, which is the same as `null`: nothing observed.
-   */
   lastStartRefusal?: { at: number; routed: boolean; message: string } | null;
-  /**
-   * Whether a sign-in can be driven here, and why not when it cannot.
-   *
-   * ⚠ **On `GET /agents` as well as `GET /agent-auth`, because it answers a
-   * question the two fields above cannot.** An agent that has no sign-in at all
-   * reports `loggedIn: null` — there is nothing to probe — which is
-   * indistinguishable from a probe that failed, and every screen that picks an
-   * agent reads this cheap route. `blocked === "no_flow"` is the one member that
-   * is a fact about the *agent*; the other three are the host's.
-   *
-   * Absent on an older daemon, and its absence must read as "an ordinary agent":
-   * fall back to `AgentAuthListing.loginSupported`, which is exactly what this
-   * client did before the field existed.
-   */
   login?: AgentLoginSupport;
-  /**
-   * Whether this machine can put this harness on itself, from here.
-   *
-   * ⚠ **Absent means `false`, which is the opposite of `AgentRouting.pinsModel`
-   * and the same as `SystemInfo.routable`.** A daemon that has never registered
-   * the install routes answers a bare `404` with no error envelope — there is
-   * nothing to render — so a button drawn on an optimistic reading is a control
-   * that looks broken. For a *control*, "keep working against an older daemon"
-   * means not drawing it.
-   *
-   * ⚠ **Read `=== true`, never `!== false`**, and the counter-example is twelve
-   * lines away in `AgentsPanel`: `login.canSignOut !== false` is deliberate,
-   * because *that* control's refusal is a `503` carrying the route's own
-   * sentence, so offering it costs a clean error. This one's costs a dead button.
-   * Somebody will try to make the two match; they are different for a reason.
-   *
-   * ⚠ **And it is narrower than `!available`.** The daemon sets it only where
-   * `deploy/agents.sh` is the remedy — a built-in's CLI missing from PATH — never
-   * for a missing ACP adapter, an unknown harness id, or a contributed harness
-   * whose program is gone. None of those is something a download repairs.
-   */
+  // Absent means false: an older daemon has no install routes. Narrower than not available.
   installable?: boolean;
-  /**
-   * What a screen calls this harness, or absent for one this product ships.
-   *
-   * ⚠ **Deliberately not {@link AgentAvailability.displayName}, and reaching for that
-   * instead is the mistake this field exists to prevent.** The daemon's
-   * `displayName` is a log line and a settings-list row title — literally
-   * `Claude (claude-agent-acp)` and `Kimi Code CLI` — while `agentCard.ts`'s own
-   * rule is that a label names neither a package nor a CLI, because it is drawn on
-   * a 96px tile. Three of the five built-ins fail that rule outright, so a client
-   * that used `displayName` as a label would put "Codex (codex-acp)" on a strip.
-   *
-   * Absent for a built-in, where `AGENT_LABEL` is the answer and is hand-written
-   * on purpose. Read through `harnessName`, never directly.
-   */
   label?: string;
-  /*
-   * `standalone` used to ride here and is gone on both sides: a plugin adds a
-   * harness, never an agent. `startsBare` answers `false` for every contributed id
-   * now, so a daemon that still sends the field is simply not read — which is the
-   * same direction its own fallback took, made unconditional.
-   */
-  /**
-   * The plugin that added this harness, or absent for one this product ships.
-   *
-   * Three screens need it and none of them could work it out: the subline under a
-   * tile that is native to no provider, the sentence saying where to go to remove
-   * it, and what a refusal names when the plugin is switched off.
-   */
   contributedBy?: { pluginId: string; pluginName: string };
 }
 
-/**
- * Where a claude session's opening permission mode came from.
- *
- * ⚠ **Mirrored from `ClaudeSettingsMode` in `src/acp/agents.ts`; named as the
- * daemon names it, or the hand-mirror sweep never compares it.** It was written
- * here first as an anonymous inline object, which the sweep is blind to twice
- * over: it iterates `export interface` declarations, and `src/acp/agents.ts` was
- * not among the files it reads. Both halves are fixed — the name here, the file
- * there — because either alone still buys nothing.
- */
 export interface ClaudeSettingsMode {
-  /** The string as written, clipped. Never normalised — see the daemon's docblock. */
   value: string;
-  /** The file it was read from, so the sentence on screen can name it. */
   file: string;
 }
 
-/** One environment variable an agent reads a pasted credential from. */
 export interface AgentCredentialSlot {
   envName: string;
   set: boolean;
   updatedAt: number | null;
 }
 
-/**
- * Whether *this* agent's login can be driven here, and what its flow needs.
- *
- * Beside `AgentAuthListing.loginSupported` rather than replacing it, and it
- * carries the two facts that daemon-wide boolean cannot. `supported` folds in
- * whether the agent's own CLI resolved — a different binary from the adapter,
- * and claude's ships inside an SDK package with no `bin` entry — which used to
- * surface only as a `503` after the button was tapped. `needsInput` is whether
- * anything is typed back: claude's flow waits on a paste prompt, the other two
- * are device-code flows whose box was never used.
- *
- * Optional: an older daemon sends neither, and the fallbacks are the listing's
- * own `loginSupported` and "assume there is an input box", i.e. exactly what
- * this client did before.
- */
 export interface AgentLoginSupport {
   supported: boolean;
-  /**
-   * Why the wizard cannot run, when it cannot. Optional: an older daemon omits it.
-   *
-   * Read as a *narrowing*, never as a gate — `supported` is still what decides
-   * whether the button is drawn. An unknown value degrades to "no specific advice"
-   * rather than throwing, which is this file's whole contract.
-   */
+  // A narrowing, never a gate: supported decides whether the button is drawn.
   blocked?: "no_flow" | "no_script" | "no_cli" | "interactive_pty" | null;
   needsInput: boolean;
-  /** Whether the agent's CLI has a sign-out verb. kimi has none. */
   canSignOut?: boolean;
 }
 
@@ -2140,164 +774,41 @@ export interface AgentAuthInfo extends AgentAvailability {
 }
 
 export interface AgentAuthListing {
-  /**
-   * The daemon's own platform, as `process.platform`. Absent on an older daemon.
-   *
-   * Used for **one** thing: naming the system in the sentence that explains why a
-   * sign-in wizard cannot run. Never a gate — `login.blocked` decides that — for
-   * the reason `wire.ts` gives about every narrowing in it.
-   */
   os?: string;
-  /**
-   * Whether this daemon's runtime will drive an interactive login at all.
-   *
-   * Reported rather than inferred from anything else: a host without `script`
-   * has no pty to allocate, and a client that guessed would offer a wizard that
-   * answers 503. Superseded per agent by `AgentAuthInfo.login`, and kept because
-   * that field is absent on an older daemon.
-   */
   loginSupported: boolean;
   agents: AgentAuthInfo[];
 }
 
-/**
- * A *system* — who serves a model and who you sign in to.
- *
- * ⚠ **The distinction this whole screen is built on: a system is not a harness.**
- * A harness (`AgentId`) is the CLI that runs the loop; a system is where its
- * traffic goes. They were the same thing while each of the three agents spoke
- * only to its own vendor, which is why the settings screen used to say "Agents"
- * and then ask you to sign in to Anthropic.
- */
 export interface SystemInfo {
   id: string;
   displayName: string;
-  /** The wire shape it speaks. Compared against what a harness accepts. */
   apiType: string;
-  /**
-   * Whether a foreign harness can be pointed at it at all.
-   *
-   * Optional for this file's usual reason — an older daemon does not send it —
-   * and the fallback is "assume not", which greys a cross-system pairing rather
-   * than offering one that would fail at the start.
-   */
   routable?: boolean;
-  /**
-   * The harness that reaches it without being routed, or `null`.
-   *
-   * A string rather than a closed union for `AgentId`'s reason, and with one rule
-   * the daemon enforces that this side may rely on: a provider a plugin added may
-   * only ever name a harness **that same plugin added**. So this never points at a
-   * built-in it did not come with, and the settings screen cannot be made to draw
-   * "Sign in to Claude Code" under a heading its author chose.
-   */
   nativeHarness: AgentId | null;
-  /** Whose CLI drives its sign-in wizard, or `null` for a key-only system. */
   loginVia: AgentId | null;
-  /**
-   * What to offer when this system is *routed* into a foreign harness.
-   *
-   * Empty for a natively-reached one, where the agent publishes its own list —
-   * which is not a gap. See `AgentCapabilities.models`.
-   */
   models: { id: string; name: string }[];
-  /**
-   * What the native harness prefixes a model id with, or `null`/absent where it
-   * spells them the way the endpoint does.
-   *
-   * Optional for this file's usual reason — an older daemon does not send it —
-   * and the fallback is `null`, which is today's behaviour for every system that
-   * existed before this field: no respelling, so the two lists a system can carry
-   * are compared exactly as they always were.
-   */
   nativeModelPrefix?: string | null;
-  /**
-   * Which of the native harness's variables holds *this* system's key, or `null`
-   * where it reads only one and there is nothing to narrow.
-   *
-   * Read by the settings screen that mounts a harness's card under a system's
-   * name: opencode takes a key for OpenRouter and a key for OpenCode Zen, and
-   * without this both boxes were drawn under whichever heading you opened.
-   * Absent on an older daemon, which draws them all — today's behaviour.
-   */
   keyEnv?: string | null;
   keySet: boolean;
   keyUpdatedAt: number | null;
-  /**
-   * The plugin that added this provider, or absent for one this product ships.
-   *
-   * Drawn where somebody has to be told where a row came from, and named in the
-   * one refusal that is about the plugin rather than about the pairing. Never
-   * branched on for a *presentation*: a contributed provider is a provider, and a
-   * row that looked different because of where it came from would be this client
-   * having an opinion about somebody's tools.
-   */
   contributedBy?: { pluginId: string; pluginName: string };
 }
 
-/**
- * What a harness will let us do about which system it talks to.
- *
- * `null` where it will not let us do anything, which is kimi. ⚠ **`providerId`
- * is the agent's own and differs between them** — claude says `main`, codex said
- * `custom-gateway` under codex-acp 1.1.9 and `openai` under 1.8.0 — so nothing
- * here may be written down client-side either.
- */
+/** providerId is the agent's own and changes between versions, so never hard-code one. */
 export interface AgentRouting {
   providerId: string;
   supported: string[];
-  /**
-   * Whether this harness can be told which model to run on somebody else's system.
-   *
-   * ⚠ **The fourth arm of `hostable`, which this side could not express and had a
-   * paragraph admitting it.** The daemon folds `ROUTED_MODEL_ENV` into its own
-   * refusal precisely so a pairing that would *start*, look correct, and quietly
-   * run the endpoint's default model never reaches a session — and until this
-   * field existed the picker offered exactly that pairing and `POST /custom-agents`
-   * refused it after somebody had assembled it.
-   *
-   * ⚠ **Absent means `true`, which is the opposite fallback from `routable` one
-   * interface up — and it is airtight rather than optimistic.** A daemon too old
-   * to send this is a daemon with no plugin catalogue, so the only harness it can
-   * route is the one that has always had an arm. There is no version of an older
-   * daemon for which the safe answer is `false`, and answering `false` there would
-   * grey out Claude Code on every machine in the fleet that had not been updated.
-   */
+  // Absent means true, the opposite of routable: an older daemon can only route the built-in that always could.
   pinsModel?: boolean;
 }
 
-/** One harness's answer to what it offers and what it accepts. */
 export interface AgentCapabilities {
   models: { id: string; name: string; description: string | null; group: string | null }[];
   routing: AgentRouting | null;
-  /**
-   * Which build of the harness's own CLI published `models`, or absent.
-   *
-   * ⚠ **Optional, and the absence is a *daemon* that is older rather than a
-   * harness that has none** — the two are told apart by `null` against `undefined`
-   * and nothing else. A daemon that predates this field sends neither, so a client
-   * must draw no line at all rather than one saying the build is unknown: an
-   * unknown build and an un-upgraded daemon are different facts and only the
-   * second is about the machine.
-   *
-   * `version` may be `null` on a binary that would not say which build it is;
-   * `source` says why *this* one was picked, which is what tells a machine
-   * running the copy `deploy/agents.sh` keeps current — or the operator's own,
-   * found first on PATH — from one an operator pointed at by hand through
-   * `CLAUDE_CODE_EXECUTABLE` or `CODEX_PATH`, since only the second explains a
-   * daily refresh that changed nothing on that machine. `vendored` was a third
-   * member, the copy this repository used to ship under `node_modules`; it went
-   * with those copies (Q4.114), and nothing carrying the three-member union was
-   * ever released, so no daemon sends the word. A value this build has not heard
-   * of is still drawn — the plain line naming the build, which is
-   * `compatibility.md`'s rule 2: an unknown value fails toward "keep working".
-   */
   cli?: { version: string | null; source: "override" | "path" } | null;
-  /** Why this harness could not be asked, or `null`. Never throws the picker away. */
   error: string | null;
 }
 
-/** A harness, a system and a model, under a name somebody chose. */
 export interface CustomAgent {
   id: string;
   name: string;
@@ -2307,20 +818,6 @@ export interface CustomAgent {
   createdAt: number;
 }
 
-/**
- * One remembered position in a machine's agent strip.
- *
- * ⚠ **`ref` is a string here and an `AgentId` nowhere**, which is the mirror of
- * the daemon's own posture rather than this file being loose. The strip stores a
- * position for something that may not exist right now — a harness signed out, an
- * assembled agent this build cannot resolve — and the whole point is that the
- * position survives. What resolves it is `orderStrip` in `agentStrip.ts`, against
- * the two listings the strip already reads, and a `ref` that resolves to nothing
- * is dropped there.
- *
- * `kind` *is* narrow, because it is this system's own vocabulary and reaches a
- * branch in the client: an unknown third value would be a row nothing could draw.
- */
 export interface AgentStripEntry {
   kind: "harness" | "custom";
   ref: string;
@@ -2334,17 +831,14 @@ export interface LoginRunView {
   done: boolean;
   exit: { code: number | null; signal: string | null } | null;
   dropped: number;
-  /** Total output produced so far. Poll with this as the next `since`. */
   cursor: number;
 }
 
 export interface LoginChunk extends LoginRunView {
   chunk: string;
-  /** The requested cursor pointed at output that has since been discarded. */
   gap: boolean;
 }
 
-/** What happened to an install, once it has ended. `src/agentinstall.ts`'s own. */
 export type InstallOutcome =
   | "running"
   | "installed"
@@ -2354,7 +848,6 @@ export type InstallOutcome =
   | "cancelled"
   | "spawn_failed";
 
-/** Where the installer has got to, as its own checkpoints report it. */
 export type InstallPhase = "start" | "download" | "install" | "link" | "done" | "failed";
 
 export interface InstallRunView {
@@ -2363,46 +856,18 @@ export interface InstallRunView {
   startedAt: number;
   endedAt: number | null;
   done: boolean;
-  /**
-   * ⚠ **Never derived from `exit`, on either side of the wire.** The installer
-   * exits 0 having printed that it failed — it must, because three of its four
-   * callers contract it never fails — so the daemon decides this by asking the
-   * machine again afterwards. A client that read `exit.code === 0` as success
-   * would draw "installed" over a harness that is not there.
-   */
+  // Never derived from exit: the installer exits 0 on failure, so the daemon decides.
   outcome: InstallOutcome;
   exit: { code: number | null; signal: string | null } | null;
   phase: InstallPhase | null;
-  /** The tail of what the installer said, for a client that lost the transcript. */
   detail: string | null;
   dropped: number;
-  /** Total output produced so far. Poll with this as the next `since`. */
   cursor: number;
-  /**
-   * Whether a Stop would be honoured right now.
-   *
-   * ⚠ **Read it, and hide the control rather than offer one that refuses.** The
-   * daemon will not signal a run whose installer is writing outside its staging
-   * directory — a killed vendor installer leaves a truncated binary that the
-   * daemon then executes as a harness — and the cancel route's only refusal is a
-   * bare `404 install_not_found`, which for a run that plainly exists is a false
-   * sentence. So the truth arrives before the press. An older daemon sends no
-   * such field, which is why this is optional here and required there.
-   */
   cancellable?: boolean;
 }
 
 export interface InstallChunk extends InstallRunView {
   chunk: string;
-  /**
-   * The requested cursor pointed at output that has since been discarded.
-   *
-   * ⚠ **Read here, unlike on a login.** `LoginWizard` ignores its own copy of
-   * this flag, which is survivable for a transcript that is a few lines of a
-   * device-code prompt. An installer's is far likelier to overflow the daemon's
-   * 64 KiB ceiling, and a raw pane that silently claims to be the whole record
-   * undoes the one thing the fallback rests on.
-   */
   gap: boolean;
 }
 
@@ -2427,28 +892,13 @@ export interface RootListing {
 
 export interface EventsPage {
   events: StoredEvent[];
-  /**
-   * The lowest seq the daemon can still serve.
-   *
-   * The *derived* floor, not the raw store `firstSeq`: they differ when the log
-   * holds nothing for a session whose sequence is already high, and in that case
-   * this is `lastSeq + 1` — "there is nothing left" — rather than 0.
-   */
   firstSeq: number;
   lastSeq: number;
   dropped: number;
   gap: boolean;
 }
 
-/**
- * `GET /sessions`, bounded.
- *
- * `total` and `truncated` are what make a limit safe to act on. A row missing from
- * `sessions` means one of two completely different things — the session is gone, or
- * it fell outside the window — and pruning local state on the wrong one discards a
- * live transcript. Optional because an older daemon does not send them, and their
- * absence must read as "not truncated" rather than as `undefined`.
- */
+/** A row missing past the limit may still exist: never prune local state on it while truncated. */
 export interface SessionList {
   sessions: SessionSnapshot[];
   now: number;
@@ -2457,41 +907,12 @@ export interface SessionList {
   truncated?: boolean;
 }
 
-/** Every error from every service in this system has this shape. */
 export interface WireError {
   error: { code: string; message: string; detail: unknown };
 }
 
-/* ------------------------------------------------------------------ *
- * Control plane — packages/control-plane/src/app.ts
- * ------------------------------------------------------------------ */
-
 export type Scope = "session:read" | "session:write" | "machine:admin";
 
-/**
- * How long a machine has been away, or `null` when that says nothing useful.
- *
- * ⚠ **"Offline" was the same word for a lid that closed a minute ago and a host
- * that died last week**, because presence is deleted on disconnect and nothing
- * outlived it. That is the first question anybody has about a machine that is not
- * answering, and the product could not answer it at all.
- *
- * Three `null`s, and they are three different silences rather than one:
- *
- * * **`undefined`** — a control plane that predates the field. Saying "never
- *   seen" there would be a claim about a fleet that is working fine.
- * * **`null`** — nothing has ever recorded a tunnel. The row already says
- *   *"waiting for the daemon to dial in"*, which is the same fact with a remedy
- *   attached, so a second sentence would be noise.
- * * **just now** — under a couple of minutes, where the poll interval and the
- *   presence staleness window are the same size as the answer. A machine that
- *   dropped four seconds ago is one somebody is watching; telling them it was
- *   last seen "0m ago" is a number pretending to be information.
- *
- * Coarse on purpose above that: the question is "did this work today", and
- * minute-level precision on a day-old absence reads as certainty the row does not
- * have.
- */
 export function lastSeenText(at: number | null | undefined, now = Date.now()): string | null {
   if (at === undefined || at === null) return null;
   const seconds = Math.max(0, Math.round((now - at) / 1000));
@@ -2501,57 +922,11 @@ export function lastSeenText(at: number | null | undefined, now = Date.now()): s
   return `last seen ${Math.round(seconds / 86_400)} days ago`;
 }
 
-/**
- * Who brought this machine online, as the line a screen draws — or `null` where
- * there is nothing to say.
- *
- * **One string for two surfaces**, the machine list's row and the machine's own
- * screen, for the reason the control plane's own `labelOrName` gives one file
- * over: a rule with two homes has no way to keep them agreeing, and this one is
- * a *disclosure* — two spellings of it would be two disclosures, one of which
- * somebody would eventually shorten. `lastSeenText` beside it is the same shape
- * for the same reason.
- *
- * **The punctuation is deliberately not here.** The list's sublines are
- * fragments ("online", "last seen 3 h ago") and take no full stop; the machine
- * screen's lines are sentences and do. The *fact* is shared and the register
- * belongs to the surface, so each caller ends the line the way its neighbours
- * end theirs.
- *
- * `null` in is every case that means *unknown* — see `MachineRecord.enrolledBy`,
- * which is where the argument for the field lives — and `null` out is what
- * makes "only render it when there is something to render" a property of this
- * function rather than a condition each screen re-derives.
- */
 export function enrolledByText(who: string | null | undefined): string | null {
   if (who === undefined || who === null || who.length === 0) return null;
   return `Enrolled by ${who}`;
 }
 
-/**
- * The names that name more than one machine in this list, case-folded.
- *
- * **This is what lets a row draw its id only where the id is doing something.**
- * The id was on every row unconditionally, and the reason given was correct as
- * far as it went: a name is not unique, so two machines called `mac` are told
- * apart by nothing else. What that argument does not establish is that the other
- * rows need it — and it is 18 characters of hex in the one line a row has for
- * *state*, on every machine, for a collision that is rare.
- *
- * The property is preserved exactly rather than traded away: the id appears
- * whenever the name is ambiguous **to this reader**, which is the same question
- * `nameVisibleTo` asks on the server, and disappears only where there is nothing
- * to disambiguate.
- *
- * Case-folded because the server folds too — `idx_users_name_folded` is why
- * `Casey` and `casey` can both exist, and the same is true one table over, so
- * `Mac` and `mac` are a collision a reader would have to squint at. Folding here
- * and not on the server's side of it is deliberate: this decides what to *draw*,
- * and drawing the id for a pair that differs only in case is the honest answer.
- *
- * `readonly` in and `ReadonlySet` out, so a caller cannot mutate the answer back
- * into the list it was computed from.
- */
 export function ambiguousNames(machines: readonly { name: string }[]): ReadonlySet<string> {
   const seen = new Set<string>();
   const twice = new Set<string>();
@@ -2565,118 +940,16 @@ export function ambiguousNames(machines: readonly { name: string }[]): ReadonlyS
 
 export interface MachineRecord {
   id: string;
-  /**
-   * What *this* user calls it.
-   *
-   * The row's own `machines.name` is unique fleet-wide and nobody chooses it; for
-   * a machine you own the control plane sends your label here instead. So two
-   * people may each have a "laptop" and neither has to know the other does.
-   */
   name: string;
   enrolled: boolean;
-  /**
-   * When the control plane last saw a tunnel for it, or `null`.
-   *
-   * Beside `relayOnline` rather than folded into it, and the pair is not
-   * redundant: that one is a boolean about *now* and had nothing behind it, so a
-   * lid that closed a minute ago and a host that died last week produced the same
-   * word on the same row. This is the question somebody actually has about a
-   * machine that is not answering.
-   *
-   * Optional, and `null` and `undefined` mean different things: `null` is "no
-   * tunnel has ever been recorded" — a machine that never enrolled — while
-   * absence is a control plane that predates the table and cannot claim either.
-   * A client that collapsed them would tell somebody their working fleet has
-   * never been seen.
-   */
+  // null means never seen; absent means an older control plane that cannot say.
   lastSeenAt?: number | null;
-  /**
-   * Whether this user owns it, and therefore may rename, re-enroll and retire it.
-   *
-   * `false` for a machine an admin registered before ownership existed, and for
-   * one somebody else owns and shared. Optional, so an older control plane
-   * degrades to "nothing is owned" rather than to `undefined` being drawn as true.
-   */
   owned?: boolean;
-  /**
-   * Past its **owner's** machine limit, and therefore switched off at the relay.
-   *
-   * Not a reachability fact: it is asserted by the control plane before any
-   * probe, and it is true of a machine whose daemon is running. What follows
-   * from it *is* reachability — the tunnel is refused at dial, so the machine
-   * also reads offline — and `machine.ts` carries both for that reason.
-   *
-   * Optional and tested `=== true`, exactly as `owned` is, and the polarity is
-   * decided by which typo survives: written this way the natural `=== true`
-   * degrades an older control plane to "nothing is suspended", which is true
-   * there. Spelled `withinLimit`, the natural `=== true` would draw **every
-   * machine in the fleet** as suspended and hide the controls on all of them.
-   */
+  // Named so the natural true test degrades an older control plane to nothing suspended.
   overLimit?: boolean;
-  /**
-   * Its owner has been banned, so it is switched off until that is lifted.
-   *
-   * The sibling of `overLimit` and read the same way. Two fields rather than one
-   * "switched off" flag because the **remedies differ** — retire a machine
-   * versus unban a person — and a row that could not tell them apart would send
-   * somebody to do the wrong one. Only ever true for a machine somebody else
-   * owns: a banned owner cannot reach this app at all.
-   */
   ownerDisabled?: boolean;
-  /**
-   * Whose enrollment code brought this machine online, where that was not the
-   * person reading the list.
-   *
-   * **This is the whole of a disclosure that could not be a refusal.** An admin
-   * may revoke a machine — which frees its label — register a new one for the
-   * same person under that freed name, mint its first code and redeem it on
-   * their own hardware. The row that then appears in the victim's list carries
-   * the name they just lost, `owned: true`, enrolled and online, and it is
-   * somebody else's computer. Every step is a route that has to stay: revoking
-   * is the denial side, and registering a machine *for* somebody is what
-   * `deploy/install.sh`'s daemon wizard does from the host being installed,
-   * which is a real flow rather than an attack. So the composition is made
-   * **visible** instead, and this field is the visibility.
-   *
-   * Five answers, and the last four are named rather than collapsed into the
-   * first — collapsing them is exactly what made the control plane's first two
-   * attempts at this reassuring and wrong:
-   *
-   * * **`null` or absent** — you enrolled it yourself, this machine has never
-   *   enrolled, or the control plane predates the field. Nothing is drawn.
-   * * **a display name** — this machine enrolled with somebody else's code.
-   * * **`"a provisioning key"`** — `POST /v1/provision`, which needs no account
-   *   at all, only `REEMOAT_CP_PROVISION_KEY`. The *most* alarming case, so it
-   *   is the one that must never read as the absent one.
-   * * **`"a deleted account"`** — the enroller's account has gone since. The
-   *   column is deliberately left dangling there and says so.
-   * * **`"somebody this control plane did not record"`** — the machine enrolled
-   *   before the column existed. ⚠ **This is the answer the first release
-   *   folded into `null`**, and it was not an edge: `machines.enrolled_by` is
-   *   written only at redemption, so on the day the column shipped it was the
-   *   answer for *every machine in the fleet* — the whole disclosure reading as
-   *   "I enrolled this myself" on the screen built to say otherwise.
-   *
-   * ⚠ **A name is not by itself a substitution, and that is this field's stated
-   * limit.** The daemon wizard runs `cpctl admin addmachine --owner` then `cpctl
-   * admin enroll`, so *every* wizard-installed machine names the admin who ran
-   * the installer, and a substitution draws the same row as a normal install.
-   * What it buys is that the owner can tell *this enrolled with somebody else's
-   * code* from *with mine*, and recognise the name or not; the remedy for one they
-   * do not recognise is to re-enroll the machine themselves, which sets this back
-   * to nothing.
-   *
-   * ⚠ **And the field names who *minted* the code, never who redeemed it.**
-   * `POST /v1/enroll` is public — the credential is the body, and a daemon
-   * redeeming a code presents no account — so there is no redeemer to record.
-   * A code **you** minted that leaks and is redeemed on somebody else's hardware
-   * therefore reports *you*, which is `null`, which draws nothing. That shape is
-   * outside what this field is evidence about; `store.ts` carries the argument.
-   *
-   * Optional, per the mirror's rule for a field added after the first release:
-   * an older control plane sends nothing, and nothing is the same silence as the
-   * `null` this side could not tell it apart from anyway.
-   */
+  // Whose code enrolled it, when not the reader: the visible half of a substitution that cannot be refused.
+  // Names who minted the code, never who redeemed it.
   enrolledBy?: string | null;
   scopes: Scope[];
   relayUrl: string | null;
@@ -2685,7 +958,7 @@ export interface MachineRecord {
 
 export interface IssuedToken {
   token: string;
-  /** Epoch **milliseconds**, already converted from the `exp` claim's seconds. */
+  // Epoch milliseconds, already converted from the exp claim's seconds.
   expiresAt: number;
   scopes: Scope[];
   machine: {
@@ -2693,32 +966,10 @@ export interface IssuedToken {
     name: string;
     relayUrl: string | null;
     relayOnline: boolean;
-    /**
-     * The machine's X25519 static public key, base64url, or `null`.
-     *
-     * ⚠ **Beside the route rather than on `GET /v1/machines`, and for the route's
-     * own reason.** Minting is how a client learns where a machine is; a key and
-     * an address are the same kind of fact — *how to reach this thing* — and
-     * splitting them would create two answers that can disagree about one
-     * machine. They move together or not at all.
-     *
-     * `null` for a machine that has not dialled since it learned to announce one,
-     * which on a fleet mid-update is every machine. The client turns that into a
-     * sentence about updating that daemon and refuses the route: there is no mode
-     * without it. Optional so a control plane older than this reads as "not
-     * reported" rather than as `undefined` reaching a handshake.
-     */
+    // null for a machine that has not announced a key; the client refuses the route without one.
     key?: string | null;
   };
-  /**
-   * The control plane's own clock when it answered, in epoch milliseconds.
-   *
-   * **Read this; do not compare `expiresAt` to `Date.now()` directly.** Both are
-   * absolute instants but on different clocks, and a phone's is routinely wrong.
-   * `expiresAt - serverTime` is the lifetime, which is the only part the two
-   * clocks agree on; `machine.ts` adds that to local now. Optional so an older
-   * control plane degrades to the previous behaviour rather than to `NaN`.
-   */
+  // The lifetime is expiresAt minus serverTime; never compare expiresAt with the local clock.
   serverTime?: number;
 }
 
@@ -2726,217 +977,53 @@ export interface Me {
   id: string;
   name: string;
   isAdmin: boolean;
-  /**
-   * Which credential this is, and whether the account has a password at all.
-   *
-   * Neither is an authorization fact — both credentials are full authority. They
-   * are what stops the client guessing: `via` decides whether there is a session
-   * to sign out of, and `hasPassword` distinguishes "change your password" from
-   * "set one", which is the state every account carried over from before login
-   * existed is in and which is otherwise indistinguishable from a forgotten one.
-   *
-   * Optional, so an older control plane degrades rather than rendering
-   * `undefined`.
-   */
   via?: "api_key" | "session";
   hasPassword?: boolean;
-  /**
-   * When they last chose a password themselves, or `null`.
-   *
-   * `null` is three states the screen draws as one word — the row predates the
-   * column, the password was issued rather than chosen, or there is none — and
-   * `hasPassword` separates the last from the first two. Optional because an
-   * older control plane does not send it, which degrades to the same word.
-   */
   passwordChangedAt?: number | null;
-  /**
-   * The address on the account, and whether anybody proved it.
-   *
-   * **`emailVerified` is carried rather than derived from `email !== null`**,
-   * because the two are different states and the difference is the whole of what
-   * an address is worth here: an unverified one reserves nothing and
-   * `POST /v1/forgot` will not mail it. Inferring one from the other tells
-   * somebody they can recover their account when they cannot.
-   */
   email?: string | null;
   emailVerified?: boolean;
-  /**
-   * The control plane is refusing every other route until a new password lands.
-   *
-   * Tested as `=== true`, never `!== false`. `phase: "ready"` with `me === null`
-   * is a state this app really reaches — `bootstrap`'s catch keeps it when the
-   * control plane is unreachable but machines are already known — and failing
-   * closed there would trap somebody in a password form they may not owe, during
-   * an outage, with a working app behind it.
-   */
+  // Only an explicit true counts: failing closed would trap somebody in a password form during an outage.
   mustChangePassword?: boolean;
   mustChangePasswordReason?: string | null;
-  /**
-   * How many machines this account owns, its ceiling, and whether it may add one.
-   *
-   * **`canAddMachine` is the control plane's answer, not a comparison this
-   * client makes.** "Somebody at their limit is not offered a way to add more"
-   * is a rule that service owns, and re-deriving it here would be a second copy
-   * that drifts the first time the rule gains a clause. The two numbers come too
-   * because the *sentence* a screen draws needs them: "you are using all 2 of
-   * your 2" cannot be written from a boolean.
-   *
-   * All three optional, and `quota.ts` collapses their absence to one `unknown`
-   * state that **fails open** — an older control plane, or a `me` that could not
-   * be read, must not be the reason somebody with quota cannot reach the only
-   * form in this app that creates a machine.
-   *
-   * `machineCount` is **not** `state.machines.length`: that list includes
-   * machines granted to you and owned by somebody else, and the limit counts
-   * only the ones you own.
-   */
+  // canAddMachine is the control plane's answer, never recomputed; machineCount counts owned machines only.
   machineCount?: number;
   machineLimit?: number | null;
   canAddMachine?: boolean;
 }
 
-/** What `POST /v1/login` answers with. The token is the browser's credential. */
 export interface SessionToken {
   token: string;
   sessionId: string;
-  /** Epoch milliseconds, on the control plane's clock. */
   expiresAt: number;
   user: Me;
   serverTime?: number;
 }
 
-/** One signed-in device, from `GET /v1/me/sessions`. */
 export interface SessionRecord {
   id: string;
   createdAt: number;
   expiresAt: number;
   lastSeenAt: number;
-  /**
-   * What the sign-in said about itself, or `null`.
-   *
-   * Optional on the type as well as nullable, and the two mean different things:
-   * `undefined` is a control plane that predates these fields, `null` is one that
-   * has them and had nothing to record. Both draw the same way, which is why the
-   * client never has to tell them apart — but a client that declared them
-   * required would break against the older server rather than against neither.
-   *
-   * **Neither is evidence.** Both are caller-supplied; see `device.ts`.
-   */
   ip?: string | null;
   userAgent?: string | null;
-  /**
-   * The installation this sign-in belongs to, or `null`.
-   *
-   * Optional for `ip`'s reason — a control plane that predates devices sends
-   * neither key — and nullable because a sign-in from a browser or a mailed link
-   * belongs to no registered installation and says so.
-   *
-   * ⚠ **`deviceName` is the one field on this row that is not caller-supplied in
-   * `userAgent`'s sense**, and the list prefers it for exactly that: a `User-Agent`
-   * is a claim a request makes about itself, while a device name was written by
-   * somebody who had already signed in. It is still not *evidence* — a stolen
-   * session can register a device and call it anything — but it is the string a
-   * person can recognise, which is the only question this list answers.
-   */
   deviceId?: string | null;
   deviceName?: string | null;
-  /** Whether this row is the credential making the request. */
   current: boolean;
 }
 
-/**
- * One installation signed in to this account.
- *
- * **Not a session and not a credential.** A session is a bearer token with an
- * expiry; a device is the computer or phone that keeps producing them, and it
- * outlives every one of them — which is the whole point, because "sign this laptop
- * out and leave my phone alone" had nothing to act on before. Holding the id
- * authorizes nothing: every request still carries the session token, and the id is
- * read only after that token has resolved.
- *
- * **It is not an authorization subject either.** A grant is `(user, machine)`, so
- * every device of one person reaches the same fleet — `web-shell.md`'s "one bearer
- * credential, short-lived per-machine tokens" is unchanged by any of this.
- */
 export interface DeviceRecord {
   id: string;
   name: string;
   platform: string;
   createdAt: number;
-  /**
-   * When it was retired, or `null`.
-   *
-   * Retired rows are **listed**, deliberately: the question this screen gets
-   * opened for is usually asked after something has gone wrong, and a list one row
-   * shorter cannot tell "I retired that laptop on Tuesday" from "that laptop was
-   * never registered".
-   */
   revokedAt: number | null;
-  /**
-   * When a sign-in on it was last used, or `null` for one that never held a live
-   * session.
-   *
-   * Derived by the control plane from the sessions bound to it rather than stored
-   * on the row — see the `devices` table comment in `schema.sql`. So it moves at
-   * most once every fifteen minutes, like everything else that reads it.
-   */
   lastSeenAt: number | null;
-  /**
-   * Whether this installation has registered an X25519 public key, and when.
-   *
-   * ⚠ **Not the key**, and the control plane's own docblock says why: the
-   * question this row exists to answer is *can this installation reach a machine*
-   * — one word — and 43 characters of base64url on a row is a value somebody
-   * copies, compares, or pastes into a support conversation, none of which is a
-   * thing to do with a key. `false` covers a row registered before device keys
-   * existed and one whose credential store lost the key, and both draw the same
-   * sentence because both have the same remedy.
-   *
-   * ⚠ **This is the fifth feature this hand mirror has silently dropped, and the
-   * guard is not what catches it.** `webcheck.plugin-protocol.ts` sweeps every
-   * interface here whose original it can find, and it looks each one up in a
-   * hard-coded list of `src/` files with no control-plane file in it — so this
-   * type hits the sweep's `continue` and is compared against nothing at all. The
-   * control plane has been answering `hasKey` on **every** device row since the
-   * column landed, and the screen whose whole purpose is that question could not
-   * read it.
-   *
-   * **Optional on the type as well as boolean, for `SessionRecord.ip`'s reason.**
-   * `public_key` and `key_set_at` are `migrate()` additions onto a `devices` table
-   * that shipped without them, so a control plane older than that release lists
-   * devices and sends neither key. `cp.ts`'s own `registerDevice` already reads
-   * `hasKey?: boolean` off the registration answer for exactly this reason.
-   * `undefined` means *nobody said*, which is not the same claim as `false` and
-   * must not be drawn as one — a client that declared them required would mark
-   * every device on such a server as unable to reach anything.
-   */
+  // Whether a key exists, never the key; undefined means nobody said, which is not false.
   hasKey?: boolean;
-  /**
-   * When that key was last written, or `null` for a row that has never had one.
-   *
-   * Mirrored because the control plane sends it on every row and this file is the
-   * copy — the whole failure being fixed here is a field served and not declared,
-   * and declaring one of a pair repeats it at half size. **Nothing draws it yet**,
-   * and that is deliberate rather than an oversight: the screen's question is
-   * *can this installation reach a machine*, which `hasKey` answers on its own,
-   * and a second date beside `last used` on a row this narrow would compete with
-   * the one somebody actually came to read. It is here for the day a row has to
-   * say *re-keyed on Tuesday* — the state `wrong_device` recovery produces — and
-   * for `pnpm cpctl devices`, which prints rows rather than laying them out.
-   */
   keySetAt?: number | null;
-  /** Whether this row is the installation making the request. */
   current: boolean;
 }
 
-/**
- * An enrollment code, which exists in exactly one response and nowhere else.
- *
- * `controlPlaneUrl` comes from the server rather than from `window.location`
- * because in dev the browser's origin is Vite's port, which proxies `/v1` — a
- * value pasted from there onto another machine would name a host that machine
- * cannot reach.
- */
 export interface EnrollmentCode {
   code: string;
   machineId?: string;
@@ -2944,7 +1031,6 @@ export interface EnrollmentCode {
   controlPlaneUrl: string;
 }
 
-/** `POST /v1/machines`: the machine, its grant, and its first code, in one answer. */
 export interface CreatedMachine {
   machine: MachineRecord;
   enrollment: { code: string; expiresAt: number };
@@ -2959,51 +1045,21 @@ export interface AdminUser {
   disabled: boolean;
   hasPassword: boolean;
   sessions: number;
-  /**
-   * The address, and whether it was proved.
-   *
-   * This is the one place the cost of deleting the admin password reset is
-   * visible: an account with no *verified* address has no recovery at all on an
-   * instance with no SMTP. An admin should be able to look at that rather than
-   * discover it when somebody forgets a password.
-   */
   email?: string | null;
   emailVerified?: boolean;
-  /** Created with a temporary password and still holding it. */
   mustChangePassword?: boolean;
 }
 
-/**
- * What creating a person answers with, in **two shapes**.
- *
- * `password` is optional now, and that is a good breaking change rather than a
- * loosening: with mail configured the server invites and no password exists at
- * any moment, so a call site that renders `body.password` unconditionally puts
- * `undefined` inside a card that says "copy this". Making it optional forces the
- * two results to be told apart where they are drawn.
- */
 export interface CreatedUser {
   id: string;
   name: string;
   isAdmin: boolean;
   invited: boolean;
-  /** Only on the arm where no invitation could be sent. */
   password?: string;
-  /** Only on the invited arm. */
   email?: string;
   mailQueued?: boolean;
   mustChangePassword?: boolean;
 }
-
-/* ------------------------------------------------------------------ *
- * Plugins
- *
- * Mirrored from `src/plugins/protocol.ts`, which is written to be
- * mirrorable — it imports nothing, for this reason. The cost is the one
- * this file's header already states: it can drift, and drift shows up at
- * runtime rather than at build time, so **every narrowing over these
- * shapes fails open**. `plugins.ts` is where that is done and asserted.
- * ------------------------------------------------------------------ */
 
 export type PluginScope =
   | "sessions.read"
@@ -3015,90 +1071,18 @@ export type PluginScope =
   | "harness"
   | "system";
 
-/**
- * One line per scope, for the list somebody reads before installing.
- *
- * Copied rather than fetched. It is the *client's* job to explain what a
- * capability means to the person looking at it, and a daemon that could choose
- * these strings would be a daemon that could describe `net` as "nothing much".
- *
- * ⚠ **`Record<PluginScope, string>` and the fall-through at the call site are
- * both load-bearing, and they answer different questions.** The exhaustive type
- * is about *this* build: a sixth scope added to the union above is a compile
- * error here, so the sentence is written by whoever adds the scope rather than
- * found missing by whoever installs the first plugin asking for it. It was
- * `Record<string, string>` and that caught nothing — the exhaustive copy was the
- * one in `src/plugins/protocol.ts`, which is the copy nobody draws, so a new
- * scope would have failed the build on the unused table and fallen through to a
- * raw identifier on the rendered one. The fall-through is about the *other*
- * build: this file is a hand mirror of a daemon that may be newer than the tab,
- * so `PluginSummary.scopes` claiming `PluginScope[]` is a claim about a wire
- * this file does not control. A scope this client has not heard of must still
- * land as its own identifier — legible, and never a guess about what a newer
- * daemon means by it. Removing the `??` because the type now says it cannot miss
- * would be believing the mirror; it is the same fail-open rule `plugins.ts`
- * keeps over every other shape here.
- */
+/** Written by this client, never fetched; exhaustive here, but callers still fall back to the raw scope for a newer daemon. */
 export const PLUGIN_SCOPE_TEXT: Record<PluginScope, string> = {
-  /*
-   * ⚠ **One line each, and the length is the decision rather than the wording.**
-   * These were sentences — *"Start, prompt, stop and rename sessions, and answer
-   * the questions agents ask"* — and six of them stacked is the wall of text that
-   * pushed the install control off a phone and got read by nobody, which is the
-   * one failure a consent screen cannot survive: an unread disclosure discloses
-   * nothing. `webcheck` holds them to a line, because a table of sentences is one
-   * well-meant edit away from being a wall again.
-   *
-   * ⚠ **Lower-case fragments, because they are read as the tail of "It may".**
-   * The heading is the verb; each row completes it. Capitalised they read as six
-   * separate claims and take a line each to restate the subject.
-   *
-   * ⚠ **Two of the six carry a consequence rather than a mechanism, and those
-   * halves survive the shortening or the shortening was not worth having.**
-   * `sessions.write` also grants `sessions.answerPermission` and
-   * `sessions.answerElicitation` — so a plugin holding it plus the
-   * `permission.requested` hook approves every permission an agent raises on this
-   * machine, on a product whose own docs call that prompt the thing standing
-   * between an agent and arbitrary shell. And `model` spends the operator's
-   * **quota**, on an account they signed an agent into for their own work, from a
-   * hook that can fire on every turn of every session. "ask a model a question"
-   * describes the mechanism perfectly and hides the only part worth reading.
-   *
-   * "your agents" rather than a vendor: which agents exist is a fact about the
-   * machine, and naming Claude here would be wrong on a host that has only codex.
-   */
   "sessions.read": "read your sessions and transcripts",
   "sessions.write": "control sessions, and answer agents' questions",
   "files.read": "read files in a session's workspace",
   store: "keep its own data here",
   net: "reach the hosts it lists",
   model: "ask your agents, at your cost",
-  /*
-   * ⚠ **The two that gate no method, and their lines have to carry the *thing*
-   * rather than the mechanism — the same rule `sessions.write` and `model` are
-   * already written under.** "add an agent" describes a list growing by one and
-   * hides that the machine will run a program the plugin's author named, as this
-   * user, on every session started on it. "add a provider" hides that a key the
-   * operator pastes is sent to a host the plugin chose.
-   *
-   * ⚠ **And the consent screen names the command line and the address as well**,
-   * because a line in a list is where somebody learns a capability exists and not
-   * where they can judge one. These two are the only scopes with a second
-   * disclosure, and that is because they are the only two where the *value*
-   * matters as much as the verb.
-   */
   harness: "add an agent that runs a program it names",
   system: "add a provider your saved keys are sent to",
 };
 
-/**
- * How long one of those lines may be.
- *
- * ⚠ **A number in the mirror rather than a rule in a review**, for the reason the
- * table above gives: the shortening is the whole change, and nothing else in this
- * build would notice it being undone one entry at a time. `webcheck` reads this,
- * so the ceiling and the strings it bounds move together or not at all.
- */
 export const PLUGIN_SCOPE_TEXT_MAX = 56;
 
 export type PluginHook =
@@ -3114,15 +1098,6 @@ export interface PluginAction {
   on: "session" | "screen";
 }
 
-/**
- * A harness a plugin adds to a machine.
- *
- * Mirrored so the consent screen can draw it. **Nothing here is executed, drawn as
- * markup, or reached for at runtime** — this client's whole relationship with a
- * contributed harness is `GET /agents`, exactly as with a built-in. What this shape
- * is for is the one screen that has to show somebody a command line before it is
- * installed.
- */
 export interface HarnessContribution {
   id: string;
   name: string;
@@ -3133,15 +1108,6 @@ export interface HarnessContribution {
   authHint: string | null;
 }
 
-/**
- * A provider a plugin adds to a machine.
- *
- * Same standing as {@link HarnessContribution}: drawn at consent and never read
- * again — `GET /systems` is where a provider comes from once it is installed.
- * `baseUrl` is the field the disclosure exists for, and it is the whole normalised
- * address rather than an origin, because that is what the daemon compares against
- * what was agreed to.
- */
 export interface SystemContribution {
   id: string;
   name: string;
@@ -3160,16 +1126,6 @@ export interface PluginContributions {
   settings: boolean;
   actions: PluginAction[];
   hooks: PluginHook[];
-  /**
-   * Harnesses and providers this plugin adds.
-   *
-   * ⚠ **Optional on this side, and that is `compatibility.md`'s rule 2 rather than
-   * laziness.** A daemon older than this tab does not send them, and the fallback
-   * has to be "this plugin adds none" — which is true of every plugin such a daemon
-   * can have installed, since it would refuse the manifest. The direction that is
-   * *not* safe is the mirror knowing less than the daemon, and `webcheck`'s sweep
-   * is what refuses that.
-   */
   harnesses?: HarnessContribution[];
   systems?: SystemContribution[];
 }
@@ -3205,11 +1161,7 @@ export interface PluginRowAction {
 
 export type PluginRowTone = "ok" | "warn" | "danger";
 
-/**
- * Where a row goes. **A destination this app has, never a URL** — see
- * `src/plugins/protocol.ts` for the argument, which is the same one that keeps a
- * session-menu action from navigating.
- */
+/** A destination this app has, never a URL. */
 export type PluginOpen = { session: string } | { screen: true };
 
 export interface PluginRow {
@@ -3224,39 +1176,10 @@ export interface PluginRow {
 
 export type PluginFieldKind = "text" | "password" | "number" | "toggle" | "select";
 
-/**
- * Which of a plugin's two screens is being drawn. Mirrors `PluginSurface`.
- *
- * ⚠ **The browser is the only side that knows this for an action's answer**, and
- * that is why the narrowing lives here as well as in the daemon. A `view` is
- * invoked by its id, so the daemon knows which surface it is answering for — but
- * a *form submit* reaches it as an action id, which says which action and never
- * which pane it was pressed on. The component drawing the pane knows; nothing
- * upstream of it does.
- */
 export type PluginSurface = "screen" | "settings";
 
-/**
- * What a settings pane draws. Mirrors `PLUGIN_SETTINGS_BLOCK_TYPES`.
- *
- * A settings pane is a form plus the words around it. `text` and `notice` are
- * not settings — they are the sentence above a control and the warning beside
- * it — and a form with no way to say anything about itself is a worse pane, not
- * a stricter one. `list` and `columns` are a **screen**, which a plugin already
- * has at `/p/:machineId/:pluginId`.
- */
 export const PLUGIN_SETTINGS_BLOCK_TYPES: readonly PluginBlock["type"][] = ["text", "notice", "form"];
 
-/**
- * The three controls a setting may be. Mirrors `PLUGIN_SETTINGS_FIELD_KINDS`.
- *
- * A box you type in, a switch, a dropdown. `password` and `number` are spellings
- * of the first rather than a fourth and a fifth kind: `PluginField.value` is a
- * string on the wire whatever the kind, so `number` only ever bought a keyboard,
- * and `password` masked a value the daemon keeps in a plaintext SQLite column —
- * an assurance this system does not provide, offered on the screen where a false
- * one costs most.
- */
 export const PLUGIN_SETTINGS_FIELD_KINDS: readonly PluginFieldKind[] = ["text", "toggle", "select"];
 
 export interface PluginFieldOption {
@@ -3283,7 +1206,6 @@ export type PluginBlock =
 
 export interface PluginView {
   title: string | null;
-  /** How often this view asks to be re-read. Already clamped by the daemon. */
   refreshMs: number | null;
   blocks: PluginBlock[];
 }
@@ -3294,6 +1216,5 @@ export type PluginResult =
 
 export interface PluginInstalled {
   plugin: PluginSummary;
-  /** The version this replaced, or `null` when it was a fresh install. */
   replaced: string | null;
 }

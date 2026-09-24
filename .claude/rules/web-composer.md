@@ -199,9 +199,9 @@ state; a register split was argued and withdrawn. Q3.562, Q3.593.
 **`Composer` outlives a session switch, so every write that follows an `await` is
 split in two.** Neither `SessionView` nor `Composer` carries a `key`, so switching
 session re-renders the same instance — while `POST /sessions/:id/prompt` and
-`/config` are both on the 90s slow-route budget. The **keyed** halves (`drafts`,
+`/config` are both on slow-route budgets (150s and 90s). The **keyed** halves (`drafts`,
 `attach.ts`'s map, `echo.ts`'s map, `store.applySnapshot`) run unconditionally,
-naming the session they belong to; the **shared React** halves (`text`, `busy`,
+naming the session they belong to (`echo.ts`'s land and clear also name the send); the **shared React** halves (`text`, `busy`,
 `stage`, `applying`, `pendingCaret`, `closeMenu`) are gated on `onScreen()`, which
 compares the `liveKey` ref. Ungated, a `409 turn_in_flight` from session A ran
 `update(body)` on the composer now bound to B — A's message in B's box, where Enter
@@ -246,7 +246,7 @@ that reads as "it did not send" and invites a duplicate.
   unmounts the composer and a lost chip is bytes nothing can reference), not the
   store (60fps progress would wake it).
 - **`restoreAttachments` merges; it does not assign.** Paste, drop and the
-  paperclip stay live during a 90s prompt, so a file attached mid-flight was deleted
+  paperclip stay live during a prompt, which may take 150s, so a file attached mid-flight was deleted
   by the restore that runs when a send is refused: the chip vanished, its upload ran
   on against the per-session 100 files / 100 MiB, its `cancel` went with the entry,
   and the retried send went without the screenshot. Restored items lead, live ones

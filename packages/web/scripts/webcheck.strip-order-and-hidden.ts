@@ -4,21 +4,6 @@ import { stripComments } from "./webcheck.source.js";
 
 process.stdout.write("\nthe order and the hidden set a machine remembers for its strip\n");
 {
-  /* ---------------------------------------------------------------- *
-   * ⭐ The merge, which is the whole of what the daemon's strip means
-   *
-   * The daemon stores a **partial** record — a position and a switch for what
-   * somebody actually moved or hid — and separately reports what it can start
-   * right now. Neither is the row. `orderStrip` is the rule that turns the two
-   * into one list, and its three clauses each close a state that is only
-   * reachable when the fleet changes under a stored order: an agent deleted on
-   * another device, a harness signed out for a week, an agent assembled since the
-   * last time anybody opened the settings screen.
-   *
-   * Driven rather than read off disk, unlike the placements below: this is a pure
-   * function over two lists, which is the shape this file prefers wherever it can
-   * get it.
-   * ---------------------------------------------------------------- */
   const { orderStrip, stripEntries, stripKey, moveRow, dropIndex, defaultRow } = await import(
     "../src/agentStrip.js"
   );
@@ -44,13 +29,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ] as never).map((row) => `${stripKey(row.kind, row.id)}${row.hidden ? " (hidden)" : ""}`),
     ["custom:ca_1", "harness:kimi (hidden)", "harness:claude"],
   );
-  /*
-   * ⚠ **A ref that resolves to nothing is dropped, and the daemon still holds the
-   * row.** That asymmetry is the design: the position survives a harness being
-   * signed out or a preset being unreadable on this build, and comes back with the
-   * thing. What must never happen is the other direction — a tile drawn for an
-   * agent that cannot be started, which is the state `offeredHere` exists against.
-   */
   check(
     "a stored entry naming something the machine no longer offers is dropped",
     ids(
@@ -62,14 +40,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     ["harness:kimi", "harness:claude", "custom:ca_1"],
   );
-  /*
-   * ⚠ **A new agent goes last and is *visible*, and both halves are the assertion.**
-   * Last, because the stored list is a total order over what existed when it was
-   * written and inventing a position inside it would be this function having an
-   * opinion nobody expressed. Visible, because an agent arriving already switched
-   * off is indistinguishable from the daemon having lost it — the one default here
-   * that would generate a bug report.
-   */
   check(
     "an agent the store has never heard of is appended, and visible",
     orderStrip(natural, [{ kind: "harness", ref: "kimi", hidden: true }] as never).map(
@@ -77,12 +47,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     ["harness:kimi (hidden)", "harness:claude", "custom:ca_1"],
   );
-  /*
-   * ⚠ **A harness and an assembled agent sharing an id are two rows.** Nothing can
-   * produce that collision today — a preset id is `ca_` plus eight hex and a
-   * harness id is one word — and the key is what keeps it from being a thing to
-   * remember, on either side of a rename.
-   */
   check(
     "the two kinds are keyed apart",
     ids(
@@ -92,12 +56,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     ["custom:x", "harness:x"],
   );
-  /*
-   * ⚠ **A duplicate is drawn once.** The `PUT` route refuses one, so this cannot
-   * arrive from this daemon — but the list also comes back from that route's echo
-   * and from whatever a future build stores, and one agent drawn twice is two tiles
-   * that select each other.
-   */
   check(
     "a repeated entry draws one row",
     ids(
@@ -108,12 +66,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     ["harness:kimi", "harness:claude", "custom:ca_1"],
   );
-  /*
-   * ⚠ **Every row is written back, including the ones nobody has touched.** That
-   * is what makes the next read stable: an agent this screen has *seen* has a
-   * position, so the one assembled after it cannot be drawn in front of it by
-   * carrying an earlier `created_at`.
-   */
   check(
     "the write-back carries every row and renames id to ref",
     stripEntries(orderStrip(natural, [])),
@@ -124,15 +76,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
   );
 
-  /* ---------------------------------------------------------------- *
-   * Moving a row
-   *
-   * ⚠ **Splice and never swap**, which is the difference the moment a drag crosses
-   * more than one row: a swap leaves the list in an order nobody asked for, and it
-   * makes the pointer and the keyboard disagree about what "move down" means. Out
-   * of range answers a copy rather than throwing — the drag reports a position
-   * measured from a pointer, and a pointer that has left the list is not an error.
-   * ---------------------------------------------------------------- */
   const rows = orderStrip(natural, []);
   check("moving down splices rather than swaps", ids(moveRow(rows, 0, 2)), [
     "harness:kimi",
@@ -148,11 +91,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
   check("a target past the end lands on the end", ids(moveRow(rows, 0, 99)), ids(moveRow(rows, 0, 2)));
   check("and a source that is not a row is a no-op", ids(moveRow(rows, 7, 0)), ids(rows));
 
-  /*
-   * ⚠ **Rounded, not truncated.** The row swaps when the dragged one is more than
-   * half over its neighbour, which is where the eye expects it; truncation swaps a
-   * full row late and reads as the list resisting the drag.
-   */
   check(
     "a drag crosses a row at the halfway point",
     [
@@ -164,42 +102,12 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [0, 1, 1, 2, 0],
   );
-  // A list that has not been measured yet cannot say where a pointer is, and
-  // guessing would move a row on the first frame of every drag.
   check("an unmeasured row height moves nothing", dropIndex(1, 300, 0, 3), 1);
 
-  /* ---------------------------------------------------------------- *
-   * ⭐ Which row is the default, which is one rule read by two screens
-   *
-   * New session selects it when nobody has chosen; the Agents screen draws
-   * **default** on it. Those are the same call — a badge naming a row the other
-   * screen would skip is a confident claim about somewhere else that the reader
-   * cannot check from where they are standing — so what is driven here is the
-   * rule, and the two call sites are pinned as source text one section down.
-   *
-   * ⚠ **"First" is two narrowings past index 0, and each was a state on screen.**
-   * A hidden row is one somebody took off New session and it keeps its place here,
-   * so the list's first entry is routinely one that is not drawn. An unstartable
-   * row is the same failure through the other door: the Agents list is deliberately
-   * wider than the strip, and a preset is listed whatever state its harness is in.
-   * Either one, defaulted onto, is a screen with nothing drawn as chosen and a dead
-   * `Start`.
-   * ---------------------------------------------------------------- */
   const { startableHere } = await import("../src/agents.js");
   const anyRow = (): boolean => true;
   const three = orderStrip(natural, []);
-  /*
-   * ⚠ **Null-tolerant, and `ids` is not.** These four sites all read the *answer*
-   * of the function under test, and `null` is one of its answers — so wrapping it
-   * in `ids` threw `Cannot read properties of null` out of `stripKey` and killed
-   * the process where a FAIL was wanted. Measured: two single-character mutations
-   * of `defaultRow`'s predicate — one deleted `!`, one added one — crashed the run
-   * at this line and took **175** further checks with them, including the pane's
-   * own file-wide ratchets (`danger`, `opacity`, the `harness`-in-a-`className`
-   * sweep) and the whole model-catalogue section. A driver that dies on the
-   * regression it is meant to name disables the rest of the net at the moment it
-   * is needed, which is worse than the regression.
-   */
+  // Null-tolerant, unlike ids: defaultRow may answer null, and a throw here would abort every later check.
   const idOf = (row: { kind: string; id: string } | null): string | null =>
     row === null ? null : stripKey(row.kind as never, row.id);
   check(
@@ -222,11 +130,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     idOf(defaultRow(three, (row: { id: string }) => row.id !== "claude")),
     "harness:kimi",
   );
-  /*
-   * ⚠ **Both narrowings at once, and the answer is neither of the rows they
-   * skipped.** Asserted together because a `find` written with one condition and
-   * not the other passes every single-cause case above.
-   */
   check(
     "a hidden row and an unstartable one are both stepped over",
     idOf(
@@ -237,12 +140,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     "custom:ca_1",
   );
-  /*
-   * ⚠ **`null` is a real answer and pointing at row 0 anyway is the one thing this
-   * must not do.** A machine whose every agent is hidden, signed out or uninstalled
-   * has no default, and inventing one is the state `offeredHere` would refuse a
-   * line later — leaving `Start` live over a tile that is not drawn.
-   */
   check(
     "a machine with nothing to start has no default at all",
     [
@@ -260,16 +157,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [null, null, null],
   );
 
-  /* ---------------------------------------------------------------- *
-   * And the predicate the two screens hand it
-   *
-   * ⚠ **`startableHere` is `offeredHere` without the hidden test**, and the split
-   * falls exactly there because hidden is the half that is not about startability
-   * at all: the daemon would run a hidden agent perfectly, it simply has no tile.
-   * The Agents screen draws hidden rows on purpose — un-hiding is what takes
-   * somebody there — so it asks this one, and the two cannot disagree about
-   * anything else because there is only one body.
-   * ---------------------------------------------------------------- */
   const info = (id: string, available: boolean, loggedIn: boolean | null): unknown => ({
     id,
     available,
@@ -298,13 +185,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false, false, false, false],
   );
-  /*
-   * ⚠ **A preset is only as startable as the harness under it, and this is the arm
-   * the old `.find((row) => !row.hidden)` walked straight into.** `ca_dead` has a
-   * row in the daemon's table and draws a tile — a disabled one, saying its harness
-   * is not installed — so first in somebody's order it was the default, and
-   * `POST /sessions` answers 503 for it.
-   */
   check(
     "and a preset is weighed through its harness rather than only by existing",
     [
@@ -314,13 +194,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false, false],
   );
-  /*
-   * ⚠ **Installed rather than signed in, on that arm alone.** An assembled agent
-   * runs on the system's saved key — a different credential in a different table
-   * from the CLI sign-in the bare arm weighs — so asking for a sign-in here would
-   * refuse exactly the agents that need one least. `ca_signedout` is built on codex,
-   * which is installed and signed out, and it starts.
-   */
   check(
     "and an assembled agent on a signed-out harness still starts",
     startableHere({ kind: "custom", id: "ca_so" }, machine, [
@@ -328,23 +201,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ] as never),
     true,
   );
-  /* ---------------------------------------------------------------- *
-   * ⭐ And a harness that refused to open a session
-   *
-   * The reported defect: a harness a plugin added kept its tile after the machine
-   * had been told it would not start. Its `loggedIn` is permanently `null` — there
-   * is no status to probe — so the two arms above could never take the tile away,
-   * and every press cost a worktree and a branch before the agent declined.
-   *
-   * ⚠ **The refusal axis reaches the preset arm and the credential axis still does
-   * not, which is the pair that has to be asserted together.** The comment above
-   * `ca_so` is unchanged and still true: an assembled agent runs on the *system's*
-   * saved key, so a signed-out codex still starts one. A refused *start* is a
-   * different fact — the harness declined to open a session at all — but only
-   * where it was measured with routing already applied, because `applySystem` runs
-   * before `session/new` and a **bare** refusal has told nobody anything about a
-   * start that runs on somebody else's key.
-   * ---------------------------------------------------------------- */
   const refused = (id: string, routed: boolean): unknown => ({
     id,
     available: true,
@@ -352,18 +208,10 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     login: { supported: false, blocked: "no_flow", needsInput: false, canSignOut: false },
     lastStartRefusal: { at: 1, routed, message: "it said no" },
   });
-  /*
-   * ⚠ **The `login` object is here for the first time in this whole block.** Every
-   * other fixture omits it, so `no_flow` had never travelled through
-   * `offersStripTile` → `startableHere` → `offeredHere` → `defaultRow` in one
-   * piece — which is exactly the path the defect was on.
-   */
   const plugged = [
     refused("byo:gemini", false),
     refused("byo:routed", true),
     { id: "byo:fine", available: true, loggedIn: null, login: { supported: false, blocked: "no_flow", needsInput: false, canSignOut: false } },
-    // A built-in, because the bare-tile arm needs a harness that *can* have a tile
-    // and no contributed one can any more — a plugin adds a harness, not an agent.
     { id: "claude", available: true, loggedIn: true },
     { ...(refused("codex", false) as object), loggedIn: true },
   ] as never;
@@ -379,13 +227,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false],
   );
-  /*
-   * ⚠ **And no contributed harness has a tile at all now**, refusal or none —
-   * `startsBare` answers `false` for every one of them, so this arm is settled
-   * before the refusal is even weighed. Asserted beside the arm above so the two
-   * reasons a tile is absent cannot be confused for each other: one is a
-   * measurement about a moment, the other is what a plugin may contribute.
-   */
   check(
     "and one a plugin added has none in any state",
     [
@@ -394,13 +235,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [false, false],
   );
-  /*
-   * ⚠ **And the preset arm splits where the harness arm does not**, which is the
-   * assertion that keeps one refusal from condemning a pairing it never tested. A
-   * bare tile *is* a bare start, so any refusal takes it; a preset routed onto
-   * somebody else's system is only condemned by a refusal that had already
-   * survived `providers/set`.
-   */
   check(
     "while a preset is only condemned by a refusal that routing did not save",
     [
@@ -410,11 +244,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [true, false],
   );
 
-  /*
-   * ⚠ **A machine that has not spoken offers nothing.** Two `null` listings are the
-   * loading state, and "yes, startable" over silence is the guess that put `Start`
-   * live over a default nobody had checked.
-   */
   check(
     "an unread listing is not a startable one",
     [
@@ -425,80 +254,23 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [false, false, false],
   );
 
-  /* ---------------------------------------------------------------- *
-   * Where the two screens are
-   *
-   * ⚠ **Placements, so they are read off disk** — the idiom this file already uses
-   * for the strip's own controls. What is pinned is not that the screens behave but
-   * that the one line whose rewriting is the whole fix is still written that way:
-   * the gear goes to the machine's Agents screen, and the acts the strip gave up
-   * are on it.
-   * ---------------------------------------------------------------- */
   const newSession = stripComments(
     readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"),
   );
   const pane = stripComments(
     readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
   );
-  /* ---------------------------------------------------------------- *
-   * ⭐ And the way back from a hidden tile
-   *
-   * `offersStripTile` takes a harness's tile away once the machine reports it
-   * refused to open a session, so this screen is the only place it appears. What
-   * it owes back is a control, and the control's whole subject is off-screen —
-   * somebody ran the harness's own program on the machine, which reaches the
-   * daemon in no way at all.
-   *
-   * Placements again, read off disk, because nothing typed can hold one.
-   * ---------------------------------------------------------------- */
   check(
     "a refused harness can be asked again from the list that still holds it",
     [
-      // Conditional on the fact the row is already reporting one line up, never on
-      // the row's *kind*, which this screen may not use for a presentation.
       /behind\?\.lastStartRefusal != null && \(\s*<RowAction\s+label="Check again"/.test(pane),
-      /*
-       * ⚠ **Resolved for both kinds of row, which is the half that was missing.**
-       * This list excludes every harness `startsBare` is false for — opencode, and
-       * every one a plugin added — so those appear here *only*
-       * through the presets built on them, and keying the control on the harness
-       * row alone left it unreachable for exactly the harnesses whose remedy is
-       * furthest away.
-       */
       /const behind = harness \? info : \(listing\.agents\.find/.test(pane),
-      // The harness's id, not the row's: on a preset row those differ and the
-      // record is kept against the harness.
       /onRecheck\(behind\.id\)/.test(pane),
-      /*
-       * ⚠ **It patches the one row rather than re-reading the listing.** `attempt`
-       * is `Try again`'s counter and it refetches `GET /agent-strip` with it —
-       * drawn optimistically, possibly with a `PUT` in the air — so a blanket
-       * re-read would put the pre-write order back under a finger that had just
-       * moved a row. That button can afford it because it is only drawn when the
-       * *read* failed.
-       */
       /setListing\(\(held\) =>[\s\S]{0,400}one\.id === fresh\.id \? fresh : one/.test(pane),
     ],
     [true, true, true, true],
   );
-  /*
-   * ⭐ **And the way to the card, which is the only way left** (Q3.640). New
-   * session installs nothing and signs nothing in any more: a strip with nothing to
-   * start says why and offers Agent settings, which lands on this list. So a row
-   * that is reporting a fault has to lead to the harness's own card, or the walk
-   * from "nothing can start" ends one screen short of the remedy.
-   *
-   * Four halves, each one a way to lose it quietly: conditional on the fact the row
-   * already reports rather than on its kind; a push to the leaf rather than a
-   * button that runs something in place; inside the one menu rather than beside it,
-   * since a row that gains a control moves every control beside it; and the old
-   * silent Install gone, so the card is the one surface that starts a run.
-   * `\s+` between tokens rather than single spaces, so a formatter reflowing the
-   * JSX cannot turn a live assertion into a false one. The third operand is a
-   * preset on a harness that refused while routed — the fault New session's
-   * *not ready* sends somebody here about, which the row used to carry no Set up
-   * for.
-   */
+  // A faulty row leads to its harness's card from inside the menu (Q3.640); tokens are matched with whitespace classes so a reflow cannot break it.
   check(
     "a row whose agent cannot start opens that agent's card, from inside the menu",
     [
@@ -513,13 +285,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true, true, false, false],
   );
-  /*
-   * And the card is this screen's own leaf, mounted untitled — the harness's name
-   * heads it, since the pane already says "Setup" — and keyed on machine and
-   * harness, so a live login run cannot leak from one harness's card into
-   * another's. Imported from the panel that draws it everywhere else, which is
-   * what keeps it one card rather than a copy.
-   */
   check(
     "and the card is a leaf of this screen, mounted untitled",
     [
@@ -530,12 +295,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true],
   );
-  /*
-   * ⚠ **And the card that *states* the refusal carries one too**, because the list
-   * above cannot reach every harness that can be in this state. `AgentDetail` is
-   * where `stanceLine` draws the sentence, and a sentence naming a remedy with no
-   * control beside it is the dead end this whole state was hidden into.
-   */
   check(
     "and so does the card that says so",
     /stance === "start_refused" && \(\s*<Button[\s\S]{0,400}recheckAgent\(agent\.id\)/.test(
@@ -558,15 +317,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true],
   );
-  /*
-   * ⚠ **And it makes the address whole before it leaves.** `/new` with no machine
-   * is a real state — the rail's **All** tab navigates to it, and a cold link
-   * reaches it — and the sync effect deliberately does not rewrite it, so the way
-   * *back* from another pop-up is a `/new` that has forgotten the folder somebody
-   * walked to and the tile they tapped. The `replace` is what makes this door
-   * affordable at all; without it this is the pop-up-replacing-a-pop-up failure
-   * that put the sign-in wizard inline, reintroduced by a different control.
-   */
   check(
     "and it writes the machine and the folder into the address first",
     /navigate\(newPath\(selected, cwd \?\? undefined\), true\);\s*navigate\(agentStripPath\(selected\)\);/.test(
@@ -574,35 +324,12 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     true,
   );
-  /*
-   * ⚠ **Both doors into the builder are here now**, which is what the New session
-   * screen's control count dropping from nine to eight has to mean. A count going
-   * down is only good news if the acts moved rather than disappeared — the trap
-   * `PluginsPanel`'s kebab assertion was written against — so this is the other
-   * half of it.
-   */
   check(
     "adding and editing an agent both live on that screen",
     [pane.includes("agentPath(machineId)"), pane.includes("agentEditPath(machineId, row.id)")],
     [true, true],
   );
-  /*
-   * ⚠ **Two controls on every row — a handle and a menu — and what varies is
-   * *inside* the menu.** That is this screen's one layout rule and the reason the
-   * split falls where it does: a row that loses a control moves every control
-   * beside it, and on a list you drag that is the one thing that must not happen,
-   * while a menu's panel is drawn on demand and displaces nothing.
-   *
-   * So the kebab is live on every row — hiding is the act every row has, including
-   * a built-in harness, which is what "the delete option must be available for
-   * Claude Code" turned out to mean — **and nothing switches it off, not even a
-   * daemon that cannot store an order.** `frozen` used to disable the whole menu,
-   * which took Edit and Check again with it, two items that never touch the strip
-   * route; it now disables the one item that does, inside the panel. Read off the
-   * kebab's own JSX — the slice from its glyph to its `onClick` — rather than off
-   * the file, because `disabled={frozen}` legitimately survives on the handle and
-   * on the Remove item.
-   */
+  // Read off the kebab's own JSX, because the handle and the Remove item legitimately carry a frozen disable.
   const kebabAt = pane.indexOf("icon={MoreHorizontal}");
   check("the kebab was found", kebabAt > 0, true);
   const kebab = pane.slice(kebabAt, pane.indexOf("onClick={toggle}", kebabAt));
@@ -615,30 +342,11 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [false, false, false],
   );
-  /*
-   * What an old daemon *does* take away is the one item that writes the strip —
-   * on the same line as the pinned label, so the two cannot come apart. The
-   * other reason that item waits is `removing` (review D8): the row's confirm
-   * closes on the tap that sends the `DELETE`, so without it the kebab was the
-   * door to a second one before the first had answered.
-   */
   check(
     "and only the item that writes the strip is what an old daemon disables",
     /label=\{row\.hidden \? "Add back" : "Remove"\}\s*disabled=\{frozen \|\| removing\}/.test(pane),
     true,
   );
-  /*
-   * The in-flight id is held one level up, keyed by row id — the listing
-   * repaints under the row — set before the `DELETE` and cleared in `finally`,
-   * since on failure the row stays and has to be tappable again. The confirm's
-   * own Remove reads it too, for a confirm reopened during the flight.
-   */
-  /*
-   * The line under the name is where a fault displaces the vendor — `not signed
-   * in`, `would not start` — and it was the faintest ink on the row (review D9).
-   * `muted` on a live row; a hidden row's line goes to `faint` with its name,
-   * or the row's ground and its ink disagree about whether anything happened.
-   */
   check(
     "the under line is muted on a live row and faint only with a hidden name",
     /truncate text-2xs \$\{row\.hidden \? "text-faint" : "text-muted"\}`\}>\s*\{under\}/.test(pane),
@@ -649,23 +357,9 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
   check("set before the DELETE goes out", removeBody.indexOf("setRemoving(id);") > 0 && removeBody.indexOf("setRemoving(id);") < removeBody.indexOf(".removeCustomAgent(id)"), true);
   check("and cleared in finally, by id", /\.finally\(\(\) => setRemoving\(\(held\) => \(held === id \? null : held\)\)\)/.test(removeBody), true);
   check("each row is told whether it is the one", /removing=\{removing === row\.id\}/.test(pane), true);
-  // The confirming pair is `TwoStep`'s (E7's review, Q3.552); `twoStep` is that
-  // one element, and the row's `removing` reaches it as the act's refusal.
-  // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
+  // The TwoStep element ends at a self-closing tag on its own line; a fragment inside question carries one too.
   const twoStep = pane.slice(pane.indexOf("<TwoStep"), pane.indexOf("<TwoStep") + pane.slice(pane.indexOf("<TwoStep")).search(/^\s*\/>/m));
   check("and the confirm's Remove waits on it", pane.indexOf("<TwoStep") >= 0 && /disabled=\{removing\}/.test(twoStep) && /onAct=\{onRemove\}/.test(twoStep), true);
-  /*
-   * ⚠ **And both verbs are on both kinds now, which is the whole of "they must not
-   * stand out".** Edit was absent from a built-in row on the argument that a
-   * harness has nothing stored to edit — true, and the wrong conclusion: this list
-   * holds *agents*, and the built-in one is the one that exists by default rather
-   * than a different kind of thing. A row with fewer verbs than its neighbours is
-   * exactly what made it look special.
-   *
-   * What "edit" can mean there is *start from it*: there is no row to `PATCH`, so
-   * it opens the builder already pointed at the harness. That is the one branch
-   * left, and it is on the destination rather than on whether the item is drawn.
-   */
   check(
     "every row can be edited, and a built-in one opens the builder pointed at its harness",
     [
@@ -676,39 +370,9 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true],
   );
-  /*
-   * ⚠ **One removal per row, named the same *and drawn the same* on both kinds.**
-   * It began as an eye button beside the kebab — three controls competing for the
-   * right-hand end of a phone row, on a row that is also a drag target — then as
-   * "Hide from New session" *beside* an assembled agent's "Remove agent", which is
-   * two removals on one row and a harness that could only be hidden while
-   * everything next to it could be removed. From the picker's side both acts are
-   * the same one: this stops being offered.
-   *
-   * ⚠ **`danger` was the last thing that gave the two apart, and it is gone.** It
-   * rode the assembled arm alone, to carry that one is `DELETE /custom-agents/:id`
-   * while the other is a flag — which is exactly the internal difference this
-   * screen is not meant to have an opinion about, and it was reported as one. It
-   * was overclaiming on its own terms too: `danger` is for an act nothing brings
-   * back, and this one is rebuildable from the bar at the foot of the same screen,
-   * which is also why it has no confirmation.
-   *
-   * The negatives are the ratchet: no `danger` anywhere on this row's actions, no
-   * eye button, no second removal.
-   *
-   * ⚠ **The `danger` negative is read off the row and not off the file, and it was
-   * read off the file.** `StripEditor`'s own status line sets `text-danger` when a
-   * reorder is *refused* — the one report a write gets, on a list that has already
-   * jumped back under it — and a substring sweep over the whole module counted that
-   * as the row wearing red. Scoping it to `StripRowView` is what keeps the ratchet
-   * about the thing it is about; it stays a bare `danger` rather than the prop
-   * alone, so a hand-rolled `text-danger` on a menu item fails it too.
-   */
+  // The danger negative is scoped to StripRowView: StripEditor's refused-reorder status line legitimately uses the danger tone.
   const rowAt = pane.indexOf("function StripRowView");
-  // A slice taken from a name that is not there passes every negative below while
-  // asserting nothing at all, which is this driver's one failure mode — and
-  // `indexOf` answering -1 makes `slice` return the last character rather than
-  // nothing, so the position is what is checked and not the length.
+  // The position is what is checked: a slice from an indexOf of -1 passes every negative below while asserting nothing.
   check("the row component was found", rowAt > 0, true);
   const rowSrc = pane.slice(rowAt);
   check(
@@ -721,42 +385,11 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false, false, false],
   );
-  /*
-   * ⚠ **And no branch on the row's *kind* decides how anything looks.** The kind
-   * still decides where a name is read from and where Edit navigates — those are
-   * lookups and destinations, invisible either way. What it may not decide is
-   * presentation, which is the property that kept being broken one control at a
-   * time: first the kebab was disabled on a harness, then Edit was absent from it,
-   * then Remove was red on everything else. Swept as a class-string property
-   * rather than pinned at the one place it last went wrong.
-   */
   check(
     "and the row's kind decides no presentation",
     [/danger=\{[^}]*harness/.test(pane), /className=\{[^}]*\bharness\b/.test(pane)],
     [false, false],
   );
-  /*
-   * ⚠ **A harness hides on one tap; an assembled agent asks first, in place, by
-   * name.** The settings-row rule confirms acts nothing brings back, and hiding is
-   * undone by `Add back` one tap away — so the harness arm still confirms nothing
-   * (`onToggle` is called straight from the menu). Deleting an assembled agent is
-   * a `DELETE` whose undo is a walk through the builder, so its arm opens the
-   * row's own confirmation rather than calling `onRemove` from the menu: the menu
-   * closes on the first tap, and a menu held open to hold a question would be a
-   * second dismissable layer over the sheet.
-   *
-   * Three things about the pair. It **names the agent** — "Remove <name>?" with
-   * where to rebuild it — because a question that names nothing is answered by
-   * reflex. **Cancel is last** (Q3.218: a second tap on a laggy connection lands on
-   * the undo) — `TwoStep`'s guarantee now, so what is pinned here is that the
-   * act reaches it as a plain `Remove` with no `danger`, and that the row draws
-   * no Cancel of its own. And it **holds the row's height** by the row's own
-   * arithmetic — the sum of the name line and the subline the normal column
-   * draws — which is the property the old confirmation broke: a drag measures
-   * one row at `pointerdown` and applies it to every neighbour, so a taller
-   * confirming row put an oversized step into `dropIndex`. The `danger` negative
-   * one check up still covers this pair.
-   */
   check(
     "an assembled agent's removal asks in place, by name, with Cancel last",
     [
@@ -766,15 +399,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true, true],
   );
-  /*
-   * ⚠ **The `2.5` above and below the question sit on the question, not on the
-   * primitive's box.** The box also holds the two answers, and a 44px
-   * coarse-pointer button padded by 2.5 on each side is 64px in a 60px row —
-   * the exact arithmetic error this pin exists to catch, one element over.
-   * `align="end"` is what puts the question in the name column and the answers
-   * in the kebab's slot: the question grows from a zero basis, so it can never
-   * wrap the answers onto a second line and grow the row that way either.
-   */
   check(
     "and the question is drawn at the row's own height",
     [
@@ -787,22 +411,7 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true, true, true, false, true],
   );
-  /*
-   * ⚠ **44px of ink on the one control that now carries every act on the row.**
-   * `md` is the size that does *not* reach the platform floor — 36px with no
-   * growth mechanism — and it is also the prop's default, so this is one omitted
-   * argument away at all times. `lg` is what the plugin machine table settled on
-   * for a row's icons, for the same reason.
-   */
   check("and it is drawn at the size a row's icon is drawn at", /size="lg"/.test(pane), true);
-  /*
-   * ⚠ **The drag is captured on the handle rather than listened for on `window`**,
-   * which is `AppShell`'s `RailHandle` rule — the gesture belongs to the control it
-   * started on, and the capture survives the pointer leaving the row, which it does
-   * at once because the row is what is moving. `touch-none` is the other half:
-   * without it a phone claims the vertical gesture for scrolling before
-   * `pointermove` is ever delivered, and the row simply does not move.
-   */
   check(
     "the drag is captured, keyboard-reachable, and does not fight the phone's scroller",
     [
@@ -814,13 +423,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false, true, true, true],
   );
-  /*
-   * ⚠ **A refused write puts back what the daemon last confirmed**, not what was on
-   * screen one edit ago. Several writes can be in flight — the keyboard emits one
-   * per key — so undoing just the failed one leaves a list that is neither what
-   * somebody asked for nor what is stored, and the sequence guard is what stops an
-   * early failure erasing a later success.
-   */
   check(
     "a failed save restores the last confirmed order under a sequence guard",
     [
@@ -829,47 +431,17 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true],
   );
-  /*
-   * ⚠ **And the guard is two-sided, which it was not.** Refusing every answer but
-   * the newest issued is right for what is *drawn* and wrong for the restore
-   * target: with A confirmed and B in flight, A's success advanced nothing, and
-   * B's failure then repainted the list as it stood **before A** while the daemon
-   * held A. Two different questions — "may this repaint?" and "is this now what is
-   * stored?" — and they take two different counters.
-   */
   check(
     "and a success advances the restore target even when a newer write is in flight",
     [pane.includes("if (mine <= confirmed.current) return;"), pane.includes("confirmed.current = mine;")],
     [true, true],
   );
-  /*
-   * ⚠ **The writes are serialized, because ordering the answers is not ordering
-   * the requests.** `PUT /agent-strip` replaces rather than merges, so order is the
-   * whole of its meaning — and the keyboard emits one write per key. Two in flight
-   * over a relay can be applied in either order, and the loser is the one this
-   * client believes was superseded, with nothing reporting a disagreement.
-   */
   check("and they are sent one after another", /queue\.current = queue\.current/.test(pane), true);
-  /*
-   * ⚠ **An empty list is only said to be an empty *machine* when the read worked**
-   * — the rule `NewSession` keeps one screen over, and one this pane reintroduced
-   * on its first draft: every failure arm sets an empty listing so the spinner
-   * leaves, so a 503, a dead network or a daemon too old for the route each drew
-   * "this machine reports no agents", the last one *beside* the sentence saying the
-   * route is missing.
-   */
   check(
     "an empty machine is said only where the read succeeded",
     /rows\.length === 0 && failure === null && supported/.test(pane),
     true,
   );
-  /*
-   * ⚠ **And an empty *list* is not always an empty machine.** This list leaves out
-   * every harness `startsBare` is false for — opencode, and any a plugin added —
-   * so a machine listing only those has agents and draws no rows, and "reports no
-   * agents" over it contradicts the New session sentence that sent somebody here.
-   * Two sentences, told apart by the listing rather than by the rows.
-   */
   check(
     "a list with no rows says whether the machine has no agents or only ones that need a model",
     /listing\.agents\.length === 0\s*\?\s*"This machine reports no agents\."\s*:\s*"Every agent on this machine needs a model\. Add an agent to pick one\."/.test(
@@ -877,19 +449,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ),
     true,
   );
-  /*
-   * ⚠ **A preset row names its harness's fault, where it used to name its
-   * system.** A fault displaces the vendor on a harness row, and a preset on a
-   * missing harness — or one that refused while routed, which `startableHere`
-   * refuses and New session's *not ready* counts — is the same fault one row
-   * removed. It is also what explains the Set up in that row's menu, which would
-   * otherwise offer to set up a harness the row never mentions. Both tests are
-   * the New session tile's own (`missing`, `refused`), and the words are the
-   * tile's, so the two screens describe one preset alike;
-   * `webcheck.strip-chosen-tile.ts` pins the tile's half. Ordered, because a
-   * preset that is fine has to fall through to its system and a missing one may
-   * not read as refused.
-   */
   {
     const missingAt = pane.search(/const presetMissing = preset !== null && \(behind === null \|\| !behind\.available\);/);
     const refusedAt = pane.search(
@@ -912,15 +471,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
       [true, true, true, true, true],
     );
   }
-  /*
-   * ⚠ **And the poll loop an adopted run starts stops with the list.** It
-   * re-arms with a bare `setTimeout`, and this list unmounts on every Set up now
-   * — the leaf replaces it — so each ◀ back during a run started one more loop
-   * while the last went on polling for a component that was gone. Three
-   * places a loop can be standing when that happens: a tick already queued, an
-   * answer already out, and a failure already out. The flag is set on the way
-   * in as well, or StrictMode's second mount could watch nothing.
-   */
   const watchAt = pane.indexOf("const watch = (");
   const watchBody = watchAt < 0 ? "" : pane.slice(watchAt, pane.indexOf("poll(cursor);", watchAt));
   check(
@@ -933,23 +483,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true, true, 3],
   );
-  /*
-   * ⚠ **The rows animate only while a drag is live.** Clearing the transform and
-   * reordering the keyed children happen in one commit, and a transition takes its
-   * start value from the last style recalc — so a row left with
-   * `transition-transform` would interpolate `translateY(±h) → none` over a layout
-   * that has already moved by ∓h, overshooting a full row and sliding back on every
-   * drop. With the class gone in the same commit there is nothing to interpolate.
-   */
-  /*
-   * ⚠ **The row under the finger is never transitioned, and that was the whole of
-   * "it moves very unsmoothly".** Its transform is rewritten on every pointer
-   * event; with a 150ms `transition-transform` on it, each write started a fresh
-   * interpolation from wherever the last had reached, so the row crawled after the
-   * finger instead of following it. Only the neighbours animate, and only while a
-   * drag is live — which is also what stops the overshoot at the drop, when the
-   * transform clear and the keyed reorder land in one commit.
-   */
   check(
     "the neighbours animate during a drag and the dragged row never does",
     [
@@ -958,17 +491,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false],
   );
-  /*
-   * ⚠ **The phone fix, which is three things and not one.** The handle was a 32px
-   * strip at the left edge of a row inside a sheet that scrolls: miss it and the
-   * sheet moves, which is what "impossible to drag on a phone" is. So it is 44px
-   * square; `press` came off it, because that class puts
-   * `transform: scale(0.97)` on a button for as long as it is `:active` — an
-   * entire drag — and a control that shrinks and stays shrunk reads as broken; and
-   * the glyph is `pointer-events-none`, because `touch-action` is not inherited and
-   * a touch beginning on the `<svg>` is a touch the engines are free to hand to the
-   * scroller before they have walked up to the button carrying `touch-none`.
-   */
   check(
     "the handle is a 44px target that cannot lose a touch to the scroller",
     [
@@ -979,21 +501,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false, true, true],
   );
-  /*
-   * ⚠ **And the second guard, because the first was dead on arrival and nothing
-   * said so.** `touch-none` is a `@layer utilities` class; `index.css` carried
-   * `button { touch-action: manipulation }` **unlayered**, and an unlayered rule
-   * beats a layered one regardless of specificity — so the effective value on the
-   * handle stayed `manipulation`, which permits panning, and a phone took every
-   * drag for a scroll. A mouse is not gated by `touch-action` at all, which is why
-   * it worked on a desktop and reported as "impossible on mobile".
-   *
-   * Two assertions, because two separate things had to be true: the base rule is
-   * layered so the utility can win, and there is a mechanism that does not depend
-   * on the cascade being right. React attaches `onTouchMove` passively — the fact
-   * `AgentStrip`'s wheel handler is written out of — so the second one can only be
-   * an `addEventListener`.
-   */
   check(
     "a phone cannot take the drag for a scroll, by two mechanisms that do not share a cause",
     [
@@ -1005,13 +512,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [true, true],
   );
   {
-    /*
-     * The cascade half, read off the stylesheet. What is asserted is not that the
-     * declaration exists — it always did — but that it is **inside a layer**, which
-     * is the whole of the difference between a utility that can override it and one
-     * that cannot. The negative beside it is the general rule: a bare-element rule
-     * left unlayered silently kills the matching utility everywhere.
-     */
     const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
     const layered = /@layer base \{\s*button \{\s*touch-action: manipulation;/.test(css);
     const bare = /\n button \{\n  touch-action/.test(css.replace(/\r/g, ""));
@@ -1021,41 +521,12 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
       [true, false],
     );
   }
-  /*
-   * ⚠ **A hidden row is dimmed in place.** It keeps its position — that is the
-   * thing you came to set, and taking it out of the list would take away the only
-   * way to bring it back — so what says it is switched off is the ground and the
-   * ink. Not `opacity`: it composites the whole row including the line explaining
-   * what the row is, and this one still has to be read and pressed.
-   */
   check(
     "a hidden row says so with a ground and an ink, and never with opacity",
     [/row\.hidden\s*\?\s*"bg-raised\/60"/.test(pane), /row\.hidden \? "text-faint"/.test(pane), /opacity/.test(pane)],
     [true, true, false],
   );
-  /*
-   * ⚠ **The handle is switched off by one thing only: a daemon that cannot store an
-   * order.** It was also switched off while the row held a removal confirmation —
-   * the drag measures one row's height off the row it started on, and that pair
-   * lived inside the same `<li>`, so a drag begun there carried an oversized step
-   * into `dropIndex`. The confirmation is back at the row's own height (pinned
-   * above), and the handle stays mounted through it — its `touchmove` listener is
-   * registered once for the component's life and a handle that unmounted would
-   * come back without one — so nothing about a confirming row needs the handle
-   * switched off.
-   */
   check("the handle answers to the daemon and to nothing else", /disabled=\{frozen\}/.test(pane), true);
-  /*
-   * ⚠ **The status line sits under the list, with no height reserved** (13A). It
-   * carried two reserved lines *above* the rows so a refused write could not push
-   * them under a finger — and those two lines were blank on every healthy
-   * machine's first paint, between the lede and the list. Under the rows the
-   * only thing a sentence can displace is the `Add an agent` bar, so the reserve
-   * is gone: an empty `<p>` has no line box, and the margin rides the text. The
-   * `sr-only` move announcer is a second `role="status"` and is exempt from the
-   * height test by being `absolute`; the first one in source order is the one
-   * this is about.
-   */
   const listAt = pane.indexOf('<ul className="mt-1 border-y border-edge">');
   const statusAt = pane.indexOf('role="status"');
   check("the status line was found, after the list", listAt > 0 && statusAt > listAt, true);
@@ -1068,11 +539,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [false, true, true],
   );
-  /*
-   * The lede at the screen-line cap: the name, the id, and the one rule the
-   * `default` badge needs a reader to know. What removing costs left it for the
-   * row that decides it.
-   */
   check(
     "the lede says what the list is and which row is the default, and no more",
     [
@@ -1081,24 +547,10 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, false],
   );
-  /*
-   * At the screen-line cap since review D10 — fourteen, the name and the id one
-   * each: "What New session offers on" was a word over it. And the caveat under
-   * the list, for a daemon that cannot store an order, at the ten-word caveat
-   * cap with its dash counted; read off the source rather than restated.
-   */
   check("and opens on what the list is rather than on a question", /New session's agents on \{machine\.name\} \(/.test(pane), true);
   const tooOld = /supported \? "" : "([^"]+)"/.exec(pane)?.[1] ?? "";
   check("the old-daemon caveat names the fact and the remedy", /^Daemon too old to reorder agents — update it\.$/.test(tooOld), true);
   check("at the ten-word caveat cap, the dash counted", tooOld.length > 0 && tooOld.trim().split(/\s+/).length <= 10, true);
-  /*
-   * ⚠ **Removing an agent hands the removal to the strip whatever door it came
-   * through, and the builder's copy of this was gated and permanently wrong.**
-   * `agentPick.ts`'s standing pick is never taken, and this hand-off is the only
-   * thing that clears it — so a removal that skipped it left `heldPick` naming a
-   * row the daemon had dropped for the life of the tab, which suppresses the
-   * default and leaves `Start` disabled on every later visit to New session.
-   */
   {
     const builderSrc = stripComments(
       readFileSync(new URL("../src/ui/AgentBuilder.tsx", import.meta.url), "utf8"),
@@ -1112,35 +564,11 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
       ],
       [true, false, true],
     );
-    /*
-     * The *pick* keeps its gate, and the asymmetry is the whole of the rule: a
-     * hand-off left behind fires on some later visit, and a pick is a thing
-     * somebody would then be given without asking. A removal cannot be — an id
-     * that has been deleted can never be a choice made again.
-     */
     check(
       "while an assembly is handed off only when the way out is the strip",
       /if \(preset === null && overlayKind\(out\) === "new"\)/.test(builderSrc),
       true,
     );
-    /*
-     * ⚠ **The seed is weighed against the *listing* now, and it therefore waits —
-     * which is a real change to this screen and is why the assertion moved rather
-     * than being deleted.** It arrives off a URL, so a harness this machine does
-     * not have must open the ordinary new-agent screen rather than one holding a
-     * value nothing can resolve (`compatibility.md`'s rule 2, and the direction the
-     * `edit` marker already fails in). That used to be answerable at mount, against
-     * a closed union; which harnesses exist is a fact about the machine now, and a
-     * *shape* test — the only thing this side could answer alone — would seed the
-     * screen with a harness that is not there: a selected row, a raw id where a
-     * name goes, and every model refused against something absent.
-     *
-     * ⚠ **So the two halves are pinned together and neither is enough alone.** The
-     * state must start empty, or the address is trusted before it is checked; and
-     * the effect must be guarded by a ref, or a re-read puts the address's harness
-     * back over one somebody cleared — which is exactly the clobber `touched`
-     * exists to prevent one component over, arriving through a different door.
-     */
     check(
       "the builder does not trust the address until the machine has confirmed it",
       [
@@ -1150,15 +578,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
       ],
       [true, true, true],
     );
-    /*
-     * ⚠ **And the row it fills still does not wait, which is the property Q3.528's
-     * own assertion cannot see.** That one compares two string indices — the
-     * Harness field appearing above the Model field — and it goes on passing
-     * whatever either row is gated on. What made the order worth having is that the
-     * cheap question is answered while the expensive read runs, so what has to be
-     * pinned is that the harness *rows* fall back rather than blocking: with the
-     * listing still in flight the picker draws the five this product ships.
-     */
     check(
       "and the harness rows fall back rather than waiting on that listing",
       /agents \?\? AGENT_IDS\.map\(\(id\) => \(\{ id \}\)\)/.test(builderSrc),
@@ -1167,18 +586,6 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
   }
 }
 
-/* ------------------------------------------------------------------ *
- * Where a claude session's opening mode comes from, and where that is said
- *
- * ⚠ **A placement, which is why it is read off the file.** The daemon sends no
- * mode at `session/new`, so a session that opens in `Bypass permissions` opened
- * that way because the adapter read the user's own `permissions.defaultMode` —
- * and until this line there was no screen that could say so. Nothing typed can
- * hold "this sentence is in the section and not in a row", and the row is where
- * it would naturally have gone: its subline is **one line by construction**,
- * because two kinds of row with different line counts is a list whose rows are
- * different heights and a drag measures one and applies it to all.
- * ------------------------------------------------------------------ */
 process.stdout.write("\nwhere the opening mode is explained\n");
 {
   const pane = stripComments(
@@ -1194,47 +601,14 @@ process.stdout.write("\nwhere the opening mode is explained\n");
     /settingsMode !== null && \(/.test(pane),
     true,
   );
-  /*
-   * The sentence names the file and quotes the value. It deliberately does not
-   * predict the mode: the adapter merges project settings over this one and
-   * normalises through aliases of its own, and the composer's chip is what says
-   * what a running session is really in.
-   */
   check("naming the setting and the file it came from", /permissions\.defaultMode/.test(pane) && /settingsMode\.file/.test(pane), true);
-  /*
-   * ⚠ **And it is not in the row.** Asserted as an absence over the row's own
-   * render, because the failure this prevents is invisible in a screenshot of one
-   * machine: a second line appears only on a claude row, so a list with a claude
-   * row and an assembled one beside it has two heights and the drag misplaces
-   * every drop after the first.
-   *
-   * ⚠ **Bounded at both ends and on a named component, because the first version
-   * of this check could not observe what it forbids — twice over.** It read
-   * `pane.slice(pane.indexOf("<a class string>"))`: an unguarded `indexOf`, so a
-   * renamed class answers `-1` and `slice(-1)` yields **one character**, over
-   * which the absence is trivially true. And even when it matched, the anchor sat
-   * hundreds of lines *below* every `settingsMode` site, so the slice could never
-   * have contained one — the check passed on geometry rather than on the property.
-   *
-   * So: the component by name, both ends, each anchor asserted found before the
-   * absence is read, and a floor on the region's size — an absence over an empty
-   * or one-character string is the failure shape this whole file is careful about.
-   */
   const rowStart = pane.indexOf("function StripRowView(");
   check("the row's own component is where this is asserted", rowStart >= 0, true);
-  /*
-   * `StripRowView` is the last top-level declaration in the file today, so this
-   * resolves to the end of it — said out loud rather than left to `slice`, because
-   * "no next function" and "the anchor was not found" are the same `-1` and only
-   * one of them is fine. Add anything after it and the region tightens by itself.
-   */
   const next = pane.indexOf("\nfunction ", rowStart + 1);
   const rowEnd = next === -1 ? pane.length : next;
   const rowRender = pane.slice(rowStart, rowEnd);
   // A floor, so a region that collapsed to nothing cannot satisfy an absence.
   check("which is a region big enough to be a component", rowRender.length > 2000, true);
-  // The positive control: the region really is the row, and not some other span
-  // that happens to lack the string.
   check("and it really is the row that draws the one-line subline", rowRender.includes("min-h-[var(--text-2xs--line-height)] truncate"), true);
   check("and never inside a row's one-line subline", rowRender.includes("settingsMode"), false);
 }

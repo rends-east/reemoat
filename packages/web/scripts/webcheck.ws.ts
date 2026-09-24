@@ -1,65 +1,26 @@
-/**
- * The loopback daemon, and the machine `SessionStream` is given instead of a
- * control plane.
- *
- * A real `WebSocketServer` on purpose: the rotation cases are a race between two
- * live sockets, and stubbing that away would remove the only thing worth testing.
- * The server is created when this module is evaluated — which the runner does
- * before it runs any section — and closed by {@link closeWss}.
- */
+/** A real loopback WebSocketServer, started when this module loads: the rotation cases are a race between two live sockets. */
 
 import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
 import type { AddressInfo } from "node:net";
 import { sleep } from "./webcheck.env.js";
 import { SessionStream, type Stream } from "./webcheck.modules.js";
-// Type-only, so it is erased rather than evaluating `machine.ts` ahead of the
-// `window` stub — the rule `webcheck.modules.ts` states. Imported rather than
-// re-declared: a hand-written copy of this shape is what went stale below.
+// Type-only, so machine.ts is not evaluated ahead of the window stub.
 import type { StreamSocket } from "../src/e2ee.js";
 import type { Route } from "../src/machine.js";
-
-/* ------------------------------------------------------------------ *
- * A daemon-shaped WebSocket server
- *
- * Speaks only the frames `stream.ts` reads. Each connection records the `since`
- * it was opened with, which is what the rotation cases assert against.
- * ------------------------------------------------------------------ */
 
 export interface Attach {
   since: number;
   send: (frame: unknown) => void;
   close: (code: number, reason: string) => void;
-  /**
-   * An abrupt drop, which is what a network change actually looks like.
-   *
-   * `1006` cannot be *sent* — it is reserved for "the connection went away without
-   * a close frame" — so a dead network has to be simulated by killing the socket,
-   * not by closing it politely with that code.
-   */
+  /** An abrupt drop: 1006 cannot be sent, so a dead network is simulated by killing the socket. */
   terminate: () => void;
-  /**
-   * This socket is no longer open, from the *server's* side of it.
-   *
-   * Not "the client closed it" on its own — `close()` and `terminate()` above set
-   * it too — but on a socket this side never touched, that is exactly what it
-   * means, and it is the only way to see the difference between a client that
-   * released an abandoned socket and one that left it attached to the daemon.
-   */
+  /** Closed from the server's side; close and terminate above set it too. */
   closed: boolean;
 }
 
 export const attaches: Attach[] = [];
 const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
 
-/*
- * A `workspace`, because the fixture never had one.
- *
- * Every row below was built from a legacy `cwd` and no `workspace` at all, which
- * was harmless while nothing read it — and stops being harmless the moment
- * `folderPathOf` does. Fixed here rather than by writing `?.` into `groups.ts`:
- * optional chaining there would silently file every real session under the
- * fallback bucket and nothing would ever fail.
- */
 export const workspaceAt = (cwd: string, repoRoot: string | null = null) => ({
   mode: repoRoot === null ? "plain" : "worktree",
   root: cwd,
@@ -123,52 +84,20 @@ export function events(attach: Attach, from: number, to: number): void {
   attach.send({ type: "events", events: batch });
 }
 
-/* ------------------------------------------------------------------ *
- * A machine, to the extent `SessionStream` needs one
- * ------------------------------------------------------------------ */
-
 export let forgotten = 0;
 let tokenExpiresAt: number | null = null;
 
 export const machine = {
   id: "m_1",
   ensureToken: async (): Promise<string> => "t_ok",
-  /*
-   * `kind: "relay"`, and it is not decoration.
-   *
-   * ⚠ This stub said `{base}` alone, with a comment asserting that *"`Route` lost
-   * its `kind` with the direct path"*. That was true for four releases and is not
-   * any more — a `Route` carries `kind` again, read by `settleAnswer` to apply a
-   * 401 rule the relay arm must never get. The stub is handed over `as never`, so
-   * **nothing type-checked this**: a comment was the only thing saying what the
-   * shape was, and a comment is what went stale. `relay` because these sections are
-   * about rotation and the cursor, which are the same on both arms.
-   */
+  // kind is read by settleAnswer, and the stub is passed as never so nothing type-checks it; relay because rotation is the same on both arms.
   resolveRoute: async (): Promise<Route> => ({ base: `http://127.0.0.1:${port}`, kind: "relay" }),
   currentRoute: (): Route => ({ base: `http://127.0.0.1:${port}`, kind: "relay" }),
   forgetRoute: (): void => void (forgotten += 1),
   tokenExpiresAt: (): number | null => tokenExpiresAt,
-  /*
-   * The real signature, four arguments, though only two are read here.
-   * `SessionStream.open` passes all four; a two-argument stub compiled only because
-   * of the `as never` above, and it is the shape a reader would copy.
-   */
   streamUrl: (session: string, since: number, _token: string, _route: Route): string =>
     `ws://127.0.0.1:${port}/sessions/${session}/stream?since=${since}&token=t_ok`,
-  /*
-   * What `SessionStream.open` actually calls now, and it is a different question
-   * from {@link streamUrl}.
-   *
-   * ⚠ **A real `WebSocket`, deliberately, on a `kind: "relay"` route.** These
-   * sections are about rotation, the cursor and the close-code table, and the
-   * whole claim `StreamSocket` rests on is that those are identical on both
-   * transports — so a fixture that reached for the encrypted channel here would
-   * be testing the channel instead, and would need a relay, a daemon and a device
-   * key to do it. What it must keep is the *signature*: four arguments and a
-   * `StreamSocket` out, so a class that starts passing a fifth fails here rather
-   * than silently on a phone. `webcheck.e2ee.ts` is where the channel's own half
-   * of this is driven.
-   */
+  // A plain WebSocket on purpose: rotation and the cursor are the same on both transports, and webcheck.e2ee.ts drives the channel.
   openStream: (session: string, since: number, token: string, route: Route): StreamSocket =>
     new WebSocket(machine.streamUrl(session, since, token, route)),
 };
@@ -197,9 +126,6 @@ export function recorder() {
 }
 
 export function newStream(sink: unknown, since: number): Stream {
-  // Duck-typed on purpose: constructing a real `MachineConnection` would pull in
-  // the control plane, and the collaborator is exactly the seam that makes this
-  // testable without one.
   return new SessionStream(
     { machineId: machine.id, sessionId: "s_1" } as never,
     machine as never,
@@ -216,15 +142,7 @@ export async function nextAttach(count: number): Promise<Attach> {
   throw new Error(`attach ${count} never arrived`);
 }
 
-/**
- * `nextAttach`, for the cases where a socket that never arrives is the *answer*.
- *
- * A throw would be right for a fixture that cannot proceed and wrong for an
- * assertion whose whole subject is "does the client still open one" — the
- * orphaned-rotation case below fails by opening nothing, and a driver that
- * threw there would take every section after it down with the crash-truncation
- * failure CLAUDE.md records rather than printing one FAIL.
- */
+/** Like nextAttach, but answers null instead of throwing, for cases where no socket arriving is the answer. */
 export async function attachWithin(count: number, ms: number): Promise<Attach | null> {
   for (let i = 0; i * 10 < ms; i += 1) {
     if (attaches.length >= count) return attaches[count - 1]!;
@@ -233,12 +151,6 @@ export async function attachWithin(count: number, ms: number): Promise<Attach | 
   return null;
 }
 
-/**
- * Shut the server down.
- *
- * Called by the runner between the last section that uses it and the first that
- * does not, which is where the bare `wss.close()` sat when this was one file.
- */
 export function closeWss(): void {
   wss.close();
 }

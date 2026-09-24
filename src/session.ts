@@ -53,504 +53,79 @@ import { LocalRuntime } from "./runtime/local.js";
 import type { AgentHandle, SessionRuntime } from "./runtime/types.js";
 import { describeError } from "./http.js";
 
-/** ACP's "authentication required" error code. */
 const AUTH_REQUIRED = -32000;
-/**
- * JSON-RPC `resourceNotFound`, which on a resume means one specific thing: the
- * agent no longer has that conversation.
- *
- * Read as a code rather than off the message, because the message is prose the
- * adapter builds (`Resource not found: <uuid>`) and the code is the contract.
- *
- * Measured 2026-08-04 in production on ten sessions at once, and the first
- * explanation was wrong in a way worth keeping. It read "they were created while
- * agents ran in containers, so their transcripts never reached this host" —
- * true of **six**, whose `cwd` has no project directory under
- * `~/.claude/projects` at all. The other three had one, with nine transcripts in
- * it and theirs missing: they were `/clear` casualties, where the CLI forked to
- * a new conversation and the id we had stored was left naming the fork's parent.
- *
- * That second class is **not fixed and cannot be fixed from here**, which took
- * an attempt to establish. Measured 2026-08-05: `/clear` works (the agent
- * answers `NO MEMORY` straight after), our ACP session id does **not** change,
- * and claude forks underneath — verified by content, the file named by our id
- * still holds the pre-clear conversation while the live one sits under an id we
- * are never told. So there is no rename to follow; a first attempt built exactly
- * that and was reverted for being machinery for an event that does not occur.
- * The lead worth measuring is `session/list`, which claude does advertise.
- *
- * **One caveat, and it is the adapter's rather than ours.** It maps *two* SDK
- * failures onto this code (claude-agent-acp 0.63.0, `createSession`, in the
- * `catch` around `q.initializationResult()`): "No conversation found with
- * session ID", which is settled, and "Query closed before response received",
- * which is a transport hiccup and is not. We cannot tell them apart from here,
- * so treating the code as settled can strand a session that a retry would have
- * recovered. That is the deliberate trade: the alternative is spawning an agent
- * per dead session on every boot forever, and the way back is one tap on Resume.
- */
+// On resume: the agent no longer has the conversation. Matched by code, not message.
 const RESOURCE_NOT_FOUND = -32002;
-/**
- * JSON-RPC `internalError` — the agent's "something went wrong and I will not
- * say what".
- *
- * Read for exactly one purpose, in `Session.resume`: it is what kimi 0.29.2
- * answers when asked to resume a session left in plan mode while the client
- * declares `clientCapabilities.fs`. Nothing else keys on it, and nothing should
- * — it is the generic bucket, so treating it as *meaning* anything beyond "try
- * the one optional capability off" would be reading tea leaves.
- */
 const INTERNAL_ERROR = -32603;
 const CANCEL_GRACE_MS = 5_000;
-/** Ceilings on RPCs that write to the agent's stdin. See `doDispose`. */
 const CANCEL_SEND_TIMEOUT_MS = 1_000;
-/**
- * How long {@link Session.cancelTurn} waits to see the turn actually end.
- *
- * Shorter than `CANCEL_GRACE_MS`, and the difference is who is waiting.
- * `doDispose` spends five seconds because what follows it is SIGTERM, so every
- * second bought there is a chance for the agent to shut down cleanly instead. A
- * cancel is asked for by somebody holding a phone, and what follows it is
- * nothing — the turn ends when it ends, `turn_end` reaches the transcript on its
- * own, and the caller does not need to be there for it. So this bounds only how
- * long the answer is willing to say *whether* it worked, and 1500ms is the point
- * past which a person taps again rather than waits.
- */
 const CANCEL_SETTLE_MS = 1_500;
 const CLOSE_TIMEOUT_MS = 2_000;
-/**
- * The ACP **extension** that puts a message into the turn already running.
- *
- * The leading underscore is the protocol's own mark for a method outside the
- * standard set, so nothing here may treat it as ACP proper: it is offered by an
- * agent or it is not, `AcpClient.supportsSteering` is the whole test, and a
- * daemon-held queue is what covers the agents that decline.
- *
- * Measured 2026-09-11 against the pinned adapters, driving a real turn and
- * injecting into it:
- *
- *   claude-agent-acp 0.73.0  `{outcome: "injected"}` in ~2ms; the agent abandoned
- *                            the essay it was writing and answered the injected
- *                            message instead.
- *   codex-acp 1.8.0          `{outcome: "injected"}` in ~4ms; the agent finished
- *                            what it was saying first and took the message after.
- *
- * ⚠ **And the property this daemon actually depends on: the original
- * `session/prompt` stayed open and resolved exactly once, `end_turn`, on both.**
- * An injection is not a second turn, produces no second response and no second
- * `turn_end`, so `pump`'s accounting is untouched by it. That was the open risk
- * and it did not fire.
- */
+// ACP extension injecting into the running turn; the original session/prompt still resolves exactly once.
 const STEER_METHOD = "_session/steering";
 
-/**
- * How one background task is stopped without ending the turn that started it.
- *
- * A second ACP **extension**, the underscore being the protocol's own mark for
- * one, served by the agent exactly as `_session/steering` is. The adapter's
- * docblock says what makes it worth having rather than reusing `session/cancel`:
- * *"Stops one Claude background task without cancelling the parent prompt turn"*
- * — and, on the runtime that owns it, *"prompt cancellation intentionally does
- * not finish it because background work may outlive a prompt."*
- *
- * Answers `{stopped: boolean}`, and **`false` is not a failure**: the task
- * finished on its own between the tap and the request. See `ManagedSession.
- * stopBackgroundTask`.
- */
+// Stops one background task without cancelling the turn; `{stopped: false}` means it already finished.
 const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
 
-/**
- * How long that stop may take.
- *
- * `STEER_TIMEOUT_MS`' number and its argument: both adapters answer their
- * extensions in single-digit milliseconds, so ten seconds means the pipe is not
- * being read at all rather than that the work is slow to stop. Unlike a steer
- * there is nothing to degrade to — the caller gets a failure and the row says so
- * — which is the whole reason the control draws `· stopping…` optimistically and
- * can take it back.
- */
 const ASYNC_TASK_STOP_TIMEOUT_MS = 10_000;
-/**
- * Ceiling on the steer request, which writes to the agent's stdin like every
- * other RPC here.
- *
- * ⚠ **A timeout is the one place this feature can duplicate a message**, and it
- * is bounded rather than solved: nothing distinguishes "the agent never read it"
- * from "the agent took it and was slow to answer", so a caller that queued on
- * timeout could deliver the same text twice. Ten seconds is chosen against the
- * measurement above — both adapters answered in single-digit milliseconds,
- * because the answer says only that the message was *accepted*, never that it was
- * acted on — so a timeout here means the pipe is not being read at all, which is
- * the case where a queued retry is right.
- */
+// A timeout here can duplicate a message if the caller then queues it.
 const STEER_TIMEOUT_MS = 10_000;
 
-/**
- * What became of a steered message.
- *
- * Four values where the wire has three, and the fourth is the point: `unsupported`
- * is this daemon's word for "ask somebody else", covering both an agent that never
- * advertised the method and one that advertised it and then refused the call.
- *
- * ⚠ **`started_new_turn` is a failure mode here rather than a success.** Measured
- * 2026-09-11 on claude-agent-acp 0.73.0: steering with no turn running starts one,
- * and that turn has **no `session/prompt` request to resolve** — so nothing ever
- * hands this daemon a `turn_end` for it and `pump` could never close it. That is
- * why {@link Session.steer} opts into the adapters' `promptRequired` fallback and
- * why {@link ManagedSession} only steers while it holds a turn. Reaching this arm
- * means the race was lost or the adapter ignored the opt-in; the events still
- * arrive and are recorded by the idle drain, and the caller reports it.
- */
+/** `started_new_turn` is a failure: that turn has no session/prompt for pump to close. */
 export type SteerOutcome = "injected" | "started_new_turn" | "prompt_required" | "unsupported";
-/**
- * Ceiling on the `session/new` a clear opens.
- *
- * Measured at ~600ms against claude 0.63.0 on an already-running process — no
- * handshake, only the session — so this is loose by an order of magnitude rather
- * than tuned. Bounded at all for the reason every stdin write here is: the SDK
- * puts no timeout on them, and an agent that has stopped reading its pipe would
- * otherwise park the HTTP request that asked for the clear indefinitely.
- */
 const NEW_SESSION_TIMEOUT_MS = 15_000;
-/**
- * Ceiling on the `session/new` or `session/resume` that **opens** a session.
- *
- * ⚠ **These two were the hole in "every RPC that writes to agent stdin is
- * bounded"**, and the rule reads as absolute, so nothing was looking. Every other
- * stdin write in this file goes through `withDeadline` or the abandoning sibling
- * beside it; the two on the launch path went through neither, and they are the
- * ones whose failure is worst.
- *
- * What an unbounded launch cost: an agent that completes `initialize` and then
- * stops reading its pipe — a wedged tool, a full pipe buffer, a dead inner
- * process, exactly the case the constant above is written about — leaves
- * `Session.start`'s promise pending for ever. `registry.ts` awaits it with no
- * ceiling of its own, so `DELETE /sessions/:id` never answers; `stopping` is
- * memoised, so every retry joins the same dead promise. No `exitRecord` is ever
- * written, so the session never becomes `terminal`: it cannot be resumed and it
- * holds one of `MAX_LIVE_SESSIONS` for the life of the process. At shutdown there
- * is no `agentHandle` yet, so the SIGKILL sweep skips it — and the child was
- * spawned detached with its pid never persisted, so the next boot's reaper cannot
- * find it either. One permanently leaked agent, holding a worktree.
- *
- * Four times `NEW_SESSION_TIMEOUT_MS` rather than the same number, because this
- * one is not the same question. That one bounds a `session/new` on a process
- * already running and answering (~600ms measured); this one covers a cold agent
- * that may still be loading a model list, and `session/resume` on top, which
- * restores a conversation whose length nobody here controls. Loose on purpose:
- * the value of a bound is that it exists, and a launch that takes a minute is a
- * bad experience where a launch that never returns is a leaked process.
- */
+// Bounds the launch RPC: unbounded, a wedged agent leaks its process, worktree and session slot.
 const LAUNCH_SESSION_TIMEOUT_MS = 60_000;
-/**
- * Ceiling on a mode/model/effort change.
- *
- * Generous because switching model is not a local edit — claude rebuilds its
- * available modes around the new model's capabilities — but bounded for the same
- * reason every other stdin write here is: the SDK puts no timeout on it, so an
- * agent that has stopped reading its pipe would park an HTTP request forever.
- */
 const SET_CONFIG_TIMEOUT_MS = 15_000;
-/**
- * Ceilings on the agent's command list. See {@link toCommands} for why they are
- * applied here rather than downstream.
- *
- * Set against a real list rather than guessed. Measured 2026-08-03 against claude
- * 0.63.0 on a machine with plugins installed: **100 commands, 18.7 KiB**, longest
- * name 24 characters, longest hint exactly 64, and descriptions with a median of
- * 68 but a maximum of 1135 — a skill's whole trigger paragraph. So the name cap is
- * generous, the hint cap is *raised past* the longest real one rather than set at
- * it, and the description cap is the one that actually bites. It is the payload
- * that is being bounded, not the row: the menu truncates prose with CSS, so what
- * this stops is one verbose skill costing more than the other ninety-nine.
- *
- * **The name cap is a refusal and the other two are truncations**, which is the
- * one asymmetry here. A description and a hint are prose to show; a name is text
- * to *send*, so a clipped one is not a shorter command but a broken one. See
- * {@link toCommands}.
- */
+// The name cap refuses (a clipped name is a broken command); the others truncate.
 const MAX_AGENT_COMMANDS = 256;
 const MAX_COMMAND_NAME_CHARS = 64;
 const MAX_COMMAND_DESCRIPTION_CHARS = 200;
 const MAX_COMMAND_HINT_CHARS = 100;
 
-/**
- * What an elicitation form is allowed to be.
- *
- * Same placement and the same argument as the command caps above — the agent
- * chooses every string here, so "bounded by what the agent sent" is not a bound —
- * with the asymmetry one level up: **structure is refused and prose is carried
- * whole.**
- *
- * A form missing a question is not a smaller form, it is a form whose answer
- * *means something different*, so a count over its cap refuses the whole
- * elicitation rather than delivering a form somebody can answer wrongly. An
- * option's `value` is refused for the reason a command's name is: it round-trips
- * to the agent, and a clipped one is a value the agent will not recognise.
- *
- * ⚠ **`title` and `description` used to be clipped here — by
- * `MAX_ELICITATION_TITLE_CHARS` at 100 and
- * `MAX_ELICITATION_DESCRIPTION_CHARS` at 300 — and are not any more.** They are the *question*: with
- * several questions on one form the adapter puts each one in a field's
- * `description` and leaves `message` as a preamble, so a 300-character cap was a
- * cap on the sentence somebody is being asked to answer, and an option's
- * `description` is the sentence explaining what one answer means. Measured against
- * the live log on this machine, one real option description was **318** characters
- * and was being cut. A question a person reads half of is a question they answer
- * wrongly, which is the same failure "structure is refused" exists to avoid, one
- * field along — so the split now runs between *structure* and *prose* rather than
- * between refusing and clipping.
- *
- * What bounds every string *on the form* is `MAX_ELICITATION_FORM_BYTES` alone,
- * and that is the point of the paragraph below: one whole-object number instead of
- * four per-string ones, refused rather than silently altered.
- *
- * ⚠ **`message` is the exception, because it is not on the form**, and its clip
- * came back in 0.9.1 after it was measured to reopen a permanent stall — see
- * {@link MAX_ELICITATION_MESSAGE_CHARS}, which is where that argument lives.
- *
- * `MAX_ELICITATION_FORM_BYTES` is the backstop the per-item caps cannot be: they
- * stop one enormous string, this stops a thousand small ones. It is deliberately
- * *not* the 8 KiB a pending permission's blob gets — that number is what it is
- * because a permission rides `SessionSnapshot`, which `GET /sessions` returns for
- * sixty sessions every four seconds, and a form does not ride the snapshot. The
- * number and its reason move together.
- *
- * A refusal rather than a `clampBlob` stand-in throughout, because
- * `{truncated: true, bytes}` is a fine thing to show above an Approve button and
- * a useless thing to show above a form.
- *
- * **Measured 2026-08-06 against live claude**, a two-question `AskUserQuestion`
- * driven through `pnpm harness --agent claude --json`: 2 questions → **4 fields**
- * (each question brings its own `_custom` box), 4 options each, longest option
- * value 19 characters, longest description 155, `message` the adapter's own
- * "Please answer the following questions.", nothing `required`, no `format`, no
- * `default`, no `preview`, and ~2.5 KiB in total. The tool's own schema caps
- * questions at 4 and options at 4, so **8 fields is the real ceiling** and every
- * number here sits well above what an agent can actually produce — which is the
- * point, since these bound the pathological case and not a real form.
- *
- * The value cap is the one worth being generous with: it is a *refusal*, so
- * getting it wrong loses a whole form, and it guards a string that is 19
- * characters in practice. The byte backstop is what actually bounds the total.
- */
+// Structure is refused, prose is carried whole (no MAX_ELICITATION_TITLE_CHARS clip); MAX_ELICITATION_FORM_BYTES bounds the total.
 const MAX_ELICITATION_FIELDS = 24;
 const MAX_ELICITATION_OPTIONS = 24;
 const MAX_ELICITATION_FORM_BYTES = 32 * 1024;
 const MAX_ELICITATION_VALUE_CHARS = 512;
 
-/**
- * The agent's preamble to a question, and the one prose string on this path that
- * is bounded rather than carried whole.
- *
- * ⚠ **This is a restoration, and what forced it is a permanent stall rather than
- * a byte budget.** `MAX_ELICITATION_MESSAGE_CHARS` was retired at 512 with the
- * rest of the prose clips (see the section above, whose argument still stands —
- * 512 really did cut real questions), on the understanding that
- * `MAX_ELICITATION_FORM_BYTES` was left holding the total. It is not: that number
- * is weighed over the projected {@link ElicitationForm}, and `message` is **not a
- * field of it** — `onElicitation` carries it beside the form and `registry.ts`
- * puts it on both the event and the snapshot. So between 0.3.0 and here, one
- * agent-minted string was the only value on this path bounded by nothing at all,
- * and it rides the two places that cannot afford one:
- *
- * - **`elicitation_request` as an event.** `truncateEvent` returns that arm
- *   unchanged — deliberately, a truncated question is an unanswerable question —
- *   and `StreamConnection.flush` takes the first event of a batch *whatever it
- *   weighs*, so one ~1 MiB question is one WebSocket message past
- *   `MAX_SOCKET_MESSAGE_BYTES`. `MessageAssembler` refuses it, the channel fails,
- *   and `stream.ts` reconnects with the cursor unchanged onto the same batch, for
- *   ever. That is the identical stall `BATCH_MAX_BYTES` was repaired to remove,
- *   on a different trigger.
- * - **`PendingElicitationSnapshot` as state.** It rides `GET /sessions` for sixty
- *   sessions every four seconds and every `hello` frame, and it is one of the
- *   residues {@link fitSnapshotFrame}'s ladder concedes it cannot cut: the
- *   halving rung floors at one row, so a single enormous question defeats every
- *   rung and the oversized control frame goes out anyway.
- *
- * **Why 4096 and not the 512 that was taken out.** The cap has to sit above every
- * honest question and below anything that costs a frame, and both ends are
- * measured. Above: the largest real prose string this machine's log has ever
- * carried on an elicitation is the **318**-character option description that got
- * 512 retired, and the `message` claude's adapter actually sends is its own
- * 38-character "Please answer the following questions." — so 4096 is an order of
- * magnitude clear of the case that broke the old number, which 512 was not.
- * Below: 4096 code units is at most 16 KiB of UTF-8, half of the form's own 32
- * KiB backstop and twice a permission's whole 8 KiB `MAX_PERMISSION_SNAPSHOT_BYTES`
- * — so even at `refusalReason()`'s unbounded parked count the messages contribute
- * the same order as the permissions beside them, and no single one of them can be
- * a frame by itself.
- *
- * **A clip rather than a refusal, which is the opposite of everything else in
- * this section, and the asymmetry is the point.** A form is refused because a
- * form missing a question has an answer that means something else. A `message` is
- * a preamble: `clip` leaves its truncation *visible* in the string, the fields
- * are untouched, and the form is still answerable. Refusing the whole elicitation
- * over a long preamble would lose a question somebody could have answered — which
- * is the harm the 0.3.0 retirement was about.
- */
+// `message` is outside the form's byte backstop, so it is clipped here or one preamble stalls the stream.
 const MAX_ELICITATION_MESSAGE_CHARS = 4 * 1024;
-/** Cap on events buffered for a turn iterator that is not currently running. */
 const MAX_BUFFERED_EVENTS = 2_000;
-/**
- * Ceiling on the text a single `tool_call_update` carries out of a tool.
- *
- * `events.ts` has claimed this constant existed since tool output started being
- * kept, and it did not — so the only bound was `truncateEvent`'s 128 KiB
- * per-event backstop, which is the thing that comment says must *not* be the
- * budget for the commonest event. Tool output is the largest thing an agent
- * emits: one `cat` of a large file built the whole string here, in the agent's
- * own synchronous RPC handler, and then wrote 128 KiB into a log with an 8 MiB
- * per-session budget — sixty-odd of them evict the transcript they sit beside.
- *
- * 32 KiB is a whole test run or several hundred lines of a file, which is far
- * more than anyone reads in a transcript pane, and it leaves the per-event cap
- * doing the job it was described as doing: catching the one enormous event
- * rather than every ordinary one.
- */
 const MAX_TOOL_OUTPUT_BYTES = 32 * 1024;
 
-/**
- * How many images one `tool_call_update` may have kept.
- *
- * Its own bound because the byte budget above cannot reach them — see the note
- * in `toolOutput`. Bounded at ingest for the same reason `MAX_PARENT_ID_CHARS`
- * is: the agent chooses how many blocks to send, and "bounded by what the agent
- * sent" is not a bound.
- */
 const MAX_IMAGES_PER_UPDATE = 8;
 
-/**
- * What a permission may say about itself, and how many ways it may offer to
- * answer.
- *
- * ⚠ **These are the two fields that had no bound at all, and they are the two
- * that ride the *snapshot*.** `rawInput` and `content` were clamped — at the
- * registry, deliberately, at 8 KiB each — while `title` and `options` were
- * passed through exactly as the agent sent them, into `PendingPermissionSnapshot`
- * and from there onto `GET /sessions` for every session on the machine, every WS
- * `hello`, and every frame `touchSafe()` fans out. Four seconds, every attached
- * client, over the relay, to a phone. `truncateEvent` then declined to cut the
- * event on the stated ground that permissions are "already clamped far tighter
- * upstream by `clampBlob`" — which is true of two fields that are not on the
- * event and false of the two that are.
- *
- * So the comment is now correct rather than aspirational: bounded here, at
- * ingest, where `toCommands` and `toElicitationForm` already bound theirs.
- *
- * **Everything here is a refusal now, and the two 200-character clips are gone.**
- * They were `MAX_PERMISSION_TITLE_CHARS` and `MAX_PERMISSION_OPTION_NAME_CHARS`,
- * and the argument for them — *these two are read by a human and nothing else, so
- * clip them* — is exactly backwards for the one agent that asks a **question**
- * down this channel. kimi surfaces its own `AskUserQuestion` as a
- * `session/request_permission`, so `option.name` is a model-written answer, and
- * `permission.ts`'s `askedQuestion` matches that name against the same string in
- * `rawInput` **by identity** to recover the question. `rawInput` is bounded by
- * bytes and was never clipped by characters, so past 200 the two sides disagreed,
- * the match broke, and the whole question fell back to a row of buttons. A latent
- * bug nothing asserted, removed by removing the clip rather than by teaching the
- * join about it.
- *
- * ⚠ **What replaces them is one whole-object number, because the amplifier was
- * never the string length — it was the snapshot.** `MAX_PERMISSION_SNAPSHOT_BYTES`
- * is measured over the projected `{title, options}` and **refuses**, which is the
- * same shape `MAX_ELICITATION_FORM_BYTES` has one section down and the same shape
- * the option cap beside it already had. It is 8 KiB rather than the form's 32 for
- * the reason the form's own note gives from the other side: a form is fetched when
- * a card opens, and this pair rides `GET /sessions` for sixty sessions every four
- * seconds, to every attached client, over the relay, to a phone. A card whose title
- * alone is 50 KB is not one anybody can read; telling the agent so is a sentence it
- * can act on, and it is what the 24-option cap beside it already does.
- *
- * 24 options matches `MAX_ELICITATION_OPTIONS`, and for the same reason: it is
- * far above every measured card (four is the most any agent has sent) and far
- * below a number that costs a phone anything. Measured on this machine's own log,
- * the longest real title is **14** characters and the longest option name **31**,
- * so 8 KiB is three orders of magnitude of headroom over anything observed.
- */
+// Refused, never clipped: a MAX_PERMISSION_OPTION_NAME_CHARS clip broke kimi's identity match; {title, options} is weighed as one whole.
 const MAX_PERMISSION_OPTIONS = 24;
 const MAX_PERMISSION_OPTION_ID_CHARS = 256;
 const MAX_PERMISSION_SNAPSHOT_BYTES = 8 * 1024;
 
-/**
- * How many file locations one tool call may name, and how long each may be.
- *
- * ⚠ **`locations` was unaccounted in `estimateBytes` and uncut in
- * `truncateEvent`**, on both `tool_call` and `tool_call_update` — so an agent
- * sending a large array produced an event whose real size far exceeded its
- * charged size, walking past the 128 KiB per-event cap, past the per-session
- * byte budget (`schema.sql` pins that column to `estimateBytes`, not to the
- * payload) and past the WS queue's `MAX_QUEUE_BYTES`. Three bounds defeated by
- * one field nobody added a term for, which is precisely the failure the
- * `tool_call_update` arm's own comment names.
- *
- * Bounded here as well as counted there, because counting alone would only make
- * the event *visibly* oversized rather than smaller.
- */
 const MAX_TOOL_LOCATIONS = 64;
 const MAX_TOOL_LOCATION_CHARS = 1_024;
 
-/** An approval the agent is waiting on, as handed to a {@link PermissionResolver}. */
 export interface PendingPermission {
   toolCallId: string | null;
   title: string;
   options: PermissionOptionSummary[];
-  /**
-   * The tool's arguments, as the agent sent them with the request.
-   *
-   * Carried because it is often the **only** copy. The obvious place to find a
-   * command is the `tool_call` event with the same id, and joining there was the
-   * original plan — but measured against kimi, that event arrives with
-   * `rawInput: null` and the arguments appear for the first time here, on the
-   * permission request itself. A client that joined the log would show an
-   * approval button and no command, every time, for the one agent that actually
-   * asks.
-   *
-   * Bounded at the registry boundary, not here: this is what the agent sent and
-   * `session.ts` does not decide retention.
-   */
+  // Often the only copy of the arguments (kimi's tool_call has none); bounded at the registry.
   rawInput: unknown;
-  /**
-   * The request's content blocks — where an edit's diff lives.
-   *
-   * Same reasoning as `rawInput`. ACP hands both over on the request and the
-   * pair of them is what "the thing being approved" actually means.
-   */
   content: unknown;
 }
 
-/**
- * Decides a permission request on the caller's behalf.
- *
- * The returned promise may be parked indefinitely — that is the point, it is how
- * a human on the other side of a network gets to answer. `signal` aborts if the
- * agent withdraws the request or the connection dies, so a resolver holding a
- * promise open can learn that nobody is waiting for it any more.
- */
+/** May stay parked indefinitely; `signal` aborts when the request is withdrawn or the connection dies. */
 export type PermissionResolver = (
   request: PendingPermission,
   signal: AbortSignal,
 ) => Promise<acp.RequestPermissionResponse>;
 
-/** A question the agent is waiting on, as handed to an {@link ElicitationResolver}. */
 export interface PendingElicitation {
   toolCallId: string | null;
-  /** The agent's prompt, already clipped. Always present — ACP requires it. */
   message: string;
-  /** The projected, bounded form. Never the raw `requestedSchema`. */
   form: ElicitationForm;
 }
 
-/**
- * Puts a question in front of somebody and waits for the answer.
- *
- * Parked exactly like {@link PermissionResolver}, and for exactly as long.
- *
- * There is no local fallback and there must not be one. `onPermission` answers
- * for itself when nobody is listening, because allow-once is a defensible default
- * — **a question has no defensible default answer.** So a session with no
- * resolver does not quietly decline on somebody's behalf; it never declares the
- * capability in the first place, and the agent is never given the tool.
- */
+/** No local fallback: without a resolver the capability is never declared, since a question has no default answer. */
 export type ElicitationResolver = (
   request: PendingElicitation,
   signal: AbortSignal,
@@ -558,118 +133,25 @@ export type ElicitationResolver = (
 
 export interface SessionOptions {
   agent: AgentId;
-  /**
-   * Absolute path the agent will treat as the session root, **as this daemon
-   * sees it**. Translated to the agent's view on the way into `session/new`.
-   */
   cwd: string;
-  /**
-   * Who answers approval requests. Omitted, the session decides for itself with
-   * the allow-once policy below and never blocks.
-   */
   permissions?: PermissionResolver;
-  /**
-   * Who shows the agent's questions to a person.
-   *
-   * **Its presence is what declares the capability**, and that derivation is
-   * honest here where it would not be for `fs`: this daemon can always perform a
-   * write, so "able" and "advertised" are separable there and the gate needs its
-   * own value. Nothing can stand in for somebody's opinion, so "nobody can
-   * answer" and "do not tell the agent it can ask" are one fact.
-   *
-   * Omitted — as `harness.ts` and the offline drivers leave it — the agent is
-   * never handed `AskUserQuestion` at all, rather than being handed it and
-   * refused. See `LaunchOptions.elicitation`.
-   */
+  // Its presence declares the elicitation capability.
   elicitations?: ElicitationResolver | null;
-  /**
-   * Where to run the agent. Omitted, it runs as a child process of this daemon —
-   * which is what `harness.ts` and the offline drivers want, and what the daemon
-   * itself did before containers.
-   */
   runtime?: SessionRuntime;
-  /**
-   * Where an image the agent returns is kept.
-   *
-   * **Synchronous, and it has to be.** This is called from inside the agent's own
-   * notification handler — the emit path, which never awaits — so the sink mints
-   * an id and returns immediately while the bytes are written on their own. Given
-   * none, an image renders as it always did, as the string `[image]`: the drivers
-   * and `harness.ts` have no disk to put anything on, and losing a picture is the
-   * right degradation for them.
-   */
+  // Synchronous: called from the agent's notification handler.
   keepImage?: (mime: string, data: string) => StoredFileRef | null;
-  /**
-   * Whether to ask claude for its `ultracode` session flag — xhigh effort plus
-   * standing workflow orchestration.
-   *
-   * A boolean rather than a `_meta` blob on purpose: what a caller may ask for is
-   * a *setting this daemon has measured*, and `sessionMetaFor` in `acp/agents.ts`
-   * is the only thing that decides what that turns into on the wire. Passing the
-   * blob through would make every call site a place a vendor shape can be
-   * invented.
-   *
-   * Ignored by every agent but claude, and unset it asks for nothing at all.
-   */
   ultracode?: boolean;
-  /**
-   * Which system this session's traffic reaches, or omitted for the harness's
-   * own default.
-   *
-   * ⚠ **A {@link SystemId}, never a URL or a header** — the same shape and the
-   * same argument as {@link ultracode} being a boolean: what a caller may ask
-   * for is an entry in a table this daemon measured, and `acp/systems.ts` is the
-   * only thing that decides what it turns into on the wire. Passing routing
-   * through would make every call site a place a base URL can be invented, over
-   * a daemon reachable from the internet.
-   *
-   * Omitted, or naming the harness's native system, nothing is configured at
-   * all — see `applySystem`.
-   */
+  // A SystemId, never a URL: only acp/systems.ts decides what reaches the wire.
   system?: SystemId | null;
-  /**
-   * Which model to run, or omitted for the agent's own default.
-   *
-   * ⚠ **Applied two different ways and it is not a choice this file makes.** A
-   * *native* pairing selects it over ACP, after `session/new`, because that is
-   * where the agent publishes its own list. A *routed* one cannot: claude does
-   * not publish `kimi-k2-thinking` and never will, so the id is named at spawn
-   * from `routedModelEnv` and the agent publishes it back. Which door applies is
-   * decided by the table, not here.
-   */
   model?: string | null;
-  /**
-   * What this machine offers beyond what this repository ships.
-   *
-   * ⚠ **In the bag rather than read from a module, and that is Q2.215's rule
-   * rather than a preference.** Every launch site builds one `SessionOptions`,
-   * `ManagedSession.launchOptions` is the one place it is built, and the failure
-   * that made it so was a site that *dropped* the system half and produced no
-   * route rather than a wrong one. A catalogue read from a global here would be a
-   * second source that a driver could not stand something else in for, and the
-   * three functions below would then disagree with the route that validated the
-   * pairing.
-   *
-   * Absent means `BUILTIN_CATALOGUE` — a machine with no plugins, which is what
-   * `scripts/harness.ts` and every offline driver are.
-   */
+  // Passed in, never read from a module (Q2.215). Absent means BUILTIN_CATALOGUE.
   machine?: MachineCatalogue | null;
 }
 
 export interface ResumeOptions extends SessionOptions {
-  /** The agent's own session id, from a previous run's `session/new`. */
   agentSessionId: string;
 }
 
-/**
- * Raised when the agent no longer holds the conversation being resumed.
- *
- * Distinct from {@link ResumeUnsupportedError} — that agent *cannot* reattach to
- * anything, this one simply does not have this particular one — and the
- * difference matters to the caller: the first is a fact about the binary and is
- * re-checked when it changes, the second is a fact about the world that no
- * amount of retrying will alter.
- */
 export class SessionForgottenError extends Error {
   constructor(
     displayName: string,
@@ -683,26 +165,7 @@ export class SessionForgottenError extends Error {
   }
 }
 
-/**
- * This agent cannot be pointed at the system it was asked for.
- *
- * ⚠ **Its existence is the point: there is no fallback arm.** An agent that
- * answers `providers/set` with `methodNotFound`, or that has no credential
- * stored for the system, must not quietly run on its own default — that is a
- * session billed to the wrong account, running a model nobody chose, with the
- * chip on screen naming the one they did.
- *
- * ⚠ **It does *not* fail before a worktree exists**, and an earlier draft of this
- * comment claimed it did. Measured 2026-08-25: `registry.create` resolves the
- * workspace and writes the session row before `managed.start()` is called at all,
- * so a refusal here leaves a session carrying its own exit — exactly what
- * `agent_auth_required` has always left, and the reason `AgentAvailability`
- * exists to catch the commoner case earlier. Moving the *key* half up into
- * `create` would be cheap and is not done here: the routing half needs a spawned
- * agent to answer, so only one of the two could move, and a check that fires
- * early for some refusals and late for others is worse to reason about than one
- * that always fires in the same place.
- */
+/** No fallback: an agent that cannot reach the requested system must not run on its own default. */
 export class SystemRoutingError extends Error {
   constructor(message: string) {
     super(message);
@@ -710,7 +173,6 @@ export class SystemRoutingError extends Error {
   }
 }
 
-/** Raised when an agent cannot pick up one of its own earlier sessions. */
 export class ResumeUnsupportedError extends Error {
   constructor(displayName: string) {
     super(
@@ -721,196 +183,51 @@ export class ResumeUnsupportedError extends Error {
   }
 }
 
-/**
- * A single agent session: spawn, prompt, normalized event stream, clean shutdown.
- *
- * One session owns one agent process. Routing goes through `sessionId` anyway, so
- * several sessions *could* share one `AcpClient` without reshaping the callers —
- * which is a property of the design rather than a plan. This said "the daemon
- * will later multiplex", stated as fact on the central class here, and `multiplex`
- * appeared at that one line and nowhere else in the tree: no entry in
- * `docs/DECISIONS.md`, no open question, no rule. A reader looking for the
- * half-built other half would have found nothing.
- */
 export class Session {
   private readonly queue = new EventQueue();
-  /** Tool calls that have already reported their diffs. See `emitDiffs`. */
   private readonly diffedToolCalls = new Set<string>();
   private unregister: (() => void) | null = null;
   private unsubscribeLogs: (() => void) | null = null;
   private turnActive = false;
-  /**
-   * Which `session/prompt` owns this session right now, as a number that only
-   * goes up.
-   *
-   * ⚠ **It exists because an RPC this daemon has stopped waiting for is still
-   * outstanding, and its `.then` still fires.** {@link abandonTurn} closes a turn
-   * locally — nothing is sent to the agent — so the request stays pending for as
-   * long as the adapter keeps it, and may settle in an hour, or after a *second*
-   * turn has started on this session. Both of those are live hazards rather than
-   * theory: the late `.then` would push a second `turn_end` for one prompt, which
-   * the log's own rule forbids, and if a new turn holds the queue by then it would
-   * end **that** turn instead — a reply cut off by an answer to a message from an
-   * hour ago.
-   *
-   * So every callback the request installs is fenced on the epoch it was fired
-   * under, and `abandonTurn` bumps it. A stale callback does nothing at all: it
-   * does not push, and it does not clear {@link turnActive}, which by then belongs
-   * to somebody else.
-   */
+  // Fences a prompt's callbacks: abandonTurn bumps it, so a late settle neither ends a newer turn nor clears turnActive.
   private promptEpoch = 0;
   private disposed: Promise<void> | null = null;
-  /**
-   * The agent's current mode/model/effort state.
-   *
-   * Held here rather than pushed through `queue` because the queue only drains
-   * while a prompt generator is being consumed — the same reason the registry,
-   * not this file, appends permission events. An `agent_config` pushed there
-   * would sit stranded until the next turn, which is precisely when a client
-   * most wants to have already drawn the controls.
-   */
   private config: AgentConfig = { modes: null, options: [] };
   private readonly configListeners = new Set<(config: AgentConfig) => void>();
-  /**
-   * How full the agent's context window is.
-   *
-   * Held and announced exactly like `config` above, and for a stronger version of
-   * the same reason — see the `usage_update` arm of `onUpdate`. A separate field
-   * and a separate listener rather than a member of `AgentConfig`, because that
-   * type means "what a caller may change" and this is not changeable.
-   *
-   * `null` until the agent says. Kimi may never say at all, which is why every
-   * consumer has to treat "cannot tell" as its own answer rather than as zero.
-   */
   private usage: ContextUsage | null = null;
   private readonly usageListeners = new Set<(usage: ContextUsage) => void>();
-  /** Latched by the first `messageId` this connection sends. See {@link messageIdFor}. */
   private agentNumbersMessages = false;
-  /** Counts the messages this daemon had to number itself. See {@link messageIdFor}. */
   private unnumberedMessages = 0;
-  /**
-   * Work the agent started that outlives the call that started it.
-   *
-   * Held out of band exactly like `usage` above, and for the strongest version of
-   * that reason yet: this is **state with one current version** — the adapter
-   * supersedes a task's row rather than appending to it — and it belongs to the
-   * agent *process* rather than to any turn. Routing it through `EventQueue`
-   * would put it behind a reader that only exists during a turn, and these
-   * arrive between turns by definition.
-   *
-   * ⚠ **Recording it would also break the thing it exists for.** Everything that
-   * reaches `ManagedSession.record` moves `lastEventAt`, which is what `parkable`
-   * measures age against — so a logged lifecycle would defer the sweep by
-   * accident for a task that chatters and not at all for a `sleep 600` that says
-   * nothing. The guard has to be a clause about the set, not a side effect of
-   * writing to a log, and keeping this out of band is what makes that true.
-   *
-   * Empty until the agent says, and empty for ever on four of the five agents.
-   * `AcpClient.supportsAsyncTasks` is what tells those two states apart.
-   */
+  // Out of band: logging task edges would move lastEventAt and defer the idle sweep.
   private readonly asyncTasks = new Map<string, BackgroundTask>();
   private readonly asyncTaskListeners = new Set<(tasks: readonly BackgroundTask[]) => void>();
-  /**
-   * What the agent says it will answer to a leading slash.
-   *
-   * Held out of band for the reason `config` above is, and one stronger.
-   * Measured 2026-08-03 against claude-agent-acp 0.63.0, this notification is
-   * scheduled with `setTimeout(…, 0)` *after* `newSession` / `forkSession` /
-   * `resumeSession` / `loadSession` have already returned — so it arrives
-   * **always** outside a turn, and usually before anybody has prompted at all,
-   * which is exactly the case `EventQueue` strands. It landed in `onUpdate`'s
-   * `default:` arm until now, i.e. as an `other` event, which that queue evicts
-   * first on overflow and no client renders.
-   *
-   * There is nothing to seed it from: `NewSessionResponse` carries no commands
-   * field, which is why `adopt` sets `modes` and `options` and not this.
-   */
   private commandState: AgentCommands = { commands: [], dropped: 0 };
   private readonly commandListeners = new Set<(commands: AgentCommands) => void>();
 
-  /** Where the agent runs. Kept because {@link clearContext} opens another session here. */
   private cwd = "";
 
-  /**
-   * What was attached to the request that opened this conversation.
-   *
-   * Kept for the same reason `cwd` is: {@link clearContext} opens *another*
-   * conversation on this same process, and a flag that arrived at `session/new`
-   * and then silently did not arrive at the one replacing it would make `/clear`
-   * a way to turn a setting off without saying so.
-   */
   private sessionMeta: Record<string, unknown> | undefined;
 
   private constructor(
     readonly agent: AgentId,
-    /**
-     * The agent's own id for this conversation, and **not** readonly.
-     *
-     * It moves exactly once per {@link clearContext}, to an id *we* minted and
-     * therefore know. It is emphatically not tracking the agent behind our back:
-     * measured 2026-08-05, the CLI's own `/clear` forks underneath the protocol
-     * and never tells anyone, which is precisely why the daemon carries the
-     * command out itself rather than forwarding it.
-     */
     public sessionId: string,
     private readonly client: AcpClient,
     private readonly permissions: PermissionResolver | null,
-    /**
-     * See {@link SessionOptions.elicitations}.
-     *
-     * `null` here is not "decline for them" — it is why the capability was never
-     * declared, so the agent has no tool to reach for and this handler is
-     * unreachable in practice. It still refuses rather than inventing an answer,
-     * because a declaration is a statement and only a gate is a gate.
-     */
     private readonly elicitations: ElicitationResolver | null,
-    /** See {@link SessionOptions.keepImage}. Synchronous by contract. */
     private readonly keepImage: ((mime: string, data: string) => StoredFileRef | null) | undefined,
   ) {}
 
-  /** Resolves when the ACP connection closes, for any reason. */
   get exited(): Promise<void> {
     return this.client.closed;
   }
 
-  /**
-   * Forget everything said so far, and keep working.
-   *
-   * **The daemon carries `/clear` out itself rather than forwarding it**, and
-   * that is the whole point. Measured 2026-08-05 against claude 0.63.0: sending
-   * `/clear` to the CLI makes it fork to a fresh conversation *underneath* the
-   * protocol — our session id does not change, the file it names keeps the
-   * pre-clear history, and the live conversation gets an id nobody tells us. The
-   * consequences were both real and both silent: the next boot's
-   * `session/resume` reattached to the conversation the fork left behind, so a
-   * codeword somebody had cleared came back word for word.
-   *
-   * Opening a session ourselves removes the cause instead of chasing it. The id
-   * arrives in the response, so nothing can rot; the result is exactly the state
-   * a freshly created session in this directory has, which is the best-understood
-   * state there is; and it needs no per-agent knowledge, because `session/new` is
-   * the one verb every ACP agent must implement. On kimi — which has no `/clear`
-   * at all and answers "Unknown ACP command" — the command starts working for the
-   * first time.
-   *
-   * Measured cost: ~600ms, on the **same** agent process. No relaunch, no
-   * handshake; only the session is new.
-   *
-   * Two things have to be put back afterwards, both measured rather than assumed.
-   * The new session starts at the agent's defaults, so mode and effort are
-   * re-applied from what this one was set to — otherwise clearing the context
-   * would silently reset somebody's plan mode. And the old session stays alive
-   * and answering, so it is closed where the agent supports it, or one is leaked
-   * per clear.
-   */
+  /** Runs /clear as a fresh session/new on the same process: forwarded, claude forks to a conversation we never learn of. */
   async clearContext(): Promise<{ previous: string; next: string; abandonedTasks: number }> {
     const previous = this.sessionId;
     const opened = await withDeadline(
       this.client.agent.request(acp.methods.agent.session.new, {
         cwd: this.cwd,
         mcpServers: [],
-        // The conversation is replaced; what was asked *of the agent* about it is
-        // not. See {@link Session.sessionMeta}.
         ...metaParam(this.sessionMeta),
       }),
       NEW_SESSION_TIMEOUT_MS,
@@ -918,46 +235,11 @@ export class Session {
     );
 
     const next = opened.sessionId;
-    // Re-key before anything can be addressed to the new id. `registerSession`
-    // returns its own unregister, so the old registration is dropped explicitly
-    // rather than left to be overwritten — the router is keyed by id, and the
-    // two ids are different.
     this.unregister?.();
     this.sessionId = next;
     this.unregister = this.client.registerSession(next, this.handlers());
 
-    /*
-     * ⚠ **The task set belongs to the conversation that has just been abandoned,
-     * so it goes with it — and leaving it made a session immortal.**
-     *
-     * `AcpClient` routes an update by `sessionId`, and the old id has just been
-     * unregistered, so every later edge about one of these tasks — including the
-     * terminal one — is dropped on the floor. A row left behind therefore stays
-     * `running` for the life of the process: `hasLiveBackgroundWork` answers true
-     * for ever, `parkable` refuses at its first clause, the idle sweep can never
-     * take the session and neither can `releaseOneSlot`, so a machine that has
-     * cleared a few conversations mid-build answers `429 too_many_sessions` at the
-     * ceiling with no way out but a manual stop. `stopAsyncTask` cannot repair it
-     * either: it addresses `this.sessionId`, which is now the *new* id, so the
-     * panel's Stop control could only ever answer `stopped: false`.
-     *
-     * Cleared **after** the re-key rather than before, for `clearContext`'s own
-     * reason: `session/new` can throw, and until it has not, the old conversation
-     * is still the live one and its tasks are still real.
-     *
-     * The count goes back to the caller rather than being announced here, because
-     * the transcript is the registry's to write.
-     *
-     * ⚠ **And the sentence it writes must not claim the work was killed.** The
-     * close below is both conditional and best-effort — `supportsSessionClose()`
-     * gates it, and it is a `.catch(() => {})` — so on an agent that does not
-     * offer the method, or one that refuses it, the old conversation's shells may
-     * still be running with nothing here able to report or stop them. That is why
-     * `clearedWithBackgroundWork` says the work *was still running in the
-     * conversation this cleared* rather than that it ended: the same discipline
-     * `stoppedWithBackgroundWork` states one function over, for the same reason —
-     * claim what was observed, never the likely.
-     */
+    // Drop the old conversation's tasks after the re-key: their updates are now unroutable, and a stale running row blocks parking for ever.
     const abandonedTasks = [...this.asyncTasks.values()].filter(
       (task) => !isTerminalAsyncTaskState(task.state),
     ).length;
@@ -970,15 +252,6 @@ export class Session {
       options: toConfigOptions(opened.configOptions),
     };
 
-    /*
-     * Closed on a best-effort basis, and after the swap rather than before.
-     *
-     * Before, a failure would leave this session pointing at a conversation it
-     * had just abandoned. Best-effort because the alternative is refusing a
-     * clear that has already happened — the new session exists either way, and a
-     * leaked one inside the agent is a smaller problem than a daemon and an
-     * agent disagreeing about which conversation is live.
-     */
     if (this.client.supportsSessionClose()) {
       await withDeadline(
         this.client.agent.request(acp.methods.agent.session.close, { sessionId: previous }),
@@ -991,34 +264,7 @@ export class Session {
     return { previous, next, abandonedTasks };
   }
 
-  /**
-   * Puts back the mode and options a cleared session was carrying.
-   *
-   * Only what actually differs, and each failure swallowed: this runs after the
-   * clear has already succeeded, and refusing to answer because one knob would
-   * not go back would be reporting a failure that did not happen. A knob the new
-   * session does not offer at all is skipped rather than forced — the agent
-   * decides what it exposes, and claude drops `bypassPermissions` from its modes
-   * under root.
-   *
-   * **Public because `/clear` is no longer the only conversation this daemon
-   * replaces underneath a person.** `ManagedSession.applyUltracode` does the
-   * structurally identical thing — `stop` then `resume`, a fresh conversation on
-   * the same session — and had no restore at all, so the mode somebody chose came
-   * back as whatever the new process published. The rules are here rather than
-   * copied there, because two answers to one question start to differ.
-   *
-   * ⚠ **Both withdrawal guards read the *new* conversation's own list.** The
-   * option guard used to read `option.choices` — the list off the same object the
-   * value came from — so the predicate was true by construction and the rule this
-   * docblock describes never fired: a value the new conversation no longer offers
-   * was sent anyway, refused, and swallowed at the `.catch`. Benign after a
-   * `/clear`, where the two conversations are one agent moments apart; not benign
-   * on the restart path, where the agent may be a new binary with a different
-   * vocabulary. The mode had no guard at all, which is the sharper omission —
-   * `bypassPermissions` under root is a *mode*, and it is this docblock's own
-   * example.
-   */
+  /** Re-applies only what differs and the new conversation still offers; failures are swallowed. */
   async restoreConfig(wanted: AgentConfig): Promise<void> {
     for (const option of wanted.options) {
       const now = this.config.options.find((candidate) => candidate.id === option.id);
@@ -1032,90 +278,36 @@ export class Session {
     await this.setMode(mode).catch(() => {});
   }
 
-  /** How to signal the agent, and how to recognise it after a restart. */
   get handle(): AgentHandle | null {
     return this.client.handle;
   }
 
-  /**
-   * What this agent will let a caller change, and what it is set to now.
-   *
-   * Read once after `start`/`resume` and then kept current through
-   * {@link onConfigChanged}. Always complete — see `AgentConfigEvent`.
-   */
   get agentConfig(): AgentConfig {
     return this.config;
   }
 
-  /**
-   * What this agent will let us do about which system its traffic reaches.
-   *
-   * Exposed so `agentask.ts` can read it off a spawn it was already paying for:
-   * a handshake plus `session/new` is the expensive part, and asking a second
-   * process the second question would double the only cost that matters here.
-   */
   routing(): Promise<AgentRouting | null> {
     return this.client.routing();
   }
 
-  /**
-   * The agent's model control, or `null` where it publishes none (kimi).
-   *
-   * ⚠ **Found by `category`, never by `id`** — this fleet's standing rule about
-   * every agent control. Exposed here rather than re-derived by each caller
-   * because there are two with different vocabularies: `agentask.ts` refuses a
-   * bad model to a plugin by name, and `Session.start` refuses one by failing
-   * the start. What they share is the lookup; what differs is the refusal, so
-   * only the lookup is shared.
-   */
   get modelOption(): AgentConfigOption | null {
     return this.config.options.find((one) => one.category === "model") ?? null;
   }
 
-  /**
-   * Fires whenever the agent's own configuration changes.
-   *
-   * Both directions land here: a change this daemon asked for, and one the agent
-   * made by itself. The second is not hypothetical — claude switches to `plan`
-   * from its own hook, and clamps the current mode when a model change makes it
-   * unavailable — so a client that rendered only what it last requested would
-   * show the wrong mode with no way to notice.
-   */
   onConfigChanged(listener: (config: AgentConfig) => void): () => void {
     this.configListeners.add(listener);
     return () => this.configListeners.delete(listener);
   }
 
-  /**
-   * How full the context window is, or `null` if this agent has not said.
-   *
-   * Read once after a listener is attached, for the same reason `agentConfig` is:
-   * a subscriber that arrives after the first update would otherwise wait for the
-   * next one, and between turns there is no next one.
-   */
   get contextUsage(): ContextUsage | null {
     return this.usage;
   }
 
-  /** Fires whenever the agent reports its context occupancy. High frequency — see `updateUsage`. */
   onUsageChanged(listener: (usage: ContextUsage) => void): () => void {
     this.usageListeners.add(listener);
     return () => this.usageListeners.delete(listener);
   }
 
-  /**
-   * Background work this agent has announced and not reported the end of.
-   *
-   * Ordered as the panel draws it: **running first, then newest-started first**,
-   * one comparator for the whole list. Sorted here rather than at the reader
-   * because the registry mirrors this array onto a snapshot and two sorts of one
-   * list is how the transcript and the panel come to disagree about which task is
-   * first.
-   *
-   * Terminal rows are **kept**, not dropped — Claude Code's own dialog has a
-   * `Completed` section, and a panel that empties itself cannot answer *did that
-   * build finish*.
-   */
   get backgroundTasks(): readonly BackgroundTask[] {
     return [...this.asyncTasks.values()].sort((a, b) => {
       const liveA = isTerminalAsyncTaskState(a.state) ? 1 : 0;
@@ -1125,74 +317,32 @@ export class Session {
     });
   }
 
-  /** Whether this agent said it reports background work at all. See `AcpClient.supportsAsyncTasks`. */
   get reportsBackgroundTasks(): boolean {
     return this.client.supportsAsyncTasks();
   }
 
-  /** Fires whenever a task is announced, moves, or ends. Guarded like every other fan-out here. */
   onBackgroundTasksChanged(listener: (tasks: readonly BackgroundTask[]) => void): () => void {
     this.asyncTaskListeners.add(listener);
     return () => this.asyncTaskListeners.delete(listener);
   }
 
-  /**
-   * Which commands this agent publishes, and how many were clipped off the list.
-   *
-   * Empty until the agent says — and unlike `agentConfig`, which `adopt` seeds
-   * from the `session/new` response, there is no response field to seed this
-   * from. A reader that arrives promptly can legitimately see `[]`.
-   */
   get agentCommands(): AgentCommands {
     return this.commandState;
   }
 
-  /**
-   * Whether this agent takes an `image` block, from what it said at `initialize`.
-   *
-   * Read live from the client rather than mirrored into a field, because unlike
-   * `agentConfig` it cannot change during a session — it is a fact about the
-   * agent's build. A resumed session builds a fresh `AcpClient` and therefore
-   * re-reads it, which is exactly right: nothing about this should survive a
-   * restart, because the CLI on disk may have moved.
-   */
   get acceptsImages(): boolean {
     return this.client.acceptsImages();
   }
 
-  /**
-   * Fires whenever the agent republishes its command list.
-   *
-   * More than once per session is normal rather than exceptional: claude pushes
-   * a fresh list mid-session as skills are discovered in a subdirectory. Kimi
-   * pushes once per session entry and never again, which is why a client cannot
-   * fetch once and cache for ever on the strength of having tested one agent.
-   */
   onCommandsChanged(listener: (commands: AgentCommands) => void): () => void {
     this.commandListeners.add(listener);
     return () => this.commandListeners.delete(listener);
   }
 
-  /**
-   * The agent's last stderr lines.
-   *
-   * A `ManagedSession` drains the event queue between turns now, but it
-   * deliberately **drops** `agent_log` out of turn — recording every stderr line an
-   * idle agent writes would put an unbounded stream into a log that is unbounded by
-   * design. So the lines explaining why an idle agent died still do not reach the
-   * transcript, and this is still the only way to them.
-   */
   recentLogs(): string[] {
     return this.client.recentLogs();
   }
 
-  /**
-   * Every `session/update` this agent sends, before `onUpdate` normalizes it.
-   *
-   * Not filtered by `sessionId`: an update naming a session this client never
-   * registered is exactly the kind of thing a measurement needs to see, and the
-   * only subscriber is a driver watching one agent it started itself.
-   */
   onRawUpdate(listener: NotificationListener): () => void {
     return this.client.onNotification(listener);
   }
@@ -1204,14 +354,6 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    /*
-     * Hoisted because two calls below need the *same* answer, and computing it
-     * twice is how they come to differ. `launch` spends it by withholding this
-     * harness's pasted credentials; `authMethod` spends it by refusing to name an
-     * id for a key that will not be in the environment. A pairing that was routed
-     * for one and not the other would send `authenticate` for a variable
-     * `launch` had just left out.
-     */
     const pairing = routedPairing(
       options.agent,
       options.system ?? null,
@@ -1222,9 +364,6 @@ export class Session {
       await runtime.launch(options.agent, spawnEnvOf(options), pairing),
       {
         fileIo: runtime.clientFileIo,
-        // Derived rather than configured: a question with nobody to answer it has
-        // no default, so "no resolver" and "do not tell the agent it can ask" are
-        // one fact. See `SessionOptions.elicitations`.
         elicitation: options.elicitations != null,
         authMethod: runtime.authMethod(options.agent, pairing),
       },
@@ -1253,39 +392,17 @@ export class Session {
       await client.close();
       if (isAuthRequired(error)) {
         const message = `${config.displayName} rejected session/new: authentication required.\n${config.authHint}`;
-        /*
-         * ⚠ **Recorded here and at `openResumed`, and at no third place.** This is
-         * ACP's typed `auth_required` — the agent declining to open a session at
-         * all — which is a different signal from the `errorKind:
-         * "authentication_failed"` the event pump reads mid-turn. Q7.99 measured
-         * that one against a token with 1.4 hours left on it, so `onAgentUnusable`
-         * replaces the process and writes nothing here on purpose.
-         *
-         * The sentence thrown below is unchanged and uncut; what is *stored* is
-         * clipped by the runtime. See `MAX_START_REFUSAL_CHARS`.
-         */
+        // Recorded here and in openResumed only; mid-turn authentication_failed is onAgentUnusable's (Q7.99).
         runtime.noteStartRefusal(options.agent, message, routed);
         throw new Error(message);
       }
       throw error;
     }
 
-    /*
-     * The strongest clear there is, and it is free: this harness has just opened a
-     * session, so whatever it refused before is over. Ahead of `pinNativeModel`
-     * deliberately — a model this agent has retired is a refusal about the
-     * *model*, and leaving a start refusal standing for it would take the harness
-     * off the New session strip over a preset nobody has to use.
-     */
     runtime.forgetStartRefusal(options.agent);
 
     const session = Session.adopt(options, client, response.sessionId, response);
     try {
-      // A model this agent does not offer fails the start, and there is nothing
-      // here to strand: no conversation exists yet, so the only cost of refusing
-      // is a session that was never created. `openResumed` weighs the identical
-      // sentence differently, which is why `pinNativeModel` answers one rather
-      // than throwing it.
       const unpinned = await pinNativeModel(session, options);
       if (unpinned !== null) throw new SystemRoutingError(unpinned);
     } catch (error) {
@@ -1295,44 +412,13 @@ export class Session {
     return session;
   }
 
-  /**
-   * Reattaches a fresh agent process to one of its own earlier sessions.
-   *
-   * The agent died with the daemon that owned it, but its session id did not: both
-   * agents keep their side of it on disk, so a new subprocess can be pointed back
-   * at the same conversation. We already hold the transcript, which is why this is
-   * `session/resume` (no replay) rather than `session/load` (replays the whole
-   * history as notifications, every one of which we would append a second time).
-   */
+  /** Uses session/resume, never session/load, which would replay history already in the log. */
   static async resume(options: ResumeOptions): Promise<Session> {
     const runtime = options.runtime ?? new LocalRuntime();
     try {
       return await Session.openResumed(options, runtime.clientFileIo);
     } catch (error) {
-      /*
-       * One retry without the file-IO capability, and only for `internalError`.
-       *
-       * Measured 2026-08-05 against kimi 0.29.2, deterministically: a session
-       * **left in plan mode** fails `session/resume` with `-32603` when the
-       * client declares `clientCapabilities.fs`, and resumes perfectly without
-       * it. Leaving plan mode before the session ends cures it; the mode is one
-       * tap away on the composer and is reached for several times an hour, so
-       * "left in plan mode" is an ordinary way to end a day rather than a corner.
-       *
-       * This is not a workaround bolted on beside the design — it is the seam the
-       * design keeps. `fileIo` exists precisely so the capability can be
-       * declined, `LaunchOptions.fileIo` is required so declining stays a
-       * deliberate act, and the cost was measured before any of this: with the
-       * capability, kimi made five reverse-RPC calls and claude none; without it,
-       * neither made any, and both edit files perfectly well by themselves. What
-       * is lost is the `source: "fs_write"` half of a duplicated `file_change`.
-       *
-       * Narrow on purpose. Only `-32603`, which is the code that was measured —
-       * widening it to "any failure we do not understand" would be guessing, and
-       * every other way a resume fails is already typed. And only on resume:
-       * `session/new` has never failed this way, so extending it there would be
-       * speculation too.
-       */
+      // One retry without fs, only for -32603: kimi cannot resume a plan-mode session with fs declared.
       if (!runtime.clientFileIo || !hasRpcCode(error, INTERNAL_ERROR)) throw error;
       return await Session.openResumed(options, false);
     }
@@ -1345,7 +431,6 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    // Hoisted for `Session.start`'s reason: two calls, one answer.
     const pairing = routedPairing(
       options.agent,
       options.system ?? null,
@@ -1361,9 +446,7 @@ export class Session {
       },
     );
 
-    // Re-applied on every resume, and it has to be: routing lives in the agent
-    // *process*, and a resume is a new one. A session that came back unrouted
-    // would carry on in the same conversation against a different vendor.
+    // Re-applied on every resume: routing lives in the agent process.
     let routed: boolean;
     try {
       routed = await applySystem(client, options, runtime);
@@ -1392,80 +475,30 @@ export class Session {
     } catch (error) {
       await client.close();
       if (isAuthRequired(error)) {
-        // The same record the start path writes, from the same typed code. A
-        // resume is how a harness that went stale overnight announces itself, and
-        // a daemon that only learned from `session/new` would keep offering a
-        // tile for one that had refused every conversation on the machine.
         const message = `${config.displayName} rejected session/resume: authentication required.\n${config.authHint}`;
         runtime.noteStartRefusal(options.agent, message, routed);
         throw new Error(message);
       }
-      // Typed here rather than left for the registry to recognise, because this
-      // is the ACP boundary and a JSON-RPC code has no business travelling any
-      // further in. The caller needs the distinction to decide whether retrying
-      // could ever help.
       if (hasRpcCode(error, RESOURCE_NOT_FOUND)) {
         throw new SessionForgottenError(config.displayName, options.agentSessionId);
       }
       throw error;
     }
 
-    // See `Session.start`: a harness that has just picked a conversation back up
-    // is not one that would not start.
     runtime.forgetStartRefusal(options.agent);
 
     const session = Session.adopt(options, client, options.agentSessionId, response);
 
-    /*
-     * The model is named to the agent here too, and for a **native** pairing this
-     * is the only mechanism there is.
-     *
-     * ⚠ **This was missing and the loss was total and silent.** `spawnEnvOf`
-     * answers `{}` for a native system because `routedModelEnv` fires only for a
-     * routed one, and `applySystem` returns at its first line for the same
-     * reason — so with no pin nothing named the model to the agent at all, and
-     * `SystemRoutingError` cannot fire on a launch that configured nothing.
-     * Measured against a peer publishing a `category: "model"` select whose
-     * current value is sonnet, with a preset naming opus: started, the session
-     * ran opus; resumed, it ran sonnet, with the chip on screen naming opus
-     * either way. Q2.215's shape one door further in — the guard is bypassed
-     * rather than defeated — and `session/resume` answers with the same
-     * `configOptions` `session/new` does, so the list to weigh the model against
-     * is already on `modelOption` by the time `adopt` returns.
-     *
-     * ⚠ **And it does not refuse, which is the whole difference from `start`.**
-     * The conversation already exists. A model the CLI has since retired would
-     * make every resume of this session fail for ever, and that permanent
-     * refusal is exactly the stranding Q2.216 designed away when it chose a
-     * demotion over a 502 that never expires. Demoting *quietly* is the other
-     * half of the trap and is the defect above, so the answer is neither: pin it
-     * when the agent still offers it, and put a sentence in the transcript when
-     * it does not. `restoreConfig` skips a choice the new conversation no longer
-     * offers for the same reason and swallows the failure; what is new here is
-     * that this one is said out loud, because a model is not a knob — it is what
-     * the session is billed for.
-     */
+    // For a native pairing this is the only pin on resume (Q2.215); it demotes rather than refuses (Q2.216).
     let unpinned: string | null;
     try {
       unpinned = await pinNativeModel(session, options);
     } catch (error) {
-      // The agent offered the model and then refused the call. Same three
-      // choices and the same answer: a live conversation is not torn down over a
-      // config option, and a resume that failed here would fail here again.
       unpinned =
         `${options.agent} would not put this conversation back on ` +
         `${JSON.stringify(options.model ?? "")} (${describeError(error)}).`;
     }
     if (unpinned !== null) {
-      /*
-       * Said in the transcript rather than through `onWarning`, and the two are
-       * not interchangeable: a warning reaches whoever is reading the daemon's
-       * stdout, and the person this concerns is holding a phone. `error` is the
-       * event this daemon already writes about itself when it carries on after
-       * something it could not do — `abandonResume` is the same shape — and it is
-       * the loud row on purpose, since the alternative considered was refusing
-       * the resume outright.
-       */
       const current = session.modelOption?.value;
       const running =
         typeof current === "string" && current !== "" ? `running ${current}` : "running this agent's own default";
@@ -1478,14 +511,6 @@ export class Session {
     return session;
   }
 
-  /**
-   * Wires a live ACP session into a `Session`.
-   *
-   * Shared by `start` and `resume` because everything after the session exists —
-   * handler registration, log forwarding, the seed event — is identical, and the
-   * two drifting apart is how a resumed session quietly stops reporting file
-   * changes.
-   */
   private static adopt(
     options: SessionOptions,
     client: AcpClient,
@@ -1507,10 +532,7 @@ export class Session {
       session.queue.push({ type: "agent_log", line });
     });
 
-    // Both fields, because agents fill in different ones: claude populates
-    // `modes` *and* publishes an equivalent `mode` config option, while kimi
-    // populates only `configOptions`. Reading one of them is how
-    // "kimi has no modes" became folklore — it has four.
+    // Read both: kimi fills only configOptions.
     session.config = {
       modes: toModes(opened.modes),
       options: toConfigOptions(opened.configOptions),
@@ -1528,49 +550,12 @@ export class Session {
     return session;
   }
 
-  /**
-   * Changes one of the agent's configuration knobs.
-   *
-   * Returns the agent's own refreshed view rather than the value that was asked
-   * for: `session/set_config_option` answers with the complete option set, and
-   * setting one knob genuinely changes others — switching model rebuilds the
-   * available modes and can reset the current one. Echoing the request back
-   * would show a control state that never existed.
-   */
+  /** Answers the agent's refreshed config: setting one knob can change others. */
   async setConfigOption(configId: string, value: string | boolean): Promise<AgentConfig> {
     return this.queueConfig(() => this.sendConfigOption(configId, value));
   }
 
-  /**
-   * Runs one config change, in its turn.
-   *
-   * ⭐ **Two changes in flight at once corrupted the held config, and nothing
-   * anywhere prevented it.** {@link updateConfig} replaces the option list
-   * *wholesale* with whatever the response carried, and setting a model rebuilds
-   * the mode and effort lists — so with A and B overlapping, whichever response
-   * landed last won, and it had been computed by the agent before the other change
-   * existed. The session then reported a configuration that never was, on the
-   * snapshot, permanently, until something else happened to touch it.
-   *
-   * The only thing holding it off was `locked` in `AgentConfigBar`, and that was
-   * half a guard: the composer's `/model` and `/effort` menus call
-   * `applyConfigChange` directly and never see it, and `pnpm client config` knows
-   * of no such thing. So the race was reachable in a browser today, by choosing on
-   * the strip and then in the slash menu.
-   *
-   * Serialized rather than refused, deliberately. A refusal would be one more
-   * `busy` for somebody who tapped twice quickly and did nothing wrong, and the
-   * ordering a queue gives is exactly what they asked for: the changes apply in
-   * the order they were made, and each caller is answered with the state as of its
-   * own change.
-   *
-   * ⚠ **The chain is the reentrancy hazard.** {@link setMode} delegates to a
-   * config option when the agent publishes one, so the public methods must queue
-   * and the `send*` pair must not: queueing both would have `setMode` wait on a
-   * slot it is itself holding, for ever. Same for {@link restoreConfig}, which
-   * calls the public methods in a loop and is therefore never queued as a whole —
-   * each of its steps takes its own turn.
-   */
+  // Unqueued: public methods queue and send* must not, or setMode waits on its own slot.
   private async sendConfigOption(configId: string, value: string | boolean): Promise<AgentConfig> {
     const response = await withDeadline(
       this.client.agent.request(
@@ -1586,26 +571,13 @@ export class Session {
     return this.config;
   }
 
-  /**
-   * Switches permission/plan mode.
-   *
-   * Routed through `session/set_config_option` when the agent publishes a
-   * mode-category option, which both supported agents do, because that call
-   * answers with the refreshed state while `session/set_mode` answers with
-   * nothing at all — its response type carries only `_meta`. The bare
-   * `session/set_mode` is the fallback for an agent that offers `modes` and no
-   * equivalent option, and there the new state has to be assumed.
-   */
   async setMode(modeId: string): Promise<AgentConfig> {
     return this.queueConfig(() => this.sendMode(modeId));
   }
 
-  /** {@link setMode}'s body, already holding its turn. See {@link sendConfigOption}. */
   private async sendMode(modeId: string): Promise<AgentConfig> {
     const option = this.config.options.find((candidate) => candidate.category === "mode");
     if (option !== undefined && option.kind === "select") {
-      // The **unqueued** one, and this line is the reason the split exists: the
-      // public `setConfigOption` would wait on the slot this call is holding.
       return this.sendConfigOption(option.id, modeId);
     }
     await withDeadline(
@@ -1620,30 +592,11 @@ export class Session {
     return this.config;
   }
 
-  /**
-   * The tail of the config queue. Never rejects, never carries a value.
-   *
-   * Both properties are load-bearing. A rejected tail would take every later link
-   * with it — one refused change and the control is dead for the life of the
-   * session — so the outcome is swallowed *here* while the caller still gets the
-   * real one from the promise it was handed. And it carries no value because the
-   * answer belongs to whoever asked: each caller is told the state as of its own
-   * change, not as of the last one to run.
-   */
+  // Never rejects, or one refusal kills every later change.
   private configChain: Promise<void> = Promise.resolve();
 
-  /**
-   * Take a turn at rewriting {@link config}. See {@link sendConfigOption} for why.
-   *
-   * Deliberately unbounded: these come from somebody tapping, each link carries
-   * `SET_CONFIG_TIMEOUT_MS` of its own, and a cap would have to answer a refusal to
-   * the one caller least able to do anything about it. What bounds a queue in
-   * practice is the route's own budget on the far side.
-   */
+  // Serialized: options are replaced wholesale, so overlapping responses would corrupt the held state.
   private queueConfig(run: () => Promise<AgentConfig>): Promise<AgentConfig> {
-    // `then(run, run)` rather than `finally`: a link runs whether its predecessor
-    // resolved or threw, because one agent refusing a value says nothing about
-    // whether the next change is valid.
     const result = this.configChain.then(run, run);
     this.configChain = result.then(
       () => {},
@@ -1652,77 +605,21 @@ export class Session {
     return result;
   }
 
-  /**
-   * Folds a change into the held state and tells everyone.
-   *
-   * `currentModeId` arrives alone on ACP's `current_mode_update`, so it is
-   * merged rather than assigned: the event this feeds is defined as complete
-   * state, and a client rebuilding a snapshot from a delta would have to keep a
-   * reducer of its own.
-   *
-   * ⚠ **`options` is replaced, not merged**, which is what made the overlap in
-   * {@link sendConfigOption} corrupting rather than merely out of order — and it
-   * is right: ACP defines the response's `configOptions` as the complete list, so
-   * merging would keep a control the agent has just withdrawn. The queue is what
-   * makes "complete" true of the state we hold, by never letting a stale complete
-   * list arrive after a fresh one.
-   */
   private updateConfig(change: { options?: AgentConfigOption[]; currentModeId?: string }): void {
     let modes = this.config.modes;
     let options = change.options ?? this.config.options;
 
     if (change.currentModeId !== undefined) {
       const modeId = change.currentModeId;
-      /*
-       * ⚠ **The third door onto `modes.current`, and the only one `toModes` does
-       * not stand in front of.** `session/new` and `session/resume` both build
-       * their mode state through {@link toModes}, which refuses a
-       * `currentModeId` over {@link MAX_CONFIG_ID_CHARS} outright. A
-       * `current_mode_update` notification arrives here instead and used to be
-       * written through unconditionally — so the bound one screen down held on
-       * two paths of three, and the third is the one an agent can send at any
-       * moment, repeatedly, outside a turn.
-       *
-       * Measured through a real registry and a stub ACP agent over real streams:
-       * a 2 MB `currentModeId` produced a logged `agent_config` of **2,000,126
-       * bytes after `truncateEvent`**, against a `MAX_SOCKET_MESSAGE_BYTES` of
-       * 1,048,576. `truncateEvent`'s `agent_config` arm spreads `...event.modes`
-       * and only nulls `available[].description`, so it never touches this field;
-       * `estimateBytes` charged only `available`'s ids and names, so `flush` did
-       * not see it either and took the event as the unconditional first of a
-       * batch. Past the ceiling `MessageAssembler` refuses, the channel fails,
-       * and `stream.ts` reconnects onto the same `seq` — the permanent stall.
-       *
-       * **Ignored rather than clipped, which is {@link toModes}' own call**: a
-       * clipped id selects nothing, and this id round-trips to the agent in
-       * `session/set_mode`. Ignoring keeps the mode that was already current,
-       * which is also the honest answer — every id in `available` is filtered to
-       * this same bound, so an id longer than it names no mode this session has.
-       */
+      // Ignored, not clipped: a clipped id selects nothing, and unbounded it stalls the stream.
       if (modeId.length > MAX_CONFIG_ID_CHARS) return;
       if (modes !== null) modes = { ...modes, current: modeId };
-      // Keep the mode-category option in step, so the two ways of expressing the
-      // same fact cannot disagree on screen.
       options = options.map((option) =>
         option.category === "mode" && option.kind === "select" && option.choices.some((c) => c.value === modeId)
           ? { ...option, value: modeId }
           : option,
       );
     } else if (change.options !== undefined && modes !== null) {
-      /*
-       * The same sync, in the direction that was missing.
-       *
-       * Every path that carries fresh options — `config_option_update`, and the
-       * response to every `set_config_option`, which is how a mode change is
-       * actually made on both supported agents — left `modes.current` at
-       * whatever it was. So the two expressions of one fact disagreed the moment
-       * anybody switched mode: `options` said `plan`, `modes.current` still said
-       * `default`, and both go out on the snapshot and on `session_started`.
-       *
-       * Latent rather than visible today only because `AgentConfigBar` happens
-       * to read the option. That is not a property worth relying on when the
-       * field is published.
-       */
       const current = options.find((option) => option.category === "mode" && option.kind === "select");
       if (
         current !== undefined &&
@@ -1739,51 +636,23 @@ export class Session {
       try {
         listener(this.config);
       } catch {
-        // A broken listener must not stop the others, and must not propagate
-        // into an agent notification handler. Same guard as `SessionLog.append`.
+        // A broken listener must not stop the others or reach the agent's notification handler.
       }
     }
   }
 
-  /**
-   * Records the agent's command list, and tells everyone.
-   *
-   * **Assigned whole, never merged.** ACP defines the notification as a full
-   * replacement and the adapter's own comment tells clients to replace their
-   * cached list; merging would keep offering a command the agent has since
-   * withdrawn, and the agent would then refuse the thing its own menu offered.
-   */
   private updateCommands(commands: AgentCommands): void {
     this.commandState = commands;
     for (const listener of this.commandListeners) {
       try {
         listener(this.commandState);
       } catch {
-        // Same guard, same reason as `updateConfig` above: a broken listener must
-        // not stop the others or propagate into an agent notification handler.
+        // Same guard as updateConfig.
       }
     }
   }
 
-  /**
-   * Records what the agent said about its context window.
-   *
-   * Validated before it is stored, because the agent is a party this daemon does
-   * not trust: a `used` of `NaN` or `-1` would propagate through the snapshot into
-   * a client's percentage and render as something between nonsense and a crash.
-   * A notification that fails the check is dropped whole rather than half-stored,
-   * so the last good reading survives — an unreadable update is not evidence the
-   * previous one stopped being true.
-   *
-   * A non-positive `size` is kept as 0 rather than rejected: "the agent reported
-   * occupancy but not a window" is a real state, and 0 is what every consumer
-   * already has to read as "cannot tell" because it is the one value they must not
-   * divide by.
-   *
-   * `_meta` is deliberately dropped, which costs `_claude/rateLimit` — the reason a
-   * turn is stalled. Worth carrying one day; not worth an unbounded agent-shaped
-   * blob on a snapshot returned sixty at a time.
-   */
+  // An invalid update is dropped whole so the last good reading survives.
   private updateUsage(update: acp.UsageUpdate): void {
     const used = Number(update.used);
     const size = Number(update.size);
@@ -1801,50 +670,12 @@ export class Session {
       try {
         listener(this.usage);
       } catch {
-        // Same guard, same reason: this runs inside the agent's notification
-        // handler, and one broken subscriber must not cost the others their update.
+        // Same guard as updateConfig.
       }
     }
   }
 
-  /**
-   * Which message a chunk belongs to — the agent's own answer, or one of ours.
-   *
-   * ACP's `messageId` is the only boundary a client gets: the spec says *"All
-   * chunks belonging to the same message share the same `messageId`. A change in
-   * `messageId` indicates a new message has started."* Everything else about a
-   * streamed fragment and a whole message is identical on the wire.
-   *
-   * ⚠ **Two of the four agents measured for it send nothing here, and one of them sends nothing
-   * on some of its messages, which is the case this function exists for.**
-   * Measured in `claude-agent-acp` 0.73.0 and recorded at Q3.604, which quotes
-   * the output: every path through `toAcpNotifications` calls `applyMessageId`,
-   * but `AsyncTaskRuntime` publishes its `**Task stopped by user:** <name>.` line
-   * as a bare update — so stopping twenty tasks produces twenty whole messages,
-   * none numbered and none ending in a newline, which a transcript joining on
-   * absence renders as one paragraph of twenty run-together sentences.
-   *
-   * So: the *first* id seen proves this connection numbers its messages, and from
-   * then on a chunk arriving without one is a message of its own and gets a
-   * `~`-prefixed id here. Before that first id — and for ever, on an agent that
-   * never sends one — the answer is `null` and a client joins exactly as it does
-   * today. **The latch never clears**, because "this agent stopped numbering" is
-   * not a thing that happens; what does happen is a new process after a resume,
-   * where the replay restates ids within the first few updates.
-   *
-   * The tilde is why this can share one field with the agent's own value rather
-   * than needing a second. Three of the four send no id at all, so only claude's
-   * space is in question, and it is written down in this tree after all — in the
-   * adapter this repository pins: `messageIdForGrouping` in claude-agent-acp
-   * 0.73.0 (`dist/acp-agent.js:6752`) answers the Anthropic message id (`msg_…`)
-   * where the assistant message carries one and the SDK message `uuid` otherwise.
-   * Neither can begin with `~`, so the two spaces cannot collide. The second
-   * argument stands on its own as well: a reader that looks for the `~` can tell
-   * a daemon-made id
-   * from an agent's, and a reader that only compares for equality is right either
-   * way, because these ids are generated per connection and counted from one, so
-   * two of ours are equal exactly when they name the same message.
-   */
+  // After the agent's first messageId, an unnumbered chunk is its own message with a `~` id (Q3.604).
   private messageIdFor(sent: unknown): string | null {
     const given = typeof sent === "string" ? sent.slice(0, MAX_MESSAGE_ID_CHARS) : "";
     if (given.length > 0) {
@@ -1856,48 +687,9 @@ export class Session {
     return `~${this.unnumberedMessages}`;
   }
 
-  /**
-   * Fold one task update into the live set, and tell anybody watching.
-   *
-   * **Bounds are applied here, where the record is built**, exactly as
-   * `boundToolCallId` bounds a call id at ingest: the reader in
-   * `acp/asynctasks.ts` owns the *refusals* — an unreadable id, an unreadable
-   * state — because those are facts about the wire, and this owns the *clips*,
-   * because `clip` is the vocabulary's and leaves the loss visible.
-   *
-   * ⚠ **An update about a task nobody announced is dropped.** The adapter creates
-   * a row from a spawn and never from a progress or a state, and so does this: a
-   * task synthesized out of a terminal edge would appear in the panel already
-   * finished, having never been seen running, which is a row about nothing. The
-   * exception that proves it is the one the adapter itself documents — a Bash
-   * result can arrive *after* the terminal edge — and that is the adapter's
-   * problem, solved on its side by an unannounced tombstone, before any of this
-   * reaches us.
-   *
-   * ⚠ **A terminal state is not final.** The adapter closes a task it stops
-   * seeing in the CLI's level with `stopped`, and the real edge can land after —
-   * so a row may go `stopped → completed`, and nothing here may refuse the
-   * second one on the grounds that it already had a terminal word.
-   */
   private applyAsyncTaskEdge(edge: AsyncTaskEdge): void {
     if (edge.kind === "spawned") {
-      /*
-       * Past the cap a new id is not tracked — but **only once the finished rows
-       * have been spent**, and that order is the correction rather than a
-       * refinement.
-       *
-       * `MAX_TRACKED_ASYNC_TASKS`' argument for refusing is that *"the set is
-       * already non-empty, so the session is already deferring"*, and the map
-       * keeps terminal rows on purpose so the panel can answer *did that build
-       * finish*. Those two together made the argument false: after
-       * `MAX_TRACKED_ASYNC_TASKS` shells had merely **completed**, `size` was at
-       * the cap with nothing live in it, so the next genuinely running task was
-       * dropped, `hasLiveBackgroundWork` answered false, and the sweep released
-       * an agent mid-build — the one failure this whole feature exists to
-       * prevent. The cap has to bound *live* work for its own justification to
-       * hold, so a finished row is given up before a running one is refused, and
-       * the refusal is reached only when all of them are still going.
-       */
+      // Evict a finished row before refusing a running one, or the sweep releases an agent mid-build.
       if (
         !this.asyncTasks.has(edge.asyncTaskId) &&
         this.asyncTasks.size >= MAX_TRACKED_ASYNC_TASKS &&
@@ -1905,18 +697,7 @@ export class Session {
       ) {
         return;
       }
-      /*
-       * ⚠ **A second spawn for an id already held is not a new task.** The
-       * adapter creates a row from a spawn and never from anything else, so it is
-       * also the one update that can arrive about a row that has already ended —
-       * and writing the record below unconditionally would take a `completed` row
-       * back to `running`, drop its `summary` and `usage`, and restart its clock.
-       * One such frame puts `hasLiveBackgroundWork` back to true and re-arms the
-       * deferral over work that is over. The state arm below reasons carefully in
-       * the other direction (*"a terminal state is not final"*); this is the same
-       * care pointed the other way, so the lifecycle — `state`, `startedAt`,
-       * `endedAt` — is kept and only what the spawn describes is refreshed.
-       */
+      // A repeat spawn keeps the row's lifecycle and refreshes only its description.
       const known = this.asyncTasks.get(edge.asyncTaskId);
       if (known !== undefined) {
         this.asyncTasks.set(edge.asyncTaskId, {
@@ -1957,8 +738,6 @@ export class Session {
     const held = this.asyncTasks.get(edge.asyncTaskId);
     if (held === undefined) return;
 
-    // Newest-non-null, field by field: an update carries only what changed, and
-    // an absent field is the agent declining to restate rather than clearing.
     const merged: BackgroundTask = {
       ...held,
       outputFilePath:
@@ -1975,16 +754,7 @@ export class Session {
       merged.usage = edge.usage ?? held.usage;
     } else {
       merged.state = edge.state;
-      /*
-       * The end is stamped here because nothing on the wire carries one.
-       *
-       * `held.endedAt ?? Date.now()` rather than a fresh stamp: the adapter's
-       * `stopped → completed` correction is two terminal edges about one end, and
-       * the second is a *relabelling* — it must not push the time out. A
-       * correction the other way, back to `running` or `paused`, clears it: a row
-       * that is running again did not end, and a kept stamp would freeze its
-       * elapsed time at a moment it has since passed.
-       */
+      // A terminal relabelling keeps the first end; a return to running clears it.
       merged.endedAt = isTerminalAsyncTaskState(edge.state) ? (held.endedAt ?? Date.now()) : null;
     }
 
@@ -1992,20 +762,6 @@ export class Session {
     this.announceAsyncTasks();
   }
 
-  /**
-   * Give up the longest-finished task so a running one can be tracked.
-   *
-   * Terminal rows are kept for the panel's `Completed` section rather than for
-   * their own sake, so they are exactly what there is to spend when the cap is
-   * reached — and the oldest end is the one a reader is least likely to still be
-   * asking about. Ordered by `endedAt`, falling back to `startedAt` for the row
-   * that somehow reached a terminal state without one.
-   *
-   * `false` means every tracked row is still live, which is the only state in
-   * which {@link MAX_TRACKED_ASYNC_TASKS}' own argument for refusing holds: the
-   * session really is already deferring, and a further id would extend a deferral
-   * rather than create one.
-   */
   private evictFinishedTask(): boolean {
     let oldest: BackgroundTask | null = null;
     for (const task of this.asyncTasks.values()) {
@@ -2024,30 +780,13 @@ export class Session {
       try {
         listener(tasks);
       } catch {
-        // `updateUsage`'s guard, for `updateUsage`'s reason: this runs inside the
-        // agent's notification handler and one broken subscriber must not cost
-        // the others their update.
+        // Same guard as updateUsage.
       }
     }
   }
 
-  /**
-   * Sends a prompt and streams the turn's events.
-   *
-   * The iterator ends on `turn_end` or `error`. Events produced outside a turn
-   * (agent logs, the initial `session_started`) queue up and are delivered at
-   * the head of the next turn.
-   */
   async *prompt(
     text: string,
-    /**
-     * Blocks to send after the text: `resource_link`s for staged files, and an
-     * `image` for each one the agent said it would take. Built by the caller, not
-     * here — this layer knows the protocol and not what a person attached.
-     *
-     * Defaulted so `harness.ts`, the regression test for the untouched default
-     * paths, keeps compiling and keeps driving exactly the shape it always did.
-     */
     extra: readonly acp.ContentBlock[] = [],
   ): AsyncGenerator<SessionEvent, void, void> {
     if (this.turnActive) {
@@ -2055,46 +794,19 @@ export class Session {
     }
     this.turnActive = true;
 
-    /*
-     * The queue is taken **before** the request is fired, and the order is the
-     * rule rather than the tidiness.
-     *
-     * Between this statement and the RPC below there is no await, so no other
-     * reader can be resumed in between — which is what makes "a turn's own
-     * `turn_end` can never be delivered to the idle drain" a property of the
-     * ordering. Reversed, an idle drain parked on `next()` would be the one holding
-     * the queue when the agent's first update arrived, and the turn would yield
-     * nothing at all.
-     */
+    // Claim before firing, with no await between, so the idle drain never takes this turn's turn_end.
     const claim = this.queue.claimForTurn();
 
-    // The epoch this request answers under. See the field: it is what makes a
-    // late answer to an abandoned turn harmless rather than a second ending.
     const epoch = (this.promptEpoch += 1);
 
     void this.client.agent
       .request(acp.methods.agent.session.prompt, {
         sessionId: this.sessionId,
-        /*
-         * The text block is dropped when there is no text.
-         *
-         * A message that is only a screenshot is legitimate — `server.ts` allows
-         * it as long as something came with it — and sending `{type:"text",
-         * text:""}` alongside the link would hand the agent an empty turn to
-         * interpret. The route guarantees this array is never empty: text and
-         * attachments cannot both be absent.
-         */
         prompt: text.length === 0 ? [...extra] : [{ type: "text", text }, ...extra],
       })
       .then(
         (response) => {
-          // The daemon gave up on this turn and said so; the answer is late and
-          // there is nothing left for it to end. Dropped rather than recorded,
-          // because a second `turn_end` for one prompt is the shape the log
-          // refuses — and because the turn it would reach now may not be this one.
           if (this.promptEpoch !== epoch) return;
-          // A run that the turn's own end interrupts still owes its final block —
-          // `onUpdate` cannot flush it, because there is no next update.
           this.flushToolDraft();
           this.queue.push({
             type: "turn_end",
@@ -2113,29 +825,14 @@ export class Session {
         },
       )
       .finally(() => {
-        // ⚠ Fenced too, and this is the half that would break a *live* turn
-        // rather than merely duplicate a dead one: after an abandonment a second
-        // prompt may already hold `turnActive`, and clearing it here would let a
-        // third prompt fire into a session the agent is still answering.
+        // Fenced: after an abandonment a newer prompt may own turnActive.
         if (this.promptEpoch === epoch) this.turnActive = false;
       });
 
-    /*
-     * `finally` rather than a release after the loop, because a consumer that
-     * breaks out of its `for await` calls `gen.return()` — which runs this — and a
-     * cancelled turn has to hand the queue back as reliably as a finished one.
-     */
     try {
       for (;;) {
         const event = await this.queue.next(claim);
-        /*
-         * Displaced. Reachable rather than defensive: `turnActive` is cleared in
-         * the RPC's own `.finally` *before* the `turn_end` it produced has been
-         * drained — `doDispose` relies on that ordering — so a second `prompt()`
-         * can pass the guard above and claim the queue under this one. Returning is
-         * what makes that graceful: this generator ends, its `release` below is
-         * identity-checked and no-ops, and the new turn keeps what it took.
-         */
+        // Displaced by a newer prompt; the release below is identity-checked.
         if (event === null) return;
         yield event;
         if (event.type === "turn_end" || event.type === "error") return;
@@ -2145,141 +842,38 @@ export class Session {
     }
   }
 
-  /**
-   * Read what the agent says when no turn is being consumed.
-   *
-   * **The bug this closes: an agent goes on emitting after its turn has ended, and
-   * nobody was reading.** `session/prompt` resolves while claude drives background
-   * work, the generator above returns on `turn_end`, and everything after it was
-   * pushed into a queue with no consumer — held until the *next* prompt started a
-   * new generator, which then drained the whole backlog in one microtask cascade.
-   * Measured on a live log: 294,907 ms of silence, then 57 events stamped inside a
-   * 2 ms span, whose content was five minutes of the agent saying it was waiting.
-   * Past `MAX_BUFFERED_EVENTS` it was not even held — it was evicted.
-   *
-   * Synchronous on the way in, and that is what makes it displaceable rather than
-   * racy: the claim is taken before this returns, so a prompt starting in the next
-   * microtask displaces this reader deterministically instead of overwriting it.
-   * A `null` claim means a turn already owns the queue and there is nothing to do,
-   * which is why the caller may call this without knowing whether one has started.
-   *
-   * Deliberately **not** wired up by `Session` itself. A bare `Session` — `harness`,
-   * the Session-level drivers — behaves exactly as it always did, which is what
-   * keeps `harness` a regression test for the untouched default paths. Only
-   * `ManagedSession` attaches one.
-   */
+  /** Reads events outside a turn; a starting prompt displaces it. Only ManagedSession attaches one. */
   drainBetweenTurns(onEvent: (event: SessionEvent) => void): void {
     const claim = this.queue.claimForIdle();
     if (claim === null) return;
     void (async () => {
       for (;;) {
         const event = await this.queue.next(claim);
-        // Displaced by a turn, or the session is gone. `CLOSED` is compared by
-        // identity and never recorded: it is a sentence this daemon writes about
-        // itself, and a closed queue answers it synchronously and for ever, so a
-        // reader that carried on would spin the microtask queue for the life of the
-        // process.
+        // CLOSED answers for ever, so carrying on would spin.
         if (event === null || event === CLOSED) return;
         try {
           onEvent(event);
         } catch {
-          // Swallow, and **do not** evict the listener — the deliberate inverse of
-          // `SessionLog.append`'s fan-out guard one file over, which is the thing
-          // somebody will copy. There it has many listeners and dropping a broken
-          // one costs that client its seq; here there is exactly one consumer, and
-          // dropping it silences everything this session says for the rest of the
-          // agent's life.
+          // Keep the listener: it is this session's only consumer.
         }
       }
     })();
   }
 
-  /**
-   * Ask the agent to abandon the turn in flight, and stay running.
-   *
-   * The same notification `doDispose` has always sent, reached by a second door
-   * and deliberately through the same private method rather than a second
-   * `notify` call — `session/cancel` is written down in exactly one place, so
-   * "every RPC that writes to agent stdin is bounded" is a property of that place
-   * and not of two call sites agreeing.
-   *
-   * **It asks and does not force**, and returning `void` is how that is said out
-   * loud. ACP defines cancellation as a notification: there is no response, the
-   * promise resolves when the bytes are written, and an agent that ignores the
-   * message goes on working. Whether the turn actually ended is a *later* and
-   * separate question — {@link awaitTurnEnd} — because in between the caller has
-   * something it must do first.
-   *
-   * **That something is answering anything the agent has parked on a human.** ACP
-   * says a client which has cancelled MUST respond to a pending
-   * `session/request_permission` with `cancelled`, and until it does, an agent
-   * blocked on one is not executing anything that could notice this notification
-   * at all. Folding the wait in here would therefore have timed out every single
-   * time on exactly the sessions most worth cancelling. The answer is the
-   * registry's to give because the registry holds the promise — see
-   * `ManagedSession.cancelTurn`, the only caller of either method.
-   */
+  /** Asks, never forces. Parked permissions must be answered before the turn can end. */
   async cancelTurn(): Promise<void> {
     await this.sendCancel();
   }
 
-  /**
-   * Resolves `true` if the turn really ended, `false` if it had not by the budget.
-   *
-   * `false` is "not yet", never "refused" — nothing here can tell those apart, and
-   * nothing escalates on it. What forces is {@link dispose}, a different verb with
-   * a different cost.
-   */
   awaitTurnEnd(timeoutMs: number = CANCEL_SETTLE_MS): Promise<boolean> {
     return this.waitForTurnToSettle(timeoutMs);
   }
 
-  /**
-   * Whether this agent takes a message into the turn it is already running.
-   *
-   * Read through to the client, like {@link acceptsImages}, so a caller never has
-   * to know that the answer lives in `initialize`'s `_meta` rather than in
-   * `agentCapabilities`.
-   */
   get supportsSteering(): boolean {
     return this.client.supportsSteering();
   }
 
-  /**
-   * Put a message into the turn that is already running.
-   *
-   * The one thing plain `session/prompt` cannot do, and the reason this method
-   * exists rather than a second prompt: claude's adapter queues a second prompt
-   * FIFO while codex's **supersedes** the first, so the same call means two
-   * different things on two agents and one of them silently discards a live turn.
-   * `_session/steering` means one thing on both.
-   *
-   * **`idleBehavior: "promptRequired"` is not optional here**, and it is opt-in on
-   * the wire because the adapters' default is the older behaviour. Without it, a
-   * steer that finds no turn *starts* one — with no `session/prompt` for this
-   * daemon to await, so `pump` would never see it end. With it, the same race
-   * answers `prompt_required` and hands the decision back, which is the only shape
-   * `ManagedSession` can act on. See {@link SteerOutcome}.
-   *
-   * Bounded like every other RPC that writes to agent stdin, and the bound is a
-   * refusal rather than a guess: a timeout answers `unsupported`, so the caller
-   * queues. {@link STEER_TIMEOUT_MS} carries what that costs.
-   *
-   * ⚠ **And the bound abandons.** It used to race a bare timer, which stopped
-   * this daemon waiting and told the agent nothing: every steer the pipe swallowed
-   * left one request outstanding in the SDK for the life of the connection, still
-   * holding the whole prompt payload, while the caller queued the same text and
-   * the person typed the next one. {@link withAbandonableDeadline} carries the
-   * measurement. The timeout arm and the refusal arm are now one `catch` because
-   * they always answered the same string — merging them is what lets the deadline
-   * carry a cancellation out with it.
-   *
-   * An outcome string this daemon does not know degrades to `injected`, which is
-   * `compatibility.md`'s "fail toward keep working" pointed at the one direction
-   * that matters here: the request succeeded, so the agent took the message, and
-   * re-sending it because we could not read the label would put the same sentence
-   * into the model twice.
-   */
+  /** `promptRequired` is mandatory: an idle steer would start a turn pump cannot close. */
   async steer(text: string, extra: readonly acp.ContentBlock[] = []): Promise<SteerOutcome> {
     if (!this.supportsSteering) return "unsupported";
 
@@ -2291,9 +885,6 @@ export class Session {
             STEER_METHOD,
             {
               sessionId: this.sessionId,
-              // The same block-building rule `prompt` states: no empty text block,
-              // because a message that is only a screenshot is legitimate and an
-              // empty string is a turn the agent has to interpret.
               prompt: text.length === 0 ? [...extra] : [{ type: "text", text }, ...extra],
               _meta: { steering: { idleBehavior: "promptRequired" } },
             },
@@ -2303,10 +894,6 @@ export class Session {
         `${this.client.config.displayName} taking a message into the running turn`,
       );
     } catch {
-      // An agent that advertised the method and then refused the call — `-32601`
-      // from one that lied, or anything else — and the deadline, which used to be
-      // a separate arm returning this same string. All of them mean the one thing
-      // to the caller, which is that this message needs the other route.
       return "unsupported";
     }
 
@@ -2319,31 +906,7 @@ export class Session {
     return "injected";
   }
 
-  /**
-   * Ask the agent to stop one piece of background work.
-   *
-   * **`false` is an ordinary answer and never an error.** The adapter answers it
-   * for a task it no longer holds, which is exactly what losing a race with the
-   * work finishing looks like — `cancelTurn`'s `no_turn` judgement, one method
-   * over. A thrown error is different and is left to throw: it means the agent
-   * refused or could not be reached, and the row has a sentence for that.
-   *
-   * Not gated on the agent having advertised anything, unlike `steer`. The only
-   * way a caller has an `asyncTaskId` at all is that this agent announced the
-   * task, so the capability question was already answered by the id existing —
-   * and an agent that then refuses the method answers `-32601`, which is the
-   * failure the caller is told about rather than one worth pre-empting.
-   *
-   * ⚠ **The deadline abandons the request rather than only stopping the wait**,
-   * and this method is the one it was argued for: nothing gates a second tap on
-   * the first one's silence, and `stopBackgroundTask` is deliberately reachable
-   * mid-turn, so twenty taps at a wedged agent are twenty live requests. The
-   * probe behind that — 20 `_session/async_task/stop` calls against a peer that
-   * never answers, leaving 20 entries in the SDK's pending map under a bare
-   * deadline — was taken at the `Connection` level rather than through this
-   * method, and is written up at {@link withAbandonableDeadline}, along with what
-   * the cancellation does and does not buy.
-   */
+  /** `false` means the task already finished, never an error. */
   async stopAsyncTask(asyncTaskId: string): Promise<boolean> {
     const answer = await withAbandonableDeadline(
       (options) =>
@@ -2369,81 +932,23 @@ export class Session {
     );
   }
 
-  /**
-   * Stop waiting for a turn the agent has never answered, and say so.
-   *
-   * **This is not a third stopping verb, and the difference is the whole design.**
-   * Stopping the agent and stopping the session are two things this daemon keeps
-   * apart (Q2.42), and nothing here sends either: no `session/cancel`, no
-   * `$/cancel_request`, no abort signal on the request. The agent is not told
-   * anything, does not stop, and is free to answer whenever it gets there. What
-   * ends is **this daemon's claim that a turn is in flight** — which is all
-   * `status === "running"` ever meant, and all that was stuck.
-   *
-   * ⚠ **`withAbandonableDeadline` is deliberately not used, though it is sitting
-   * right there and looks like the answer.** Two measurements say otherwise. Its
-   * own docblock records that against a peer which never answers, the cancellation
-   * reclaimed nothing — `pendingResponses` stayed at 20 of 20 — so it does not
-   * solve the residual it exists for in exactly this case. And it names
-   * `session/prompt` as the one method whose `ctx.signal` an installed adapter
-   * actually honours (codex-acp 1.8.0 threads it into the model call), so on that
-   * adapter the "deadline" would abort the agent's work. That is the third
-   * stopping verb, arrived at by accident, and it is what "the agent must never
-   * notice a client leaving" forbids.
-   *
-   * ⚠ **`turnActive` is cleared here rather than left to the RPC's `.finally`.**
-   * It is the flag {@link prompt} refuses a second prompt on, and it is *only*
-   * ever cleared inside the outstanding request's own callbacks — so a turn closed
-   * without those callbacks running would read as idle, open the composer, accept
-   * the next message, and then throw *"a prompt is already in flight"* into the
-   * transcript for the rest of the session. Every message after the wedge would be
-   * recorded and then errored. The epoch bump on the line above is what keeps the
-   * late `.finally` from taking the *next* turn's flag back down with it.
-   *
-   * Answers whether there was anything to abandon, so a sweep can report honestly
-   * rather than counting the sessions it looked at.
-   */
+  /** Ends this daemon's claim of a turn without telling the agent (Q2.42). */
   abandonTurn(): boolean {
     if (!this.turnActive) return false;
-    // Before the push, so the still-pending request's callbacks are already dead
-    // by the time anything downstream can react to the ending.
     this.promptEpoch += 1;
     this.turnActive = false;
-    // The same debt the real ending pays: a tool block half-built when the turn
-    // stops is owed to the transcript, and `onUpdate` cannot flush it because
-    // there is no next update coming.
     this.flushToolDraft();
-    /*
-     * Into the queue rather than straight into the log, because the queue is what
-     * the turn's generator is parked on: this is the event that makes `for await`
-     * return, which runs `pump`'s `finally`, which clears `ManagedSession.turn`,
-     * sweeps the pending permissions, starts the idle drain and delivers anything
-     * queued. Every one of those comes free from ending the turn the ordinary way
-     * — which is the reason this writes an event rather than a status.
-     */
     this.queue.push({ type: "turn_end", stopReason: "abandoned", usage: null });
     return true;
   }
 
-  /**
-   * Cancels any in-flight turn, closes the session if the agent supports it, and
-   * shuts the process down.
-   */
   async dispose(): Promise<void> {
     this.disposed ??= this.doDispose();
     return this.disposed;
   }
 
   private async doDispose(): Promise<void> {
-    // Both RPCs below write to the agent's stdin, and the SDK puts no timeout on
-    // that write: an agent that has stopped reading its pipe — a wedged tool, a
-    // dead inner process, a full pipe buffer — parks them forever. Everything
-    // that actually terminates the process is downstream of here, so an unbounded
-    // await is the difference between a clean stop and an orphan nobody can see.
-    //
-    // The cancel goes out unconditionally rather than only when `turnActive`,
-    // because that flag is cleared before the `turn_end` it produced is drained —
-    // a dispose arriving in that window used to skip the graceful path entirely.
+    // Bounded: a wedged agent would otherwise park the kill path. Cancel unconditionally, as turnActive clears early.
     try {
       await this.sendCancel();
       if (this.turnActive) await this.waitForTurnToSettle(CANCEL_GRACE_MS);
@@ -2466,14 +971,8 @@ export class Session {
 
     this.unregister?.();
     this.unsubscribeLogs?.();
-    // Before the close, so a session torn down mid-run does not take the only
-    // complete copy of that run's block with it. The queue drains only inside a
-    // turn, so this is best-effort in exactly the way every other event is here.
     this.flushToolDraft();
-    // The close is in a `finally` because an idle drain is parked on this queue and
-    // `CLOSED` is the only thing that ends it. `dispose()` memoises, so a throw here
-    // is sticky and no later call retries — which would leave that reader parked for
-    // the life of the process.
+    // CLOSED is the only thing that ends the idle drain, and dispose() memoises.
     try {
       await this.client.close();
     } finally {
@@ -2491,22 +990,6 @@ export class Session {
     };
   }
 
-  /**
-   * Hand the agent's question to whoever is going to answer it.
-   *
-   * Two refusals before anything is parked, and both are `invalidParams` rather
-   * than a fabricated `{action: "decline"}` — nobody declined, and measured
-   * against claude's adapter an RPC error is also the kindest of the three
-   * answers, because it becomes `{behavior: "deny", message: …}` and the model
-   * carries on knowing why.
-   *
-   * The first is the form itself: {@link toElicitationForm} throws on a shape
-   * this daemon will not render or will not carry, and its message names the cap.
-   * The second is having no resolver at all, which cannot happen through the
-   * daemon — the capability is derived from the resolver's presence, so the agent
-   * was never handed the tool — but *is* reachable if somebody wires
-   * `LaunchOptions.elicitation` on by hand, and a statement is not a gate.
-   */
   private async onElicitation(
     request: ElicitationRequest,
     signal: AbortSignal,
@@ -2531,10 +1014,6 @@ export class Session {
     return this.elicitations(
       {
         toolCallId: request.toolCallId ?? null,
-        // Bounded here and nowhere else: the form's byte backstop does not weigh
-        // this field, and everything downstream of this call — the event, the
-        // snapshot, the `hello` frame — carries it verbatim. See
-        // {@link MAX_ELICITATION_MESSAGE_CHARS} for what an unbounded one costs.
         message: clipElicitationMessage(request.message),
         form,
       },
@@ -2542,67 +1021,15 @@ export class Session {
     );
   }
 
-  /**
-   * A tool's arguments being typed, held back until they stop growing.
-   *
-   * **The model streams a tool call's *input* into the content channel, one token
-   * at a time, and every block is a strict extension of the last.** Measured
-   * 2026-08-13 against this daemon's own database: one `Write` produced a
-   * `tool_call` and then **715** `tool_call_update`s whose only content block grew
-   * from `{` to the finished input JSON — followed by that JSON once more beside
-   * the `rawInput` it belongs to, and then the single line that is actually a
-   * result. Across every session on that machine those superseded blocks are
-   * **15.4% of all events and 55.8% of all bytes**: written to SQLite, replayed
-   * down every socket, and paged back over the relay to a phone.
-   *
-   * Nothing renders them. The transcript folds a run back to its final form
-   * (`supersedes` in `tail.ts`), so what all that traffic buys is one block that
-   * the *next* event supersedes.
-   *
-   * Held rather than dropped, because the last block of a run is the only one that
-   * is complete, and a tool whose output really is cumulative would lose it. What
-   * is *not* held is anything carrying news: a status change, a title, arguments,
-   * locations or images go out at once. That is what keeps the spinner honest —
-   * `EventList` draws `in_progress` as a spinning `Loader` and `pending` as a
-   * static glyph, so holding the update that first says `in_progress` would leave
-   * a long write looking like it had not started.
-   *
-   * ⚠ **This is the same rule as `tail.ts`'s `supersedes`, stated a second time,
-   * and the duplication is deliberate rather than overlooked.** `packages/web`
-   * cannot import from `src/`. The two are not required to agree, and the drift
-   * that matters can only go one way: the client's fold is the *guarantee* — every
-   * transcript already on disk carries the full 715 and always will — while this
-   * is an optimisation on top of it. A daemon that suppresses less costs bytes; a
-   * daemon that suppressed *more* than the client could fold would lose content,
-   * which is why this holds instead of dropping.
-   */
+  // Holds streamed-argument drafts until they stop growing; may suppress less than tail.ts's supersedes, never more.
   private toolDraft: {
     toolCallId: string;
-    /**
-     * The longest block seen for this call, held or pushed — or `null` when the
-     * last thing sent for it carried no single block.
-     *
-     * Nullable rather than `""`, and the difference is not cosmetic: every string
-     * starts with the empty one, so an empty base makes the *first* block after a
-     * status-only update look like an extension of something and holds it back for
-     * no reason. There is nothing to be a draft of until a block has actually gone
-     * out.
-     */
+    // Null, not "": an empty base makes the first block look like an extension.
     block: string | null;
-    /** The status last *pushed* for it, so a transition is never held back. */
     status: acp.ToolCallStatus | null;
-    /** The event waiting to go out, or `null` when the last one was pushed. */
     held: Extract<SessionEvent, { type: "tool_call_update" }> | null;
   } | null = null;
 
-  /**
-   * Send the held draft, if there is one.
-   *
-   * Called before **every** other event this session emits, and before `turn_end`,
-   * `error` and shutdown — so a run that is never followed by another update still
-   * puts its final block in the log. Ordering inside the call is preserved: the
-   * draft is always older than whatever is being emitted now.
-   */
   private flushToolDraft(): void {
     const draft = this.toolDraft;
     if (draft?.held == null) return;
@@ -2611,13 +1038,7 @@ export class Session {
     this.queue.push(event);
   }
 
-  /**
-   * Hold this update if it says nothing but "the arguments are one token longer".
-   *
-   * Returns `true` when it has been held and must not be pushed.
-   */
   private holdsToolDraft(event: Extract<SessionEvent, { type: "tool_call_update" }>): boolean {
-    // Exactly one block and nothing else on the event: anything richer is news.
     if (event.content?.length !== 1) return false;
     const block = event.content[0];
     if (block === undefined) return false;
@@ -2625,11 +1046,7 @@ export class Session {
     if (event.locations.length > 0 || event.images !== null) return false;
     const draft = this.toolDraft;
     if (draft === null || draft.block === null || draft.toolCallId !== event.toolCallId) return false;
-    // A status the caller has not seen yet is news, whatever the content says.
     if (event.status !== draft.status) return false;
-    // The rule itself, and it is a **strict** extension: an exactly repeated block
-    // is a tool that printed the same thing twice, which is content rather than a
-    // draft of anything.
     if (block.length <= draft.block.length || !block.startsWith(draft.block)) return false;
     draft.block = block;
     draft.held = event;
@@ -2638,20 +1055,9 @@ export class Session {
 
   private onUpdate(notification: acp.SessionNotification): void {
     const update = notification.update;
-    // Everything that is not a tool-call update ends any run in progress, so the
-    // held block cannot arrive after an event that was emitted later than it.
+    // Any other update ends the run, so the held block cannot land after a later event.
     if (update.sessionUpdate !== "tool_call_update") this.flushToolDraft();
-    /*
-     * Background work, out of band and before the switch.
-     *
-     * **Before, because these three cannot be `case`s.** They are a draft ACP
-     * extension the published SDK's `SessionUpdate` union does not carry, so a
-     * `case "async_task_spawned"` does not typecheck — the same reason
-     * `supportsSteering` reads `_meta` by hand one file over. Reaching the
-     * `default:` arm instead would make each an `other` event, which the idle
-     * drain drops from the log and which nothing would ever have folded into a
-     * set.
-     */
+    // Before the switch: these extension updates are not in the SDK's union.
     if (ASYNC_TASK_UPDATES.includes(update.sessionUpdate)) {
       const edge = readAsyncTaskEdge(update);
       if (edge !== null) this.applyAsyncTaskEdge(edge);
@@ -2671,10 +1077,7 @@ export class Session {
         return;
 
       case "tool_call": {
-        // Bounded once, here, and used for the `file_change` records too — see
-        // `boundToolCallId`. `toolCallLineage` still reads the *raw* id, because
-        // its only use for it is the "a call cannot run inside itself" test,
-        // which has to compare what the agent actually sent.
+        // toolCallLineage reads the raw id for its self-parent test.
         const toolCallId = boundToolCallId(update.toolCallId);
         this.queue.push({
           type: "tool_call",
@@ -2691,27 +1094,10 @@ export class Session {
       }
 
       case "tool_call_update": {
-        // Collected as the blocks are rendered, so an image leaves the prose and
-        // arrives on the event in one pass.
         const images: StoredFileRef[] = [];
-        /*
-         * `rawOutput` only where the blocks carried nothing, which is the whole
-         * rule and is what keeps one command from being reported twice.
-         *
-         * Measured against codex-acp 1.1.9: a finished command arrives as
-         * `{status, rawOutput: {formatted_output, exit_code}}` and **no content
-         * block at all** — its stdout lives in `rawOutput`, in `_meta`, or behind
-         * a `type: "terminal"` handle, none of which `toolOutput` reads. So every
-         * Bash card on a codex session showed the command, a tick, and nothing
-         * else: the daemon dropped output the agent had already sent. claude puts
-         * the same bytes in a `content` block *and* sets `rawOutput`, so
-         * preferring the blocks is what stops it appearing twice there.
-         */
+        // rawOutput only when the blocks carried nothing, or claude's output appears twice.
         const content =
           toolOutput(update.content, this.keepImage, images) ?? rawToolOutput(update.rawOutput);
-        // Bounded once, here, for the reason `boundToolCallId` gives — and with
-        // the same function the `tool_call` arm uses, so a call and its updates
-        // still land on the same string and `toolDraft` keeps matching them.
         const toolCallId = boundToolCallId(update.toolCallId);
         const event: Extract<SessionEvent, { type: "tool_call_update" }> = {
           type: "tool_call_update",
@@ -2719,45 +1105,17 @@ export class Session {
           title: update.title ?? null,
           status: update.status ?? null,
           locations: toLocations(update.locations),
-          // ACP carries arguments here too, and this arm did not copy them — so an
-          // agent that announces a bare call and fills the arguments in afterwards
-          // lost them completely.
           rawInput: update.rawInput ?? null,
           content,
           images: images.length === 0 ? null : images,
-          // Only the edge, not `subagent`: measured 2026-08-01, claude drops that
-          // flag on a spawn's completing update, so carrying it here would say
-          // "not a subagent any more" about the call that just finished being one.
+          // Only the edge: claude drops `subagent` on a spawn's completing update.
           parentToolCallId: toolCallLineage(update).parentToolCallId,
-          // The one marker that says this card's work is not over. Read here
-          // rather than merged from the task set, because it is a fact the agent
-          // stated about *this update* — the same discipline `parentToolCallId`
-          // follows one line up, and the reason neither is derived from the other.
           backgrounded: readBackgroundedMarker(update._meta),
         };
-        /*
-         * The arguments being typed. Held, not pushed — see `toolDraft`.
-         *
-         * **The `update.content?.length === 1` guard is on the *raw* blocks and is
-         * not the same test `holdsToolDraft` makes.** That one asks about the
-         * rendered `content`, which is text only: `toolOutput` drops a `diff`
-         * block, so a raw `[{text}, {diff}]` renders to a single string, passes the
-         * hold, and takes the `emitDiffs` call below with it — losing a
-         * `file_change` for a patch that really was written. Requiring the raw
-         * array to be one block means anything arriving *beside* the text is
-         * emitted rather than held.
-         *
-         * `emitDiffs` is skipped with the held event by the same logic: a held
-         * update is one this session has not emitted, and it has, by that guard,
-         * nothing but the text block. The flush that eventually sends it is
-         * followed by the update that ends the run, whose own `emitDiffs` runs
-         * against the finished content.
-         */
+        // Raw one-block guard: a rendered single string may hide a diff block, which must not be held.
         if (update.content?.length === 1 && this.holdsToolDraft(event)) return;
         this.flushToolDraft();
         this.queue.push(event);
-        // Whatever this call's newest block and status are, they are now the ones
-        // the reader has seen — which is what the next update is judged against.
         this.toolDraft = {
           toolCallId: event.toolCallId,
           block: event.content?.length === 1 ? (event.content[0] ?? null) : null,
@@ -2772,8 +1130,6 @@ export class Session {
         this.queue.push({ type: "plan", entries: update.entries });
         return;
 
-      // Not queued, for the reason `this.config` documents: the queue drains
-      // only inside a turn, and a mode change most often arrives outside one.
       case "current_mode_update":
         this.updateConfig({ currentModeId: update.currentModeId });
         return;
@@ -2782,20 +1138,10 @@ export class Session {
         this.updateConfig({ options: toConfigOptions(update.configOptions) });
         return;
 
-      // Not queued either, and for the sharpest version of the reason: measured,
-      // both adapters schedule this on a `setTimeout(…, 0)` *after* answering
-      // `session/new`, so it is guaranteed to arrive outside a turn and almost
-      // always before the first prompt exists to drain the queue.
       case "available_commands_update":
         this.updateCommands(toCommands(update.availableCommands));
         return;
 
-      // Not queued either, and for a stronger version of the same reason. A mode
-      // change arrives outside a turn; this arrives *thousands of times inside
-      // one* — measured 2026-07-31 against claude-agent-acp 0.63.0, it is emitted
-      // from the `message_delta` handler on every streaming token. The queue would
-      // be the wrong place even if it drained, so it goes out of band and the
-      // registry decides how often a client hears about it.
       case "usage_update":
         this.updateUsage(update);
         return;
@@ -2809,30 +1155,11 @@ export class Session {
     }
   }
 
-  /**
-   * Permission policy: allow once.
-   *
-   * Prefer an `allow_once` option, fall back to `allow_always`, and cancel if the
-   * agent offers neither. The event is emitted either way, carrying the option
-   * list and the decision — that round trip is what the real client will own.
-   */
   private async onPermission(
     request: acp.RequestPermissionRequest,
     signal: AbortSignal,
   ): Promise<acp.RequestPermissionResponse> {
-    /*
-     * **Refused whole rather than trimmed**, and this is the one arm where that
-     * is the only honest answer. An `optionId` round-trips verbatim in the
-     * response below, so clipping one produces an answer the agent will not
-     * recognise; dropping an option removes a choice the agent offered, which is
-     * the thing the client's `permissionLayout` gives up a *layout* rather than an
-     * option to avoid, one layer up. So a card past the cap is declined *to the agent*, which is a sentence
-     * it can act on, rather than silently altered into one nobody can answer.
-     *
-     * `invalidParams` and never `methodNotFound`, matching the elicitation
-     * refusals: the capability is present and this particular request is not
-     * renderable.
-     */
+    // Refused whole: optionIds round-trip verbatim, and dropping one removes a choice.
     const oversized =
       request.options.length > MAX_PERMISSION_OPTIONS ||
       request.options.some((option) => option.optionId.length > MAX_PERMISSION_OPTION_ID_CHARS);
@@ -2843,27 +1170,12 @@ export class Session {
       );
     }
 
-    /*
-     * **Carried exactly as sent, then the pair is weighed as one thing.**
-     *
-     * Neither string is shortened any more — see the constants for why clipping
-     * `name` broke `askedQuestion`'s identity match against `rawInput` — so what
-     * bounds them is the byte measure below, taken *after* projection so it counts
-     * what would actually ride `SessionSnapshot` rather than what arrived.
-     */
     const options: PermissionOptionSummary[] = request.options.map((option) => ({
       optionId: option.optionId,
       name: option.name,
       kind: option.kind,
     }));
     const title = request.toolCall.title ?? request.toolCall.toolCallId;
-    /*
-     * Refused rather than trimmed, for the reason the option cap above is: this is
-     * the pair that rides the snapshot, and a card nobody can read is better
-     * declined *to the agent* — which is a sentence it can act on — than delivered
-     * silently shortened. `invalidParams`, matching every other refusal on this
-     * path and on the elicitation one.
-     */
     const weight = jsonBytes(title) + jsonBytes(options);
     if (weight > MAX_PERMISSION_SNAPSHOT_BYTES) {
       throw acp.RequestError.invalidParams(
@@ -2876,10 +1188,6 @@ export class Session {
       request.options.find((option) => option.kind === "allow_always") ??
       null;
 
-    // Hand the decision off only when there is something a human could actually
-    // pick. An agent offering no actionable option falls through to the cancel
-    // below, as it always has — parking a resolver there would block the agent on
-    // a request that no answer can clear.
     if (this.permissions && choice) {
       return this.permissions(
         {
@@ -2909,11 +1217,6 @@ export class Session {
   private async onReadTextFile(
     request: acp.ReadTextFileRequest,
   ): Promise<acp.ReadTextFileResponse> {
-    // Used as given. This read happens in the *daemon*, on a path the agent
-    // chose — which used to be a trust boundary and is not one now: the agent is
-    // a child of this process with this process's uid, so a path refused here is
-    // a path it can read for itself with one syscall. What is left is a service,
-    // and refusing to perform it would be theatre.
     const path = request.path;
 
     let content: string;
@@ -2933,26 +1236,6 @@ export class Session {
     return { content: lines.slice(start, end).join("\n") };
   }
 
-  /**
-   * Performs the write and reports it.
-   *
-   * This is a real write, not a notification hook — when an agent routes file IO
-   * through the client, the client is the only thing that touches the disk.
-   *
-   * The path is used as given, and that is a decision rather than an omission.
-   * It runs in the daemon on a path the agent chose, which was a route out of a
-   * sandbox while there was a sandbox; there is none now and the agent could
-   * make this write itself. What survives from that era is the *gate* —
-   * `SessionRuntime.clientFileIo`, which `AcpClient` enforces by answering
-   * `methodNotFound` rather than merely not advertising — because that is the
-   * seam a confining runtime would use, and `LaunchOptions.fileIo` is required so
-   * deleting it at either call site is a type error.
-   *
-   * Worth keeping from the measurement that closed it: claude and kimi edit
-   * files perfectly well with this capability declined, so re-declining costs
-   * almost nothing — only the `source: "fs_write"` half of the duplicated `file_change`
-   * pair.
-   */
   private async onWriteTextFile(
     request: acp.WriteTextFileRequest,
   ): Promise<acp.WriteTextFileResponse> {
@@ -2964,8 +1247,6 @@ export class Session {
 
     this.queue.push({
       type: "file_change",
-      // The host path, like every other path on the wire: a client asking the
-      // Changes API about this file has to be talking about the same one.
       path,
       oldText,
       newText: request.content,
@@ -2975,17 +1256,7 @@ export class Session {
     return {};
   }
 
-  /**
-   * Turns `diff` content on a tool call into file-change events.
-   *
-   * A single edit is reported twice by the Claude adapter: once on the initial
-   * `tool_call`, derived from the tool's input, and again on a later
-   * `tool_call_update`, derived from the resulting patch. The two differ in
-   * trailing whitespace, so content-equality does not deduplicate them. The
-   * first update carrying diffs for a tool call wins — later ones are dropped,
-   * which also keeps every hunk of a multi-hunk patch, since those all arrive
-   * together in one content array.
-   */
+  // First update with diffs wins: claude reports each edit twice with different whitespace.
   private emitDiffs(
     toolCallId: string,
     content: acp.ToolCallContent[] | null | undefined,
@@ -2997,14 +1268,6 @@ export class Session {
     for (const item of diffs) {
       this.queue.push({
         type: "file_change",
-        // The path the agent named, unchanged. It used to go through a
-        // translation here, because the agent's filesystem and the daemon's were
-        // different namespaces and a path from one meant nothing in the other.
-        // They are the same filesystem now, so there is nothing to translate and
-        // nothing that can fail to translate. The Changes API remains the
-        // authoritative answer for what a session changed; this is the reporting
-        // half of the pair, on the agent's own RPC handler, where nothing may
-        // block.
         path: item.path,
         oldText: item.oldText ?? null,
         newText: item.newText,
@@ -3014,14 +1277,6 @@ export class Session {
     }
   }
 
-  /**
-   * Resolves `true` when the turn really settled, `false` when the budget ran out.
-   *
-   * The answer is the whole reason this is not a bare `Promise<void>` any more.
-   * `doDispose` throws it away and is right to — what follows it kills the process
-   * either way — but {@link cancelTurn} reports to a person, and "the agent stopped"
-   * and "the agent has not answered yet" are the two things they need told apart.
-   */
   private waitForTurnToSettle(timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
       const started = Date.now();
@@ -3041,95 +1296,37 @@ export class Session {
   }
 }
 
-/**
- * What a reader is handed when the queue it was waiting on has closed.
- *
- * A module constant so it can be recognised by **identity**. A closed queue
- * answers `next()` synchronously and for ever, so a reader that matched on the
- * message would spin the microtask queue for the life of the process the moment
- * it got this back — and a reader that *recorded* it would put a sentence this
- * daemon writes about itself into a transcript as though the agent had said it.
- */
 const CLOSED: SessionEvent = Object.freeze({
   type: "error",
   message: "session closed",
   data: null,
 });
 
-/**
- * Whether this is the sentence above rather than something an agent said.
- *
- * ⚠ **By identity, and exported because the turn generator yields it.**
- * `drainBetweenTurns` recognises it and stops; the turn loop does not, so a
- * session disposed mid-turn hands its pump an `error` event that looks exactly
- * like a provider failure and is in fact this daemon taking the agent away. The
- * pump has to tell them apart before it writes anything about *why* the turn
- * ended — `agent_error` on a deliberate teardown would be the daemon blaming the
- * agent for its own act.
- *
- * Identity and never the message: the string is prose, and matching it would make
- * an agent that happens to say "session closed" indistinguishable from this.
- */
+/** By identity, never message: tells this daemon's teardown apart from an agent error. */
 export function isSessionClosed(event: SessionEvent): boolean {
   return event === CLOSED;
 }
 
-/**
- * A single-consumer async queue of events, whose consumer may change hands.
- *
- * **Ownership is checked rather than assumed, and that is the whole of this
- * class's complexity.** `next()` used to park its resolver in `waiting`
- * unconditionally, so a second consumer silently overwrote the first: the
- * displaced reader's promise never settled, which is a hang rather than a
- * mismatch — and a hang inside `daemoncheck` or `harness`, which consume
- * {@link Session.prompt} as a generator on a bare `Session`.
- *
- * A claim is a monotonic number. Taking one wakes whoever held the last with
- * `null`, and `next()` answers `null` for a claim that is no longer current, so a
- * reader that was *already* resumed cannot take one more event on its way out.
- * A turn outranks an idle drain — `claimForIdle` refuses while a turn holds it,
- * and `claimForTurn` refuses a queue a turn already holds rather than displacing
- * it, because the asymmetric version can strand `turnHolds` with no owner able to
- * clear it, which silently returns the session to buffering with nothing saying
- * so.
- */
+// A claim wakes the previous reader with null; a turn is never displaced.
 class EventQueue {
   private readonly buffered: SessionEvent[] = [];
   private waiting: ((event: SessionEvent | null) => void) | null = null;
   private closed = false;
-  /** Bumped by every claim, so a stale reader is recognisable by number. */
   private reader = 0;
-  /** Whether the current claim belongs to a turn, which nothing may displace. */
   private turnHolds = false;
 
-  /**
-   * Take the queue for a turn.
-   *
-   * Called synchronously *before* the `session/prompt` RPC is fired, which is what
-   * makes "a turn's own `turn_end` can never reach the idle drain" a property of
-   * the ordering rather than a hope: between the claim and the request there is no
-   * point at which another reader can be resumed.
-   */
   claimForTurn(): number {
     if (this.turnHolds) throw new Error("a turn already holds this session's events");
     this.turnHolds = true;
     return this.handover();
   }
 
-  /** Take the queue between turns, or answer `null` because a turn has it. */
   claimForIdle(): number | null {
     if (this.turnHolds) return null;
     return this.handover();
   }
 
-  /**
-   * Give the queue back.
-   *
-   * Identity-checked, and that is load-bearing rather than tidy: a stale release
-   * clearing `turnHolds` under a *live* turn would route that turn's events to the
-   * drain, park its generator for ever and pin `ManagedSession.turn`, so the
-   * session answers `409 turn_in_flight` for the rest of its life.
-   */
+  // Identity-checked: a stale release under a live turn pins ManagedSession.turn for ever.
   release(claim: number): void {
     if (claim !== this.reader) return;
     this.turnHolds = false;
@@ -3154,14 +1351,7 @@ class EventQueue {
     this.buffered.push(event);
     if (this.buffered.length <= MAX_BUFFERED_EVENTS) return;
 
-    // What this still bounds is narrower than it was. A `ManagedSession` attaches
-    // a drain between turns, so the unread window is the gap between `adopt` and
-    // `onStarted`, plus any bare `Session` (`harness`, the Session-level drivers)
-    // where nothing drains between turns at all and an idle agent writing to
-    // stderr would otherwise grow this without limit. Evict only what is safe to
-    // lose: dropping a `text` or `file_change` would leave a transcript that reads
-    // as complete and is not, which is worse than the leak. If there is nothing
-    // droppable, record the loss rather than hide it.
+    // Evict agent_log or other first, since a missing text leaves a transcript that reads as complete; with neither buffered, drop the oldest and say so.
     const droppable = this.buffered.findIndex(
       (candidate) => candidate.type === "agent_log" || candidate.type === "other",
     );
@@ -3177,15 +1367,6 @@ class EventQueue {
     });
   }
 
-  /**
-   * The next event, `null` for a reader that has been displaced, or {@link CLOSED}.
-   *
-   * The staleness test is the **first** statement for a reason: a displaced reader
-   * whose promise was already resolved with an event is still inside its own loop,
-   * and without this it would come back and take one more from a queue it no
-   * longer owns — delivering an event to a turn that had ended, or to a drain a
-   * turn had just displaced.
-   */
   next(claim: number): Promise<SessionEvent | null> {
     if (claim !== this.reader) return Promise.resolve(null);
     const buffered = this.buffered.shift();
@@ -3204,12 +1385,6 @@ class EventQueue {
   }
 }
 
-/**
- * Waits for `promise`, giving up after `timeoutMs`.
- *
- * Never rejects: callers use it to bound best-effort teardown RPCs, where the
- * only thing that matters is that control comes back.
- */
 function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
   const settled = promise.then(
     () => undefined,
@@ -3222,37 +1397,6 @@ function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<void
   return Promise.race([settled, expired]).finally(() => clearTimeout(timer));
 }
 
-/**
- * Bounds an RPC whose *answer* is wanted, and fails loudly when it does not come.
- *
- * The sibling above is for teardown, where the only thing that matters is that
- * control comes back; this one is for a request a person is waiting on, where
- * silently resolving would report a mode change that never happened.
- *
- * ⚠ **Giving up on the answer is all it does.** The request stays outstanding in
- * the SDK for as long as the peer keeps quiet. {@link withAbandonableDeadline} is
- * the third sibling, for the two callers that also tell the agent to drop it, and
- * carries the argument and the reason the choice is opt-in.
- *
- * **Whether a residual here matters is a per-call-site question, and all seven
- * were walked rather than waved at.** Three are reclaimed because the connection
- * itself goes: `session/new` and `session/resume` on the launch path, and
- * `providers/set` inside `applySystem` — which is called from those same two
- * launches, each inside a `try` whose `catch` is `await client.close()`, and
- * whose own local `catch` rethrows as `SystemRoutingError` rather than
- * swallowing. Four are not, because their connection deliberately stays live, and
- * they divide again. `session/new (clear)` and `session/close (clear)` are argued
- * at {@link withAbandonableDeadline}: abandoning cannot un-open a conversation
- * and buys nothing on a best-effort close, so each clear leaves one open
- * residual. `session/set_config_option` and `session/set_mode` are the two a
- * person is tapping, and what bounds them is not this helper but `queueConfig`:
- * every public config change is a link on `configChain`, and a link fires only
- * once its predecessor settles. A deadline settles it, so a wedged agent accrues
- * at most one pending entry per `SET_CONFIG_TIMEOUT_MS` — 15s — however fast the
- * control is tapped. That is a bound rather than a fix, and it is the same
- * residual {@link withAbandonableDeadline}'s last ⚠ names: closing it for good
- * is a door in `acp/client.ts`, not a choice between these three helpers.
- */
 function withDeadline<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_, reject) => {
@@ -3261,108 +1405,7 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number, what: string): 
   return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
 }
 
-/**
- * {@link withDeadline}, for a request the agent must also be *told* to drop.
- *
- * ⚠ **A deadline that only stops waiting leaves the request outstanding for
- * ever.** Probed 2026-09-14 against the installed SDK — `@agentclientprotocol/
- * sdk` 1.3.0, node v26.3.0 — by standing a `Connection` on a stream pair whose
- * peer accepts `_session/async_task/stop` and never answers, firing 20 of them
- * under this file's own two wrappers and reading `pendingResponses` directly.
- * Bare `withDeadline`: 20 of 20 deadlines expired, `pendingResponses.size` 20,
- * and **zero** `$/cancel_request` frames written. `Promise.race` settles *this*
- * daemon's promise and says nothing to anybody else — so somebody tapping stop
- * on a wedged agent adds one permanently pending entry per tap, each retaining
- * the params it was sent with, and a steer that times out and is queued instead
- * leaves its whole prompt payload behind the same way.
- *
- * What this adds is the one lever the SDK offers: `SendRequestOptions.
- * cancellationSignal`, aborted the instant the timer wins, which makes the
- * connection send `$/cancel_request` for that id — the same probe under this
- * wrapper wrote 20 of them. A peer that honours it answers — normally
- * `RequestError.requestCancelled()` — and it is the *answer* that deletes the
- * map entry, and the abort listener with it, in `Connection.handleResponse`.
- * That half was measured too, on a second pass where the probe pushed an error
- * response back for the cancelled id: `pendingResponses.size` went 1 → 0. So
- * against a cooperative adapter the accumulation is gone, and the agent
- * additionally stops doing work nobody is waiting for.
- *
- * ⚠ **It is cooperative, and the residual is real** — which the same probe shows
- * rather than merely warns about: against the peer that never answers, this
- * wrapper left `pendingResponses.size` at 20 too. The 20 cancellations went out
- * and nothing came back, so nothing was reclaimed. The SDK says as much in its
- * own words — *"the returned promise is still settled by the peer's eventual
- * response"* — and `Connection` offers no way to forget a request: the map is
- * private, and only a response or `close()` removes an entry. Closing is not the
- * remedy here, because the connection is shared with the live conversation: a
- * timed-out background stop would end the very turn that method exists in order
- * not to touch.
- *
- * ⚠ **And the residual is the mainline case here rather than an exotic tail, which
- * is the honest reading of the two constants that feed this.**
- * `ASYNC_TASK_STOP_TIMEOUT_MS` says ten seconds *"means the pipe is not being read
- * at all rather than that the work is slow to stop"*, and `STEER_TIMEOUT_MS` says
- * the same of its own. A peer that has stopped reading its pipe cannot process a
- * `$/cancel_request` sent down that pipe — and the cancellation goes out through
- * the same write queue that is not draining, so each timed-out tap now also leaves
- * one unflushed notification behind a write that will never complete. So what this
- * buys is narrower still than *cooperative*: against a merely **slow** adapter the
- * entry is reclaimed — but by the adapter answering in its own time, not by the
- * cancellation, because ⚠ **neither pinned adapter observes it** (see below). The
- * work is therefore not stopped on either agent this repository ships against;
- * *"stops doing work nobody is waiting for"* is what a cooperative adapter would
- * do and is not true of claude-agent-acp 0.73.0 or codex-acp 1.8.0.
- * The accumulation the probe measured —
- * repeated taps at a wedged agent — is **not** bounded by this, and is still
- * bounded only by a door in `acp/client.ts`: a request wrapper owning its own id,
- * or `pendingResponses` behind a method. That is a different file and a different
- * change, and it is the one that would actually close it.
- *
- * ⚠ **What the two adapters do with a cancel on an *extension* request is
- * answered by reading them, and the answer is: nothing at all.** Both call sites
- * are extensions — `_session/steering` and `_session/async_task/stop` — so on
- * every timeout a `$/cancel_request` goes out naming a method this repository did
- * not define. The SDK's server half aborts **that one request's**
- * `AbortController` and touches no other request and no session; the question was
- * whether an adapter might wire that signal to the *session* instead, which would
- * let a timed-out steer end the live turn — precisely what
- * {@link ASYNC_TASK_STOP_METHOD} exists in order not to do. Neither pin does.
- * claude-agent-acp 0.73.0 registers both as
- * `.onRequest(STEER_METHOD, { parse: parseSteerRequest }, (ctx) => agent.steer(ctx.params))`
- * and the same shape for the stop (`dist/acp-agent.js`) — `ctx.signal` is passed
- * to neither, and neither `steer` nor `stopAsyncTask` takes a second argument.
- * codex-acp 1.8.0 is the sharper answer: across its whole bundle `ctx.signal`
- * appears **once**, on `.onRequest(methods.agent.session.prompt, (ctx) =>
- * getAgent().prompt(ctx.params, ctx.signal))` — the core method, and no extension
- * handler beside it gets one. So the controller
- * the SDK aborts is consulted by nobody, the feared coupling does not exist on
- * either pin, and that is also why the paragraph above says the work is not
- * actually stopped.
- *
- * What reading cannot settle is a *future* adapter version wiring that signal up.
- * `pincheck` is where that would be caught, since it already drives the pinned
- * adapters' own code rather than comparing constants.
- *
- * Opt-in rather than folded into {@link withDeadline}, because four of the callers
- * already there have an *effect* that outlives the answer, and they split two and
- * two.
- *
- * `session/new` and `session/resume` on the **launch** path are reclaimed: a
- * `session/new` this daemon gave up on at 60s may have opened a conversation
- * anyway and telling the agent to forget the request does not close one, but both
- * handlers `await client.close()` in their `catch`, and that reclaims the whole
- * process. Abandoning would trade a reclaimed leak for an ambiguous one.
- *
- * ⚠ **The two on the `clearContext` path are not reclaimed, and saying so is what
- * stops the next reader assuming they are.** `session/new (clear)` and
- * `session/close (clear)` run on a connection that deliberately stays live — the
- * whole point of a clear is that the process carries on, and the close is already
- * best-effort with a `.catch(() => {})`. Nothing ever removes their entries. They
- * are left on {@link withDeadline} because abandoning a `session/new` cannot
- * un-open a conversation and abandoning a best-effort `session/close` buys
- * nothing, so what each leaves is an open residual — one per clear, holding its
- * whole payload — rather than something this helper would fix.
- */
+// Also sends $/cancel_request; neither pinned adapter observes it on these extensions, so pendingResponses still fills.
 function withAbandonableDeadline<T>(
   send: (options: acp.SendRequestOptions) => Promise<T>,
   timeoutMs: number,
@@ -3373,18 +1416,6 @@ function withAbandonableDeadline<T>(
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      // Aborted *before* the reject, so the cancellation is enqueued ahead of the
-      // rejection and can never be ordered behind a caller's reaction to the
-      // deadline. ⚠ **Enqueued, not sent** — `abort()` runs the SDK's `cancel()`
-      // synchronously, but that ends in `sendWireMessage`, which only appends to
-      // `Connection.writeQueue` and returns the chained promise. Probed against
-      // sdk 1.3.0: zero frames had reached the stream when `abort()` returned,
-      // one had after a turn of the event loop. In the wedged case — the only
-      // case that reaches this line — none ever will, and that is the residual
-      // the docblock's third ⚠ is about. Only on this path, never on a settled
-      // one: by then the entry is already gone, and a `$/cancel_request` for an
-      // id the peer has answered is a frame about nothing, sent into somebody
-      // else's code.
       abandon.abort();
       reject(new Error(`${what} did not answer within ${timeoutMs / 1000}s`));
     }, timeoutMs);
@@ -3401,23 +1432,7 @@ function hasRpcCode(error: unknown, code: number): boolean {
   );
 }
 
-/**
- * Whether a launch failure was the agent saying it is not signed in.
- *
- * ⚠ **Matched on the message because that is all there is**, and exported so
- * there is one copy of that concession rather than two. `Session.start` and
- * `Session.resume` rewrap the ACP refusal with the agent's own `authHint` and
- * throw a plain `Error` — no typed class survives the rewrap — so every caller
- * that wants to tell "not signed in" from "would not start" has to read the
- * sentence. `registry.ts` was doing exactly this inline, and `agentask.ts` needed
- * the same answer for a different vocabulary (`502 agent_auth_required` there, a
- * plugin-facing `model_agent_signed_out` here). Two regexes for one fact is how
- * one of them comes to be missing a word the other has.
- *
- * Here rather than in `registry.ts` because this file is where the message is
- * *written*, and both callers already import from it — the dependency runs the
- * right way for both.
- */
+/** Matched on the message: start and resume rewrap auth_required as a plain Error. */
 export function isAuthRequiredMessage(message: string): boolean {
   return /authentication required/i.test(message);
 }
@@ -3426,112 +1441,32 @@ function isAuthRequired(error: unknown): boolean {
   return hasRpcCode(error, AUTH_REQUIRED);
 }
 
-/**
- * The files a tool call says it touched.
- *
- * ⚠ **Bounded here, and it used to be bounded nowhere.** `estimateBytes` charged
- * neither `tool_call` nor `tool_call_update` for this array and `truncateEvent`
- * cut it on neither, so a large one produced an event whose stored size and
- * charged size disagreed without limit — see `MAX_TOOL_LOCATIONS`. Both halves
- * are needed: the terms in `events.ts` make the event's size *honest*, and this
- * makes it *small*.
- *
- * Truncated rather than refused, unlike a permission's options: nothing here
- * round-trips to the agent and nothing acts on a location, so a shorter list is
- * a smaller answer to the same question rather than a different one.
- */
 function toLocations(
   locations: acp.ToolCallLocation[] | null | undefined,
 ): FileLocation[] {
   return (locations ?? []).slice(0, MAX_TOOL_LOCATIONS).map((location) => ({
-    // Reporting, like `emitDiffs`: an unmappable path is shown as the agent
-    // named it rather than dropped, and nothing acts on it. Textual for the same
-    // reason — this is reached from `onUpdate`, on the emit path.
     path: clip(location.path, MAX_TOOL_LOCATION_CHARS),
     line: location.line ?? null,
   }));
 }
 
-/**
- * A tool call's own id, bounded at ingest.
- *
- * ⚠ **The sibling field was bounded and this one was not.**
- * `MAX_PARENT_ID_CHARS` in `acp/subagents.ts` exists because `truncateEvent`
- * spreads `parentToolCallId` through untouched on both tool-call arms, so an
- * unshrinkable field with no ceiling walks an event straight past the per-event
- * cap. `toolCallId` is the *same agent-chosen string* — claude's parent id is
- * byte-for-byte the parent's own `toolCallId` — sits on the same two events, is
- * charged for by `estimateBytes` through `idSize`, and had no ceiling anywhere:
- * one event could therefore carry megabytes past the 128 KiB cap, into the
- * per-session byte budget and into the WS queue's `MAX_QUEUE_BYTES`, collapsing
- * an attached socket and reporting `slow_consumer` about a client that was never
- * slow.
- *
- * Clipped rather than refused, which is the opposite of what
- * `MAX_PARENT_ID_CHARS` does with an over-long value — because there is no
- * "none" to fall back to here: the field is what identifies the call, and
- * dropping the event loses a tool call outright. Clipping is safe because the
- * id is never typed by a person and never sent back to the agent; it only
- * correlates our own events with each other, and `clip` is deterministic, so a
- * call and every later update for it still land on the same string.
- */
+// Clipped, not refused: the id identifies the call, and clip is deterministic.
 function boundToolCallId(id: string): string {
   return clip(id, MAX_PARENT_ID_CHARS);
 }
 
-/** What this daemon asks the agent for at the door, from what the caller asked for. */
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {
   return sessionMetaFor(options.agent, { ultracode: options.ultracode === true });
 }
 
-/**
- * Select the model on a pairing that reaches its system natively.
- *
- * ⚠ **Native only, and the asymmetry is the design rather than an omission.** A
- * routed pairing was pointed at its model at spawn (`routedModelEnv`) and the
- * agent has already published it back as its current value; asking again would
- * be a second mechanism racing the first. A native one has to ask, because the
- * list is the agent's and only exists once the agent has answered the call that
- * opens a conversation — either of them.
- *
- * ⚠ **Validated against what this agent just published, never against a cache.**
- * `agentask.ts` makes the same argument for the same reason: a list can be ten
- * minutes old and a CLI update retires a model in between, so the check that
- * counts is against the agent standing in front of us.
- *
- * ⚠ **Both launch paths, and for a long time only one.** `session/resume`
- * publishes the same `configOptions` `session/new` does, and a native pairing is
- * pointed at its model by nothing else — no `ROUTED_MODEL_ENV`, no
- * `providers/set` — so a resume that skipped this ran the agent's own default
- * with nothing anywhere saying so. The pin belongs to the *process*, and a
- * resume is a new one, exactly as `applySystem` already says of routing.
- *
- * ⚠ **It answers a sentence rather than throwing one, because its two callers
- * disagree about what an un-pinnable model means.** `Session.start` refuses:
- * nothing exists yet to strand, and carrying on with the default is a session
- * running a model nobody chose while the chip on screen names the one they did.
- * `Session.openResumed` cannot refuse — the conversation is already there, and a
- * model the CLI has since retired would make every resume of it fail for ever,
- * which is the permanent refusal Q2.216 chose a demotion over. So the decision
- * is the caller's and the wording is not: one sentence, said two ways.
- *
- * `null` means the model is the agent's current one, and it is also the answer
- * when there was nothing to pin at all.
- */
+// Native pairings only. Answers a sentence: start refuses on it, openResumed demotes (Q2.216).
 async function pinNativeModel(session: Session, options: SessionOptions): Promise<string | null> {
   const model = options.model ?? null;
   const system = options.system ?? null;
   if (model === null || model === "") return null;
   const machine = options.machine ?? BUILTIN_CATALOGUE;
   const spec = system === null ? null : machine.system(system);
-  /*
-   * ⚠ **The arm that would otherwise be a `TypeError` on the resume path, and
-   * that is why it answers a sentence.** `openResumed` calls this and is designed
-   * never to refuse — it resumes anyway and pushes one `error` event saying what
-   * the session came back on (Q2.217) — so a throw here would strand a
-   * conversation for a reason that has nothing to do with it. A system whose
-   * plugin was removed is exactly that reason.
-   */
+  // A sentence, never a throw: openResumed must not strand a conversation (Q2.217).
   if (system !== null && spec === null) {
     return machine.systemState(system) === "disabled"
       ? `This session's provider comes from a plugin that is switched off on this machine.`
@@ -3539,65 +1474,20 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
   }
   if (spec !== null && spec.nativeHarness !== options.agent) return null;
 
-  /*
-   * ⚠ **The one place a stored model id is respelled, and it is the last moment
-   * before the agent is asked.** Everything upstream — the route, the row in
-   * `custom_agents`, the wire — carries the endpoint's own slug, so a preset says
-   * one thing whichever harness runs it. opencode is the only harness today that
-   * spells a native id differently, prefixing `openrouter/`, and putting that
-   * back here rather than at save time is what keeps a preset re-pointable: an
-   * edit that swaps the harness must not have to rewrite the model.
-   *
-   * Idempotent on purpose. An id that already carries the prefix is left alone,
-   * so a value that reached the store the long way round — a hand-written row, an
-   * older client that stored what the agent published — pins instead of failing
-   * with the prefix doubled.
-   */
+  // The one place a model id is respelled, so a preset stays harness-agnostic; idempotent.
   const prefix = spec?.nativeModelPrefix ?? null;
   const wanted = prefix === null || model.startsWith(prefix) ? model : `${prefix}${model}`;
 
   const option = session.modelOption;
   if (option === null) return `${options.agent} offers no choice of model on this machine.`;
-  /*
-   * ⚠ **Already on it is *done*, and this is checked before the list — because a
-   * current value outside the published choices is a state this daemon already
-   * treats as normal everywhere else.** Q2.219 says so outright about the model
-   * menu: the selected choice is never removed from a narrowed list, whatever
-   * namespace it is in, precisely so a session somebody switched by hand keeps a
-   * way back to itself. An agent that resumed a conversation on the model it was
-   * started with and no longer *offers* that model is the same fact seen from the
-   * other end.
-   *
-   * ⚠ **Without this the refusal below contradicts itself in one sentence, on the
-   * loudest row in the transcript, about a session that is fine.** Reported from
-   * the app, verbatim: *"opencode has no model called `opencode/hy3-free` — it
-   * offers … and 352 more. The conversation was resumed anyway, running
-   * opencode/hy3-free."* Both halves were true and the row was still wrong: the
-   * clause `openResumed` appends names what the session *came back on*, and it
-   * came back on exactly what the preset asked for. There was no demotion to
-   * announce. `daemoncheck` drove only `current !== wanted`, so the sentence that
-   * shipped was the one nothing had ever produced.
-   *
-   * Answering here rather than only silencing the notice, because the two callers
-   * weigh this differently and both are wrong to act: `openResumed` would draw an
-   * error row about a session running the right model, and `Session.start` would
-   * throw `SystemRoutingError` — a permanent 502 on a preset whose model the agent
-   * is *currently running*, which is the stranding Q2.216 chose a demotion over.
-   *
-   * It also spends one fewer round trip on every resume of a session already on
-   * its model: `setConfigOption` below would send a value the agent is holding.
-   */
+  // Already on the model is done, even outside the published list (Q2.219).
   if (option.value === wanted) return null;
   if (!option.choices.some((one) => one.value === wanted)) {
     const names = option.choices.map((one) => one.value);
     const shown = names.slice(0, MODEL_NAMES_IN_PIN_REFUSAL).join(", ");
     const rest =
       names.length > MODEL_NAMES_IN_PIN_REFUSAL ? `, and ${names.length - MODEL_NAMES_IN_PIN_REFUSAL} more` : "";
-    // The full stop is the documented form of this sentence — `agents.ts` draws
-    // it with one and `.claude/rules/agent-systems.md` writes it with one — and
-    // it is load-bearing here for a second reason: the resume notice appends a
-    // clause saying what the session came back on, and two sentences need a
-    // boundary between them.
+    // The full stop is load-bearing: the resume notice appends a sentence.
     return (
       `${options.agent} has no model called ${JSON.stringify(wanted)}` +
       `${names.length === 0 ? "" : ` — it offers ${shown}${rest}`}.`
@@ -3607,15 +1497,8 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
   return null;
 }
 
-/** How many model names a pin refusal lists before it stops counting. */
 const MODEL_NAMES_IN_PIN_REFUSAL = 8;
 
-/**
- * What the agent process is started with beyond its own environment.
- *
- * Empty for every native pairing, which is every session this daemon has ever
- * started until now.
- */
 function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
   const system = options.system ?? null;
   const model = options.model ?? null;
@@ -3623,44 +1506,7 @@ function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
   return routedModelEnv(options.agent, system, model, options.machine ?? BUILTIN_CATALOGUE);
 }
 
-/**
- * Point this agent at the system it was asked for, before any session exists.
- *
- * ⚠ **Between the handshake and `session/new`, and that window is the whole
- * mechanism.** Both adapters that implement this say the configuration is
- * process-scoped and applies to sessions created *after* the call — which is
- * exactly the lifetime this daemon has, since it spawns one adapter per session.
- * Nothing has to be undone and nothing leaks into a neighbouring conversation,
- * because there are no neighbours.
- *
- * ⚠ **`providerId` comes off the agent's own answer.** Measured 2026-08-25:
- * claude calls it `main`, codex calls it `custom-gateway` — and `codex-acp`
- * 1.8.0 calls it `openai` (2026-09-04), so the id has moved once already.
- * Written down, this would configure one agent and hand the other an
- * `invalid_params` about a provider it has never heard of.
- *
- * ⚠ **The credential goes here rather than into the environment this daemon
- * spawns — which is one hop, and not the secrecy an earlier draft claimed.** An
- * agent runs as this uid and can print its own environment into a transcript that
- * is appended to the log and rendered in a browser. Measured against the pinned
- * adapter: `claude-agent-acp` 0.63.0 folds these headers back into
- * `ANTHROPIC_CUSTOM_HEADERS` on the CLI it spawns, so the key does touch a process
- * table, one below this one, where `agentEnv` cannot reach it. See
- * `acp/systems.ts` for the measurement and for what would actually close it.
- *
- * ⚠ **Answers whether it actually routed, which is a different question from
- * whether a system was named.** A native pairing configures nothing here and
- * returns at the line that says so, because the agent already reaches its vendor
- * on its own credential — so "asked for a system" and "running on somebody else's
- * key" are not the same fact, and only this function can tell them apart. Its one
- * reader is {@link SessionRuntime.noteStartRefusal}: a `session/new` refused on a
- * routed pairing has already survived `providers/set` and condemns every way of
- * starting this harness, while one refused bare says nothing about a routed
- * start — which is the signed-out Claude Code on OpenRouter that this repository
- * documents as working. Returned rather than recomputed at the call site, because
- * a second copy of `spec.nativeHarness === options.agent` is the kind of test that
- * comes to disagree with this one.
- */
+// Between handshake and session/new: provider config is process-scoped. Returns whether it routed.
 async function applySystem(
   client: AcpClient,
   options: SessionOptions,
@@ -3670,13 +1516,6 @@ async function applySystem(
   if (system === null) return false;
   const machine = options.machine ?? BUILTIN_CATALOGUE;
   const spec = machine.system(system);
-  /*
-   * ⚠ **A `SystemRoutingError` and never a `TypeError`.** What reaches a screen
-   * from an unguarded index here is `agent_launch_failed` carrying the words
-   * "cannot read properties of null", which says nothing anybody can act on. This
-   * is a `502 system_not_routable` with the same shape as every other refusal on
-   * this path — and it names the plugin, because reinstalling it is the remedy.
-   */
   if (spec === null) {
     throw new SystemRoutingError(
       machine.systemState(system) === "disabled"
@@ -3684,26 +1523,12 @@ async function applySystem(
         : `This session's provider is no longer on this machine.`,
     );
   }
-  // Native needs no configuring — the agent already reaches it, and replacing
-  // its own routing with a copy would swap an OAuth token for a pasted key.
-  //
-  // ⚠ **`routedPairing` is the same question asked before the spawn**, and the two
-  // are allowed to differ in exactly one direction: it answers `true` wherever this
-  // function would go on to *throw* — no key saved, a protocol the agent cannot
-  // speak, a provider whose plugin is off — because all of those are still sessions
-  // aimed somewhere else, and none is a reason to have handed the harness its own
-  // vendor credential at spawn time. Where this returns `false` for a native
-  // pairing, so does that. Keep them that way round: a `routedPairing` that
-  // answered `false` on any path this one routes would put the credential back.
+  // routedPairing may answer true where this throws, never false where this routes.
   if (spec.nativeHarness === options.agent) return false;
 
   const routing = await client.routing();
   const refusal = hostable(options.agent, system, routing, machine);
   if (refusal !== null) throw new SystemRoutingError(refusal);
-  // `hostable` returning null with a null routing is unreachable for a
-  // non-native system — it refuses on `routing === null` — but the compiler
-  // cannot see that, and an assertion here would be a second place the rule
-  // lives. Re-reading it is one branch.
   if (routing === null || spec.baseUrl === null) {
     throw new SystemRoutingError(`${spec.displayName} cannot be reached from this agent.`);
   }
@@ -3727,8 +1552,6 @@ async function applySystem(
       "providers/set",
     );
   } catch (error) {
-    // Rewritten rather than rethrown, because what reaches a screen otherwise is
-    // a JSON-RPC code about a method nobody on the far side has heard of.
     throw new SystemRoutingError(
       `${client.config.displayName} refused to route to ${spec.displayName}: ` +
         `${error instanceof Error ? error.message : String(error)}`,
@@ -3737,152 +1560,11 @@ async function applySystem(
   return true;
 }
 
-/**
- * `_meta` as a spreadable, so a request carries no such key when there is nothing
- * to say.
- *
- * `{_meta: undefined}` is not the same message as `{}`: it survives
- * `JSON.stringify` as an absent key here but is a present-and-undefined property
- * to anything reading the object first, and the agent on the far side is somebody
- * else's code. Spreading nothing is the form with no such question.
- */
 function metaParam(meta: Record<string, unknown> | undefined): { _meta?: Record<string, unknown> } {
   return meta === undefined ? {} : { _meta: meta };
 }
 
-/**
- * What an agent's configuration controls may be, in this daemon's units.
- *
- * ⭐ **`agent_config` was a door past `MAX_SOCKET_MESSAGE_BYTES` until these
- * numbers existed, and a nearer one than the door that had been written down as
- * "the one".** Measured 2026-09-19 by
- * replaying `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES` and weighing
- * `JSON.stringify` in UTF-8 — the way `StreamConnection.flush` weighs a batch —
- * over one select option built from a stub agent:
- *
- * - 20 000 choices named `m<i>` → **1 318 159 bytes after truncation**
- * - 5 000 choices at a 100-character value and name → **1 275 255**
- * - one choice carrying a 2 MB `value` → **4 000 214**
- * - at a realistic 40-character value and name the cliff is **7 766 choices**,
- *   which is *below* `plan.entries`' ~9 500 — so this was the nearest door, not a
- *   fourth one out at the edge
- * - one option with a 500 000-character `id` and `name` → 1 000 212, which is past
- *   `BATCH_MAX_BYTES` and just *under* the socket ceiling. Named because it is the
- *   shape that had no bound, not because that particular number stalls
- * - a 2 MB `currentModeId` on a `current_mode_update` → **2 098 061 bytes logged**,
- *   and 916 with the bound. That one is not on this path at all: see below
- *
- * Past the socket ceiling `MessageAssembler` refuses the message, `src/e2ee.ts`
- * fails the whole channel, and `stream.ts` reconnects with its cursor unchanged
- * onto the same event, for ever — {@link MAX_ELICITATION_MESSAGE_CHARS}'s
- * permanent stall on a third trigger.
- *
- * **Reachable rather than hostile-only**, which is why this is a bound and not a
- * note filed under "an agent runs as you anyway": opencode publishes **362 models
- * on one control**, and a plugin may now contribute an agent and an inference
- * provider this repository does not vendor and cannot measure. Nothing above needs
- * a malicious binary, only a large one.
- *
- * ⚠ **Why `truncateEvent`'s own arm cannot do this, and why its argument is right
- * anyway.** That arm nulls descriptions and deliberately leaves ids, names and
- * values alone, on the ground that *"a picker missing a choice would silently
- * offer the agent less than it supports"*. That is correct and is kept — a dropped
- * choice is a wrong answer where a clipped description is only a shorter one — and
- * what it means is that the arm cannot shrink the large part at all. So the bound
- * has to be here, at ingest, where {@link toCommands}, `toElicitationForm` and the
- * permission caps already put theirs. The *silently* is what is addressed rather
- * than accepted: every cut below sets `truncated` on the option, which is already
- * on the wire and already sends a picker to `GET /sessions/:id`.
- *
- * ⚠ **"At ingest" is three doors for this event, and the functions below are two
- * of them.** `toConfigOptions` and `toModes` are reached from `session/new` and
- * `session/resume`; a `current_mode_update` notification reaches `updateConfig`
- * directly and touches neither. That third door stayed open for a revision after
- * these two were written and read as complete, and its own guard is in
- * `updateConfig` with the measurement beside it. A fourth would be invisible from
- * here too — so what actually watches for one is the label census in
- * `scripts/daemoncheck.after-the-turn-and-config.ts`, which replays every
- * `truncateEvent` arm and reports which still exceed one WebSocket message.
- *
- * **Refusals and clips split the way they do everywhere else on this path:
- * structure that round-trips is refused, prose is clipped.** `option.id` and a
- * choice's `value` are sent back to the agent verbatim by `sendConfigOption`
- * above, so an over-long one is *dropped* — a clipped
- * id names no control and a clipped value is one the agent will not recognise,
- * which is `MAX_ASYNC_TASK_ID_CHARS`'s call rather than
- * {@link MAX_MESSAGE_ID_CHARS}'s. `name`, `category` and `description` are a label
- * and prose that never leave this fleet, so they are clipped and stay legible.
- *
- * **Both ends of each number, and the ends that are not measured are said to be
- * not measured.**
- *
- * - `MAX_CONFIG_ID_CHARS` (256) is a *refusal*, so it has to clear anything real
- *   by a wide margin. ⚠ **No id or value on this path has been measured in this
- *   tree** — the one measured number here is opencode's *count*, 362 — so this is
- *   a ceiling picked for consistency with the two agent-chosen ids that already
- *   exist at 256, `MAX_ASYNC_TASK_ID_CHARS` and {@link MAX_MESSAGE_ID_CHARS}, and
- *   not a headroom figure anybody checked. The same caveat that constant states
- *   about itself, for the same reason.
- * - `MAX_CONFIG_NAME_CHARS` (256) and `MAX_CONFIG_DESCRIPTION_CHARS` (512) are
- *   clips. Below: `registry.ts` already cuts a choice description to
- *   `MAX_CHOICE_DESCRIPTION_CHARS` (120) before it rides a snapshot, so these bite
- *   only on prose no screen shows whole. Above: ⚠ **no description on a *config*
- *   control has been measured in this tree.** The nearest measured figure is the
- *   **318**-character option description on this machine's log that retired
- *   {@link MAX_ELICITATION_MESSAGE_CHARS}'s 512 — a different path, borrowed as the
- *   only real number anybody has for "how long an agent's explanatory sentence
- *   gets", and 512 clears it. Somebody who wants the real one should log
- *   `option.description.length` off a live `session/new`.
- * - `MAX_CONFIG_OPTIONS` (32) and `MAX_CONFIG_MODES` (32). The agents in this tree
- *   publish a handful of each — `model` and `effort` on claude, `thinking` on kimi,
- *   and a permission/plan mode list of the same order of size — so 32 is roughly an
- *   order of magnitude clear of anything this repository has seen, and it is what
- *   bounds the residue the byte backstop below cannot cut. ⚠ It is a *refusal* for
- *   options past it, so if an agent ever does publish more than 32 controls the
- *   ones past 32 vanish with nothing said: unlike a cut choice list there is no
- *   `truncated` at option level to say so, and that is a known gap rather than a
- *   decision — it is left because no agent has come close and a flag here would be
- *   a wire change nothing yet draws.
- * - `MAX_CONFIG_CHOICES` (2048) is 5.6× opencode's measured 362. It exists to stop
- *   the backstop halving 20 000 rows one at a time rather than to bind on its own.
- * - `MAX_CONFIG_BYTES` (256 KiB) is the backstop, and it is the one number here
- *   weighed in bytes that actually exist: `jsonBytes` serializes, so escaping is
- *   already counted and this bounds the wire cost of `options` directly rather
- *   than through a code-unit estimate. ⚠ **It was 128 KiB for an afternoon and
- *   that was wrong**, on an "above" argument that counted a model row at ~60
- *   bytes: 362 rows *with prose on each* is ~163 KiB, so 128 KiB cut the largest
- *   real list this repository knows of down to 256 rows. The measurement that caught it is in
- *   `daemoncheck.after-the-turn-and-config`, which now drives 362 models each
- *   carrying a 400-character description and asserts the list comes through
- *   **whole and unflagged** — so the "does not bite on anything real" half of this
- *   number is checked rather than asserted. Below: 256 KiB is a quarter of
- *   `MAX_SOCKET_MESSAGE_BYTES`, which leaves `modes` its room beside `options` and
- *   three quarters of the ceiling as headroom.
- *
- * ⚠ **What this deliberately does not claim.** The per-string and per-count caps
- * do **not** on their own bound the product: JSON escaping can cost six bytes for
- * one code unit, so 2048 rows of capped strings is megabytes either way.
- * `MAX_CONFIG_BYTES` is what holds the total, and it holds it by *cutting* rather
- * than by arithmetic — so the honest statement is that a config leaves here at
- * most `MAX_CONFIG_BYTES` **whenever some option still has more than one choice to
- * give up**, and otherwise at whatever the caps above leave, which is bounded but
- * larger. No single figure for that residue is asserted in prose. What is asserted
- * is the number that actually matters, and it is asserted in a driver rather than
- * here: `daemoncheck.after-the-turn-and-config` replays **every** arm of
- * `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES` and reports which exceed
- * `MAX_SOCKET_MESSAGE_BYTES`, so a claim about how many doors there are is checked
- * instead of counted by hand. Counting them by hand is how "the one door" got
- * written down over this one.
- *
- * ⚠ **`estimateBytes`'s `agent_config` case under-charges and is left alone.** It
- * charges an option's `id`, `name` and `description` and a choice's `value`, `name`
- * and `description`, and charges neither `category` nor a choice's `group` nor the
- * option's current `value`. That was a live hazard while the fields were unbounded
- * and is not one now — every uncharged field is capped above, so the under-report is
- * bounded by construction rather than by the agent. Widening the charge would move
- * the per-session byte budget and `MAX_QUEUE_BYTES` for every session, which is a
- * change with its own measurement to do and nothing to do with this stall.
- */
+// Ingest bounds on agent_config: round-tripping ids are dropped, prose clipped, MAX_CONFIG_BYTES the backstop.
 const MAX_CONFIG_OPTIONS = 32;
 const MAX_CONFIG_MODES = 32;
 const MAX_CONFIG_CHOICES = 2048;
@@ -3891,21 +1573,8 @@ const MAX_CONFIG_NAME_CHARS = 256;
 const MAX_CONFIG_DESCRIPTION_CHARS = 512;
 const MAX_CONFIG_BYTES = 256 * 1024;
 
-/**
- * One option's choices cut to `keep`, with the selected one kept and the cut said.
- *
- * A near-copy of `clipChoices` in `registry.ts` and deliberately not shared with
- * it: that one is the *snapshot's* cut, at a fixed 40 rows, and it runs on the way
- * out of a poll; this one is the *ingest* backstop and runs once, on the way in.
- * Merging them would tie a display budget to a wire bound, and the two move for
- * different reasons.
- */
 function headChoices(option: AgentConfigOption, keep: number): AgentConfigOption {
   const head = option.choices.slice(0, keep);
-  // The selected choice may sit past the cut and is the one a client cannot do
-  // without — every screen that names the session reads it from here. Swapped into
-  // the last slot rather than prepended, so the order of what survives is still the
-  // agent's own; `clipChoices` takes the same care for the same reason.
   if (head.length > 0 && !head.some((choice) => choice.value === option.value)) {
     const selected = option.choices.find((choice) => choice.value === option.value);
     if (selected !== undefined) head[head.length - 1] = selected;
@@ -3913,22 +1582,6 @@ function headChoices(option: AgentConfigOption, keep: number): AgentConfigOption
   return { ...option, choices: head, truncated: true };
 }
 
-/**
- * The whole option list brought under {@link MAX_CONFIG_BYTES}, or as near as the
- * choices can bring it.
- *
- * Halving the widest option each turn rather than cutting flat to one, for
- * `fitSnapshotFrame`'s reason one file over: a list that would nearly have fitted
- * keeps nearly all of it, at a cost of at most ⌈log2 n⌉ weighings over a payload
- * that halves as it goes. Widest first so a single enormous control is what pays,
- * rather than the three short ones beside it.
- *
- * ⚠ **It terminates by giving up, not by reaching the budget.** Once no option has
- * more than one choice left there is nothing here able to cut, and what comes back
- * is over budget — bounded only by the per-string and per-count caps above. That is
- * the honest shape of this function and the reason the docblock on the constants
- * refuses to state a single residue figure.
- */
 function fitConfigBytes(options: AgentConfigOption[]): AgentConfigOption[] {
   let out = options;
   while (jsonBytes(out) > MAX_CONFIG_BYTES) {
@@ -3945,24 +1598,13 @@ function fitConfigBytes(options: AgentConfigOption[]): AgentConfigOption[] {
   return out;
 }
 
-/**
- * The agent's mode state, bounded the way the config options below it are.
- *
- * ⚠ **`currentModeId` refuses the whole state rather than being clipped.** It
- * names a row in `available` and `AgentConfigBar` matches the two by identity, so a
- * clipped one selects nothing — and a mode state with nothing selected is not a
- * smaller mode state, it is a control that draws blank. `null` here is the same
- * thing an agent that publishes no modes produces, which every reader already
- * handles; see {@link AgentConfigEvent} on why `modes` being absent is ordinary.
- */
+// An over-long currentModeId drops the whole state: a clipped id selects nothing.
 function toModes(modes: acp.SessionModeState | null | undefined): AgentModes | null {
   if (modes == null) return null;
   if (modes.currentModeId.length > MAX_CONFIG_ID_CHARS) return null;
   return {
     current: modes.currentModeId,
     available: modes.availableModes
-      // Dropped rather than clipped, for the reason `MAX_CONFIG_ID_CHARS` gives:
-      // a mode id round-trips in `session/set_mode`.
       .filter((mode) => mode.id.length <= MAX_CONFIG_ID_CHARS)
       .slice(0, MAX_CONFIG_MODES)
       .map((mode) => ({
@@ -3973,26 +1615,11 @@ function toModes(modes: acp.SessionModeState | null | undefined): AgentModes | n
   };
 }
 
-/**
- * Flattens ACP's config options into something a client can render blind.
- *
- * The two shapes that need collapsing are the select payload's grouped and
- * ungrouped forms — `SessionConfigSelectOptions` is either a list of values or a
- * list of groups of values, and a client is not the right place to branch on
- * that. Groups survive as a label on each choice, which is all a rendered
- * dropdown needs.
- *
- * Nothing is filtered by id or category. A knob this daemon has never heard of
- * still reaches the UI as a labelled control, which is the point: the agents add
- * these faster than a hardcoded list could follow.
- */
 function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined): AgentConfigOption[] {
   const bounded: AgentConfigOption[] = [];
   for (const option of options ?? []) {
     if (bounded.length >= MAX_CONFIG_OPTIONS) break;
-    // Dropped rather than clipped: both of these are sent back to the agent
-    // verbatim by `sendConfigOption`, so a clipped one names nothing the agent
-    // will answer to. See {@link MAX_CONFIG_ID_CHARS}.
+    // Dropped, not clipped: both round-trip through sendConfigOption.
     if (option.id.length > MAX_CONFIG_ID_CHARS) continue;
     if (typeof option.currentValue === "string" && option.currentValue.length > MAX_CONFIG_ID_CHARS) continue;
     const all = option.type === "select" ? toChoices(option.options) : [];
@@ -4006,21 +1633,7 @@ function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined):
       value: option.currentValue,
       choices: kept,
     };
-    /*
-     * ⚠ **The count cap goes through {@link headChoices} rather than through a
-     * bare `slice`, and the first draft of this did not.** A `slice(0, n)` drops
-     * whatever sits past `n`, and the selected choice is exactly the row most
-     * likely to be there — the agent's current model is often the newest and last
-     * published. The session then reported a model it was not on, which is the one
-     * failure the snapshot's own cut in `registry.ts` was built to avoid and which
-     * `daemoncheck.after-the-turn-and-config` already asserted one section over.
-     *
-     * Either way the cut is *said* rather than swallowed, which is the whole of
-     * what makes cutting here legitimate: `truncated` is already on the wire and
-     * already sends a picker to `GET /sessions/:id` for the rest. ⚠ On this path
-     * that route answers from the same bounded record, so it has no more to give —
-     * see the constants above.
-     */
+    // headChoices, not slice: the selected choice is often last and must survive.
     bounded.push(
       kept.length > MAX_CONFIG_CHOICES
         ? headChoices(flat, MAX_CONFIG_CHOICES)
@@ -4032,58 +1645,10 @@ function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined):
   return fitConfigBytes(bounded);
 }
 
-/**
- * How long an agent's `messageId` may be before this daemon stops carrying it.
- *
- * **Clipped rather than refused**, which is the opposite call to
- * `MAX_ASYNC_TASK_ID_CHARS` next door and for the reason that one states: a task
- * id round-trips to the agent in `_session/async_task/stop`, so a clipped one
- * names nothing; this id never leaves this fleet — it is compared to the previous
- * chunk's and nothing else — so a clipped one still separates two messages, which
- * is the whole of its job. The same number as `MAX_PARENT_ID_CHARS` because it is
- * the same kind of quantity — an agent-chosen id no spec bounds — and because two
- * numbers for one kind of thing is how a pair drifts apart, which is the argument
- * that constant already makes about sharing itself with `toolCallId`. ⚠ **Its
- * "measured ids are under 40 characters" is *not* inherited with the number**:
- * that was measured on claude's and kimi's **tool call** ids, and no `messageId`
- * length has been measured in this tree. So 256 here is a ceiling picked for
- * consistency, not a headroom figure anybody checked — which costs nothing, since
- * the clip is lossless for this field's only job.
- */
+// Clipped, not refused: this id never leaves the fleet.
 const MAX_MESSAGE_ID_CHARS = 256;
 
-/**
- * Flattens and bounds ACP's command list.
- *
- * **Clamped here, at ingest, rather than at the store** — the same placement and
- * the same reason as `MAX_PARENT_ID_CHARS` in `acp/subagents.ts`: these strings
- * are the agent's, and "bounded by whatever the agent sent" is not a bound. The
- * list rides no event, so `truncateEvent` would never see it, and nothing
- * downstream is willing to shrink it.
- *
- * The count cap is set far above anything measured on purpose — 256 against a
- * real 100 — because what it exists for is the pathological case, an MCP server
- * publishing hundreds of prompts, and not to trim a real list. What is cut is
- * *counted* rather than swallowed, for the reason `truncateEvent`'s
- * `agent_config` arm gives: a picker missing a row silently offers the agent less
- * than it supports.
- *
- * A nameless entry is dropped whole rather than half-stored — the rule
- * `updateUsage` follows for an unreadable reading. Duplicates keep the first,
- * because the agent's own order is authoritative and a menu must never offer one
- * name twice.
- *
- * **The name is dropped rather than clipped, and it is the one field that is.**
- * `clip` is a *display* truncator: it appends `…[truncated N bytes]`, which is
- * right for a description nobody types and wrong for a name, because a command
- * is invoked by sending `/<name>` as text. Clipping produced a row reading
- * `/aaaa…[truncated 34 bytes]` that a client would insert into the composer
- * verbatim. Worse, `seen` held the *unclipped* name while the stored one was
- * clipped, so two names sharing their first `MAX_COMMAND_NAME_CHARS - 32`
- * characters became byte-identical and `dropped` reported none — defeating the
- * uniqueness rule directly above and hiding the loss. A name that cannot be
- * typed is not a command, so it is counted into `dropped` like any other cut.
- */
+/** Drops untypeable or duplicate names and counts them; clips prose. */
 export function toCommands(list: acp.AvailableCommand[] | null | undefined): AgentCommands {
   const commands: AgentCommand[] = [];
   const seen = new Set<string>();
@@ -4111,71 +1676,14 @@ export function toCommands(list: acp.AvailableCommand[] | null | undefined): Age
   return { commands, dropped };
 }
 
-/** Raised when a form is one this daemon will not put in front of anybody. */
 export class ElicitationRefusedError extends Error {}
 
-/**
- * The agent's preamble, bounded at ingest.
- *
- * Its own function rather than a `clip` call inlined at {@link
- * Session.onElicitation}, for two reasons. **Exported so `daemoncheck` can drive
- * it** — `onElicitation` is private, reachable only through a live ACP round trip,
- * and a bound nothing exercises is the shape this repository keeps shipping
- * (`fitSnapshotFrame` is the precedent and says so at its own docblock). And the
- * `typeof` guard belongs somewhere it can be read: `ElicitationRequest.message` is
- * typed `string` by the SDK and is *agent-supplied JSON at runtime*, so an agent
- * that omits it used to put `undefined` on a `PendingElicitationSnapshot.message`
- * that declares itself "always present — ACP requires it". An absent preamble is
- * an empty one; it is never a hole in a declared type.
- *
- * {@link clip} appends `…[truncated N bytes]`, so a cut says so on screen rather
- * than ending mid-sentence — which is what makes a clip tolerable here at all.
- */
 export function clipElicitationMessage(message: string): string {
   if (typeof message !== "string") return "";
   return clip(message, MAX_ELICITATION_MESSAGE_CHARS);
 }
 
-/**
- * Projects ACP's elicitation schema into the fixed shape this system carries.
- *
- * Same placement and the same argument as {@link toCommands} — at ingest, because
- * the agent chooses every string and the alternative bound is no bound. What
- * differs is the *response* to going over: `toCommands` counts a cut into
- * `dropped` and carries on, because a menu missing a row is still a menu. A form
- * missing a question is not a smaller form, it is one whose answer means
- * something else, so this throws and the agent hears why.
- *
- * Normalizing `enum` against `oneOf`, and `items.enum` against `items.anyOf`,
- * happens here rather than in the browser so there is one answer to "what is an
- * option" and the daemon validates the reply against the same list it sent.
- *
- * An option whose `const` is not a string is **dropped, never coerced**:
- * `String(42)` as a wire value is the mistake `parentToolCallId` already names —
- * a value that names something the agent will not recognise. Duplicates keep the
- * first, because a list whose two rows send the same value has one unreachable
- * row.
- *
- * An unknown property type refuses the whole form rather than being skipped. A
- * field nobody can draw is a field somebody's answer will be missing, and the
- * agent should hear that now rather than receive an object with a hole in it.
- *
- * **The SDK's `ElicitationPropertySchema.is*` guards were used here first and
- * were taken back out**, which is worth recording because reaching for them is
- * the obvious move and they are right next to the types. They validate the whole
- * payload rather than the tag, so *any* field they do not expect — a
- * `format: "hostname"`, which is valid JSON Schema and not one of ACP's four; a
- * single `oneOf` entry whose `const` is a number — makes the property match no
- * variant at all, and the form is then refused for a reason that has nothing to
- * do with what this client can draw. Measured: a `type: "string"` carrying one
- * numeric `const` among good ones took the unknown-type arm and refused
- * everything.
- *
- * So the tag decides which arm, and each arm validates only the fields it
- * actually reads — the same rule `toCommands` follows, and the one ACP's own
- * open unions are designed for. Strict about what is used, lenient about what is
- * ignored.
- */
+/** Throws ElicitationRefusedError rather than drop a question; each type arm validates only what it reads. */
 export function toElicitationForm(schema: acp.ElicitationSchema | null | undefined): ElicitationForm {
   const properties = schema?.properties ?? {};
   const required = new Set(Array.isArray(schema?.required) ? schema.required : []);
@@ -4190,14 +1698,6 @@ export function toElicitationForm(schema: acp.ElicitationSchema | null | undefin
     fields.push(toElicitationField(key, property, required.has(key)));
   }
 
-  /*
-   * A pointer resolves or it goes.
-   *
-   * `alternativeTo` names another field on this form, and a name that is not on it
-   * — or is the field's own — would reach the client as a control that clears
-   * nothing, or clears itself. Swept after the loop because the answer depends on
-   * every key, which is not knowable while they are still arriving.
-   */
   const keys = new Set(fields.map((field) => field.key));
   for (const field of fields) {
     if (field.alternativeTo === null) continue;
@@ -4205,9 +1705,6 @@ export function toElicitationForm(schema: acp.ElicitationSchema | null | undefin
   }
 
   const form: ElicitationForm = { fields };
-  // The backstop the per-item caps cannot be: they bound one string, this bounds
-  // a thousand of them. Measured after projecting, so it counts what would
-  // actually be carried rather than what arrived.
   if (jsonBytes(form) > MAX_ELICITATION_FORM_BYTES) {
     throw new ElicitationRefusedError(
       `this form is larger than the ${MAX_ELICITATION_FORM_BYTES} bytes this client will carry`,
@@ -4216,34 +1713,7 @@ export function toElicitationForm(schema: acp.ElicitationSchema | null | undefin
   return form;
 }
 
-/**
- * The question a field is an alternative answer to, out of the agent's own `_meta`.
- *
- * ⚠ **`_meta` is dropped everywhere else on this path and this is the exception,
- * so what it takes is narrow and typed on the way out**: one named key, one
- * boolean, one string, projected to a scalar. `acp/subagents.ts` reads
- * `_meta.claudeCode` the same way and for the same reason.
- *
- * **Both agents that ask questions declare it, under their own names**, and this
- * is the third place a difference between them is projected away rather than
- * chosen between — the same job `toElicitationOptions` does for `oneOf` against
- * `enum`. claude sends `_askUserQuestionCustomAnswer: {questionId,
- * isCustomAnswer}`; codex sends `codex: {questionId, isOtherAnswer, isSecret}`.
- * Measured 2026-09-09 off `claude-agent-acp` 0.73.0's
- * `askUserQuestionsToCreateRequest` and `codex-acp` 1.8.0's
- * `buildUserInputRequest`, and both then resolve the answer the same way: the
- * free text wins over the selection whenever it is non-empty.
- *
- * ⚠ **The key's shape is still never read**, which is the whole reason this goes
- * through `_meta` at all — codex spells the field `<id>__other` where claude
- * spells it `<id>_custom`, and Q6.54 refuses both by name. A declaration is the
- * agent saying so; a suffix is us guessing.
- *
- * codex puts a `codex` block on the *question* too, carrying `isOther` and no
- * `questionId` — so the marker being read is `isOtherAnswer`, exactly `true`,
- * beside a string. Anything else answers `null`, which is the shape every agent
- * that declares nothing already has.
- */
+// Reads only the declared marker, never the key's suffix (Q6.54).
 function customAnswerFor(property: acp.ElicitationPropertySchema): string | null {
   const meta = (property as Record<string, unknown>)["_meta"];
   if (meta === null || typeof meta !== "object") return null;
@@ -4275,8 +1745,6 @@ function toElicitationField(
     alternativeTo: customAnswerFor(property),
   };
 
-  // Read off the untyped view: the tag chooses the arm, and each arm reads only
-  // what it uses. See the note on the guards above the function.
   const raw = property as Record<string, unknown>;
 
   switch (property.type) {
@@ -4285,32 +1753,10 @@ function toElicitationField(
       return {
         ...base,
         kind: "string",
-        /*
-         * **An empty projection is no options at all, not a choice of nothing.**
-         *
-         * `toElicitationOptions` answers `[]` — never `null` — whenever `enum` or
-         * `oneOf` is an array from which nothing survives: `enum: []`, or a
-         * `oneOf` whose every `const` is non-string, which its own docblock names
-         * as a measured shape. The array arm below refuses that outright ("a
-         * select with no options is a dead end"); the string arm let it through,
-         * and the two sides then disagreed about what the field *is*. The client
-         * reads `options.length > 0` and draws a free-text box;
-         * `validateElicitationContent` reads `options !== null` and refuses every
-         * value against an empty list. So Submit lit up and the route answered
-         * `400 not_an_option` for anything the person could type — a required
-         * field answerable only by Skip or Cancel.
-         *
-         * Normalizing to `null` makes both sides agree that it is free text: the
-         * smaller change, and it keeps a field the agent may only have
-         * mis-specified.
-         */
+        // An empty projection is free text (null), or the validator refuses every answer.
         options: emptyToNull(toElicitationOptions(raw["oneOf"], raw["enum"])),
         min: numberOrNull(raw["minLength"]),
         max: numberOrNull(raw["maxLength"]),
-        // A hint, enforced by nobody — see `validateElicitationContent` on why
-        // the canonical email and uri patterns are worse than no check at all.
-        // An unrecognised format is dropped rather than refused, because it says
-        // nothing this client acts on.
         format: typeof format === "string" && FORMATS.has(format) ? (format as ElicitationField["format"]) : null,
         default: typeof raw["default"] === "string" ? (raw["default"] as string) : null,
       };
@@ -4342,8 +1788,6 @@ function toElicitationField(
     case "array": {
       const items = (raw["items"] ?? {}) as Record<string, unknown>;
       const options = toElicitationOptions(items["anyOf"], items["enum"]);
-      // A free list is a control nothing here draws, and a select with no options
-      // is a dead end that eats what somebody typed.
       if (options === null || options.length === 0) {
         throw new ElicitationRefusedError(
           `field ${JSON.stringify(key)} is a list with no choices, which this client cannot draw`,
@@ -4369,7 +1813,6 @@ function toElicitationField(
   }
 }
 
-/** `[]` and `null` mean different things downstream — see the string arm. */
 function emptyToNull(options: ElicitationOption[] | null): ElicitationOption[] | null {
   return options === null || options.length === 0 ? null : options;
 }
@@ -4379,9 +1822,6 @@ function toElicitationOptions(titled: unknown, bare: unknown): ElicitationOption
   if (Array.isArray(titled)) {
     for (const raw of titled) {
       const entry = (raw ?? {}) as Record<string, unknown>;
-      // Never coerced: a non-string wire value is one the agent will not
-      // recognise coming back, so it is not an option at all. `String(42)` here
-      // is the mistake `parentToolCallId` already names one file over.
       if (typeof entry["const"] !== "string") continue;
       const value = entry["const"];
       const title = entry["title"];
@@ -4403,8 +1843,6 @@ function toElicitationOptions(titled: unknown, bare: unknown): ElicitationOption
   const options: ElicitationOption[] = [];
   const seen = new Set<string>();
   for (const option of source) {
-    // Refused rather than clipped, for the reason a command's name is: this
-    // string goes back to the agent and has to round-trip exactly.
     if (option.value.length > MAX_ELICITATION_VALUE_CHARS) {
       throw new ElicitationRefusedError(
         `an option value is longer than the ${MAX_ELICITATION_VALUE_CHARS} characters this client will carry`,
@@ -4424,17 +1862,6 @@ function toElicitationOptions(titled: unknown, bare: unknown): ElicitationOption
 
 const FORMATS = new Set(["email", "uri", "date", "date-time"]);
 
-/*
- * Both take `unknown`, because `ElicitationPropertySchema`'s open catch-all arm
- * types every field that way and the base fields are read before the guards have
- * narrowed anything. Widening here rather than casting at each of their nine call sites.
- *
- * ⚠ This was `clipOrNull(value, budget)` and the budget is gone, not forgotten —
- * see the elicitation caps. **What survives is the empty-to-null half, and it is
- * the load-bearing half**: `""` and `null` are the same absence to every reader,
- * and letting an empty string through would make `askTitle` in the web client
- * draw a blank heading instead of falling through to the next source.
- */
 function textOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -4447,8 +1874,6 @@ function toChoices(options: acp.SessionConfigSelectOptions): AgentConfigChoice[]
   const choices: AgentConfigChoice[] = [];
   for (const entry of options) {
     if ("group" in entry) {
-      // The group's *name* rather than its id: this is a heading to print, and
-      // the id is only ever meaningful to the agent that minted it.
       for (const option of entry.options) choices.push(toChoice(option, entry.name));
     } else {
       choices.push(toChoice(entry, null));
@@ -4457,12 +1882,6 @@ function toChoices(options: acp.SessionConfigSelectOptions): AgentConfigChoice[]
   return choices;
 }
 
-/*
- * `value` is carried whole here and filtered by length in {@link toConfigOptions}
- * rather than clipped, because it round-trips to the agent — the split
- * {@link MAX_CONFIG_ID_CHARS} describes. The rest is a label and prose, so it is
- * clipped and stays legible.
- */
 function toChoice(option: acp.SessionConfigSelectOption, group: string | null): AgentConfigChoice {
   return {
     value: option.value,
@@ -4472,14 +1891,6 @@ function toChoice(option: acp.SessionConfigSelectOption, group: string | null): 
   };
 }
 
-/**
- * One ACP content block, as text — and images pulled out on the way past.
- *
- * `kept` is an out-parameter rather than a return value because the caller is
- * accumulating a `string[]` and an image contributes no text: the block is
- * removed from the prose and named on the event instead. Given no sink, the old
- * `[image]` placeholder is what comes out, which is what the drivers see.
- */
 function renderContentBlock(
   block: acp.ContentBlock,
   keep?: (mime: string, data: string) => StoredFileRef | null,
@@ -4496,8 +1907,6 @@ function renderContentBlock(
       const ref = keep?.(block.mimeType, block.data) ?? null;
       if (ref === null) return "[image]";
       kept?.push(ref);
-      // No text at all: the picture is on the event now, and a placeholder beside
-      // it would render as a stray `[image]` under the image it describes.
       return "";
     }
     default:
@@ -4505,23 +1914,6 @@ function renderContentBlock(
   }
 }
 
-/**
- * What the tool said, out of ACP's `content` array.
- *
- * The `diff` half of that array goes to {@link Session.emitDiffs} and becomes
- * `file_change` events; this is the other half, and until now it was thrown away
- * — so a client could show what an agent *ran* and never what it *got back*.
- *
- * Only `{type: "content"}` blocks carrying text survive. `terminal` is a live
- * handle rather than a value: rendering its id would be showing a person a number
- * they cannot use, and following it is a different feature. `diff` is excluded
- * because it already has an event of its own, and carrying it twice would put the
- * same patch in the transcript under two shapes.
- *
- * `null` rather than `[]` when nothing survives, so "the update carried no output"
- * stays distinguishable from "the tool answered with nothing" — a client may
- * legitimately say the second and must not say it for the first.
- */
 function toolOutput(
   content: acp.ToolCallContent[] | null | undefined,
   keep?: (mime: string, data: string) => StoredFileRef | null,
@@ -4529,80 +1921,30 @@ function toolOutput(
 ): string[] | null {
   if (!content || content.length === 0) return null;
   const blocks: string[] = [];
-  /*
-   * One budget across the whole array, not one per block.
-   *
-   * A per-block cap is no cap at all here: nothing stops an agent from sending a
-   * thousand blocks, and `MAX_TOOL_OUTPUT_BYTES` is a statement about how much of
-   * a tool's output ends up in the transcript rather than about how it was
-   * chopped up on the way. Spent in arrival order so the *start* of the output
-   * survives, which is where a command says what it did.
-   */
   let remaining = MAX_TOOL_OUTPUT_BYTES;
   let images = 0;
   for (const item of content) {
     if (item.type !== "content") continue;
-    /*
-     * Images are bounded by their own count, and they have to be.
-     *
-     * `MAX_TOOL_OUTPUT_BYTES` cannot do it: a kept image contributes no text, so
-     * `remaining` never moves for one, and the `text.length === 0` skip below
-     * runs before the budget test anyway. An update carrying a thousand image
-     * blocks therefore did a thousand base64 decodes and three thousand
-     * synchronous SQLite queries inside the agent's notification handler — the
-     * emit path, which must not block.
-     *
-     * A count rather than a byte budget because `keepAgentImage` already bounds
-     * each one and the session total; what was missing was a bound on how many
-     * one update may ask for. Eight is above anything measured (three in one
-     * database, all from `Read`) and far below a number that costs a turn.
-     */
+    // Images need their own count: they spend no text budget.
     if (item.content.type === "image" && images >= MAX_IMAGES_PER_UPDATE) continue;
     const before = kept?.length ?? 0;
     const text = renderContentBlock(item.content, keep, kept);
     images += (kept?.length ?? 0) - before;
     if (text.length === 0) continue;
     if (remaining <= 0) {
-      // Visibly, never silently — the same rule `truncateEvent` follows. A reader
-      // who sees output stop has to be able to tell "the tool printed no more"
-      // from "we declined to carry the rest".
       blocks.push(`…[truncated: tool output exceeded ${MAX_TOOL_OUTPUT_BYTES} bytes]`);
       break;
     }
-    // `events.ts`'s own helper, imported rather than copied, so a truncation reads
-    // the same wherever it happens.
     blocks.push(clip(text, remaining));
     remaining -= text.length;
   }
   return blocks.length > 0 ? blocks : null;
 }
 
-/**
- * A tool's output where the agent put it beside the blocks rather than in them.
- *
- * `ToolCallUpdate.rawOutput` is `unknown` in the schema — it is the tool's own
- * result object, whatever that tool is — so this reads exactly one key and
- * refuses everything else. `formatted_output` is codex's, and it is named here
- * rather than tested for an agent id: an agent that spells its output that way
- * is one we can read, and one that does not is unaffected. Measured, claude never
- * writes that key (its `rawOutput` is the tool's content), so nothing changes for
- * it even before the caller's "only when the blocks were empty" gate.
- *
- * The exit code is deliberately not turned into a line of prose. It is already on
- * the update as `status: "failed"`, which is what the card draws, and inventing
- * `exit 1` as text would put a sentence in the transcript that no tool printed.
- *
- * Bounded by the same budget the blocks spend, and visibly — a reader who sees
- * output stop must be able to tell "the command printed no more" from "we
- * declined to carry the rest".
- */
 function rawToolOutput(rawOutput: unknown): string[] | null {
   if (rawOutput === null || typeof rawOutput !== "object" || Array.isArray(rawOutput)) return null;
   const formatted = (rawOutput as Record<string, unknown>)["formatted_output"];
   if (typeof formatted !== "string") return null;
-  // Trailing newlines are what a shell leaves behind, and the transcript adds its
-  // own spacing. Leading whitespace goes with them: an empty answer must reduce to
-  // nothing rather than to a blank block that reads as output.
   const text = formatted.trim();
   if (text.length === 0) return null;
   return [clip(text, MAX_TOOL_OUTPUT_BYTES)];

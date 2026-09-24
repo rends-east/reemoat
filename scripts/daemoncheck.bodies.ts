@@ -1,20 +1,6 @@
 import { gzipSync } from "node:zlib";
 
-/* ------------------------------------------------------------------ *
- * A tar writer, small enough to read.
- *
- * Built here rather than shelled out for the reason the import section's own
- * builder gives: neither `tar` nor `zip` is guaranteed on a CI box. This one is
- * deliberately *separate* from that builder rather than hoisted out of it — that
- * one exists to write archives no honest tool will produce, and lifting it here
- * would couple a plugin's happy path to a fixture whose whole job is to be
- * malformed.
- *
- * At module scope because three sections build one now: installing, the hooks a
- * freshly-installed plugin is seeded with, and `POST /plugins` over HTTP. Two of
- * those want the same bytes an install already proved good, and a second copy of
- * a tar writer is a second place for a checksum to be wrong.
- * ------------------------------------------------------------------ */
+/** A minimal gzipped ustar writer; kept apart from the import section's builder, whose job is to write malformed archives. */
 export const tarOf = (files: Record<string, string>): Buffer => {
   const parts: Buffer[] = [];
   for (const [name, body] of Object.entries(files)) {
@@ -47,19 +33,6 @@ export const bodyOf = (bytes: Buffer): ReadableStream<Uint8Array> =>
     },
   });
 
-/**
- * The same bytes, plus whether anybody released the stream.
- *
- * ⚠ **The one property of this route that is argued everywhere and asserted
- * nowhere.** `PluginHost.install` cancels the request body on the busy path and
- * again in its `finally`, and `POST /plugins`'s own docblock spends a paragraph
- * on why: the relay grants a stream's window on consumption, so a reader that
- * stops parks the sender at one window, and the valve after that closes the
- * **whole tunnel for this machine**. Every plugin fixture here used `bodyOf` or
- * `stallingBody`, neither of which records a cancel — so both calls could have
- * been deleted and this driver would have stayed green. The uploads section has
- * had exactly this fixture since Q5.72.
- */
 export const watchedBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; state: { cancelled: boolean; pulled: number } } => {
   const state = { cancelled: false, pulled: 0 };
   return {
@@ -77,15 +50,7 @@ export const watchedBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; 
   };
 };
 
-/**
- * The same bytes, held until the returned `release` is called.
- *
- * What it buys is the *middle* of an install, which no other body here can reach:
- * `PluginHost.install` claims the daemon-wide mutex and then awaits the stream, so
- * this is the window in which a `remove` or a `setEnabled` arrives — the window a
- * measured `DELETE` used to walk straight through, dropping the row and every
- * `plugin_data` key of a plugin the install then re-created.
- */
+/** Like `bodyOf`, but withholds the bytes until `release()`: holds an install mid-stream, after it has taken the daemon-wide mutex. */
 export const stallingBody = (bytes: Buffer): { body: ReadableStream<Uint8Array>; release: () => void } => {
   let release = (): void => {};
   const parked = new Promise<void>((resolve) => {

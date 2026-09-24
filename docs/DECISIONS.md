@@ -4770,7 +4770,7 @@ ended loses its composer** — and that one line revived the `disabled` on
 terminal session, both dead code until then. `StatusDot` takes the session
 and goes through `statusTone`, because a `Record<SessionStatus, string>`
 cannot express a distinction that lives on `exit`. And
-`POST /sessions/:id/prompt` joins `slowRoute`'s 90s budget unconditionally,
+`POST /sessions/:id/prompt` joins `slowRoute` unconditionally,
 because `request` sees only a method and a path — a deadline that depended on
 session state would be state leaking into the transport, and a deadline that
 is too short here is a *transport* failure, which renders a healthy machine
@@ -13556,8 +13556,8 @@ moves it out of the `onScreen()` set `web-composer.md` describes and into the
 theirs.
 
 **The settle is in the store, and it takes two calls rather than one.** `onEvents`
-compares the newest seq against the echo's; `promptLanded` lowers the sentinel to
-the real seq **and compares again immediately**, because the ordering that makes
+compares the newest seq against the echo's; `promptLanded` lowers its own send's sentinel to
+the real seq (a late answer to an earlier send lands nothing) **and compares again immediately**, because the ordering that makes
 that necessary is the common one rather than the exotic one — the `prompt` event
 comes down a socket waiting for nothing, while the POST that created it is on a
 90-second budget. When the event wins, `onEvents` has already compared it against
@@ -16158,7 +16158,7 @@ deleted check is how the next wrong string gets in.
 
 **Rule.** `GET /agents/capabilities`, `POST /custom-agents` and
 `PATCH /custom-agents/:id` are `slowRoute` entries, so they get
-`SLOW_ROUTE_TIMEOUT_MS` (90s) rather than `REQUEST_TIMEOUT_MS` (15s). `/agents` is
+a slow-route budget (`slowRouteTimeout`, 290s for these three) rather than `REQUEST_TIMEOUT_MS` (15s). `/agents` is
 matched by **prefix**; `/custom-agents` by **verb plus prefix**.
 
 **Why the miss happened, which is more useful than the miss.** `/agent-auth` was
@@ -16194,15 +16194,14 @@ both sit on a first paint where 90 seconds of a screen that cannot say anything 
 worse than 15 and a refusal. `(POST|PATCH)` plus the prefix covers a write route
 that does not exist yet without covering the two reads that do.
 
-**Stated rather than fixed: 90s does not bound the new worst member.** 360s does,
-and `SLOW_ROUTE_TIMEOUT_MS` governs eight other routes whose docblock says a move
-should follow a measurement. Ninety seconds covers what the route actually costs —
-three spawns and a handshake each, then ten minutes of cache — and a harness hung to
-its full budget still lands on the failure this table exists to prevent, three
-minutes later instead of fifteen seconds later. The honest fix is a per-route budget,
-which stops `slowRoute` being a boolean and is a shape change with call sites outside
-the file; the gap is written into the constant's own docblock instead of implied
-away.
+**Fixed per route rather than by raising one constant.** `slowRouteTimeout` gives each
+slow route its own daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s), never below the old
+90s. Here that is 290s over a 260s chain: two login probes, `SLOT_WAIT_MS`, then the
+ask's handshake, authenticate, `session/new` and `providers/list`. `ASK_TIMEOUT_MS`
+bounds a prompt, which a capability read never sends. A single constant above the
+worst member was tried and rejected: it made every slow route, every prompt included,
+take up to five minutes to fail on a dead connection. `slowRoute` stays a boolean,
+derived from the budget.
 
 **The structural hazard is not fixed and is recorded as Q7.123**: `slowRoute` lives
 in `packages/web` and the routes it is about live in `src/`, so nothing fails when
@@ -17350,8 +17349,8 @@ daemon reads were one `Promise.all`, so `systems` was set only when **both** leg
 landed — and the OpenRouter effect is gated on `openRouterListed`, which is derived
 from `systems`. `GET /systems` is a table read; `GET /agents/capabilities` starts
 one agent per harness — serially at the time, all at once since Q3.524 — on a
-route whose own budget is
-`SLOW_ROUTE_TIMEOUT_MS`. So a 672 KiB read of somebody else's catalogue did not
+route whose own budget was
+the 90s slow-route one. So a 672 KiB read of somebody else's catalogue did not
 begin until the render in which the spinner left. It was queued behind four cold
 agent spawns and was then, necessarily, the last thing on screen.
 
@@ -27765,8 +27764,9 @@ focus, and dismissing a menu must not also dismiss the soft keyboard.
 never the mime the uploader declared, never derived from an extension — plus
 `attachment`, `nosniff` and `no-store`; and the client re-types the `Blob` to
 `application/octet-stream` before creating an object URL for it. Never
-`window.open(blobUrl)`, never `target="_blank"` without `download`, never an
-`<iframe src=blobUrl>`.
+`window.open(blobUrl)`, never a `blob:` URL behind `target="_blank"` — an object
+URL reaches an anchor only with `download`, and `webcheck.native-bridge.ts` pins
+every `_blank` anchor to an address — never an `<iframe src=blobUrl>`.
 
 **Why.** A `blob:` URL carries the *client's* type and inherits the *creating*
 origin, so both halves are needed. The reason is stronger than the usual
@@ -28128,11 +28128,11 @@ a clock.
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
 | Passwords | scrypt N=2^15 r=8 p=1 — ~51ms on the machine this was measured on (Node 26, 2026-08-07), against ~25ms at 2^14 and ~103ms at 2^16 — holding `128·N·r` = 32 MiB for the duration of each. `maxmem` is passed explicitly at **128 MiB**, because Node's default ceiling is 32 MiB and OpenSSL refuses *at* the boundary: measured, N=2^15 r=8 throws `memory limit exceeded` while N=2^14 succeeds, and a KDF that throws for some parameter sets looks like a wrong password on one deployment rather than a configuration error. 12–256 characters, NFKC and never trimmed; the maximum is not about KDF cost (scrypt passes the input through one PBKDF2 iteration, so bcrypt's folklore does not apply) but about not storing a string somebody else sized. **4 concurrent hashes, at most 2 of them public** (Q1.39); wait lists per lane, 32 authenticated and 16 public, then `503 overloaded` with `Retry-After: 1` |
 | Sessions | 30 days absolute, 14 idle, `last_seen_at` written at most once per 15 minutes — the guard that makes idle expiry affordable at all, since the alternative is an fsync per request on a `synchronous = FULL` database in the process carrying every tunnel. 10 per user, the **oldest revoked** rather than the newest refused, evicted inside the mint's own transaction. Each records what it said about itself, clamped at ingest: 256 characters of `User-Agent`, 64 of address. A revoked row is kept **7 days** and swept at startup with its origin — short because no reader surfaces it (`listSessions` and the admin count both filter `revoked_at IS NULL`), non-zero because deleting on revoke would make the day something does read it unanswerable |
-| Login throttle | **5 failures per 15 minutes per `<name, address>` pair** (Q1.37), then 30s doubling to a 15-minute ceiling, the *exponent* clamped at 30 so `Infinity` is unreachable. A second instance under `ADDRESS_THROTTLE` counts **30 per address** — looser because that key is shared by everybody who appears to be at one address, and 5 would make one person's bad afternoon an office lockout; a `429` reports the longer of the two blocks. A password change is `passwordChangeKey(userId)`, its own namespace. 10 000 keys per instance, and past it settled entries go first and then the map is cleared outright — which lets somebody buy one reset for ten thousand requests, stated rather than hidden, because an unbounded map keyed by a caller-chosen string is the worse failure. 200 characters per composed key, 120 for the name half (a 200-character name would otherwise cut the address off and share one counter), 64 for an address. In memory: a restart clears it |
+| Login throttle | **5 failures per 15 minutes per `<name, address>` pair** (Q1.37), then 30s doubling to a 15-minute ceiling, the *exponent* clamped at 30 so `Infinity` is unreachable. A second instance under `ADDRESS_THROTTLE` counts **30 per address** — looser because that key is shared by everybody who appears to be at one address, and 5 would make one person's bad afternoon an office lockout; a `429` reports the longer of the two blocks. A password change is `passwordChangeKey(userId)`, its own namespace. 10 000 keys per instance, and past it settled entries go first and then the map is cleared outright — which lets somebody buy one reset for ten thousand requests, stated rather than hidden, because an unbounded map keyed by a caller-chosen string is the worse failure. `MAX_KEY_CHARS` per composed key (325 today, derived from the builders' field caps so no built key is cut), 254 for a login identifier or a mail recipient, 120 for other name halves, 64 for an address. In memory: a restart clears it |
 | Machines per user | **50 is the ceiling, not the limit.** It is the anti-abuse bound — creating one is reachable by anybody with a password, and each is a row plus an enrollment code plus a tunnel credential, against a `synchronous = FULL` file in the process carrying every tunnel. The *limit* is `machines.per_user`, a setting (env-seeded, database-owned) overridable per person in `user_machine_limits`, refused above the ceiling on both write paths and clamped again on read. **Unset resolves to 50**, which is the behaviour before the setting existed and deliberately not 0 — nothing seeds `instance_settings`, so a 0 default would take the whole fleet offline on deploy. Over the limit is **derived** from rank among `machine_owners` ordered by `(created_at, machine_id)`, never stored, so lowering switches off the newest and raising switches them back on with no recompute (Q1.51). Still counted with no revoked filter, which is why a revoke has to `releaseOwner` (Q1.43); `PUT …/owner` counts rows for *other* machines, so re-labelling one you already own is never your fifty-first — and it preserves `created_at` when the owner is unchanged, or an admin re-label would move a machine to the back of its own queue |
 | Control-plane bodies | 64 KiB above THE LINE and 256 KiB below it. The two public routes are the only places in this service where somebody with **no credential** decides how many bytes it reads, and neither had ever bounded it; below the line there was no bound at all, on the reasoning that a caller past the gate has a credential — a statement about *who* is asking and not about *how much*, when every route calls `readJsonObject`, which buffers before it looks. Both answer `413 payload_too_large` in the envelope every client here parses, because `bodyLimit`'s default `onError` is `text/plain` and none of them can read it. `currentPassword`/`newPassword` are refused over 512 characters |
 | Agent commands | 256 per session; 64 characters of name, 200 of description, 100 of hint — clamped at **ingest** in `session.ts`, like `MAX_PARENT_ID_CHARS`: the agent chooses the strings, the list rides no event so `truncateEvent` never sees it, and "bounded by what the agent sent" is not a bound. Measured 2026-08-03, claude publishes **100 commands / 18.7 KiB**, longest name 24, longest hint exactly 64, descriptions median 68 and max 1135. So 256 is for an MCP server publishing hundreds of prompts rather than for trimming a real list; the hint cap sits *above* the longest real one; the description cap is the only one that bites. **The name cap is a refusal and the other two are truncations** — `clip` appends `…[truncated N bytes]`, right for prose and wrong for a name, since a command is invoked by *sending* `/<name>`; dedup running on the unclipped name while the clipped one was stored made two long names collide with `dropped` reporting none. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot entirely; only `commandsRevision`, a number, rides the poll |
-| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — which get 90s; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
+| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — each of which gets its own budget, its daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s) and never below `SLOW_ROUTE_FLOOR_MS` (90s): `POST /sessions` 215s, `/prompt` 150s, `GET /agents/capabilities` and the `/custom-agents` writes 290s, the rest 90s, each held above its chain by webcheck; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
 | Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
@@ -33712,10 +33712,17 @@ call.
 shape as `SmtpDialer` and `AgentProcess`: `SSH` is what reaches the box, so
 `echo` turns the remote argv into an assertion, and `GH` is how the commit's
 verdict is read, so a stub exercises the green path and the red one.
-`deploycheck` drives twenty-four cases — every named secret separately, because a
-guard that fires on "any of them missing" passes just as well when it names the
-wrong one; the daemon refusal; both gate outcomes and the escape; the exact
-remote command; and that the key is neither printed nor left behind.
+`deploycheck` drives thirty-three cases — every named secret separately, by the
+refusal's first line, because a guard that fires on "any of them missing" passes
+just as well when it names the wrong one; the daemon refusal; both gate outcomes
+and the escape; the exact remote command; the host key pinned from
+`DEPLOY_KNOWN_HOSTS` into a known_hosts file of its own under
+`StrictHostKeyChecking=yes`, with no scan anywhere in the script; that
+`deploy.yml` forwards every secret the script requires; and that the key is
+neither printed nor left behind. The pin was a claim before it was code: the
+script said "pinned rather than trusted on first use" while `ssh-keyscan -H`
+appended whatever answered, on every run. It fails closed now, and uses its own
+file because a reused runner's `~/.ssh/known_hosts` may still hold scanned keys.
 
 **What is still unmeasured is only the transport.** No ssh has run and no host
 has answered; the decisions are exercised, the socket is not. That is a smaller
@@ -34064,6 +34071,10 @@ answer already held; `unknown` remains the value for never having asked, and a
 failed probe still lands on `offline`. That covers every screen at once rather
 than one predicate per caller. `daemonReadable` is the second half, for the
 genuine first-load `probing`, and it is pure so all four values are walked.
+Extended to `offline`: a re-probe keeps `offline` and its reason until it answers, so
+`probing` is published only from `unknown` and `daemonRead` maps it to `asking`.
+`skipReasonFor` alone still attempts a machine mid-probe, because its request joins the
+probe in flight.
 
 **What it confirms.** `.claude/rules/web-shell.md` already states this rule for
 the rail — reachability flickers, so a row may not change because of it — and the
@@ -34970,8 +34981,8 @@ the semantics decide what the keys should do.
 
 ### Q7.123 — `slowRoute` is a hand-maintained list in a different package from the routes it is about
 
-**Position.** Which calls get 90 seconds instead of 15 is a predicate in
-`packages/web/src/machine.ts`, matching on verb and path. The routes are registered in
+**Position.** Which calls get more than 15 seconds, and how much more, is a table
+(`daemonChainMs`) in `packages/web/src/machine.ts`, matching on verb and path. The routes are registered in
 `src/server.ts`. Nothing connects the two: adding a route that spawns an agent
 compiles, typechecks, passes `daemoncheck`, passes `webcheck`, and goes out on a
 budget it cannot meet.
@@ -35006,6 +35017,11 @@ version with no second copy, and it is a protocol change with a compatibility st
 which is `compatibility.md`'s subject rather than this one's. The realistic near-term
 step is the smallest: a comment at each expensive route in `src/server.ts` naming
 `slowRoute`, so the grep exists in the direction somebody actually edits.
+
+**Half closed.** webcheck's "how long a slow route is given" reads each member's daemon
+budgets from `src/` and fails when a chain outgrows the client's number or a table branch
+has no chain. A new route that spawns a process with no table entry still passes; that
+half stays open.
 
 **Status.** Not built — deferred at the 2026-08-26 design review
 

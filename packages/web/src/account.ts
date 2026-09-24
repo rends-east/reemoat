@@ -1,192 +1,45 @@
 import { ApiError } from "./http";
 
-/**
- * What a credential is, and what a refusal of one means.
- *
- * Pure, and out here rather than inside `AppStore`, for the reason `groups.ts`
- * and `keys.ts` both state: `webcheck` has no DOM and no control plane, so a rule
- * that lives in a method is a rule nothing can assert. That is not abstract for
- * these — every one of them decides whether somebody is thrown out of a running
- * app, and getting one wrong is invisible until it happens to a person mid-turn.
- */
-
 export type AuthFailure = "credentials" | "disabled" | "expired" | "device_revoked";
 
-/**
- * Whether an answered request means this credential is finished.
- *
- * **Keyed on the code, never the status**, and that is the whole point of the
- * function. The test used to be `status === 401 || status === 403`, which was
- * correct only because the browser never called an admin route: the control
- * plane's `requireAdmin` answers `403 forbidden` to every non-admin, so the
- * moment there is a Users section, opening it would clear the credential and
- * return somebody to the sign-in screen for looking at a page they may not have.
- * `meansMachineGone` in `http.ts` argues the same thing one file over.
- *
- * A transport failure is `null` and must be: `fetch` rejecting says nothing about
- * the credential, and clearing it there means a tunnel on the underground signs
- * you out.
- *
- * An **unrecognised 401 still ends the session**, and the asymmetry with 403 is
- * deliberate. `wire.ts`'s rule is that a client behind the server passes unknown
- * words through rather than guessing — but falling open here would park the app
- * in a loop where every request 401s and nothing ever offers a way back in.
- */
+/** Keyed on the code, never the status. A transport failure is null; an unrecognised 401 still ends the session. */
 export function authFailure(error: unknown): AuthFailure | null {
   if (!ApiError.isApiError(error)) return null;
   if (error.status === 403) {
-    /*
-     * The only 403 that is about *this credential* rather than about the route or
-     * the thing being asked for. The others this client can now reach are
-     * `forbidden` (`requireAdmin`, i.e. a screen you may not have) and
-     * `machine_revoked` (a machine that has been retired, from re-enrolling or
-     * minting a token for it) — both of which leave the credential perfectly
-     * good, and neither of which may throw somebody out of the app.
-     */
+    // user_disabled is the only 403 about the credential; forbidden and machine_revoked leave it good.
     return error.code === "user_disabled" ? "disabled" : null;
   }
   if (error.status !== 401) return null;
-  /*
-   * **A 401 about the request body is not a 401 about the credential.**
-   *
-   * `POST /v1/me/password` answers `401 invalid_password` when the *current
-   * password* field is wrong — the session that carried the request is
-   * perfectly good, and it is the one thing standing between the person and the
-   * screen they are trying to use. Treating it as a dead credential signed
-   * somebody out for mistyping their own password, which is both the worst
-   * moment to do it and the moment they are most likely to.
-   *
-   * Found by driving the real form in a browser; every offline assertion passed,
-   * because each one asked about a credential and this code is not about one. It
-   * also made `changePasswordError`'s "That is not your current password."
-   * unreachable — the session was cleared before the message could be shown.
-   *
-   * It is reachable from **two** routes, and not the ones this used to name:
-   * the admin routes it once cited are deleted, and `proveSelf` and
-   * `proveCurrentPassword` with them. `POST /v1/me/password` asks everybody,
-   * through `verifyCurrentPassword` — it is also the route that has to let an
-   * account with no password row set a first one. `PUT /v1/me/email` asks an
-   * API-key caller on an account that has a password, through the same helper,
-   * and a session nothing: the address is the reset channel, and review D13
-   * found a leaked `cpctl` key repointing it and locking the owner out, where a
-   * session is a person signed in and listed under Devices (Q1.630, amended
-   * 2026-09-05). `POST /v1/me/keys` never asks — cloning a key escalates
-   * nothing. Either route that asks is a screen where being signed out for
-   * mistyping your own password is the same catastrophe. From the email route
-   * the refusal is `cpctl`'s to meet rather than this client's: `setMyEmail`
-   * sends no `currentPassword`, so the one browser that presents a key — the
-   * adoption from `LEGACY_STORAGE` — is answered 400 there, never 401.
-   *
-   * `invalid_login` is here for the same reason and reachable by nobody: it comes
-   * from `/v1/login`, which carries no credential and does not go through
-   * `cpFetch`. Listed anyway, because the next person to route it through here
-   * should not have to rediscover this.
-   */
+  // A 401 about the body, such as a wrong current password from verifyCurrentPassword (which replaced proveSelf), is not about the credential.
   if (error.code === "invalid_password" || error.code === "invalid_login") return null;
   if (error.code === "session_expired") return "expired";
-  /*
-   * This installation was retired, which is the one 401 that asks for a second
-   * act beyond signing in again.
-   *
-   * ⚠ **It is a member of its own and must not be folded into `"credentials"`.**
-   * Every other refusal here means *the credential is finished*; this one means
-   * **the stored device id is finished too**. Folded, the client would sign out,
-   * sign back in offering the same retired id, be handed a fresh device by the
-   * server's adopt-or-register rule — and go on presenting a dead id for ever,
-   * with the app quietly re-registering on every launch.
-   *
-   * ⚠ **And `session_revoked` must stay out of this arm**, which is the same rule
-   * read from the other end: a session retired by the per-user cap leaves the
-   * device perfectly valid, so a client that gave its id up there would register
-   * a second device for one computer every time somebody signed in on an
-   * eleventh. Two codes, two behaviours; the control plane splits them for
-   * exactly this, and `resolveSession` asks about the device *first* so the
-   * distinction survives a revocation that ends both.
-   */
+  // device_revoked retires the stored device id as well, so it may not be folded into credentials, and session_revoked may not join it.
   if (error.code === "device_revoked") return "device_revoked";
-  /*
-   * Everything else that is a 401, which is `session_revoked`,
-   * `api_key_revoked`, `invalid_api_key`, `missing_api_key` and anything a later
-   * release adds.
-   *
-   * **`api_key_revoked` is reachable and no arm of its own is needed.**
-   * `revoked_at` was a column nothing could write, so a key was immortal; there
-   * is **one** writer now, a deliberate revocation by the holder — `DELETE
-   * /v1/me/keys/:keyId`, `revokeMyKey` here. This used to name three. The sweep
-   * inside the admin password reset went with that route: an admin can no
-   * longer end this tab by resetting somebody's password, because an admin can
-   * no longer reset somebody's password. Then the admin twin, `DELETE
-   * /v1/admin/users/:id/keys/:keyId`, was deleted on 2026-09-06 (Q1.631): an
-   * admin can no longer revoke the key either, or see that it exists. So the
-   * only way this tab's key stops working under it is that its own holder
-   * revoked it from the keys screen or `cpctl keys --revoke` — or the account
-   * was disabled or deleted, which arrive as their own codes.
-   *
-   * It answers `"credentials"` rather than a fourth `AuthFailure` member,
-   * deliberately: the union names what the person must **do**, and the remedy
-   * for a revoked credential is the sign-in screen — the same one a stolen
-   * session and an unknown token lead to. `"expired"` is separate only because
-   * nothing was taken away there, which is not what any of these are.
-   */
   return "credentials";
 }
 
-/**
- * How long the server said to wait, or `null` when it did not say.
- *
- * **The number was computed twice and read nowhere.** `tooManyAttempts` on the
- * control plane sends `Retry-After` *and* `detail.retryAfterSeconds`, precisely
- * so a client can wait instead of retrying into the block — and both halves were
- * thrown away here, while somebody facing a fifteen-minute lockout was told to
- * "wait a moment". The **body** is what is read, and it has to be: `parseBody`
- * takes a status, a status text and a string, never a `Response`, so no header
- * can reach an `ApiError` at all. That is why the server says it twice, and why
- * only one of the two was ever reachable from here.
- *
- * `null` for anything that is not a positive finite number, including a server
- * that predates the field. The wording then falls back, because "wait 0 seconds"
- * and "wait NaN minutes" are both worse than saying nothing precise.
- */
+/** Read from the body, since an ApiError carries no headers. null unless a positive finite number. */
 export function retryAfter(error: unknown): number | null {
   if (!ApiError.isApiError(error)) return null;
   const detail = error.detail as { retryAfterSeconds?: unknown } | null;
   const seconds = detail?.retryAfterSeconds;
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return null;
-  // Up, never down: telling somebody to come back before the block lifts sends
-  // them into a refusal that then extends it — the throttle doubles.
+  // Round up: coming back before the block lifts extends it.
   return Math.ceil(seconds);
 }
 
-/**
- * A number of seconds as a duration somebody reads rather than counts.
- *
- * Two units and no more. The throttle's own steps are 30s doubling to 15 min, so
- * "seconds" and "minutes" cover every value it can produce, and an hour would be
- * a unit for a state this service cannot reach.
- */
 export function waitText(seconds: number): string {
   if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
   const minutes = Math.ceil(seconds / 60);
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
-/**
- * What a `429 too_many_attempts` says, wherever it arrives from.
- *
- * One sentence for the sign-in form and the password form, because it is one
- * refusal from one throttle — the login route and `passwordChangeKey` are
- * different key spaces on the same counter, and a person who meets both should
- * not have to notice that they were worded differently.
- */
 export function tooManyAttemptsText(error: unknown): string {
   const seconds = retryAfter(error);
-  // "a moment" is the honest answer when the server did not say, and the only
-  // one that stays true whatever the block turns out to be.
   if (seconds === null) return "Too many attempts. Wait a moment and try again.";
   return `Too many attempts. Wait ${waitText(seconds)} and try again.`;
 }
 
-/** What the sign-in screen says about a sign-out nobody asked for. */
 export function signedOutText(failure: AuthFailure): string {
   switch (failure) {
     case "expired":
@@ -196,53 +49,13 @@ export function signedOutText(failure: AuthFailure): string {
     case "credentials":
       return "You were signed out. Sign in again.";
     case "device_revoked":
-      /*
-       * Named as an act somebody did, rather than as something that happened.
-       *
-       * The generic sentence one arm up would be true and useless here: the
-       * person most likely to see this is the one who just retired this computer
-       * from another device, and the second most likely is somebody whose
-       * account owner did it for them. Both need to know it was **this
-       * computer**, or the obvious reading is that the service logged them out.
-       *
-       * It ends on what works, because it does: signing in registers this
-       * installation again, and nothing about the account has changed.
-       */
       return "This device was signed out and retired. Sign in again to use it.";
   }
 }
 
-/**
- * What every screen says when a request to the control plane never got an
- * answer.
- *
- * One sentence, because it is one fact: `fetch` rejected, nothing was refused,
- * and the credential, the machines and the keys are all exactly as they were.
- * The four error readers below return it for a non-`ApiError`, and the settings
- * screens draw it in their `Empty failed` arm — `MachinesSection` said *"Control
- * plane unreachable."* for the same state while `AccountSection` and
- * `KeysSection` said this, two spellings of one outage a person may see seconds
- * apart (review D7). A screen may follow it with its own second sentence, which
- * is what the machine list does.
- */
 export const CONTROL_PLANE_UNREACHABLE = "Cannot reach the control plane.";
 
-/**
- * A sign-in the control plane accepted and this computer would not keep: the
- * sign-in screen of a signed-out account, signed in to as **somebody else**.
- *
- * ⚠ **Refused rather than adopted, and not by the page.** That window is one
- * account's — its keyring entry, its device and its daemon root — and taking a
- * different person's session there would register the first person's device key
- * for the second, which is the linkage a device key exists to prevent, and start
- * the first person's database under the second's sign-in. So the host asks the
- * control plane whose the token is before it writes anything, answers `refused`,
- * and revokes the session it was handed; `cp.login` turns that into this, and
- * nothing is adopted anywhere (Q1.651).
- *
- * A class of its own rather than a string, for the same reason every other refusal
- * here keys on a code: the sentence is the screen's, and the fact is this.
- */
+/** A sign-in as somebody else in this account's window: the host refuses it and revokes the session, adopting nothing (Q1.651). */
 export class WrongAccount extends Error {
   constructor() {
     super("that sign-in belongs to a different account");
@@ -250,72 +63,36 @@ export class WrongAccount extends Error {
   }
 }
 
-/** What the sign-in screen says about a sign-in that was refused. */
 export function signInError(error: unknown): string {
-  /*
-   * First, and before the transport arm below that every non-`ApiError` would
-   * otherwise fall into: this one was *answered*, and "this is not your password"
-   * is exactly backwards — the password was right, for another account. The
-   * sentence names both ways forward, because both are real: the other account
-   * belongs on the list as itself, and this one may be the one to let go.
-   */
   if (error instanceof WrongAccount) {
     return "That is a different account — add it from Add account, or remove this one.";
   }
   if (!ApiError.isApiError(error)) {
-    // Named apart from a wrong password on purpose: somebody whose password is
-    // right and whose network is not should not go and change their password.
     return `${CONTROL_PLANE_UNREACHABLE} This is not your password.`;
   }
   switch (error.code) {
     case "invalid_login":
-      // One sentence for every way in, because the server gives one answer for
-      // all of them and a client that split them would put the enumeration back.
-      // It stopped naming the *name* when the field grew to take an address too:
-      // "that name and password" in front of somebody who typed an address reads
-      // as the address having been the mistake.
+      // One sentence for every way in: splitting them would put account enumeration back.
       return "Those sign-in details do not match.";
     case "user_disabled":
       return "This account has been disabled.";
     case "too_many_attempts":
-      // The real number, from `detail.retryAfterSeconds`. A sign-in throttle
-      // reaches fifteen minutes, and "wait a moment" in front of that sends
-      // somebody back in thirty seconds to be refused again — which, because the
-      // block doubles on a refusal, is advice that makes the wait longer.
       return tooManyAttemptsText(error);
     default:
       return error.message;
   }
 }
 
-/**
- * Whether Sign in can be pressed.
- *
- * Deliberately **not** the password policy. A policy tightened after somebody's
- * password was set would otherwise disable the only button that leads to the
- * screen where they could change it.
- */
+/** Deliberately not the password policy: a tightened policy must not disable the way to change a password. */
 export function signInReady(name: string, password: string): boolean {
   return name.trim().length > 0 && password.length > 0;
 }
 
-/**
- * Mirrored from the control plane's `password.ts`, which is the only side that
- * can enforce anything. Two numbers, so they can be kept in step by looking.
- */
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 256;
 
 export type PasswordProblem = "too_short" | "too_long" | "mismatch" | "unchanged";
 
-/**
- * What is wrong with a proposed password, or `null`.
- *
- * The order is part of the rule. Length first, because it has to be fixed
- * whatever else is true; `unchanged` before `mismatch`, because "you typed your
- * old password twice" is a more useful sentence than "these do not match" when
- * they in fact do.
- */
 export function passwordProblem(current: string, next: string, confirm: string): PasswordProblem | null {
   if (next.length < PASSWORD_MIN) return "too_short";
   if (next.length > PASSWORD_MAX) return "too_long";
@@ -337,16 +114,7 @@ export function passwordProblemText(problem: PasswordProblem): string {
   }
 }
 
-/**
- * What a gate screen says when a link does not work.
- *
- * **Every way a token can be unusable reads the same**, and that is asserted as
- * an equality rather than trusted to the prose: unknown, already spent and
- * expired are indistinguishable to anybody who does not hold the token, and
- * telling them apart helps only somebody sweeping. The server already answers
- * one code for the three; this makes sure a future second code cannot quietly
- * split them on screen.
- */
+/** Unknown, spent and expired tokens must read the same. */
 export function linkError(error: unknown): string {
   if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
   switch (error.code) {
@@ -367,7 +135,6 @@ export function linkError(error: unknown): string {
   }
 }
 
-/** What the sign-up form says when the server refuses. */
 export function registerError(error: unknown): string {
   if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
   switch (error.code) {
@@ -379,12 +146,6 @@ export function registerError(error: unknown): string {
       return error.message;
     case "too_many_attempts":
       return tooManyAttemptsText(error);
-    /*
-     * Reachable only by a client that did not send the field the form always
-     * sends — an older bundle against a newer control plane, or a script. The
-     * sentence names the box rather than the field, because whoever reads it is
-     * looking at a form and not at a request.
-     */
     case "terms_not_accepted":
       return "Tick the box to say you agree, then try again.";
     default:
@@ -392,25 +153,7 @@ export function registerError(error: unknown): string {
   }
 }
 
-/**
- * The one state badge a person's row carries, beside the `admin` role.
- *
- * A row could now say `admin`, `disabled`, `no password`, `temporary password`
- * and `unverified email` at once — five boxes beside a truncating name on a
- * 390px phone, which is the exact collapse the kebab menu was introduced to end.
- * So `admin` is a *role* and always draws, and everything else is **one** badge
- * chosen by precedence.
- *
- * The precedence is the rule, ordered by how stuck the person is, each strictly
- * subsuming the next: nothing else matters about an account nobody can use; an
- * account with no password cannot sign in at all; one holding a temporary
- * password can sign in and do nothing else; one with an unverified address can
- * use the app and simply cannot recover it.
- *
- * `emailEnabled` is the second argument because on an instance with no SMTP
- * *nobody* has a verified address, so a badge on every row would be noise. It is
- * the honest signature: how stuck is this person on **this** instance.
- */
+/** One badge chosen by how stuck the person is; an unconfirmed address counts only on an instance with mail. */
 export type UserState = "disabled" | "no_password" | "temporary_password" | "unverified_email" | null;
 
 export function userState(
@@ -420,8 +163,7 @@ export function userState(
   if (user.disabled) return "disabled";
   if (!user.hasPassword) return "no_password";
   if (user.mustChangePassword === true) return "temporary_password";
-  // No address is not an *unverified* address. A bare `!emailVerified` test
-  // brands every account that simply never added one.
+  // No address is not an unverified address.
   if (emailEnabled && typeof user.email === "string" && user.email.length > 0 && user.emailVerified !== true) {
     return "unverified_email";
   }
@@ -441,45 +183,21 @@ export function userStateText(state: NonNullable<UserState>): string {
   }
 }
 
-/** What the password form says when the server refuses. */
 export function changePasswordError(error: unknown): string {
   if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
   switch (error.code) {
     case "invalid_password":
       return "That is not your current password.";
     case "too_many_attempts":
-      // Same sentence as the sign-in form, same reason — see `tooManyAttemptsText`.
-      // This throttle is keyed on the *user id* (`passwordChangeKey`), so being
-      // here means the person themselves has been mistyping, and the number of
-      // minutes is the only actionable part of the refusal.
       return tooManyAttemptsText(error);
     case "weak_password":
-      // The server's own sentence, not a repeat of the client's: this arm is
-      // reachable only when the mirror above has drifted, and the number that
-      // matters then is the one the server is actually using.
       return error.message;
     default:
       return error.message;
   }
 }
 
-/* ------------------------------------------------------------------ *
- * API keys, the parts of the screen that are decisions rather than paint
- * ------------------------------------------------------------------ */
-
-/**
- * Whether a listed key is the one this browser is holding.
- *
- * **Client-side, with no control-plane change** (decision D-K-1). The browser
- * holds the credential, `keyPrefix` on the control plane is `slice(3, 11)` of the
- * key — the eight clear characters after `rk_` — and a listed row carries exactly
- * that prefix. So "this browser" is a string comparison over something already in
- * hand.
- *
- * ⚠ **Only for an `api_key` credential.** With a session credential no key is
- * this browser's and revoking one cannot sign you out, so the badge and the
- * sentence under it are drawn for neither. `webcheck` pins both arms.
- */
+/** Only for an api_key credential: the listed prefix is the eight characters after rk_. */
 export function thisBrowsersKey(
   credential: { value: string; kind: "session" | "api_key" } | null,
   prefix: string,
@@ -487,14 +205,6 @@ export function thisBrowsersKey(
   return credential !== null && credential.kind === "api_key" && credential.value.slice(3, 11) === prefix;
 }
 
-/**
- * How long ago, in the row vocabulary, extended past days.
- *
- * `shortDuration` in `bits.tsx` stops at days because a session row is never
- * older than a week; a key's "made" and a password's "changed" are commonly
- * months. Same units below two days, then `mo` and `y`, so a screen that draws
- * both never mixes "3d" with "three months".
- */
 export function ageText(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) return "<1m";
@@ -509,48 +219,13 @@ export function ageText(ms: number): string {
   return `${Math.round(days / 365)}y`;
 }
 
-/**
- * The order the keys screen draws: newest first, revoked last.
- *
- * The route answers `created_at ASC` because that is the order a database gives
- * for free; the screen wants the key you just made at the top and the dead ones
- * out of the way. Sorted here rather than on the control plane so an older one
- * answers the same screen. Stable within each half, so two keys minted in one
- * second keep the order the server gave.
- */
 export function orderKeys<K extends { createdAt: number; revokedAt: number | null }>(keys: readonly K[]): K[] {
   const live = keys.filter((key) => key.revokedAt === null).sort((a, b) => b.createdAt - a.createdAt);
   const dead = keys.filter((key) => key.revokedAt !== null).sort((a, b) => b.createdAt - a.createdAt);
   return [...live, ...dead];
 }
 
-/**
- * The one-shot line the gate draws after this browser's own key was revoked.
- *
- * **The sign-out is deliberate, so it says so** (decision 5A). Revoking the key
- * a tab is holding used to be discovered: the next request answered `401
- * api_key_revoked`, `cpFetch` signed the tab out, and the gate said "Your session
- * expired" about a thing the person had just done on purpose. Now the client
- * clears the credential itself, writes this under one `sessionStorage` name, and
- * the gate reads it **once** — `peekRevokedKeyNotice` reads it without deleting
- * and `clearRevokedKeyNotice` deletes it, the gate calling the first from a
- * state initialiser and the second from a mount effect — so a reload of the
- * sign-in screen does not repeat it. `sessionStorage` rather than `localStorage`
- * because the notice belongs to the tab that did the revoking.
- *
- * ⚠ **Reading and deleting are two functions on purpose** (review D16). They
- * were one, deleting on read inside a `useState` initialiser — correct on React
- * 19, which keeps the first initialiser's result across StrictMode's double
- * invocation, and resting on exactly that detail: an engine that kept the
- * *second* result would have shown the notice zero times. Peek in the
- * initialiser, clear in an effect, and "read once" is a property of the
- * construction rather than of a React version: state survives StrictMode's
- * simulated remount, so its double-fired effect deletes a value already in
- * state, and a second peek before the effect answers the same line.
- *
- * All three take the storage as an argument so they stay pure: `webcheck`
- * drives them with a `Map`, and nothing here touches `window`.
- */
+/** Shown once: peek in a state initialiser, clear in an effect, so StrictMode can neither drop nor repeat it. */
 export const REVOKED_KEY_NOTICE = "reemoat.revokedKey";
 
 export function revokedKeyNotice(prefix: string): string {

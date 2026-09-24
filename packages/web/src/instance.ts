@@ -1,149 +1,24 @@
 import type { MailDelivery } from "./cp";
 
-/**
- * What this control plane allows, and where each setting's value came from.
- *
- * Two separate jobs that share a shape. The first is read by the signed-out
- * screen, which has no credential; the second only by an admin looking at the
- * Server and Email settings. They live together because both are *statements about the instance*
- * rather than about a person, and neither belongs in `settings.ts` — that module
- * answers "which settings screen does this URL name, and who may see it".
- */
-
-/* ------------------------------------------------------------------ *
- * What the signed-out screen learns
- * ------------------------------------------------------------------ */
-
 export interface InstanceConfig {
   registration: "off" | "open";
-  /**
-   * Whether this instance can send mail at all.
-   *
-   * **Independent of `registration`, and that independence is the point.** The
-   * fourth combination — registration off, mail configured — is a real and
-   * important instance: admin-only, where people still recover their own
-   * accounts. Folding the two into one "self-service" flag closes the reset door
-   * whenever registration closes, which is exactly the cell that costs somebody
-   * their account.
-   */
+  /** Independent of registration: an admin-only instance with mail still lets people recover their accounts. */
   email: boolean;
-  /**
-   * Where this instance's source is, and which version it is running.
-   *
-   * The AGPL §13 offer, drawn on the signed-out screen because that is where the
-   * people it is owed to are. `null` when the control plane did not say — an
-   * older one, or one rolled back past the field — and the footer then draws
-   * nothing rather than guessing a URL, because a *wrong* source link is worse
-   * than none: it looks like the offer was made.
-   */
   source: { url: string; version: string | null } | null;
-  /**
-   * Where this instance's plugin catalogue lives, or `null` for one with none.
-   *
-   * The address rather than a boolean, because the client has to `fetch` it and
-   * has no other way to learn it. Safe to publish for the reason it is safe to
-   * read: the document's own `connect-src` already names this exact origin —
-   * both come from one variable the control plane reads once at startup — so a
-   * client can never be handed a catalogue the page is not permitted to reach.
-   *
-   * `null` on an instance with no market, on a control plane that predates the
-   * field, and on a value that could not be read. All three are the same state
-   * here and are drawn the same way: the Market tab says there is nothing to
-   * browse, and installing a plugin from a file is untouched.
-   */
   catalogue: string | null;
 
-  /**
-   * Where this instance publishes a build of the Reemoat app, or `null`.
-   *
-   * `catalogue`'s shape, and an argument of its own: an address rather than a
-   * flag because the gate renders it into an `href` and has no other way to learn
-   * it; env-only and unset by default because a URL compiled into this bundle
-   * would be one project's download appearing on every fork's sign-up screen,
-   * under a licence that hands them the build.
-   *
-   * ⚠ **`null` is the honest and expected state, not a degraded one.** This
-   * repository publishes no signed build today — `tauri.conf.json` has
-   * `signingIdentity: null`, no updater artifacts and no `dmg` target, and
-   * `ci-release.sh` uploads nothing — so an instance that names no address is
-   * simply telling the truth. The handoff page says so and points at building
-   * from source, rather than drawing a button that downloads nothing.
-   */
   appDownload: string | null;
 
-  /**
-   * Whether this instance publishes the built-in Terms, Acceptable Use Policy
-   * and Privacy Policy.
-   *
-   * A flag rather than an address, unlike `catalogue` and `appDownload`, because
-   * the documents ship *inside this bundle* — what varies is whether a given
-   * deployment adopts them as its own. `OPERATOR` names one particular party, so
-   * an instance that has not said "these are mine" must not draw them, must not
-   * ask anybody to agree to them, and must not have its sign-up refused for
-   * failing to.
-   *
-   * **`false` on an instance that has not opted in, on a control plane that
-   * predates the field, and on any value that is not literally `true`.** All
-   * three are the same state and are drawn the same way: no documents, no
-   * consent box, and no requirement on the register route. Q1.638.
-   */
+  /** Only a literal true adopts the built-in documents; anything else means no documents and no consent box (Q1.638). */
   legal: boolean;
 }
 
-/**
- * The body of `GET /v1/instance`, turned into the flat thing this client
- * reasons about — or `null` when it cannot be read.
- *
- * **This function exists because its absence was a live defect, and a cast is
- * not a parse.** `cp.ts` read the response as `readJson<InstanceConfig>`, and
- * the two shapes have never matched: the server answers
- * `{registration: {enabled, requiresEmail}, mail: {configured}}` and this type
- * is flat, so `config.registration` was an *object* that `=== "open"` could
- * never match and `config.email` was `undefined`. On an instance with
- * registration on and SMTP working, the sign-in screen therefore drew neither
- * door and printed the sentence written for an instance that has neither.
- *
- * Every driver was green throughout: `relaycheck` asserted the nested body
- * against the live route, `webcheck` asserted every predicate here against
- * hand-written *flat* fixtures, and nothing anywhere ran one through the other.
- * The generic on `readJson<T>` is an unchecked assertion, so the compiler had
- * nothing to say either. That gap is what this function closes and what
- * `webcheck` now spans by extracting the server's own literal.
- *
- * **An unreadable body is `null`, never a defaulted config.** `null` means
- * "unknown", which `showsGateLink` fails *open* on; returning
- * `{registration: "off", email: false}` would fail closed — which is exactly
- * the failure above, reached by a different road.
- *
- * `registration.requiresEmail` is deliberately **not** read: on the server it is
- * `mailConfigured().configured`, i.e. the same fact as `mail.configured`, and
- * `signupMode` derives it here rather than carrying two fields that can drift.
- */
-/**
- * Is this something a browser will treat as a link off this origin?
- *
- * ⚠ **The §13 offer is the one field where "non-empty string" is not enough.** It
- * is rendered straight into an `href`, and a fork editing `SOURCE_URL` to a
- * scheme-less value — `github.com/them/theirs`, which reads like a URL — produces a
- * **relative** href. That path has no extension and is not under `/assets/`, so the
- * control plane's SPA fallback answers it with `index.html`: the "Source" link opens
- * a second copy of this app. A wrong source link is worse than none, because it
- * looks like the offer was made — reached here by a typo rather than by malice.
- *
- * ⚠ **Nothing in this client renders it any more** — see `ui/gate/GateCard.tsx`
- * for what was removed and why. This guard stays, and it is not dead: the field
- * is still parsed, still asserted on the wire by `relaycheck`, and still the one
- * value in `InstanceConfig` that a fork is told to change. A reader that comes
- * back finds it already refusing the shape that would embarrass it, rather than a
- * plain `string` somebody has to re-derive this whole paragraph about.
- */
+/** Absolute http(s) only: a scheme-less value becomes a relative href that the SPA fallback answers with the app itself. */
 function isAbsoluteHttpUrl(raw: string): boolean {
   try {
     const parsed = new URL(raw);
     return parsed.protocol === "https:" || parsed.protocol === "http:";
   } catch {
-    // Not a URL at all. `new URL` is the only parser here and it throws rather
-    // than answering, so this is the whole of the negative case.
     return false;
   }
 }
@@ -156,13 +31,6 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
   const configured = read(read(body, "mail"), "configured");
   if (typeof enabled !== "boolean" || typeof configured !== "boolean") return null;
 
-  /*
-   * `source` is read leniently and is the one field whose absence is not a
-   * refusal: a control plane that predates it, or one rolled back past it, still
-   * has a readable config and must still draw a sign-in screen. Only the URL is
-   * required — a version without one names nothing, while a URL without a version
-   * is still a complete §13 offer.
-   */
   const url = read(read(body, "source"), "url");
   const version = read(read(body, "source"), "version");
   const source =
@@ -170,42 +38,9 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
       ? { url, version: typeof version === "string" && version.length > 0 ? version : null }
       : null;
 
-  /*
-   * Read with the same leniency `source` gets, and for the same reason: a control
-   * plane that predates the field still has a readable config and must still draw
-   * a sign-in screen. `isAbsoluteHttpUrl` rather than a bare string check, because
-   * this value is handed to `new URL` and then to `fetch` — a scheme-less value
-   * would resolve **relative to this origin**, and the SPA fallback answers such a
-   * path with `index.html`, so the market would parse the app's own HTML as a
-   * catalogue and report it as malformed. An unreadable address is no catalogue,
-   * which is a state this client already draws.
-   */
   const catalogue = read(read(body, "plugins"), "catalogue");
-  /*
-   * Read with `catalogue`'s leniency and through the same guard, for a reason one
-   * degree sharper: this value is not `fetch`ed, it is put in an `href` a person
-   * taps. A scheme-less `example.com/app` reads like an address and is a
-   * **relative** path, resolved against this control plane rather than followed
-   * off it — the §13 offer's own measured failure, arriving on the one button
-   * somebody was told would give them the app. `new URL` also parses
-   * `javascript:` and `data:` without throwing, which is the other half of what
-   * the guard is for on this field specifically, and the reason it is not a
-   * `startsWith("http")`.
-   */
   const appDownload = read(read(body, "app"), "download");
-  /*
-   * `machines.offer` is not read. A control plane from before its deletion
-   * (Q1.650) still sends it whenever its env names a shop, and it is dropped like
-   * any key this parser does not know — which is what keeps a new app from
-   * drawing a link the owner withdrew, against a control plane nobody has
-   * redeployed.
-   */
-  /*
-   * Strictly `true`, unlike the two above, and the asymmetry is the point: those
-   * two fail to `null` and lose a feature, while this one decides whether a
-   * document naming a named party is put in front of somebody. Anything that is
-   * not an explicit yes is a no.
-   */
+  // machines.offer from an older control plane is dropped on purpose (Q1.650).
   const legal = read(read(body, "legal"), "documents");
   return {
     registration: enabled ? "open" : "off",
@@ -217,33 +52,12 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
   };
 }
 
-/**
- * Where to ask for the list of official plugins, or `null`.
- *
- * ⚠ **Fails closed on an unknown config, which is the opposite of `mailUsable`
- * beside it, and the reconciling sentence is this file's standing one:** fail
- * closed where the cost is a missing screen, fail open where the cost is a
- * locked-out person. Nobody is locked out of anything by a market that is not on
- * offer for one render — every plugin already installed still works, and
- * importing a file still installs one. Guessing an address, meanwhile, produces a
- * request the page's own CSP refuses before it leaves, which is a failure with no
- * symptom anybody can see.
- */
+/** Fails closed on an unknown config: a missing market costs a screen, never a lockout. */
 export function catalogueUrl(config: InstanceConfig | null): string | null {
   return config?.catalogue ?? null;
 }
 
-/**
- * What the registration form has to ask for.
- *
- * `null` when the config is not known yet, and that is **a different answer from
- * `gateOffer`'s fail-open**, deliberately. `gateOffer` decides whether to draw a
- * door and guessing wrong costs one tap; this decides what fields a form
- * contains, and both wrong guesses are bad — assume verified and an instance
- * with no SMTP silently drops an address somebody typed; assume local and an
- * instance with SMTP produces an account that can never be confirmed. So the
- * register screen waits rather than guesses.
- */
+/** null while the config is unknown: the fields depend on it, so the register screen waits rather than guesses. */
 export type SignupMode = "closed" | "open_local" | "open_verified";
 
 export function signupMode(config: InstanceConfig | null): SignupMode | null {
@@ -252,64 +66,15 @@ export function signupMode(config: InstanceConfig | null): SignupMode | null {
   return config.email ? "open_verified" : "open_local";
 }
 
-/** Whether an admin creating a person can invite them instead of handing over a password. */
 export function adminMayInvite(config: InstanceConfig | null): boolean {
-  /*
-   * **Fails closed on `null`, the opposite of `gateOffer`**, and the same
-   * sentence reconciles them: here the cost of being wrong is that the admin
-   * passes a password along by hand, which is the status quo and not a lockout.
-   */
   return config?.email === true;
 }
 
-/**
- * Whether an address on an account can do anything on this instance.
- *
- * **Every promise Settings → Account's Email block makes is `mailConfigured`'s
- * to keep**, and on an instance without SMTP it keeps none of them: `PUT
- * /v1/me/email` answers `409 mail_unconfigured` before it reads the body, no
- * confirmation link is ever sent, and `POST /v1/forgot` has nothing to send
- * either. The screen nonetheless drew the whole block by default — an "Add an
- * address" button over the sentence *"Add an address and confirm it, and you can
- * reset your own password"*, which is the **exact** capability the instance
- * lacks, offered to the exact people who have no other way back in. `Me` carries
- * nothing that could have said otherwise, which is why the answer comes from the
- * config the store already holds rather than from a new field on the wire.
- *
- * **Shown with the reason rather than hidden**, and that is the choice this
- * function exists to support rather than make: a block that quietly disappears
- * is looked for, and a person who cannot find "where do I add my email" learns
- * nothing about why they will never be able to reset their password. So the
- * heading, any address already on the account, and a sentence naming what the
- * operator has to configure all stay; what goes is every *control*, because a
- * control that can only be refused is the thing this UI's rule about "true in
- * the state it is drawn in" forbids.
- *
- * **Fails open on `null`, with `gateOffer`, and against `adminMayInvite`.** The
- * reconciling sentence is the same one: *fail closed where the cost is a missing
- * screen, fail open where the cost is a locked-out person.* Hiding the form on
- * an unknown config would take away the only route to a recovery channel — on an
- * instance whose mail may well be working, since `config` is `null` for a
- * control plane rolled back past `/v1/instance` and for a single failed fetch,
- * neither of which is evidence about SMTP. What failing open costs instead is
- * one refused submit carrying the server's own sentence, which is the ordinary
- * shape of every other form here.
- */
+/** Fails open on null: hiding the controls on an unknown config would remove the only route to recovery. */
 export function mailUsable(config: InstanceConfig | null): boolean {
   return config === null || config.email;
 }
 
-/* ------------------------------------------------------------------ *
- * Whether mail is actually arriving
- * ------------------------------------------------------------------ */
-
-/**
- * How long a queued message may sit before that is worth saying out loud.
- *
- * The pump retries 60s → 1h with full jitter over 8 attempts, so a message in
- * flight for a few minutes is a provider being slow rather than a fault. An hour
- * means the retries are losing.
- */
 export const MAIL_BACKLOG_WARN_MS = 60 * 60 * 1000;
 
 export type MailTrouble =
@@ -317,33 +82,7 @@ export type MailTrouble =
   | { kind: "failed"; text: string }
   | { kind: "backlog"; text: string };
 
-/**
- * The one sentence Email settings owes an admin about delivery, or `null`.
- *
- * ⚠ **Nothing said any of this, and the silence was the defect.** `send()` on the
- * server reports whether a *row was inserted*; the Users screen turns that into
- * "Invitation sent to …" and stops. A permanent SMTP failure after that point
- * reached one `console.error` inside a container with rotating logs, the delivery
- * log was removed from this UI as noise, and `cpctl admin mail` only helps
- * somebody who already suspects a problem. So the first user's invitation could
- * fail and every surface an admin looks at said things were fine — while the
- * invited account, holding no password and an unverified address, had no door
- * left: `POST /v1/forgot` mails nothing for an address nobody has confirmed.
- *
- * **Ordered by remedy, not by severity**, which is the same rule the machine
- * badge follows for `ownerDisabled` before `overLimit`. An open breaker is the
- * only one that is *currently stopping* delivery, so it outranks a count of past
- * failures; and a failure that has already happened outranks a backlog that may
- * still clear on its own.
- *
- * `null` for a config this client has not read, deliberately — a rolled-back
- * control plane sends no `delivery` object, and inventing "all clear" from
- * absence is how a banner becomes something nobody trusts.
- *
- * Each sentence is at most ten words (the copy table's cap), and the singular
- * `1 message has` is pinned: it is the one an admin of a personal instance
- * actually reads, since the first failure is the invitation to the second user.
- */
+/** Ordered by remedy: open breaker, then past failures, then backlog. null when no delivery object was sent. */
 export function mailTrouble(delivery: MailDelivery | undefined): MailTrouble | null {
   if (delivery === undefined) return null;
   if (delivery.paused) {
@@ -365,23 +104,10 @@ export function mailTrouble(delivery: MailDelivery | undefined): MailTrouble | n
   return null;
 }
 
-/* ------------------------------------------------------------------ *
- * Where a setting's value came from
- * ------------------------------------------------------------------ */
-
-/**
- * One setting, both sides of the fallback.
- *
- * Not two parallel `env`/`stored` objects: that would put a second
- * implementation of the precedence rule in the client, and the server already
- * computed it. `value` is the *effective* one.
- */
 export interface ConfigField {
   key: string;
-  /** Never carries a value for a secret. See `smtp.password` on the server. */
   secret: boolean;
   value: string | null;
-  /** For a secret only: whether a row exists at all. */
   set?: boolean;
   source: "database" | "environment" | "unset";
   envName: string;
@@ -391,48 +117,15 @@ export interface ConfigField {
 
 export type FieldOrigin = "env" | "overrides_env" | "stored" | "unset";
 
-/**
- * Which of the four states a field is in.
- *
- * `overrides_env` is the only one where "reset to environment" means anything,
- * which is why it is a state rather than two booleans a screen has to combine.
- */
 export function fieldOrigin(field: ConfigField): FieldOrigin {
   if (field.source === "environment") {
-    // An incoherent pair — the server said "environment" while reporting no
-    // environment value — degrades to `unset` rather than throwing. `wire.ts`'s
-    // posture: a client renders what it can and never crashes on a shape.
     return field.envSet ? "env" : "unset";
   }
   if (field.source === "database") return field.envSet ? "overrides_env" : "stored";
   return "unset";
 }
 
-/**
- * The one sentence a write-only secret's row says about itself.
- *
- * **Both halves of that sentence used to be computed separately and could
- * contradict each other inside one line.** The screen read
- * `field.set === true ? "A password is set." : "No password set."` and then
- * appended `originText(fieldOrigin(field))` — but `set` is the server answering
- * *"is there a database row"*, not *"does a password exist"*: `app.ts` writes
- * `set: resolved.source === "database"`, and a password supplied by
- * `REEMOAT_CP_SMTP_PASSWORD` is a documented, working configuration that
- * `mailConfigured` reads and that produces `set: false, envSet: true`. The line
- * then rendered **"No password set. from the environment"** — telling the
- * operator of a working instance that the credential is missing, beside a Send
- * test button the same screen had enabled.
- *
- * So existence and provenance are one answer here rather than two, and there is
- * no concatenation left for them to disagree across. **Presence is
- * `set || envSet`; removability is `set` alone** — those are genuinely different
- * questions, because an environment value cannot be cleared from a screen, and
- * conflating them is what put "Remove it" and the truth on opposite sides of one
- * boolean.
- *
- * `null` for a field the server did not send: that is *unknown*, and claiming
- * "no password" about it would be the same lie one step further out.
- */
+/** Presence is set or envSet; removability is set alone, since an environment value cannot be cleared here. */
 export function secretFieldText(field: ConfigField | undefined): string | null {
   if (field === undefined) return null;
   if (field.set === true) {
@@ -456,20 +149,9 @@ export function originText(origin: FieldOrigin): string {
   }
 }
 
-/**
- * Whether "reset to environment" is offered.
- *
- * True for exactly one origin. `stored` with nothing in the environment is
- * **false**: there is nothing to reset *to*, and the act there is "clear", which
- * is a different control with a different consequence.
- */
 export function canResetField(field: ConfigField): boolean {
   return fieldOrigin(field) === "overrides_env";
 }
-
-/* ------------------------------------------------------------------ *
- * The SMTP form
- * ------------------------------------------------------------------ */
 
 export interface SmtpDraft {
   host: string;
@@ -480,13 +162,6 @@ export interface SmtpDraft {
   publicUrl: string;
 }
 
-/**
- * Which field of the draft each SMTP setting key fills.
- *
- * `smtp.password` is deliberately absent: the draft has no field for it, since
- * the password is write-only and held in its own state on the screen. A key
- * outside this table therefore changes nothing in {@link draftAfterClear}.
- */
 export const SMTP_DRAFT_FIELD: Readonly<Record<string, keyof SmtpDraft>> = {
   "smtp.host": "host",
   "smtp.port": "port",
@@ -496,55 +171,14 @@ export const SMTP_DRAFT_FIELD: Readonly<Record<string, keyof SmtpDraft>> = {
   "mail.public_url": "publicUrl",
 };
 
-/**
- * The draft after one key was cleared on the server, given what the server now
- * says: **exactly that key's field takes the answer's value, and every other
- * field keeps whatever was typed into it.**
- *
- * This is the repair for a Reset that did not survive the next Save (review
- * D14). `save` sends all six fields from the draft, and the per-field Reset
- * re-synced the draft only while the form had no edits — so with one field
- * edited, Reset on another cleared it on the server, the draft still held the
- * old value, and Save wrote it straight back. "Saved." was the only thing on
- * screen. Patching one field is the whole fix: the other edits are still the
- * person's, and the screen's re-sync effect keeps the full sync for a form with
- * nothing of its own to lose.
- *
- * Pure so `webcheck` drives it with a dirty draft and a cleared key.
- */
+/** Only the cleared key takes the server's value; every other field keeps what was typed, so Save cannot write the old value back. */
 export function draftAfterClear(draft: SmtpDraft, key: string, answerDraft: SmtpDraft): SmtpDraft {
   const field = SMTP_DRAFT_FIELD[key];
   if (field === undefined) return draft;
   return { ...draft, [field]: answerDraft[field] };
 }
 
-/**
- * The public URL a fresh server is offered: the origin this page was served
- * from, **as a value rather than a placeholder**.
- *
- * `mailConfigured` on the control plane requires `mail.public_url`, and the
- * screen drew the origin only as a placeholder — so an admin who filled in the
- * SMTP fields and pressed Save still had a server refusing to send, with the
- * one value it wanted sitting greyed in the box they had just looked at
- * (review D15). On every ordinary deployment the origin *is* where links in
- * mail should point, so it goes into the draft and the form is marked dirty:
- * Save is live and sends it, and the provenance line under the field keeps
- * saying "not set" until the 200 makes it true.
- *
- * Seeded only where nothing is set anywhere — a stored or environment value
- * is somebody's decision — and only from an origin that would pass
- * `smtpProblem`, since a `file:` or `null` origin seeded here would be a
- * problem sentence over a value nobody typed. The screen calls this **once,
- * at mount**, never on the re-sync after a save or a clear: a person who
- * empties the field on purpose and saves must not watch it come back.
- *
- * And the screen keeps the server's `mail.problems` on screen while the seed is
- * the form's only edit (`seeded` in `EmailSection`): the diagnosis is drawn
- * under a clean form, and dirt nobody typed hid it on exactly the server this
- * is for.
- *
- * Pure so `webcheck` drives both arms.
- */
+/** Seeds this page's origin only where nothing is set anywhere; the screen calls it once, at mount. */
 export function seedPublicUrl(
   draft: SmtpDraft,
   field: ConfigField | undefined,
@@ -555,20 +189,7 @@ export function seedPublicUrl(
   return { draft: { ...draft, publicUrl: origin }, dirty: true };
 }
 
-/**
- * What is wrong with what has been typed, or `null`.
- *
- * A **typo catcher, not a validator** — the server is the only side that can
- * enforce anything, which is `account.ts`'s stated posture about every other
- * form here. In particular the address checks look for an `@` and stop: this
- * repository's position on canonical email patterns is that they are wrong in
- * both directions, and refusing somebody's real address in a form is worse than
- * letting the server say so.
- *
- * **An entirely empty draft is `null`, not a problem.** That is "mail is not
- * configured", which is a legal state — a form that refused to save it could
- * never turn mail off.
- */
+/** A typo catcher, not a validator. An entirely empty draft means mail is off, which is legal. */
 export function smtpProblem(draft: SmtpDraft): string | null {
   const empty =
     draft.host.trim().length === 0 &&
@@ -590,15 +211,6 @@ export function smtpProblem(draft: SmtpDraft): string | null {
   return null;
 }
 
-/**
- * Whether the sender and the sign-in look like they will disagree.
- *
- * A warning the screen shows and never a refusal: most submission servers insist
- * the envelope sender is the mailbox you authenticated as, and answer
- * `550 sender not allowed` otherwise — but a relay that authorises a whole
- * verified domain legitimately sends as any address in it. The server makes the
- * same judgement in `mailConfigured` and also declines to enforce it.
- */
 export function senderMismatch(draft: SmtpDraft): boolean {
   const username = draft.username.trim().toLowerCase();
   const from = draft.from.trim().toLowerCase();

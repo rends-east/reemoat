@@ -1,60 +1,6 @@
 #!/bin/sh
-# What a runner does to publish a release, as a script rather than as YAML.
-#
-# The same argument `ci-deploy.sh` opens with, applied to the other act: a
-# workflow file is exercised by pushing and watching, so anything in one that
-# *decides* something is a decision no driver can reach. `release.yml` is
-# therefore a checkout and four calls, and every refusal below is driven by
-# `deploycheck` with no registry, no forge and no network, through five seams:
-#
-#   GH            — how the commit's CI verdict is read, and how the release is
-#                   created. A stub in the driver, so the green path and every
-#                   red one are both exercised.
-#   DOCKER        — every call that would reach a registry. `echo` in the driver,
-#                   so the exact build argv is an assertion rather than a hope.
-#   RELEASE_ROOT  — the tree whose versions are read. Pointed at a synthetic
-#                   fixture, which is what makes "refuse a tag the manifests
-#                   disagree with" testable at all without committing six
-#                   deliberately-wrong manifests.
-#   TAURI         — the app bundler. `echo` in the driver, for `DOCKER`'s reason:
-#                   which bundle kind and which target triple reach it is an
-#                   assertion rather than a hope.
-#   NODE          — the daemon payload's staging step. Un-prefixed like the two
-#                   above because it is a program this script runs, not a value
-#                   it reads.
-#   APKSIGNER     — the Android signature check. A seam for `GH`'s reason rather
-#                   than `DOCKER`'s: its answers matter, and so does what it
-#                   prints about which schemes verified — so the driver stubs a
-#                   verifier for each kind of APK (both schemes, v2 alone, the
-#                   JAR signature alone) and one that verifies nothing, and none
-#                   of them needs an Android SDK on the machine running the
-#                   driver.
-#
-# **Five verbs, and every one of them re-runs every gate.**
-#
-#   plan      compute and print; write the release notes out. Touches nothing.
-#   image     build one platform and push it **by digest**, claiming no tag.
-#   manifest  merge the digests into the tags that people type.
-#   app       build the native app for one target and name the artifact it
-#             produced. A **sibling** of `image`, not a successor: an app
-#             artifact has no merge step, so a verb between this and `publish`
-#             would decide nothing.
-#   publish   create the GitHub Release from the notes `plan` extracted, with
-#             every app artifact and the installer on it.
-#
-# The verbs exist so each `run:` line in the workflow is one word. The gates
-# repeat because a workflow is a graph somebody can re-run a single job of, and
-# `manifest` executing against a tag that `plan` would have refused is precisely
-# the failure that shape invites. Repeating them costs milliseconds.
-#
-# **What a green run here does not earn.** Nothing about GHCR actually accepting
-# the push, nothing about whether the image would start, and nothing about the
-# attestation verifying afterwards. Those need the world; this needs a tree.
+# Release verbs plan|image|manifest|app|publish, each re-running every gate; GH, DOCKER, TAURI, NODE, APKSIGNER and RELEASE_ROOT are seams deploycheck stubs.
 set -eu
-
-# ---------------------------------------------------------------------------
-# The seams, and what each verb needs.
-# ---------------------------------------------------------------------------
 
 GH=${GH:-gh}
 DOCKER=${DOCKER:-docker}
@@ -62,78 +8,18 @@ DOCKER=${DOCKER:-docker}
 _here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RELEASE_ROOT=${RELEASE_ROOT:-$(dirname -- "$_here")}
 
-# The published name, and the reason it is nested rather than flat. GHCR takes
-# `owner/name` and `owner/repo/name` alike; the second is chosen so the published
-# reference and the locally-built one are visibly the same artifact —
-# `reemoat/control-plane:current` beside
-# `ghcr.io/rends-east/reemoat/control-plane:v0.1.0`. `REEMOAT_CP_IMAGE` is one
-# string either way, which is the whole point of that variable.
 RELEASE_IMAGE=${RELEASE_IMAGE:-ghcr.io/rends-east/reemoat/control-plane}
 
-# The architectures this release is published for, and the one variable that
-# decides them — the way `REEMOAT_CP_IMAGE` is the one variable that decides
-# built-here against pulled-from-a-registry.
-#
-# `linux/amd64` alone, deliberately. arm64 is *viable*: the lockfile carries
-# `@esbuild/linux-arm64` and the glibc rollup binary, the base image is
-# `node:24-slim`, and public repositories get native arm64 runners. It is not
-# *measured*: `check.yml`'s image job runs on `ubuntu-latest`, so `imagecheck` has
-# never built, started or probed this image on arm64, and publishing a manifest
-# entry no check has ever exercised would make the first arm64 build in this
-# project's history happen on the release path and the first arm64 *run* happen on
-# somebody's server. The Dockerfile makes the same argument against alpine in more
-# words. Earning it is two edits here and one matrix entry in `check.yml`.
-#
-# QEMU is refused outright rather than deferred: `pnpm install`, esbuild and vite
-# under emulation is the ten-to-forty-times case, on a job already budgeted in
-# minutes.
+# linux/amd64 only until imagecheck has built and run this image on arm64.
 RELEASE_PLATFORMS=${RELEASE_PLATFORMS:-linux/amd64}
 RELEASE_PLATFORM=${RELEASE_PLATFORM:-$RELEASE_PLATFORMS}
 
 RELEASE_LATEST=${RELEASE_LATEST:-1}
 
-# The app targets this release is published for, and the one variable that
-# decides them — `RELEASE_PLATFORMS`' shape, and its argument word for word.
-#
-# ⚠ **Every name here must already be built by a job in `check.yml`.** Publishing
-# a target no check has ever compiled would make its first build in this project's
-# history happen on the release path and its first *run* happen on somebody's
-# laptop, with no way to tell a bundler regression from a bug. `deploycheck` reads
-# `check.yml`'s matrix and this list against each other, so "add a platform" is
-# two edits or it is none.
-#
-# `macos-x64` rather than `universal-apple-darwin`: `tauri-build`'s `copy_binaries`
-# resolves `binaries/node-<target-triple>`, so a universal build wants a `lipo`-ed
-# Node *and* both esbuild platform binaries inside the payload. Neither has been
-# measured here, and two arch-specific artifacts cover the same hardware with
-# nothing unmeasured on the path.
-# ⚠ **`-` rather than `:-`, and it is the only knob in this file spelled that
-# way.** For every other one an empty value is meaningless — `RELEASE_IMAGE=""`
-# is not a request — so `:-` reads "unset or empty means the default" and costs
-# nothing. For a *list* an empty value is a request: publish no app at all, which
-# is what a control-plane-only patch release wants and what the driver needs in
-# order to exercise the notes and the installer without seven artifacts. With
-# `:-` there is no way to say it.
-# ⚠ **A target joins this list in the same change that gives it a `check.yml`
-# leg, never before**, and `deploycheck` asserts that pairing by reading the two
-# files against each other. The four below arrived together with `check.yml`'s
-# `native` matrix, which builds each of them — a real bundle rather than the
-# `--no-bundle` link check that job used to be, because a weaker build standing
-# behind a published artifact is the thing this rule exists to stop.
-#
-# `android` is here on the same terms: `android-apk` in `check.yml` assembles a
-# signed APK on every push, and the four repository secrets the `app` verb
-# refuses by name further down are set. An unsigned APK installs on nothing, and
-# a throwaway key can never be replaced on a device that took it — so those
-# secrets are the other half of this word, and removing them is how it comes
-# back out.
+# Every target needs a check.yml native leg (deploycheck pairs the two); `-` not `:-`, because an empty list means publish no app.
 RELEASE_APP_TARGETS=${RELEASE_APP_TARGETS-macos-arm64 macos-x64 linux-x64 windows-x64 android}
 RELEASE_APP_TARGET=${RELEASE_APP_TARGET:-}
 
-# The Android release key, base64 in and never written inside the checkout.
-#
-# Four values because a JKS carries two passwords and they are routinely
-# different; each is refused by name, so somebody who set three finds out which.
 RELEASE_ANDROID_KEYSTORE=${RELEASE_ANDROID_KEYSTORE:-}
 RELEASE_ANDROID_KEYSTORE_PASSWORD=${RELEASE_ANDROID_KEYSTORE_PASSWORD:-}
 RELEASE_ANDROID_KEY_ALIAS=${RELEASE_ANDROID_KEY_ALIAS:-}
@@ -142,15 +28,6 @@ RELEASE_ANDROID_KEY_PASSWORD=${RELEASE_ANDROID_KEY_PASSWORD:-}
 TAURI=${TAURI:-tauri}
 NODE=${NODE:-node}
 
-# The Android signature verifier.
-#
-# ⚠ **`apksigner` is the only thing in this script that can tell a signed APK
-# from an unsigned one**, or say which schemes signed it, and it ships inside the
-# Android SDK's build-tools rather than on PATH, at a version-numbered path
-# nobody should write down here.
-# Left unset it is resolved out of the SDK the build already needed; the `app`
-# verb refuses rather than skipping the check when it cannot be found, because a
-# verification that silently does not run is worse than none — it reads as green.
 APKSIGNER=${APKSIGNER:-}
 
 RELEASE_WORK=${RELEASE_WORK:-${RUNNER_TEMP:-/tmp}/reemoat-release}
@@ -172,14 +49,6 @@ esac
 
 R=$RELEASE_ROOT
 
-# ---------------------------------------------------------------------------
-# What must be set, checked before anything reaches a registry or a forge.
-#
-# The same reasoning as `ci-deploy.sh`: a missing input is a configuration
-# mistake and has to read as one, rather than as buildx failing obscurely against
-# an image reference ending in a colon.
-# ---------------------------------------------------------------------------
-
 missing=""
 [ -n "${RELEASE_TAG:-}" ] || missing="$missing RELEASE_TAG"
 [ -n "${RELEASE_REF:-}" ] || missing="$missing RELEASE_REF"
@@ -193,16 +62,6 @@ if [ -n "$missing" ]; then
 Until they are set, release by hand: git tag v0.1.0 && git push origin v0.1.0,
 which is what triggers .github/workflows/release.yml."
 fi
-
-# ---------------------------------------------------------------------------
-# The tag is a version, and a prerelease is refused by name.
-#
-# Refused rather than accepted quietly, because accepting one means answering
-# three questions nobody has answered: whether `latest` moves for it, whether the
-# GitHub Release is marked prerelease, and what shape `CHANGELOG.md` takes for a
-# version that is not final. A refusal that says so is how the next person finds
-# out the decision is theirs to make.
-# ---------------------------------------------------------------------------
 
 VERSION=${RELEASE_TAG#v}
 
@@ -218,8 +77,6 @@ esac
 
 case "$RELEASE_TAG" in
   v*) ;;
-  # Named as a shape rather than as "add a v", which read as `vnightly` when the
-  # rest of the tag was not a version either.
   *) fail "refusing \"$RELEASE_TAG\": a release tag is v<major>.<minor>.<patch>, e.g. v0.1.0" ;;
 esac
 
@@ -233,32 +90,13 @@ if [ "$(printf '%s' "$VERSION" | tr -cd '.' | wc -c | tr -d ' ')" != "2" ]; then
   fail "refusing \"$RELEASE_TAG\": \"$VERSION\" is not major.minor.patch"
 fi
 
-# ---------------------------------------------------------------------------
-# The tag against every place the version is written down.
-#
-# Six files, six comparisons, and each refusal names its own file — because
-# "the version disagrees" is not actionable and "packages/web/package.json says
-# 0.1.0" is.
-#
-# `pnpm pincheck` already asserts all of these agree with each other, so in a
-# green tree this whole section reduces to one comparison. It is done in full
-# anyway, for one reason: `RELEASE_SKIP_CHECK_GATE=1` exists, and with it the
-# `pincheck` that would have caught the disagreement never runs. The one thing a
-# release must never do is ship an image whose section 13 source offer names a
-# version whose source nobody can fetch.
-#
-# Read with `sed` rather than `node`. A `ci-*` script depends on nothing but a
-# shell — `deploy/lib.sh`'s `json_field` does use node and is deliberately not
-# reachable from here.
-# ---------------------------------------------------------------------------
+# Re-checked here because RELEASE_SKIP_CHECK_GATE skips pincheck; read with sed since a ci-* script needs nothing but a shell.
 
 manifest_version() {
   sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$1" | head -1
 }
 
-# An empty read is a pattern that stopped matching, and it has to fail as loudly
-# as a disagreement — a check that silently compares "" to "" is the one outcome
-# worse than no check. Same rule `pincheck`'s `capture` states in TypeScript.
+# An empty read means the pattern stopped matching, and must fail as loudly as a disagreement.
 require_read() {
   [ -n "$2" ] || fail "refusing $RELEASE_TAG: could not read a version out of $1.
 
@@ -284,39 +122,10 @@ agree "packages/control-plane/src/app.ts" "$offer_version"
 changelog_version=$(sed -n 's/^## \[\([0-9][0-9.]*\)\] - .*/\1/p' "$R/CHANGELOG.md" | head -1)
 agree "CHANGELOG.md" "$changelog_version"
 
-# And the daemon's own literal, which is the sixth and was checked here by
-# nothing.
-#
-# The paragraph above is the whole argument for it: `pincheck` asserts this one
-# too, and `RELEASE_SKIP_CHECK_GATE=1` is exactly the case where `pincheck` never
-# runs. What ships wrong then is the number a machine reports about itself, which
-# `cpctl admin fleet` reads back and a staged rollout is planned from — and a
-# fleet inventory that reports the wrong version is worse than no inventory,
-# because "nothing is below v2 any more" is the sentence that decides whether the
-# floor can be raised.
 daemon_version=$(sed -n 's/^export const DAEMON_VERSION = "\([^"]*\)";$/\1/p' "$R/src/version.ts")
 agree "src/version.ts" "$daemon_version"
 
-# ---------------------------------------------------------------------------
-# The release notes, which are a thing somebody wrote.
-#
-# Extracted from the heading to the next one, so `publish` never reaches for
-# `--generate-notes`. An empty section is refused: a release nobody can read is
-# worse than a release that failed to publish, because only one of the two gets
-# noticed.
-# ---------------------------------------------------------------------------
-
-#
-# It stops at the next `##` **or at the link-reference block**, and the second
-# half was measured rather than anticipated: the newest release is the last
-# section in the file, so there is no following heading to stop at and the first
-# extraction ran to end-of-file and swallowed
-# `[Unreleased]: https://…/compare/…` — publishing a release whose notes end in
-# two dangling link definitions. Every changelog in this format has that block and
-# it is always last, so it is a terminator in its own right.
-#
-# The trailing pipeline trims blank lines off both ends, so the notes begin and
-# end with prose whatever spacing the file uses around headings.
+# Stops at the next heading or at the trailing link-reference block, then trims blank lines at both ends.
 extract_notes() {
   awk -v head="## [$VERSION] " '
     index($0, head) == 1 { inside = 1; next }
@@ -331,61 +140,11 @@ notes=$(extract_notes)
 
   The GitHub Release is that section and nothing else. Write it before tagging."
 
-# ---------------------------------------------------------------------------
-# Refuse a commit whose checks are not green — and **wait** for one still running.
-#
-# The same gate `ci-deploy.sh` applies, with one thing true here that is not true
-# there: the `check` *workflow* is green only when the `check` job and the `image`
-# job both are. So this gate is strictly stronger than a deploy's — the image
-# about to be pushed is the one `imagecheck` already built and started.
-#
-# ⚠ **It used to read the verdict once, and that made the gate a race this
-# workflow loses by default.** The old query filtered to `status == "completed"`
-# and collapsed everything else through `// "none"`, so a `check` run that was
-# still *in flight* was indistinguishable from a commit that had never been
-# checked at all — and both refused. But `release.yml` triggers on the tag push,
-# and `check.yml` triggers on the very same push, so the two start in the same
-# second and this gate runs ~15s later against a run that takes ~2m10s. The gate
-# was therefore only ever passing because somebody had pushed the branch minutes
-# *earlier*, leaving a completed run on the same commit for it to find.
-#
-# Measured on this repository. v0.8.0: branch pushed 21:44:03, its `check`
-# finished 21:46:05, the tag pushed 21:48:46 — 2m41s of slack, gate green.
-# v0.9.0: branch pushed 12:22:35, tag pushed 12:22:37, gate read at 12:22:51 with
-# both runs still going — `"none"`, and the release refused. Two seconds apart is
-# the ordinary way to push a branch and its tag; the 2m41s was luck, and nothing
-# anywhere asked for it. The refusal even said *"Wait for it"*, to a person who
-# had already walked away.
-#
-# So `pending` is now its own verdict and it is waited on, bounded by
-# `RELEASE_CHECK_WAIT_SECONDS` (default 2700, under `release.yml`'s
-# `timeout-minutes: 45`, so the deadline is this script's sentence rather than a
-# runner kill with no explanation).
-#
-# ⚠ **The number is a multiple of the SLOWEST leg, not of the fastest.** It was
-# 420 — "three times a `check` run" — written when `check` was five quick jobs.
-# `check` now carries `native-android` and `android-apk`, which run an NDK
-# toolchain and a full Gradle assemble, so 420 would refuse an ordinary tag
-# *after* the image and manifest jobs had already pushed: the half-done release
-# state `publish`-is-last exists to prevent, arriving through the gate instead.
-# A leg added to `check` moves this number in the same change.
-#
-# ⚠ **`none` is deliberately NOT waited on.** A commit with no `check` run at all
-# is the shape a missing `actions: read` produces — `release.yml` says so at the
-# `plan` job — and that is a permissions bug which must stay loud and instant
-# rather than hiding behind a seven-minute wait. Run rows exist the moment the
-# event dispatches, so there is no registration lag for this to paper over: at
-# 12:22:51 above, both runs already existed and were merely unfinished.
-#
-# `RELEASE_SKIP_CHECK_GATE=1` is the escape, and it is deliberately awkward.
-# ---------------------------------------------------------------------------
+# A pending check is waited on, bounded by the slowest check leg; none is refused at once, since it means a missing actions: read.
 
 if [ "${RELEASE_SKIP_CHECK_GATE:-0}" = "1" ]; then
   echo "check gate skipped by RELEASE_SKIP_CHECK_GATE"
 else
-  # Both injectable so `deploycheck` can drive the wait, the deadline and the
-  # green-after-pending path in milliseconds. A wait of 0 is the old read-once
-  # behaviour exactly, which is how the driver asserts what that used to cost.
   check_wait=${RELEASE_CHECK_WAIT_SECONDS:-2700}
   check_poll=${RELEASE_CHECK_POLL_SECONDS:-15}
   waited=0
@@ -421,15 +180,7 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------------------
-# Refuse a re-release.
-#
-# Two questions, and the second is the one that matters. GitHub refuses to create
-# a release that exists; **GHCR moves a tag without complaining**, so publishing
-# v0.1.0 twice silently repoints a name somebody has already pulled and pinned. A
-# registry that overwrites quietly is why this asks rather than relies on the
-# forge to refuse.
-# ---------------------------------------------------------------------------
+# GHCR moves an existing tag silently, so a re-release is refused here rather than left to the forge.
 
 if [ "${RELEASE_ALLOW_RETAG:-0}" = "1" ]; then
   echo "existing-release check skipped by RELEASE_ALLOW_RETAG"
@@ -440,12 +191,7 @@ else
   Releases are not edited in place here. Cut the next version, or say so out
   loud: RELEASE_ALLOW_RETAG=1"
   fi
-  # ⚠ The image half is asked by every verb **except `publish`**, and that is
-  # ordering rather than a softer rule. `manifest` runs immediately before it and
-  # creates exactly the tag this looks for, so asking here would make the last
-  # step of a successful release refuse the release it just built — a gate that
-  # fires only when everything worked. `plan` runs first and asks in full, which
-  # is where a genuine re-release is caught.
+  # Not asked by publish: manifest has just created this tag, and plan already caught a genuine re-release.
   if [ "$verb" != "publish" ] && "$DOCKER" buildx imagetools inspect "$RELEASE_IMAGE:$RELEASE_TAG" >/dev/null 2>&1; then
     fail "refusing $RELEASE_TAG: $RELEASE_IMAGE:$RELEASE_TAG is already published.
 
@@ -455,22 +201,6 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------------------
-# What gets published, computed from files rather than written down here.
-#
-# Every label below is derived. A `LABEL org.opencontainers.image.licenses=` line
-# in the Dockerfile would be a third place this project's licence is recorded,
-# beside `package.json` and `LICENSE`, and the third copy is the one that goes
-# stale.
-#
-# `source` is read from `app.ts`'s `SOURCE_URL` rather than from
-# `package.json`'s `repository.url`, which is the more load-bearing of two
-# strings that are equal today. GHCR uses that label to link the package to a
-# repository, and `app.ts` instructs a fork to change that constant to satisfy
-# section 13 — so a fork that follows the licence instruction gets a correct
-# image label as a side effect. `pincheck` keeps the two in step here.
-# ---------------------------------------------------------------------------
-
 json_field() {
   sed -n "s/.*\"$2\": *\"\([^\"]*\)\".*/\1/p" "$1" | head -1
 }
@@ -478,12 +208,6 @@ json_field() {
 source_url=$(sed -n 's/^const SOURCE_URL = "\([^"]*\)";$/\1/p' "$R/packages/control-plane/src/app.ts")
 require_read "packages/control-plane/src/app.ts (SOURCE_URL)" "$source_url"
 
-# Each guarded, for `require_read`'s own stated reason: an empty read is a
-# pattern that stopped matching and has to fail as loudly as a disagreement. Only
-# `source_url` was, and the other four go straight into a `--label` — so
-# reformatting `package.json`, or making `author` an object, published an image
-# with an empty licence or vendor and a green run everywhere. `deploycheck`'s
-# `labelFollows` asserts the populated case and cannot see the empty one.
 license=$(json_field "$R/package.json" license)
 require_read "package.json (license)" "$license"
 homepage=$(json_field "$R/package.json" homepage)
@@ -495,18 +219,6 @@ require_read "packages/control-plane/package.json (description)" "$description"
 created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 short_sha=$(printf '%s' "$RELEASE_REF" | cut -c1-12)
 
-# Three tags, and two that were considered and dropped.
-#
-#   v0.1.0     the git tag verbatim, so what an operator pastes is what `git tag`
-#              says.
-#   sha-<12>   the only tag stable by construction, and the one a rollback wants.
-#   latest     the quick-start line needs something to type. It moves, and the
-#              README says it moves.
-#
-# Dropped: a bare `0.1.0`, because two names for one digest is two things to keep
-# in step for no gain; and rolling `0.1` and `0`, because under SemVer a 0.x
-# *minor* is the breaking one, so `:0` here would mean "may break without
-# warning" while reading like stability.
 tag_version="$RELEASE_IMAGE:$RELEASE_TAG"
 tag_sha="$RELEASE_IMAGE:sha-$short_sha"
 tag_latest=""
@@ -518,37 +230,9 @@ emit() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# The app targets, as a table rather than as branching.
-#
-# Four questions per target and each has exactly one answer here: which Rust
-# triple it builds for, whether it carries a daemon payload, what artifact falls
-# out with what name, and which runner builds it.
-#
-# The fourth arrived with the workflow wiring and is the reason the other three
-# stayed here rather than half-migrating into YAML: `plan` emits this table as
-# `release.yml`'s matrix, so the workflow holds no list of its own and adding a
-# target is `RELEASE_APP_TARGETS` plus a `check.yml` leg — never a third edit.
-#
-# ⚠ **What it deliberately does *not* answer is which bundle kinds to produce.**
-# That is `bundle.targets` in `packages/native/src-tauri/tauri.<platform>.conf.json`,
-# and passing `--bundles` here would be a second copy of it — two places to keep
-# in step, with the silent direction being a release that publishes a `.deb` while
-# the checked-in configuration says AppImage. So the build below carries no
-# `--bundles` at all and `deploycheck` asserts its absence.
-#
-# The product name is **read** rather than written, the way every OCI label
-# already is: a fork that renames the app gets correctly-named assets without
-# editing this script.
-# ---------------------------------------------------------------------------
-
 app_product=$(json_field "$R/packages/native/src-tauri/tauri.conf.json" productName)
 require_read "packages/native/src-tauri/tauri.conf.json (productName)" "$app_product"
 
-# Every target this script can build, which is a wider list than
-# `RELEASE_APP_TARGETS`: the first is what the table knows how to do, the second
-# is what this release publishes. Naming both is how "unknown target" and "known
-# target you did not ask for" stay two different refusals.
 app_known="macos-arm64 macos-x64 linux-x64 linux-arm64 windows-x64 android"
 
 app_triple() {
@@ -558,17 +242,12 @@ app_triple() {
     linux-x64) echo "x86_64-unknown-linux-gnu" ;;
     linux-arm64) echo "aarch64-unknown-linux-gnu" ;;
     windows-x64) echo "x86_64-pc-windows-msvc" ;;
-    # Four ABIs in one universal APK, so there is no single triple to name and
-    # the arch token is absent from the asset name for the same reason.
     android) echo "" ;;
     *) return 1 ;;
   esac
 }
 
-# `full` carries the Node runtime and a copy of `src/`; `client` carries neither.
-# `.claude/rules/native-packaging.md` owns the argument and the per-platform
-# answer; this reads it back rather than restating it, by asking the one thing
-# that decides it — whether that platform has an overlay taking the payload away.
+# full carries the Node runtime and src/, client neither; decided by whether the platform overlay drops externalBin.
 app_profile() {
   _overlay=""
   case "$1" in
@@ -592,34 +271,7 @@ app_profile() {
   fi
 }
 
-# And which runner builds it, which is the fourth question and the one this file
-# had no answer for at all.
-#
-# ⚠ **It is here rather than in `release.yml`'s matrix for the reason every other
-# row is here: a matrix written out in YAML is a third list to keep in step with
-# `RELEASE_APP_TARGETS` and with `check.yml`, and the only one of the three that
-# nothing can drive.** `plan` emits this table as the matrix, so `deploycheck`
-# reads JSON a fixture produced rather than grepping a workflow for a leg
-# somebody hand-wrote — and "add a target" stays two edits or it is none.
-#
-# Both macOS targets answer the same arm64 runner, which is the row worth stating
-# because it is the one that is not obvious. `tauri build --target
-# x86_64-apple-darwin` cross-compiles there, and `build-daemon.mjs`'s `TARGETS`
-# already carries the x64 Node build and `@esbuild/darwin-x64` beside the arm64
-# pair — so there is nothing unmeasured about the payload either. GitHub's
-# Intel-macOS label has moved once already; a second runner would be a second
-# thing to re-check every time it moves again.
-#
-# ⚠ **There is deliberately no `android` arm, and its absence is what keeps
-# android out of the matrix.** An APK needs a JDK, the SDK, the NDK and a Gradle
-# run, and it is the only target that reads a signing key — so it is
-# `app-android`, a job of its own, and `plan` announces it with a flag instead. A
-# row here would be a value with no reader, which is the objection
-# `native-packaging.md` already makes to `bundle.targets` on a mobile overlay.
-#
-# The `*)` arm is reachable by drift rather than by typo: `app_check_targets` has
-# already refused a name the table does not know, so what lands there is a target
-# somebody added to `app_triple` and `app_artifacts` and not to this.
+# No android arm on purpose: android is its own app-android job rather than a matrix leg.
 app_runner() {
   case "$1" in
     macos-arm64 | macos-x64) echo "macos-latest" ;;
@@ -630,10 +282,7 @@ app_runner() {
   esac
 }
 
-# One line per artifact, as `<glob>|<how>|<asset name>`. `zipdir` is for a macOS
-# `.app`, which is a *directory* — `ditto -c -k --keepParent` rather than `zip
-# -r`, because a plain zip flattens the framework symlinks inside a bundle and
-# produces something that will not launch.
+# zipdir uses ditto because zip -r flattens the framework symlinks inside a .app.
 app_artifacts() {
   _t=$(app_triple "$1") || return 1
   _b="packages/native/src-tauri/target/$_t/release/bundle"
@@ -645,35 +294,14 @@ app_artifacts() {
       echo "$_b/appimage/*.AppImage|copy|$app_product-$VERSION-$1.AppImage" ;;
     windows-*)
       echo "$_b/nsis/*-setup.exe|copy|$app_product-$VERSION-$1-setup.exe" ;;
-    # ⚠ **Named exactly, never `*.apk`, and the reason is one filename.** AGP
-    # writes `app-universal-release-unsigned.apk` when the release build type
-    # carries no `signingConfig` — which is what happens when
-    # `System.getenv("ANDROID_KEYSTORE_PATH")` answers null inside the Gradle
-    # **daemon**, a JVM that outlives one build and captured its environment when
-    # it started. A `*.apk` glob matched that name exactly as well as the signed
-    # one and matched exactly one file, so the collision gate saw nothing wrong
-    # and the release would have carried an APK that installs on no device, under
-    # the signed one's asset name. Naming the file is the cheap half; the
-    # `apksigner` run in the `app` verb is what catches an APK at the right name
-    # whose signature does not verify.
+    # Named exactly, never a glob: AGP writes app-universal-release-unsigned.apk when the build saw no signing key.
     android)
       echo "packages/native/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk|copy|$app_product-$VERSION-android.apk" ;;
     *) return 1 ;;
   esac
 }
 
-# Every asset name this release is going to carry, in one place, so `plan` can
-# refuse a collision before a single runner starts and `publish` can name the one
-# that is missing rather than saying "something".
-# ⚠ **Every name in the list is checked against the table before anything uses
-# it, and the loop below is why.** `app_artifacts` answers 1 for a name the table
-# does not know, and it is called *inside a pipeline* — there is no `pipefail`
-# here, so `set -e` never sees it and the name contributes no asset at all.
-# A typo therefore used to pass `plan`'s collision gate and `publish`'s
-# completeness gate alike, and the release went out with that platform simply
-# absent: the exact outcome `publish`'s own refusal says cannot happen. The
-# `app` verb refuses an unknown *singular* target, but a typo'd list never
-# reaches it, because no matrix leg runs for a name nobody wrote a job for.
+# Validates every name first: app_artifacts fails inside a pipeline, where set -e (no pipefail) never sees it.
 app_check_targets() {
   for _target in $RELEASE_APP_TARGETS; do
     app_triple "$_target" >/dev/null 2>&1 || fail \
@@ -686,10 +314,7 @@ app_check_targets() {
   done
 }
 
-# ⚠ **`app_check_targets` is deliberately NOT called from here.** Both call sites
-# below invoke this function inside `$( )`, and `fail` in a command substitution
-# exits the *subshell*: the refusal prints on stderr, `$?` stays 0 and the release
-# carries on. Measured. So the check is called by each verb directly.
+# Must not call app_check_targets: callers run this inside command substitution, where fail exits only the subshell.
 app_asset_names() {
   for _target in $RELEASE_APP_TARGETS; do
     app_artifacts "$_target" | while IFS='|' read -r _glob _how _name; do
@@ -698,21 +323,9 @@ app_asset_names() {
   done
 }
 
-# ---------------------------------------------------------------------------
-# The verbs.
-# ---------------------------------------------------------------------------
-
 case "$verb" in
 
   plan)
-    # ── what every app leg is going to be asked for, before any of them runs ──
-    #
-    # Both of these are cheap, both run first, and both exist because the
-    # alternative is discovering them in the fortieth minute of a matrix.
-    #
-    # A collision is a table edit rather than a build failure: two targets
-    # computing one asset name would have one silently win, and
-    # `releases/latest/download/<name>` resolves on that name.
     app_check_targets
     app_seen=""
     for app_name in $(app_asset_names); do
@@ -726,54 +339,14 @@ case "$verb" in
       app_seen="$app_seen $app_name"
     done
 
-    # ⚠ **The Android key is deliberately *not* asked for here, and the first
-    # version of this did ask.** It looked like the same cheap gate as the one
-    # above: refuse early rather than after forty minutes of matrix. It is not.
-    # The four secrets are scoped to the `app-android` job precisely so that *who
-    # can read the keystore* is answerable by reading `release.yml` — and `plan`
-    # is the job whose whole property is that it "can write nothing anywhere".
-    # Asking here would mean handing the signing key to the job that runs every
-    # gate, or refusing every release for want of a secret this job cannot see.
-    #
-    # And the saving was imaginary: `app` and `app-android` are siblings under
-    # `plan`, so they start in the same second. A missing secret is found at the
-    # same moment every other leg begins, not forty minutes later. The `app` verb
-    # names all four, one at a time.
+    # The Android secrets are deliberately not checked here: only the app-android job can read them.
 
     mkdir -p "$RELEASE_WORK"
     printf '%s\n' "$notes" > "$RELEASE_NOTES_FILE"
-    # ── AGPL §6, which `bundle.licenseFile` does not discharge ─────────────
-    #
-    # ⚠ **Handing somebody a binary is a *distribution*, and §13's source offer is
-    # about the hosted service.** `docs/NATIVE.md` names the gap; what it does not
-    # name is that `bundle.licenseFile` closes it only for the bundlers that read
-    # one — `dmg` and `nsis` — and the macOS artifact is a `.app`, which reads it
-    # for nothing. So the offer rides the release page, where every artifact is.
-    #
-    # It names *this tag* rather than a branch: `main` is routinely ahead of every
-    # tag, so "the corresponding source" has to be the commit that was built.
-    # `source_url` is `app.ts`'s `SOURCE_URL` — the same constant §13 uses and the
-    # one a fork is instructed to change — so a fork gets a correct offer for free.
+    # AGPL section 6 source offer naming this tag, since bundle.licenseFile does not reach a .app.
     printf '\n---\n\nThese builds are AGPL-3.0-only, and conveying a binary is a distribution.\nThe corresponding source for this release is the `Source code` archive on this\npage and %s/tree/%s.\n' \
       "$source_url" "$RELEASE_TAG" >> "$RELEASE_NOTES_FILE"
-    # ── the matrix `release.yml` runs, computed here rather than written there ──
-    #
-    # ⚠ **Three outputs for one list, and the shape of each is decided by what
-    # reads it.** `app_targets` is the word list a person reads in the log and
-    # what `publish`'s download step is gated on. `app_matrix` is the same thing
-    # as JSON, in the `{"include": […]}` form a matrix takes directly.
-    # `app_desktop` and `app_android` are what the two jobs' `if:` lines compare
-    # — and they exist because **an empty matrix in GitHub Actions is a job that
-    # fails rather than one that skips**, so "no targets today" has to be sayable
-    # to an `if:` before the matrix is ever evaluated.
-    #
-    # `app_desktop` is not `app_targets`: a release asking for android alone has
-    # a non-empty target list and an empty matrix, which is precisely the case
-    # that would have failed.
-    #
-    # Built by hand rather than with `jq`, for the reason the header gives: a
-    # `ci-*` script depends on nothing but a shell. Every value interpolated is a
-    # target name out of a closed table, so there is nothing here to escape.
+    # An empty GitHub Actions matrix fails rather than skips, so app_desktop and app_android gate the jobs.
     app_matrix='{"include":['
     app_desktop=""
     app_android=""
@@ -818,9 +391,7 @@ case "$verb" in
     meta="$RELEASE_WORK/metadata-$(printf '%s' "$RELEASE_PLATFORM" | tr '/' '-').json"
     mkdir -p "$RELEASE_WORK"
 
-    # Labels first, into the positional parameters, because a description carries
-    # spaces and a word-split list of `--label` arguments would quietly truncate
-    # it at the first one.
+    # Labels go into the positional parameters so a description with spaces is not word-split.
     set --
     set -- "$@" --label "org.opencontainers.image.title=reemoat control plane"
     set -- "$@" --label "org.opencontainers.image.description=$description"
@@ -833,18 +404,7 @@ case "$verb" in
     set -- "$@" --label "org.opencontainers.image.documentation=$source_url/blob/$RELEASE_TAG/deploy/README.md"
     set -- "$@" --label "org.opencontainers.image.vendor=$vendor"
 
-    # Pushed **by digest**, claiming no tag at all. Two runners building two
-    # architectures must not each write the same tag — the second would win and
-    # the release would be single-arch with no error anywhere. `manifest` is what
-    # turns digests into names.
-    #
-    # ⚠ **No `--load` here, and that is not an oversight.** `imagecheck` passes
-    # `--load` and explains at length why it must: under the docker-container
-    # driver a local build otherwise stays in the buildx cache, the command exits
-    # 0, and the next `docker run` reaches for Docker Hub. That reasoning is about
-    # a build whose output is the local daemon. This one's output is a registry,
-    # and `--load` beside `push` is a contradiction. Copying that flag over is the
-    # obvious mistake, so `deploycheck` asserts it is absent.
+    # Pushed by digest with no tag (manifest names it); no --load, which deploycheck asserts absent.
     echo "building $RELEASE_PLATFORM for $RELEASE_IMAGE at $RELEASE_TAG"
     "$DOCKER" buildx build \
       --platform "$RELEASE_PLATFORM" \
@@ -855,10 +415,6 @@ case "$verb" in
       --metadata-file "$meta" \
       "$R"
 
-    # Two failures, and they are not the same failure — which is why they do not
-    # share `require_read`'s wording about a reformatted file. No metadata at all
-    # means the build did not run or did not get far enough to write it; metadata
-    # with no digest in it means buildx changed the key.
     [ -f "$meta" ] || fail "refusing $RELEASE_TAG: the build wrote no metadata at $meta.
 
   buildx writes that file at the end of a successful build, so its absence means
@@ -874,9 +430,6 @@ case "$verb" in
     ;;
 
   manifest)
-    # Every digest `image` wrote, merged into the tags people type. The same
-    # command for one digest as for two, which is the whole reason arm64 later is
-    # a matrix entry rather than a rewrite of this script.
     [ -d "$RELEASE_DIGEST_DIR" ] || fail "refusing $RELEASE_TAG: no digests at $RELEASE_DIGEST_DIR."
 
     set --
@@ -889,9 +442,6 @@ case "$verb" in
       refs="$refs $RELEASE_IMAGE@$(cat "$f")"
     done
 
-    # An empty digest directory is what a silently-skipped matrix leg looks like,
-    # and merging nothing would publish a tag that resolves to nothing while
-    # every step reported success.
     [ -n "$refs" ] || fail "refusing $RELEASE_TAG: $RELEASE_DIGEST_DIR holds no digests.
 
   Every \`image\` job was skipped or failed to write one. Publishing the tags now
@@ -901,11 +451,7 @@ case "$verb" in
     # shellcheck disable=SC2086 -- refs is a list of image references, deliberately split
     "$DOCKER" buildx imagetools create "$@" $refs
 
-    # And the digest of what that produced, emitted rather than left for the
-    # workflow to go and ask for. The attestation step needs a subject digest,
-    # and "run an inspect and parse it" is a decision — the kind this whole file
-    # exists to keep out of YAML. It is the **index** digest, not a platform's:
-    # one attestation covering the manifest people actually pull.
+    # The index digest, not a platform's, is the attestation subject.
     index_digest=$("$DOCKER" buildx imagetools inspect "$tag_version" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)
     [ -n "$index_digest" ] || fail "refusing $RELEASE_TAG: $tag_version was created and then could not be inspected.
 
@@ -949,15 +495,7 @@ case "$verb" in
     app_target_profile=$(app_profile "$RELEASE_APP_TARGET")
     mkdir -p "$RELEASE_APP_DIR"
 
-    # ── the payload, or the absence of one ────────────────────────────────
-    #
-    # ⚠ **The client half is the one with a real failure behind it.** A runner is
-    # reused and a matrix leg is re-run, so `binaries/node-*` and `target/daemon`
-    # outlive the build that staged them — and `tauri-build` copies whatever it
-    # finds, with no configuration saying it should not. The overlay removing
-    # `externalBin` is what makes that harmless, so this refuses rather than
-    # deleting: a staged runtime on a client leg means the leg is not the one
-    # whose name it is running under.
+    # A client leg refuses a runtime staged by an earlier run, because tauri-build copies whatever it finds.
     if [ "$app_target_profile" = "full" ]; then
       echo "staging the daemon payload for $app_target_triple"
       "$NODE" "$R/packages/native/scripts/build-daemon.mjs" "$app_target_triple"
@@ -980,10 +518,7 @@ case "$verb" in
   runner that never staged one."
     fi
 
-    # ── the build ─────────────────────────────────────────────────────────
-    #
-    # No `--bundles`: the kinds are `bundle.targets`, merged from the platform
-    # overlay, and a flag here would be the second copy of that list.
+    # No --bundles: the kinds come from bundle.targets in the platform overlay.
     echo "building $RELEASE_APP_TARGET ($app_target_profile) for $RELEASE_TAG"
     if [ "$RELEASE_APP_TARGET" = "android" ]; then
       android_missing=""
@@ -996,44 +531,7 @@ case "$verb" in
   All four are repository secrets. An unsigned APK installs on nothing, and one
   signed with a throwaway key can never be replaced on a device that took it —
   Android refuses an upgrade whose signer changed."
-      # ── the signing key on disk, and the four things writing it out has to
-      #    get right ─────────────────────────────────────────────────────────
-      #
-      # Still outside the checkout, so no `git add` and no artifact upload can
-      # carry it — that half of the old comment held, and it was the only half.
-      #
-      # ⚠ **The directory is made by `mktemp -d`, not named.** The old path was
-      # `$RELEASE_WORK/android-release.jks`, and `RELEASE_WORK` falls back to
-      # `/tmp/reemoat-release` whenever `RUNNER_TEMP` is unset — which is every
-      # run outside GitHub Actions, a maintainer's laptop included. `/tmp` is
-      # world-writable, `mkdir -p` succeeds on a directory somebody else already
-      # made, and `>` follows a symlink: anybody with a shell on that host could
-      # have pre-created `/tmp/reemoat-release/android-release.jks` pointing at a
-      # file they can read, and been handed the fleet's release key. `mktemp -d`
-      # creates the directory itself, at 0700, under a name nobody can predict,
-      # and fails rather than reusing one.
-      #
-      # ⚠ **And it is deliberately not `$RELEASE_WORK`, which is the parent of
-      # `$RELEASE_APP_DIR`** — the directory `publish` uploads assets out of.
-      # Nothing globs the parent today. The signing key does not live one `*`
-      # away from the upload set on the strength of "nothing globs it today".
-      #
-      # ⚠ **The trap is armed before anything secret exists, and it used to be
-      # armed after the write.** A Ctrl-C or a cancelled job inside that window
-      # left the keystore on the runner with no handler to remove it. Arming it
-      # against the empty directory means there is no moment in which the key is
-      # on disk and unclaimed.
-      #
-      # ⚠ **`umask 077` around the write, because `>` creates at the umask.** A
-      # runner's default is `022`, so the old redirection produced a `0644`
-      # keystore. The `mktemp` directory already denies everyone else and this is
-      # the second lock rather than the first: a mode is what survives the file
-      # being copied somewhere, and a directory's mode is not.
-      #
-      # `-s` afterwards because `base64 -d` on a truncated or mis-pasted secret
-      # writes an empty file and exits 0, and an empty keystore is a Gradle error
-      # forty minutes later that reads as a toolchain problem rather than as a
-      # bad secret.
+      # Key dir from mktemp, outside RELEASE_WORK, with the trap armed before the write and umask 077 around it.
       android_key_dir=$(mktemp -d "${TMPDIR:-/tmp}/reemoat-android-key.XXXXXX")
       trap 'rm -rf "$android_key_dir"' EXIT INT TERM
       ANDROID_KEYSTORE_PATH="$android_key_dir/android-release.jks"
@@ -1049,32 +547,7 @@ case "$verb" in
       export ANDROID_KEYSTORE_PATH ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
       (cd "$R/packages/native" && "$TAURI" android build --apk)
 
-      # ── the signature, checked rather than assumed ────────────────────────
-      #
-      # ⚠ **A release build signs itself only if `System.getenv("ANDROID_KEYSTORE_PATH")`
-      # is non-null *inside the Gradle JVM*, and that JVM is a daemon which
-      # outlives this script.** `app/build.gradle.kts` reads the variable at
-      # configuration time; a Gradle daemon started by an earlier build — a
-      # previous matrix leg, a developer's `tauri android dev`, a retry — carries
-      # the environment it was started with, so exporting the four names above is
-      # not by itself evidence that the build saw any of them. What it produces
-      # then is `app-universal-release-unsigned.apk`; what it produces if the
-      # keystore is unreadable is a build failure. Both of those are caught now.
-      # This covers the third case: an APK at the signed name whose signature does
-      # not actually verify.
-      #
-      # ⚠ **What this proves and what it does not.** `apksigner verify` answers
-      # *this APK is signed and the signature is internally consistent for its
-      # minSdk*. It does not answer *signed with the release key* — that needs a
-      # certificate fingerprint, which is not in this repository and would be a
-      # second place the identity of the signing key lives. Android's own refusal
-      # to upgrade across a changed signer is the backstop for the wrong key; this
-      # is the backstop for **no** key, which is the one with no symptom until
-      # somebody tries to install it.
-      #
-      # The resolver takes the last match, which is the highest build-tools
-      # version the shell's glob ordering gives. A miss is a refusal rather than a
-      # skip, for the reason the seam's own comment gives.
+      # A reused Gradle daemon can build without the signing env, so the signature is verified rather than assumed.
       if [ -z "$APKSIGNER" ]; then
         for _candidate in "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/nonexistent}}"/build-tools/*/apksigner; do
           if [ -x "$_candidate" ]; then APKSIGNER=$_candidate; fi
@@ -1100,36 +573,7 @@ case "$verb" in
   nothing, and the name it would carry is the one people fetch from
   releases/latest/download."
 
-      # ── and signed with v1 as well as v2, which Android does not need ─────
-      #
-      # ⚠ **The JAR signature is for an installer that is not Android's.** AGP
-      # leaves it out by itself at `minSdk` 24, and 0.10.1 shipped that way: it
-      # passed the check above, installed on a Pixel and over `adb install` on a
-      # OnePlus 13, and that OnePlus's own installer refused it as invalid. That
-      # an OEM installer parsing the APK before the platform does wants a JAR
-      # signature is the leading hypothesis rather than a measurement;
-      # `app/build.gradle.kts` carries the rest beside `enableV1Signing`.
-      #
-      # ⚠ **`--min-sdk-version 23` is what makes the v1 line mean anything.**
-      # `apksigner` consults a JAR signature only below API 24 or when there is
-      # no v2-or-newer block — Android 7's own rule, in apksig's `ApkVerifier` —
-      # and by default it checks from the manifest's `minSdk`, which is 24. So at
-      # the default it prints `v1 scheme (JAR signing): false` about an APK
-      # carrying a perfectly good one, and a gate reading that line would refuse
-      # every correct release. At 23 the JAR signature is verified and a missing
-      # one is an error rather than a skip — apksig's `JAR_SIG_NO_MANIFEST`,
-      # which apksigner prints as `ERROR: Missing META-INF/MANIFEST.MF`, never
-      # by that name. Not lower: a lower floor also holds the signature to
-      # algorithms older platforms lack, which is a question about devices this
-      # app does not install on.
-      #
-      # A second run rather than a flag on the first, so each refusal is about one
-      # thing: that one is a signature that does not verify, this one a scheme the
-      # build left out. The lines are what is read, never the exit status: a
-      # verifier answering 0 without having checked a scheme cannot pass for one
-      # that did, and one answering 1 fails closed because its line is missing.
-      # They are printed on success too, because which schemes verified is the
-      # first thing to read the day an installer refuses an APK again.
+      # Needs v1 and v2 schemes, checked from API 23 because apksigner ignores v1 at minSdk 24; the printed lines are read, not the exit status.
       android_schemes=$("$APKSIGNER" verify --verbose --min-sdk-version 23 "$android_apk" 2>&1) || true
       for android_scheme in "v1 scheme (JAR signing)" "v2 scheme (APK Signature Scheme v2)"; do
         case "$android_schemes" in
@@ -1150,7 +594,6 @@ $android_schemes" ;;
       (cd "$R/packages/native" && "$TAURI" build --target "$app_target_triple")
     fi
 
-    # ── what it produced, named ───────────────────────────────────────────
     app_plan_file="$RELEASE_WORK/app-$RELEASE_APP_TARGET.plan"
     app_artifacts "$RELEASE_APP_TARGET" > "$app_plan_file"
     while IFS='|' read -r glob how name; do
@@ -1192,23 +635,7 @@ $android_schemes" ;;
 
   \`plan\` writes that file. Run it first, or pass RELEASE_NOTES_FILE."
 
-    # `--verify-tag` so this can only ever release a tag that exists, rather than
-    # creating one from whatever the runner happens to have checked out.
-    # Never `--generate-notes`: the notes are the CHANGELOG section, which is a
-    # thing a person wrote and a driver checks.
-    # **The installer rides the release, and that is what makes the download
-    # source neutral.** The one-liner in `README.md` points at
-    # `releases/latest/download/install.sh`, so what a stranger pipes into a
-    # shell comes from the repository rather than from anybody's control plane —
-    # "where the software is" and "which fleet I join" stay two questions. The
-    # copy uploaded here has its placeholder **unsubstituted**, which is the
-    # whole point: fetched this way the script has no address in it and asks.
-    #
-    # Copied under its published name rather than uploaded as `bootstrap.sh#label`:
-    # `releases/latest/download/<name>` resolves on the *asset* name, so the file
-    # name is part of the URL people paste. `deploy/bootstrap.sh` keeps its own
-    # name in the tree, where it sits beside `install.sh` and must not be
-    # confused with it.
+    # --verify-tag releases only an existing tag; install.sh is bootstrap.sh with its placeholder unsubstituted.
     [ -f "$RELEASE_ROOT/deploy/bootstrap.sh" ] \
       || fail "refusing $RELEASE_TAG: no deploy/bootstrap.sh to publish as install.sh.
 
@@ -1216,23 +643,7 @@ $android_schemes" ;;
   URL that 404s for everybody who reads it."
     cp "$RELEASE_ROOT/deploy/bootstrap.sh" "$RELEASE_WORK/install.sh"
 
-    # ── every app artifact this release said it would carry ───────────────
-    #
-    # ⚠ **Refused by name rather than counted, and refused rather than published
-    # partially.** `manifest`'s "a silently-skipped matrix leg" argument, one act
-    # over and sharper: a release page missing the Windows build is not a partial
-    # release, it is a release that looks finished to everybody except the people
-    # it was missing for, with every check green and nothing anywhere red.
-    #
-    # `fail-fast: true` on `release.yml`'s **`app`** matrix already closes the
-    # ordinary path — the `app` one specifically, which is worth saying because
-    # for one release this sentence stood while the only `fail-fast:` in that
-    # file was on the `image` matrix, a different job it says nothing about. The
-    # case this exists for is the **re-run-one-job button** that `release.yml`'s
-    # header names as its whole recovery story: `actions/download-artifact` with
-    # `pattern: app-*` will happily satisfy a re-run with a subset and say
-    # nothing. And `app-android` is a job rather than a matrix leg, so no
-    # `fail-fast:` covers it at all — this gate is the only thing that does.
+    # Missing artifacts are refused by name: a re-run of one job can download a subset, and app-android has no fail-fast.
     app_check_targets
     set --
     app_missing=""

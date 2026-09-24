@@ -64,314 +64,50 @@ import {
 } from "./worktree.js";
 import { describeError } from "./http.js";
 
-/**
- * How far back to look for the `context_cleared` that would make the recorded
- * conversation a known-empty one.
- *
- * Small on purpose, and it fails in the safe direction: a marker older than this
- * is not found, so the answer is "not unused" and nothing is recreated. The only
- * case it has to reach is a clear with nothing after it but a restart's own
- * status events, which is a handful.
- */
 const UNUSED_CONVERSATION_LOOKBACK = 64;
 const MAX_LOOKBACK_BYTES = 1024 * 1024;
 
 const START_TIMEOUT_MS = 45_000;
 const SHUTDOWN_BUDGET_MS = 20_000;
-/**
- * The belt-and-braces SIGKILL sweep after the graceful stops, bounded.
- *
- * Deliberately well inside what is left of `daemon.ts`'s hard limit (25s) once
- * `SHUTDOWN_BUDGET_MS` has been spent. The sweep is a syscall per session again
- * rather than a `docker exec`, so the bound costs nothing — and it stays, because
- * the reason a teardown is bounded does not depend on what it costs. An unbounded
- * sweep turns an orderly shutdown into a hard one at exactly the moment nobody is
- * watching.
- */
+// Bounded well inside daemon.ts's 25s hard limit once SHUTDOWN_BUDGET_MS is spent.
 const SHUTDOWN_SWEEP_MS = 3_000;
 const KILL_CONFIRM_MS = 250;
 
-/**
- * The exits that may be written **over** `parked`, against `exitRecord`'s
- * otherwise absolute first-writer-wins rule.
- *
- * That rule exists so a stop cannot relabel `daemon_restarted` as `stopped` and
- * erase the daemon's promise to come back. `parked` carries no such promise — it
- * means *nobody had decided* — so a later act that genuinely decides something may
- * say so, and both members are such an act: `stopped` is a person pressing Stop,
- * and `agent_signed_out` is `signOutSessions` sweeping an agent's credential away.
- *
- * A list rather than two `||`s because it is the thing to read when a third
- * candidate is proposed: the test is whether the reason records somebody deciding,
- * never merely that it is newer.
- */
+// Exits that may overwrite `parked` despite first-writer-wins: each must record somebody deciding, not merely be newer.
 const RELABELS_PARKED: readonly ExitReason[] = ["stopped", "agent_signed_out"];
 
-/**
- * The youngest a session may be and still be taken to make room at the ceiling.
- *
- * ⚠ **This was `0`, and `0` is what made a lossless mechanism able to destroy
- * work.** `releaseOneSlot` deliberately ignores {@link IDLE_PARK_MS} — the sweep
- * releases by *age* because nobody asked, a ceiling releases by *need* because
- * somebody is asking right now — but ignoring the threshold entirely made the age
- * clause vacuous, so a create or a wake could take an agent whose turn had ended
- * seconds earlier.
- *
- * That is the sharp edge on the one thing `parkable` cannot see. A session running
- * a backgrounded build reports `idle`, so at the ceiling it was a candidate the
- * instant its turn ended. Two minutes is the margin that stops the *cheapest*
- * version of the mistake, and it is short enough that a machine genuinely at its
- * ceiling still evicts rather than refusing.
- *
- * ⚠ **`parkable` can see *some* of it now, and this number is not spent.** It
- * refuses while claude reports a live async task (Q2.228) — and that is one agent
- * out of four, and within it shells, workflows and monitors only, because the
- * adapter marks a backgrounded **subagent** `ignored` and announces it as nothing
- * at all. So kimi, codex, opencode and Q7.113's own measured case are still
- * exactly as invisible as they were, and this margin is the whole of what stands
- * for them. A guard bought for a case that is still real must not be deleted
- * because a neighbour got a signal.
- *
- * Deliberately not `IDLE_PARK_MS`: that would restore the behaviour Q2.223
- * records, where the daemon told somebody to destroy a conversation by hand rather
- * than take a warm agent it could have taken losslessly.
- */
+// Minimum age for eviction at the ceiling: parkable cannot see most backgrounded work (Q7.113). Not IDLE_PARK_MS (Q2.223).
 const CEILING_PARK_FLOOR_MS = 2 * 60_000;
 
-/**
- * How many sessions may be live at once, and why there is a number here at all.
- *
- * `create()` had no bound of any kind: it resolved a cwd, ran `git worktree add`
- * — a real checkout, with the repository's own hooks — and spawned an agent, once
- * per request, for ever. The only thing downstream that counted sessions was
- * `SqliteSessionStore.prune`, and that is not a bound on creation, it is a
- * **deletion**: it kept the newest `maxSessions` rows by creation and took every
- * other transcript with it, at daemon boot, with one `console.error` after the
- * fact and only for the cap. (It takes only inactive rows now, never leaves
- * fewer than `DEFAULT_MIN_SESSIONS`, and reports every id through `onPruned` —
- * Q2.222 — but it is still a deletion, and this bound is still the one on
- * creation.)
- *
- * That was survivable while the daemon served one person, and `sqlite.ts` says
- * so in the comment beside the cap — "with one person there is nobody to take it
- * from". A grant makes it false. `grants` is `(user_id, machine_id)` and `POST
- * /v1/tokens` mints for any holder, so anybody sharing a machine can create
- * sessions on it; a loop then fills the table past the cap with fresh empty
- * rows, and the next restart deletes the owner's conversations. The daemon
- * deliberately does not know *who* is asking — it "stops asking who the subject
- * is" — so the
- * remedy cannot be per-person, and does not need to be: what makes the prune
- * destructive is the rate of creation, not its origin.
- *
- * **Live, not total, and `terminal` is the test.** A session somebody stopped
- * holds no agent and no file descriptors; a worktree, yes, and that is bounded
- * separately by the prune and by the upload caps. This is the bound on what is
- * *running*.
- *
- * **Resume never *refuses*, and since parking it does not simply ignore this
- * either.** `autoResume` and `POST /sessions/:id/resume` put an agent back in
- * front of a conversation that already exists; refusing there would mean a daemon
- * that came back from a deploy holding work it would not restore, and a person
- * who typed a message being told their own conversation is unavailable. So a wake
- * that would cross this ceiling **parks the least recently used session instead**
- * — see `makeRoomForWake` — and proceeds either way. The bound is enforced by
- * eviction, never by a refusal; only `create()` answers 429.
- *
- * ⚠ **What this number means changed with parking, and the old sentence was
- * wrong in a way worth keeping.** It read: *"64 is a backstop rather than a
- * workflow limit — a machine running 64 agents at once has run out of memory long
- * before it runs out of slots"*. That conceded the point and then did nothing
- * about it. Measured 2026-09-09 on the development machine: a live claude session
- * is 259–341 MB of `phys_footprint` (an ACP bridge plus the CLI under it), a live
- * opencode session 447–476 MB, mean ~397 MB — so 64 of them is ~25 GB, and this
- * was never a memory budget at all. It is one now, because the population it
- * counts is bounded from the other end: `idlepark.ts` releases an idle agent, so
- * what this caps is **agents resident at once**, not conversations somebody may
- * have. The number is unchanged and its meaning is not.
- *
- * `REEMOAT_MAX_LIVE_SESSIONS` moves it.
- */
+/** Caps agents resident at once, enforced by parking on wake; only create() refuses (429). REEMOAT_MAX_LIVE_SESSIONS moves it. */
 export const MAX_LIVE_SESSIONS = 64;
 
-/**
- * How long a session must be quiet before the daemon lets its agent go.
- *
- * **Chosen against two measurements rather than by feel** (2026-09-09, this
- * machine, and both are in Q2.224). A resident agent costs ~397 MB on average. A
- * parked one comes back in 1 292 ms at p50 — claude, resuming on its own, over 28
- * real reattaches — and 2 376 ms at p90. So the exchange rate is roughly 400 MB
- * for a second and a third, and the question is only how long a pause has to be
- * before somebody would rather have the memory.
- *
- * Thirty minutes is past every pause that happens *inside* a working session —
- * lunch, a meeting, a long read — while still releasing everything left overnight,
- * which is where the waste actually is: the three sessions that motivated this had
- * been idle 48.7 hours, not 48 minutes. Shorter would be met often enough to
- * notice; much longer buys nothing, because the distribution of real idleness has
- * almost nothing between "an hour" and "a day".
- *
- * `REEMOAT_IDLE_PARK_MINUTES` moves it and `0` switches it off.
- */
+/** Quiet time before an agent is released (Q2.224). REEMOAT_IDLE_PARK_MINUTES moves it; 0 disables. */
 export const IDLE_PARK_MS = 30 * 60_000;
 
-/**
- * How often the sweep looks.
- *
- * A minute, and it is deliberately not derived from {@link IDLE_PARK_MS}. What
- * this decides is only how *late* a park may be — a session goes at some point in
- * `[idleMs, idleMs + this)` — and a minute of slack on a thirty-minute threshold
- * is noise. Scaling it with the threshold would mean somebody who sets five
- * minutes silently gets a coarser sweep than somebody who sets an hour, which is
- * the opposite of what either of them asked for.
- */
 export const IDLE_PARK_SWEEP_MS = 60_000;
 
-/**
- * How long a turn may go without one byte from the agent before this daemon
- * stops waiting for it.
- *
- * **What this bounds is the one RPC that has no bound.** `session/prompt` is
- * fired with no deadline in `session.ts`, deliberately — a turn may legitimately
- * run for hours — and `status === "running"` derives from nothing else: it is
- * `this.turn !== null`, and `this.turn` is cleared only by the pump's `finally`,
- * which is reached only when the generator returns, which happens only on a
- * `turn_end` or an `error`, both of which are produced only by that request
- * settling. An adapter that simply never answers therefore pins a session at
- * `running` for the life of the process. Reported that way: a panel reading
- * *working* hours after the agent had finished. `POST /cancel` cannot help —
- * `waitForTurnToSettle` polls the same flag the same request clears — and the
- * idle sweep cannot see it, because `parkable`'s first line refuses anything that
- * is not `idle`. Only `DELETE /sessions/:id` or a restart cleared it.
- *
- * **Silence rather than duration, and that is the whole of why this is safe.** The
- * measured turn above ran 88 minutes and was working the whole time; what says a
- * turn is dead is not how long it has run but that nothing has come out of it.
- *
- * ⚠ **And it is the *agent's* silence**, `ManagedSession.lastAgentEventAt` rather
- * than the `lastEventAt` `parkable` uses. Every write moves that one, the person's
- * own messages included — so somebody typing into a session that says *working*
- * reset the clock on every message and kept the wedge alive. The same measured
- * session shows three such prompts inside the open turn. The two clocks are
- * deliberately separate rather than one field: for parking, a person typing **is**
- * activity, and it is the reason not to take the agent away.
- *
- * **Three hours, and the number is measured rather than chosen.** It was an hour,
- * on the reasoning that what goes quiet inside a turn is a single long tool call —
- * a build, a test suite — and that an hour is past all of those. That reasoning
- * was about the wrong kind of turn. Read out of the reporting machine's own store,
- * over the 2 203 events of the session that produced the bug report
- * (`s_89d35945`, prompt 03:11:07 → a **real** `turn_end{end_turn}` from the agent
- * at 04:39:26): the largest silence inside that live turn was **51.7 minutes**,
- * seq 426 → 427, with 21.8 minutes the next largest. An hour would have cleared
- * that by 8.3 minutes, which is a coincidence and not a margin.
- *
- * ⚠ **Both figures are gaps between *agent* events**, which is the series the
- * predicate measures. Swept over every event the second one reads 21.5 minutes
- * instead, because a person's prompt landed inside it (seq 1509 → 1510); the
- * largest is 51.7 either way. Written down because these numbers get re-derived —
- * they already have been, from the other end — and the two series disagree in
- * exactly the place this entry is about.
- *
- * So the threshold is set as a multiple of the one measured silence rather than as
- * a margin over it, and the multiple is chosen from the asymmetry. Ending a turn
- * that was not over is **not** recoverable in the way the other mistake is: the
- * transcript says the agent stopped answering where it had not, the real end's
- * `stopReason` and `usage` are dropped, and the next message reaches an agent
- * still answering the last one. Waiting too long is the status quo this fixes,
- * bounded instead of infinite. One of those errs into a corrupted conversation and
- * the other into a slower repair, so the number errs large: ~3.5× the measured
- * gap. ⚠ It is no longer derived from {@link IDLE_PARK_MS} at all — the old "twice
- * the park threshold" was arithmetic dressed as an argument, and the two answer
- * different questions on different evidence.
- *
- * ⚠ **Nothing is sent to the agent when this fires.** See
- * {@link Session.abandonTurn}: the turn ends locally, the request stays pending,
- * and anything the agent says afterwards still reaches the transcript through the
- * idle drain. The session becomes `idle`, which is what puts it back under the
- * ordinary sweep — so the wedged agent is released thirty minutes later by the
- * code that could not see it before, and the pending request goes with the process.
- *
- * `REEMOAT_TURN_SILENCE_MINUTES` moves it and `0` switches it off.
- */
+/** Agent silence after which a turn is abandoned locally; errs large, since ending a live turn is unrecoverable. REEMOAT_TURN_SILENCE_MINUTES moves it; 0 disables. */
 export const TURN_SILENCE_MS = 3 * 60 * 60_000;
 
-/**
- * The largest value `PATCH /settings` will accept, in minutes.
- *
- * A week. Not a limit anybody is expected to meet — it is there so a typed field
- * cannot store a number that makes the setting meaningless (a year is
- * indistinguishable from `0`, except that `0` says what it means). Refused at the
- * route with a sentence naming the bound, rather than clamped, because silently
- * storing something other than what somebody typed is worse than saying no.
- */
 export const MAX_IDLE_RELEASE_MINUTES = 7 * 24 * 60;
 
-/**
- * Where this machine's own preferences are kept.
- *
- * A port rather than the store itself, for `UploadsPort`'s reason: the offline
- * drivers stand a `Map` in, and the registry needs three methods rather than a
- * SQLite handle.
- */
 export interface MachineSettingsPort {
   read(key: MachineSettingKey): string | null;
   write(key: MachineSettingKey, value: string): void;
 }
 
-/**
- * What a settings screen is told.
- *
- * ⚠ **The number and nothing else, which took a correction.** This carried a
- * `source` — `stored` against `config` — on the argument that a screen must not
- * show a value without saying where it came from, the rule the agent settings
- * screen follows when it reads `~/.claude/settings.json` and says so. The owner
- * removed the line it fed, and was right: that rule is about a control a
- * configuration has silently *answered*, and here the configuration is only a
- * default for a machine nobody has set. There is no operator to inform — this is
- * one person's machine and one person's preference — so the provenance was a
- * sentence about env files on a screen where nothing else mentions one.
- *
- * With the line gone the field had no reader, which is the state this repository
- * deletes rather than keeps: an unread discriminant is how a branch against
- * nothing gets written. It went, and `clear`/`null` went with it — the only thing
- * either could express was "go back to the configuration".
- */
 export interface MachineSettingsView {
-  /** Minutes of quiet before a session's agent is shut down. `0` is never. */
   idleReleaseMinutes: number;
 }
 
-/**
- * Creations allowed in a burst, before the refill decides the rate.
- *
- * The live cap alone does not close the hole: stop a session and it stops being
- * live, so a loop of create-and-stop still writes rows as fast as it can ask, and
- * rows are what the prune deletes. This is the second half, and the two together
- * are what bound it — 16 immediately, then one per `SESSION_CREATE_REFILL_MS`,
- * so filling a 200-row cap takes hours rather than seconds and the owner watches
- * it happen.
- *
- * In memory, and a restart resets it. That is the same stance `throttle.ts` takes
- * one package over and for the same reason: this bounds abuse, it does not
- * account for it, and a restart is new information.
- */
 export const SESSION_CREATE_BURST = 16;
 
-/** One creation slot back per two minutes: ~30/hour once the burst is spent. */
 export const SESSION_CREATE_REFILL_MS = 120_000;
 
-/** Which bound refused, so the route can answer with the right sentence. */
 export type SessionLimitReason = "too_many_sessions" | "session_rate_limited";
 
-/**
- * A creation refused by one of the two bounds above.
- *
- * Both are 429 rather than 503: the daemon is healthy and the caller is being
- * told to slow down, which is a different sentence from `shutting_down` and from
- * `agent_unavailable`. `retryAfterSeconds` is 0 for the live cap, honestly — a
- * session ends when somebody ends it, and inventing a number there would be the
- * daemon guessing about a person.
- */
+/** Answered 429; `retryAfterSeconds` is 0 for the live cap, whose end nobody can predict. */
 export class SessionLimitError extends Error {
   constructor(
     readonly reason: SessionLimitReason,
@@ -385,67 +121,18 @@ export class SessionLimitError extends Error {
 
 const CANCELLED: acp.RequestPermissionResponse = { outcome: { outcome: "cancelled" } };
 
-/**
- * A cap on the agent-chosen payload carried with a pending permission.
- *
- * Deliberately far below the 128 KiB per-event cap. This does not ride an event,
- * it rides the *snapshot* — which is returned by `GET /sessions` for every
- * session at once, by every `hello` frame, and by every action that answers with
- * a session. An unbounded `rawInput` there is multiplied by the session count on
- * a path a phone polls every few seconds.
- *
- * 8 KiB is far more than a command line and enough for a small diff; anything
- * larger is not something a human is approving off a phone screen anyway, and it
- * degrades to a visible `{truncated: true, bytes}` rather than to silence.
- */
 const MAX_PERMISSION_BLOB_BYTES = 8 * 1024;
 
 const ELICITATION_CANCELLED: acp.CreateElicitationResponse = { action: "cancel" };
 
-/**
- * How much of one answer the *log* keeps.
- *
- * Only the log. What reaches the agent is verbatim, and an over-long answer is
- * refused on the route rather than shortened — the daemon must not hand the agent
- * a cut-down version of what somebody typed and let it act on the difference.
- * This copy is a rendering for a person to read back, and `clip` leaves its own
- * marker saying it was cut.
- */
+// Caps only the logged copy; the agent gets the answer verbatim, and over-long ones are refused at the route.
 const MAX_ELICITATION_ANSWER_CHARS = 2_048;
 
-/**
- * Whether a person is being waited on here, whatever kind of question it is.
- *
- * One predicate rather than two `.length` reads, because the set of things that
- * can park a turn on a human went from one to two and will go to three. Every
- * place that used to ask `pendingPermissions.length > 0` asks this, so a third
- * kind is one line here rather than a search — and `daemoncheck` pins that this
- * agrees with `status === "blocked"`, which derives from the maps themselves.
- *
- * Derived from the *snapshot* rather than from the status, keeping `listRank`'s
- * own reason: the derived status could gain a state that also has something
- * outstanding, and a rank that read `status` would then stop sorting it first.
- */
+/** Every check for a waiting human goes through this; daemoncheck pins it against status "blocked". */
 export function awaitingHuman(session: SessionSnapshot): boolean {
   return session.pendingPermissions.length + session.pendingElicitations.length > 0;
 }
 
-/**
- * Whether a context-usage update is worth waking every attached client for.
- *
- * Pure and module-scope so a driver can assert it with no session — the same
- * reason `normalizeTitle` below and `containerRunArgs` elsewhere are.
- *
- * The threshold is the *rendered* value, not the raw one: a client draws a whole
- * percent, so two readings that round the same way are indistinguishable on screen
- * and a frame carrying the second is a frame nobody can perceive. `size` and
- * `cost` are compared exactly, because both change rarely and both change what is
- * drawn when they do.
- *
- * A `size` of 0 on either side counts as different. That is the "cannot tell"
- * value, and crossing into or out of it flips a client between showing a
- * percentage and showing nothing — the most visible transition there is.
- */
 export function usageWorthAnnouncing(before: ContextUsage, after: ContextUsage): boolean {
   if (before.size !== after.size) return true;
   if (before.cost?.amount !== after.cost?.amount) return true;
@@ -454,41 +141,14 @@ export function usageWorthAnnouncing(before: ContextUsage, after: ContextUsage):
   return Math.round((before.used / before.size) * 100) !== Math.round((after.used / after.size) * 100);
 }
 
-/** Whether a resume is being attempted because the daemon booted, or because somebody spoke. */
 export type ResumeTrigger = "boot" | "prompt";
 
-/** How many times one daemon life will try a session before it says so and stops. */
 export const MAX_RESUME_ATTEMPTS = 3;
-/** How many agents may be starting at once during the boot pass. */
 export const RESUME_CONCURRENCY = 2;
 export const RESUME_RETRY_MIN_MS = 2_000;
 export const RESUME_RETRY_MAX_MS = 60_000;
 
-/**
- * Whether the daemon should bring this session back by itself.
- *
- * The one rule behind "a session reads as stopped only when somebody stopped
- * it", and a `switch` with **no `default` arm** on purpose: adding a member to
- * `ExitReason` must be a compile error here rather than a silent `false` that
- * strands a whole class of session with nobody noticing.
- *
- * Narrower than {@link ManagedSession.resumable}, which answers the different
- * question the manual `POST /sessions/:id/resume` asks — a session somebody
- * stopped can be resumed on request, it is simply never resumed *for* them.
- *
- * **`agent_exited` splits on the trigger, and that is the one judgement call
- * here.** It means the agent quit while the daemon carried on, so the daemon did
- * not end it and the boot pass has no business resurrecting it: an agent that
- * crashed on Tuesday would otherwise be handed a fresh process by Friday's
- * deploy, for a conversation its owner watched die and moved on from. A prompt
- * is somebody explicitly asking, three days later or three seconds, and "it
- * crashed, let me carry on" is exactly the flow that should work.
- *
- * The other exclusions are settled rather than judged: `stopped` is the whole
- * point; `start_failed`/`start_timeout` never had a conversation to return to
- * (and almost never have an `agentSessionId` either); `agent_kill_failed` is
- * legacy and ambiguous — see its note in `events.ts`.
- */
+/** No default arm: a new ExitReason must be a compile error here, not a silent false. */
 export function autoResumable(
   exit: SessionExit | null,
   agentSessionId: string | null,
@@ -498,110 +158,27 @@ export function autoResumable(
   switch (exit.reason) {
     case "daemon_shutdown":
     case "daemon_restarted":
-    // The daemon took this agent away to change what it asks for at the door, so
-    // the daemon owes it a fresh one — on both triggers, because a restart that
-    // did not complete is precisely the state the boot pass exists to repair.
     case "config_changed":
       return true;
     case "agent_exited":
       return trigger === "prompt";
-    /*
-     * ⚠ **`agent_signed_out` answers `true` on a prompt, and that is a reversal.**
-     *
-     * It answered `false` on both triggers, because "bringing the conversation
-     * back would launch a process holding a credential they have just revoked —
-     * which fails at the first message, in a transcript, as an internal error".
-     * Two things were wrong with that. The failure is no longer an internal
-     * error: `onAgentUnusable` records it and replaces the agent instead of
-     * ending the conversation, so a revoked credential now costs one error row
-     * per message somebody chooses to send. And the premise held only for the *route*
-     * that writes this reason — `POST /agent-auth/:agent/logout` — while the far
-     * commoner writer was an expired token that the CLI had since refreshed on
-     * its own, leaving a conversation nothing could revive: `reloadCredentials`
-     * is the only reversal and every one of its callers is an in-app credential
-     * write, so signing in from a terminal reached none of them.
-     *
-     * On `boot` it stays `false`, and the distinction is the same one
-     * `agent_exited` draws one case up: a prompt is a person asking for this
-     * conversation *now*, and by then the credential situation may be anything at
-     * all. A boot pass is nobody asking, and starting an agent that cannot
-     * authenticate at 4am is how a fleet spends a morning on it.
-     */
+    // Prompt only: a boot pass must not start agents that cannot authenticate.
     case "agent_signed_out":
       return trigger === "prompt";
-    /*
-     * ⚠ **`parked` is `false` at boot, and that is the whole reason parking
-     * works.**
-     *
-     * The daemon let this agent go because nobody was using it. Bringing every
-     * one of them back at the next boot would put the memory straight back —
-     * measured on this machine 2026-09-09: five live sessions held 1 984 MB, and
-     * 1 384 MB of it belonged to three nobody had touched in 48.7 hours. Worse,
-     * it would do it all at once: resumes contend, and a boot pass of three
-     * turned a 1.3s reattach into 90s.
-     *
-     * On a prompt it is `true` for the same reason every other reversal in this
-     * switch is — a prompt is a person asking for this conversation *now* — and
-     * here it is not even a reversal of anybody's decision, because nobody
-     * decided. It is the only way back by design: there is no Resume control for
-     * a parked session, so the composer is the whole affordance.
-     */
+    // Never at boot, or parking gives the memory straight back; a prompt is the only way back.
     case "parked":
       return trigger === "prompt";
-    /*
-     * ⚠ **A message revives one somebody stopped, and that is a reversal too.**
-     *
-     * `stopped` was the one reason that meant "a human ended it", and refusing it
-     * on both triggers was how the daemon avoided overruling a person. It still
-     * does: **a prompt is not the daemon deciding anything.** It is the same
-     * person, on the same conversation, typing into it — the identical argument
-     * `agent_exited` has always made one case up, and the identical one
-     * `reloadCredentials` makes about a sign-in undoing a sign-out.
-     *
-     * What forced the question is that the composer is now unconditional: a box
-     * you can type into that answers `409 session_terminal` is worse than no box,
-     * and "type to start it again" is what every row on that screen already
-     * implies. `boot` stays `false`, so nothing revives a stopped conversation on
-     * its own — which is the whole of what the old rule was protecting.
-     */
     case "stopped":
       return trigger === "prompt";
-    /*
-     * These two never had a conversation to return to, and the `agentSessionId`
-     * guard at the top already answers for them — written out anyway, because a
-     * reason that reaches here with an id somehow must not fall into an arm above.
-     */
     case "start_failed":
     case "start_timeout":
-    // Legacy and genuinely ambiguous: it *replaced* the caller's reason whenever a
-    // kill went unconfirmed, so a row carrying it may be somebody's Stop wearing a
-    // different word — and `agentConfirmedDead: false` means the old agent may
-    // still hold the conversation file. Two agents on one file is worse than a
-    // refusal.
+    // An unconfirmed kill may leave the old agent on the conversation file; two agents on one file is worse than a refusal.
     case "agent_kill_failed":
       return false;
   }
 }
 
-/**
- * Whether a stop leaves a conversation a message would bring back — and therefore
- * whether the controls and commands it was carrying still describe something.
- *
- * {@link autoResumable}'s `prompt` column asked one step earlier. `doStop` has the
- * reason in hand before there is an `exitRecord` to read it from, and
- * `persistedRow` has an exit but wants the same answer — so both come here rather
- * than writing the reason set out a second time. **A call into that function and
- * never a second `switch`**, which is what keeps "adding an `ExitReason` is a
- * compile error" true in exactly one place.
- *
- * The `agentSessionId` clause is load-bearing here too and comes for free: a
- * session with no conversation to return to has nothing a remembered control could
- * be about.
- *
- * ⚠ The synthesized exit is read for its `reason` alone — `autoResumable` touches
- * nothing else on it — and it is built here rather than passed in because the one
- * caller that has a real `SessionExit` would otherwise be the odd one out.
- */
+/** autoResumable's prompt column for a bare reason; call it, never a second switch. */
 export function revivableByPrompt(reason: ExitReason, agentSessionId: string | null): boolean {
   return autoResumable(
     { reason, detail: null, at: 0, agentHandle: null, agentConfirmedDead: true },
@@ -610,55 +187,12 @@ export function revivableByPrompt(reason: ExitReason, agentSessionId: string | n
   );
 }
 
-/**
- * How large a remembered agent state may be before it is not remembered at all.
- *
- * Refused whole rather than clipped, and that is the decision in here. Clipping a
- * choice list would leave `setConfigOption` validating against a shorter list than
- * the agent published, so a value somebody really can choose would answer
- * `invalid_value` — a control that lies rather than one that is absent. Past this
- * bound the row stores nothing and the strip degrades to what it does today.
- *
- * Twice the measured worst case: opencode publishes 362 models and reduces to
- * ~33 KB. Doubled resident, not merely on disk — `SqliteSessionStore.put` keys its
- * dirty check on `JSON.stringify` of the whole parameter object, so this blob is
- * held in memory once per session as well as written.
- */
+// Refused whole, never clipped: a shorter choice list would make valid values answer invalid_value.
 const MAX_AGENT_STATE_BYTES = 64 * 1024;
 
-/**
- * What is worth keeping of an agent's controls once the agent is gone.
- *
- * ⚠ **The raw `agentConfigState`, never `snapshot().agentConfig`.** That one is
- * composed through `withUltracode`, which rewrites the effort value to a choice no
- * agent ever published, and through `dedupeAliasChoices`, which moves the model
- * selection off its placeholder onto a concrete row. Replaying either would send
- * the agent something it never said — the same ⚠ `restartAgent` already carries
- * about its own capture.
- *
- * Every option and every choice's **value and name** are kept, because those are
- * what a tap sends and what the chip draws. What goes is prose: a description on a
- * choice nobody has selected. That is the same cut `snapshotConfig` already makes
- * for the wire, for the same reason — 362 models with a sentence each is the whole
- * of the size problem — and it is lossless for everything that decides anything.
- */
+/** Reduced from the raw agentConfigState, never the composed snapshot; only unselected choices lose their descriptions. */
 export function reduceAgentState(config: AgentConfig, commands: AgentCommands): AgentStateMemory | null {
-  /*
-   * ⚠ **Nothing to remember is `null`, and this arm is not defensive tidying — it
-   * is a defect a live run caught and no driver did.**
-   *
-   * Every session that was already terminal when this shipped has an empty pair:
-   * `doStop` emptied it under the old rule, or the agent never published. Stored,
-   * that is a 77-byte blob saying *"the agent offered nothing"*, which
-   * `ManagedSession.restore` then adopts — and adopting it seeds
-   * `commandsRevisionValue` to 1, so the client is told to fetch a list that is
-   * empty. Strictly worse than the `0` it replaced, which at least meant *"this
-   * daemon has nothing"*. Measured on the development machine: eight rows written
-   * this way on the first boot after the change.
-   *
-   * `null` is the column's own documented value for exactly this, and the honest
-   * one: there is nothing here.
-   */
+  // Nothing to remember is null: a stored empty pair makes restore tell clients to fetch an empty list.
   if (config.options.length === 0 && commands.commands.length === 0) return null;
   const reduced: AgentStateMemory = {
     config: {
@@ -672,46 +206,18 @@ export function reduceAgentState(config: AgentConfig, commands: AgentCommands): 
     },
     commands,
   };
-  // Measured against the serialised form because that is what is stored and what
-  // the dirty-check key holds — a field count would not bound either.
   if (JSON.stringify(reduced).length > MAX_AGENT_STATE_BYTES) return null;
   return reduced;
 }
 
-/**
- * How long to wait before attempt `attempt` (1-based).
- *
- * **Full** jitter — a delay drawn from `[0, capped)` rather than the capped
- * value ±20% — for the reason `relay/protocol.ts` gives about a fleet
- * reconnecting to one relay, arriving here from the other direction: a boot pass
- * retries N sessions whose attempts were started together, so a narrow band
- * keeps them synchronised and they collide again on every round.
- *
- * Deliberately not importing `reconnectDelayMs`. That constant is a statement
- * about a fleet hitting one control plane; this one is about one machine's own
- * agents, and coupling them would mean tuning either changes the other.
- */
 export function resumeBackoffMs(attempt: number, random: () => number = Math.random): number {
   const capped = Math.min(RESUME_RETRY_MIN_MS * 2 ** Math.max(attempt - 1, 0), RESUME_RETRY_MAX_MS);
   return Math.floor(random() * capped);
 }
 
-/**
- * What went wrong with a resume, in one vocabulary.
- *
- * Both callers need this and they need it to agree: `server.ts` turns it into an
- * HTTP answer for somebody who pressed a button, and the boot pass records it on
- * the snapshot for somebody who was not there. A client reads the same `code`
- * either way and draws the same sentence, so two mappings would mean the
- * automatic path and the manual path explaining the same failure differently.
- *
- * The status is here rather than in the route because it is a property of the
- * failure — 409 for "this cannot work", 502/503/504 for "it did not work this
- * time" — and splitting the two apart is how they drift.
- */
+/** One vocabulary for the route and the boot pass: 409 means it cannot work, 5xx that it did not this time. */
 export function describeResumeFailure(error: unknown): {
   code: string;
-  /** Narrow on purpose, so `server.ts` can hand it straight to `jsonError`. */
   status: 409 | 502 | 503 | 504;
   message: string;
 } {
@@ -721,28 +227,12 @@ export function describeResumeFailure(error: unknown): {
   if (error instanceof ResumeUnsupportedError) return { code: "resume_unsupported", status: 409, message };
   if (error instanceof AgentUnavailableError) return { code: "agent_unavailable", status: 503, message };
   if (error instanceof StartTimeoutError) return { code: "agent_start_timeout", status: 504, message };
-  // The predicate lives in `session.ts`, which is where the message is written —
-  // see `isAuthRequiredMessage` for why it is a string match at all, and why
-  // there is one copy of that concession rather than one per caller.
   if (isAuthRequiredMessage(message)) {
     return { code: "agent_auth_required", status: 502, message };
   }
   return { code: "agent_launch_failed", status: 502, message };
 }
 
-/**
- * Whether a republished command list is the same one already held.
- *
- * `usageWorthAnnouncing` one field over, and here for the same reason: the agent
- * decides the rate, this process pays for it. See {@link ManagedSession} where it
- * is called for what a bump actually costs at both ends.
- *
- * A plain field-by-field walk rather than a hash or a JSON compare. `toCommands`
- * has already bounded the list to 256 entries of bounded strings, so the walk is
- * trivially cheap; a serialization would allocate on a path that runs inside the
- * agent's own notification handler, and a hash would have to be kept in step with
- * a shape the compiler is watching here.
- */
 export function sameCommands(before: AgentCommands, after: AgentCommands): boolean {
   if (before.dropped !== after.dropped) return false;
   if (before.commands.length !== after.commands.length) return false;
@@ -757,31 +247,7 @@ export function sameCommands(before: AgentCommands, after: AgentCommands): boole
   });
 }
 
-/**
- * Whether two background-task lists say the same thing.
- *
- * {@link sameCommands}' shape and {@link usageWorthAnnouncing}'s purpose: the
- * amplification it guards is `applyBackgroundTasks`' `touchSafe()`, which builds
- * a snapshot, writes a row and enqueues a frame **per attached client**, inside
- * the agent's own synchronous emit path.
- *
- * ⚠ **`usage.durationMs` is deliberately not compared, and it is the field that
- * makes this worth having.** The adapter's `taskProgress` spreads five optional
- * fields, so a progress frame carrying a usage block and nothing else is legal —
- * and it merges to a record identical to the one already held apart from a
- * counter **nothing draws**. The web client's `taskElapsedMs` refuses that number
- * by name and measures `startedAt` to `endedAt` instead, because the adapter
- * drops the SDK's final `usage` and a duration from whichever progress frame
- * arrived last is stale by the whole final leg. A frame whose only delta is that
- * number is a fan-out with nothing on the other end of it.
- *
- * Everything else is compared, including the three fields no screen reads today —
- * `summary`, `lastToolName`, `outputFilePath`. They are state this daemon
- * publishes, and a comparison that knows which fields today's UI happens to draw
- * is one that goes wrong the day a second client draws another. Order counts as a
- * difference, because the order is the one `Session.backgroundTasks` sorts into
- * and a row moving up the panel is news.
- */
+/** usage.durationMs is deliberately not compared: nothing draws it, and a frame changing only it would fan out to every client. */
 export function sameBackgroundTasks(
   before: readonly BackgroundTask[],
   after: readonly BackgroundTask[],
@@ -809,79 +275,13 @@ export function sameBackgroundTasks(
   });
 }
 
-/**
- * The counters a client draws out of an {@link AsyncTaskUsage}, compared.
- *
- * `durationMs` is the third member and is absent on purpose; see the caller.
- * Presence is compared as well — `null` against a record is the agent reporting
- * for the first time, which is a row gaining two numbers it did not have.
- */
 function sameTaskUsage(before: AsyncTaskUsage | null, after: AsyncTaskUsage | null): boolean {
   if (before === null || after === null) return before === after;
   return before.totalTokens === after.totalTokens && before.toolUses === after.toolUses;
 }
 
-/**
- * Drops a choice that is an alias of another, and moves the selection onto the real one.
- *
- * Agents publish placeholder choices that duplicate a concrete one. Measured
- * 2026-07-31 against claude 0.63.0, its model list opens with `default`, named
- * `Default (recommended)`, whose description is character-for-character that of
- * `opus[1m]` — "Opus 5 with 1M context · Best for everyday, complex tasks". Offering
- * both is offering one model twice under two names, and a session left on the
- * placeholder is the whole reason the control read "Default" and answered nothing.
- *
- * Two rows carrying the *same non-empty description* are a statement by the agent
- * that they are the same thing, which is why that is the test rather than a list of
- * known ids. Where nothing duplicates — effort, whose choices have no descriptions
- * at all, and every kimi control — nothing is dropped, and that is right rather than
- * a gap: there the placeholder is the only way back to the agent's own default and
- * removing it would remove the way back.
- *
- * **Two arms, because the adapter changed what `default` carries, and the second
- * shape is a better signal than the first.** Both read off `buildConfigOptions` in
- * `dist/acp-agent.js`, and both are confined to {@link PLACEHOLDER_CHOICE_VALUES}:
- *
- *   - **claude-agent-acp 0.63.0** writes every row as
- *     `description: m.description ?? undefined`, so `default`'s description is the
- *     shared blurb — character for character the description of the row it
- *     resolves to (`opus[1m]`, "Opus 5 with 1M context · Best for everyday"). The
- *     first arm: a placeholder whose description equals another row's
- *     *description* is an alias of it.
- *   - **claude-agent-acp 0.73.0** (measured live 2026-09-04) special-cases `default`:
- *     `description: namedMatch?.displayName ?? resolvedModel`, where `namedMatch`
- *     is the non-`default` entry sharing its `resolvedModel` — and
- *     `getAvailableModels` puts that same `displayName` into the concrete row's
- *     `name`. So `default` reads "Opus (1M context)" while `opus[1m]` still reads
- *     its blurb: no two descriptions match, the first arm finds nothing, the
- *     placeholder survives, and `chipValue` in the web client — which mines a
- *     description only past a `·` — draws "Default (recommended)", the exact
- *     sentence this function exists to prevent. The second arm: a placeholder
- *     whose description equals another row's *name* is an alias of it. The
- *     fall-through matters too: when no named row shares the resolved model the
- *     adapter writes the raw model id, which matches no name and collapses onto
- *     nothing — right, since there is no row to collapse onto.
- *
- * The first arm is kept for the 0.63.0 shape rather than replaced, because which
- * adapter a machine runs is a pin this repository moves and a plugin's agent may
- * lag it. Neither arm looks at a concrete row's description against another's
- * name: the placeholder set is the whole permission to drop anything.
- *
- * The later row wins because that is the order agents use: placeholder first,
- * concrete after. Rewriting `value` onto it is a *rename of an equivalent*, not an
- * invention — and it is confined to the snapshot, which is a description of state
- * for drawing. The live config `setConfigOption` validates against is untouched,
- * and a client picking a row now sends the concrete value, so the next session
- * starts on it for real.
- *
- * Here rather than in the browser because this is the only side that has every
- * description: `snapshotConfig` keeps only the selected choice's prose, so a client
- * cannot see that two rows match. It also makes the snapshot *smaller*.
- */
 export function dedupeAliasChoices(option: AgentConfigOption): AgentConfigOption {
   const lastByDescription = new Map<string, string>();
-  // Only concrete rows are candidates by name: a placeholder is what gets
-  // collapsed, never what something collapses onto, so its name is not a target.
   const lastByName = new Map<string, string>();
   for (const choice of option.choices) {
     const value = String(choice.value);
@@ -893,27 +293,11 @@ export function dedupeAliasChoices(option: AgentConfigOption): AgentConfigOption
 
   const aliasOf = new Map<string, string>();
   for (const choice of option.choices) {
-    // Only a *placeholder* is ever removed. Matching descriptions alone is a
-    // heuristic over untrusted agent output, and dropping on it is destructive
-    // and one-directional: an agent that reuses one blurb across two genuinely
-    // distinct models would lose the earlier one from the picker for good, with
-    // the daemon still happily accepting the value the UI could no longer offer —
-    // invisible from the server side. `truncateEvent`'s own `agent_config` arm
-    // states the rule this would break: "a picker missing a choice would silently
-    // offer the agent less than it supports".
-    //
-    // `default` is a placeholder by construction rather than by guess: it is the
-    // id an agent uses for "whatever I would pick", and no real model is named it.
-    // So both measured cases — claude 0.63.0's `default` carrying `opus[1m]`'s
-    // description verbatim, and 0.73.0's carrying `opus[1m]`'s *name* — collapse,
-    // and nothing an agent offers uniquely can.
+    // Only a placeholder is ever removed: matching descriptions is a heuristic over untrusted agent output.
     const value = String(choice.value);
     if (!PLACEHOLDER_CHOICE_VALUES.has(value)) continue;
     const description = choice.description?.trim();
     if (description === undefined || description.length === 0) continue;
-    // The description arm first (0.63.0), the name arm only where it found no
-    // other row (0.73.0). `lastByName` never holds a placeholder, so the second
-    // arm cannot answer with the row it is asking about.
     const byDescription = lastByDescription.get(description);
     const keeper = byDescription !== undefined && byDescription !== value ? byDescription : lastByName.get(description);
     if (keeper !== undefined) aliasOf.set(value, keeper);
@@ -928,44 +312,11 @@ export function dedupeAliasChoices(option: AgentConfigOption): AgentConfigOption
   };
 }
 
-/**
- * The value that stands for claude's `ultracode` on its own effort control.
- *
- * Ours rather than the agent's, which is the one thing that makes this an
- * exception worth naming: everywhere else in this daemon a choice comes from the
- * agent and is passed through untouched. `ultracode` is a *setting* rather than
- * an ACP option — see `sessionMetaFor` — so there is nothing to pass through, and
- * the alternative to inventing this row was a switch of our own somewhere else on
- * the screen for something the agent's own interface offers in exactly this
- * place.
- *
- * It never reaches the agent: {@link ManagedSession.setConfigOption} intercepts
- * it above the ACP call, which is asserted by `daemoncheck` rather than left as a
- * property of the reading order.
- */
+/** Ours, not the agent's: setConfigOption intercepts it, so it never reaches the agent. */
 export const ULTRACODE_CHOICE = "ultracode";
 
-/**
- * The level whose presence proves the model can carry ultracode at all.
- *
- * The SDK's own condition is *"requires workflows to be enabled and an
- * xhigh-capable model"*, and claude builds the effort list from
- * `supportedEffortLevels` of the model that is currently selected. So this is a
- * capability test read off the agent's own answer, not a model name we would
- * otherwise have to keep a list of — and it turns itself off on a model that
- * cannot do it, which no list of ours would.
- */
 const XHIGH_CHOICE = "xhigh";
 
-/**
- * Which control the extra row belongs on, or `null` where there is not one.
- *
- * By `category` and never by id, like everything else that reads a control here:
- * claude calls it `effort` today and the id is not portable. Four conditions, and
- * the last is the one that keeps this from being permanent — an agent that ships
- * its own `ultracode` choice takes the row back, and the value then travels to it
- * as an ordinary selection.
- */
 export function ultracodeOptionId(config: AgentConfig, agent: AgentId): string | null {
   if (agent !== "claude") return null;
   const option = config.options.find((candidate) => candidate.category === "thought_level");
@@ -975,20 +326,7 @@ export function ultracodeOptionId(config: AgentConfig, agent: AgentId): string |
   return option.id;
 }
 
-/**
- * The agent's controls with the one row it cannot publish, and the selection it
- * cannot report.
- *
- * Applied to the state on its way to the *snapshot*, never to the state
- * `setConfigOption` validates against — the same split `dedupeAliasChoices`
- * makes and for the same reason: what a client draws and what the agent accepts
- * are two different sets, and mixing them is how a picker comes to offer
- * something the daemon then refuses.
- *
- * Before `snapshotConfig` rather than after, so the extra row obeys every rule
- * the others do: its prose is clipped, and kept only while it is the selected
- * one.
- */
+/** Applied to the snapshot only, never to the state setConfigOption validates against. */
 export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean): AgentConfig {
   const optionId = ultracodeOptionId(config, agent);
   if (optionId === null) return config;
@@ -999,22 +337,7 @@ export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean):
         ? option
         : {
             ...option,
-            /*
-             * The selection is ours because the agent cannot report this state at
-             * all. Measured 2026-08-11 against claude-agent-acp 0.63.0: the effort
-             * option's `currentValue` is built from `Settings.effortLevel`
-             * (claude-agent-acp 0.63.0, `createSession` handing
-             * `settingsManager.getSettings().effortLevel` to `buildConfigOptions`),
-             * a *different* settings key from `ultracode`,
-             * so a session running with the flag on still publishes
-             * `effort=default`. 0.73.0 hands `settingsEffortForModel(settings,
-             * currentModelInfo)` instead — per-model since 0.72.0, and still not
-             * the `ultracode` key: re-measured 2026-09-04 with the flag on, it
-             * published `effort=default` under the same id and `category`, with
-             * `xhigh` still offered. Passing that through would leave the row somebody
-             * just chose permanently unticked — a control that answers "nothing
-             * happened" every time it works.
-             */
+            // Ours: claude publishes effort=default while ultracode is on, which would leave the row unticked.
             value: on ? ULTRACODE_CHOICE : option.value,
             choices: [
               ...option.choices,
@@ -1030,30 +353,6 @@ export function withUltracode(config: AgentConfig, agent: AgentId, on: boolean):
   };
 }
 
-/**
- * The agent's controls, as they ride the snapshot rather than the log.
- *
- * The same argument `MAX_PERMISSION_BLOB_BYTES` makes, applied to the other
- * agent-chosen payload on a snapshot — and it was missed. `truncateEvent` drops
- * descriptions from an `agent_config` *event* when it is over the per-event cap,
- * but the copy `snapshot()` returns went out verbatim, and a snapshot is returned
- * for every session at once on a list a phone polls every four seconds with up to
- * sixty rows. The large part is a model list: claude advertises every model it can
- * reach, each with a name and usually a description.
- *
- * So the prose goes and the *identity* of every control stays — ids, names and
- * current values are never touched, which is the same trade `truncateEvent`
- * makes. The descriptions are still in the transcript for anything that wants
- * them, which is what `configProse` in the web client reads.
- *
- * The one thing that does not survive verbatim is the choice *list*, and only
- * where the agent said two rows are the same thing: see {@link dedupeAliasChoices},
- * which collapses a placeholder onto the concrete row it duplicates and moves the
- * selection with it. Two further droppers sit in this pipeline: `narrowToSystem`,
- * which drops every choice outside a pairing's namespace, and `clipChoices`, which
- * drops everything past {@link MAX_SNAPSHOT_CHOICES} unless `full`. Both can drop a
- * choice the agent offers uniquely, which is why `truncated` is on the wire.
- */
 function snapshotConfig(config: AgentConfig, namespace: string | null, full = false): AgentConfig {
   return {
     modes:
@@ -1070,44 +369,13 @@ function snapshotConfig(config: AgentConfig, namespace: string | null, full = fa
     options: config.options
       .map(dedupeAliasChoices)
       .map((option) => narrowToSystem(option, namespace))
-      // After the narrowing, never before it: a pairing's own catalogue is what
-      // somebody is choosing from, so cutting the union first would drop rows the
-      // narrowing was about to keep and leave a head of another system's models.
-      //
-      // Skipped whole for the one route that is not polled — see `snapshot`. The
-      // *narrowing* above still runs there, because that is a correctness rule
-      // about which system's models a pinned session may be offered rather than a
-      // size bound, and it must not differ between the two reads.
       .map((option) => (full ? option : clipChoices(option)))
       .map((option) => ({
       ...option,
-      // The option's own description is kept too, and it is short — "AI model to
-      // use", "Available effort levels for this model", one per control rather
-      // than one per choice. It is the only prose claude's effort control has:
-      // every one of its choices (`Default`, `Low`, `High`…) carries none, so
-      // without this the menu is a list of bare words with nothing saying what
-      // they are levels *of*.
       description: clipChoiceDescription(option.description),
       choices: option.choices.map((choice) => ({
         ...choice,
-        // The *selected* choice keeps its prose. Everything else loses it.
-        //
-        // This is the one description a client cannot do without, and dropping it
-        // wholesale was a mistake worth naming: claude's model list always carries
-        // a choice called `Default (recommended)`, and the only thing that says
-        // which model that actually is — "Opus 5 with 1M context" — is its
-        // description. Stripped, the control reads "Default" and answers nothing.
-        //
-        // Recovering it from the `agent_config` event in the transcript is not a
-        // substitute, which is what was tried first: that event lands at session
-        // start, so on any conversation longer than the render window it is not
-        // loaded and the label silently goes back to being useless.
-        //
-        // The cost argument the strip was built on is untouched. What made the
-        // snapshot expensive was N descriptions per option — claude advertises
-        // five models, each with prose. This keeps 1 of N, clipped, which is a few
-        // dozen bytes per session against the four absolute paths `workspace`
-        // already carries.
+        // The selected choice keeps its prose: for claude's Default (recommended) it is the only thing naming the model.
         description:
           choice.value === option.value ? clipChoiceDescription(choice.description) : null,
       })),
@@ -1115,34 +383,7 @@ function snapshotConfig(config: AgentConfig, namespace: string | null, full = fa
   };
 }
 
-/**
- * A session pinned to one system is offered that system's models and no others.
- *
- * ⚠ **Reported twice from the app, the second time after a fix that only grouped
- * them.** opencode is the native side of *two* systems and publishes **one** model
- * control holding both catalogues — 356 `openrouter/…` and six `opencode/…`. A
- * session assembled as OpenRouter therefore offered six OpenCode Zen models at the
- * bottom of its own picker, and choosing one left the session running a model from
- * a system its preset does not name: the chip, the tile and the glyph all go on
- * saying OpenRouter. That is Q2.216's dishonesty reached through the model menu
- * rather than through a preset edit.
- *
- * **The namespace is the pairing's, not the current value's**, which is the whole
- * reason this is on the daemon. The browser holds an `AgentConfigOption` off a
- * snapshot and knows nothing about systems; deriving the namespace from whatever
- * model is selected right now would trap a session that had already been switched
- * to the wrong one — it would then be offered only the wrong one, for ever.
- *
- * ⚠ **The selected choice is never removed**, whatever namespace it is in. A model
- * list missing the value the control is set to makes `chipValue` fall back to a raw
- * id, and makes `pinNativeModel` refuse the next resume with "has no model called
- * …" — so a session already switched by hand keeps a way back to itself rather than
- * being cut adrift by a fix.
- *
- * Narrow twice: `category === "model"` only, since no other control's values are
- * namespaced; and only where `nativeModelPrefix` is set, which is opencode's two
- * systems and nothing else. Every other agent's list is returned by identity.
- */
+/** Narrowed by the pairing's namespace, never the current value's, and the selected choice is never removed (Q2.216). */
 export function narrowToSystem(option: AgentConfigOption, namespace: string | null): AgentConfigOption {
   if (namespace === null || option.category !== "model") return option;
   const kept = option.choices.filter(
@@ -1151,51 +392,14 @@ export function narrowToSystem(option: AgentConfigOption, namespace: string | nu
   return kept.length === option.choices.length ? option : { ...option, choices: kept };
 }
 
-/** Bounded, because it now rides a record `GET /sessions` returns sixty of. */
 const MAX_CHOICE_DESCRIPTION_CHARS = 120;
 
-/**
- * How many choices of one option ride the *list*.
- *
- * ⚠ **The description was bounded and the count was not, and the count is the one
- * that grew.** `clipChoiceDescription` above was measured against claude, which
- * "advertises five models, each with prose" — so N descriptions was the expensive
- * part and N itself was small. opencode is not: with an `OPENROUTER_API_KEY` in its
- * environment it publishes **362** models in one control (measured 2026-08-27, and
- * `narrowToSystem` keeps 356 of them for the OpenRouter pairing and *all* 362 for a
- * bare session, whose namespace is `null` and which returns before it filters). At
- * sixty rows on a four-second poll, over a relay, to a phone, that is the largest
- * thing in the response by an order of magnitude — the cost this whole function
- * exists to control, arriving through the one dimension it did not bound.
- *
- * **The selected choice is always kept, wherever it sits**, because it is what the
- * chip, the strip tile and `configProse` draw; losing it would make a session
- * report a model it is not running. `truncated` is what tells a client the menu is
- * a head rather than the whole list, so a picker can say so and read the rest from
- * `GET /sessions/:id`, which is not paginated and not polled.
- *
- * 40 rather than a rounder number: claude's five, codex's dozen and kimi's list all
- * fit whole, so the flag stays false for three of the four this repository ships.
- * **opencode is the exception and is the reason for the bound** — the 362 measured
- * above are cut to 40 on every polled snapshot, so `truncated` is set in ordinary
- * use rather than never.
- */
+// The selected choice is always kept; truncated says the rest is on GET /sessions/:id.
 const MAX_SNAPSHOT_CHOICES = 40;
 
-/**
- * One option's choices, cut to {@link MAX_SNAPSHOT_CHOICES} with the selected one
- * kept.
- *
- * Returns the option by identity when nothing was cut, so a client comparing
- * snapshots sees no change where there is none — `narrowToSystem` above takes the
- * same care for the same reason.
- */
 function clipChoices(option: AgentConfigOption): AgentConfigOption {
   if (option.choices.length <= MAX_SNAPSHOT_CHOICES) return option;
   const head = option.choices.slice(0, MAX_SNAPSHOT_CHOICES);
-  // The selected choice may sit past the cut, and it is the one a client cannot do
-  // without. Swapped into the last slot rather than prepended: the order of what
-  // survives is the agent's own, and moving the head around would reorder a menu.
   if (!head.some((choice) => choice.value === option.value)) {
     const selected = option.choices.find((choice) => choice.value === option.value);
     if (selected !== undefined) head[head.length - 1] = selected;
@@ -1212,68 +416,19 @@ function clipChoiceDescription(description: string | null): string | null {
     : `${trimmed.slice(0, MAX_CHOICE_DESCRIPTION_CHARS - 1).trimEnd()}…`;
 }
 
-/**
- * The longest title this daemon will accept from a rename.
- *
- * Bounded for the same reason `MAX_PERMISSION_BLOB_BYTES` is: a title rides the
- * *snapshot*, which `GET /sessions` returns for up to sixty sessions at once on a
- * path a phone polls every four seconds. 120 characters is worst-case ~140 bytes
- * per row, a fraction of the four absolute paths `workspace` already carries —
- * but it stays a fraction only because there is a cap.
- */
-/**
- * Choice values that mean "whatever the agent would pick", not a thing in itself.
- *
- * The only values {@link dedupeAliasChoices} will remove. Kept as a set rather
- * than a literal so the next agent's spelling is one entry, and deliberately tiny:
- * every addition here is permission to delete a row from somebody's picker.
- */
 const PLACEHOLDER_CHOICE_VALUES = new Set(["default"]);
 
 export const MAX_TITLE_CHARS = 120;
 
-/**
- * The length a title derived from a prompt is clipped to.
- *
- * Shorter than what a rename may set, on purpose: a person who types a name chose
- * it and means it, while a derived one is a guess made from the first thing they
- * happened to say, and a guess that fills a rail row is worse than a short one.
- */
 const DERIVED_TITLE_CHARS = 60;
 
-/**
- * Makes an arbitrary string safe to be a session's name, or `null` if nothing is
- * left of it.
- *
- * Controls are *stripped* rather than refused, and that asymmetry is deliberate:
- * on the rename path refusing would be defensible, but the same function runs on
- * the derived path where the input is a prompt somebody wrote for an agent, and
- * there is nobody to refuse to. U+2028/U+2029 are in the class because they are
- * line breaks that `\s` in a `RegExp` without `u` does not always treat as such,
- * and a line break in a title is a row that grows by a line.
- *
- * `null` and never `""`: the store's `title` column distinguishes "never named"
- * from "named", and an empty string would be a third state that renders as a
- * blank header.
- */
 export function normalizeTitle(raw: string, limit: number = MAX_TITLE_CHARS): string | null {
-  // Escapes and not literals: a control character written into the source of a
-  // regex is invisible in every editor and diff that will ever show this line.
   const flattened = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ");
   const collapsed = flattened.replace(/\s+/g, " ").trim();
   if (collapsed.length === 0) return null;
   return collapsed.length <= limit ? collapsed : `${collapsed.slice(0, limit - 1).trimEnd()}…`;
 }
 
-/**
- * Names a session after the first thing its owner asked for.
- *
- * The first non-empty *line*, not the first 60 characters: a prompt that opens
- * with a one-line summary and then pastes a stack trace should be named after the
- * summary, and one that opens with the stack trace is not going to be well named
- * by anything. Breaking on a nearby space rather than mid-word costs one scan and
- * is the difference between "Fix the reconnect back" and "Fix the reconnect ba".
- */
 export function deriveSessionTitle(prompt: string): string | null {
   const firstLine = prompt.split(/\r?\n/).find((line) => line.trim().length > 0);
   if (firstLine === undefined) return null;
@@ -1292,164 +447,42 @@ export interface PendingPermissionSnapshot {
   title: string;
   options: PermissionOptionSummary[];
   raisedAt: number;
-  /**
-   * What is actually being approved: the tool's arguments, and the request's
-   * content blocks when it is an edit.
-   *
-   * Here rather than left to a client-side join against the `tool_call` event,
-   * because for kimi that event carries `rawInput: null` and this request is the
-   * only place the command appears. Both are bounded and both may be the
-   * `{truncated: true, bytes}` stand-in.
-   */
+  /** Carried here because kimi's tool_call event has rawInput null; both may be the truncated stand-in. */
   rawInput: unknown;
   content: unknown;
 }
 
-/**
- * A question the agent is waiting on, as it rides `SessionSnapshot`.
- *
- * **The form is not here, and that is the difference from a pending permission.**
- * A permission earns its 8 KiB of `rawInput`/`content` on this record because a
- * blocked session has to be answerable *from the list* — the whole "does anything
- * anywhere need me" thesis rests on approving being two taps from anywhere. A
- * question is not answerable from a list: you have to read the form and fill it
- * in. So the snapshot carries only enough to say one is waiting and to draw a
- * row, and `GET /sessions/:id/elicitations/:elicitationId` serves the fields when
- * a card opens — which is exactly where a command list lives, and for exactly the
- * same reason.
- *
- * `fieldCount` is here so a card can size a skeleton before its fetch lands, and
- * for no other reason; nothing decides anything on it.
- */
 export interface PendingElicitationSnapshot {
   elicitationId: string;
   toolCallId: string | null;
-  /**
-   * The agent's prompt. Always present — ACP requires it.
-   *
-   * ⚠ **Clipped at ingest, and for five releases it was not.** The old sentence
-   * here said "Clipped at ingest" after `MAX_ELICITATION_MESSAGE_CHARS` had been
-   * retired, leaving `MAX_ELICITATION_FORM_BYTES` — which weighs the *form*, of
-   * which this is not a field — holding nothing. A snapshot carrying one
-   * elicitation therefore had no bounded worst case at all, which is the residue
-   * `fitSnapshotFrame`'s ladder concedes it cannot cut past: its halving rung
-   * floors at one row, so one enormous question defeats every rung and the
-   * oversized control frame goes out anyway. The clip is back at 4096 code units,
-   * applied by `clipElicitationMessage` in `session.ts` — the one place that
-   * bounds this field and the event's copy of it together. See `src/server.ts`.
-   */
+  /** The agent's prompt, clipped at ingest by clipElicitationMessage in session.ts. */
   message: string;
   fieldCount: number;
   raisedAt: number;
 }
 
-/** What a resume failure is allowed to say. Both clamped — see below. */
 export const MAX_RESUME_ERROR_CODE_CHARS = 64;
 export const MAX_RESUME_ERROR_MESSAGE_CHARS = 512;
 
-/**
- * What an exit is allowed to say about why.
- *
- * `SessionExit.detail` rides two things that cannot afford an unbounded string:
- * `snapshot()`, so every `GET /sessions` poll carries it for every session, and
- * `StatusEvent`, which `estimateBytes` charges a **flat 192** because the rest of
- * that event is union literals and numbers. So a long detail is both re-sent
- * every four seconds and invisible to the per-event cap.
- *
- * It is agent-reachable: `onStartFailed` writes `describeError(error)`, and on
- * an ACP handshake failure that error's message is whatever the agent put in its
- * JSON-RPC error — the same "bounded by what the agent sent" that is not a bound
- * anywhere else in this file.
- *
- * The same 512 as a resume failure's message, deliberately: they are the same
- * kind of sentence in the same place on the same screen, and two numbers for one
- * job is how they end up disagreeing.
- */
 export const MAX_EXIT_DETAIL_CHARS = MAX_RESUME_ERROR_MESSAGE_CHARS;
 
-/**
- * What the daemon's own resume pass is doing about this session.
- *
- * On the snapshot rather than in the log, and the admission rule is the same one
- * `title`, `pinned` and `contextUsage` pass: it is state superseded whole rather
- * than something that happened, so a transcript would accumulate a line per
- * attempt for a fact that only ever has one current value. The *failure* is
- * narrative and does get one `error` event — once, on the final attempt.
- *
- * It earns its place beside those by answering *does anything anywhere need me*
- * from the list: a session the daemon gave up on is one nobody is coming for,
- * and without this field it is byte-identical to one that has not been tried
- * yet. That is also why it is bounded an order tighter than a pending
- * permission's 8 KiB — this rides `GET /sessions` for sixty sessions every four
- * seconds, and unlike a permission nothing here needs to be *acted on* from the
- * list, only recognised.
- *
- * Absent means an older daemon that does not resume at all. A client must read
- * that as "waiting", never as "failed": quietly wrong about a session that is
- * never coming back is a great deal better than a red banner on every ended
- * session in the fleet.
- */
+/** Absent means an older daemon that does not resume: a client reads that as waiting, never failed. */
 export interface SessionResumeState {
   state: "waiting" | "running" | "failed";
-  /** How many times *this daemon* has tried. Reset by a success, not persisted. */
   attempts: number;
-  /** The last refusal, in the daemon's own error vocabulary. */
   error: { code: string; message: string } | null;
   at: number;
 }
 
-/**
- * The one give-up that outlives this daemon, and why it is the only one.
- *
- * `ResumeGiveUp` itself lives in `events.ts` beside `ExitReason`, with
- * `isPersistedGiveUp`, because the store reads the column too: the prune
- * decides a deletion from it and may not act on a value it cannot name.
- *
- * Retry state is otherwise in memory on the argument that a restart is new
- * information — a new binary, a re-signed-in agent, a remounted disk. That
- * argument holds for every reason except this one: the agent has told us the
- * conversation does not exist, which is a fact about the world rather than about
- * an attempt, and no restart of ours changes what is on its disk.
- *
- * The others are deliberately left transient because re-checking them is cheap
- * or genuinely worth redoing. `workspace_missing` costs one `stat` and a folder
- * really can be put back. `unsupported` is a property of the agent *binary*,
- * which an upgrade changes, and the per-pass memo already reduces it to one
- * spawn per agent per boot. `attempts_exhausted` is the transient case by
- * definition.
- *
- * Measured 2026-08-04, which is why this exists at all: ten sessions whose
- * transcripts did not survive the move off containers were each costing three
- * agent spawns on every single restart, for ever.
- */
+/** Only forgotten persists: no restart changes what is on the agent's disk. */
 export function resumeGiveUpPersists(reason: ResumeGiveUp): boolean {
   return reason === "forgotten";
 }
 
-/**
- * Everything a client needs to understand a session without replaying anything.
- *
- * This is the authoritative view. The event log is narrative: it says what
- * happened, in order, but a client that has just arrived should not have to
- * reconstruct "is this thing blocked right now" by folding over it.
- */
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
-  /**
-   * The assembled agent this session was started as, or `null` for a bare
-   * harness.
-   *
-   * ⚠ **An id, and nothing about what it *says*.** The name, the system and the
-   * model are not here: they are the preset's, they can be edited, and a copy on
-   * a snapshot fanned out per client on every output token is a copy that goes
-   * stale in the one place it would be read. The client already lists the
-   * presets to draw its picker; this is the join key.
-   *
-   * On the snapshot rather than only in the log for the same reason `agent` is: a
-   * **restored** session has no live agent to have published anything, and its
-   * row still has to say what it is.
-   */
+  /** An id only: the preset's name, system and model are editable, so a copy here would go stale. */
   customAgent: string | null;
   /** Where the agent runs. Always equal to `workspace.root`. */
   cwd: string;
@@ -1459,145 +492,23 @@ export interface SessionSnapshot {
   agentHandle: AgentHandle | null;
   turn: number | null;
   turnStartedAt: number | null;
-  /**
-   * When somebody asked the agent to abandon this turn, or `null`.
-   *
-   * On the snapshot rather than only in the log because it is *state* and because
-   * of the one property the log cannot supply: an agent may ignore a cancel. A
-   * turn that ends answers with `turn_end{stopReason: "cancelled"}` and needs
-   * nothing here; a turn that goes on working is the case this field exists for,
-   * and a client that could not see it would redraw the button as if nothing had
-   * been asked. It survives a reload for the same reason — the request was made
-   * by the fleet's owner, not by a tab.
-   *
-   * Cleared where `turn` is, so the pair can never disagree: an agent that answers
-   * is `{turn: null, cancelRequestedAt: null}` again, and asking twice is allowed.
-   */
   cancelRequestedAt: number | null;
-  /**
-   * Messages this daemon has taken and the agent has not been given yet.
-   *
-   * ⚠ **Usually empty on an agent that can be steered, never guaranteed empty.**
-   * `sendMidTurn` falls through to the queue on a steerable agent whenever the
-   * steer itself fails — an agent that advertised `_session/steering` and then
-   * answered `unsupported`, or a `prompt_required` landing while a `/clear` or a
-   * restart is in flight. So a client must read this array rather than infer it
-   * from {@link midTurnDelivery}; `queuedSeqs` in `wire.ts` does. The `seq` on each entry names the `prompt` event
-   * the message already is, so a client draws its line under that bubble rather
-   * than inventing a row — the same division of labour `cancelRequestedAt` has
-   * with `turn_end`.
-   */
+  /** Not guaranteed empty on a steerable agent: a failed steer falls through to the queue. */
   queuedPrompts: QueuedPrompt[];
-  /**
-   * Work this session's agent started that outlives the call that started it.
-   *
-   * On the snapshot rather than in the log because it is state with one current
-   * version, and because `parkable` reads it — see `backgroundTasksState`. Empty
-   * on a session with no agent, and empty for ever on an agent that does not
-   * report: {@link reportsBackgroundTasks} is what tells the two apart, and a
-   * client that draws this list without reading that field is claiming *nothing is
-   * running* on four agents out of five.
-   */
+  /** Empty for ever on an agent that does not report; read reportsBackgroundTasks before drawing it. */
   backgroundTasks: BackgroundTask[];
-  /**
-   * Whether this session's agent reports background work at all.
-   *
-   * Read off the agent's own `initialize` answer, never off its id. `false` while
-   * there is no agent — the honest value, since nothing has said anything.
-   */
   reportsBackgroundTasks: boolean;
-  /**
-   * What this session does with a message sent while a turn is running.
-   *
-   * `"steer"` — the agent takes it into the turn (claude, codex).
-   * `"queue"` — it waits for the turn to end (kimi, and anything else).
-   *
-   * ⚠ **On the snapshot because the client has to draw two different sentences,
-   * and optional on the mirror because an older daemon draws neither.** Its
-   * absence in `wire.ts` is the whole compatibility story for this feature: a
-   * daemon that does not send it is one that still answers `409 turn_in_flight`,
-   * so the composer keeps every gate it has today and Send stays refused. Nothing
-   * branches on a *version* — `compatibility.md` rule 1 — it branches on a
-   * capability the daemon states.
-   *
-   * `null` while there is no agent to ask. `holdConfig`'s problem and not this
-   * one: nothing is drawn from it while the strip is `stale`.
-   */
   midTurnDelivery: "steer" | "queue" | null;
   lastEventAt: number | null;
   createdAt: number;
-  /**
-   * The agent's mode/model/effort controls, and what they are set to.
-   *
-   * On the snapshot rather than only in the log, and that is load-bearing for two
-   * reasons that outlive the one it used to give. The controls are **state with one
-   * current version**, so a client folding a log to find them would be re-deriving a
-   * value the record already carries — and the log evicts a prefix. And a *restored*
-   * session has no live agent to have published anything, so there may be nothing in
-   * the log to fold.
-   *
-   * The reason this used to give was that `session_started` landed after the first
-   * `prompt` event; it lands when the agent is adopted now, since a `ManagedSession`
-   * drains the queue between turns. The conclusion did not depend on it.
-   *
-   * Empty options mean the agent offers none, not that we have not asked.
-   */
   agentConfig: AgentConfig;
-  /**
-   * Moves whenever the agent republishes its command list. `0` means it never has.
-   *
-   * A number rather than the list, and this is the one place to read why.
-   * Everything else on this record is either tiny or needed to answer *does
-   * anything anywhere need me* without opening a session — a pending permission
-   * earns its 8 KiB here precisely because a blocked session has to be answerable
-   * **from the list**. A command list is neither: it is only ever wanted inside
-   * one session's composer, by somebody who has already opened it and pressed a
-   * key. claude publishes dozens with descriptions, and `GET /sessions` returns
-   * this record for up to sixty sessions every four seconds, over the relay, to a
-   * phone. So the list lives behind `GET /sessions/:id/commands` and this says
-   * when to go and get it.
-   *
-   * Clamping the list to poll size instead was the tempting alternative and it is
-   * worse: `truncateEvent`'s `agent_config` arm already names the failure — a
-   * picker missing a row silently offers the agent less than it supports — and a
-   * `/` menu with no `/compact` because it sorted seventeenth is not a smaller
-   * menu, it is a wrong one.
-   *
-   * A client refetches on `!==` and never on `>`. A daemon restart puts this back
-   * to 0 while a client still holds 5, and the right response there is to drop the
-   * cache rather than conclude the daemon is behind.
-   */
+  /** The list itself is served by GET /sessions/:id/commands; clients refetch on any change, since a restart resets this to 0. */
   commandsRevision: number;
-  /**
-   * What this session is called. `null` means nobody has named it, and a client
-   * should draw its own fallback from the working directory rather than an empty
-   * string — which is why this is never `""`.
-   */
   title: string | null;
-  /**
-   * Sorted to the top of the list, and never dropped by a `?limit=` cut.
-   *
-   * Outranks liveness and never outranks a pending permission: a pin is somebody's
-   * bookmark, and a blocked session is somebody being waited on.
-   */
   pinned: boolean;
-  /**
-   * Where this session sits in the list, or `null` for wherever its age puts it.
-   *
-   * A **position clock**, not an index: the unit is a millisecond, and unset means
-   * `createdAt`. That is what lets one order cover a row somebody dragged and a
-   * row nobody has touched — both are instants, so they compare, and a session
-   * created a moment ago is at the top of its folder with nothing written here.
-   */
+  /** A position clock in milliseconds; null means createdAt. */
   rank: number | null;
-  /**
-   * How full the model's context window is, or `null` for "cannot tell".
-   *
-   * Three answers and not two, for the reason `Liveness` and `loggedIn` have
-   * three: kimi may never report it at all, and a restored session has no live
-   * agent to ask. Rendering "cannot tell" as "0% used" would put a number on
-   * screen that nobody measured, and a person would plan around it.
-   */
+  /** null means cannot tell, never 0%. */
   contextUsage: ContextUsage | null;
   firstSeq: number;
   lastSeq: number;
@@ -1606,57 +517,11 @@ export interface SessionSnapshot {
   /** Questions the agent is waiting on. Read through `awaitingHuman`, not directly. */
   pendingElicitations: PendingElicitationSnapshot[];
   exit: SessionExit | null;
-  /**
-   * Absent whenever this daemon has had no reason to think about resuming the
-   * session — which is every live session, and every session it will not bring
-   * back. See {@link SessionResumeState} for why absent means "waiting".
-   */
   resume?: SessionResumeState;
-  /**
-   * What a socket frame had to leave out to fit under the wire ceiling.
-   *
-   * ⚠ **Absent everywhere but a reduced frame, and that is the whole contract.**
-   * `snapshot()` never sets it, so `GET /sessions` and `GET /sessions/:id` always
-   * carry a whole record and never this field; only `fitSnapshotFrame` in
-   * `src/server.ts` writes it, on the `hello`/`snapshot` frames its ladder had to
-   * cut. So **absent means whole**, which is also what an older daemon says by
-   * sending nothing — `compatibility.md` rule 2, degrading to exactly today's
-   * behaviour.
-   *
-   * Why it exists: past ~512 KiB of parked requests the frame became a *lossy
-   * projection* of the same declared type the HTTP route still served whole, with
-   * nothing on it saying so. `packages/web/src/store.ts` writes both into one
-   * `row.snapshot` — the four-second poll and `onSnapshot` — so the approval
-   * list, the `more` count and `PermissionCard`'s "Part of this request was too
-   * large to keep" banner flipped on every poll/frame alternation, and each flip
-   * re-armed an effect that fires `store.loadAll`. A client cannot tell the two
-   * apart from the arrays alone: a halved list is a well-formed list.
-   *
-   * Marking rather than degrading the route to match, because a route cut to the
-   * frame's shape loses data nothing can get back — the fuller record is one
-   * `GET /sessions/:id` away, and this field is what tells a client to go.
-   */
+  /** Set only by fitSnapshotFrame on a reduced socket frame; absent means whole. */
   reduced?: SnapshotReduction;
 }
 
-/**
- * How much of a snapshot a frame is actually carrying.
- *
- * The two counts are the **true** lengths of the record's own arrays — what the
- * client would have received over HTTP — and never the lengths of the arrays on
- * the frame beside them, which is what makes `reduced.pendingPermissions >
- * pendingPermissions.length` the readable form of "rows were cut". Counts rather
- * than a boolean because `waitingCount` is a number on screen: *3 more waiting*
- * has to stay true across a poll and a frame, and a flag would only say that it
- * is not.
- *
- * `blobs` is the other rung, and it is a boolean because there is nothing to
- * count: every surviving permission's `rawInput` and `content` are replaced with
- * `clampBlob(…, 0)` together. It is the difference between *the agent's own
- * payload was over 8 KiB at ingest* and *this frame dropped it* — identical
- * `{truncated, bytes}` shapes, opposite remedies, and only the second is
- * recoverable by asking the route.
- */
 export interface SnapshotReduction {
   pendingPermissions: number;
   pendingElicitations: number;
@@ -1688,24 +553,14 @@ export type PermissionResult =
   | { kind: "invalid_option"; options: PermissionOptionSummary[] }
   | { kind: "no_matching_option"; options: PermissionOptionSummary[] };
 
-/**
- * What a client may say about a question.
- *
- * **Three forms and not two, and that is measured rather than symmetry.** Against
- * claude's adapter, `decline` runs the tool with empty answers and the turn
- * *carries on* — the model is told the person skipped — while `cancel` throws and
- * the tool call dies. They are different acts, and collapsing them would take one
- * of the two away from whoever is holding the phone.
- */
+/** decline lets the turn carry on and cancel kills the tool call: different acts, both kept. */
 export type ElicitationAnswerBody =
   | { content: Record<string, ElicitationContentValue> }
   | { decline: true }
   | { cancel: true };
 
-/** What a form field's answer is allowed to be on the wire. */
 export type ElicitationContentValue = string | number | boolean | string[];
 
-/** Why a `content` object was refused. Every problem is reported, never the first. */
 export interface ElicitationProblem {
   key: string;
   code:
@@ -1740,34 +595,12 @@ export type ElicitationResult =
     }
   | { kind: "expired"; elicitationId: string }
   | { kind: "not_found" }
-  // `fields` rides along for the reason `invalid_option` returns `options`: a
-  // client that is out of date can redraw rather than guess.
   | { kind: "invalid_content"; problems: ElicitationProblem[]; fields: ElicitationField[] };
 
-/**
- * What `setConfigOption`/`setMode` can answer. Mapped onto HTTP by `server.ts`.
- *
- * `busy` is deliberately **not** "a turn is running": changing mode or model
- * mid-turn is ordinary and stays allowed. It is the one window in which the
- * agent's session id is being replaced underneath us — see `clearing`, whose
- * whole reason for existing is that nothing else may address the agent while it
- * runs. The arm is here rather than folded into `not_ready` because a client's
- * answer differs: a clear is over in ~600ms and the tap is worth repeating, where
- * `not_ready` is a session with no agent at all.
- */
+/** busy is not a running turn: it is the window in which the agent's session id is being replaced (see clearing). */
 export type AgentConfigResult =
   | { kind: "ok"; config: AgentConfig }
   | { kind: "busy"; status: SessionStatus }
-  /**
-   * A turn is running and this change cannot be made without ending it.
-   *
-   * Distinct from `busy`, which this file is careful to say is *not* about a turn
-   * — and the distinction earns itself here for the first time: exactly one
-   * control needs the agent restarted to take effect (see
-   * {@link ULTRACODE_CHOICE}), so exactly one refusal on this route is honestly
-   * "wait for the agent to finish". Every other option is applied live and does
-   * not care.
-   */
   | { kind: "turn_in_flight"; status: SessionStatus }
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus }
@@ -1777,45 +610,12 @@ export type AgentConfigResult =
 
 export type PromptResult =
   | { kind: "accepted"; turn: number; seq: number }
-  /**
-   * A turn is running, so this message goes the other way in.
-   *
-   * ⚠ **Not a refusal any more, and splitting it off `busy` is what says so.** The
-   * two used to be one arm answering `409 turn_in_flight`, and they were never one
-   * fact: a `/clear` or a restart is the agent being *unaddressable* for a second,
-   * while a turn in flight is the agent working — which is the ordinary state
-   * somebody types a correction in. This arm carries no seq and appends nothing;
-   * it tells the route to go and call {@link ManagedSession.sendMidTurn}, which is
-   * async and therefore cannot live inside this method.
-   *
-   * `busy` keeps every assertion it had, including `daemoncheck`'s that a prompt
-   * beside an in-flight clear still answers `409 turn_in_flight` over HTTP.
-   */
+  /** Not a refusal: the route goes on to sendMidTurn. busy (a clear or restart in flight) still answers 409 turn_in_flight. */
   | { kind: "turn_in_flight"; status: SessionStatus }
   | { kind: "busy"; status: SessionStatus }
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
 
-/**
- * What became of a message sent while the agent was working.
- *
- * Three ways it can land and four ways it can fail, and the first two are the
- * whole feature:
- *
- *   `steered` — the agent took it *into* the running turn. Nothing waits, nothing
- *     is drawn, and the reply arrives in the turn already on screen.
- *   `queued`  — the agent has no way to take it mid-turn, so this daemon holds it
- *     and delivers it the instant the turn ends. `position` is how many are ahead
- *     of it, so a client can say so rather than guess.
- *   `accepted` — the turn ended underneath us between the route's check and here.
- *     The honest answer is the ordinary one, and it is a **success**: re-answering
- *     `turn_in_flight` for a session that is now idle would be a refusal about a
- *     state that no longer exists.
- *
- * `queue_full` is the only new refusal. The rest are the states
- * {@link PromptResult} already names, re-checked because this method awaits and
- * the session can have gone terminal in between.
- */
 export type MidTurnResult =
   | { kind: "steered"; turn: number; seq: number }
   | { kind: "queued"; id: string; seq: number; position: number }
@@ -1825,215 +625,48 @@ export type MidTurnResult =
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
 
-/**
- * A message this daemon has taken and the agent has not been given yet.
- *
- * It rides the **snapshot** and never the log, which is `cancelRequestedAt`'s
- * arrangement and it is here for the identical reason (Q2.42): the message itself
- * is already a `prompt` event — appended when the daemon accepted it, which is
- * what {@link PromptEvent} has always meant — so an event for *waiting* would put
- * a second row on screen for one act. `seq` is what joins the two, and it is what
- * lets a client draw the line under the right bubble without matching on text.
- *
- * In memory only. A daemon restart drops it, the same standing the interrupted
- * turn itself has (Q2.12), and the cost is stated at {@link ManagedSession.doStop}
- * rather than hidden: what is lost is the delivery, never the record.
- */
+/** Rides the snapshot, never the log: the message is already a prompt event, joined by seq (Q2.42). In memory only (Q2.12). */
 export interface QueuedPrompt {
   id: string;
   seq: number;
   at: number;
 }
 
-/**
- * A queued prompt with the message still attached.
- *
- * Split from {@link QueuedPrompt} so the *snapshot* carries neither the text nor
- * the uploads: a snapshot is built on every status read and serialized to every
- * attached socket, and a client needs only `seq` to find the bubble this is about.
- * Putting the body on the wire would send the same message twice — once as the
- * `prompt` event it already is, and again on every frame until it is delivered.
- */
 interface QueuedEntry extends QueuedPrompt {
   text: string;
   attachments: readonly UploadRow[];
-  /**
-   * Where this message sat in the order they were *taken*, by this session's count.
-   *
-   * ⚠ **Not `seq`, and that distinction is a defect this replaced.** The queue was
-   * ordered by the log seq, which looks like the same number — until `safeAppend`
-   * refuses an append and answers `0` for it. Every real entry has a seq above
-   * zero, so a message the log could not record sorted **ahead of all of them** and
-   * was handed to the agent before every message accepted earlier: the exact
-   * reversal the ordering was added to prevent, reached through a narrower door.
-   *
-   * Taken synchronously at the top of {@link ManagedSession.sendMidTurn}, before
-   * the first await, so it is monotonic by construction and cannot be refused by a
-   * store. Internal: it is on `QueuedEntry` rather than `QueuedPrompt` because a
-   * client orders by the `prompt` events it already has, and the wire mirror may
-   * not grow a field for a number that never leaves this process.
-   */
+  /** Acceptance order, taken before the first await of sendMidTurn; never the log seq, which is 0 for a refused append and would sort first. */
   order: number;
 }
 
-/**
- * How many mid-turn messages one session may hold **or have in flight**.
- *
- * A bound rather than a number somebody liked: every queued message is a `prompt`
- * event already in the log and a set of uploads already marked consumed, so an
- * unbounded queue is an unbounded write nobody pressed twice. Eight is well past
- * the two or three corrections this exists for and well under anything that reads
- * as a backlog.
- *
- * ⚠ **It is no longer only a queue depth, and that is a behaviour change rather
- * than a rename.** {@link ManagedSession.sendMidTurn} weighs `queuedPrompts.length`
- * together with {@link ManagedSession.midTurnAccepted} — the sends this daemon has
- * accepted and not yet finished with — so on a *steerable* agent the ninth
- * concurrent send is refused while the queue is **empty** and all eight ahead of
- * it are on their way to being injected and never queued at all. Before that
- * reservation existed a steerable agent took any number of concurrent sends,
- * because they all inject. So every sentence that quotes this number has to read
- * *waiting or in flight*, and the ones that do not are named below.
- *
- * **The narrower shape was weighed and does not exist.** Charging a slot only
- * once a steer has actually failed would leave a steerable agent unbounded, which
- * is the appealing half — but whether a send queues is known only *after* its
- * steer answers, and by then `recordPrompt` has run. A refusal at that point has
- * already written a `prompt` event nobody will deliver, which is verbatim the
- * shape Q2.218 calls a message that reached no model, and it is the one thing
- * `sendMidTurn`'s own contract says it will not do. Every unit of in-flight
- * allowance above zero buys back exactly one such prompt-recorded-then-refused.
- * Eight *total* is therefore the only setting under which "a refused message wrote
- * nothing" holds with no exception, and refusing a ninth concurrent send is what
- * that costs. It is not hypothetical either: the agent that advertises steering
- * and then answers `unsupported` reaches the queue from the steer path on every
- * message, and `daemoncheck.mid-turn-messages.ts` drives exactly that session.
- *
- * ⚠ **The wire sentence names both causes, because one of them is not a queue.**
- * `server.ts` answers this refusal with `429 prompt_queue_full` and the detail
- * *"too many messages are already waiting or in flight for this session"*. The
- * shorter *"already waiting"* was false in the concurrent-steer case — nothing is
- * waiting — and {@link MidTurnResult}'s `queue_full` arm is the same for both
- * causes, so nothing downstream can tell them apart and correct it. The log line
- * on the queueing path below is **not** affected and deliberately keeps the
- * shorter sentence: it reads `queuedPrompts` itself, so it can only fire with
- * eight genuinely waiting.
- */
+/** Counts queued and in-flight sends together, so a refused message has written nothing (Q2.218). */
 export const MAX_QUEUED_PROMPTS = 8;
 
-/**
- * What the transcript says about a message this daemon took and will not deliver.
- *
- * One function rather than the literal at each site, because there are three of
- * them — {@link ManagedSession.doStop}, the post-await re-check in
- * {@link ManagedSession.sendMidTurn}, and the restart that could not bring an
- * agent back — and a driver matching it by regex would go on passing while two of
- * the three said different things about the same event.
- */
 export function stoppedBeforeDelivery(count: number): string {
   return count === 1
     ? "the session stopped before this message reached the agent"
     : `the session stopped before ${count} messages reached the agent`;
 }
 
-/**
- * What a `/clear` says about the background work it walked away from.
- *
- * A separate sentence from {@link stoppedWithBackgroundWork} rather than a reuse,
- * because that one's noun is load-bearing and wrong here: it says *"when it was
- * shut down"*, and a clear does not shut the agent down — the process carries
- * straight on, and what ends is the conversation those tasks belonged to. Saying
- * *shut down* over a clear would be the same category of error the second ⚠ on
- * {@link stoppedWithBackgroundWork} is about — the wrong noun for the act — one
- * act further along.
- *
- * It follows the same discipline for the same reason: it claims what was
- * observed. The previous ACP session is closed on the way through
- * `Session.clearContext`, which is what ends the shells it was holding — but a
- * rung below that nothing here can see, so the sentence stops at the work having
- * been going and this daemon no longer being able to say anything about it.
- *
- * Written at all because the alternative is silence over a build somebody was
- * waiting on: the row vanishes from the panel at the clear, and without this the
- * only trace it ever existed is gone with it.
- */
 export function clearedWithBackgroundWork(count: number): string {
   return count === 1
     ? "one background task was still running in the conversation this cleared"
     : `${count} background tasks were still running in the conversation this cleared`;
 }
 
-/**
- * What ending a session did to the work its agent had left running.
- *
- * One function rather than a literal for {@link stoppedBeforeDelivery}'s reason,
- * and one row for one act rather than a row per task: what a reader needs is that
- * the session ended holding work, and a stop that ends five background builds
- * should not write five lines about one decision.
- *
- * ⚠ **The wording says what was observed rather than what was intended, and the
- * distinction is the whole of it.** This daemon disposes the agent and the agent's
- * own shutdown group-kills the shells it backgrounded — but there is a rung below
- * that, and a SIGKILL leaves them running as orphans with nothing able to report
- * or stop them. So the sentence claims the thing that is true either way: the work
- * was still going, and nothing here can say any more about it. Claiming *killed*
- * would be `{action: "decline"}`'s mistake — a fact asserted because it is the
- * likely one.
- *
- * ⚠ **And the noun is the *agent* rather than the session, which is not a
- * synonym here.** `doStop` is reached by `daemon_shutdown` and by `restartAgent`'s
- * `stop("config_changed")` — `applyUltracode` and `restoreConfig` both go through
- * it — so a deploy, or toggling ultracode, reaches this line on a session that has
- * not ended and is about to carry on. *"The session ended"* would be false in
- * every one of those; the work really did die in all of them, so the row belongs
- * and only the noun was ever at issue.
- *
- * ⚠ **This docblock was orphaned and is deliberately back.** It sat above
- * {@link clearedWithBackgroundWork}'s own docblock, describing nothing, while the
- * function it is about stood bare — which in a repository with no test framework
- * is the specification for this string quietly detaching from the string.
- */
 export function stoppedWithBackgroundWork(count: number): string {
   return count === 1
     ? "the agent was still running one background task when it was shut down"
     : `the agent was still running ${count} background tasks when it was shut down`;
 }
 
-/**
- * What a `/clear` answered with.
- *
- * Shares three of its arms with {@link PromptResult} because a clear is refused
- * for exactly the same reasons a prompt is, and `server.ts` maps them with the
- * same code. `cleared` replaces `accepted` because no turn starts: there is a
- * seq to point at and nothing to wait for.
- */
 export type ClearResult =
   | { kind: "cleared"; seq: number }
   | { kind: "busy"; status: SessionStatus }
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
 
-/**
- * What stopping the turn answered with.
- *
- * **`no_turn` is a success and not a refusal**, which is where this union parts
- * company with the two above it. A prompt sent to a session that cannot take one
- * has not happened; a cancel sent to a session with nothing running has already
- * got what it asked for — the agent is not working. That state is also reachable
- * by losing an ordinary race, since the tap and the turn's own end are two events
- * nobody orders, and answering a red error for "it stopped a moment before you
- * asked" would make the button look broken at exactly the moment it did its job.
- *
- * `settled` is the observation, never a promise: `false` means the agent had not
- * finished by the time we stopped watching, which happens and is not a failure —
- * the turn ends into the transcript whenever the agent gets there, with nobody
- * attached. Nothing escalates on it. See `Session.cancelTurn`.
- *
- * `busy` keeps its meaning from {@link AgentConfigResult} rather than from
- * {@link PromptResult}: a `/clear` is in flight, so the agent's session id is
- * being replaced and nothing may address it — which is emphatically not "a turn
- * is running", the one thing a cancel would be glad to hear.
- */
+/** no_turn is a success; settled false means we stopped watching, not a failure. */
 export type CancelResult =
   | { kind: "cancelled"; turn: number; settled: boolean }
   | { kind: "no_turn"; status: SessionStatus }
@@ -2041,20 +674,6 @@ export type CancelResult =
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
 
-/**
- * What stopping one piece of background work answered with.
- *
- * ⚠ **`stopped` is a two-valued *answer*, not a success flag**, which is the
- * distinction `CancelResult` draws one type up between `cancelled` and `settled`.
- * `false` means the agent no longer held that task — it finished on its own
- * between the tap and the request, which is losing an ordinary race — and the
- * route answers `200` for it, because a red error over a control that got what it
- * asked for makes the control look broken.
- *
- * `no_task` is different and *is* a refusal: this session never announced that
- * id, so there is nothing the caller could be talking about. The three session
- * arms are `CancelResult`'s own, for its reasons.
- */
 export type StopTaskResult =
   | { kind: "answered"; stopped: boolean }
   | { kind: "no_task" }
@@ -2077,7 +696,6 @@ export class StartTimeoutError extends Error {
 
 export type ResumeUnavailableReason = "session_live" | "no_agent_session_id";
 
-/** Raised when a session cannot be resumed for a reason the caller can act on. */
 export class ResumeUnavailableError extends Error {
   constructor(
     readonly sessionId: string,
@@ -2106,13 +724,6 @@ interface ResolutionRecord {
 
 interface PendingElicitationRecord {
   info: PendingElicitationSnapshot;
-  /**
-   * The form, held here rather than on the snapshot.
-   *
-   * Kept because the answer is validated against it: a client is only ever shown
-   * this projection, so validating a reply against anything else would refuse
-   * answers it was invited to give.
-   */
   form: ElicitationForm;
   resolve: (response: acp.CreateElicitationResponse) => void;
 }
@@ -2125,18 +736,6 @@ interface ElicitationResolutionRecord {
 
 export type SessionWatcher = (snapshot: SessionSnapshot) => void;
 
-/**
- * One session, owned by the daemon rather than by whoever is looking at it.
- *
- * Zero attached clients is a normal state. Nothing here references a connection,
- * which is what makes a client disappearing a non-event.
- */
-/**
- * State a restored session is rebuilt from.
- *
- * Every field is optional and every default matches a fresh session, so the
- * normal construction path reads exactly as it did before this existed.
- */
 export interface ManagedSessionInit {
   createdAt?: number;
   agentSessionId?: string | null;
@@ -2146,148 +745,31 @@ export interface ManagedSessionInit {
   lastEventAt?: number | null;
   askSeq?: number;
   askSalt?: string;
-  /** The one give-up that survives a restart. See {@link resumeGiveUpPersists}. */
   resumeGaveUp?: ResumeGiveUp | null;
   title?: string | null;
   pinned?: boolean;
   rank?: number | null;
-  /**
-   * What the agent was offering when it went, for a session a message would bring
-   * back. See {@link AgentStateMemory}.
-   */
   agentState?: AgentStateMemory | null;
-  /**
-   * What this session was last told about ultracode, or `null` for never told.
-   *
-   * Three-valued for the reason `owner_subject` is nullable and `pinned` is not:
-   * there is no honest default here. "Nobody has chosen" is a different state
-   * from "chosen off" — the first follows `REEMOAT_CLAUDE_ULTRACODE`, the second
-   * outranks it — and collapsing them would mean every session that existed
-   * before the switch did, and every session created after it, permanently
-   * disagreeing with the machine's own setting.
-   */
+  /** null means nobody chose and follows REEMOAT_CLAUDE_ULTRACODE; false outranks it. */
   ultracode?: boolean | null;
 }
 
 export interface ManagedSessionOptions {
   sessionStore?: SessionStore | null;
-  /**
-   * Free a slot before this session's agent is started again, if the machine is
-   * at its ceiling.
-   *
-   * **Injected rather than reached for, because a `ManagedSession` knows nothing
-   * about the other sessions on the machine** — and this is the one operation
-   * that has to. `SessionRegistry.makeRoomForWake` is what fills it; absent (the
-   * bare-`Session` drivers, `harness.ts`) there is no fleet to make room in and
-   * the wake simply proceeds.
-   *
-   * Called from `doResume` rather than from the routes, so that **every** way
-   * back is covered by one call: the transparent resume a prompt performs in
-   * `server.ts`, the manual `POST /sessions/:id/resume`, and the boot pass. Three
-   * call sites would be three chances to add a fourth and forget.
-   */
   makeRoomForWake?: () => Promise<void>;
   restore?: ManagedSessionInit;
-  /** Where this session's agent runs. Defaults to a child of this daemon. */
   runtime?: SessionRuntime;
-  /**
-   * Files staged for this session's prompts.
-   *
-   * Optional, and absent it is simply as if nobody ever attached anything: the
-   * drivers and `harness.ts` construct a registry with no upload root, and the
-   * route refuses an attachment before it ever reaches here.
-   */
   uploads?: UploadsPort | null;
-  /**
-   * Whether this session may show a person a question.
-   *
-   * **A thunk rather than a captured boolean**, and that is not style: `daemon.ts`
-   * calls `registry.restore()` before it reads the environment, so a value taken
-   * at construction would be stale for every restored session on the machine. The
-   * same argument `LocalRuntimeOptions.secrets` already makes — read at launch,
-   * never captured.
-   *
-   * Defaults to allowing it. A `Session` with no resolver never declares the
-   * capability, so the drivers and `harness.ts` are unaffected either way.
-   */
+  /** A thunk: daemon.ts restores sessions before it reads the environment, so a captured value would be stale. */
   elicitationAllowed?: () => boolean;
-  /**
-   * Whether a session nobody has decided about asks for ultracode.
-   *
-   * **A thunk, for exactly the reason {@link elicitationAllowed} is one**, and
-   * this is the case that argument was written about: `daemon.ts` calls
-   * `registry.restore()` before it reads the environment, so a boolean captured
-   * at construction would be `false` for every session on the machine that the
-   * daemon just brought back — which is all of them, after the restart that put
-   * the setting into effect.
-   */
   ultracodeDefault?: () => boolean;
-  /**
-   * Which assembled agent this session was started as, or `null` for a bare
-   * harness.
-   *
-   * Carried rather than resolved: what a preset *says* — its system and its
-   * model — is read at every launch through `customAgents`, so editing one
-   * changes what its sessions come back as. What this holds is only the
-   * reference, which is what makes it safe to be immutable.
-   */
   customAgent?: string | null;
-  /**
-   * How to read back what an assembled agent says, by id.
-   *
-   * ⚠ **A function read at launch, never a value captured at construction** —
-   * `LocalRuntimeOptions.secrets`' argument, and it buys the same thing: editing
-   * a preset takes effect on the next start without a daemon restart, and a
-   * session restored before the store existed does not hold a stale copy.
-   *
-   * `null` from it is not an error and must not fail the launch. A preset can be
-   * deleted while a session that names it is asleep, and the honest outcome then
-   * is the harness on its own — the session's `agent` column still says which
-   * one — rather than a conversation that can never be resumed again.
-   *
-   * ⚠ **The harness is in the answer, and it is not there to be used.** It is
-   * there to be *compared*: `PATCH /custom-agents/:id` accepts a change of
-   * harness, so a preset can be re-pointed at a different CLI under a session
-   * that was started on the old one, and `agent` is immutable. Without this
-   * field the pair `{system, model}` was spread over the session's own harness
-   * and produced a triple nobody chose and, half the time, one `hostable`
-   * refuses — a live session that answers `502 system_not_routable` for ever.
-   * See {@link ManagedSession.assembled}, which is the only reader.
-   */
+  /** Read at launch; null falls back to the bare harness. The harness is returned only to be compared, since agent is immutable. */
   resolveCustomAgent?: (id: string) => { harness: AgentId; system: SystemId; model: string } | null;
-  /**
-   * What this machine offers beyond what this repository ships.
-   *
-   * **A thunk, for `elicitationAllowed`'s reason and `resolveCustomAgent`'s**: it
-   * is answered at every launch rather than captured, so a plugin installed while
-   * a session slept is offering its harness by the time that session resumes, and
-   * one removed is refused rather than silently resolved against a stale copy.
-   */
   machineCatalogue?: () => MachineCatalogue;
-  /**
-   * Where a degradation nobody else can see gets reported.
-   *
-   * Exists for exactly one thing today: `SessionLog`'s fan-out guard evicts a
-   * listener that threw, and the listeners are **live WebSockets**. Nothing was
-   * ever passed for `ListenerErrorHandler`, so a socket could stop receiving
-   * events for the rest of its life with nothing anywhere saying so — the one
-   * degradation path in this daemon that reported through no callback at all.
-   *
-   * Optional like every other seam here: absent, this is exactly the silence
-   * that existed before, which is what keeps the drivers and `harness.ts`
-   * constructing a registry with nothing to print to.
-   */
   onWarning?: (detail: string) => void;
 }
 
-/**
- * What a session needs from the upload store, and nothing more.
- *
- * A narrow port rather than the class, so `registry.ts` does not depend on
- * `uploads.ts` — the dependency arrow in this codebase runs `server` →
- * `registry` → `session` → `acp/*`, and an upload store is a peer of the event
- * store rather than something underneath a session.
- */
 export interface UploadsPort {
   blocksFor(rows: readonly UploadRow[], caps: { image: boolean }): Promise<acp.ContentBlock[]>;
   markConsumed(sessionId: string, uploadIds: readonly string[]): void;
@@ -2303,41 +785,13 @@ export class ManagedSession {
   private startPromise: Promise<Session> | null = null;
   private startAbandoned = false;
   private stopRequested = false;
-  /**
-   * Whether an `authentication_failed` from the agent may replace it.
-   *
-   * Re-armed by every prompt and spent by {@link onAgentUnusable}, which is the
-   * whole of what makes that a retry rather than a loop: a credential that really
-   * has gone away fails the fresh agent the same way, and the second failure sits
-   * in the transcript beside the first instead of starting a third process. What
-   * drives the next attempt is somebody sending another message.
-   *
-   * Starts armed, so the first failure a restored session meets is answered.
-   */
+  // Re-armed by every prompt and spent by onAgentUnusable, so an auth failure restarts the agent once rather than looping.
   private authRestartArmed = true;
   private stopping: Promise<void> | null = null;
   private exitRecord: SessionExit | null = null;
   private resuming: Promise<void> | null = null;
-  /** Set while an *automatic* resume runs. See `onStartFailed`. */
   private quietResume = false;
 
-  /*
-   * What this daemon has tried about bringing the session back, and how it went.
-   *
-   * **In memory, deliberately, and never persisted.** It is a fact about *this
-   * process's* attempts rather than about the session — the same category as
-   * `agentConfigState` and `contextUsageState` above, which are not restored for
-   * the same reason: a number read off disk describes a process that is not
-   * running. Persisting it would also need `SCHEMA_VERSION` 6→7 for a counter
-   * whose only job is to stop a loop inside one daemon life.
-   *
-   * So a restart resets the budget and the daemon tries again, which is the
-   * wanted behaviour rather than a leak: a restart is *new information* — a new
-   * binary, a re-signed-in agent, a remounted disk — and refusing to try because
-   * a previous process failed three times would make the very deploy that fixes
-   * the bug fix nothing. The cost is bounded and small: a session that can never
-   * resume spends `maxAttempts` spawns per deploy and says so once.
-   */
   private resumeAttempts = 0;
   private lastResumeFailureAt: number | null = null;
   private resumeError: { code: string; message: string } | null = null;
@@ -2346,486 +800,95 @@ export class ManagedSession {
   private turn: number | null = null;
   private turnCounter: number;
   private turnStartedAt: number | null = null;
-  /**
-   * When somebody asked this turn to stop. Rides the snapshot; see the field there.
-   *
-   * In memory and not in SQLite, unlike `turnCounter` beside it, and the reason is
-   * that the question it answers cannot outlive the process: after a restart there
-   * is no turn to have cancelled — every session comes back idle — so a persisted
-   * value could only ever describe a turn that no longer exists.
-   */
   private cancelRequestedAt: number | null = null;
-  /**
-   * Messages taken while a turn was running, waiting for it to end.
-   *
-   * Non-empty on an agent that cannot be steered, and on a steerable one whenever
-   * the steer failed — {@link sendMidTurn} pushes here exactly when `Session.steer`
-   * was not an option **or did not land**, which includes an agent that advertised
-   * the method and answered `unsupported`, and a `prompt_required` that arrives
-   * while `clearing` or `restarting` holds. In memory, so a
-   * restart drops it; {@link doStop} is where that cost is written down.
-   *
-   * ⚠ **It is read by {@link parkable}**, and that is not tidiness. `status`
-   * reads `running` while the turn is up, but the queue outlives the turn by
-   * design — so between the turn ending and the drain there is an honest `idle`
-   * over a session that owes somebody an answer, and a queue that cannot drain
-   * only gets older while it waits. Exactly the hole the `clearing` marker had to
-   * close one field over.
-   */
+  // Read by parkable: the queue outlives the turn, so an idle session may still owe a delivery.
   private queuedPrompts: QueuedEntry[] = [];
-  /** Counts messages taken mid-turn, so the queue can be ordered by acceptance. See {@link QueuedEntry.order}. */
   private acceptOrder = 0;
-  /** Where a degradation with no other surface is reported. See the constructor. */
   private readonly warn: ((detail: string) => void) | null = null;
-  /** Distinguishes queued entries within one session. Never leaves the daemon. */
   private queueSeq = 0;
-  /**
-   * Mid-turn sends this daemon has accepted and not yet finished with.
-   *
-   * ⚠ **A reservation, weighed with {@link queuedPrompts} against
-   * {@link MAX_QUEUED_PROMPTS}, and it is the only thing that makes that bound
-   * real.** {@link sendMidTurn} reads the queue's length and then suspends twice
-   * — `blocksFor` and `Session.steer` — before anything is pushed, so with
-   * nothing standing for a request in flight every concurrent send reads the
-   * same empty queue and passes. The check reads `queuedPrompts.length`, and the
-   * push that would raise it is two awaits later, so N concurrent sends all read
-   * zero and all pass against a ceiling of eight. Held from the entry check to
-   * the `finally`, which is to say across **every** await rather than across the
-   * two that exist today.
-   *
-   * ⚠ **It counts sends that are never going to touch the queue, and that is the
-   * bound's whole cost.** On a steerable agent an accepted send is on its way to
-   * an injection, so eight of those in flight close the ceiling to a ninth while
-   * `queuedPrompts` is `[]` — a refusal that is right and a wire sentence that is
-   * not. Why the conservative shape was chosen over a counter that charges only
-   * the steers that fail, and where the false sentence is, are both at
-   * {@link MAX_QUEUED_PROMPTS}.
-   *
-   * `daemoncheck.mid-turn-messages.ts` drives it at `MAX_QUEUED_PROMPTS + 3` on a
-   * session whose steers are held and released together — three past the ceiling
-   * rather than one, so what it asserts is a refusal *count* rather than a
-   * boolean. `+ 1` would already walk past a single check; `+ 3` is what makes a
-   * miscount visible as a miscount.
-   *
-   * In memory and never persisted, like `cancelRequestedAt` two fields up and for
-   * the same reason: it describes requests this process is currently serving, and
-   * a restart has none.
-   */
+  // A reservation held across every await of sendMidTurn; without it concurrent sends all read an empty queue and pass MAX_QUEUED_PROMPTS.
   private midTurnAccepted = 0;
   private lastEventAt: number | null = null;
-  /**
-   * When the **agent** last said something, as distinct from when anything last
-   * happened here.
-   *
-   * ⚠ **The distinction is the whole of what {@link wedged} measures, and reading
-   * `lastEventAt` there was a defect.** Every write moves that one — `status`
-   * events, the daemon's own errors, and above all the *person's* messages, which
-   * `recordPrompt` appends through `safeAppend`. So somebody typing into a session
-   * that says *working* reset the silence clock on every message, and the one
-   * state this daemon cannot otherwise escape was kept alive by the person trying
-   * to escape it. Measured on the reporting machine's own store: the session that
-   * produced the bug report took three prompts (04:28:35, 04:32:16, 04:38:44)
-   * while its turn was open, each one a reset.
-   *
-   * Set only from {@link record} — the pump's loop and the idle drain, i.e. events
-   * that came out of the agent — and from the drain's early return for the
-   * `agent_log`/`other` it drops, because those are the agent speaking even when
-   * they are not worth logging. In memory, like `turn` itself: after a restart
-   * there is no live turn for it to be about.
-   */
+  // Only agent events move this: wedged must not be reset by the person's own messages, which move lastEventAt.
   private lastAgentEventAt: number | null = null;
 
-  /**
-   * A `/clear` that has been sent and not yet come back.
-   *
-   * A second marker beside `turn` rather than a reuse of it, because a clear is
-   * not a turn: it burns no turn number, it produces no `turn_end`, and
-   * `turnStartedAt` would put a "working" timer on the snapshot for something the
-   * agent is not thinking about. What it shares with a turn is the only thing
-   * this field is read for — **nothing else may talk to the agent while it
-   * runs**, which is every method on this class that issues an ACP request and
-   * therefore all five of them: {@link prompt}, {@link clearContext},
-   * {@link setConfigOption}, {@link setMode} and {@link cancelTurn}. The list is
-   * written out because the rule above is a sentence and a new such method would
-   * not fail to compile; it read as enforced while covering only the first two,
-   * which is the `sessionOf` shape this repo names its worst defects after. The
-   * fifth arrived exactly as predicted and had to be added by hand — a cancel
-   * sent inside this window would notify the id `session/close` is about to
-   * destroy, which stops nothing and looks from outside like an agent ignoring
-   * it.
-   *
-   * `clearContext` re-keys the ACP session underneath us (`session/new`,
-   * then `session/close` on the old id, measured at ~600ms and bounded at 15s),
-   * and for that whole window `this.turn` was `null`, so a prompt arriving beside
-   * a `/clear` passed every guard and was issued against the conversation about
-   * to be closed: its updates went to `router.sessions.get(<old id>)`, which is
-   * `undefined` and drops them silently, and the turn died with the `session/close`
-   * — a message recorded in the transcript that reached no model and produced no
-   * reply. A second `/clear` in the same window is the same hole with a worse
-   * ending: both capture the same `previous`, both close it, and the conversation
-   * the first one opened is left live inside the agent with nothing left to close
-   * it.
-   */
-  /**
-   * Whether this session was already `parked` when its agent was signed out.
-   *
-   * ⚠ **The one thing the relabel destroys, kept so that signing back in can put
-   * it back rather than spawn.** `signOutSessions` rewrites `parked` →
-   * `agent_signed_out` because a parked row carrying the old reason is woken by
-   * the next message into an agent with no credential, and `reloadCredentials`'s
-   * revive filter looks for exactly that reason. Both are right. What they cost
-   * together is that the reason a session was *released for being idle* is now
-   * indistinguishable from one whose agent was *taken away mid-conversation*, and
-   * the second is resumed on sign-in while the first must not be: `events.ts` says
-   * bringing them all back "would refill exactly the memory parking freed —
-   * measured, five simultaneous resumes turned a 1.3s reattach into 90s."
-   *
-   * In memory rather than on the exit record, and deliberately: `SessionExit` is
-   * on the wire, and a new member of `ExitReason` is the five-surface change this
-   * repository has twice been bitten by. The cost of the choice is bounded and
-   * worth stating — a daemon restart between the sign-out and the sign-in loses
-   * the flag, and that session is resumed on the next sign-in as it is today.
-   */
+  // Survives the parked to agent_signed_out relabel, so sign-in can put an idle-released session back rather than spawn.
   private parkedAtSignOut = false;
 
   private clearing = false;
 
-  /**
-   * A restart this daemon is performing on somebody's behalf, mid-flight.
-   *
-   * **The sibling `clearing` predicted, arriving on the path `clearing` does not
-   * cover.** `applyUltracode` is `stop("config_changed")` → `resume()` →
-   * `restoreConfig(wanted)`, which is `/clear`'s shape with a process boundary in
-   * the middle: the conversation is replaced underneath a person and a snapshot
-   * captured *before* the change is put back at the end. `stopRequested`,
-   * `terminal` and a null `session` cover the first two steps by themselves — and
-   * then `onStarted` assigns `this.session`, `armForStart` has already cleared
-   * `stopRequested`, and every one of those guards goes quiet while the restore is
-   * still in flight.
-   *
-   * What lands in that window is reverted with no error and no record. The config
-   * bar is one gesture from the composer and an agent restart runs into seconds,
-   * so: tap a mode, `session.setMode` succeeds, the route answers `200`, and then
-   * `restoreConfig` applies the *pre-restart* mode last and the chip snaps back.
-   * That is the defect `clearing`'s own docblock describes for `/clear`,
-   * reproduced verbatim one method over — which is why this is a second flag
-   * rather than a widening of `turn`: a restart burns no turn number either.
-   *
-   * Read at the same five places for the same reason, and tested beside
-   * `clearing` rather than instead of it, because the two windows can be told
-   * apart in a way the refusal cannot: both answer `busy`, and a caller only ever
-   * needs to know that the agent is not accepting instructions yet.
-   */
+  // With clearing, refused at every method that addresses the agent: nothing else may talk to it while either holds.
   private get restarting(): boolean {
     return this.restart !== null;
   }
 
-  /**
-   * Every window in which this session's config is about to be replaced
-   * wholesale, and a tap therefore has nothing to be recorded against.
-   *
-   * ⚠ **`resuming` is the one that had to be added, and leaving it out was a
-   * silent `ok`.** `clearing` and `restarting` were the whole set for as long as
-   * `doStop` emptied `agentConfigState` for every reason but `parked`: a wake had
-   * nothing to replay, so `restoreConfig` was a no-op and no window opened. Once
-   * {@link revivableByPrompt} kept the controls for every stop a message undoes
-   * and `agent_state_json` carried them across a restart, `doResume`'s
-   * `await restoreConfig(wantedConfig)` became a real replay on an **ordinary
-   * wake** — and it runs *after* `onStarted` has published, so a tap landing in
-   * that window passes `configIsDeferred` (`armForStart` has cleared the exit),
-   * passes `terminal`, finds a live `session`, reaches the agent and answers
-   * `ok`. `restoreConfig` then puts back a snapshot captured *before* the tap:
-   * 200, chip moves, nothing happens. That is the exact failure {@link restarting}
-   * exists to prevent, arriving through the door the widening opened.
-   *
-   * ⚠ **Named here rather than spelled out at the two call sites**, because the
-   * set is the thing that drifted: two flags were written out by hand in
-   * `setConfigOption` and `setMode`, and the third belonged in both. The other
-   * readers of `clearing || restarting` — sending, stopping, `/clear`'s own guard
-   * — are deliberately *not* switched to this: a resume is not a reason to refuse
-   * a message, it is the thing a message asked for.
-   */
+  // Only setConfigOption and setMode refuse on this: a resume is what a message asks for.
   private get replacingConfig(): boolean {
     return this.clearing || this.restarting || this.resuming !== null;
   }
 
-  /**
-   * Wait for a restart this daemon started, then carry on. Resolves at once when
-   * there is none, and **never rejects**.
-   *
-   * The public half of {@link restart}, and it exists so that sending a message
-   * during an ultracode change is a wait rather than a refusal. Somebody flipped a
-   * setting and then typed — they did not ask for a restart and should not have to
-   * know one is happening, which is the same judgement that took the spinner off
-   * the strip.
-   *
-   * Never rejecting is the contract: a failed restart is reported by the *state*
-   * that follows it — `session_terminal`, `not_ready` — through the arms the prompt
-   * route already has. Rejecting here would invent a second error surface for a
-   * request whose caller never mentioned a restart.
-   *
-   * ⚠ **Only the prompt route waits.** `setConfigOption` and `setMode` keep
-   * answering `busy`, deliberately: a change that landed mid-restart would be
-   * overwritten by `restoreConfig` replaying the snapshot captured before it, with
-   * nothing recorded — which is the defect {@link restart} was introduced to close.
-   * Waiting there would reopen it in a slower disguise.
-   */
+  /** Resolves at once when there is no restart and never rejects; only the prompt route waits. */
   whenRestarted(): Promise<void> {
     return this.restart?.done ?? Promise.resolve();
   }
 
-  /**
-   * The controls captured before a restart, and the whole of what makes one
-   * invisible.
-   *
-   * {@link restarting} is *derived from* this rather than kept beside it, because
-   * they are one fact: a boolean that can disagree with the config the snapshot is
-   * serving would be a second place for this window to be described, and the
-   * disagreement would be silent. Written in one statement and cleared in one
-   * `finally`, so the window in which `snapshot()` reports controls the live agent
-   * never published is **by construction** the window in which `prompt`,
-   * `clearContext`, `cancelTurn`, `setConfigOption` and `setMode` all answer
-   * `busy`. That is what licenses it: nothing a client does with a held value can
-   * reach an agent, because nothing reaches an agent.
-   */
   private restart: { readonly config: AgentConfig; readonly done: Promise<void> } | null = null;
 
-  /**
-   * Which controls the snapshot reports, which are not always the ones the agent
-   * last published.
-   *
-   * ⭐ **Choosing `ultracode` made the mode chip flash `Manual`.** `applyUltracode`
-   * is `stop("config_changed")` → `resume()` → `restoreConfig(wanted)`, and
-   * `onStarted` assigns the *new* conversation's own config in the middle of it —
-   * for claude, the mode it calls `Manual`. That value is not one bad frame: it is
-   * read by `applyAgentConfig`'s own touch, by the usage and command reads beside
-   * it, by the `idle` status touch, by `onResumed`, and again by every round trip
-   * the restore then makes, so the mode reads `Manual` for the *whole* restore
-   * while the controls around it correct one at a time. Nothing on a client can
-   * hold against it, because it is a live, non-empty answer — which is why
-   * suppressing any single fan-out fixes nothing. Serving `wanted` instead makes
-   * the strip read as though nothing happened to it, which is what a restart
-   * nobody asked to watch should look like.
-   *
-   * Composed here and **never** assigned into `agentConfigState`, which is
-   * `withUltracode`'s own split one screen up, for its reason: that field is what
-   * `setConfigOption` and `setMode` validate against, and `restoreConfig`
-   * deliberately *withdraws* a mode or a choice the new conversation no longer
-   * offers. Held there, a withdrawn value would pass validation and be sent to an
-   * agent that just refused it.
-   *
-   * ⚠ **The empty window this gate was written for no longer opens, and the gate
-   * stays anyway.** It used to read: between `doStop` clearing `agentConfigState`
-   * and `onStarted` refilling it there is no live agent, an empty config is how a
-   * client is told so, and serving `wanted` there would draw enabled chips onto a
-   * certain `409`. `config_changed` is a reason a prompt revives, so `doStop` keeps
-   * the controls through a restart now ({@link revivableByPrompt}) and the second
-   * clause below is never the one that answers. What replaced the `409` is the
-   * `busy` guard at the top of `setConfigOption` and `setMode`, moved **above**
-   * their deferred arms precisely so this window refuses rather than records.
-   *
-   * ⚠ **The justification that used to stand here was false, and it was the only
-   * one left.** It read: *"`armForStart` empties `agentConfigState` on the way in
-   * to a spawn, and a resume that fails leaves it empty with a `restart` still
-   * held."* `armForStart` assigns seven fields — `exitRecord`, `parkedAtSignOut`,
-   * `stopRequested`, `stopping`, `startAbandoned`, `startPromise`, `session` — and
-   * `agentConfigState` is not one of them; only three sites assign it at all, and
-   * none is that one. The `restart` half is false too: `restartAgent` clears it in
-   * its `finally`.
-   *
-   * What the gate is actually worth now is narrower and still real: `held` is the
-   * *restart*'s captured config, and serving it over an `agentConfigState` this
-   * daemon has emptied would report a memory where the rule is "no live agent yet:
-   * report that". `doStop` empties it for the three {@link revivableByPrompt}
-   * refuses, so the second clause still has a state to answer for — it is simply
-   * rarer than the deleted sentence claimed.
-   *
-   * ⚠ **And the window the first paragraph calls closed has a sibling that is
-   * open**: a restored session being auto-resumed at boot carries adopted options
-   * with `exitRecord` cleared and `session` still null, so the strip draws live and
-   * a tap reaches `not_ready`. That is a refusal rather than a silent overwrite —
-   * named here rather than fixed, because the alternative is the faint strip this
-   * whole change exists to remove.
-   */
+  // Serves the restart's captured config over the new conversation's; never assigned into agentConfigState, which validation reads.
   private get snapshotConfigSource(): AgentConfig {
     const held = this.restart?.config ?? null;
     if (held === null || held.options.length === 0) return this.agentConfigState;
-    // No live agent yet: report that rather than a memory. See the ⚠ above.
+    // No live agent yet: report that rather than a memory.
     if (this.agentConfigState.options.length === 0) return this.agentConfigState;
     return held;
   }
 
-  /**
-   * What the agent's own session id and pid were before the daemon died.
-   *
-   * Only consulted when `session` is null. A live session always answers from
-   * the real thing; these are how a restored one still knows what to resume.
-   */
   private restoredAgentSessionId: string | null;
   private restoredAgentHandle: AgentHandle | null;
 
-  /**
-   * The live agent's controls, mirrored here so the snapshot can carry them.
-   *
-   * Deliberately *not* restored from disk, **with one exception that follows
-   * `doStop`'s own.** These describe what the agent will accept right now — a
-   * claude that has since been pointed at a different model offers different modes
-   * — so a stale copy would put a control on screen that the next
-   * `set_config_option` would reject, and a restored session answers with an empty
-   * set until `resume` re-reads it from a live agent.
-   *
-   * The exception is a session a *message* would bring back. `doStop` already keeps
-   * these for exactly that set ({@link revivableByPrompt}), on the argument that the
-   * options still describe what the conversation *is*; `agent_state_json` is that
-   * same keeping carried across a process boundary, because the argument does not
-   * stop being true when the daemon restarts. Measured 2026-09-19: every parked row
-   * on this machine answered `revision 0, count 0` and drew three `—` chips,
-   * permanently, because nothing publishes again until somebody types.
-   *
-   * ⚠ **What makes the stale copy honest here is that nothing in it reaches an
-   * agent unchecked.** A wake replays it through `Session.restoreConfig`, whose two
-   * withdrawal guards skip any option or mode the returning agent no longer offers
-   * — which is the risk the paragraph above names, answered rather than accepted.
-   */
+  // Not restored from disk except for a session a message would revive; restoreConfig skips anything the agent withdrew.
   private agentConfigState: AgentConfig = { modes: null, options: [] };
   private unsubscribeConfig: (() => void) | null = null;
 
-  /**
-   * Which commands the live agent publishes, and a counter that announces them.
-   *
-   * Not restored from disk for the reason directly above, and one more: a
-   * restored session has no agent to run a command against, so a `/compact`
-   * offered from a stale list would be a menu entry that cannot be chosen.
-   *
-   * The counter is what rides the snapshot; the list does not. See
-   * {@link SessionSnapshot.commandsRevision} for why that split, and not a clamp.
-   */
   private agentCommandsState: AgentCommands = { commands: [], dropped: 0 };
   private commandsRevisionValue = 0;
   private unsubscribeCommands: (() => void) | null = null;
 
-  /**
-   * What this session is called, and whether it is kept at the top of the list.
-   *
-   * Restored from disk, and that is the opposite of `agentConfigState` directly
-   * above on purpose. The controls describe a *live agent* and go stale the moment
-   * it dies; these describe the *record*, and a name somebody typed on a phone is
-   * still their name for it after a restart. `owner_subject` is the precedent —
-   * set at creation and authoritative once the process that created it is gone.
-   */
   private titleValue: string | null;
   private pinnedValue: boolean;
   private rankValue: number | null;
 
-  /**
-   * What somebody chose about ultracode for this session, or `null` for nobody.
-   *
-   * Restored from disk beside `title` and `pinned` and for the same reason: it
-   * describes the *record* rather than a live agent. What it is **not** is a
-   * cached answer — {@link ultracodeWanted} folds it with the machine's default
-   * at the moment of a launch, so a `null` here follows the environment for ever
-   * rather than freezing whatever it happened to be at construction.
-   */
   private ultracodeChoice: boolean | null;
   private readonly ultracodeDefault: () => boolean;
 
-  /**
-   * How full the live agent's context window is.
-   *
-   * Deliberately *not* persisted and not restored, for exactly the reason
-   * `agentConfigState` is not: it describes an agent that is running right now,
-   * and a number read off disk describes one that is not. `null` — "cannot tell" —
-   * is the honest answer for a restored session, and a stale 87% would be a lie a
-   * person would act on.
-   */
   private contextUsageState: ContextUsage | null = null;
   private unsubscribeUsage: (() => void) | null = null;
-  /**
-   * Work the agent left running, and whether it is the kind of agent that says.
-   *
-   * On the snapshot rather than in the log for `contextUsageState`'s reasons —
-   * state with one current version, out of a log that evicts a *prefix* — and one
-   * of its own: this is what `parkable` reads, so it has to be a fact about the
-   * session held now rather than something reconstructed by folding a transcript.
-   *
-   * ⚠ **The pair is deliberate and neither half stands alone.** An empty array
-   * means *this agent reports background work and has none*; an empty array with
-   * `reportsBackgroundTasks: false` means *nobody asked*. kimi backgrounds fully
-   * and never says, so without the second field a panel would draw the same empty
-   * list for both and claim it meant the same thing. `contextUsage`'s three-valued
-   * `null`, spelled across two fields because a count has no spare value.
-   *
-   * Both are cleared at `doStop`: a dead agent's background work is not a fact
-   * about anything, and nothing survives a wake to correct it.
-   */
+  // Read by parkable. An empty list with reportsBackgroundTasksState false means nobody asked.
   private backgroundTasksState: readonly BackgroundTask[] = [];
   private reportsBackgroundTasksState = false;
   private unsubscribeBackgroundTasks: (() => void) | null = null;
 
   private readonly sessionStore: SessionStore | null;
-  /** See {@link ManagedSessionOptions.makeRoomForWake}. */
   private readonly makeRoomForWake: (() => Promise<void>) | null;
 
   private readonly pending = new Map<string, PendingRecord>();
-  /**
-   * Every permission this session has ever settled.
-   *
-   * Unbounded on purpose — it dies with the session, entries are tiny, and a
-   * fixed ring would turn "you already answered that" into "that never existed"
-   * for precisely the lost-response retry it exists to serve.
-   *
-   * Deliberately not persisted. After a restart nobody can act on any of it and
-   * `expired` is the right answer for every entry, so persisting it would give an
-   * unbounded-because-it-dies-with-the-session map a way to outlive what bounded
-   * it. The id *shape* is persisted instead — see `askSalt`.
-   */
+  // Unbounded on purpose: it dies with the session, and a ring would turn already answered into never existed.
   private readonly resolved = new Map<string, ResolutionRecord>();
-  /**
-   * One counter for every parked question, whatever kind it is.
-   *
-   * `perm-N-salt` and `elic-N-salt` are minted from this and from {@link askSalt},
-   * so each kind's numbering has gaps — which nothing reads as a count. What that
-   * buys is that recognising an id across a restart costs no second column, and
-   * therefore no `migrate()` and no `SCHEMA_VERSION` argument. Named `ask` rather
-   * than `permission` because a field called `permission*` that also counts
-   * elicitations asserts a property nobody enforces.
-   */
   private askSeq: number;
-  /** Per session, so a transposed id from another session cannot match here. */
   private readonly askSalt: string;
 
-  /**
-   * Questions the agent is waiting on, and the ones it has stopped waiting on.
-   *
-   * Parallel to `pending`/`resolved` rather than merged with them — see
-   * {@link resolveElicitation} for why the two cannot share a map. The
-   * `resolvedElicitations` docblock is `resolved`'s: unbounded on purpose, dies
-   * with the session, and a fixed ring would turn "you already answered that"
-   * into "that never existed" for the one retry it exists to serve.
-   */
   private readonly pendingElicitations = new Map<string, PendingElicitationRecord>();
   private readonly resolvedElicitations = new Map<string, ElicitationResolutionRecord>();
 
   private readonly watchers = new Set<SessionWatcher>();
-  /** Where this session's agent runs. */
   private readonly runtime: SessionRuntime;
-  /** Where files staged for this session live, if this daemon stages any. */
   private readonly uploads: UploadsPort | null;
-  /** See {@link ManagedSessionOptions.elicitationAllowed}. Read at launch, never captured. */
   private readonly elicitationAllowed: () => boolean;
 
-  /**
-   * Where an image the agent returns is kept.
-   *
-   * A bound arrow rather than a method reference, because it is handed to
-   * `Session` and called from inside the agent's notification handler — the emit
-   * path. It must therefore stay synchronous, and it is: the store mints the id
-   * and writes the bytes on its own.
-   */
+  // Called from the agent's emit path, so it must stay synchronous.
   private readonly keepAgentImage = (mime: string, data: string): StoredFileRef | null =>
     this.uploads?.keepAgentImage(this.id, mime, data) ?? null;
 
-  /** See `ManagedSessionOptions.customAgent`. Immutable, like `agent`. */
   readonly customAgent: string | null;
   private readonly machineCatalogue: () => MachineCatalogue;
   private readonly resolveCustomAgent: (
@@ -2842,17 +905,7 @@ export class ManagedSession {
     this.customAgent = options.customAgent ?? null;
     this.resolveCustomAgent = options.resolveCustomAgent ?? (() => null);
     this.machineCatalogue = options.machineCatalogue ?? (() => BUILTIN_CATALOGUE);
-    // The third argument is what `SessionLog` has always taken and nobody ever
-    // supplied: an evicted listener is a live socket that has silently stopped
-    // receiving, and every other degradation in this codebase reports through a
-    // callback rather than vanishing. `listener` itself is deliberately not in
-    // the message — a function has no name worth printing and the session id is
-    // what identifies the loss.
     const onWarning = options.onWarning;
-    // Kept on the instance as well, because the log is no longer the only thing
-    // here with something to report: `sendMidTurn` has one arm — an agent that
-    // advertised steering and then started a turn of its own — that is invisible
-    // from every other surface. See `SteerOutcome`.
     this.warn = onWarning ?? null;
     this.log = new SessionLog(
       id,
@@ -2878,23 +931,11 @@ export class ManagedSession {
     this.askSeq = init.askSeq ?? 0;
     this.askSalt = init.askSalt ?? randomBytes(2).toString("hex").slice(0, 3);
     this.resumeGivenUp = init.resumeGaveUp ?? null;
-    // Before the touchSafe below, or the first row written would say this session
-    // has no name and no pin — which for a *restored* one would be a lie that the
-    // next unrelated touch would then persist over the truth.
+    // Before the touchSafe below, or a restored session's first row would drop its name and pin.
     this.titleValue = init.title ?? null;
     this.pinnedValue = init.pinned ?? false;
     this.rankValue = init.rank ?? null;
-    /*
-     * ⚠ **The one thing about a live agent that is restored from disk, and the
-     * docblock on `agentConfigState` is where the exception is argued.**
-     *
-     * ⚠ **`commandsRevisionValue` moves with it, and leaving it at 0 makes the
-     * whole restore invisible.** `commandsPlan` in `packages/web/src/store.ts`
-     * reads a revision of `0` or `undefined` as *"this daemon has nothing"* and
-     * drops the fetch — so a restored list at revision 0 would sit on the daemon
-     * and the `/` menu would be empty anyway, which is the exact symptom this
-     * exists to end.
-     */
+    // The one live-agent state restored from disk; the revision moves with it, since a client skips the fetch at revision 0.
     if (init.agentState != null) {
       this.agentConfigState = init.agentState.config;
       this.agentCommandsState = init.agentState.commands;
@@ -2903,14 +944,10 @@ export class ManagedSession {
     this.ultracodeChoice = init.ultracode ?? null;
     this.ultracodeDefault = options.ultracodeDefault ?? (() => false);
 
-    // Write the row before anything can be appended to it. `start()` does not
-    // touch before its 45-second await, so without this a daemon killed during
-    // agent startup would leave events belonging to no session. Zero watchers are
-    // registered yet, so this is a pure write.
+    // Write the row before anything can be appended to it: start does not touch before its long await.
     this.touchSafe();
   }
 
-  /** Records where this session lives, and anything worth warning about it. */
   recordWorkspace(warnings: readonly WorkspaceWarning[]): void {
     this.safeAppend({
       type: "workspace",
@@ -2925,14 +962,6 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /**
-   * Rebuilds a session from disk. Never spawns — the agent died with the daemon.
-   *
-   * Takes the same options object the constructor does rather than a positional
-   * list. It was six positionals and every new seam added a seventh, which is
-   * the arrangement where two of them get transposed and the compiler agrees
-   * because both are optional functions.
-   */
   static restore(
     row: PersistedSession,
     store: EventStore,
@@ -2950,23 +979,11 @@ export class ManagedSession {
         lastEventAt: row.lastEventAt,
         askSeq: row.askSeq,
         askSalt: row.askSalt,
-        // Validated on the way in rather than trusted: the column is a plain
-        // string on disk and a row written by a future version could hold a
-        // member this one does not know. An unrecognised value reads as "not
-        // given up", which costs one spawn and is the safe direction — the
-        // alternative is a session silently never coming back. The prune reads
-        // the column through the same predicate and keeps such a row
-        // (`isActiveRow`), so what this pass would put an agent back on is
-        // still there to be put back on.
+        // Validated: an unknown value reads as not given up, which costs one spawn and is the safe direction.
         resumeGaveUp: isPersistedGiveUp(row.resumeGaveUp) ? row.resumeGaveUp : null,
         title: row.title,
         pinned: row.pinned,
         rank: row.rank,
-        // Adopted for any row whose reason a message revives, which is the same
-        // gate that wrote it. Asked again on the way in rather than trusted,
-        // because the column outlives the build that wrote it: a row stored under
-        // one reason and relabelled under another by an older daemon would
-        // otherwise come back describing a conversation nobody can reach.
         agentState:
           row.exit !== null && revivableByPrompt(row.exit.reason, row.agentSessionId)
             ? row.agentState
@@ -2976,66 +993,35 @@ export class ManagedSession {
     });
   }
 
-  /** What this session is called, or `null` if nobody has named it. */
   get title(): string | null {
     return this.titleValue;
   }
 
-  /** Whether it is kept at the top of the list. */
   get pinned(): boolean {
     return this.pinnedValue;
   }
 
-  /** Where it sits in the list, or `null` for wherever its age puts it. */
   get rank(): number | null {
     return this.rankValue;
   }
 
-  /** Where the agent runs. Kept as a field-shaped accessor so callers are unchanged. */
   get cwd(): string {
     return this.workspace.root;
   }
 
-  /** What the client originally asked for. Feeds the directory picker. */
   get requestedCwd(): string {
     return this.workspace.requestedCwd;
   }
 
-  /**
-   * What this session is doing, derived on every read.
-   *
-   * Never stored, so it cannot drift from the pending map — a session with a
-   * parked permission reports `blocked` because it *is* blocked, not because
-   * something remembered to say so.
-   */
   get status(): SessionStatus {
     if (this.exitRecord) {
-      // Terminal like the rest, but the only one that resumes: the agent's own
-      // session id outlived the process on both sides, and nobody chose this.
-      // Read through `endedWithDaemon` rather than listing the reasons again —
-      // the daemon's resume pass and every client ask the identical question,
-      // and a second copy here is the one that drifts.
+      // Read through endedWithDaemon, never a second list of reasons.
       if (endedWithDaemon(this.exitRecord)) return "interrupted";
       switch (this.exitRecord.reason) {
         case "start_failed":
         case "start_timeout":
           return "failed";
-        /*
-         * ⚠ **Written out because the `default:` below is what would have
-         * answered, and it answers `exited`.**
-         *
-         * A parked session reading as `exited` says somebody stopped this
-         * conversation, when nobody did — the daemon let the agent go because
-         * the session had been quiet, and the next message brings it back. That
-         * is the one thing parking may not look like, and nothing would have
-         * caught it: unlike `autoResumable`, this switch has a `default` arm, so
-         * a new `ExitReason` lands there silently and compiles clean.
-         *
-         * Deliberately *not* solved by adding the reason to
-         * `DAEMON_EXIT_REASONS` — that would make it `interrupted`, which is
-         * warn-toned on every client and claims the daemon will bring it back on
-         * its own. See the reason's own note in `events.ts`.
-         */
+        // Spelled out: the default arm would answer exited, and nobody stopped a parked session.
         case "parked":
           return "parked";
         default:
@@ -3043,10 +1029,6 @@ export class ManagedSession {
       }
     }
     if (this.stopRequested) return "stopping";
-    // Both maps, through one count. An approval and a question are the same fact
-    // from this screen's point of view — something is waiting on a person — and a
-    // session parked on a form that reported `running` would blink "working…"
-    // over a question nobody had answered.
     if (this.awaitingCount > 0) return "blocked";
     if (this.turn !== null) return "running";
     if (this.session === null) return "starting";
@@ -3057,320 +1039,70 @@ export class ManagedSession {
     return this.exitRecord !== null;
   }
 
-  /**
-   * True when there is an agent conversation to reattach to.
-   *
-   * Deliberately *not* "ended only because the daemon did", which is what this
-   * used to claim: a session somebody stopped is resumable too, and the manual
-   * `POST /sessions/:id/resume` has always been allowed to do it. Which sessions
-   * the daemon brings back *on its own* is a stricter question, and it is
-   * `autoResumable`'s.
-   */
   get resumable(): boolean {
     return this.terminal && this.agentSessionId !== null;
   }
 
-  /** How this session ended, or `null` while it is still running. */
   get exit(): SessionExit | null {
     return this.exitRecord;
   }
 
-  /** When something last happened here. `null` for a session that never spoke. */
   get lastActivityAt(): number | null {
     return this.lastEventAt;
   }
 
-  /**
-   * When the **agent** last said something. `null` until it has.
-   *
-   * Exported beside {@link lastActivityAt} rather than left private because the
-   * difference between the two is the whole of what {@link wedged} rests on, and
-   * a driver that can only observe the *outcome* of a clock cannot tell which
-   * clock produced it — the two differ by milliseconds in a test, so no choice of
-   * `now` discriminates them. The property is therefore asserted directly: a
-   * message from a person moves one and not the other.
-   */
   get lastAgentActivityAt(): number | null {
     return this.lastAgentEventAt;
   }
 
-  /**
-   * Whether the daemon may let this session's agent go and keep the conversation.
-   *
-   * **`status === "idle"` is doing almost all of the work here, and that is the
-   * point.** The three things parking must never interrupt — a turn in flight, a
-   * permission somebody has not answered, a question waiting on a person — are
-   * exactly the states that derivation reports as something other than `idle`
-   * (`running`, `blocked`), along with the two where there is nothing to park yet
-   * or already (`starting`, `stopping`, and every terminal one). So the guarantee
-   * that *the agent never notices a client leaving* is one comparison rather than
-   * a list that can fall out of step with `status`, which is where it would rot:
-   * a fourth waiting state added to `awaitingCount` would be covered here on the
-   * day it is added, and a hand-written list would not.
-   *
-   * The other two are about being able to come back at all. Without an
-   * `agentSessionId` there is no conversation to resume onto, so parking would be
-   * a one-way door.
-   *
-   * ⚠ **The `resumeGivenUp` clause cannot fire today, and is kept deliberately —
-   * with the reason written here rather than left to be rediscovered.** A session
-   * the daemon has given up resuming is one the agent said it no longer holds, and
-   * `onResumed` clears that verdict on the resume that succeeded — so a session
-   * live enough to be `idle` has, by construction, just proved it can be brought
-   * back. There is no live-and-given-up state to refuse. A driver fixture built to
-   * exercise it was parked anyway, which is how this was established rather than
-   * assumed (`daemoncheck.restart-and-resume.ts` pins both halves).
-   *
-   * It stays because the clause it states is the one somebody would otherwise
-   * delete on the way to "…and park the settled ones too", and because the
-   * relationship it depends on — that a give-up outlives only a failed resume —
-   * is a fact about another function that could change without anybody looking
-   * here.
-   *
-   * Takes `now` rather than reading the clock, so the sweep and its driver see
-   * the same instant. `createdAt` stands in for a session that never spoke — it
-   * has been idle since it existed, which is the strongest case for parking, not
-   * an exemption from it.
-   */
+  /** Idle status covers every state parking must not interrupt; the resumeGivenUp clause cannot fire today and is kept on purpose. */
   parkable(now: number, idleMs: number): boolean {
     if (this.status !== "idle") return false;
-    /*
-     * ⚠ **The two windows `status` cannot describe, and the reason this is not
-     * covered by the `idle` comparison above.**
-     *
-     * A `/clear` and a `restartAgent` both replace the agent process underneath a
-     * session that is reporting `idle` — the `status` getter reads neither flag —
-     * so both are parkable without this line. The sweep's half-hour rarely reaches
-     * one, but `releaseOneSlot` asks with `idleMs` of `0`, which makes the age
-     * clause vacuously true: at the ceiling, a create or a wake could stop a
-     * session mid-`/clear`. That lands between `session/new` and the assignment of
-     * the id it handed back, so the daemon keeps the *parent* conversation and the
-     * agent has already forked — which is Q2.7's codeword-comes-back failure,
-     * arrived at from the one direction `clearContext` does not guard.
-     *
-     * Six other members already refuse on exactly this pair (`prompt`,
-     * `clearContext`, `cancelTurn`, `setConfigOption`, `setMode` and
-     * `takesCredentialChange`) under the rule one of them states as "one process
-     * boundary at a time". This is the seventh caller and it was the only one not
-     * asking.
-     */
+    // A clear or restart leaves status idle, and releaseOneSlot asks with idleMs 0, so both must refuse here (Q2.7).
     if (this.clearing || this.restarting) return false;
-    /*
-     * ⚠ **And a third clause, which — like `resumeGivenUp` below it — cannot fire
-     * today, and is kept deliberately with the reason written here rather than
-     * left to be rediscovered.**
-     *
-     * A queue outlives the turn it was filled during, so "idle with something
-     * waiting" is the state to worry about: taking the agent away there strands a
-     * message already accepted, already written into the transcript and already
-     * charged its uploads. It is unreachable as the code stands, and the argument
-     * is exhaustive rather than hopeful — `deliverQueued` runs in `pump`'s
-     * `finally`, after `whenRestarted` and after `clearContext`, and it declines
-     * in exactly six places: an empty queue, `terminal || stopRequested`,
-     * `clearing || restarting`, a turn in flight, and no session. None of those is
-     * a state `status` reports as `idle` while something is still queued. So a
-     * queue is either draining or behind a boundary the two clauses above already
-     * refuse on.
-     *
-     * It stays because it is the clause somebody would otherwise delete on the
-     * way to "…and park the settled ones too", and because what makes it
-     * unreachable is a property of *another* function's call sites — one new
-     * early return in `deliverQueued` reopens it in silence. Neither threshold
-     * would stand in for it: the sweep's half hour and the ceiling's two-minute
-     * floor are both about *age*, and a queue that cannot drain gets older while
-     * it waits.
-     */
+    // Unreachable today, since deliverQueued never leaves an idle session queued; kept so a new early return there cannot strand a message.
     if (this.queuedPrompts.length > 0) return false;
-    /*
-     * ⚠ **Work the agent started that outlives the turn that started it — the
-     * fourth thing `status` cannot see, and the only one of the four that
-     * destroys something when it is missed.**
-     *
-     * The two clauses above and this one are one family: *a session that owes
-     * somebody something while `status` honestly reads `idle`.* A `/clear` owes a
-     * process boundary, a queue owes a message this daemon already accepted, and
-     * this owes a build. The turn **has** ended, so `idle` is not a bug in the
-     * derivation — Q2.44's rule is that the turn ending is not the agent
-     * stopping, and background work is that rule's sharpest case.
-     *
-     * **Neither threshold defends it**, which is why this is a clause and not a
-     * bet on timing. The sweep's half hour and the ceiling's two minutes are both
-     * about *age*, and the age they weigh is the **transcript's**, which a build
-     * does not move while it runs. Read straight out of this machine's own store
-     * on 2026-09-14 (`select ts from events where session_id='s_5d26f98e'`):
-     * `s_5d26f98e` recorded its last event at 1789374056302 and carries a `parked`
-     * status event at 1789377682390 — released **60m26s** later, on the first
-     * `IDLE_PARK_SWEEP_MS` tick past this machine's `idleReleaseMinutes` of 60.
-     * Note what the record does *not* say: nothing persisted can tell you whether
-     * that session still had work running when it went, because
-     * `backgroundTasksState` is in memory and the `parked` exit carries no trace of
-     * it. That silence is the clause's own subject — the agent reporting is the
-     * only way anything here finds out. What a release does to that work is not a
-     * pause — `doStop` disposes the agent, the CLI's own shutdown group-kills
-     * every shell it backgrounded, and nothing comes back: `session/resume`
-     * replays no task state, and the CLI's background set is per-process by its
-     * own documentation.
-     *
-     * ⚠ **Narrower than it looks, and the next person must not read it as a
-     * general fix.** It fires for claude only — kimi backgrounds fully and reports
-     * nothing, codex has no push, opencode cannot background at all — and within
-     * claude for shells, workflows and monitors only, because the adapter marks a
-     * backgrounded **subagent** `ignored` and announces it as nothing at all. That
-     * is Q7.113's own measured case, still invisible. `CEILING_PARK_FLOOR_MS` and
-     * the drain's clock are what stand for everything this cannot see, and
-     * neither may be spent on the strength of this clause existing.
-     *
-     * **Unbounded by decision**, and the bound is the *signal* rather than a
-     * clock: the adapter reconciles the CLI's background-task level and sends a
-     * terminal edge for anything the agent stops naming, and `doStop` clears the
-     * set outright. A deferral cap was argued for — a task that never ends holds
-     * ~397 MB against a ceiling that only became a memory budget because
-     * `idlepark.ts` bounds the population from the other end — and declined,
-     * because the asymmetry runs the other way: too large costs memory, too small
-     * costs work. The seam is one constant beside `CEILING_PARK_FLOOR_MS`. Q2.228.
-     */
+    // Background work the transcript's age cannot see; claude only, blind to backgrounded subagents (Q7.113), unbounded by decision (Q2.228).
     if (this.hasLiveBackgroundWork) return false;
     if (this.agentSessionId === null) return false;
     if (this.resumeGivenUp !== null) return false;
     return now - (this.lastActivityAt ?? this.createdAt) >= idleMs;
   }
 
-  /**
-   * Whether the daemon should stop waiting for a turn nothing has come out of.
-   *
-   * **The mirror image of {@link parkable}, and the two are deliberately not one
-   * predicate.** That one asks whether an agent may be let go while `status`
-   * reads `idle`; this one asks whether a `running` that nothing can clear should
-   * be ended. They share a clock — `lastActivityAt`, which every event moves —
-   * and nothing else: a session cannot satisfy both, since the first line of each
-   * is the other's opposite.
-   *
-   * `status === "running"` rather than `this.turn !== null`, and the difference is
-   * the whole safety of this. The derivation puts `blocked` **above** `running`, so
-   * a session parked on a permission or a question reads `blocked` however long
-   * nobody answers — and a person who walked away from an approval is the single
-   * most likely source of an hour's silence in this product. Reading the field
-   * directly would reap exactly them. `stopping`, `starting`, `parked` and every
-   * terminal state fall out the same way, each for its own reason and none of them
-   * needing a clause here.
-   *
-   * The three clauses that are not free:
-   *
-   * - `clearing || restarting` is the boundary rule {@link parkable} states as
-   *   "one process boundary at a time", and it is the same rule from the same
-   *   direction: both replace the agent under a session, and a turn ended in the
-   *   middle of one is a turn ended against a process that no longer exists.
-   * - `hasLiveBackgroundWork` is Q2.228 applied to the other threshold. claude
-   *   holds `session/prompt` open while it drives work it has spawned, so the
-   *   silence is real and the turn is not wedged. ⚠ It is exactly as narrow here
-   *   as it is there — claude only, shells and workflows and monitors only — and
-   *   the hour above is what stands for everything it cannot see.
-   * - `queuedPrompts` is **not** a clause, unlike in `parkable`, and the asymmetry
-   *   is the point: a queue is drained by `deliverQueued` from the pump's
-   *   `finally`, so ending the turn is what *delivers* it. Refusing here would
-   *   strand the very message the queue is holding.
-   *
-   * Takes `now` for `parkCandidates`' reason — the sweep and its driver see one
-   * instant — and `silenceMs` rather than reading the threshold, so `0` switching
-   * this off has exactly one home.
-   */
+  /** Reads status, so blocked (an unanswered approval) is never reaped; a queue is no clause, since ending the turn delivers it. */
   wedged(now: number, silenceMs: number): boolean {
     if (silenceMs <= 0) return false;
     if (this.status !== "running") return false;
     if (this.clearing || this.restarting) return false;
     if (this.hasLiveBackgroundWork) return false;
-    /*
-     * ⚠ **`lastAgentEventAt`, never `lastActivityAt`** — see that field. The one
-     * this could not use is moved by the *person's* messages, so typing into a
-     * session that says *working* reset the clock and the wedge outlived every
-     * attempt to escape it.
-     *
-     * `turnStartedAt` as the floor rather than `createdAt`, and it matters here in
-     * a way it does not in `parkable`. A turn always has one, and a turn whose
-     * agent has not spoken yet has no agent clock of its own — the field still
-     * holds the *previous* turn's last word, which is older. Taking the later of
-     * the two is what stops a fresh turn being reaped on a stale timestamp.
-     */
+    // The agent's clock, never lastActivityAt, which a person's messages move; floored at turnStartedAt for a fresh turn.
     const quietSince = Math.max(this.lastAgentEventAt ?? 0, this.turnStartedAt ?? 0);
     return now - quietSince >= silenceMs;
   }
 
-  /**
-   * End a turn this daemon has given up waiting for, and say whether there was
-   * one.
-   *
-   * A delegate and nothing else: the decision is {@link wedged}, the mechanism is
-   * `Session.abandonTurn`, and what happens next is `pump`'s ordinary `finally`
-   * reached through the queue. `false` for a session with no agent — a wedged turn
-   * implies a live one, so this is the unreachable arm rather than a case.
-   */
   abandonTurn(): boolean {
     return this.session?.abandonTurn() ?? false;
   }
 
-  /**
-   * Whether the agent is still running something it started earlier.
-   *
-   * `running` and `paused` are the two non-terminal states, and the test goes
-   * through `isTerminalAsyncTaskState` rather than listing them here — that
-   * function mirrors the adapter's own `isTerminal`, and a second hand-written
-   * list of "the finished ones" is exactly what goes out of step when a sixth
-   * word is added.
-   *
-   * A task the agent described with a word this client cannot read never reaches
-   * the set as a state at all: `readAsyncTaskEdge` drops the whole update, so the
-   * row keeps what it had and stays live. Failing toward not killing work is the
-   * direction chosen everywhere in this feature.
-   */
   private get hasLiveBackgroundWork(): boolean {
     return this.backgroundTasksState.some((task) => !isTerminalAsyncTaskState(task.state));
   }
 
-  /** How many times this daemon has already tried to bring it back. */
   get resumeAttemptCount(): number {
     return this.resumeAttempts;
   }
 
-  /** Why the daemon stopped trying, or `null` while it still might. */
   get resumeAbandoned(): ResumeGiveUp | null {
     return this.resumeGivenUp;
   }
 
-  /**
-   * Whether the daemon has stopped trying for a reason a restart cannot change.
-   *
-   * The gate on both automatic paths. Without it a session whose conversation
-   * the agent has forgotten is queued again on every boot and on every message
-   * somebody types into it, spawning an agent each time to be told the same
-   * thing.
-   */
+  /** The gate on both automatic paths, so a forgotten conversation is not respawned on every boot and every message. */
   get resumeSettled(): boolean {
     if (this.resumeGivenUp === null || !resumeGiveUpPersists(this.resumeGivenUp)) return false;
-    /*
-     * A conversation this daemon opened and never used is **not** settled, even
-     * when a previous life wrote the verdict down.
-     *
-     * That verdict persists precisely because a restart cannot change what is on
-     * the agent's disk — true, and it is exactly why it must not also mean
-     * "nothing can be done". A cleared-and-unused conversation is recreatable by
-     * construction, and a daemon that learns how to recover a class of session
-     * must not be vetoed by a row written before it knew.
-     *
-     * Found the hard way: the very first session this recovery was built for had
-     * already been marked `forgotten` on the boot before, so it was filtered out
-     * of the queue and the new code never ran on it.
-     */
+    // A conversation this daemon opened and never used is not settled, even under a persisted verdict: it is recreatable.
     return !this.conversationKnownEmpty();
   }
 
-  /**
-   * One failed attempt: spends budget, and says nothing in the log.
-   *
-   * Nothing is appended here on purpose. A crash-looping session would otherwise
-   * write an event per attempt into a log that evicts a *prefix* — spending the
-   * operator's own first prompt to record the same failure three times. The one
-   * `error` event comes from {@link abandonResume}, at the end.
-   */
   noteResumeFailure(code: string, message: string): number {
     this.resumeAttempts += 1;
     this.lastResumeFailureAt = Date.now();
@@ -3379,39 +1111,13 @@ export class ManagedSession {
     return this.resumeAttempts;
   }
 
-  /**
-   * A failure that spends nothing and gives nothing up: the reason is put on the
-   * snapshot so a screen can say why the session is still waiting, and the
-   * counters are left exactly as they were.
-   *
-   * ⚠ **The one caller is a harness with no CLI on the machine, and the reason it
-   * is neither an attempt nor a verdict is that the thing which fixes it is
-   * already scheduled.** Measured 2026-09-04 on the dev stand, on the first
-   * deploy after the vendored CLIs went (Q4.114): the stand's deploy path
-   * restarts the daemon without running `deploy/agents.sh` first, so three
-   * opencode sessions met `opencode not found on this daemon's PATH` three times
-   * each, were marked `attempts_exhausted`, and stayed that way after the
-   * updater had installed opencode five minutes later — because that verdict is
-   * final for a daemon's life and nothing re-drives it. An attempt is for a
-   * failure that a retry might not repeat; a verdict is for a fact a retry
-   * cannot change. A missing binary is neither: it repeats exactly until the
-   * install lands, and then it does not. So it costs no attempt, `resumeSettled`
-   * stays `false`, and the pass the daemon starts after every completed agent
-   * update picks the session up again.
-   */
+  /** Spends no attempt: a missing CLI repeats until the install lands, and the pass after each agent update retries it. */
   deferResume(code: string, message: string): void {
     this.lastResumeFailureAt = Date.now();
     this.resumeError = { code, message };
     this.touchSafe();
   }
 
-  /**
-   * Stop trying, and say so exactly once.
-   *
-   * The `error` event is what makes this visible in a transcript somebody opens
-   * later; the snapshot field is what makes it visible in a list they never
-   * open. Both are needed and they are not the same audience.
-   */
   abandonResume(reason: ResumeGiveUp, code: string, message: string): void {
     if (this.resumeGivenUp !== null) return;
     this.resumeGivenUp = reason;
@@ -3433,47 +1139,12 @@ export class ManagedSession {
     return this.session?.handle ?? this.restoredAgentHandle;
   }
 
-  /**
-   * How many things are waiting on a person, of either kind.
-   *
-   * The in-class twin of the exported {@link awaitingHuman}, and it exists
-   * because `status` runs *before* a snapshot exists — `snapshot()` calls it, so
-   * it cannot read one. Two forms of one rule is exactly the drift the predicate
-   * is meant to prevent, so `daemoncheck` asserts the two agree on a session
-   * holding only a question.
-   */
+  // The in-class twin of awaitingHuman, since status runs before a snapshot exists; daemoncheck asserts they agree.
   private get awaitingCount(): number {
     return this.pending.size + this.pendingElicitations.size;
   }
 
-  /**
-   * A frozen point-in-time copy.
-   *
-   * Copied, not referenced: a frame built now and serialized four seconds later
-   * must describe now, not some moment in between that never existed.
-   */
-  /**
-   * This session as a frame, built now.
-   *
-   * ⚠ **`fullConfig` decides whether the model list is cut, and exactly one route
-   * asks for it.** `snapshotConfig` bounds the choice count because this record
-   * rides `GET /sessions` — sixty of them, every four seconds, over a relay, to a
-   * phone. But the *browser reads its model picker out of this same object*
-   * (`store.ts`'s rule: state comes from the snapshot, only prose comes from the
-   * log), so a cut with no way to read past it is a picker missing rows and
-   * nothing saying so. `GET /sessions/:id` passes `true`: it is one session,
-   * fetched on demand, and is not polled — which is what makes it the place the
-   * rest can honestly live.
-   *
-   * ⚠ **`listing` is the same argument from the other end, and it is a second
-   * flag rather than the inverse of the first because there are three surfaces
-   * and not two.** `GET /sessions` is the polled many-session read and passes it;
-   * `GET /sessions/:id` is the one-session read and passes `fullConfig`; the WS
-   * `snapshot` frame passes neither, because it is one session and it is sent
-   * only when something about it actually changed. Collapsing the pair would make
-   * the socket pay a cut that exists for a poll, or make the poll carry what the
-   * socket may.
-   */
+  /** fullConfig (GET /sessions/:id) skips the choice cut; listing (the polled GET /sessions) drops what a poll cannot afford. */
   snapshot(options: { fullConfig?: boolean; listing?: boolean } = {}): SessionSnapshot {
     const stats = this.log.stats();
     return Object.freeze({
@@ -3488,46 +1159,9 @@ export class ManagedSession {
       turn: this.turn,
       turnStartedAt: this.turnStartedAt,
       cancelRequestedAt: this.cancelRequestedAt,
-      /*
-       * Copied, like every other array here: a frame built now and serialized
-       * later must describe now.
-       *
-       * ⚠ **Field by field, never a spread.** `QueuedEntry` extends the public
-       * shape with the message body and its uploads, and `{...entry}` copied both
-       * onto every frame — found by driving a real kimi, where the snapshot came
-       * back carrying the text of a message that is already a `prompt` event one
-       * seq away. That is the duplication {@link QueuedPrompt} exists to prevent,
-       * on every snapshot until delivery, and it is invisible to a type: the
-       * extra keys are assignable to the declared one.
-       */
+      // Field by field, never a spread: QueuedEntry carries the message body and its uploads.
       queuedPrompts: this.queuedPrompts.map((entry) => ({ id: entry.id, seq: entry.seq, at: entry.at })),
-      /*
-       * Copied, like every other array here: a frame built now and serialized
-       * later must describe now, and the set behind this one is replaced whole on
-       * every update the agent sends.
-       *
-       * ⚠ **And cut on the polled read, for `agentConfig`'s reason one field
-       * down.** A session may hold `MAX_TRACKED_ASYNC_TASKS` of these, and the
-       * ingest clips in `acp/asynctasks.ts` bound each one at 2 888 characters of
-       * string — 256 id + 200 name + 64 `taskType` + 512 description + 512 summary
-       * + 64 `lastToolName` + 1 024 `outputFilePath` + 256 `toolCallId` — so sixty
-       * sessions at that cap is about 5.5 MB in **one** poll, and `store.ts`'s
-       * `POLL_INTERVAL_MS` repeats that poll every four seconds, over a relay, to a
-       * phone. A bound rather than a frame anybody watched: it is what the clips
-       * *allow*, and it is the number the cut has to be sized against because
-       * nothing stops an agent reaching it. All of it for a list whose interesting
-       * part is a handful of rows. `outputFilePath` is the
-       * largest field in the record and the one thing in it **nothing draws**: it
-       * names `/private/tmp/claude-<uid>/…/tasks/<id>.output`, outside the
-       * workspace, which `files-paths-git.md` containment refuses to read, so
-       * there is no detail view to build and the panel's own footer says so
-       * instead. It is kept in this daemon's state, sent whole on `GET
-       * /sessions/:id` and on any socket frame that fits — `fitSnapshotFrame`'s
-       * first rung nulls it too on one it has to reduce — and dropped wherever
-       * sixty copies of it ride one
-       * poll. `null` rather than absent, because the field is declared on both
-       * sides of the wire and an absence would be a third state to read.
-       */
+      // The polled read nulls outputFilePath, the largest field and one nothing draws.
       backgroundTasks:
         options.listing === true
           ? this.backgroundTasksState.map((task) => ({ ...task, outputFilePath: null }))
@@ -3536,17 +1170,10 @@ export class ManagedSession {
       midTurnDelivery: this.session === null ? null : this.session.supportsSteering ? "steer" : "queue",
       lastEventAt: this.lastEventAt,
       createdAt: this.createdAt,
-      // Primitives, so `Object.freeze` being shallow is not a problem the way it
-      // is for `workspace` and `agentConfig` above.
       title: this.titleValue,
       pinned: this.pinnedValue,
-      // **Always emitted, `null` included**, and that is not tidiness: a client
-      // reads the field being *absent* as "this daemon cannot store an order" and
-      // takes the gesture away for that machine's rows. Omitting it when unset
-      // would make every fresh session look like an old daemon.
+      // Always emitted, null included: a client reads an absent rank as a daemon that cannot store an order.
       rank: this.rankValue,
-      // Copied rather than referenced, like `workspace` above: `Object.freeze` is
-      // shallow, and a frame built now must describe now.
       contextUsage:
         this.contextUsageState === null
           ? null
@@ -3557,11 +1184,7 @@ export class ManagedSession {
         options.fullConfig === true,
       ),
       commandsRevision: this.commandsRevisionValue,
-      // The derived floor rather than the raw `firstSeq`. A client reads this as
-      // "the lowest seq this daemon still has", and the raw value is 0 when the
-      // log holds nothing for a session whose sequence is already high — which
-      // told the browser history began at 1 and left its "load earlier" button
-      // paging a log with nothing in it, for ever.
+      // The derived floor, not the raw firstSeq, which is 0 for a log that holds nothing.
       firstSeq: oldestAvailable(stats),
       lastSeq: stats.lastSeq,
       dropped: stats.dropped,
@@ -3569,9 +1192,6 @@ export class ManagedSession {
         ...record.info,
         options: [...record.info.options],
       })),
-      // Copied, like the array above — `snapshot()` returns a frozen point in
-      // time, and `Object.freeze` is shallow. `info` is a flat record of scalars,
-      // so a spread is the whole copy.
       pendingElicitations: [...this.pendingElicitations.values()].map((record) => ({
         ...record.info,
       })),
@@ -3580,28 +1200,10 @@ export class ManagedSession {
     });
   }
 
-  /**
-   * What the auto-resume pass has to say about this session, or nothing.
-   *
-   * Spread onto the snapshot only when it exists, so the field stays *absent*
-   * for the sessions nobody has thought about — which is every live one. A
-   * `null` there would mean something, and what it would mean is exactly what
-   * absence already means, one allocation cheaper on a record built for sixty
-   * sessions every four seconds.
-   *
-   * The error is clamped here rather than at the point it is recorded, because
-   * this is the boundary it crosses: the strings come from an agent's own
-   * failure message, which nothing bounds on the way in.
-   */
   private get resumeState(): SessionResumeState | null {
     if (this.resuming !== null) {
       return { state: "running", attempts: this.resumeAttempts, error: null, at: Date.now() };
     }
-    // A live session has nothing to say here, and this is a guard rather than an
-    // assertion: the counters are only ever raised by a failure, which restores
-    // the exit, and only ever cleared by the success that follows — so a running
-    // session with attempts on it should be unreachable. Structural beats
-    // remembering to reset in a second place.
     if (!this.terminal) return null;
     if (this.resumeGivenUp !== null) {
       return {
@@ -3614,8 +1216,6 @@ export class ManagedSession {
         at: this.lastResumeFailureAt ?? Date.now(),
       };
     }
-    // A deferral has an error and no attempt — see `deferResume` — and it is the
-    // one waiting state with something to say, so it is drawn.
     if (this.resumeAttempts === 0 && this.resumeError === null) return null;
     return {
       state: "waiting",
@@ -3628,38 +1228,15 @@ export class ManagedSession {
     };
   }
 
-  /**
-   * Carry out a `/clear`: the agent forgets, the transcript does not.
-   *
-   * Here rather than in `session.ts` for the reason every other out-of-turn append
-   * is here: `Session` has no `SessionLog`, and the registry owns what goes into the
-   * transcript. It used to be argued from the queue draining only inside a turn —
-   * true then, and no longer, since a `ManagedSession` reads it between turns; the
-   * conclusion is unchanged because it never depended on that.
-   *
-   * The prompt is recorded first and unconditionally, because it is what
-   * somebody typed and the log is a record of that rather than of what worked.
-   * The boundary is appended only on success, because it is a claim about the
-   * agent.
-   */
   async clearContext(text: string): Promise<ClearResult> {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
     if (!session) return { kind: "not_ready", status: this.status };
-    // Refused mid-turn rather than queued. Clearing under a running agent means
-    // deciding what happens to the turn's own output, and there is no answer to
-    // that which is not a surprise to somebody.
     if (this.turn !== null || this.clearing || this.restarting) return { kind: "busy", status: this.status };
 
-    // `?? 0` for the same reason `prompt` uses it: a store that refused the
-    // insert still returns a placeholder at that seq, and the caller needs a
-    // number rather than a reason to give up on an operation that will happen.
     const seq = this.safeAppend({ type: "prompt", text, attachments: [] })?.seq ?? 0;
-    // Set before the append is even flushed and, crucially, before the await
-    // below: see the field. Everything from here to the `finally` runs with the
-    // agent's session id being replaced underneath it, and nothing else may
-    // issue a request in that window.
+    // Set before the await: nothing else may address the agent while its session id is replaced.
     this.clearing = true;
     this.touchSafe();
 
@@ -3671,10 +1248,6 @@ export class ManagedSession {
         agentSessionId: moved.next,
         previousAgentSessionId: moved.previous,
       });
-      // Said after the clear rather than before it, so the row reads in the order
-      // the acts happened; `doStop` pays the same debt at its own end. `Session`
-      // has already dropped the set and announced the empty one, so by here the
-      // panel is honest and this is the only thing left that remembers.
       if (moved.abandonedTasks > 0) {
         this.safeAppend({
           type: "error",
@@ -3682,30 +1255,16 @@ export class ManagedSession {
           data: null,
         });
       }
-      // The new session publishes its own controls, and they are the ones a client
-      // must now draw — `restoreConfig` puts back what it can, and what it could
-      // not is a fact the strip has to show rather than hide.
       this.applyAgentConfig(session.agentConfig);
       this.touchSafe();
       return { kind: "cleared", seq };
     } finally {
-      // In a `finally` because a failed clear must not leave the session refusing
-      // every prompt for the rest of its life — `session.clearContext` can throw,
-      // and the conversation it was replacing is then still the live one.
       this.clearing = false;
-      // And the same nudge the restart path owes, for the same reason: a clear is
-      // the second of the three states `deliverQueued` declines in.
-      //
-      // ⚠ A message queued *before* a `/clear` is delivered *after* it, into the
-      // fresh conversation. That is the honest reading of both acts in the order
-      // they were asked for, and it is why the queue is not emptied here: the
-      // person sent the message and then cleared, so the message is what they
-      // want the new conversation to start with.
+      // A message queued before a clear is delivered into the fresh conversation, on purpose.
       this.deliverQueued();
     }
   }
 
-  /** Notified whenever the snapshot changes. Unsubscribe with the returned fn. */
   watch(watcher: SessionWatcher): () => void {
     this.watchers.add(watcher);
     return () => {
@@ -3713,113 +1272,29 @@ export class ManagedSession {
     };
   }
 
-  /* --------------------------------------------------------------------- *
-   * Lifecycle
-   * --------------------------------------------------------------------- */
-
-  /**
-   * Whether this session's next agent is asked for ultracode.
-   *
-   * A getter and never a field: `ultracodeChoice` is what somebody decided, the
-   * default is what the machine is set to, and the fold has to happen at the
-   * moment of a launch. See {@link ManagedSessionOptions.ultracodeDefault}.
-   */
   private get ultracodeWanted(): boolean {
     return this.ultracodeChoice ?? this.ultracodeDefault();
   }
 
-  /**
-   * Which system and model this session runs on, read fresh at every launch.
-   *
-   * `{}` for a bare harness, which is every session started before assembled
-   * agents existed — and spreading nothing is what keeps `Session.start`'s
-   * behaviour for those byte for byte what it was.
-   *
-   * **Two degradations, and they are the same demotion for the same reason.** A
-   * preset can be deleted under a sleeping session, and a preset can be
-   * *re-pointed at another harness* under one — `PATCH /custom-agents/:id`
-   * accepts a change of `harness` and weighs `hostable` against the body it was
-   * given, which says nothing about a session that already exists. Either way
-   * the preset has stopped describing this session, and either way the honest
-   * answer is the bare harness the session's own `agent` column names rather
-   * than a pairing nobody chose.
-   */
   private get assembled(): { system?: SystemId; model?: string } {
     if (this.customAgent === null) return {};
     const one = this.resolveCustomAgent(this.customAgent);
-    // A preset deleted under a sleeping session: the harness on its own is the
-    // honest outcome, and it is what `agent` has said all along.
     if (one === null) return {};
-    /*
-     * An edit that re-points a preset at a different harness leaves the sessions
-     * already started on it where they are, on the harness they were started
-     * with, because **a conversation cannot change vendor underneath itself** —
-     * `agent` is immutable, the agent process is spawned from it, and the
-     * transcript on the other side belongs to that CLI.
-     *
-     * Spreading the new pair over the old harness was the behaviour this arm
-     * replaces, and it failed both ways. Loudly: preset `{claude, anthropic,
-     * opus}` edited to `{codex, openai, gpt-5-codex}` left a claude session
-     * resuming with `system: "openai"`, whose `nativeHarness` is codex, so
-     * `applySystem` reached `hostable` and every resume from then on answered
-     * `502 system_not_routable` with nothing on any screen connecting it to the
-     * edit. Quietly, which is worse: edited to `{kimi, moonshot,
-     * kimi-k2-thinking}` it left the claude harness routed at Moonshot on that
-     * model — a triple `hostable` permits and `POST /sessions` could never have
-     * produced — while the preset, the tile and the glyph all said Kimi Code.
-     */
+    // A conversation cannot change vendor underneath itself: agent is immutable, so a re-pointed preset no longer applies.
     if (one.harness !== this.agent) return {};
     return { system: one.system, model: one.model };
   }
 
-  /**
-   * The model-id prefix this session's own system spells, or `null`.
-   *
-   * `null` for a bare harness, for a routed pairing — where the agent's list is
-   * the harness's own and nothing namespaces it — and for every system that sets
-   * no `nativeModelPrefix`, which is all of them but opencode's two. Read through
-   * {@link assembled}, so a preset re-pointed at another harness answers `null`
-   * here for the same reason it answers no system there.
-   */
   private get modelNamespace(): string | null {
     const system = this.assembled.system;
     if (system === undefined) return null;
-    // `null` for a system this machine no longer offers, and this is on the
-    // **poll** path — `narrowToSystem` shapes every snapshot. A throw here would
-    // be one per client per touch on a session whose plugin somebody removed.
+    // null rather than a throw: this runs on every poll, and a plugin may have been removed.
     const spec = this.machineCatalogue().system(system);
     if (spec === null) return null;
     return spec.nativeHarness === this.agent ? spec.nativeModelPrefix : null;
   }
 
-  /**
-   * The whole option bag a launch is made with, in one place.
-   *
-   * ⚠ **One getter because there are three launch sites, and an omission at any
-   * of them is silent.** `doResume`'s empty-conversation arm wrote the bag out
-   * by hand and left `...assembled` off it, and nothing refused the result:
-   * with no `system`, `spawnEnvOf` returns `{}` so no routed-model variable is
-   * set, and `applySystem` returns at its first line so `client.routing()`,
-   * `hostable` and `providers/set` are never reached and `SystemRoutingError`
-   * cannot fire. The agent opened a conversation on the harness's own vendor,
-   * account and default model while `sessions.custom_agent` and the snapshot went
-   * on naming the assembled agent — exactly the failure with no symptom
-   * `.claude/rules/agent-systems.md` names under *"Routable and un-pinnable must
-   * refuse"*. That arm is not an edge, either: `conversationKnownEmpty` answers
-   * `true` for every `turnCounter === 0`, so every created-but-unprompted session
-   * took it, on a restart, on Resume, and on an ultracode toggle.
-   *
-   * ⚠ **Everything here is re-read at the launch and nothing is remembered.**
-   * `assembled` goes back to the preset store, so an edit takes effect without a
-   * daemon restart and routing — which lives in the agent *process* — cannot be
-   * lost by a resume; `ultracodeWanted` folds in the machine default, which
-   * claude reads when the conversation is opened, so a resume without it comes
-   * back quietly demoted; `elicitationAllowed` is a thunk for the same reason.
-   *
-   * A resume adds `agentSessionId` and nothing else, which is what makes one bag
-   * correct for all three sites — and what makes a fourth site unable to
-   * disagree with the other three.
-   */
+  // One bag for all three launch sites, re-read at every launch: an omission at any one of them is silent.
   private get launchOptions(): SessionOptions {
     return {
       agent: this.agent,
@@ -3839,26 +1314,10 @@ export class ManagedSession {
     await this.launch(Session.start(this.launchOptions), timeoutMs);
   }
 
-  /** Adopts a starting agent, bounded by `timeoutMs`. Shared by start and resume. */
   private async launch(starting: Promise<Session>, timeoutMs: number): Promise<void> {
     this.startPromise = starting;
 
-    // This promise is never dropped, whatever happens to the request that began
-    // it. A late resolve owns a live subprocess with piped stdio; if nothing is
-    // holding a reference, nothing will ever dispose it.
-    //
-    // **The launch identifies itself to its own callbacks**, which is the same
-    // `this.session !== session` check every other late notification in this class
-    // already makes. `startAbandoned` cannot do that job: it is cleared by the
-    // *next* `armForStart()`, so a launch that timed out at 45s and resolved at
-    // 48s — ordinary, since nothing bounds `session/new` or `session/resume` end
-    // to end — arrived to find the flag already reset by the retry, was adopted as
-    // the live session, and was then overwritten by the retry's own agent two
-    // seconds later. The displaced agent is `detached`, holds the session's
-    // worktree, is referenced by nothing (`doStop` awaits `startPromise`,
-    // `shutdown` collects `session.agentHandle`) and survives the daemon's own
-    // exit, invisible to the next boot's reaper because the persisted pid is the
-    // other one's.
+    // Never dropped: a late resolve owns a live subprocess. Callbacks check launch identity, since the next armForStart resets startAbandoned.
     starting.then(
       (session) => this.onStarted(starting, session),
       (error: unknown) => this.onStartFailed(starting, error),
@@ -3884,34 +1343,8 @@ export class ManagedSession {
     if (outcome !== null) throw outcome;
   }
 
-  /**
-   * Reattaches a fresh agent to this session's earlier conversation.
-   *
-   * This is the only terminal → non-terminal transition in the daemon, which is
-   * why it resets the whole ended-ness of the session in one place: `exitRecord`
-   * decides `status` and `terminal`, `stopRequested` gates every permission, and
-   * `stopping` is memoised so a later stop() would otherwise return the promise
-   * from the *previous* life and resolve immediately without killing anything.
-   *
-   * Turn numbering continues from the persisted counter rather than restarting,
-   * so turn 4 means the fourth turn of the conversation and not the fourth since
-   * the last crash.
-   */
   async resume(timeoutMs = START_TIMEOUT_MS, quiet = false): Promise<void> {
-    /*
-     * Memoised like `stopping`, and for a symmetrical reason.
-     *
-     * Two prompts arriving together — a phone that retried, or the boot pass
-     * meeting somebody's first message — used to have the second one lose:
-     * the first clears `exitRecord` synchronously, so by the time the second
-     * arrives the session is no longer `terminal` but does not yet have a
-     * `session`, and `prompt` answers `not_ready`. Joining the promise makes the
-     * second request wait for the launch it was going to need anyway.
-     *
-     * This replaces the old behaviour where a concurrent second call got
-     * `409 session_live`. That throw is still here for a genuinely live session,
-     * which is the case it was actually written for.
-     */
+    // Memoised like stopping, so a second concurrent request joins the launch instead of answering not_ready.
     if (this.resuming) return this.resuming;
     this.quietResume = quiet;
     this.resuming = this.doResume(timeoutMs, quiet);
@@ -3923,23 +1356,6 @@ export class ManagedSession {
     }
   }
 
-  /**
-   * Clears everything that makes this session look ended, so `launch` can run.
-   *
-   * Extracted because it has two callers now: a resume, and the fresh
-   * conversation that recovers a cleared session whose empty one the agent never
-   * wrote down. `stopping` is in the list for the reason spelled out on
-   * `resume` — a memoised promise from the previous life would make a later
-   * `stop()` resolve without killing anything.
-   */
-  /**
-   * What a resume that worked has to forget: everything this daemon learned from
-   * the attempts that did not.
-   *
-   * `resumeGivenUp` is in the list because a session abandoned over a stalled
-   * mount and then brought back must not stay marked as hopeless on the snapshot
-   * for the rest of the daemon's life.
-   */
   private onResumed(): void {
     this.resumeAttempts = 0;
     this.lastResumeFailureAt = null;
@@ -3950,9 +1366,7 @@ export class ManagedSession {
 
   private armForStart(): void {
     this.exitRecord = null;
-    // With the exit record gone the origin it described is gone too, or a session
-    // woken between a sign-out and a sign-in would be put back to `parked` by a
-    // later `returnToParked` while holding a live agent.
+    // Cleared with the exit record, or a later returnToParked would park a session holding a live agent.
     this.parkedAtSignOut = false;
     this.stopRequested = false;
     this.stopping = null;
@@ -3961,76 +1375,14 @@ export class ManagedSession {
     this.session = null;
   }
 
-  /**
-   * Whether the current conversation is one nothing has ever been said in.
-   *
-   * **Two arms, because there are two ways to get there**, and they are the two
-   * ways a conversation ends up with no existence on the agent's disk. claude
-   * writes a transcript **lazily, with the first turn**, so a conversation that
-   * never had one was never written down at all. A session nobody ever spoke to
-   * is in that state from birth; a cleared one is put back into it by
-   * `clearContext`, which mints a fresh empty conversation through
-   * `session/new`. Measured in production: resuming either fails, and the
-   * session could not be brought back at all, which is worse than the bug the
-   * clear interception was built to fix.
-   *
-   * The first arm is `turnCounter === 0` — a field on the row, so it needs no
-   * window and cannot age out of one. The second walks the log, and *that* is
-   * where the correction below applies.
-   *
-   * The second arm asks about the *log*, not about an id, and that correction
-   * is the point. Its first version compared the marker's `agentSessionId` to
-   * the current one, and worked exactly once: the recovery opens *another* empty
-   * conversation and deliberately appends no marker for it, so the next restart
-   * found no record naming the new id and gave up. Which id is current is not
-   * the question. If nothing has been said since the last clear then whatever
-   * conversation is current is empty, however many times it has been reopened.
-   *
-   * Narrow where it matters and safe at the edges — of the second arm, which is
-   * the one with edges. It wants a `context_cleared` with no `prompt` after it —
-   * the `/clear` itself is appended *before* the marker, so only a later prompt
-   * counts — and it reads a bounded tail, so a marker older than the window is
-   * simply not found and nothing is recreated.
-   */
+  /** True when nothing has been said: no turn ever ran, or the log tail ends in a clear. claude writes a transcript only with the first turn. */
   private conversationKnownEmpty(): boolean {
-    /*
-     * A session that has never run a turn is empty for the first reason, and
-     * `turnCounter` is the durable, unambiguous way to know it.
-     *
-     * Measured 2026-08-05: a session created at 13:56 and left untouched failed
-     * to resume exactly the way a cleared one did. claude writes a transcript
-     * with the first *turn*, so a conversation that never had one has no
-     * existence on disk — whether it got that way through `session/new` at
-     * creation or through a clear. The predicate knew only the second and
-     * stranded the first.
-     *
-     * Deliberately **not** "no `prompt` in the log". That was tried and is
-     * wrong: an empty log is not evidence of an empty conversation, only of an
-     * empty log — events are pruned, and a restored session may have its history
-     * somewhere this store does not hold.
-     *
-     * What is true of `turnCounter` is that it is written by the same row write
-     * as `agentSessionId`, so a restore can never see one without the other.
-     * What is **not** true is that the two describe the same conversation —
-     * `clearContext` moves the id and leaves the counter alone, so after a clear
-     * the counter is still counting the conversation the fork left behind. That
-     * is precisely why the walk below is still required rather than subsumed:
-     * this arm answers for a session nobody ever spoke to, and for nothing else.
-     */
+    // Not an empty log, which pruning makes; and a clear moves the id but not the counter, so the walk below is still needed.
     if (this.turnCounter === 0) return true;
 
     const stats = this.log.stats();
     const from = Math.max(0, stats.lastSeq - UNUSED_CONVERSATION_LOOKBACK);
-    /*
-     * The whole window is walked and the answer is whichever came **last**, a
-     * marker or a prompt. Returning early on the first prompt after the first
-     * marker is wrong and was measured wrong: a session cleared twice has an
-     * older marker with its own conversation after it, and stopping there
-     * answers about a conversation two generations dead.
-     *
-     * A prompt resets rather than decides, so the `/clear` that *precedes* its
-     * own marker costs nothing — the marker follows and sets it again.
-     */
+    // Whichever came last wins: a session cleared twice has an older marker with a conversation after it.
     let cleared = false;
     for (const stored of this.log.read(from, UNUSED_CONVERSATION_LOOKBACK + 1, MAX_LOOKBACK_BYTES)) {
       const type = stored.event.type;
@@ -4045,152 +1397,27 @@ export class ManagedSession {
     if (agentSessionId === null) throw new ResumeUnavailableError(this.id, "no_agent_session_id");
     if (!this.terminal) throw new ResumeUnavailableError(this.id, "session_live");
 
-    /*
-     * Make room *before* `armForStart`, and never refuse.
-     *
-     * Before, because `armForStart` clears `exitRecord` — which is what
-     * `terminal` reads — so a session that has passed that line is already
-     * counted live and would be making room for itself. It cannot evict itself
-     * either way (`parkable` wants `status === "idle"` and this one is terminal),
-     * but the count it is measured against would be off by one, which is exactly
-     * how a ceiling ends up admitting one more than it says.
-     *
-     * ⚠ **Never refuses, and that is deliberate.** The obvious alternative is to
-     * answer the wake with the 429 `create()` gives. It is wrong here for the
-     * reason `MAX_LIVE_SESSIONS` states: a wake is somebody typing into a
-     * conversation they already have, and telling them it is unavailable because
-     * the machine is busy is worse than being briefly over a soft ceiling. So
-     * this frees a slot if it can and says nothing if it cannot — a machine whose
-     * every live session is mid-turn has no idle agent to take, and going one
-     * over is the right answer there.
-     *
-     * Swallowed for the same reason: a failure to park somebody *else's* session
-     * is not a reason to fail this person's resume.
-     */
-    /*
-     * ⚠ **Only when somebody is asking, which is what `quiet` distinguishes.**
-     *
-     * The paragraph above is the licence for this call and it is written entirely
-     * about a person typing. The boot pass is the codebase's canonical case of
-     * *nobody* asking — the same split `autoResumable` makes between `boot` and
-     * `prompt` — and it passes `quiet`. Left ungated, the restart pass evicted
-     * sessions it had itself just resumed, and did it in the opposite order to the
-     * one it queued in: `autoResumePass` takes most-recently-active first, while
-     * `parkCandidates` takes least-recently-active, so at the ceiling each further
-     * wake parked the session before it. A full spawn plus `session/close` plus a
-     * confirmed SIGKILL, spent to hold fewer conversations than the daemon started
-     * with — and against `.env.example`'s standing promise that a daemon coming
-     * back from a deploy restores the work it was holding.
-     *
-     * A boot pass that reaches the ceiling now simply stops admitting: the
-     * remainder stay terminal and come back on a prompt, which is what
-     * `autoResumable` already says about `parked`.
-     */
+    // Before armForStart, which makes this session count as live; never refuses.
+    // Only when a person is asking: a quiet boot pass at the ceiling would evict sessions it had just resumed.
     if (!quiet) {
-      /*
-       * ⚠ **Re-checked after the await, because that await is real work and a
-       * person can decide something inside it.**
-       *
-       * At the ceiling `makeRoomForWake` is a full teardown of another session's
-       * agent — a `session/close`, SIGTERM, a confirmed SIGKILL — so this is a
-       * window seconds wide in which this session still reads `parked`. A `DELETE
-       * /sessions/:id` landing in it takes `stop()`'s {@link RELABELS_PARKED}
-       * branch and answers `200` reading `stopped`; without this the resume then
-       * carried on, `armForStart()` nulled the very `exitRecord` that recorded the
-       * decision, and the turn the person was aborting ran against a fresh agent.
-       *
-       * ⚠ **Identity, not `stopRequested`, and the difference is the whole of why
-       * this is written out.** The park that got us here *is* a stop, so
-       * `stopRequested` has been `true` since before this call and stays true until
-       * `armForStart` — testing it refuses every wake of every parked session. What
-       * actually distinguishes a decision made *inside* the await is that the
-       * relabel **replaces** `exitRecord` with a new object, so the reference is
-       * the signal. That is the same identity discipline `launch`/`onStarted`
-       * already use for a superseded launch.
-       */
+      // Re-checked by identity after the await: a stop inside it replaces exitRecord, and stopRequested is already true for a park.
       const before = this.exitRecord;
       await this.makeRoomForWake?.().catch(() => {});
       if (this.exitRecord !== before) throw new ResumeUnavailableError(this.id, "session_live");
     }
 
     const previousExit = this.exitRecord;
-    /*
-     * What the controls said before the agent went away, captured for the same
-     * reason `restartAgent` captures it: `onStarted` replaces `agentConfigState`
-     * with whatever the *fresh* process publishes, with nothing in between.
-     *
-     * ⚠ **This used to be empty on all but a parked resume, and it is not any
-     * more.** The sentence here read *"for every other resume this is empty —
-     * `doStop` cleared it — so the restore below is a no-op and needs no branch"*,
-     * and that was true while `doStop` cleared the config for every reason but
-     * `parked`. It now keeps it for every stop a message undoes
-     * ({@link revivableByPrompt}) and `agent_state_json` carries it across a
-     * restart, so this capture is real on an ordinary wake — a session somebody
-     * stopped, one whose agent quit, one signed out from, and one the daemon took
-     * away at shutdown. It carries any choice made on the strip while the agent
-     * was away, and `restoreConfig` sends only what differs and only what the
-     * returning agent actually offers.
-     *
-     * ⚠ **A real capture is also a real window**, which is what
-     * {@link replacingConfig} is for: the replay below lands *after* `onStarted`
-     * has published, so a tap arriving inside it would otherwise reach the agent,
-     * answer `ok` and be overwritten by this snapshot.
-     */
     const wantedConfig = this.agentConfigState;
     this.armForStart();
 
-    // Same argument as `onStartFailed`: on the automatic path this is one half
-    // of a round trip nobody asked for, and the snapshot already says a resume
-    // is running. A person who pressed Resume is watching, so they still get it.
     if (!quiet) {
       this.safeAppend({ type: "status", status: "starting", exit: null });
     }
     this.touchSafe();
 
-    /*
-     * An empty conversation is opened, not resumed — asked once, up front.
-     *
-     * claude writes its transcript **lazily, with the first turn**, so a
-     * conversation that never had one names nothing on disk and asking the agent
-     * to restore it can only fail. Two ways in: `clearContext` mints an empty
-     * conversation through `session/new`, and a session created and never
-     * prompted has been in that state since birth. Measured in production, both
-     * of them — the session could not be brought back at all, which is worse
-     * than the bug the clear interception was built to fix, because the old
-     * failure left a working session with the wrong memory and this one left no
-     * session.
-     *
-     * Opening another empty conversation is *identical* rather than
-     * approximate: there was nothing in the old one to lose, and empty is what
-     * clearing — or never speaking — asked for. Deciding it here rather than in
-     * a catch is what makes it one agent spawn instead of two: the doomed resume
-     * is not attempted at all, and nothing about it reaches the log.
-     *
-     * `conversationKnownEmpty` is the whole gate, and it is narrow by
-     * construction on both arms: a turn counter still at zero, or a
-     * `context_cleared` with no `prompt` after it, the latter failing safe
-     * outside its window. Every other lost conversation resumes and, if the
-     * agent has forgotten it, stays stalled — because silently handing somebody
-     * a fresh agent while they expect their history restored is the same quiet
-     * lie as handing back what they cleared.
-     *
-     * Nothing is appended on success either way. A cleared transcript already
-     * carries its marker and an untouched one has nothing to say; either way
-     * saying it again would imply a second thing happened, when semantically the
-     * state is unchanged — empty before, empty now.
-     */
+    // An empty conversation is opened, not resumed: claude writes nothing to disk before the first turn, so a resume can only fail.
     const empty = this.conversationKnownEmpty();
     try {
-      /*
-       * ⚠ **Both arms take the same bag, and the asymmetry that used to be here
-       * was a bug rather than a decision.** This arm was written out by hand
-       * without the assembled agent's system and model, so every unprompted
-       * session — which is every session at `turnCounter === 0` — came back on
-       * the harness's own vendor and default model, silently, while still
-       * reporting itself as the assembled agent. What differs between a start
-       * and a resume is `agentSessionId` and nothing else; see
-       * {@link launchOptions}.
-       */
       await this.launch(
         empty
           ? Session.start(this.launchOptions)
@@ -4198,32 +1425,10 @@ export class ManagedSession {
         timeoutMs,
       );
       this.onResumed();
-      /*
-       * Put back a choice made while the agent was away.
-       *
-       * After `onResumed` and after the launch, so it runs against the config the
-       * returning agent actually published — `restoreConfig` compares against
-       * that, skips anything unchanged, and skips any value this build of the
-       * agent no longer offers. Awaited, so the first prompt after a wake cannot
-       * beat the setting it was sent with; swallowed inside `restoreConfig`
-       * itself, so a refused option cannot turn a successful resume into a failed
-       * one.
-       *
-       * ⚠ **No longer a no-op for every resume but a parked one.** That sentence
-       * rested on `doStop` clearing the config for every other reason; it now
-       * clears it only for the three {@link revivableByPrompt} refuses —
-       * `start_failed`, `start_timeout`, `agent_kill_failed` — which are also the
-       * three that never reach a resume. So this replays a real option list on
-       * essentially every wake, and what makes that safe is `restoreConfig`'s two
-       * withdrawal guards rather than an empty list.
-       */
+      // Awaited so the first prompt after a wake cannot beat it; restoreConfig swallows refusals and skips withdrawn values.
       await this.session?.restoreConfig(wantedConfig);
     } catch (error) {
-      // Put the original exit back. The commonest failure here is the agent no
-      // longer recognising the session id, and letting `onStartFailed`'s
-      // `start_failed` stand would rewrite `daemon_restarted` out of existence —
-      // the same erasure `doStop`'s `exitRecord ??=` exists to prevent, reached
-      // through the other door. The session stays retryable either way.
+      // Put the original exit back, or start_failed would erase daemon_restarted; the session stays retryable.
       if (previousExit) {
         this.exitRecord = previousExit;
         if (!quiet) {
@@ -4236,27 +1441,17 @@ export class ManagedSession {
   }
 
   private onStarted(launch: Promise<Session>, session: Session): void {
-    // Not the launch this session is waiting on any more, so this agent belongs
-    // to nobody: dispose it here or it runs for ever. Before `this.session` is
-    // assigned, deliberately — adopting it first is what let a superseded agent
-    // become the live one for the two seconds until the real launch resolved,
-    // during which a prompt would have started a turn on the agent about to be
-    // discarded.
+    // A superseded launch: dispose before assigning this.session, or a prompt could start a turn on an agent about to be discarded.
     if (this.startPromise !== launch) {
       void session.dispose().catch(() => {});
       return;
     }
 
     this.session = session;
-    // Carried separately so it outlives the process. This is the entire resume
-    // story: every agent keeps its side of this id on disk, so it is still
-    // meaningful to a fresh subprocess after a restart.
     this.restoredAgentSessionId = session.sessionId;
     this.restoredAgentHandle = session.handle;
 
-    // The connection can close while the process lives, and the process can die
-    // while the session is idle. Either way this must end in dispose(), not just
-    // a status field, or we mark a live agent "exited" and lose our last handle.
+    // Must end in dispose, not only a status field, or a live agent is marked exited and its last handle lost.
     void session.exited.then(
       () => this.onAgentGone(session),
       () => this.onAgentGone(session),
@@ -4267,23 +1462,14 @@ export class ManagedSession {
       return;
     }
 
-    // Read once, then subscribe. The initial state is already known by the time
-    // `Session.start` resolves, and the *registry* appends the event rather than
-    // `session.ts` for the same reason it appends permission events: `Session` holds
-    // no log, and this state arrives on its own channel rather than through the
-    // event queue at all.
     this.unsubscribeConfig?.();
     this.applyAgentConfig(session.agentConfig);
     this.unsubscribeConfig = session.onConfigChanged((config) => {
-      // Identity-checked like `onAgentGone`: a resume replaces `this.session`,
-      // and a late notification from the previous agent must not overwrite the
-      // controls of the one that replaced it.
+      // Identity-checked here and below: a late notification from a replaced agent must not overwrite the current one's state.
       if (this.session !== session) return;
       this.applyAgentConfig(config);
     });
 
-    // Same read-once-then-subscribe shape, same identity check, for the same
-    // reason — a resumed agent's window occupancy is not the previous one's.
     this.unsubscribeUsage?.();
     const initialUsage = session.contextUsage;
     if (initialUsage !== null) this.applyContextUsage(initialUsage);
@@ -4292,17 +1478,7 @@ export class ManagedSession {
       this.applyContextUsage(usage);
     });
 
-    /*
-     * The same shape again — and here the read-once half is load-bearing rather
-     * than symmetric.
-     *
-     * Both adapters schedule `available_commands_update` on a `setTimeout(…, 0)`
-     * taken *after* they answer `session/new`, so it can land inside `Session`
-     * between `Session.start` resolving and this line running — into a listener
-     * set that is still empty. Subscribing without reading would therefore lose
-     * the whole list on every session that started quickly, intermittently, with
-     * nothing to show for it but an empty menu.
-     */
+    // Read once before subscribing: the adapters can publish commands before this line runs.
     this.unsubscribeCommands?.();
     const initialCommands = session.agentCommands;
     if (initialCommands.commands.length > 0) this.applyAgentCommands(initialCommands);
@@ -4311,17 +1487,7 @@ export class ManagedSession {
       this.applyAgentCommands(commands);
     });
 
-    /*
-     * And the same shape a fourth time, with one difference worth naming: the
-     * read-once is **unconditional**, where `applyContextUsage` above skips a
-     * `null` and `applyAgentCommands` skips an empty list.
-     *
-     * Those two are protecting a value somebody may already be looking at. This
-     * one is the opposite: a fresh agent has announced nothing, so the honest set
-     * is empty — and a stale set surviving a resume is a session `parkable`
-     * refuses to release for ever, over work that died with the process before it.
-     * Skipping the empty read is how that would happen.
-     */
+    // Unconditional: a stale set surviving a resume would keep parkable refusing for ever.
     this.unsubscribeBackgroundTasks?.();
     this.reportsBackgroundTasksState = session.reportsBackgroundTasks;
     this.applyBackgroundTasks(session.backgroundTasks);
@@ -4335,87 +1501,14 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /**
-   * Reads what the agent says when no turn is reading it.
-   *
-   * **The agent does not stop talking when the turn ends, and until this existed
-   * nobody was listening.** `session/prompt` resolves while claude drives work it
-   * has spawned; `Session.prompt`'s generator returns on `turn_end`; everything
-   * after that went into a queue whose only consumer had gone. It was released by
-   * the *next* prompt, which is why a conversation could sit silent for five
-   * minutes, read as finished, and then produce a burst of dialog about work that
-   * had happened long before the message that appeared to cause it. Measured on a
-   * live log: 294,907 ms of silence, then 57 events inside a 2 ms span.
-   *
-   * Here rather than inside `Session` so a bare `Session` is untouched, which is
-   * what keeps `harness` a regression test for the default paths.
-   *
-   * Safe to call without knowing whether a turn is running: `drainBetweenTurns`
-   * answers a `null` claim by doing nothing. Called on adoption and again at the
-   * end of every turn; it needs no explicit stop, because a turn displaces it and
-   * `dispose` closes the queue under it.
-   */
   private startIdleDrain(session: Session): void {
     session.drainBetweenTurns((event) => {
-      /*
-       * The identity check every late callback in this class makes, plus the one
-       * this reader needs on its own account: `doStop` never nulls `this.session`,
-       * and teardown can spend seconds in `sendCancel` and `session/close`, so
-       * without `stopRequested` the agent's parting words would land *after*
-       * `sweepPending` and before the terminal `status` event, on a session
-       * somebody has already ended.
-       */
+      // stopRequested too: doStop never nulls this.session, and teardown can take seconds.
       if (this.session !== session || this.stopRequested) return;
 
-      /*
-       * ⚠ **`agent_log` and `other` are dropped here, and that is what today
-       * already does rather than a new loss.** Out of turn these were exactly what
-       * `EventQueue` evicted first, which is why a fleet-wide count over five
-       * database snapshots — 95,618 events — holds **zero** `agent_log` rows. The
-       * producer runs for the whole life of the agent process, not just during
-       * turns, so recording them would put an unbounded stderr stream into a
-       * per-session log that is deliberately `Infinity`/`Infinity`; make
-       * `REEMOAT_LOG_EVENTS` actively harmful, since that eviction is a *prefix*
-       * and would spend somebody's first prompt on stderr; charge against the
-       * tab's 16 MiB ceiling, which evicts from the oldest and would push the
-       * start of the conversation out; and bury a reattaching phone behind
-       * `ATTACH_REPLAY_MAX`, which is a *seq* window and cannot tell machinery
-       * from conversation. Neither type is drawn anywhere, and the last 20 stderr
-       * lines are already on `Session.recentLogs()`.
-       */
+      // agent_log and other are never recorded: out of turn they are an unbounded stream into a log that evicts a prefix.
       if (event.type === "agent_log" || event.type === "other") {
-        /*
-         * ⚠ **Dropped from the log, but not from the clock — and that distinction
-         * is what keeps the sweep from killing work in progress.**
-         *
-         * These two are deliberately not recorded (the paragraph above says why),
-         * and until this line they were not counted as activity either. So a
-         * session running a backgrounded build or subagent — which reports `idle`,
-         * because `daemon-sessions.md`'s own rule is that "the turn ending is not
-         * the agent stopping" — moved nothing at all while it produced output.
-         * `lastActivityAt` reads `lastEventAt`, `parkable` reads that, and at
-         * thirty minutes the sweep SIGKILLed the process group with nothing
-         * recorded but a `status` event.
-         *
-         * An agent still writing to stderr is an agent still doing something. That
-         * is the weakest possible signal, so it is spent here: the clock moves, the
-         * transcript does not, and a session nobody can see progress on is still
-         * not one the sweep may take.
-         *
-         * ⚠ **Kept, and weak by a margin that can be derived rather than assumed.**
-         * `parkable` refuses outright over work claude *reports* (Q2.228), and this
-         * line is what is left for the three agents that report none and for
-         * claude's backgrounded subagents. Read out of this machine's own store on
-         * 2026-09-14: `s_5d26f98e` has its last event at ts 1789374056302 and its
-         * `parked` status event at 1789377682390 — 60m26s apart. A release needs
-         * `now - lastActivityAt >= idleMs`, and `idleReleaseMinutes` on that machine
-         * is 60, so `lastEventAt` can have been no later than 26 seconds past that
-         * last event. Whatever the agent wrote to stderr in the intervening hour,
-         * this line bought it **at most 26 seconds** of the sixty minutes it needed.
-         * So a quiet agent gets essentially nothing from it, which is the argument
-         * for the clause above rather than against this line: it is a floor under
-         * the worst case, not a defence.
-         */
+        // Dropped from the log but not from the clock: output still counts as activity for parkable.
         this.lastEventAt = this.lastAgentEventAt = Date.now();
         return;
       }
@@ -4423,14 +1516,11 @@ export class ManagedSession {
       try {
         this.record(event);
       } catch {
-        // Already degraded inside the store, exactly as `pump` has it. Guarded
-        // here rather than around the whole callback so one failed append cannot
-        // end the drain.
+        // Already degraded inside the store; guarded here so one failed append cannot end the drain.
       }
     });
   }
 
-  /** Mirrors the agent's controls onto the snapshot and into the transcript. */
   private applyAgentConfig(config: AgentConfig): void {
     this.agentConfigState = config;
     this.safeAppend({ type: "agent_config", modes: config.modes, options: config.options });
@@ -4438,29 +1528,7 @@ export class ManagedSession {
   }
 
 
-  /**
-   * Mirrors the agent's command list, and moves the number that announces it.
-   *
-   * Appends nothing to the log — `applyContextUsage`'s rule below, reached by a
-   * different road: this is state superseded whole, and the log evicts a
-   * *prefix*, so a logged list would cost the operator's own first prompt to
-   * re-record something that is replaced rather than accumulated.
-   *
-   * **Gated on the list actually differing**, which is `applyContextUsage`'s rule
-   * rather than `applyAgentConfig`'s, and the reasoning that put it on the other
-   * side was wrong. It said a command list has no rate — but the rate here is a
-   * property of the *agent's* output, not of this daemon: claude republishes from
-   * `commands_changed`, which fires as skills are discovered while it walks a
-   * subdirectory, so an identical list can arrive repeatedly during one turn. And
-   * a bump is far from free at either end. Here it builds a snapshot, writes a row
-   * and enqueues a frame per attached client, on the agent's synchronous emit
-   * path; there it makes every attached client refetch the whole list — 18.7 KiB
-   * measured — over the relay, to a phone. `usageWorthAnnouncing` exists for the
-   * same shape one field over, and the amplification is larger here.
-   *
-   * The comparison is cheap by construction: `toCommands` has already bounded the
-   * list to 256 entries of bounded strings before this ever sees it.
-   */
+  // Gated on the list differing: claude republishes identical lists mid-turn, and each bump makes every client refetch.
   private applyAgentCommands(commands: AgentCommands): void {
     if (sameCommands(this.agentCommandsState, commands)) return;
     this.agentCommandsState = commands;
@@ -4468,7 +1536,6 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /** The live agent's command list, served by its own route rather than the snapshot. */
   get agentCommands(): AgentCommands {
     return this.agentCommandsState;
   }
@@ -4477,29 +1544,7 @@ export class ManagedSession {
     return this.commandsRevisionValue;
   }
 
-  /**
-   * Mirrors the agent's context occupancy onto the snapshot.
-   *
-   * The field is assigned on *every* update, so a poller and a fresh attach always
-   * read the exact current number. What is coalesced is the **fan-out**, and that
-   * is the whole of this method.
-   *
-   * Measured 2026-07-31 against claude-agent-acp 0.63.0: `usage_update` is emitted
-   * from the `message_delta` handler, i.e. on essentially every streaming token.
-   * `touchSafe()` builds a snapshot, writes a row and enqueues a `{type:"snapshot"}`
-   * frame *per attached client* — so an unconditional call here would be thousands
-   * of frames per turn, generated on the agent's own synchronous emit path, against
-   * an 8000-item outbound queue. That is not a slow consumer; that is us.
-   *
-   * The rule is what a client can actually *see* change: the whole percent, the
-   * window size, or the cost. At most ~100 fan-outs per turn instead of thousands,
-   * and no client can tell the difference, because the number it draws is the one
-   * that changed. `applyAgentConfig` above still touches unconditionally — a mode
-   * change has no rate.
-   *
-   * Nothing is appended to the log. This is state, not narrative, and the log has
-   * a 5000-event budget that real transcript is competing for.
-   */
+  // Assigned on every update; only the fan-out is coalesced, since usage_update fires on nearly every token.
   private applyContextUsage(usage: ContextUsage): void {
     const before = this.contextUsageState;
     this.contextUsageState = usage;
@@ -4507,34 +1552,7 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /**
-   * Mirrors the agent's background work onto the snapshot.
-   *
-   * Appends nothing to the log — `applyContextUsage`'s rule, and here the
-   * argument is sharper than "a prefix is evicted": everything that reaches
-   * `record` moves `lastEventAt`, and `lastEventAt` is what `parkable` measures
-   * age against. A logged lifecycle would therefore defer the sweep **by
-   * accident** for a task that chatters and not at all for a quiet one — the
-   * guard would be strongest exactly where it is least needed. The clause reads
-   * this set instead, which is the same answer for both.
-   *
-   * ⚠ **Gated on the list actually differing, and the sentence that stood here
-   * was false.** It read *"every update here carries news a row would draw"*, and
-   * argued it from the rate: `usage_update` comes out of the `message_delta`
-   * handler, i.e. essentially every output token, while a task announces itself
-   * once and then reports at whatever rate the work has. The rate is the right
-   * observation and the conclusion did not follow — every field of the adapter's
-   * progress frame is optional, so one carrying nothing a row draws merges to a
-   * byte-identical record and still fanned a whole snapshot to every attached
-   * client, synchronously, from inside the agent's stdout handler.
-   * {@link sameBackgroundTasks} is the test, and `usage.durationMs` sits outside
-   * it for the reason stated there.
-   *
-   * **The assignment stays unconditional and only the fan-out is gated**, which
-   * is `applyContextUsage`'s split exactly: a poller and a fresh attach must read
-   * the current set even when the update that produced it was not worth a frame,
-   * and `parkable` reads this field directly.
-   */
+  // Not logged, since anything recorded moves lastEventAt, which parkable measures; always assigned, fan-out gated.
   private applyBackgroundTasks(tasks: readonly BackgroundTask[]): void {
     const before = this.backgroundTasksState;
     this.backgroundTasksState = tasks;
@@ -4542,133 +1560,34 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /**
-   * Renames or pins this session.
-   *
-   * Deliberately unlike {@link setConfigOption} in three ways, each of which is a
-   * decision rather than an omission. It is synchronous, because no agent is
-   * involved. It has no `not_ready` refusal, because nothing here needs a live
-   * agent. And it has no `terminal` refusal, because naming a session you have
-   * finished with so you can find it again next week is exactly a thing people
-   * do — refusing on a terminal session would make the feature useless at the one
-   * moment it is most wanted.
-   *
-   * An absent field is "leave it alone"; `title: null` is "clear it", which lets
-   * the next prompt derive a fresh one. Normalization happens here rather than at
-   * the route so there is one answer to "what is a legal title", and the caller is
-   * handed the snapshot rather than an echo because the two differ.
-   */
+  /** Allowed on a terminal session: naming a finished session is the point. */
   setMeta(change: { title?: string | null; pinned?: boolean; rank?: number | null }): SessionSnapshot {
     if (change.title !== undefined) {
       this.titleValue = change.title === null ? null : normalizeTitle(change.title);
     }
     if (change.pinned !== undefined) this.pinnedValue = change.pinned;
-    // `null` clears it back to "follows its age", the way `title: null` clears a
-    // name — absent is "leave it alone". Finiteness is the route's to refuse; by
-    // here the value has been through it.
     if (change.rank !== undefined) this.rankValue = change.rank;
     this.touchSafe();
     return this.snapshot();
   }
 
-  /**
-   * Whether a control tapped now is a choice to be applied later.
-   *
-   * True for exactly one state: a session whose agent the daemon released for
-   * being idle. Its options are still published (see `doStop`), so the strip is
-   * live and a tap has to mean something — and the one thing it must **not** mean
-   * is "start an agent". Waking on a chip would make every glance at a settings
-   * row cost ~400 MB, which is the memory this whole mechanism exists to release,
-   * and it would be a second way back for a feature whose answer to "how do I get
-   * my agent back" is *send a message*.
-   *
-   * So the choice is recorded against the remembered config and applied to the
-   * fresh agent by `doResume`, at the moment the conversation genuinely resumes.
-   * The person sees the chip move immediately, which is true — the setting will be
-   * in force the next time the agent runs, and there is no run before then for it
-   * to be wrong about.
-   *
-   * ⚠ **The choice itself is still only in memory, and the *controls* are not any
-   * more.** A daemon restart drops a tap somebody made against a parked session —
-   * `agentConfigState` is a process's state and there is no process — but the
-   * options it was validated against are written to `agent_state_json` and adopted
-   * back, so the strip comes back live and tappable rather than faint. What is lost
-   * is one pending choice, not the ability to make it again.
-   *
-   * ⚠ **And this is no longer only about parking.** It is
-   * {@link revivableByPrompt} — every stop a message would undo — because the
-   * argument was never about the word: a conversation that comes back on a message
-   * is one whose controls still describe something, whether the daemon let the
-   * agent go, the agent quit, somebody pressed Stop, or somebody signed out.
-   */
+  /** A tap on a session a prompt would revive is recorded and applied at resume; it never starts an agent. */
   private get configIsDeferred(): boolean {
     if (this.exitRecord === null) return false;
     return revivableByPrompt(this.exitRecord.reason, this.agentSessionId);
   }
 
-  /**
-   * Record a choice made while the agent is away, and publish it.
-   *
-   * Goes through `applyAgentConfig` rather than assigning, so the change reaches
-   * the transcript and every attached client by the one path a live change uses.
-   * A second tab watching this session sees the chip move for the same reason it
-   * would have if an agent had answered.
-   */
   private recordDeferredConfig(next: AgentConfig): AgentConfigResult {
     this.applyAgentConfig(next);
     return { kind: "ok", config: this.snapshot().agentConfig };
   }
 
-  /**
-   * Changes one of the agent's controls, refusing anything it did not advertise.
-   *
-   * Validated here rather than at the route because this is where the advertised
-   * set lives, and refusing locally keeps a typo from reaching the agent as a
-   * JSON-RPC error whose text is the agent's, not ours. The value check is
-   * deliberately against the *choices* rather than a format: `effort` and
-   * `thinking` share a category and share no values at all.
-   */
+  /** Refuses any control or value the agent did not advertise. */
   async setConfigOption(configId: string, value: string | boolean): Promise<AgentConfigResult> {
-    /*
-     * ⚠ **Ahead of the deferred arm, and that ordering is what the widening of
-     * {@link revivableByPrompt} made load-bearing.**
-     *
-     * `restartAgent` reaches its process boundary through `stop("config_changed")`
-     * — a reason a prompt revives — so from the moment it stops, `configIsDeferred`
-     * answers `true`. Recorded there, a choice would be written into
-     * `agentConfigState` and then silently overwritten by the `restoreConfig` that
-     * is already putting back a snapshot captured *before* the tap: 200, chip
-     * moves, nothing happens. That is the exact failure {@link restarting} was
-     * written for, arriving through the door parking opened.
-     *
-     * `busy` is the honest answer in every one of these windows for one reason:
-     * the config is about to be replaced wholesale, so there is nothing a
-     * recording could be recorded *against*. {@link replacingConfig} is where the
-     * set is named, including the wake this widening added to it.
-     */
+    // Before the deferred arm: during a restart configIsDeferred is true, and restoreConfig would overwrite a recorded choice.
     if (this.replacingConfig) return { kind: "busy", status: this.status };
     if (this.configIsDeferred) {
-      /*
-       * ⚠ **Ultracode first, exactly as the live path does it below — because the
-       * choice the browser was drawn from does not exist in `agentConfigState`.**
-       *
-       * `snapshot()` serves `withUltracode(...)`, which *appends* an `ultracode`
-       * choice to the agent's own effort option; the raw state never carries it.
-       * So validating this id against `agentConfigState` refused the one chip the
-       * client had just drawn, and a parked session answered `invalid_value` to a
-       * tap on it — against a feature whose headline claim is that a released
-       * session's controls stay live. The reverse was worse and silent: with
-       * ultracode already on, choosing an ordinary level *was* recorded while
-       * `ultracodeChoice` stayed `true`, so the wake spawned with ultracode still
-       * set and the next snapshot forced the chip back with nothing to show for
-       * the tap.
-       *
-       * Recorded rather than applied: `applyUltracode` restarts the agent, and a
-       * parked session has none to restart — the wake reads `ultracodeWanted`
-       * when it opens the conversation, which is the only moment the setting is
-       * read at all. That is the same reason the live path has to restart and
-       * this one must not.
-       */
+      // Ultracode first: the agent's own options never carry ULTRACODE_CHOICE, so it cannot be validated below; recorded for the wake.
       const deferredUltracodeId = ultracodeOptionId(this.agentConfigState, this.agent);
       if (deferredUltracodeId !== null && configId === deferredUltracodeId) {
         const wanted = value === ULTRACODE_CHOICE;
@@ -4676,9 +1595,6 @@ export class ManagedSession {
           this.ultracodeChoice = wanted;
           this.touchSafe();
         }
-        // Nothing else to record for the on case: `ULTRACODE_CHOICE` is not a
-        // value the agent's own option carries, so it would fail the validation
-        // below. Turning it *off* names a real level and falls through.
         if (wanted) return { kind: "ok", config: this.snapshot().agentConfig };
       }
       const option = this.agentConfigState.options.find((candidate) => candidate.id === configId);
@@ -4687,10 +1603,6 @@ export class ManagedSession {
       if (option.kind === "select" && (typeof value !== "string" || !option.choices.some((c) => c.value === value))) {
         return { kind: "invalid_value", option };
       }
-      // Validated against the same options the live path validates against, so a
-      // value refused with an agent is refused without one. Only the sending
-      // differs — and the ultracode row above, which neither path validates here
-      // because neither state carries it.
       return this.recordDeferredConfig({
         modes: this.agentConfigState.modes,
         options: this.agentConfigState.options.map((candidate) =>
@@ -4700,52 +1612,20 @@ export class ManagedSession {
     }
     if (this.terminal || this.stopRequested) return { kind: "terminal", status: this.status };
     if (!this.session) return { kind: "not_ready", status: this.status };
-    // Beside `prompt`'s guard and for the same reason, which the marker's own
-    // docblock states as a rule over *everything* that talks to the agent: this
-    // reaches `Session.setConfigOption`, which reads `this.sessionId` at request
-    // time, and a clear is in the middle of replacing it. Two ways that goes
-    // wrong, neither of them visible: the request lands on the conversation
-    // `session/close` is about to destroy, or it lands during `restoreConfig`,
-    // which is putting back a `wanted` snapshot captured *before* this change —
-    // so the mode somebody just chose is silently overwritten by the pre-clear
-    // one. `AgentConfigBar` sits beside the composer, so `/clear` and then a mode
-    // tap is one gesture apart. The guard itself has moved above the deferred arm
-    // — see the ⚠ at the top of this method — and this comment stays here with the
-    // rest of the argument about a clear replacing the conversation underneath.
 
-    /*
-     * The one control that is not the agent's to change, handled before anything
-     * is validated against what the agent published — because what it offers is a
-     * row the agent has never heard of.
-     *
-     * Both directions restart the agent, and both have to: the setting is read
-     * when a conversation is opened, so turning it *off* by leaving it out of the
-     * next `session/new` is the only way to turn it off at all. Choosing an
-     * ordinary level therefore clears it first and then falls through to the
-     * normal path, which applies that level to the agent this restart produced —
-     * `this.session` is deliberately re-read below rather than captured above,
-     * because by then it is a different object.
-     */
+    // Both directions restart the agent, since ultracode is read only when a conversation opens; this.session is re-read below because the restart replaces it.
     const ultracodeId = ultracodeOptionId(this.agentConfigState, this.agent);
     if (ultracodeId !== null && configId === ultracodeId) {
       const wanted = value === ULTRACODE_CHOICE;
       if (wanted !== this.ultracodeWanted) {
-        // A restart mid-turn would kill the turn: `doStop` sweeps every parked
-        // permission and disposes the agent, and the work in flight is not
-        // re-sent by the resume that follows. The one refusal on this route that
-        // really is about a turn — see `AgentConfigResult`.
+        // A restart would kill the turn in flight.
         if (this.turn !== null) return { kind: "turn_in_flight", status: this.status };
         await this.applyUltracode(wanted);
       }
-      // Nothing else to send: the agent has no such value, and no other value of
-      // its own means this. The restart is the whole act.
       if (wanted) return { kind: "ok", config: this.snapshot().agentConfig };
     }
 
     const session = this.session;
-    // Re-read after the restart above, and it can genuinely be absent: a resume
-    // that failed leaves the session terminal, holding the choice that was just
-    // recorded, to be picked up by the next prompt or the next boot.
     if (!session) return { kind: "not_ready", status: this.status };
 
     const option = this.agentConfigState.options.find((candidate) => candidate.id === configId);
@@ -4757,35 +1637,12 @@ export class ManagedSession {
       return { kind: "invalid_value", option };
     }
 
-    // Nothing is applied here. `session.setConfigOption` fires `onConfigChanged`
-    // before it resolves, so the listener above has already folded this in *and
-    // appended the event* — calling `applyAgentConfig` again on the returned
-    // value put a second, identical `agent_config` in the transcript for every
-    // change, charged twice against the event budget and drawn twice by clients.
-    // The answer is read back off the snapshot so it is the same state the
-    // listener stored, which is what the removed call was reaching for.
+    // Not applied here: setConfigOption notifies before it resolves, so applying again would log agent_config twice.
     await session.setConfigOption(configId, value);
     return { kind: "ok", config: this.snapshot().agentConfig };
   }
 
-  /**
-   * Records the choice and puts an agent in front of it.
-   *
-   * The restart is not an implementation detail that could be optimised away
-   * later: `ultracode` is read by the CLI when a conversation is opened, and the
-   * only two ways to open one are a new agent or a `/clear`. Between them this is
-   * the one that keeps the conversation, which is what somebody flipping a switch
-   * on the composer expects to happen — the same trade a deploy already makes,
-   * and the same machinery: `stop` then `resume`, on the same `agentSessionId`.
-   *
-   * The choice is written *first*, so a restart that fails leaves a session which
-   * knows what it was asked for and will ask for it on the next attempt, rather
-   * than one that has to be told twice.
-   *
-   * A session with no `agentSessionId` — created and never spoken to — has
-   * nothing to reattach to and needs no restart: its first agent has not opened a
-   * conversation yet, so recording the choice is the whole act.
-   */
+  /** Written before the restart, so a failed restart still asks for it next time. */
   private async applyUltracode(next: boolean): Promise<void> {
     this.ultracodeChoice = next;
     this.touchSafe();
@@ -4793,74 +1650,16 @@ export class ManagedSession {
     await this.restartAgent();
   }
 
-  /**
-   * Replace this session's agent process, keeping the conversation.
-   *
-   * **Extracted rather than copied, because there are two callers now and the
-   * sequence is not one anybody would reproduce correctly from memory.** It was
-   * written for `ultracode` — a setting the agent reads when the conversation is
-   * opened, so the only way to change it is to open a new one — and a pasted
-   * credential is the same shape of fact: `secrets` are read at spawn, in
-   * `env: { ...agentEnv(), ...this.secrets(agent) }`, so a token saved while an
-   * agent is running reaches it never. Somebody pasted one, the badge turned
-   * green, and the conversation in front of them went on failing to authenticate.
-   *
-   * `resume()` carries `agentSessionId`, so what comes back is *this*
-   * conversation rather than a fresh one. The window in which the controls are
-   * held and every instruction answers `busy` is opened synchronously below and
-   * closed in the `finally` — see {@link restarting} for why that has to be one
-   * statement and one `finally`.
-   *
-   * **Callers own the decision to do this at all.** Nothing here asks whether a
-   * turn is in flight or a permission is parked, because `applyUltracode`'s
-   * caller has already decided for its own reasons; see `reloadCredentials`,
-   * which decides differently.
-   */
+  /** Replaces the agent process, keeping the conversation; callers decide whether that is safe. */
   private async restartAgent(): Promise<void> {
-    /*
-     * Captured before the stop, because the stop is what destroys it.
-     *
-     * `doStop` assigns `agentConfigState = {modes: null, options: []}` and
-     * `onStarted` then assigns whatever the *new* process published, with nothing
-     * in between — so choosing ultracode put the mode back to the agent's own
-     * default, which claude calls `Manual`. `/clear` has had this restore since it
-     * was written (`Session.clearContext` captures `this.config` before it
-     * overwrites it); this path did the same thing with the capture missing.
-     *
-     * ⚠ `agentConfigState` and **never** `snapshot().agentConfig`. That one is
-     * composed through `withUltracode`, which rewrites the effort value to the
-     * invented `ULTRACODE_CHOICE` — a value this daemon guarantees never reaches
-     * an agent — and through `dedupeAliasChoices`, which rewrites the model value
-     * off its `default` placeholder onto a concrete model. Replaying either would
-     * send the agent something it never published: the first is refused, and the
-     * second silently pins the model on a session whose operator chose to let the
-     * agent decide.
-     */
+    // Captured before the stop resets it. The raw state, never the snapshot's agentConfig, which carries values the agent never published.
     const wanted = this.agentConfigState;
 
-    /*
-     * Held across all three steps, and the third is the one that needs it.
-     *
-     * `stop` and `resume` defend themselves — `stopRequested`, then `terminal`,
-     * then a null `session` — but every one of those goes quiet the moment
-     * `onStarted` assigns the new agent, while `restoreConfig` below is still
-     * putting back a snapshot captured before any of this began. A `setMode` that
-     * lands there succeeds, answers 200, and is then overwritten by the restore
-     * with nothing recorded. See {@link restarting}.
-     *
-     * `finally` rather than a clear after the restore, because a `resume()` that
-     * throws must not leave the session refusing every instruction for the rest of
-     * its life — and because the caller carries on: `setConfigOption` falls through
-     * to apply the level somebody actually chose, which is a direct call on
-     * `Session` rather than a second trip through the guard, and has to happen
-     * *after* the restore rather than be refused by it.
-     */
+    // Held across stop, resume and restore so the guards answer busy; cleared in finally so a throwing resume cannot wedge the session.
     let finished!: () => void;
     this.restart = {
       config: wanted,
-      // Assigned synchronously, before the first `await` below, so the window the
-      // guards refuse in and the window `whenRestarted` waits out are the same one
-      // — opened by this statement, closed by the `finally`.
+      // Assigned before the first await, so the guard window and whenRestarted's window are the same.
       done: new Promise<void>((resolve) => {
         finished = resolve;
       }),
@@ -4869,85 +1668,22 @@ export class ManagedSession {
       await this.stop("config_changed");
       await this.resume();
 
-      /*
-       * `this.session` rather than the launch's own value, because `onStarted` has
-       * already declined and disposed a launch that lost its race — so reading the
-       * field is how this asks "is the agent that came up still the live one".
-       *
-       * Awaited rather than fired, because `setConfigOption` returns
-       * `this.snapshot().agentConfig` as soon as this resolves: a restore still in
-       * flight would put the agent's defaults in that response body, which is the
-       * revert this exists to stop, arriving in the answer.
-       */
+      // Awaited so the caller's response snapshot never shows the agent's defaults.
       await this.session?.restoreConfig(wanted).catch(() => {});
     } finally {
-      /*
-       * Cleared and *announced*, and the touch is the half that is not tidiness.
-       *
-       * The held answer is optimistic about exactly one thing — that the restore
-       * puts it back — and the restore is allowed not to: `restoreConfig` skips a
-       * mode or a choice the new conversation no longer offers, and swallows every
-       * error. So this is the one moment the hold can be found wrong, and it was
-       * the one transition that fanned nothing out: the last frame every attached
-       * client had seen was a held one, and nothing was scheduled to correct it.
-       * The caller gets the truth in the response body; this is that same answer
-       * for everybody else, one frame after the controls become tappable again.
-       */
+      // Announced: the restore may skip options, and clients last saw the held config.
       this.restart = null;
       this.touchSafe();
-      // A restart is one of the states `deliverQueued` declines in, so the way out
-      // of it owes the queue a nudge — otherwise a message taken just before the
-      // agent was replaced waits for a turn that nobody will start.
+      // A restart is a state deliverQueued declines in, so leaving it owes the queue a nudge.
       this.deliverQueued();
-      /*
-       * ⚠ **And if no agent came back, the nudge lands on nothing.**
-       *
-       * `doStop` deliberately keeps the queue for `config_changed`, which is how
-       * `restartAgent` reaches its process boundary — so a `resume()` that threw
-       * leaves entries with no path out at all: `deliverQueued` returns at its
-       * `!session`, and its only other callers are `pump`'s `finally` and
-       * `clearContext`, neither of which runs on a session that never came back.
-       * `onAgentUnusable` swallows the failure (`.catch(() => undefined)`) and is
-       * exactly the caller most likely to hit it, since it fires when the agent is
-       * already broken.
-       */
+      // doStop keeps the queue for config_changed, so if no agent came back nothing else would drain it.
       if (this.session === null) this.dropQueuedUndelivered();
-      // Resolved last, so a prompt that was waiting resumes against the corrected
-      // state rather than racing the frame that corrects it. `resolve`, never
-      // `reject`: see {@link whenRestarted}.
+      // Resolved last so a waiting prompt sees the corrected state; never rejected, see whenRestarted.
       finished();
     }
   }
 
-  /**
-   * Take a credential saved after this agent started, by starting it again.
-   *
-   * **Returns whether it did**, because the caller reports a count and a silent
-   * "no" would make a screen say chats were brought back when none were.
-   *
-   * The refusals are the whole design:
-   *
-   *   - **Terminal**: nothing is running to replace, and the next `resume()`
-   *     reads the credential anyway. Restarting here would launch an agent
-   *     nobody asked for, on a conversation somebody deliberately ended.
-   *   - **Mid-turn**: `stop()` would kill the turn. And a session that is
-   *     *currently working* is one whose credential is demonstrably fine — the
-   *     sessions that need the new one are exactly the idle and the failing.
-   *     That is not a compromise; a turn in flight is evidence.
-   *   - **Blocked**: a parked permission is somebody being waited on, and the
-   *     restart would drop the question without answering it. This daemon's whole
-   *     shape is that an approval cannot be lost.
-   *   - **Already restarting or clearing**: one process boundary at a time.
-   *
-   * Everything refused here picks the credential up the next time it starts,
-   * which for a turn in flight is whenever it next ends and is resumed.
-   *
-   * **A getter rather than a promise that answers `false`**, so a caller can count
-   * what it is about to do *before* doing it. The first version of
-   * `reloadCredentials` returned a number it decremented inside a `.then`, which
-   * resolves after the return — so the count it reported was every session on the
-   * agent, refusals included.
-   */
+  /** False while terminal, mid-turn, awaiting a permission, or at another process boundary; a getter so callers can count before acting. */
   get takesCredentialChange(): boolean {
     if (this.terminal || this.stopRequested) return false;
     if (this.session === null || this.agentSessionId === null) return false;
@@ -4962,26 +1698,9 @@ export class ManagedSession {
     await this.restartAgent();
   }
 
-  /** Switches permission/plan mode. Same refusal shapes as {@link setConfigOption}. */
   async setMode(modeId: string): Promise<AgentConfigResult> {
     const session = this.session;
-    /*
-     * ⚠ **Ahead of the deferred arm, and that ordering is what the widening of
-     * {@link revivableByPrompt} made load-bearing.**
-     *
-     * `restartAgent` reaches its process boundary through `stop("config_changed")`
-     * — a reason a prompt revives — so from the moment it stops, `configIsDeferred`
-     * answers `true`. Recorded there, a choice would be written into
-     * `agentConfigState` and then silently overwritten by the `restoreConfig` that
-     * is already putting back a snapshot captured *before* the tap: 200, chip
-     * moves, nothing happens. That is the exact failure {@link restarting} was
-     * written for, arriving through the door parking opened.
-     *
-     * `busy` is the honest answer in every one of these windows for one reason:
-     * the config is about to be replaced wholesale, so there is nothing a
-     * recording could be recorded *against*. {@link replacingConfig} is where the
-     * set is named, including the wake this widening added to it.
-     */
+    // Before the deferred arm, as in setConfigOption.
     if (this.replacingConfig) return { kind: "busy", status: this.status };
     if (this.configIsDeferred) {
       const option = this.agentConfigState.options.find((candidate) => candidate.category === "mode");
@@ -4989,9 +1708,6 @@ export class ManagedSession {
         this.agentConfigState.modes?.available.some((mode) => mode.id === modeId) === true ||
         option?.choices.some((choice) => choice.value === modeId) === true;
       if (!known) return { kind: "unknown_mode", modes: this.agentConfigState.modes };
-      // Both spellings are moved, for the reason the live path reads both: claude
-      // fills in `modes` and kimi publishes only the option, and a resume applies
-      // whichever the returning agent turns out to offer.
       return this.recordDeferredConfig({
         modes:
           this.agentConfigState.modes === null
@@ -5004,65 +1720,31 @@ export class ManagedSession {
     }
     if (this.terminal || this.stopRequested) return { kind: "terminal", status: this.status };
     if (!session) return { kind: "not_ready", status: this.status };
-    // Same guard as {@link setConfigOption}, moved above the deferred arm there and
-    // here for the reason stated at the top of both — and this is the one the race
-    // was *about*: `restoreConfig` re-applies the mode last, so a mode chosen
-    // inside the window is the change most likely to be quietly reverted.
 
-    // Either expression of the same fact is enough: claude fills in `modes`,
-    // kimi publishes only the option. Refusing when one of them is absent would
-    // make mode changes work on one agent and not the other for no reason.
+    // claude fills in modes and kimi publishes only the option, so either one is enough.
     const option = this.agentConfigState.options.find((candidate) => candidate.category === "mode");
     const known =
       this.agentConfigState.modes?.available.some((mode) => mode.id === modeId) === true ||
       option?.choices.some((choice) => choice.value === modeId) === true;
     if (!known) return { kind: "unknown_mode", modes: this.agentConfigState.modes };
 
-    // Not applied here either, and for the same reason — both of `setMode`'s
-    // branches go through `Session.updateConfig`, which notifies before it
-    // returns.
+    // Not applied here: updateConfig notifies before it returns.
     await session.setMode(modeId);
     return { kind: "ok", config: this.snapshot().agentConfig };
   }
 
   private onStartFailed(launch: Promise<Session>, error: unknown): void {
-    // The mirror of `onStarted`'s check, and it closes the same window from the
-    // other side: a launch that was abandoned and then *rejected* after a retry
-    // had already re-armed the session would write an `exitRecord` onto the new
-    // life — `armForStart` has just cleared it, so the `if (this.exitRecord)`
-    // guard below does not see it — leaving a session that is starting normally
-    // reported as terminal, and never cleared, because `onStarted` does not
-    // rewrite an exit it did not expect to find.
+    // Ignore a launch a retry superseded: armForStart already cleared exitRecord, so writing one would end the new life.
     if (this.startPromise !== launch) return;
     if (this.exitRecord) return;
     this.exitRecord = {
       reason: this.startAbandoned ? "start_timeout" : "start_failed",
-      // Clipped, because on an ACP handshake failure this is the agent's own
-      // error message and it rides both the snapshot and a flat-192 event.
       detail: clip(describeError(error), MAX_EXIT_DETAIL_CHARS),
       at: Date.now(),
       agentHandle: null,
       agentConfirmedDead: true,
     };
-    /*
-     * Written to the log only when somebody is watching for it.
-     *
-     * A failed resume used to leave three status events behind — `starting`,
-     * then this `failed`, then `interrupted` as the catch put the original exit
-     * back — describing a round trip that ended exactly where it began. Two of
-     * those were noise and the middle one was a lie: the session is not
-     * `failed`, that record exists for a few microseconds before being replaced.
-     *
-     * That was tolerable while a resume was a thing a person asked for. It is
-     * not now that the daemon attempts one per session per boot: on this
-     * machine, nine dead sessions had their transcripts filled with the
-     * machinery of their own failed revival, in a log that evicts a *prefix* and
-     * therefore pays for it with the operator's own first prompt.
-     *
-     * The state is still on the snapshot — `resume.state`, `attempts`, `error` —
-     * and the *final* give-up still appends one `error` event. What is dropped is
-     * only the churn.
-     */
+    // Not logged on a quiet resume, so boot-pass failures do not fill transcripts with churn.
     if (!this.quietResume) {
       this.safeAppend({ type: "status", status: this.status, exit: this.exitRecord });
     }
@@ -5070,72 +1752,20 @@ export class ManagedSession {
   }
 
   private onAgentGone(session: Session): void {
-    // Resume replaces `this.session` and clears both guards below, so without
-    // this identity check a late notification from the *previous* agent's death
-    // would stop the freshly resumed one.
+    // A late notice from a previous agent must not stop the resumed one.
     if (this.session !== session) return;
-    // On a deliberate stop we close the connection ourselves, so this fires from
-    // our own teardown; labelling that `agent_exited` would be a lie.
+    // Our own teardown closes the connection; that is not agent_exited.
     if (this.stopRequested || this.terminal) return;
     void this.stop("agent_exited").catch(() => {});
   }
 
   stop(reason: ExitReason = "stopped"): Promise<void> {
-    /*
-     * ⚠ **A person may end a conversation the daemon had parked, and without this
-     * the button silently does nothing.**
-     *
-     * A parked session is terminal and already torn down, so `stopping` holds a
-     * promise that has *already resolved* — the memo below hands it straight back,
-     * `doStop` never runs, and `DELETE /sessions/:id` answers `200` with a snapshot
-     * still reading `parked`. The row stays where it was and the person presses
-     * again. That is a regression parking introduced rather than a case nobody had
-     * thought about: before parking, a quiet session was live and Stop worked.
-     *
-     * Rewriting the reason is exactly what should happen here, and it is the one
-     * place `exitRecord`'s "first writer wins" gives way. That rule exists so a
-     * stop cannot relabel `daemon_restarted` as `stopped` and erase the daemon's
-     * promise to come back — but `parked` carries no such promise. It means
-     * *nobody had decided*, and this is somebody deciding. The teardown is not
-     * repeated because there is nothing left to tear down: no process, no
-     * subscriptions, no pending anything.
-     *
-     * Narrow on purpose, and the list is {@link RELABELS_PARKED}: only a reason
-     * somebody's own act writes may do this, and only over `parked`. `shutdown`
-     * iterates `!terminal` and never reaches a parked row, so nothing else arrives
-     * here to be silently upgraded.
-     *
-     * ⚠ **`agent_signed_out` is the second member and it is not a person pressing
-     * Stop — it is `signOutSessions`, which had the opposite bug.** That sweep also
-     * selected `!terminal`, so signing out of an agent left every parked session on
-     * it still reading `parked`: drawn as an ordinary sleeping conversation with a
-     * live composer, woken by the next message into an agent with no credential,
-     * and unreachable by `reloadCredentials`, whose revive filter looks for exactly
-     * the reason that was never written. Relabelling is the whole fix, because
-     * there is no process to tear down — and it puts the row where both the drawing
-     * and the revive already know how to treat it.
-     */
+    // A person's stop or a sign-out relabels a parked session (RELABELS_PARKED); otherwise the settled memo would make Stop a no-op.
     if (RELABELS_PARKED.includes(reason) && this.exitRecord?.reason === "parked") {
-      /*
-       * ⚠ **The intent is marked, not only the record, and that is what makes this
-       * win a race it used to lose.**
-       *
-       * Without these two lines the shortcut could not interrupt a wake already in
-       * flight. `doResume`'s first await is `makeRoomForWake`, which at the ceiling
-       * is a full teardown of somebody else's agent — so: a prompt enters
-       * `doResume` and waits there while the session still reads `parked`; a
-       * `DELETE /sessions/:id` lands, takes this branch, answers `200` reading
-       * `stopped`; the resume then continues, `armForStart()` nulls the very
-       * `exitRecord` this just wrote, and the turn the person was aborting runs
-       * against a fresh agent. Stop reported success and stopped nothing.
-       *
-       * `stopRequested` is what `doResume` re-checks after that await, and what
-       * `prompt` already tests; `stopping` makes the memo below hand back a settled
-       * promise so a second press is the no-op it should be.
-       */
+      // Mark the intent too, so a wake paused in doResume sees stopRequested and does not run the aborted turn.
       this.stopRequested = true;
       this.stopping ??= Promise.resolve();
-      // What the relabel is about to make unsayable. See {@link parkedAtSignOut}.
+      // The relabel overwrites parked; remembered for returnToParked.
       if (reason === "agent_signed_out") this.parkedAtSignOut = true;
       this.exitRecord = { ...this.exitRecord, reason, at: Date.now() };
       this.safeAppend({ type: "status", status: this.status, exit: this.exitRecord });
@@ -5143,30 +1773,13 @@ export class ManagedSession {
       return Promise.resolve();
     }
     if (this.stopping) return this.stopping;
-    // Set before the first await so `status` and the permission guards see it
-    // immediately — a memoised promise alone would not be visible until later.
+    // Set before the first await so status and the permission guards see it at once.
     this.stopRequested = true;
     this.stopping = this.doStop(reason);
     return this.stopping;
   }
 
-  /**
-   * Undo a sign-out's relabel for a session that was only ever parked.
-   *
-   * **The counterpart to {@link RELABELS_PARKED}, and the reason the revive loop
-   * does not simply resume everything it relabelled.** For a session whose agent
-   * was live when the credential went away, coming back is the repair — that is
-   * what `reloadCredentials` is for. For one that was already released as idle,
-   * the repair is the *reason*, not the process: it is put back to `parked`, the
-   * state it was in before, and the next message brings it back exactly as
-   * parking says it should. Spawning it instead refills the memory parking freed,
-   * all at once, for conversations nobody asked about — which is the case
-   * `events.ts` measured at 90s for five simultaneous resumes.
-   *
-   * Answers whether it acted, so the caller can tell "put back" from "resume this
-   * one" without asking the same question twice. Nothing is torn down here and
-   * nothing is spawned: there is no process on either side of this call.
-   */
+  /** Puts a session that was only parked when signed out back to parked instead of resuming it; returns whether it acted. */
   returnToParked(): boolean {
     if (!this.parkedAtSignOut) return false;
     this.parkedAtSignOut = false;
@@ -5180,9 +1793,7 @@ export class ManagedSession {
   private async doStop(reason: ExitReason): Promise<void> {
     this.touchSafe();
 
-    // A start still in flight owns a subprocess we have not been handed yet.
-    // Short-circuiting here would mark the row terminal while that agent is still
-    // on its way, and nothing would ever dispose it.
+    // A start in flight owns a subprocess not yet handed over; wait so it gets disposed.
     if (this.startPromise) {
       try {
         await this.startPromise;
@@ -5195,125 +1806,26 @@ export class ManagedSession {
     // which burns the whole cancel grace and pushes teardown onto the kill path.
     this.sweepPending("session_stopped");
 
-    /*
-     * **A message this daemon took and will not deliver says so, and that is
-     * required rather than tidy.**
-     *
-     * Each queued message is already a `prompt` event in the log — appended when
-     * it was accepted — so dropping the queue in silence leaves a prompt with no
-     * turn end after it, which is precisely the shape Q2.218 named as "a message
-     * that reached no model" and spent four releases being invisible. One `error`
-     * event rather than one per message: what a reader needs is that the session
-     * ended owing them a reply, and a stop that discards five drafts should not
-     * write five rows about one act.
-     *
-     * The same silence is what a **daemon restart** costs, and there is no event
-     * for that one because there is nobody left to write it: the queue is in
-     * memory (see the field), the interrupted turn is deliberately not re-run
-     * either (Q2.12), and what survives is the transcript showing the message
-     * with no answer under it.
-     */
-    /*
-     * ⚠ **Only where the session is not coming back, and that qualifier is a
-     * defect this block shipped without.**
-     *
-     * `restartAgent` reaches its process boundary through `stop("config_changed")`
-     * — the daemon taking the agent away and bringing it straight back — so an
-     * unconditional drop here threw away a message somebody had just typed and
-     * then wrote *"the session stopped"* into the transcript of a session that
-     * had not. Reproduced from `onAgentUnusable`, i.e. an agent dying or failing
-     * to authenticate **mid-turn**, which is precisely the turn a correction gets
-     * typed into. It also made `restartAgent`'s own `deliverQueued` dead code.
-     *
-     * The test is the same one `autoResumable` makes about this exact reason set:
-     * these three are the daemon's own doing and it owes the conversation a fresh
-     * agent, so the queue is owed the same. `parked` never reaches here with a
-     * queue — `parkable` refuses on one — and `daemon_shutdown` keeps a queue this
-     * process is about to lose anyway, which costs nothing and needs no arm of
-     * its own.
-     */
+    // A dropped queue must say so: each message is already a prompt event with no turn after it (Q2.218).
+    // Not for the daemon's own stops, which bring the agent and the queue back.
     const comingBack =
       reason === "daemon_shutdown" || reason === "daemon_restarted" || reason === "config_changed";
     if (!comingBack) this.dropQueuedUndelivered();
 
-    // The controls belong to the live agent, so they go with it. Assigned rather
-    // than announced: appending an `agent_config` here would put "no controls"
-    // in the transcript as if the agent had said so, when the terminal `status`
-    // event a few lines below is what actually happened.
+    // The controls go with the agent, unannounced: the terminal status below is the event.
     this.unsubscribeConfig?.();
     this.unsubscribeConfig = null;
-    /*
-     * ⚠ **Kept when the daemon is only letting an idle agent go, and that is the
-     * whole of why a parked session's controls still work.**
-     *
-     * Everywhere else this assignment is right: the options describe a process,
-     * and clearing them is what stops a client drawing a model picker for an agent
-     * that is gone. A parked session is the one case where the process is coming
-     * back to the same conversation on the next message, so the options still
-     * describe what that conversation *is* — and dropping them made the strip fall
-     * to the client's own memory, which it draws faint and refuses to accept a tap
-     * on. The result was a session you could re-model at 29 minutes and not at 31,
-     * with nothing on screen saying why, because parking deliberately shows
-     * nothing.
-     *
-     * What makes keeping them honest rather than a lie is that a tap is now
-     * *recorded* instead of sent — see `setConfigOption` — and applied to the
-     * fresh agent by `doResume`. The controls are not claiming a live agent; they
-     * are claiming the choice will land, which it does.
-     *
-     * The subscription still goes, because there is nothing on the other end of it.
-     *
-     * ⚠ **Widened from `parked` to every stop a message would undo, and the
-     * argument above is what widens it.** *"The process is coming back to the same
-     * conversation on the next message"* is not a fact about parking — it is
-     * `autoResumable`'s `prompt` column, which answers the same `true` for a
-     * session somebody stopped, one whose agent quit, one signed out from, and one
-     * the daemon took away to restart. All of them come back on a message and all
-     * of them drew the faint strip meanwhile. What stays cleared is the three that
-     * never come back: `start_failed`, `start_timeout` and `agent_kill_failed`,
-     * where `—` is the honest reading because there is no conversation to describe.
-     * {@link revivableByPrompt} is the one place that set is named.
-     */
+    // Kept for every stop a prompt revives, so a tap is recorded and applied at resume.
     if (!revivableByPrompt(reason, this.agentSessionId)) {
       this.agentConfigState = { modes: null, options: [] };
     }
 
-    // Same argument, and it matters more here: a dead agent's window occupancy is
-    // not a fact about anything. Back to `null` — "cannot tell" — rather than to a
-    // zero that would read as "plenty of room left" on the one screen that draws it.
+    // Back to null, meaning unknown; zero would read as room left.
     this.unsubscribeUsage?.();
     this.unsubscribeUsage = null;
     this.contextUsageState = null;
 
-    /*
-     * And the same for the background work, with one thing said before it goes.
-     *
-     * **Clearing is the `contextUsageState` argument reaching its strongest
-     * case.** A parked session that kept this set would claim `running` about
-     * process groups that are gone, on every snapshot, for ever — which is
-     * verbatim the failure Q7.113 refused to ship a feature over. Nothing
-     * survives a wake to correct it either: `session/resume` replays no task
-     * state, and the CLI's background set is per-process by its own
-     * documentation, so a fresh agent legitimately knows nothing.
-     *
-     * **Said once, and for every stop but one.** `dropQueuedUndelivered`'s
-     * precedent, and deliberately with no `comingBack` arm: a queued message
-     * survives a process boundary because it is this daemon's own memory, while a
-     * background process survives none of them — including `config_changed`, where
-     * the agent comes straight back and the build is still gone. That is why the
-     * sentence names the **agent** being shut down rather than the session ending.
-     *
-     * ⚠ **The one exception is `parked`, and it is silence rather than a quieter
-     * sentence.** Parking is the case Q2.224 decided must show nothing at all: the
-     * person did not ask for it, cannot act on it, and a row appearing in a
-     * conversation they left quiet is exactly the *"something happened to your
-     * session"* the feature exists to avoid. It should also be unreachable —
-     * `parkable` refuses over live work — so this arm is the same shape as the
-     * `queuedPrompts` clause it sits beside: kept because its unreachability is a
-     * property of *another* function, and silent rather than loud because the one
-     * way to get here is a guard that failed, and a guard that failed must not
-     * announce itself in somebody's transcript.
-     */
+    // Background tasks die with the process and no resume replays them (Q7.113); say so, except for parked, which shows nothing (Q2.224).
     this.unsubscribeBackgroundTasks?.();
     this.unsubscribeBackgroundTasks = null;
     const abandoned = this.backgroundTasksState.filter(
@@ -5325,50 +1837,12 @@ export class ManagedSession {
     this.backgroundTasksState = [];
     this.reportsBackgroundTasksState = false;
 
-    // And the same for the commands, which belong to that agent too. The revision
-    // is *bumped* rather than reset: it is a change marker and not a count, so
-    // moving it is what tells an attached client to drop the list it is holding.
-    // Zeroing it here would leave a client that had already fetched revision 1
-    // comparing 1 to 1 and keeping a menu whose agent is gone.
-    //
-    // The subscription goes either way, because there is nothing on the other end
-    // of it.
+    // Bumped, never reset: the revision is a change marker clients compare.
     this.unsubscribeCommands?.();
     this.unsubscribeCommands = null;
-    /*
-     * ⚠ **Kept for a parked session, which is `agentConfigState`'s exception
-     * reached one field over — and it was missing, which made parking visible.**
-     *
-     * Q2.224 kept the *controls* for exactly this reason: the process is coming
-     * back to the same conversation, so the options still describe what that
-     * conversation is. The command list is the same kind of fact about the same
-     * conversation, and withdrawing it left a session whose model picker worked
-     * and whose `/` menu was empty. Empty by construction rather than by accident:
-     * what this branch published for a parked session is `withdrawn` — literally
-     * `{ commands: [], dropped: 0 }` — whatever the agent had published a moment
-     * before it was released.
-     *
-     * ⚠ **And the composer announces it, which is the half that made parking
-     * visible.** `composerPlaceholder` in `packages/web/src/ui/composing.ts` reads
-     * `Type / for commands` only while there are entries and falls back to
-     * `Message…` when there are none, off `hasCommands: entries.length > 0` in
-     * `Composer.tsx`. So the withdrawal did not leave a promise the menu could not
-     * keep — it rewrote the placeholder under the cursor of somebody who had
-     * touched nothing. That is finding out your session was released by looking at
-     * the box you type in, which is the one thing parking is not allowed to do.
-     *
-     * Nothing has to be re-fetched on the way back, either: `onStarted` reads the
-     * fresh agent's list once and `applyAgentCommands` compares before it bumps,
-     * so an identical list costs no revision and a changed one replaces this in
-     * the ordinary way. A stale `/foo` is already handled — `acp-agents.md`'s rule
-     * is that an unmatched command is sent as typed, because a cached list can lag
-     * what the agent accepts.
-     */
+    // Kept for a revivable stop like the controls: withdrawing it changes the composer and reveals parking (Q2.224).
     if (!revivableByPrompt(reason, this.agentSessionId)) {
-      // Through the same gate `applyAgentCommands` uses, so "was there anything to
-      // withdraw" is answered in one place. `commands.length > 0` was the test here
-      // and it misses a list that is empty with a non-zero `dropped` — which is what
-      // an agent publishing 300 unusable names produces.
+      // sameCommands rather than a length test: an empty list can carry a non-zero dropped.
       const withdrawn: AgentCommands = { commands: [], dropped: 0 };
       if (!sameCommands(this.agentCommandsState, withdrawn)) {
         this.agentCommandsState = withdrawn;
@@ -5387,12 +1861,7 @@ export class ManagedSession {
       } catch (error) {
         detail = describeError(error);
       }
-      // `!== "dead"` rather than `=== "alive"`: an agent we could not ask about
-      // is one we must still try to kill, and must not then claim we watched
-      // die. When the probe itself is unavailable this ends at
-      // `confirmedDead: false`, which is what the next boot's reaper needs to
-      // see — and which is now recorded *beside* the reason rather than instead
-      // of it. See the exit record below.
+      // Anything but dead gets killed: an agent we could not probe must not be recorded as dead.
       if (handle !== null && (await this.runtime.alive(handle)) !== "dead") {
         await this.runtime.kill(handle, "SIGKILL");
         await delay(KILL_CONFIRM_MS);
@@ -5400,24 +1869,7 @@ export class ManagedSession {
       }
     }
 
-    /*
-     * Never overwrite an exit that already exists. Without this, stopping a
-     * restored session rewrites `daemon_restarted` as `stopped` and flips its
-     * status from `interrupted` to `exited` — erasing the fact that a restart
-     * happened. It also closes a pre-existing case: a stop() after
-     * onStartFailed used to overwrite `start_failed`, flipping failed → exited.
-     * onStartFailed already guards itself this way; this side did not.
-     *
-     * **The caller's reason is kept even when the kill was not confirmed**, and
-     * that is a fix rather than a simplification. This line used to read
-     * `confirmedDead ? reason : "agent_kill_failed"`, which threw the reason
-     * away for a fact `agentConfirmedDead` was already carrying one field
-     * below — so a SIGKILL that took longer than `KILL_CONFIRM_MS` collapsed
-     * `daemon_shutdown` and `stopped` into one indistinguishable value. Those
-     * two are precisely what `endedWithDaemon` has to tell apart, so an ordinary
-     * deploy on a loaded machine could silently produce a session the daemon
-     * would refuse to bring back. Nothing ever read `agent_kill_failed`.
-     */
+    // First writer wins, and the caller's reason is kept even when the kill was unconfirmed.
     this.exitRecord ??= {
       reason,
       detail,
@@ -5429,13 +1881,7 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /**
-   * Records that the daemon died underneath this session.
-   *
-   * The exit is set *before* the event announcing it, so `status` already reads
-   * `interrupted` by the time any listener sees the frame — a client folding the
-   * log and a client reading the snapshot must not disagree, even for one frame.
-   */
+  /** The exit is set before the event, so status already reads interrupted to any listener. */
   markInterrupted(agentConfirmedDead: boolean, detail: string | null): void {
     if (this.exitRecord) return;
     this.exitRecord = {
@@ -5449,38 +1895,13 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /* --------------------------------------------------------------------- *
-   * Turns
-   * --------------------------------------------------------------------- */
-
-  /**
-   * Accept a prompt, with any files staged for it.
-   *
-   * **Stays synchronous, and the second parameter is client input rather than
-   * protocol payload.** Both halves matter. Synchronous because this answers a
-   * 202 carrying `{turn, seq}` and calls `safeAppend`, so there is nowhere to put
-   * an await; the one read of an attachment's bytes happens in `pump`, which is
-   * already async. And `UploadRow[]` rather than `ContentBlock[]` because
-   * `deriveSessionTitle` and the `prompt` event both need the **text** — handed a
-   * built block array this would have to find the text blocks and re-join a
-   * string it was just given — and because whether an agent takes an `image`
-   * block is `AcpClient`'s to know, not the HTTP layer's.
-   */
+  /** Synchronous: answers the 202 with turn and seq; attachment bytes are read later in pump. */
   prompt(text: string, attachments: readonly UploadRow[] = []): PromptResult {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
     if (!session) return { kind: "not_ready", status: this.status };
-    // `clearing` beside `restarting`, because during a `/clear` this session has
-    // no turn and is still not something to send a prompt to: the id
-    // `Session.prompt` would read is the one `clearContext` is in the middle of
-    // closing. See the field.
-    //
-    // ⚠ **`this.turn !== null` used to be the third clause of this expression and
-    // is its own arm now**, and the split is the feature rather than a tidy-up: a
-    // clear is the agent being unaddressable, a turn is the agent *working*, and
-    // only the first is a reason to refuse a person's message. Everything about
-    // `busy` is unchanged, including the `409 turn_in_flight` it still answers.
+    // A clear or restart is replacing the ACP session id, so refuse; a turn in flight gets its own answer.
     if (this.clearing || this.restarting) return { kind: "busy", status: this.status };
     if (this.turn !== null) return { kind: "turn_in_flight", status: this.status };
 
@@ -5490,47 +1911,7 @@ export class ManagedSession {
     return { kind: "accepted", turn, seq };
   }
 
-  /**
-   * Take a message while the agent is working.
-   *
-   * The other half of {@link prompt}, and async where that one is synchronous by
-   * contract — which is the whole reason it is a second method rather than a
-   * branch. `Session.steer` is an RPC, `prompt` has nowhere to put an await, and
-   * the guard `prompt` depends on is an assignment made before any await. So the
-   * route calls this one when `prompt` answers `turn_in_flight`.
-   *
-   * **Two ways in and one rule for the log.** Steered or queued, the message is
-   * appended as an ordinary `prompt` event the moment this daemon accepts it —
-   * which is what {@link PromptEvent} has always said it means — and it is never
-   * appended a second time on delivery. That is what gives the client a seq to
-   * settle its echo against, puts the bubble where the message was actually
-   * written, and makes the queue a fact about *delivery* rather than about the
-   * conversation.
-   *
-   * **The bound is checked before anything is written.** It has to be: the queue
-   * is only reached on the steer path when the steer *fails*, by which point an
-   * append would already have happened, and a recorded prompt nobody will ever
-   * deliver is precisely the shape Q2.218 calls a message that reached no model.
-   * On a steerable agent the queue is empty, so the check is free and still right.
-   *
-   * ⚠ **And it is checked against a queue that counts what is still in flight**,
-   * because on the steer path "before anything is written" and "before anything
-   * is pushed" are two awaits apart: see {@link midTurnAccepted}. That is also
-   * what makes the refusal on this path match the queueing one — nothing is
-   * written for a message refused here, so there is nothing to explain
-   * afterwards.
-   *
-   * ⚠ **Which means the ceiling refuses concurrent *steers* too, over an empty
-   * queue.** Eight sends held in their steers close it to a ninth on an agent that
-   * would have injected all nine. That is the price of the ordering above and it
-   * was paid on purpose; {@link MAX_QUEUED_PROMPTS} carries the argument, the
-   * alternative that was weighed, and the one sentence on the wire that still
-   * describes the old cause.
-   *
-   * ⚠ **A cancel already asked for takes the steer off the table** and sends the
-   * message to the queue instead, which is the only one of the two doors that
-   * survives a turn being torn down. The argument is at the guard.
-   */
+  /** Steers into the running turn or queues; logged once, as a prompt event, when accepted (Q2.218). */
   async sendMidTurn(text: string, attachments: readonly UploadRow[] = []): Promise<MidTurnResult> {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
@@ -5538,190 +1919,51 @@ export class ManagedSession {
     if (!session) return { kind: "not_ready", status: this.status };
     if (this.clearing || this.restarting) return { kind: "busy", status: this.status };
 
-    // The turn ended between the route's call to `prompt` and this one. Not a
-    // refusal and not a special case: the ordinary path is now the correct one,
-    // and it re-guards everything above from scratch.
+    // The turn ended after the route's first try; the ordinary path re-guards everything.
     const turn = this.turn;
     if (turn === null) return this.asMidTurn(this.prompt(text, attachments));
 
-    /*
-     * ⚠ **The bound weighs the queue *and* the sends already accepted**, and the
-     * second term is what makes it a bound at all.
-     *
-     * `queuedPrompts.length` alone was read here and then not read again until two
-     * awaits later — `blocksFor` and `Session.steer` — with nothing standing for a
-     * request in between. The check reads `queuedPrompts.length`, and the push that
-     * would raise it is two awaits later, so N concurrent sends against an **empty**
-     * queue all read zero, all pass, and all reach `recordPrompt`, against a ceiling
-     * of eight. `daemoncheck.mid-turn-messages.ts` drives exactly that — the sends
-     * held in their steers and released together, at `MAX_QUEUED_PROMPTS + 3`, which
-     * is the smallest N that walks past a single check. The re-check after the awaits
-     * cannot fix it by itself, because by then the work is done and the append has
-     * happened.
-     *
-     * So a slot is reserved here, at the moment this daemon accepts the message,
-     * and released in the `finally` at the bottom. Held across **every** await
-     * rather than across the two that exist today, which is the arrangement a
-     * third one cannot quietly escape.
-     *
-     * ⚠ **And it charges the steer path as well, which is a refusal a steerable
-     * agent did not use to get.** A send that is going to be injected holds a slot
-     * for as long as its steer runs — up to the ten seconds `Session.steer` is
-     * allowed — so eight of them in flight refuse the ninth with `queuedPrompts`
-     * empty and nothing waiting for anybody. That is not an oversight and it is not
-     * fixable by charging only the failures: whether a send queues is known only
-     * after its steer answers, two awaits past `recordPrompt`, and refusing there
-     * means refusing a message whose `prompt` event is already in the transcript.
-     * The full argument, the shape that was weighed and declined, and the wire
-     * sentence that still says *"already waiting"* for this case are all at
-     * {@link MAX_QUEUED_PROMPTS}.
-     */
+    // Counts sends still in flight too, or concurrent sends overshoot before any push. See MAX_QUEUED_PROMPTS.
     if (this.queuedPrompts.length + this.midTurnAccepted >= MAX_QUEUED_PROMPTS) {
       return { kind: "queue_full", limit: MAX_QUEUED_PROMPTS };
     }
 
     this.midTurnAccepted += 1;
-    // Beside the reservation and for the same reason: both have to be taken before
-    // the first await, because both describe the moment this daemon *accepted* the
-    // message rather than the moment its steer gave up. See `QueuedEntry.order`.
+    // Taken before the first await: the queue is ordered by acceptance. See QueuedEntry.order.
     const order = ++this.acceptOrder;
     try {
       const seq = this.recordPrompt(session, text, attachments);
 
       let promptRequired = false;
-      /*
-       * ⚠ **A cancel already asked for takes the steer off the table, and this is
-       * the one guard this method never took.**
-       *
-       * `cancelTurn` stamps `cancelRequestedAt` and then awaits `awaitTurnEnd`,
-       * which is a window wide enough to type into — and the composer draws Send
-       * over a pending cancel **by design**, so one ordinary client reaches this
-       * with no race to lose. Steering there hands the message to a turn that is
-       * already being torn down: the `202 {steered: true}` says the agent has it,
-       * the `prompt` event is in the transcript, and the only `turn_end` that
-       * arrives is the cancelled turn's — so nothing ever answers it. `pump` refuses
-       * exactly this, on exactly this test, and names what it is refusing: "a prompt
-       * with no turn end at all is the shape this daemon calls a message that
-       * reached no model".
-       *
-       * ⚠ **Taken *before* the steer rather than after it**, because after it the
-       * message has already been handed over and re-sending it would double it —
-       * the `started_new_turn` arm below is the same problem arriving from the
-       * agent's side, and it can only report.
-       *
-       * Falling through to the queue rather than refusing the send, because the
-       * queue survives a cancel **by construction**: `deliverQueued` runs from
-       * `pump`'s `finally`, which a cancelled turn reaches like any other. That is
-       * also the decision already made from the other side — *type the correction,
-       * press Stop* is one gesture, and this is the same gesture with its two halves
-       * in the other order.
-       */
+      // No steer once a cancel is pending: that turn is being torn down and nothing would answer; the queue survives a cancel.
       if (session.supportsSteering && this.cancelRequestedAt === null) {
         const extra = await this.attachmentBlocks(session, attachments);
-        /*
-         * Re-taken, for the reason the `terminal`/`stopRequested` pair below the
-         * steer is re-taken: `blocksFor` is a real await, and a cancel landing
-         * inside it reaches the same turn teardown the guard above refuses to hand a
-         * message to. The queue is still the way out.
-         */
+        // Re-checked: a cancel may land during the attachment read.
         if (this.cancelRequestedAt === null) {
           const outcome = await session.steer(text, extra);
           if (outcome === "injected") {
             this.touchSafe();
-            /*
-             * ⚠ **The turn captured above, never `this.turn` re-read here.** Two
-             * awaits have happened, so `pump`'s `finally` may have cleared the field
-             * — and TypeScript keeps the `=== null` narrowing across an await, so
-             * `this.turn` reads as `number` while being `null` at runtime, which is
-             * how a `202 {steered: true, turn: null}` reached the wire against a
-             * declared `number`. The captured value is also the honest one: it names
-             * the turn the agent said it injected into, which does not stop being
-             * true when that turn ends.
-             */
+            // The captured turn: pump may have nulled this.turn during the awaits.
             return { kind: "steered", turn, seq };
           }
           if (outcome === "started_new_turn") {
-            /*
-             * The agent took the message and started a turn this daemon does not own.
-             *
-             * Reachable two ways: the turn ended inside the RPC and the adapter
-             * ignored the `promptRequired` opt-in `Session.steer` sends, or it never
-             * supported that opt-in. Either way the message is *delivered* — so
-             * re-sending it would double it — and what is lost is the turn boundary:
-             * there is no `session/prompt` to resolve, so no `turn_end` will ever
-             * arrive for it. The output is not lost with it; `startIdleDrain` is
-             * already reading the queue between turns and records every event of it.
-             *
-             * Reported rather than swallowed, because this is invisible from every
-             * other surface: the transcript just shows an answer with no turn around
-             * it.
-             */
+            // Delivered, but in a turn we do not own and will never see end; warn, never resend.
             this.warn?.(`${this.id}: a steered message started a turn this daemon cannot see end`);
             this.touchSafe();
-            // The captured turn, for the reason the arm above states.
             return { kind: "steered", turn, seq };
           }
-          // `prompt_required` — the turn ended and nothing was delivered — or
-          // `unsupported`, an agent that advertised the method and then refused it.
-          // Both fall through to the two honest routes below, and `prompt_required`
-          // is answered *after* the re-check rather than here: see the arm.
+          // prompt_required and unsupported fall through; prompt_required is handled after the re-check.
           promptRequired = outcome === "prompt_required";
         }
       }
 
-      /*
-       * ⚠ **Re-checked, because everything above may have happened during an
-       * await.**
-       *
-       * The guards at the top of this method were true when it was entered;
-       * `blocksFor` and `steer` are two real awaits, and a stop landing inside them
-       * used to answer `202 {queued: true}` for a session that was already
-       * terminal — with `doStop`'s own drop having run while the queue was still
-       * empty, so nothing was said either. The message then rode `queuedPrompts` on
-       * every snapshot of a dead session for ever. Recorded here rather than left
-       * silent for the reason `doStop` states: a `prompt` event with nothing after
-       * it is Q2.218's shape, and this daemon says when it will not deliver one.
-       *
-       * The bound is re-read further down on the same axis, and what it is *for*
-       * has changed: it is no longer the thing that keeps the queue at eight —
-       * the reservation this send is holding is — so what is left of it is an
-       * unreachability assertion. The argument is written at the branch itself.
-       */
+      // Re-checked after the awaits: a stopped session must not answer queued, and says the message was not delivered (Q2.218).
       if (this.terminal || this.stopRequested) {
         this.safeAppend({ type: "error", message: stoppedBeforeDelivery(1), data: null });
         return { kind: "terminal", status: this.status, exit: this.exitRecord };
       }
 
-      /*
-       * **The turn ended under the steer and nothing was delivered, so this message
-       * is owed an ordinary turn of its own.**
-       *
-       * ⚠ **Below the re-check, and that position is the fix rather than the
-       * layout.** This arm used to sit inside the `supportsSteering` block and
-       * `return` from there, so it took only `this.turn === null` and
-       * `this.session !== null` after two awaits — skipping the four guards the top
-       * of this method takes. Reproduced: a `/clear` starting in that window left
-       * `clearing` true, and the turn was armed anyway and its `session/prompt`
-       * addressed to the ACP session `clearContext` had **just abandoned** — the
-       * message going to a conversation nobody would ever read, under a
-       * `202 {accepted: true}`. That is verbatim the defect the `clearing` field
-       * exists to prevent. `terminal`/`stopRequested` are covered by the block
-       * above; `clearing`/`restarting` are named here, and a message that meets one
-       * falls through to the queue, which `clearContext` and `whenRestarted` each
-       * drain on their way out.
-       *
-       * ⚠ The one place the append happens *before* the turn is armed, where
-       * `prompt` does it the other way round. It cannot be helped and it is
-       * harmless: the steer needed the seq before it knew whether the message had
-       * landed. What `prompt`'s ordering buys is that nobody sees a turn begin on a
-       * nameless session, and the title was set by `recordPrompt` above, so that
-       * property holds here too.
-       *
-       * `this.session` re-read rather than the local captured before the awaits: a
-       * restart can begin and finish inside the ten seconds a steer is allowed, and
-       * pumping the disposed `Session` would arm a turn against a dead agent and
-       * lose the message to a closed-queue error.
-       */
+      // After the re-check: a clear or restart during the steer sends this to the queue, which it drains. Re-reads this.session, which a restart may replace.
       if (promptRequired && this.turn === null && !this.clearing && !this.restarting) {
         const live = this.session;
         if (live !== null) {
@@ -5731,44 +1973,7 @@ export class ManagedSession {
         }
       }
 
-      /*
-       * ⚠ **Unreachable while every push takes a reservation first, and kept for
-       * exactly that reason — in the idiom `parkable`'s third clause already
-       * uses.**
-       *
-       * The argument is exhaustive rather than hopeful. `queuedPrompts` has one
-       * insert, the `splice` a dozen lines down, and two removers —
-       * `deliverQueued`'s `shift` and `dropQueuedUndelivered`'s clear — which can
-       * only ever make the length *smaller*. Every send that reaches that splice
-       * took a slot at the entry check, and releases it in this method's `finally`,
-       * which runs synchronously on the way out: there is no moment another send can
-       * observe at which an entry is on the queue and its reservation is not still
-       * counted. The entry check therefore holds
-       * `queuedPrompts.length + midTurnAccepted <= MAX_QUEUED_PROMPTS` at every
-       * suspension point, and a send standing here holds one of those slots itself,
-       * so it can see at most `MAX_QUEUED_PROMPTS - 1` entries. This condition
-       * cannot be true.
-       *
-       * ⚠ **So the mechanism a previous comment gave for keeping it was the wrong
-       * one.** It said `deliverQueued` and `dropQueuedUndelivered` "can both have
-       * moved" the queue during the awaits — true, and irrelevant: both move it
-       * down, and a backstop whose stated mechanism can only make it *less* likely
-       * to fire is a false claim wearing a guard's clothes. The real mechanism is
-       * narrower and worth the branch: this fires the moment somebody pushes to
-       * `queuedPrompts` without taking a reservation first — a second queueing path,
-       * a restart draining into it, a helper that splices — and the failure without
-       * it is an unbounded queue, which is the unbounded write
-       * {@link MAX_QUEUED_PROMPTS} exists to refuse.
-       *
-       * **Loud rather than silent, which is where it parts company with the
-       * `parked` precedent.** That one stays quiet because nothing was written; here
-       * `recordPrompt` has already run, so a silent refusal would leave a `prompt`
-       * event with nothing after it — Q2.218's shape. And the sentence is true in
-       * the only state that can produce it: this reads `queuedPrompts` itself, so it
-       * fires only with `MAX_QUEUED_PROMPTS` genuinely waiting. That is what
-       * separates it from the entry check above, whose refusal can happen over an
-       * empty queue and whose wire sentence still says otherwise.
-       */
+      // Unreachable while every push holds a reservation; guards a future path that skips one, loudly since the prompt is already logged.
       if (this.queuedPrompts.length >= MAX_QUEUED_PROMPTS) {
         this.safeAppend({
           type: "error",
@@ -5787,127 +1992,42 @@ export class ManagedSession {
         attachments,
         order,
       };
-      /*
-       * ⚠ **Placed by acceptance order rather than pushed, so the queue is in the
-       * order the messages were *taken* rather than the order their steers gave
-       * up.**
-       *
-       * The ordinal is taken before the awaits and the push happens after
-       * them, so two messages whose steers resolve out of order — ordinary, they are
-       * two independent RPCs with a ten-second budget each — landed reversed: the
-       * agent was handed a correction *before* the instruction it corrects, while
-       * the transcript, which is ordered by the `prompt` events those same seqs
-       * name, showed the opposite. The pairing between the log and what the agent
-       * was told is the whole contract of this feature, so the queue follows the log
-       * rather than the wire.
-       *
-       * ⚠ **Ordered by {@link QueuedEntry.order} and never by `seq`.** The two agree
-       * whenever the log is healthy, which is what makes the seq tempting — but
-       * `safeAppend` answers `0` for an append it could not make, and every real
-       * entry is above zero, so a message the store refused sorted ahead of the
-       * whole queue and was delivered first. `order` is taken before the first
-       * await and cannot be refused, so it is monotonic by construction.
-       *
-       * The scan is over at most {@link MAX_QUEUED_PROMPTS} entries whose orders are
-       * already ascending, and `>` rather than `>=` is free here: one session takes
-       * one ordinal at a time, so two entries can never share one.
-       */
+      // Inserted by acceptance order, never seq (0 for a failed append), so the agent sees messages in log order.
       const ahead = this.queuedPrompts.findIndex((queued) => queued.order > order);
       const position = ahead === -1 ? this.queuedPrompts.length : ahead;
       this.queuedPrompts.splice(position, 0, entry);
       this.touchSafe();
-      /*
-       * ⚠ **Because the turn may have ended while the steer was in flight, and then
-       * nothing would ever come back for this.**
-       *
-       * `deliverQueued` runs from `pump`'s `finally`, so a turn that ends during the
-       * `await` above drains an **empty** queue and goes quiet — and the entry
-       * placed one line up is then waiting for a turn nobody is going to start. It
-       * is not a narrow window either: the steer is bounded at ten seconds and this
-       * arm is reached precisely when the agent is not answering promptly.
-       *
-       * A no-op in the ordinary case, where the turn is still running, so this is
-       * one call rather than a condition somebody has to keep true. The `prompt_required`
-       * arm above handles its own half explicitly because it has a turn to name in
-       * the answer; this one does not, and `queued` stays the honest word for a
-       * message that was queued — the snapshot the route sends back is what says
-       * whether it is still waiting.
-       */
+      // The turn may have ended during the steer, leaving nothing else to drain this entry.
       this.deliverQueued();
       return { kind: "queued", id: entry.id, seq, position };
     } finally {
-      /*
-       * Released here and nowhere else. A `steer` that rejects, or a `blocksFor`
-       * that does, must not leave a slot held for the life of the session — eight
-       * of those and the queue is closed to a session with nothing in it.
-       */
+      // Released only here, so a throwing steer cannot hold a slot for good.
       this.midTurnAccepted -= 1;
     }
   }
 
-  /**
-   * A {@link PromptResult} read as a {@link MidTurnResult}.
-   *
-   * The two unions share every arm the ordinary path can produce; `turn_in_flight`
-   * is the one that cannot be reached from here, because the only caller has just
-   * established there is no turn. Refused with a `busy` rather than widened,
-   * because a `MidTurnResult` saying "a turn is in flight" would send the route
-   * back round a loop it just came out of.
-   */
+  /** turn_in_flight becomes busy: the only caller has just seen no turn. */
   private asMidTurn(result: PromptResult): MidTurnResult {
     return result.kind === "turn_in_flight" ? { kind: "busy", status: result.status } : result;
   }
 
-  /**
-   * Claim the next turn number, synchronously and before any await.
-   *
-   * `Session.prompt` is a generator, so its own "already in flight" throw would
-   * not surface until the first `next()` — far too late to answer a request. This
-   * counter is the guard that does, and every assignment in here happens in one
-   * synchronous run so nothing can interleave between them.
-   */
+  /** Synchronous, so the turn guard holds before any await. */
   private armTurn(): number {
     this.turnCounter += 1;
     const turn = this.turnCounter;
     this.turn = turn;
     this.turnStartedAt = Date.now();
-    // Somebody is asking again, so the agent is allowed one more replacement if
-    // this message meets the same wall. See `onAgentUnusable` and the flag's own
-    // docblock.
+    // A new message re-arms one agent replacement; see onAgentUnusable.
     this.authRestartArmed = true;
     return turn;
   }
 
-  /**
-   * Write the message into the log and spend its uploads, once.
-   *
-   * Called at the moment the daemon **accepts** a message — which for a queued one
-   * is well before the agent is handed it, and that is deliberate. The delivery
-   * path deliberately does not call this again; a second `prompt` event for one
-   * message would put the same bubble in the conversation twice.
-   */
+  /** Called once, on acceptance; delivery never appends a second prompt event. */
   private recordPrompt(session: Session, text: string, attachments: readonly UploadRow[]): number {
-    // The first prompt names the session, once.
-    //
-    // Below the guards in the callers, so a prompt this daemon *refused* never
-    // names anything — a session called "hi" that never ran would be worse than
-    // one called by its path. The `=== null` test is the whole of the "written
-    // once" rule: a manual rename leaves the field non-null and therefore wins for
-    // ever, and clearing a title back to null is what re-arms this. `touchSafe()`
-    // in the callers persists it and fans it out in the same frame as the turn
-    // start, so no client sees a turn begin on a session that is still nameless.
-    //
-    // Still the text alone, with attachments deliberately not consulted — and the
-    // second half of that reasoning has changed, so it is worth restating rather
-    // than leaving a comment that argues from something no longer true. It used
-    // to say a files-only prompt was refused upstream, so no nameless case
-    // existed; one does now. The answer is the same for the *first* reason alone:
-    // a session called `IMG_4821.png` is worse than one called by its path, and
-    // leaving the title null is exactly what makes a client fall back to the path.
+    // Only the first prompt names the session, from its text; a manual rename keeps the field non-null.
     if (this.titleValue === null) this.titleValue = deriveSessionTitle(text);
 
-    // Built here rather than in `pump`, from the three facts that need no I/O, so
-    // it is the *same* decision `blocksFor` will make rather than a guess at it.
+    // Same inputs blocksFor uses, so the logged inlined flag matches what the agent gets.
     const caps = { image: session.acceptsImages };
     const refs =
       attachments.length === 0
@@ -5922,26 +2042,7 @@ export class ManagedSession {
 
     const seq = this.safeAppend({ type: "prompt", text, attachments: refs })?.seq ?? 0;
 
-    /*
-     * After the append, and **not** conditional on it having worked.
-     *
-     * This comment used to say the ordering meant "a prompt that could not be
-     * recorded does not mark files as spent", which the code does not do:
-     * `safeAppend` answers `null` on a failed insert, that becomes `seq` 0, and
-     * the mark runs anyway. Corrected rather than made true, because marking is
-     * the right thing either way — the turn really is starting, the agent really
-     * is about to be handed these files, and leaving them unconsumed would put
-     * them back under the 24-hour sweep while a live turn references them. What
-     * the ordering actually buys is that the recorded event and the mark cannot
-     * interleave.
-     *
-     * ⚠ **A queued message spends its uploads here too, at accept rather than at
-     * delivery.** It has to: the 24-hour sweep does not know about the queue, and
-     * a message waiting for a long turn is exactly the one whose files would be
-     * collected out from under it.
-     *
-     * Synchronous SQLite, off the agent's emit path.
-     */
+    // Marked even if the append failed; a queued message spends at accept so the 24-hour sweep cannot collect its files.
     if (attachments.length > 0) {
       this.uploads?.markConsumed(
         this.id,
@@ -5951,21 +2052,7 @@ export class ManagedSession {
     return seq;
   }
 
-  /**
-   * The blocks an agent is handed for a message's attachments.
-   *
-   * ⚠ **One method because two call sites make the same three decisions, and a
-   * divergence between them would be silent.** `pump` builds this at the head of
-   * a turn and {@link sendMidTurn} builds it for a steer, and both have to skip
-   * the read entirely when nothing is staged *or* there is no upload store — the
-   * drivers and `harness.ts` construct a registry without one — and both have to
-   * ask the **session** whether it takes an image rather than assume it. That
-   * last one is the same answer `recordPrompt` records synchronously in the
-   * event's `inlined` flag, so two copies of it is how the transcript comes to
-   * disagree with what the agent was actually sent.
-   *
-   * The one place an attachment's bytes are read.
-   */
+  /** The only read of attachment bytes, shared by pump and sendMidTurn so both decide image support as recordPrompt logged it. */
   private async attachmentBlocks(
     session: Session,
     attachments: readonly UploadRow[],
@@ -5987,25 +2074,7 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /**
-   * Forget what is waiting, and say so once.
-   *
-   * The debt {@link doStop} states: every queued message is already a `prompt`
-   * event in the log, so letting one go in silence leaves a prompt with no turn
-   * end after it — Q2.218's shape exactly. One `error` for the act rather than one
-   * per message, because what a reader needs is that the session ended owing them
-   * a reply.
-   *
-   * ⚠ **Two callers, and the second is the one that was missing.** `doStop` pays
-   * this where the session is not coming back; `restartAgent` pays it where the
-   * session was *supposed* to come back and did not. Without the second, a resume
-   * that threw left the queue on a terminal session's snapshot for ever — the
-   * transcript drawing "Waiting for the agent to finish" under a message on a
-   * conversation that had ended, with nothing to clear it and no event saying
-   * what happened. Worse than the silence: `wakeForPrompt` can revive such a
-   * session, and the stale entry was then delivered **after** whatever the person
-   * typed next, reordering the conversation they came back to.
-   */
+  /** One error for all dropped messages: each is already a prompt event with no turn end (Q2.218). */
   private dropQueuedUndelivered(): void {
     const dropped = this.queuedPrompts.length;
     if (dropped === 0) return;
@@ -6013,28 +2082,7 @@ export class ManagedSession {
     this.safeAppend({ type: "error", message: stoppedBeforeDelivery(dropped), data: null });
   }
 
-  /**
-   * Hand the agent the next message that has been waiting for it.
-   *
-   * ⚠ **Called from the very end of `pump`'s `finally`, and the position is the
-   * rule.** `sweepPending` runs in that block and is *not* fenced on turn
-   * identity, so starting the next turn any earlier would have this session's own
-   * sweep cancel a permission the new turn had already raised. Everything else in
-   * there — clearing `turn`, the idle drain, `onAgentUnusable` — has to have
-   * happened too, which is why this is last rather than merely late.
-   *
-   * Every refusal is a no-op that leaves the queue alone. A session that is
-   * terminal, stopping, clearing or restarting will be asked again: `whenRestarted`
-   * and `clearContext` both call this on their way out, so the only way a message
-   * strands is a state none of the four ever leaves.
-   *
-   * ⚠ **A stop is not that state, and it used to be the whole of this
-   * paragraph.** `doStop` empties the queue only where the session is *not* coming
-   * back: for `daemon_shutdown`, `daemon_restarted` and `config_changed` it
-   * deliberately keeps it, which is what makes `restartAgent`'s own call live code
-   * rather than dead. So a queue outliving a stop is a designed state, and what
-   * has to hold is that every path out of one asks again.
-   */
+  /** Called last in pump's finally, since sweepPending is not turn-fenced; clearContext and restartAgent call it again on their way out. */
   private deliverQueued(): void {
     if (this.queuedPrompts.length === 0) return;
     if (this.terminal || this.stopRequested) return;
@@ -6046,102 +2094,41 @@ export class ManagedSession {
     const entry = this.queuedPrompts.shift();
     if (entry === undefined) return;
     const turn = this.armTurn();
-    // No `recordPrompt`: this message was written into the log when it was
-    // accepted, and its uploads were spent then too.
+    // No recordPrompt: logged, and its uploads spent, at acceptance.
     this.runTurn(session, entry.text, entry.attachments, turn);
   }
 
-  /**
-   * Stop the turn in flight, and leave the session alive.
-   *
-   * The distinction from {@link stop} is the whole feature. Stopping kills the
-   * agent, writes an `exitRecord` and makes the session terminal; this sends one
-   * notification and changes nothing else — the process stays up, the
-   * conversation stays loaded, and the next prompt is an ordinary prompt rather
-   * than a resume. What it costs is the turn, which is the thing being asked for.
-   *
-   * **The order is send, then sweep, and it is ACP's rather than a preference.**
-   * A client that has cancelled MUST answer any pending
-   * `session/request_permission` with `cancelled`, and until it does an agent
-   * parked on one is not executing anything that could notice the cancel: the
-   * notification sits in its pipe behind a reverse-RPC it is still waiting on. So
-   * a cancel that only sent would hang exactly the session most worth
-   * cancelling — one blocked on a human — and a cancel that only swept would tell
-   * the agent its tool call was abandoned while leaving it free to pick another.
-   *
-   * **The sweep is in a `finally`.** The send is bounded and can throw on a pipe
-   * nobody is reading, and dropping the sweep there would leave the agent holding
-   * a promise this daemon will never settle, with `status` stuck on `blocked`
-   * against a turn nobody can end. `settle` is a no-op on an id that is already
-   * gone, so sweeping a second time when `pump` reaches its own `finally` costs
-   * nothing.
-   *
-   * Not memoised, unlike `stopping` and `resume()`: asking twice is a person
-   * tapping again because the first one did not visibly work, and the honest
-   * response to that is to ask the agent again rather than to hand back the first
-   * attempt's answer.
-   */
+  /** Cancels the turn but keeps the agent; sends, then sweeps pending permissions, which ACP requires be answered cancelled. */
   async cancelTurn(): Promise<CancelResult> {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
     if (!session) return { kind: "not_ready", status: this.status };
-    // Before the `turn` test, not after it: a clear holds no turn, so the other
-    // order would answer `no_turn` — "nothing is running, you have what you
-    // asked for" — about a session in the middle of an ACP round trip.
+    // Before the turn test: a clear holds no turn and must answer busy, not no_turn.
     if (this.clearing || this.restarting) return { kind: "busy", status: this.status };
     const turn = this.turn;
     if (turn === null) return { kind: "no_turn", status: this.status };
 
-    // Recorded before the await, so a snapshot built while the notification is
-    // still in the pipe already says somebody asked. Anything else leaves a
-    // window in which the button springs back and invites a second tap.
+    // Recorded before the await so a snapshot already shows the cancel.
     this.cancelRequestedAt = Date.now();
     this.touchSafe();
 
     try {
       await session.cancelTurn();
     } catch {
-      // The pipe is gone or the agent has stopped reading it. Swallowed rather
-      // than reported, because there is nothing a caller would do differently and
-      // the sweep below is the half that still matters: an agent nobody can reach
-      // is one whose turn is about to end through `pump`'s error path anyway.
+      // Unreachable agent: pump's error path ends the turn, and the sweep below still runs.
     } finally {
-      // Fenced on the turn this call was about, exactly as `pump`'s own `finally`
-      // is. `cancelTurn` can be in flight for as long as the notify takes, and a
-      // turn that ends inside that window frees the session to accept a *new*
-      // prompt — whose parked permission this sweep would then cancel, from a
-      // request that was never about it.
+      // Fenced on this turn: a new turn started meanwhile keeps its permissions.
       if (this.turn === turn) this.sweepPending("turn_cancelled");
       this.touchSafe();
     }
 
-    // After the sweep, never before it: an agent blocked on a permission cannot
-    // reach its own turn end until the answer above lands, so waiting first would
-    // spend the whole budget and report `false` about a cancel that was working.
+    // After the sweep: an agent blocked on a permission cannot end its turn until answered.
     const settled = await session.awaitTurnEnd();
     return { kind: "cancelled", turn, settled };
   }
 
-  /**
-   * Ask the agent to stop one piece of background work, and answer what it said.
-   *
-   * **The id is checked against the set this session announced, before anything
-   * reaches the agent.** That is not tidiness: the id round-trips verbatim into
-   * an RPC, so an unchecked one is a caller-supplied string handed to a
-   * subprocess — and the check is free, because the only way anybody has an id is
-   * that this daemon published it.
-   *
-   * ⚠ **Deliberately not gated on the turn, unlike every other control here.**
-   * The whole point of the verb is the adapter's own sentence: it stops one task
-   * *without cancelling the parent prompt turn*, and background work outlives a
-   * prompt by design. Refusing while a turn runs would make the panel's stop
-   * control unavailable in the state it is most likely to be used from.
-   *
-   * Nothing is appended to the log. The adapter publishes its own
-   * `**Task stopped by user:** <name>.` into the transcript, and a second row for
-   * one act is what `cancelTurn` already refuses to write.
-   */
+  /** Checks the id against announced tasks before it reaches the agent; not gated on the turn, since tasks outlive prompts. */
   async stopBackgroundTask(asyncTaskId: string): Promise<StopTaskResult> {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     const session = this.session;
@@ -6152,9 +2139,7 @@ export class ManagedSession {
     try {
       return { kind: "answered", stopped: await session.stopAsyncTask(asyncTaskId) };
     } catch (error) {
-      // Reported rather than swallowed, and rather than collapsed into
-      // `stopped: false` — those are opposite sentences. `false` says the work
-      // was already over; this says nobody knows, and the row has to say so.
+      // failed, never stopped false, which would mean the work had already ended.
       return { kind: "failed", detail: describeError(error) };
     }
   }
@@ -6167,83 +2152,24 @@ export class ManagedSession {
   ): Promise<void> {
     let failed = false;
     try {
-      // Here rather than in `prompt` because this method is already async — the
-      // emit path above it is not and must stay that way.
-      //
-      // ⚠ This said "the one place an attachment's bytes are read, and the only
-      // await this feature adds to a turn", and mid-turn messages made both halves
-      // false: `sendMidTurn` builds blocks too, on the steer path, and that one
-      // runs *concurrently with a live turn* rather than at the head of one. Both
-      // go through `attachmentBlocks` now, which is what keeps the two from
-      // deciding `acceptsImages` or an absent upload store differently — the read
-      // has one place again, and this is no longer it.
       const extra = await this.attachmentBlocks(session, attachments);
-      /*
-       * A cancel can land in the gap the line above opens.
-       *
-       * `prompt()` sets `this.turn` synchronously and fires this method, so from
-       * the outside the turn already exists — but `Session.turnActive` is not set
-       * until the generator below is first pulled, and reading an inlined image's
-       * bytes is a real `readFile` between the two. A cancel arriving there is
-       * sent to an agent holding no prompt, which every adapter discards, and
-       * this loop would then hand it the message anyway: the turn somebody
-       * stopped runs to completion, having been told it was cancelled.
-       *
-       * Narrow — it needs an image attachment, and the window is milliseconds —
-       * but the cost of closing it is one test, and the marker is already the
-       * right thing to ask. Fenced on the turn, like everything else that reads
-       * it. `finally` clears both fields and sweeps; the `turn_end` is written
-       * here because the agent never gets to send one and a prompt with no turn
-       * end at all is the shape this daemon calls a message that reached no
-       * model.
-       */
+      // A cancel can land during the attachment read, before the agent holds a prompt; end the turn here instead.
       if (this.turn === turn && this.cancelRequestedAt !== null) {
         this.record({ type: "turn_end", stopReason: "cancelled", usage: null });
         return;
       }
       let errored = false;
       for await (const event of session.prompt(text, extra)) {
-        /*
-         * Read before the record, so a store that throws cannot also lose the fact
-         * that this turn is ending in a failure — and **not every error is one.**
-         * The turn generator yields `CLOSED` when the queue closes under it, which
-         * is this daemon disposing the agent rather than the agent failing; writing
-         * `agent_error` there would blame the agent for a teardown we performed.
-         */
+        // A CLOSED error is our own teardown, not an agent failure.
         errored = event.type === "error" && !isSessionClosed(event);
-        // A recording fault must not unwind this loop. Doing so would call
-        // gen.return(), aborting the agent's turn — and force-cancelling a
-        // permission a human may be walking to their phone to approve, then
-        // telling them the turn simply ended.
+        // A recording fault must not unwind this loop: that aborts the turn and cancels pending permissions.
         try {
           this.record(event);
         } catch {
           // Already degraded inside the store; nothing useful to do here.
         }
       }
-      /*
-       * ⚠ **A turn that ended in an error still ended, and for four releases it
-       * did not say so.**
-       *
-       * `Session.prompt` converts a rejected `session/prompt` into an `error`
-       * event and returns on it, exactly as it returns on a `turn_end` — so the
-       * turn was over and nothing on the wire marked the boundary. Four prompts,
-       * three `turn_end`s, in a log anybody could read.
-       *
-       * The argument is Q2.103's, already made for the cancel path a hundred lines
-       * up: the daemon writes the end itself because the agent never gets to, and
-       * a prompt with no turn end at all is the shape this codebase calls a message
-       * that reached no model. What it actually cost: `Tail.taskFloor` keys on this
-       * event, so a turn that failed mid-delegation left its pending calls counted
-       * for ever under a permanent "waiting for 1 task"; the `turn.ended` plugin
-       * hook never fanned; and the turn's origin claim was never spent, so the
-       * plugin that started it had the *next* turn's hook suppressed instead.
-       *
-       * Not recorded while stopping, and for `record`'s own reason: the generator's
-       * synthetic "session closed" error is dropped there as a deliberate shutdown
-       * rather than a failure, and an end for an error nobody was told about would
-       * be the same misreport arriving one event later.
-       */
+      // An errored turn still ended: write the turn_end the agent never sends (Q2.103).
       if (errored && !this.stopRequested) {
         this.record({ type: "turn_end", stopReason: "agent_error", usage: null });
       }
@@ -6262,187 +2188,47 @@ export class ManagedSession {
       if (this.turn === turn) {
         this.turn = null;
         this.turnStartedAt = null;
-        // Cleared with `turn` and inside the same identity test, which is what
-        // keeps the pair from disagreeing: a late pump belonging to an older turn
-        // must not erase a cancel somebody has just asked for on the current one.
+        // Inside the identity test: a late pump must not erase a cancel on the current turn.
         this.cancelRequestedAt = null;
-        /*
-         * And the queue goes back to being read, which is the whole of the fix for
-         * "the conversation stopped and then dumped five minutes of dialog".
-         *
-         * Inside the identity test with the fields above: a late pump belonging to
-         * an older turn must not start a reader underneath the turn that replaced
-         * it. It is safe even so — `drainBetweenTurns` refuses a queue a turn holds
-         * — but relying on that would make this line correct by accident.
-         *
-         * `this.session` rather than the `session` argument, so a pump whose agent
-         * has been replaced does not attach a reader to the old one.
-         */
+        // Restart the idle drain on this.session, so a replaced agent's pump does not attach to the old one.
         const live = this.session;
-        // Not while something is waiting: `deliverQueued` at the foot of this
-        // block is about to claim the queue for a turn, and `claimForTurn` would
-        // displace a drain started one statement earlier for no reason.
+        // Not when queued: deliverQueued below claims the queue for a turn.
         if (live !== null && this.queuedPrompts.length === 0) this.startIdleDrain(live);
       }
       this.sweepPending(failed ? "pump_failed" : "turn_ended");
-      /*
-       * **A prompt the agent never engaged with means the agent is finished, so
-       * it is replaced.**
-       *
-       * ⚠ Reported with a screenshot: four messages, four identical
-       * `Internal error: The Claude Agent session has ended. Please start a new
-       * session.` The agent's ACP session had died under a live process — the
-       * daemon saw no exit, `status` stayed `idle`, and every message was
-       * accepted and failed the same way. There was no way out from inside the
-       * app.
-       *
-       * **`failed` is the precise signal and the message is not.** Reaching this
-       * `catch` means `session.prompt()` *rejected* rather than streamed a
-       * failure: the agent did not take the message at all. Anything that goes
-       * wrong **inside** a turn — a tool blowing up, a command exiting non-zero —
-       * arrives through `this.record(event)` and never comes near here, so this
-       * cannot fire on an ordinary bad turn. Measured on the real events:
-       * `{code: -32603}` with **no `errorKind`**, which is why `isAuthFailure`
-       * quite correctly ignored it and why matching the text was never an option
-       * — `describeError` is the agent's own prose and moves with its version.
-       *
-       * Same machinery as an auth failure, for the same reason: what is stale is
-       * the process, not the conversation. Armed once per prompt, so a fresh
-       * agent that fails the same way leaves the error standing and waits for
-       * somebody to send another message rather than looping.
-       */
+      // A rejected prompt means the agent process is finished: replace it.
       if (failed) this.onAgentUnusable();
       this.touchSafe();
-      /*
-       * **Last, and the position is the rule rather than the ordering that read
-       * best.** `sweepPending` above is not fenced on turn identity, so a turn
-       * started any earlier in this block would have its own permissions
-       * cancelled by this turn's sweep; `onAgentUnusable` above may have armed a
-       * restart, which `deliverQueued` then declines and `whenRestarted` picks up.
-       * Everything it needs to be true is true by the time it runs, which is the
-       * whole reason it is a call at the end rather than a branch in the middle.
-       */
+      // Last: sweepPending is not turn-fenced, and a restart armed above drains the queue when it finishes.
       this.deliverQueued();
     }
   }
 
   private record(event: SessionEvent): void {
     this.lastEventAt = this.lastAgentEventAt = Date.now();
-    // While stopping, the generator's synthetic "session closed" error is
-    // indistinguishable from a real one. Drop errors rather than report a
-    // deliberate shutdown as a failure; the terminal status event says what
-    // actually happened.
+    // While stopping, the generator's synthetic closed error is not a failure.
     if (this.stopRequested && event.type === "error") return;
     this.log.append(event);
-    /*
-     * ⚠ **And this may not write `noteStartRefusal`, however much it looks like
-     * the place.** The daemon does remember a harness that refused to open a
-     * session, and this is the third signal that says the word "authentication" —
-     * but Q7.99 measured it and it was not about a credential: a session idle
-     * 5h36m reported `errorKind: "authentication_failed"` on its first prompt with
-     * the token on disk still valid for 1.4 hours, and a freshly spawned agent
-     * worked four minutes later. Recording it would take the harness off the New
-     * session strip for everybody on the machine because one conversation's agent
-     * had gone stale. Only ACP's typed `auth_required` at `session/new` and
-     * `session/resume` writes that record; see `SessionRuntime.noteStartRefusal`.
-     */
+    // Never record a start refusal here: a stale session's auth failure is not about the credential (Q7.99).
     if (isAuthFailure(event)) this.onAgentUnusable();
   }
 
-  /**
-   * This agent cannot serve the conversation, so it is given a fresh process.
-   *
-   * **Two callers and one remedy.** The agent reporting
-   * `errorKind: "authentication_failed"` on the event pump, and a prompt the
-   * agent **rejected outright** — `session.prompt()` throwing rather than
-   * streaming a failure, which is the pump's `failed` flag and means the message
-   * was never taken. The second was found the hard way: an ACP session that died
-   * under a live process left `status: idle` and answered four messages in a row
-   * with the same `-32603`, no `errorKind` on any of them, and no way out of the
-   * conversation from inside the app.
-   *
-   * **Ground truth, and the reason there is no probe on the prompt path.** An
-   * earlier version asked the agent's CLI "are you signed in" before every
-   * message, which cost a process spawn on the hot path, could only ever be as
-   * fresh as its 3s cache — and made the offline drivers depend on whether the
-   * person running them happened to be signed in, because a stub runtime inherits
-   * the real probe. This is the agent itself reporting, at the only moment that
-   * cannot be stale.
-   *
-   * ⚠ **The auth arm used to end the conversation, and that was wrong about what
-   * it had measured.** It called `stop("agent_signed_out")`, on the reasoning that "the
-   * credential is gone, so every later message would fail the same way". Q7.99
-   * had already found otherwise and the code never caught up: a session idle
-   * 5h36m reported `authentication_failed` on its *first* prompt while the token
-   * on disk was **still valid for another 1.4 hours**, and a freshly spawned
-   * agent worked four minutes later. What had gone stale was the agent process,
-   * not the credential — so ending the conversation destroyed the thing that was
-   * fine and kept nothing that was broken.
-   *
-   * What it cost is worth writing down, because it is what this is fixing.
-   * `autoResumable` answers `false` for `agent_signed_out` on **both** triggers
-   * and the only thing that reverses it is `reloadCredentials`, whose callers are
-   * all in-app credential writes — so somebody whose CLI refreshed its own token,
-   * or who signed in from their own terminal, had a conversation that could never
-   * come back, under a notice claiming they were signed out and a Sign in button
-   * leading to a screen where they already were. The composer was gone, so there
-   * was nothing to try from inside the app at all.
-   *
-   * **So the conversation stays, and the agent is replaced under it.** The error
-   * is already in the log — `record` appended it one statement above — so what
-   * happened is on screen, in the transcript, where somebody can read it and send
-   * again. `restartAgent` is the same path a config change takes and stops with
-   * `config_changed` deliberately rather than inventing a reason: it *is* "the
-   * daemon took the agent away and is bringing it straight back", it is in
-   * `DAEMON_EXIT_REASONS` so a client draws "reconnecting", and a new `ExitReason`
-   * member would read as `showsAsEnded` on every client older than it — which is
-   * the very failure this removes.
-   *
-   * **Armed once per prompt**, which is what makes this a retry rather than a
-   * loop. If the credential really is gone the fresh agent fails the same way,
-   * the second failure lands in the transcript beside the first, and nothing
-   * restarts again until somebody sends another message. The retry is driven by
-   * the person, and the cost of a genuinely revoked credential is one spawn per
-   * message they choose to send.
-   *
-   * Fire-and-forget because `record` is on the event pump and must not await a
-   * process teardown.
-   */
+  /** Replaces the agent process, keeping the conversation, after an auth failure or a rejected prompt; armed once per prompt (Q7.99). */
   private onAgentUnusable(): void {
     if (this.terminal || this.stopRequested) return;
-    /*
-     * A restart already in flight is left alone, and this is not defensive.
-     * `restartAgent` writes `this.restart` — a single field holding the config to
-     * put back and the promise `whenRestarted` waits on — so a second one
-     * overwrites the first's receipt: the config captured before a config change
-     * is lost, and everything waiting on the old promise waits for ever. The
-     * agent coming up is a fresh process either way, which is the whole of what
-     * this wanted.
-     */
+    // A restart in flight is left alone: a second would overwrite this.restart and strand its waiters.
     if (this.restarting) return;
     if (!this.authRestartArmed) return;
     this.authRestartArmed = false;
     void this.restartAgent().catch(() => undefined);
   }
 
-  /* --------------------------------------------------------------------- *
-   * Permissions
-   * --------------------------------------------------------------------- */
-
-  /**
-   * Parks the agent's approval request and hands it to whoever shows up.
-   *
-   * The promise returned here is the agent's turn, held open. Nothing about it
-   * belongs to a connection, which is the whole of "survives the client that was
-   * going to answer it disappearing".
-   */
+  /** The returned promise holds the agent's turn open, independent of any connection. */
   private readonly resolvePermission = (
     request: PendingPermission,
     signal: AbortSignal,
   ): Promise<acp.RequestPermissionResponse> => {
-    // Refuse to park when nobody could ever answer. Each of these was a way to
-    // hang: a request against a dead session is held by a map that is about to be
-    // dropped, and one arriving outside a turn has no sweeper to clear it.
+    // Refuse to park what nobody could answer: a dead session, or a request outside a turn.
     const refusal = this.refusalReason();
     if (refusal) return Promise.resolve(this.recordRefusal(request, refusal));
 
@@ -6453,16 +2239,11 @@ export class ManagedSession {
       title: request.title,
       options: request.options,
       raisedAt: Date.now(),
-      // Bounded here, at the boundary that owns retention — `session.ts` passes
-      // through what the agent sent and does not decide how much of it is kept.
       rawInput: clampBlob(request.rawInput, MAX_PERMISSION_BLOB_BYTES),
       content: clampBlob(request.content, MAX_PERMISSION_BLOB_BYTES),
     };
 
-    // Exactly one statement in the executor. A throw inside it rejects the
-    // promise — which would answer the agent with an error while leaving the
-    // entry in `pending`, so the session would advertise `blocked` forever on a
-    // request that was already refused, and approving it would do nothing.
+    // One statement in the executor: a throw there would reject while leaving the entry pending.
     let resolve!: (response: acp.RequestPermissionResponse) => void;
     const parked = new Promise<acp.RequestPermissionResponse>((capture) => {
       resolve = capture;
@@ -6502,8 +2283,7 @@ export class ManagedSession {
     request: PendingPermission,
     by: AnswerResolvedBy,
   ): acp.RequestPermissionResponse {
-    // Recorded rather than hidden: a refused request that leaves no trace looks
-    // exactly like one that was never raised.
+    // Recorded, so a refused request is not mistaken for one never raised.
     const permissionId = this.mintPermissionId();
     this.safeAppend({
       type: "permission_request",
@@ -6554,17 +2334,7 @@ export class ManagedSession {
     };
   }
 
-  /**
-   * The only place a permission leaves `pending`.
-   *
-   * Statement order is load-bearing. `pending.delete` is the compare-and-swap:
-   * two simultaneous answers run in separate macrotasks with no await between the
-   * get and the delete, so exactly one wins. And the agent is unblocked *before*
-   * anything is logged, because a throw while appending would otherwise leave the
-   * request recorded as answered, removed from `pending`, and the agent's RPC
-   * never responded to — a permanent hang that also switches off every signal
-   * that would have made it visible.
-   */
+  /** The only exit from pending: the delete is the compare-and-swap, and the agent is unblocked before logging. */
   private settle(
     permissionId: string,
     response: acp.RequestPermissionResponse,
@@ -6602,14 +2372,7 @@ export class ManagedSession {
     return { outcome, optionId, seq };
   }
 
-  /**
-   * Both maps, in one method rather than two calls at each of the two sites.
-   *
-   * `pump`'s `finally` and `doStop` are the callers, and a sweep that reached one
-   * map from one of them would leave an agent parked on a question after the turn
-   * that raised it had ended — with the session reading `idle` while its own
-   * promise was still held.
-   */
+  /** Both maps, so neither caller can leave an agent parked after its turn. */
   private sweepPending(by: AnswerResolvedBy): void {
     for (const permissionId of [...this.pending.keys()]) {
       this.settle(permissionId, CANCELLED, by);
@@ -6619,24 +2382,7 @@ export class ManagedSession {
     }
   }
 
-  /* --------------------------------------------------------------------- *
-   * Questions
-   * --------------------------------------------------------------------- */
-
-  /**
-   * Parks the agent's question and hands it to whoever shows up.
-   *
-   * The twin of {@link resolvePermission}, deliberately beside it and
-   * deliberately not merged with it. `PendingRecord.resolve` takes a
-   * `RequestPermissionResponse` and this takes a `CreateElicitationResponse`, so
-   * one map would mean a union — and then `answerPermission` could reach a
-   * question and `chooseOption` could be handed a form, which are the two
-   * failures keeping them apart makes unsayable.
-   *
-   * `refusalReason()` is reused verbatim: a question against a dead session is
-   * held by a map about to be dropped, and one raised outside a turn has no
-   * sweeper. Both arms are right here for the reasons they were right there.
-   */
+  /** Twin of resolvePermission, kept separate so a permission answer can never reach a question. */
   private readonly resolveElicitation = (
     request: PendingElicitation,
     signal: AbortSignal,
@@ -6649,20 +2395,12 @@ export class ManagedSession {
       elicitationId,
       toolCallId: request.toolCallId,
       message: request.message,
-      // The form is *not* here. It is agent-shaped and this record rides
-      // `SessionSnapshot`, which `GET /sessions` returns for sixty sessions every
-      // four seconds — and unlike a permission, a question cannot be answered
-      // from the list anyway, so the snapshot only has to say one is waiting.
-      // `GET /sessions/:id/elicitations/:id` serves the fields, the same shape a
-      // command list already has.
+      // The form is left out: snapshots are listed often, and the elicitation route serves it.
       fieldCount: request.form.fields.length,
       raisedAt: Date.now(),
     };
 
-    // Exactly one statement in the executor, for the reason `resolvePermission`
-    // gives: a throw here rejects the promise, answering the agent with an error
-    // while leaving the entry in the map, so the session advertises `blocked` for
-    // ever on something already refused.
+    // One statement in the executor, as in resolvePermission.
     let resolve!: (response: acp.CreateElicitationResponse) => void;
     const parked = new Promise<acp.CreateElicitationResponse>((capture) => {
       resolve = capture;
@@ -6694,8 +2432,6 @@ export class ManagedSession {
     request: PendingElicitation,
     by: AnswerResolvedBy,
   ): acp.CreateElicitationResponse {
-    // Recorded rather than hidden, for the reason `recordRefusal` is: a refused
-    // request that leaves no trace looks exactly like one that was never raised.
     const elicitationId = this.mintElicitationId();
     this.safeAppend({
       type: "elicitation_request",
@@ -6726,8 +2462,7 @@ export class ManagedSession {
     if (!record) {
       const prior = this.resolvedElicitations.get(elicitationId);
       if (prior) return { kind: "already_answered", elicitationId, ...prior };
-      // "Too old to report" must never come back as "never existed" — the same
-      // rule the permission route follows, through the same `looksLikeOurs`.
+      // Too old to report must never come back as never existed.
       return this.looksLikeOurs("elic", elicitationId)
         ? { kind: "expired", elicitationId }
         : { kind: "not_found" };
@@ -6755,26 +2490,11 @@ export class ManagedSession {
       elicitationId,
       action: settled.action,
       seq: settled.seq,
-      // "Recorded", not "the agent continued" — the same honesty the permission
-      // route carries, for the same reason.
       delivered: this.session !== null && !this.terminal ? "sent" : "agent_gone",
     };
   }
 
-  /**
-   * The only place a question leaves `pendingElicitations`.
-   *
-   * Statement order is {@link settle}'s, word for word, and load-bearing for the
-   * same two reasons: the delete is the compare-and-swap that makes two
-   * simultaneous answers resolve to exactly one winner, and the agent is
-   * unblocked *before* anything is logged so that a throw while appending cannot
-   * leave a question recorded as answered whose RPC is never responded to.
-   *
-   * The one thing that differs is the cost of getting it wrong. A hung permission
-   * is invisible. `canUseTool` runs `ensureToolCallEmitted` *before* it asks, so a
-   * hung question leaves an open tool call with a question under it that will
-   * never be answered — on screen, in a transcript somebody is reading.
-   */
+  /** The only exit from pendingElicitations; same ordering as settle. */
   private settleElicitation(
     elicitationId: string,
     response: acp.CreateElicitationResponse,
@@ -6803,9 +2523,7 @@ export class ManagedSession {
         toolCallId: record.info.toolCallId,
         message: record.info.message,
         action,
-        // Clipped for the log alone. What reached the agent above is verbatim,
-        // because a shortened answer is a wrong answer; this copy is a rendering
-        // and `clip` leaves its own marker saying so.
+        // Clipped for the log only; the agent got the answer verbatim.
         answers:
           action === "accept" && answers !== null
             ? answers.map((entry) => ({
@@ -6832,24 +2550,14 @@ export class ManagedSession {
     return `elic-${this.askSeq}-${this.askSalt}`;
   }
 
-  /**
-   * Whether an id we no longer hold is one this session's *this life* minted.
-   *
-   * Takes the prefix rather than owning one, because two kinds of parked question
-   * are minted from one counter and "too old to report" must never come back as
-   * "never existed" for either of them. One rule, two callers — a second copy
-   * with `elic-` substituted is how the two would come to disagree about the
-   * salt's shape or about whether the bound is inclusive.
-   */
+  /** One check for both id kinds, so an expired id never reads as one that never existed. */
   private looksLikeOurs(prefix: "perm" | "elic", id: string): boolean {
     const match = new RegExp(`^${prefix}-(\\d+)-([0-9a-f]{3})$`).exec(id);
     if (!match) return false;
     return match[2] === this.askSalt && Number(match[1]) <= this.askSeq;
   }
 
-  /* --------------------------------------------------------------------- *
-   * Fan-out helpers. Nothing in here may throw into a caller.
-   * --------------------------------------------------------------------- */
+  // Nothing below may throw into a caller.
 
   private safeAppend(event: SessionEvent): StoredEvent | null {
     try {
@@ -6868,16 +2576,7 @@ export class ManagedSession {
       return;
     }
 
-    // Persisted before the fan-out, so a snapshot a client is holding is already
-    // on disk. In its own guard for the same reason the watcher loop has one: a
-    // store fault must not cost the watchers their frame, and a watcher throwing
-    // must not cost the row its write.
-    //
-    // This is the hook rather than a registered watcher because `watch()` evicts
-    // a watcher that throws — one transient DB error would permanently and
-    // silently unregister persistence for this session. It is also the only place
-    // that can see turnCounter, askSeq and askSalt, none of which are on the
-    // snapshot.
+    // Persisted before the fan-out, in its own guard; a hook, not a watcher, since a throwing watcher is evicted.
     try {
       this.sessionStore?.put(this.persistedRow(snapshot));
     } catch {
@@ -6908,9 +2607,7 @@ export class ManagedSession {
       lastEventAt: this.lastEventAt,
       askSeq: this.askSeq,
       askSalt: this.askSalt,
-      // Only the verdict that outlives us. Writing `attempts_exhausted` here
-      // would quietly turn the transient case into the permanent one and undo
-      // the whole "a restart is new information" argument.
+      // Only a give-up that persists; attempts_exhausted must stay transient.
       resumeGaveUp:
         this.resumeGivenUp !== null && resumeGiveUpPersists(this.resumeGivenUp)
           ? this.resumeGivenUp
@@ -6920,36 +2617,9 @@ export class ManagedSession {
       title: snapshot.title,
       pinned: snapshot.pinned,
       rank: snapshot.rank,
-      // The *choice*, never `ultracodeWanted`. Folding the machine's default in
-      // here would write it into the row on the next unrelated touch, and this
-      // session would then be pinned to today's setting for ever — which is
-      // exactly the state the column is nullable to avoid.
+      // The choice, never ultracodeWanted, or the machine default would be pinned into the row.
       ultracode: this.ultracodeChoice,
-      /*
-       * What the agent was offering, for a session a message would bring back.
-       *
-       * ⚠ **The same gate `doStop` clears on, asked over the exit rather than over
-       * the reason — one predicate, two callers, so the column can only ever hold
-       * state for a session that is coming back.** A row this answers `false` for
-       * has already had `agentConfigState` emptied by `doStop`, so following the
-       * gate rather than the emptiness is belt and braces; what it actually buys is
-       * `stop()`'s relabel branch, which rewrites `parked` → `stopped` *without*
-       * running `doStop` at all. Both of those are revivable, so the memory is
-       * right to survive the relabel — and a gate keyed on the word `parked` would
-       * have dropped it there for no reason anybody could see.
-       *
-       * `null` while an agent is live, and **that is not a gap a crash reopens.**
-       * The reasons this column exists for are the ones the boot pass refuses —
-       * `parked`, `stopped`, `agent_exited`, `agent_signed_out` — and every one of
-       * them is written by a `doStop` or by `stop()`'s relabel, with this daemon
-       * alive and `touchSafe` running. The reasons a `SIGKILL` leaves behind are
-       * `daemon_shutdown`/`daemon_restarted`, which `autoResumable` resumes at boot
-       * **by itself**: those sessions get a live agent and republish, so a memory
-       * would have been overwritten before anybody looked at it. Writing this on
-       * every touch of every live session would put up to `MAX_AGENT_STATE_BYTES`
-       * through `put`'s dirty-check key on the agent's own state-change path, to
-       * buy a state that cannot be observed.
-       */
+      // Only for a session a prompt would revive, the gate doStop clears on; null while live.
       agentState:
         snapshot.exit !== null &&
         revivableByPrompt(snapshot.exit.reason, snapshot.agentSessionId)
@@ -6959,66 +2629,18 @@ export class ManagedSession {
   }
 }
 
-/**
- * Every session the daemon owns.
- *
- * Terminal sessions stay listed — a client that was disconnected while a session
- * ended still needs to be able to find out why.
- */
 export interface CreateSessionOptions {
   agent: AgentId;
-  /**
-   * The assembled agent this session is being started as, or `null`/omitted for
-   * a bare harness.
-   *
-   * ⚠ **An id, and `agent` beside it is still the harness.** The two are not
-   * alternatives and the route does not choose between them: it resolves the row
-   * and fills in `agent` from what the row names, so they agree **at creation**.
-   *
-   * ⚠ **They can come apart afterwards, and this comment used to deny it.**
-   * `PATCH /custom-agents/:id` accepts a change of `harness`, so the preset a
-   * live session names can be re-pointed at another CLI while `agent` stays
-   * what it was — a conversation cannot change vendor underneath itself.
-   * `ManagedSession.assembled` is where that is caught, and it degrades to the
-   * bare harness rather than launching a triple nobody chose.
-   *
-   * Everything downstream of here — the worktree, the launch, the
-   * restart, the sign-out sweep — reads `agent` and has no idea this exists.
-   */
+  /** The assembled agent's id; agent is still the harness, and ManagedSession.assembled handles the two diverging. */
   customAgent?: string | null;
   cwd: string;
   /** Omitted, the daemon-wide default applies. */
   worktree?: WorktreePolicy;
   /** Client-supplied branch name. Validated by git before use. */
   branch?: string | null;
-  /**
-   * Who asked for this session, when it was not a person.
-   *
-   * ⚠ **An argument to *this act*, carried to the observers and kept nowhere.**
-   * It is not stored on the session, not on the snapshot, not persisted and not
-   * on the wire: a session a plugin opened is not that plugin's for ever, and a
-   * field that outlived the announcement would become exactly that.
-   *
-   * Here rather than in `src/plugins/` because the announcement it is for happens
-   * **inside** this function — `announce(managed, "created")` runs before `create`
-   * resolves, so there is no moment after the `await` at which the caller could
-   * stamp it. This file knows nothing about plugins and this string is opaque to
-   * it; `PluginHost` is what reads it.
-   *
-   * ⚠ **Never from a request body.** `POST /sessions` builds these options field
-   * by field and does not spread the body — a client able to name its own origin
-   * could switch off another plugin's hooks.
-   */
+  /** Who asked, when not a person: passed to observers, never stored, and never read from a request body. */
   origin?: string | null;
-  /**
-   * Where this session's worktree goes, overriding the daemon-wide policy.
-   *
-   * The daemon-wide `workspacePolicy.worktreeRoot` is the answer in production;
-   * this exists because the offline drivers point it at a temp directory. It used
-   * to be justified per-tenant, so that a worktree landed inside that person's
-   * bind mount rather than under the daemon's own home — there is one filesystem
-   * and one person now, so what is left is the override and nothing more.
-   */
+  /** Overrides the daemon-wide worktree root; the offline drivers use it. */
   worktreeRoot?: string;
 }
 
@@ -7069,11 +2691,7 @@ export type AutoResumeResult =
   | "forgotten"
   | "failed"
   | "attempts_exhausted"
-  /**
-   * The harness has no CLI on this machine. Not an attempt and not a verdict —
-   * see `ManagedSession.deferResume` — and the outcome `scripts/daemon.ts` reads
-   * as the cue to run the agent installer now rather than in five minutes.
-   */
+  /** No CLI for the harness here: not an attempt, and the daemon runs the installer on it. */
   | "agent_missing";
 
 export interface AutoResumeOutcome {
@@ -7092,95 +2710,32 @@ export interface AutoResumeReport {
   deferred: number;
 }
 
-/**
- * Somebody watching sessions appear on this daemon.
- *
- * `arrival` is what happened rather than what it looks like: a `restored` session
- * is one this daemon already had before it was last stopped, and an observer that
- * treats it as new writes a duplicate of everything it wrote last week. There is
- * no observer for a session *ending* — that is an event in the session's own log,
- * where an observer is already subscribed and where it is ordered against
- * everything else the session said.
- */
+/** restored means the daemon already had it; a session ending is an event in its own log. */
 export type SessionObserver = (
   managed: ManagedSession,
   arrival: "created" | "restored",
-  /**
-   * Who asked for it, when it was not a person — {@link CreateSessionOptions.origin}
-   * verbatim, and `null` for every restored session and every session a client
-   * created. Opaque here: this file does not know what the string names, and the
-   * one observer that does is the plugin host, which uses it to avoid handing a
-   * plugin the echo of its own write.
-   */
+  /** CreateSessionOptions.origin verbatim; null for restored and client-created sessions. */
   origin: string | null,
 ) => void;
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, ManagedSession>();
-  /**
-   * Who is told when a session appears. See {@link SessionRegistry.watchSessions}.
-   *
-   * A set rather than one callback because there is one observer today — the
-   * plugin host — and "one" is not a property worth building a type around.
-   */
   private readonly observers = new Set<SessionObserver>();
   private shuttingDown = false;
-  /**
-   * Whether the daemon may bring sessions back by itself, on both paths.
-   *
-   * Injected rather than read here: nothing in this file touches `process.env`,
-   * and `scripts/daemon.ts` owns that. One switch for the boot pass *and* the
-   * transparent resume on a prompt, because an operator who turned this off
-   * because boot spawns hurt does not want prompts spawning either.
-   */
+  /** One switch for the boot pass and the prompt-path resume; injected because this file reads no env. */
   private autoResumeAllowed = true;
-  /**
-   * Whether an agent on this daemon may ask a person a question.
-   *
-   * Injected the same way and for the same reason, but with a live consequence
-   * `autoResumeAllowed` does not have: declaring the capability re-enables
-   * claude's own `AskUserQuestion`, so turning this off withdraws a *tool* rather
-   * than a piece of UI. That is the whole justification for having a switch — on
-   * a machine nobody is watching, a session that used to finish now parks on a
-   * human until the turn is swept. The mirror of `REEMOAT_AUTO_RESUME=0`.
-   */
+  /** Off withdraws the agent's question tool, not only the UI. */
   private elicitationAllowed = true;
 
-  /**
-   * How an assembled agent's id is turned back into a system and a model.
-   *
-   * A switch rather than a constructor collaborator, for `elicitationAllowed`'s
-   * reason exactly: `restore()` runs before `daemon.ts` has opened anything, so
-   * a store handed in at construction would be absent for every session on the
-   * machine — which after a restart is all of them. Defaults to answering `null`,
-   * which every driver and `harness.ts` run with and which means "a bare
-   * harness".
-   */
+  /** A setter because restore runs before the store opens; the default means a bare harness. */
   private resolveCustomAgentBy: (
     id: string,
   ) => { harness: AgentId; system: SystemId; model: string } | null = () => null;
 
-  /**
-   * What a session nobody has decided about asks claude for.
-   *
-   * Off by default, because it is a real change to how the agent works and
-   * turning it on for somebody who did not ask is not this daemon's call. The
-   * machine that wants it says so once — see `REEMOAT_CLAUDE_ULTRACODE` — and any
-   * session can still overrule it from the effort menu, in either direction.
-   */
+  /** Ultracode for sessions that have not chosen; off unless the machine opts in. */
   private ultracodeByDefault = false;
 
-  /**
-   * What this machine offers beyond what this repository ships.
-   *
-   * ⚠ **A setter, and it must be called before `restore()` — the same rule as
-   * {@link SessionRegistry.setCustomAgents} and a stronger reason.** `restore()`
-   * rebuilds every persisted session, and `assembled` reads `custom_agents`
-   * through a validator that *drops* a row naming a harness this build cannot
-   * resolve. A session on a plugin's harness that came back before this was set
-   * would resume demoted to its bare harness, on a different vendor, with nothing
-   * on screen saying so.
-   */
+  /** Must be set before restore, or sessions on a plugin harness come back demoted to their bare harness. */
   private machine: MachineCatalogue = BUILTIN_CATALOGUE;
 
   /** See {@link machine}. Called by `daemon.ts` before `restore()`. */
@@ -7193,34 +2748,12 @@ export class SessionRegistry {
     return this.machine;
   }
 
-  /** See {@link MAX_LIVE_SESSIONS}; `daemon.ts` overrides all four. */
   private maxLiveSessions = MAX_LIVE_SESSIONS;
-  /**
-   * What the *configuration* asks for — the env file, or this file's default.
-   *
-   * Never the effective value on its own: {@link storedIdleParkMs} overrides it.
-   * Kept separate rather than overwritten so that clearing the setting on the
-   * screen gives the operator's number back rather than this file's.
-   */
+  /** The configured value; storedIdleParkMs overrides it, and clearing that setting returns to this. */
   private idleParkMs = IDLE_PARK_MS;
-  /**
-   * How long a turn may say nothing before this daemon stops waiting for it.
-   *
-   * ⚠ **Env only, and unlike {@link idleParkMs} there is no stored override.**
-   * The machine settings screen owns the park threshold because releasing an idle
-   * agent is a trade the person using the machine makes every day — memory
-   * against ~1.3 s. This is not that: it is a backstop against an adapter that has
-   * stopped answering, the honest value for it is a property of the agents rather
-   * than of the machine, and a number somebody can lower from a phone is a number
-   * that can cut live turns short. {@link TURN_SILENCE_MS} carries the argument.
-   */
+  /** Env only, with no stored override: a backstop for an adapter that stopped answering. See TURN_SILENCE_MS. */
   private turnSilenceMs = TURN_SILENCE_MS;
-  /**
-   * See {@link CEILING_PARK_FLOOR_MS}. Injectable for the reason
-   * `IDLE_PARK_SWEEP_MS` is: it is a policy about *when*, and a driver has to be
-   * able to fake it — the offline cases build a session and reach the ceiling in
-   * the same millisecond, which is precisely the shape the floor exists to refuse.
-   */
+  /** See CEILING_PARK_FLOOR_MS; injectable so drivers can fake it. */
   private ceilingParkFloorMs = CEILING_PARK_FLOOR_MS;
   /** What somebody set on the settings screen, or `null` if nobody has. */
   private storedIdleParkMs: number | null = null;
@@ -7234,55 +2767,20 @@ export class SessionRegistry {
     private readonly store: EventStore = new MemoryEventStore(),
     private readonly sessionStore: SessionStore | null = null,
     private readonly policy: WorkspacePolicy = DEFAULT_WORKSPACE_POLICY,
-    /**
-     * Where agents run. Defaults to a child process of this daemon, which is
-     * what the offline drivers and `harness.ts` drive.
-     */
     private readonly runtime: SessionRuntime = new LocalRuntime(),
-    /**
-     * Where files staged for a prompt live.
-     *
-     * Null in every driver and in `harness.ts`, which is the honest default: an
-     * upload store needs a directory on disk, and those run without one.
-     */
     private readonly uploads: UploadsPort | null = null,
-    /**
-     * Where a session reports a degradation nobody else can see.
-     *
-     * A constructor parameter beside the other collaborators rather than a
-     * setter beside `setAutoResume` and friends, because those three are
-     * *environment switches* read through a thunk at every launch, and this is a
-     * sink handed to a session when it is built. Defaults to nothing, which is
-     * the silence every driver and `harness.ts` already ran with; `scripts/` is
-     * what turns it into printed output. See {@link ManagedSessionOptions.onWarning}.
-     */
+    /** Where sessions report degradations; silent by default. */
     private readonly onWarning: ((detail: string) => void) | undefined = undefined,
   ) {}
 
-  /**
-   * Where assembled agents are read back from. See `resolveCustomAgentBy`.
-   *
-   * The harness rides along with the system and the model because a preset's
-   * harness is editable and a session's is not — `ManagedSession.assembled` is
-   * the one reader and it compares rather than uses it.
-   */
+  /** The harness rides along so ManagedSession.assembled can detect a preset re-pointed at another harness. */
   setCustomAgents(
     resolve: (id: string) => { harness: AgentId; system: SystemId; model: string } | null,
   ): void {
     this.resolveCustomAgentBy = resolve;
   }
 
-  /**
-   * Be told when a session appears, until the returned function is called.
-   *
-   * ⚠ **A throwing observer is reported and kept, never evicted**, which is the
-   * opposite of what `SessionLog.append` does to a throwing listener — and the
-   * difference is deliberate. There, a listener is one WebSocket and evicting it
-   * costs that socket its events; here, the observer is a whole subsystem, and
-   * dropping it on one bad frame would silently stop every plugin hook on the
-   * machine for the life of the daemon with nothing anywhere saying so. So the
-   * guard reports through `onWarning` and the observer stays.
-   */
+  /** A throwing observer is reported through onWarning and kept, never evicted. */
   watchSessions(observer: SessionObserver): () => void {
     this.observers.add(observer);
     return () => {
@@ -7332,26 +2830,12 @@ export class SessionRegistry {
     return this.ultracodeByDefault;
   }
 
-  /**
-   * What a session nobody has decided about asks claude for.
-   *
-   * Set from the environment by `daemon.ts`, like the two above, and read through
-   * a thunk at every launch rather than captured — `restore()` runs before this
-   * is called, so a captured value would be wrong for every session on the
-   * machine.
-   */
+  /** Read through a thunk at every launch, because restore runs before this is set. */
   setUltracode(enabled: boolean): void {
     this.ultracodeByDefault = enabled;
   }
 
-  /**
-   * The two creation bounds, from the environment.
-   *
-   * Injected like the three switches above, for the reason given there: nothing
-   * in this file reads `process.env`. Taken together rather than one setter each,
-   * because they are one policy — a live ceiling with no rate is a create-and-stop
-   * loop, and a rate with no ceiling is 200 agents at once.
-   */
+  /** The creation and parking bounds from the environment. */
   setSessionLimits(limits: {
     live?: number;
     burst?: number;
@@ -7361,89 +2845,39 @@ export class SessionRegistry {
     turnSilenceMs?: number;
   }): void {
     if (limits.live !== undefined) this.maxLiveSessions = Math.max(1, limits.live);
-    // Not clamped to a floor the way the others are: `0` is the documented way to
-    // switch parking off, and `Math.max(1, …)` would turn it into "park after 1ms".
+    // 0 switches parking off, so clamp at zero, not one.
     if (limits.idleParkMs !== undefined) this.idleParkMs = Math.max(0, limits.idleParkMs);
-    // `0` is meaningful here too — it is what the drivers use to reach the
-    // pre-floor behaviour deliberately — so this is clamped at zero, not at one.
+    // 0 is meaningful: drivers use it to disable the floor.
     if (limits.ceilingFloorMs !== undefined) this.ceilingParkFloorMs = Math.max(0, limits.ceilingFloorMs);
-    // `0` is the documented way off here too, for `idleParkMs`' reason and with
-    // the sharper consequence: clamping to a floor would turn a typo into a daemon
-    // that ends every turn the instant it starts.
+    // 0 switches it off; a floor would turn a typo into ending every turn at once.
     if (limits.turnSilenceMs !== undefined) this.turnSilenceMs = Math.max(0, limits.turnSilenceMs);
     if (limits.burst !== undefined) {
+      const previous = this.createBurst;
       this.createBurst = Math.max(1, limits.burst);
-      // Raising the burst must not leave the bucket below the new ceiling for a
-      // whole refill period; lowering it must not leave it above.
-      this.createTokens = Math.min(this.createTokens, this.createBurst);
+      // A raise adds its headroom at once rather than one refill at a time, and refunds nothing already spent; a lowering clamps.
+      this.createTokens = Math.min(this.createTokens + Math.max(0, this.createBurst - previous), this.createBurst);
     }
     if (limits.refillMs !== undefined) this.createRefillMs = Math.max(1, limits.refillMs);
   }
 
-  /**
-   * Sessions holding, or entitled to, an agent right now.
-   *
-   * **Counts processes rather than conversations, and since parking those are
-   * different things.** `terminal` is the test and it always was; what changed is
-   * that a quiet conversation now *becomes* terminal on its own, so this stopped
-   * being "how many sessions exist" and became what its name always claimed. A
-   * machine may hold hundreds of conversations and a handful of agents.
-   *
-   * A session mid-`doResume` counts from the moment `armForStart` clears its exit
-   * record, which is before its process exists — deliberately, and why
-   * `makeRoomForWake` runs above that line.
-   */
+  /** Sessions holding or entitled to an agent, not conversations. */
   get liveSessionCount(): number {
     let live = 0;
     for (const session of this.sessions.values()) if (!session.terminal) live += 1;
     return live;
   }
 
-  /**
-   * Whether this machine releases idle agents at all.
-   *
-   * The sweep asks this rather than re-reading the environment, so the threshold
-   * has exactly one home and `REEMOAT_IDLE_PARK_MINUTES=0` switches off both
-   * halves of the policy together — the sweep and the eviction a wake performs.
-   * Two switches for one decision is how they come to disagree.
-   */
+  /** The sweep and a wake's eviction both read this, so one setting switches both off. */
   get idleParkEnabled(): boolean {
     return this.effectiveIdleParkMs > 0;
   }
 
-  /**
-   * Whether this daemon gives up on turns the agent never answers.
-   *
-   * Its own switch rather than a clause on {@link idleParkEnabled}, because they
-   * are two policies that happen to share a clock. Somebody who has switched
-   * parking off has said *keep my agents resident*; they have not said *keep a
-   * session claiming to be working for ever*, and reading one answer for both
-   * questions is how a switch comes to mean something nobody chose.
-   */
+  /** Separate from idleParkEnabled: two policies that share a clock. */
   get turnSilenceEnabled(): boolean {
     return this.turnSilenceMs > 0;
   }
 
-  /**
-   * End every turn nothing has come out of for long enough, and say which.
-   *
-   * **Sequential and synchronous, unlike {@link parkIdleSessions}, and both halves
-   * of that follow from what this does.** Parking stops an agent — a
-   * `session/close`, a SIGTERM and a confirmed SIGKILL — so it has to be awaited
-   * and paced. This sends nothing anywhere: it pushes one event into a queue the
-   * turn's own generator is already parked on. There is no await to interleave
-   * with, so the list cannot go stale between building it and acting on it, which
-   * is the re-check that sweep needs and this one does not.
-   *
-   * ⚠ **`shuttingDown` is still a reason not to, for the reason parking has one.**
-   * A daemon on its way out is about to end every one of these anyway, and a
-   * `turn_end{abandoned}` written a moment before a `daemon_shutdown` would put a
-   * second, misleading ending in a transcript somebody reads later.
-   *
-   * Reports ids rather than a count, so the operator line names the sessions —
-   * this is the one thing about a wedged turn a person can act on, and "1 turn
-   * abandoned" is a sentence you cannot follow up.
-   */
+  /** Synchronous and unpaced, since it only queues an event; returns ids for the operator line. */
   abandonWedgedTurns(now = Date.now()): string[] {
     if (this.turnSilenceMs <= 0 || this.shuttingDown) return [];
     const abandoned: string[] = [];
@@ -7454,16 +2888,7 @@ export class SessionRegistry {
     return abandoned;
   }
 
-  /**
-   * What actually decides when an agent is let go.
-   *
-   * The stored value wins, and that ordering is the decision rather than an
-   * implementation detail: this is one person's trade between memory on their own
-   * machine and a ~1.3s wait, so the person using the machine outranks the env
-   * file that provisioned it. `REEMOAT_IDLE_PARK_MINUTES` is therefore the default
-   * for a machine nobody has set, and stops deciding once somebody has — there is
-   * no route back to it, because the way back is typing the number you want.
-   */
+  // The stored setting wins over the env default.
   private get effectiveIdleParkMs(): number {
     return this.storedIdleParkMs ?? this.idleParkMs;
   }
@@ -7474,15 +2899,7 @@ export class SessionRegistry {
     this.applyMachineSettings();
   }
 
-  /**
-   * Re-read the stored settings into the running daemon.
-   *
-   * Called at boot and again by `PATCH /settings`, so a change is in force before
-   * the route answers rather than at the next restart. An unreadable or out-of-range
-   * value is treated as absent — the same direction `boundedInt` falls for a bad env
-   * var, and for its reason: a setting nobody can parse must not become one nobody
-   * can undo.
-   */
+  /** Called at boot and by PATCH /settings; an unreadable or out-of-range value counts as absent. */
   applyMachineSettings(): void {
     const raw = this.settingsStore?.read("idleReleaseMinutes") ?? null;
     const minutes = raw === null ? Number.NaN : Number.parseInt(raw, 10);
@@ -7492,23 +2909,11 @@ export class SessionRegistry {
         : null;
   }
 
-  /** What the settings screen draws. */
   machineSettings(): MachineSettingsView {
     return { idleReleaseMinutes: Math.round(this.effectiveIdleParkMs / 60_000) };
   }
 
-  /**
-   * The sessions quiet enough to release, least recently active first.
-   *
-   * One ordering for both callers, which is the point of having it here: the
-   * sweep takes everything in this list and a wake takes its head, so "which
-   * session goes first" is answered once. Least-recently-active is the only
-   * defensible order — it is the same key `autoResumePass` sorts by, inverted,
-   * and the same one the prune ranks by.
-   *
-   * `now` is passed in rather than read so that a driver, and the sweep's own
-   * injected clock, see the instant the decision was actually made.
-   */
+  /** Least recently active first; the sweep takes all of them, a wake takes the head. */
   private parkCandidates(now: number, idleMs: number): ManagedSession[] {
     const ready: ManagedSession[] = [];
     for (const session of this.sessions.values()) {
@@ -7519,20 +2924,7 @@ export class SessionRegistry {
     );
   }
 
-  /**
-   * Let go of the agents nobody has used, and say which.
-   *
-   * Sequential rather than `Promise.all`, and that is the measurement rather than
-   * caution: stopping an agent is a `session/close`, then SIGTERM, then a
-   * confirmed SIGKILL of a process group, and doing several at once on a machine
-   * whose whole problem is memory pressure is how a park storm becomes a stall.
-   * There is no deadline on the sweep — nothing is waiting for it.
-   *
-   * The list is re-checked per session rather than taken once, because parking is
-   * `await`ed: a session that was idle when the list was built may have taken a
-   * prompt by the time its turn comes, and parking it then would be exactly the
-   * "the agent must never notice a client leaving" failure.
-   */
+  /** Sequential to avoid a park storm under memory pressure; re-checks each session because parking awaits. */
   async parkIdleSessions(now = Date.now()): Promise<string[]> {
     if (this.effectiveIdleParkMs <= 0 || this.shuttingDown) return [];
     const parked: string[] = [];
@@ -7545,56 +2937,9 @@ export class SessionRegistry {
     return parked;
   }
 
-  /**
-   * Free one slot at the ceiling, and say whether it worked.
-   *
-   * ⚠ **The threshold does not apply here, and that is the correction this
-   * function carries.** It measured candidates against the full
-   * `REEMOAT_IDLE_PARK_MINUTES`, on the argument that a machine with nothing idle
-   * for half an hour is genuinely that busy and stealing a warm agent from a
-   * session used two minutes ago wins nobody anything. That was wrong about who is
-   * asking. **The sweep releases by age — nobody asked. A ceiling releases by
-   * need — somebody is asking for capacity right now**, and the thing being taken
-   * is an agent sitting idle. Releasing it is lossless: the conversation, the
-   * worktree and the branch all stay, and coming back costs ~1.3s.
-   *
-   * The old rule also made the daemon's own advice worse than what it could do
-   * itself. `create`'s refusal says *"stop one before starting another"* — and a
-   * stop is **terminal**: it ends the conversation and files it under Ended. The
-   * daemon was asking a person to do destructively, by hand, the thing it could do
-   * losslessly and automatically one line earlier.
-   *
-   * What is still refused is what must be: `parkCandidates` takes only sessions
-   * whose derived status is exactly `idle`, so a turn in flight, an unanswered
-   * permission and an unanswered question are all untouchable at any ceiling. And
-   * `effectiveIdleParkMs <= 0` means somebody switched releasing off — a machine
-   * whose owner said "never shut down an idle agent" gets a refusal rather than
-   * having one taken anyway.
-   *
-   * One slot, never more: the act about to happen occupies exactly one, and taking
-   * more would be releasing agents nobody asked about — which is the sweep's job
-   * and the sweep's threshold.
-   */
+  /** Parks the oldest idle session past the ceiling floor, not the idle threshold, unless parking is off; frees one slot only. */
   private async releaseOneSlot(): Promise<boolean> {
-    /*
-     * ⚠ **Room first, and the order is the whole correctness of this function.**
-     *
-     * These two lines used to be the other way round, so a machine with releasing
-     * switched off answered `false` here at *every* call — and `create` reads that
-     * as "no slot", so every session creation on such a machine was refused with
-     * `429 too_many_sessions` at zero live sessions out of sixty-four, under a
-     * sentence insisting every one of them was busy. `REEMOAT_IDLE_PARK_MINUTES=0`
-     * is the documented off switch and `PATCH /settings` offers the same `0`, so
-     * the state was one field away and reachable by anybody holding
-     * `session:write`. Nothing caught it: no driver combined `idleParkMs: 0` with
-     * a `create`, which is the gap the case in `daemoncheck.restart-and-resume.ts`
-     * now closes.
-     *
-     * The refusal that switch is *for* is the one below — at the ceiling, with an
-     * idle agent that could be taken, on a machine whose owner said never take
-     * one. That is a decision about eviction, and it may only be asked once there
-     * is something to evict.
-     */
+    // Room first: with parking off, a machine under the ceiling must still create.
     if (this.liveSessionCount < this.maxLiveSessions) return true;
     if (this.effectiveIdleParkMs <= 0) return false;
     const [oldest] = this.parkCandidates(Date.now(), this.ceilingParkFloorMs);
@@ -7603,72 +2948,22 @@ export class SessionRegistry {
     return true;
   }
 
-  /**
-   * Whether {@link releaseOneSlot} would succeed, without taking anything.
-   *
-   * ⚠ **Exists so the ceiling can be weighed before the rate limiter while the
-   * *eviction* happens after it.** `create` used to `await releaseOneSlot()` first
-   * and consult the bucket second, so a request that was about to be refused `429
-   * session_rate_limited` had already parked somebody else's agent — and since
-   * `stop()` sets `stopRequested` synchronously, N concurrent creates each took a
-   * different victim. The eviction rate was therefore unbounded while the creation
-   * rate was 16 then one per two minutes: at the ceiling a loop parked every idle
-   * agent on the machine while creating almost nothing, and `POST
-   * /sessions/:id/resume` has no limiter at all to do it through instead.
-   *
-   * The same three tests as `releaseOneSlot`, in the same order and for the same
-   * reasons — the off switch is still consulted only once there is something to
-   * evict, which is the correction that function's own docblock records.
-   */
+  /** Same tests as releaseOneSlot without evicting, so create checks the rate limit before evicting anyone. */
   private canReleaseOneSlot(): boolean {
     if (this.liveSessionCount < this.maxLiveSessions) return true;
     if (this.effectiveIdleParkMs <= 0) return false;
     return this.parkCandidates(Date.now(), this.ceilingParkFloorMs).length > 0;
   }
 
-  /**
-   * Free a slot for a session about to wake — and never refuse one.
-   *
-   * The asymmetry with `create` is the whole of this function. A wake is somebody
-   * typing into a conversation they already have, so being told it is unavailable
-   * because the machine is busy is worse than briefly holding one agent over a
-   * soft ceiling. A create is new load, and the ceiling has to be able to say no
-   * to it or it bounds nothing — which on a provisioned host matters more than it
-   * looks: agents share the daemon's own cgroup, so a bounded session count is the
-   * only *preventive* mitigation there, the other three being swap, earlyoom and
-   * an OOM policy, all of them damage limitation.
-   */
+  /** Never refuses a wake: going over a soft ceiling beats telling someone their conversation is unavailable. */
   private async makeRoomForWake(): Promise<void> {
-    /*
-     * ⚠ **The wake is never refused; the *eviction* is metered.** Those are two
-     * different acts and only the second one reaches somebody else's session.
-     *
-     * `POST /sessions/:id/resume` carries no rate limiter of its own, and every
-     * non-quiet resume lands here — so without this a `session:write` holder could
-     * loop wake-and-evict and keep every idle agent on a shared machine
-     * permanently cold, one confirmed SIGKILL and one ~400 MB respawn per request.
-     * Spending a creation token bounds that at the burst and then one per refill,
-     * which is the same bound the same bucket already puts on spawning agents — and
-     * it is the same resource, so sharing it is the honest accounting rather than a
-     * second mechanism.
-     *
-     * With no token the wake **proceeds anyway**, one agent over a soft ceiling,
-     * which is exactly the asymmetry this function exists for: somebody typing
-     * into a conversation they already have is never told the machine is busy.
-     */
+    // Eviction spends a creation token so wake loops are rate-bounded; with none the wake proceeds over the ceiling.
     if (this.liveSessionCount < this.maxLiveSessions) return;
     if (this.takeCreateSlot(Date.now()) > 0) return;
     await this.releaseOneSlot();
   }
 
-  /**
-   * Spend one creation slot, or say how long until there is one.
-   *
-   * A plain token bucket, refilled by elapsed time rather than by a timer: a
-   * timer on a daemon that may be idle for days is a wakeup nobody needs, and the
-   * arithmetic is the same. `createTokensAt` advances by whole refills only, so a
-   * bucket already at its ceiling cannot bank credit for a burst later.
-   */
+  /** Token bucket refilled by elapsed time; returns 0, or the seconds to wait. */
   private takeCreateSlot(now: number): number {
     const elapsed = now - this.createTokensAt;
     const gained = Math.floor(elapsed / this.createRefillMs);
@@ -7684,114 +2979,27 @@ export class SessionRegistry {
     return 0;
   }
 
-  /**
-   * Bring a session back because somebody is about to talk to it, if it needs it.
-   *
-   * ⚠ **On the registry rather than at the one call site, because there are two
-   * and only one of them had it.** `POST /sessions/:id/prompt` grew this block
-   * when parking landed; `sessions.prompt` on the plugin API calls
-   * `ManagedSession.prompt` directly, and that method's first line refuses a
-   * terminal session — so a plugin could not talk to any conversation the daemon
-   * had released, and could not wake it either, there being no `sessions.resume`
-   * in the method table. Parking was swept through the plugin *hook* fan and not
-   * through the plugin *API*, which is the fifth surface `CLAUDE.md` warns is
-   * checked by neither the compiler nor a driver.
-   *
-   * A no-op for a live session, so both callers may simply await it first.
-   *
-   * **`parked` is outside the auto-resume switch, and has to be.**
-   * `REEMOAT_AUTO_RESUME=0` says "do not put agents back on your own" — it is
-   * about the boot pass deciding for somebody. Parking is not a spawn the operator
-   * declined; it is one *this daemon performed*, on by default, and a message is
-   * the only documented way back. Gated together, a machine with auto-resume off
-   * parked every conversation after half an hour and then answered `409
-   * session_terminal` to the message that was supposed to wake it — with
-   * `SessionMenu` deliberately drawing no Resume for a parked session,
-   * `sessionNotice` deliberately saying nothing, and `autoResumeEnabled` on no
-   * wire the client could read. The conversation was reachable only through
-   * `pnpm client resume`, and nothing on the phone said so.
-   *
-   * So the switch keeps its meaning for every other reason and stops deciding for
-   * the one the daemon caused itself.
-   */
+  /** Wakes a terminal session before a prompt, parked ones even with auto-resume off; used by the route and the plugin API. */
   async wakeForPrompt(managed: ManagedSession): Promise<void> {
     if (
       managed.terminal &&
       (this.autoResumeEnabled || managed.exit?.reason === "parked") &&
-      // The same gate the boot pass uses: an agent that has told us it no longer
-      // holds this conversation will say it again, and spawning one per typed
-      // message to hear it is worse than answering from what we already know.
+      // Same gate as the boot pass: an agent that forgot this conversation will say so again.
       !managed.resumeSettled &&
       autoResumable(managed.exit, managed.agentSessionId, "prompt")
     ) {
       try {
         await managed.resume();
       } catch {
-        // Swallowed on purpose — `managed.resume()` restores the original exit, so
-        // the caller's own arm still reports how the session actually ended rather
-        // than how this attempt to revive it did.
+        // Swallowed: resume restores the original exit, so the caller reports how the session really ended.
       }
     }
   }
 
   async create(options: CreateSessionOptions): Promise<ManagedSession> {
-    /*
-     * **Settled before anything is touched**, which is the whole point of doing
-     * this first: `resolveCwd` below reaches the filesystem, and a path on a
-     * stalled network mount costs a bounded probe *and* a threadpool slot. A
-     * request that is going to be refused anyway must not spend either.
-     *
-     * ⚠ It no longer only *refuses* here — it makes room first, and can therefore
-     * change state on the way through, which the old wording relied on it not
-     * doing. What that wording was protecting is intact for the reason it gave:
-     * the live cap is still weighed before the rate, so a caller sitting against a
-     * genuinely full daemon does not also drain the burst it will need when a slot
-     * frees, and the two refusals never mask each other — they have different
-     * remedies, and both of those changed: one is now "wait for one to finish",
-     * the other is still "wait for the bucket".
-     */
-    /*
-     * ⚠ **Make room before refusing, which is the whole of what the ceiling now
-     * means.**
-     *
-     * It used to refuse outright, and the sentence it refused with told a person
-     * to *stop* one of their conversations — which ends it, files it under Ended
-     * and is the one destructive thing on that screen. Meanwhile the machine was
-     * very often holding six agents that had done nothing for five minutes: quiet
-     * enough to release losslessly, not yet quiet enough for the sweep's
-     * half-hour. So the daemon asked somebody to destroy work by hand rather than
-     * do the cheap thing itself, for up to thirty minutes at a stretch. That is
-     * the complaint recorded in Q2.223, and the number was never its cause.
-     *
-     * Awaited before the count is read again: `releaseOneSlot` answers `false`
-     * only when there was genuinely nothing to take — every live session mid-turn,
-     * blocked on a person, or releasing switched off entirely — and that is the
-     * one case where a refusal is the honest answer.
-     */
+    // Capacity is weighed before touching the filesystem, and the ceiling before the rate, so the refusals never mask each other.
+    // Make room before refusing: releasing an idle agent is lossless (Q2.223).
     if (!this.canReleaseOneSlot()) {
-      /*
-       * ⚠ **It says the *limit*, and it used to say it as if it were the count.**
-       * "this machine already has 6 live sessions" interpolated `maxLiveSessions`,
-       * which is only the number of live sessions at the exact boundary — and
-       * **resume is deliberately outside this bound**, so a restart that brings
-       * eight conversations back leaves a daemon truthfully holding eight while
-       * this sentence insists on six. Reported by the owner, who read it as the
-       * daemon miscounting.
-       *
-       * And it names the setting, because this refusal is the only place in the
-       * whole product the number appears: `maxLiveSessions` is on no route and in
-       * no snapshot, so somebody hitting it had nothing to search for. On a
-       * provisioned machine it was written once into `~/.reemoat/daemon.env` and
-       * never mentioned again.
-       */
-      /*
-       * And the remedy changed with the cause. "Stop one before starting another"
-       * was the only way out while the ceiling refused on sight; now the daemon
-       * has already tried to make room, so reaching this line means every live
-       * session is *working* — mid-turn or waiting on an answer. Stopping one is
-       * still available and still destructive; waiting is the new and better
-       * remedy, so it is named first.
-       */
       throw new SessionLimitError(
         "too_many_sessions",
         0,
@@ -7806,23 +3014,7 @@ export class SessionRegistry {
         `too many sessions created recently; try again in ${wait}s`,
       );
     }
-    /*
-     * ⚠ **Nobody else's agent is taken until this request has paid for a slot,
-     * and that ordering is the bound on eviction.**
-     *
-     * The ceiling was weighed above with `canReleaseOneSlot`, which takes
-     * nothing, so the two refusals still never mask each other and a caller
-     * against a genuinely full daemon does not drain the burst it will need when
-     * a slot frees — the property the paragraph up there has always claimed.
-     * What has moved is the *act*: the park now happens below the bucket, so the
-     * rate that bounds creations bounds evictions with it.
-     *
-     * Answering `false` here is a lost race rather than the ordinary refusal —
-     * the candidate we weighed took a prompt in between — and it is honest to
-     * report it as the ceiling, because that is what it is. The token is spent
-     * either way, which is the right direction: the cost of the attempt falls on
-     * the caller that made it rather than on the sessions it would have taken.
-     */
+    // Evict only after paying for a slot, so the creation rate also bounds evictions; false here is a lost race.
     if (!(await this.releaseOneSlot())) {
       throw new SessionLimitError(
         "too_many_sessions",
@@ -7831,29 +3023,11 @@ export class SessionRegistry {
       );
     }
 
-    // Both throw before anything is spawned or recorded: a bad cwd or a missing
-    // agent should be a clean 4xx, not a baffling failure from inside the agent.
+    // Both throw before anything is spawned or recorded, so a bad cwd or agent is a clean 4xx.
     const cwd = await resolveCwd(options.cwd);
-    // Through the runtime, not `resolveAgent` directly: a container's agents are
-    // in the container, and probing this host's filesystem for them would answer
-    // a question about the wrong machine.
     this.runtime.describe(options.agent);
 
-    // And then actually *asked*, which `describe` alone does not do.
-    //
-    // `describe` is a table lookup in the container runtime — it only throws for
-    // an id the route has already rejected as `invalid_agent` — so the fail-fast
-    // the comment above promises had quietly stopped happening. The common case
-    // it exists for is a tenant who has not run `claude auth login`, or an image
-    // without that binary: the order became create-the-worktree, create-the-
-    // branch, register-the-session, *then* fail, and `create` deliberately
-    // leaves the worktree behind on failure. Nothing ever collected those, so
-    // every retry of a failing start was permanent growth inside the tenant's
-    // own tree plus a branch left in their repository.
-    //
-    // This also settles the start budget. `availability` readies the container,
-    // so `START_TIMEOUT_MS` below covers only the ACP handshake rather than
-    // racing a 120s image pull it could never win.
+    // Checked before the worktree exists: create leaves it behind on failure.
     const availability = await this.runtime.availability();
     const agentState = availability.find((entry) => entry.id === options.agent);
     if (agentState && !agentState.available) {
@@ -7862,49 +3036,11 @@ export class SessionRegistry {
       );
     }
 
-    /*
-     * **And the same fence for a harness that refused to open a session.**
-     *
-     * ⚠ **This is the paragraph directly above, applied to the axis it did not
-     * cover.** That one moved the *installed* check ahead of `createWorkspace`
-     * because "every retry of a failing start was permanent growth inside the
-     * tenant's own tree plus a branch left in their repository". A harness that
-     * answers `session/new` with `auth_required` reaches that same outcome by the
-     * other door, and it is the commoner one: the refusal happens *after* the
-     * spawn, so the worktree, the branch and the session row are all made before
-     * anything knows. Reported with a screenshot — a harness a plugin added,
-     * pressed four times.
-     *
-     * ⚠ **Bare and native starts, and a routed one only once routing has itself
-     * been refused.** `routed` is the fact `applySystem` answers: a refusal
-     * measured on a routed pairing has already survived `providers/set` and
-     * condemns every way of starting this harness, while one measured bare says
-     * nothing about a start that runs on somebody else's key. A signed-out Claude
-     * Code paired with OpenRouter is the case this repository documents as
-     * working, and a fence that read one bare refusal as a fact about every start
-     * would have broken it.
-     *
-     * ⚠ **`customAgent == null` is *not* the whole test, and reading it as one is
-     * the mistake this paragraph made for a draft.** A **native** pairing carries a
-     * system and configures nothing: `applySystem` returns at
-     * `spec.nativeHarness === options.agent`, before `providers/set` and before any
-     * key is looked up, so the session runs on the harness's own credential exactly
-     * as a bare start does — which makes a bare refusal precisely as dispositive.
-     * Left to the preset arm alone, the one press that had just been refused was
-     * the one press this fence never caught, and every repeat cost a worktree, a
-     * branch and a session row again. `nativeHere` is that third case, resolved
-     * through the two accessors this class already holds.
-     *
-     * A bare `Error` and not a typed class, deliberately: it lands on the same
-     * `/authentication required/i` arm in `server.ts` the *first* press landed on,
-     * so the second answers the same code with the same body — one reason, drawn
-     * once, whether or not it cost a worktree.
-     */
+    // Fail fast on a recorded auth refusal before creating anything, for bare, native or routed-refused starts; a bare refusal says nothing about a routed start.
     const refusal = agentState?.lastStartRefusal ?? null;
     if (refusal !== null) {
       const preset = options.customAgent == null ? null : this.resolveCustomAgentBy(options.customAgent);
-      // A preset this daemon cannot resolve names no system, so it starts bare —
-      // the same reading `assembled` takes one table over, and the safe one here.
+      // An unresolvable preset starts bare, as assembled reads it.
       const nativeHere =
         preset !== null && this.machine.system(preset.system)?.nativeHarness === options.agent;
       if (refusal.routed || options.customAgent == null || nativeHere) {
@@ -7925,9 +3061,7 @@ export class SessionRegistry {
       worktreeRoot: options.worktreeRoot ?? this.policy.worktreeRoot,
       branchPrefix: this.policy.branchPrefix,
       branchHint: options.branch ?? null,
-      // `worktree add` performs a checkout, so it runs whatever the repository's
-      // own hooks and filters say. That is the intended behaviour now — they are
-      // this user's hooks, in this user's repository.
+      // Runs the repository's own hooks and filters, as this user.
       runner: this.runtime.git(),
     });
 
@@ -7945,36 +3079,17 @@ export class SessionRegistry {
       onWarning: this.onWarning,
     });
     this.sessions.set(id, managed);
-    // Before start(), so it precedes `status: starting` and a since=0 attach sees
-    // where the session lives before it sees anything the agent said.
+    // Before start, so an attach from zero sees the workspace before the agent's output.
     managed.recordWorkspace(warnings);
-    // After the workspace is recorded and before the agent is launched, so an
-    // observer subscribing to this session's log is attached before the first
-    // thing the agent says — the same ordering `recordWorkspace` is placed for.
-    //
-    // The origin travels with the announcement and is kept nowhere. This is the
-    // ordering that forces that: this line runs before `create` resolves, so a
-    // caller holding the returned session is already too late to stamp it.
+    // Announced before launch so observers attach before the agent's first event; origin is kept nowhere.
     this.announce(managed, "created", options.origin ?? null);
 
-    // If this throws, the worktree is deliberately left in place. Tearing it down
-    // on an error path is how you eventually delete a directory you did not
-    // create, the day a bug makes `mode` wrong. The session stays listed and
-    // terminal, so the workspace is still reachable through its own route.
+    // On failure the worktree is deliberately kept; the session stays listed and terminal.
     await managed.start();
     return managed;
   }
 
-  /**
-   * Rebuilds every persisted session, without spawning anything.
-   *
-   * Must run before the server starts serving, and — because of the reaping
-   * below — only ever after the daemon lock has been claimed.
-   *
-   * A row that already carried an exit ended before the restart; it is left
-   * alone, since it has its own reason and its own final status event. Everything
-   * else was live when the daemon died, which means its agent died too.
-   */
+  /** Rebuilds persisted sessions without spawning; run after the daemon lock is held and before serving. */
   restore(options: RestoreOptions = {}): RestoreReport {
     if (!this.sessionStore) return { restored: 0, interrupted: 0, reaped: 0 };
     let interrupted = 0;
@@ -7982,19 +3097,12 @@ export class SessionRegistry {
 
     for (const row of this.sessionStore.list()) {
       if (this.sessions.has(row.id)) continue;
-      // Nothing to rebuild but the session itself: this used to reconstruct the
-      // tenant from the row's owner, and a row written before that column existed
-      // came back with none, so every restored session answered `resume` with a
-      // 502 it could not explain. There is no tenant now and no second thing to
-      // get wrong.
       const managed = ManagedSession.restore(row, this.store, {
         sessionStore: this.sessionStore,
         makeRoomForWake: () => this.makeRoomForWake(),
         runtime: this.runtime,
         uploads: this.uploads,
-        // A thunk, because `restore()` runs *before* `daemon.ts` reads the
-        // environment — a boolean captured here would be stale for every session
-        // on the machine.
+        // Thunks: restore runs before daemon.ts reads the environment.
         elicitationAllowed: () => this.elicitationAllowed,
         ultracodeDefault: () => this.ultracodeByDefault,
         resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
@@ -8002,22 +3110,13 @@ export class SessionRegistry {
         onWarning: this.onWarning,
       });
       this.sessions.set(row.id, managed);
-      // Announced for every restored row, terminal ones included: an observer
-      // rebuilding its own index after a restart needs the sessions that ended
-      // while the daemon was down as much as the ones that did not.
-      //
-      // `null`, and not because the origin was lost: a restart is not an act
-      // anybody performed, so there is nobody whose echo this would be.
+      // Every restored row is announced, with no origin: a restart is nobody's act.
       this.announce(managed, "restored", null);
       if (row.exit !== null) continue;
 
-      // The runtime owns the fence, because only it knows what makes a recorded
-      // handle stale — a host reboot for one, a container restart for the other.
       const orphan = this.runtime.reap(row.agentHandle, row.createdAt, options.reapOrphans ?? true);
       if (orphan.killed) reaped += 1;
-      // Appends `status: interrupted` at lastSeq + 1. That append is the whole
-      // demonstration: a client reconnecting with the cursor it last saw gets
-      // exactly one new event, and it explains the outage.
+      // One status event at lastSeq + 1 explains the outage to a reconnecting client.
       managed.markInterrupted(orphan.confirmedDead, orphan.detail);
       interrupted += 1;
     }
@@ -8025,34 +3124,9 @@ export class SessionRegistry {
     return { restored: this.sessions.size, interrupted, reaped };
   }
 
-  /**
-   * Puts an agent back on every session the daemon itself ended.
-   *
-   * Deliberately **not** part of `restore()`, which has to stay synchronous —
-   * the orphan reaping in there is fenced on running before anything serves.
-   * This is the async half, and `scripts/daemon.ts` starts it with `void` after
-   * the listener is up: `wait_healthy` polls `/health` for 30s during a deploy,
-   * and nothing on the boot path may sit behind N agent handshakes.
-   *
-   * Most-recently-active first, because the session somebody was mid-turn on
-   * when the deploy landed is the one they will open. `list()` stays oldest-first
-   * — that order is for display and this pass sorts its own copy.
-   *
-   * Two at a time. Each resume is a node subprocess with a `claude` grandchild
-   * under it, and eight of those starting together on a laptop right after a
-   * deploy is a real spike for no gain: two drains eight sessions in four
-   * handshakes, and nobody is reading more than one of them.
-   */
+  /** Resumes sessions the daemon ended, most recent first, two at a time; kept out of the synchronous restore so boot is not blocked. */
   async autoResume(options: AutoResumeOptions = {}): Promise<AutoResumeReport> {
-    /*
-     * ⚠ **One pass at a time, and a second caller waits for the first.** There
-     * were exactly one caller and one moment — boot — until the daemon started a
-     * pass after every completed agent update as well (Q4.114), and the first
-     * update can land while the boot pass is still waiting out a backoff. Two
-     * passes over one session would race `resume()` on it; queued instead, the
-     * second sees what the first left, and a session the first brought back is
-     * not in its queue at all.
-     */
+    // One pass at a time: a post-update pass queues behind the boot pass (Q4.114).
     const previous = this.resumePass ?? Promise.resolve();
     const run = previous.then(
       () => this.autoResumePass(options),
@@ -8068,7 +3142,6 @@ export class SessionRegistry {
   /** The pass in flight, so the next one queues behind it. */
   private resumePass: Promise<void> | null = null;
 
-  /** One pass, see {@link autoResume}. */
   private async autoResumePass(options: AutoResumeOptions): Promise<AutoResumeReport> {
     const report: AutoResumeReport = { considered: 0, resumed: 0, skipped: 0, failed: 0, deferred: 0 };
     if (!(options.enabled ?? this.autoResumeAllowed)) return report;
@@ -8086,26 +3159,14 @@ export class SessionRegistry {
       .sort((a, b) => (b.lastActivityAt ?? b.createdAt) - (a.lastActivityAt ?? a.createdAt));
     report.considered = queue.length;
 
-    /*
-     * One wasted spawn per agent binary is unavoidable — `Session.resume` can
-     * only ask whether an agent supports `session/resume` *after* it has started
-     * one — but the other N-1 are not. An agent that answered
-     * `ResumeUnsupportedError` once will answer it for every session in this
-     * pass, so it is asked once.
-     */
+    // An agent that cannot resume is asked once per pass.
     const unsupported = new Set<AgentId>();
     let next = 0;
 
     /** One session, carried through its whole retry budget before the next is taken. */
     const drive = async (session: ManagedSession): Promise<void> => {
       for (;;) {
-        // Checked per attempt rather than once at the top: a deploy's SIGTERM
-        // can land in the middle of this pass, and starting an agent we are
-        // about to kill is the one thing worse than not starting it. A resume
-        // already in flight is safe without this — `resume()` clears
-        // `exitRecord` synchronously, so the session is non-terminal and
-        // `shutdown()` collects it, and `doStop` awaits `startPromise` rather
-        // than orphaning the spawn.
+        // Checked per attempt: a shutdown can land mid-pass.
         if (this.shuttingDown) return;
 
         if (unsupported.has(session.agent)) {
@@ -8119,20 +3180,7 @@ export class SessionRegistry {
           return;
         }
 
-        /*
-         * The workspace is checked *before* the resume rather than left to fail
-         * inside the agent, because `resume()` clears and restores `exitRecord`
-         * and would emit two status events for a session that was never going
-         * to start. claude's adapter rejects a nonexistent `cwd` outright.
-         *
-         * Three answers, and the third is why this is `probeExists` and not
-         * `existsSync`. `false` is "the worktree is gone" — settled, so it costs
-         * no attempt and is never retried. `null` is "a mount did not answer",
-         * which is emphatically not the same thing: spending the whole budget on
-         * it would abandon somebody's work over a NAS that was asleep, and
-         * treating it as present would park a fresh agent inside an
-         * uninterruptible kernel wait.
-         */
+        // Checked before resuming: false is settled and never retried, null is a mount that did not answer and is retried.
         const present = await probeExists(session.workspace.root);
         if (present === false) {
           session.abandonResume("workspace_missing", "workspace_missing", `${session.workspace.root} is gone`);
@@ -8141,10 +3189,6 @@ export class SessionRegistry {
           return;
         }
 
-        // Both ways an attempt can fail converge here — a mount that would not
-        // answer and an agent that would not start — because what happens after
-        // either is identical. Written as two branches, the give-up half is the
-        // one that gets forgotten in whichever copy runs less often.
         let failure: { code: string; message: string } | null = null;
 
         if (present === null) {
@@ -8154,9 +3198,7 @@ export class SessionRegistry {
           };
         } else {
           try {
-            // Quiet: nobody asked for this attempt, so a failure leaves the
-            // snapshot's `resume` field and one `error` event at the end rather
-            // than a status round trip per try. See `onStartFailed`.
+            // Quiet: nobody asked for this attempt, so no status round trip per try.
             await session.resume(options.timeoutMs ?? START_TIMEOUT_MS, true);
             report.resumed += 1;
             say({
@@ -8175,39 +3217,14 @@ export class SessionRegistry {
               say({ sessionId: session.id, result: "unsupported", attempt: 0, detail: described.message });
               return;
             }
-            /*
-             * The agent says the conversation is gone. That is an answer, not a
-             * failure to get one, so it costs no retry budget — the same
-             * treatment `workspace_missing` gets above and for the same reason:
-             * asking again cannot change what is on the agent's disk.
-             *
-             * Spending three attempts here was measured in production at ten
-             * sessions × three spawns on every restart, for conversations that
-             * no longer existed.
-             */
+            // A forgotten conversation is an answer, not a failure: no retry budget spent.
             if (error instanceof SessionForgottenError) {
               session.abandonResume("forgotten", described.code, described.message);
               report.skipped += 1;
               say({ sessionId: session.id, result: "forgotten", attempt: 0, detail: described.message });
               return;
             }
-            /*
-             * The harness has no CLI on this machine — `describe` refused before
-             * anything was spawned. Neither an attempt nor a verdict, for the
-             * reason `deferResume` gives: it repeats exactly until the install
-             * lands and then it does not, and the daemon runs the installer on
-             * this outcome and starts another pass when it completes. Spending
-             * the budget here was measured on the dev stand: three sessions
-             * `attempts_exhausted` over a binary that arrived five minutes later.
-             *
-             * ⚠ **Only the absence the installer repairs.** The class is also
-             * thrown for a missing adapter package, an unknown or uninstalled
-             * plugin harness and a contributed program that is gone — none of
-             * which `deploy/agents.sh` can put back — and deferring those left a
-             * session "reconnecting" for the daemon's life with the installer
-             * run for nothing. `installable` is the one bit that tells them
-             * apart; everything else spends attempts and settles as before.
-             */
+            // Deferred only when installable: other missing-agent causes spend attempts as usual.
             if (error instanceof AgentUnavailableError && error.installable) {
               session.deferResume(described.code, described.message);
               report.deferred += 1;
@@ -8226,12 +3243,7 @@ export class SessionRegistry {
           return;
         }
         say({ sessionId: session.id, result: "failed", attempt: spent, detail: failure.message });
-        // Waited out here rather than requeued behind the others, which parks
-        // this worker for the backoff. That is the deliberate trade: requeueing
-        // means carrying a wall-clock deadline through the queue, and a queue
-        // whose head is not yet due either spins or needs a real clock — which a
-        // driver injecting a no-op `delay` does not have. One of two workers
-        // idling for at most 60s is the cheaper honesty.
+        // Waited out in the worker rather than requeued, which would need a real clock.
         await wait(resumeBackoffMs(spent, random));
       }
     };
@@ -8254,193 +3266,43 @@ export class SessionRegistry {
     return this.sessions.get(id);
   }
 
-  /**
-   * End every conversation running on an agent somebody has just signed out of.
-   *
-   * **This is what makes signing out mean anything.** A credential is read once,
-   * at spawn, so a process started while signed in keeps answering long after the
-   * account behind it was revoked — the conversation carries on, apparently
-   * fine, for an account its owner has just taken away. Nothing about the
-   * sign-out reached it, because nothing could.
-   *
-   * Ended rather than relaunched, which is the opposite of what a *saved*
-   * credential does and for a reason worth stating: relaunching here would start
-   * an agent with no way to authenticate, and that fails at the first message —
-   * inside the transcript, as `Internal error: Failed to authenticate`, which is
-   * the least explicable place a refusal can appear. Ending it says the true
-   * thing in the one place the client can render properly.
-   *
-   * A turn in flight is **not** spared, unlike `takesCredentialChange`. That
-   * asymmetry is the point: there, the credential was being *added* and a working
-   * turn was evidence of a working credential; here the credential is being taken
-   * away, and a turn still running on it is exactly what somebody signing out
-   * means to stop.
-   *
-   * Returns how many were ended, so the route can say so.
-   */
+  /** Ends every conversation on the agent, a turn in flight included, and relabels parked ones; returns the count. */
   async signOutSessions(agent: AgentId): Promise<number> {
-    /*
-     * ⚠ **`!terminal` alone stopped being the right set when parking landed.** A
-     * parked session on this agent is terminal with no process, and it is *coming
-     * back on the next message* — so leaving it out meant signing out of an agent
-     * while quiet conversations on it went on believing they still had it: drawn as
-     * ordinary sleeping sessions, woken into `Failed to authenticate` inside the
-     * transcript, and skipped by `reloadCredentials`, which revives on
-     * `agent_signed_out` and finds `parked`.
-     *
-     * They are in the same list rather than a second pass, because `stop()` handles
-     * the difference: for a live one it is a real teardown, and for a parked one
-     * {@link RELABELS_PARKED} rewrites the reason with nothing to tear down. So the
-     * count the route reports is the number of conversations that lost the
-     * credential, which is what it always claimed to be.
-     */
+    // Parked sessions are included: stop relabels them, so they do not wake into a missing credential.
     const live = [...this.sessions.values()].filter(
       (session) =>
         session.agent === agent &&
         (!session.terminal || session.exit?.reason === "parked"),
     );
-    // Sequential rather than `Promise.all`: each `stop` awaits a process teardown,
-    // and firing every one at once on a machine with many sessions is a thundering
-    // herd of SIGTERMs against the same event loop.
+    // Sequential, to avoid a herd of teardowns on one event loop.
     for (const session of live) {
       await session.stop("agent_signed_out").catch(() => undefined);
     }
     return live.length;
   }
 
-  /**
-   * Put a credential change in front of every conversation already running on it.
-   *
-   * **The gap this closes is a whole product's worth of confusion.** Secrets are
-   * injected at spawn, so pasting a token updated the database, turned the badge
-   * green, and changed nothing at all for the chat somebody was looking at — which
-   * went on answering `Failed to authenticate` with no explanation available
-   * anywhere on the screen. Measured 2026-08-20: a token saved at 00:23:02, a
-   * prompt refused at 00:23:12, and a session created four minutes later working
-   * immediately.
-   *
-   * **Started, not awaited.** A restart runs into seconds and this is a fan-out
-   * over every session on the agent; holding the route open for all of them would
-   * make saving a key a request that looks hung. Nothing is lost by answering
-   * early, because the wait already exists where it matters: `prompt` calls
-   * `whenRestarted()`, so somebody who saves a token and immediately types is made
-   * to wait for their own session rather than refused by it.
-   *
-   * The count is what came back, and is deliberately the number of sessions that
-   * **will** restart rather than the number that finished — the caller answers a
-   * request, not a fleet.
-   *
-   * ⚠ **`revive` is which direction the change went, and it is not a convenience.**
-   * A credential arriving and a credential going away reach the running sessions
-   * the same way — both are invisible until a relaunch — so both callers want the
-   * restart half. Only one of them wants the resume half, which is the `returning`
-   * filter below and the whole of what this argument decides.
-   */
+  /** Restarts sessions on the agent without awaiting them; revive also resumes those a sign-out ended. Returns how many will restart. */
   reloadCredentials(agent: AgentId, revive = true): number {
     const mine = [...this.sessions.values()].filter((session) => session.agent === agent);
     const restarting = mine.filter((session) => session.takesCredentialChange);
-    /*
-     * **Signing in reverses a sign-out, and only a sign-out.**
-     *
-     * `agent_signed_out` is the record of who ended these and why, so it is what
-     * decides which come back: a conversation this daemon ended *because the
-     * credential went away* is owed a resume when a credential returns. One
-     * somebody stopped by hand carries `stopped` and stays stopped — reviving
-     * that would be the daemon overruling a person, which is the whole reason the
-     * reason exists rather than a boolean.
-     *
-     * `autoResumable` deliberately answers `false` for it, and that is not in
-     * tension with this: nothing may bring these back *on its own*. This is not
-     * on its own — it is the same person, on the same machine, undoing the thing
-     * that ended them.
-     *
-     * ⚠ **And only when a credential *arrived*, which is what `revive` carries.**
-     * Both routes reach this function, and reading the change as symmetric made
-     * `DELETE /agent-auth/:agent` resume every conversation that had been ended
-     * *because there was no credential* — spawning agents with nothing to
-     * authenticate with, straight into the `Internal error: Failed to
-     * authenticate` this file argues against three docblocks up. A removal is a
-     * sign-out's second half, never its reversal: the restart half still runs, so
-     * a session holding the old secret in its environment still loses it.
-     */
+    // Only a sign-out is reversed, and only when a credential arrived; a manual stop stays stopped.
     const returning = revive
       ? mine.filter((session) => session.terminal && session.exit?.reason === "agent_signed_out")
       : [];
 
-    /*
-     * ⚠ **One at a time, and still without making the caller wait.**
-     *
-     * Each of these is a SIGTERM and a process teardown followed by a fresh spawn
-     * and an ACP handshake. Issued as N bare `void` calls they all started at
-     * once, so saving or deleting one credential on a full machine was up to
-     * `DEFAULT_MAX_SESSIONS` simultaneous teardowns and as many spawns against
-     * this one event loop — which is exactly the thundering herd `signOutSessions`
-     * refuses sixty lines up, in the same file, over the same work.
-     *
-     * The `void` stays where it matters: the loop is detached, so the route still
-     * answers with the count immediately and the restarts proceed behind it. What
-     * changed is that they now proceed in a queue rather than in a stampede.
-     *
-     * Each independently, and a failure in one may not take the others with it. A
-     * refused session never reaches here — `takesCredentialChange` decided that
-     * above — so what this swallows is a stop or a resume that genuinely threw,
-     * which the session reports through its own state the way any failed resume
-     * does.
-     */
+    // Detached so the route answers at once, and sequential so teardowns do not stampede; one failure does not stop the rest.
     void (async () => {
       for (const session of restarting) {
         if (this.shuttingDown) return;
         await session.applyCredentialChange().catch(() => undefined);
       }
       for (const session of returning) {
-        /*
-         * ⚠ **Both of these are debts serialising this loop took on**, and neither
-         * was payable before it: the old bare-`void` form did all of this in the
-         * tick that decided it, so there was no "later" for anything to change in.
-         *
-         * The shutdown check is the same one the boot resume pass makes per
-         * attempt, for the reason it states there — starting an agent we are about
-         * to kill is worse than not starting it. It matters *more* here. That pass
-         * notes a resume already in flight is safe without it, because `resume()`
-         * clears `exitRecord` synchronously and `shutdown()` then collects the
-         * session; a *queued* one has not run at all, so it is in neither
-         * `shutdown()`'s list nor anything else's, and the agent it spawns is
-         * `detached` and outlives `process.exit(0)`. The restart half above is
-         * incidentally safe — `applyCredentialChange` re-tests
-         * `takesCredentialChange`, whose first line refuses a terminal session —
-         * but it is written out there too rather than relied on silently.
-         *
-         * The predicate is re-tested for the same reason `applyCredentialChange`
-         * re-tests its own: "Re-checked, never assumed." `returning` was decided
-         * before the restarts ran, and by the time a queue of process teardowns and
-         * ACP handshakes reaches the end of it, a session may have been reconnected
-         * and then stopped by hand. `doResume` refuses only a non-terminal session
-         * and never looks at the reason, so without this it would be revived —
-         * which is the docblock's own line about a conversation carrying `stopped`
-         * staying stopped, and the daemon not overruling a person.
-         */
+        // Re-checked: a queued resume may meet a shutdown or a manual stop that happened meanwhile.
         if (this.shuttingDown) return;
         if (!(session.terminal && session.exit?.reason === "agent_signed_out")) continue;
-        /*
-         * A session that was merely *parked* when the credential went away is put
-         * back to `parked` rather than spawned. See `returnToParked`: the relabel
-         * this undoes exists so the row is drawn and reachable, not so that idle
-         * conversations are all revived at once the moment somebody signs in.
-         */
+        // A session only parked when signed out goes back to parked instead of spawning.
         if (session.returnToParked()) continue;
-        /*
-         * ⚠ **`quiet`, for `autoResumePass`'s reason and not a different one.**
-         *
-         * Nobody typed here: this loop is detached, the route answered a count
-         * before it ran, and no person is waiting on any one of these. A
-         * non-quiet resume runs `makeRoomForWake`, which at the ceiling is a
-         * `session/close`, a SIGTERM, a confirmed SIGKILL and a ~400 MB respawn
-         * of *somebody else's* idle agent — and this loop's order is
-         * `this.sessions.values()` while `parkCandidates` takes least recently
-         * active, which is the same inversion `doResume` records: the pass
-         * evicted sessions it had itself just resumed, in the opposite order to
-         * the one it queued in.
-         */
+        // Quiet, as in autoResumePass: nobody is waiting, so no eviction for this.
         await session.resume(START_TIMEOUT_MS, true).catch(() => undefined);
       }
     })();
@@ -8451,13 +3313,7 @@ export class SessionRegistry {
     return [...this.sessions.values()].sort((a, b) => a.createdAt - b.createdAt);
   }
 
-  /**
-   * Distinct working directories, most recently used first. Feeds the picker.
-   *
-   * Reports what the client *asked for*, not where the agent ended up. Once
-   * sessions run in worktrees those differ, and offering the picker a list of
-   * ephemeral `.reemoat/worktrees/…` paths would make it useless.
-   */
+  /** Distinct requested cwds, most recent first, for the picker; never worktree paths. */
   recentCwds(limit = 10): string[] {
     const seen: string[] = [];
     for (const session of [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt)) {
@@ -8481,17 +3337,11 @@ export class SessionRegistry {
     return managed;
   }
 
-  /**
-   * Stops everything, then makes sure.
-   *
-   * A resolved stop proves an attempt was made, not that a child died, so the
-   * group kill runs unconditionally on every path out of here.
-   */
+  /** Stops everything, then kills every group regardless, since a resolved stop proves no child died. */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const live = this.list().filter((session) => !session.terminal);
-    // Collected *before* the stops, because a session that stops cleanly forgets
-    // its handle, and this list is precisely for the ones that did not.
+    // Collected before the stops: a clean stop forgets its handle.
     const handles = live
       .map((session) => session.agentHandle)
       .filter((handle): handle is AgentHandle => handle !== null);
@@ -8501,20 +3351,7 @@ export class SessionRegistry {
       delay(SHUTDOWN_BUDGET_MS),
     ]);
 
-    // Parallel, and bounded by the same budget as the stops above.
-    //
-    // This was a serialized `for..of` with two awaits per handle. That was free
-    // while each one was a `process.kill` syscall, and ruinous when the container
-    // runtime made it a `docker exec` — a subprocess spawn plus a daemon round
-    // trip, N sessions costing 3N of them strictly one after another, outside the
-    // shutdown budget and against `daemon.ts`'s hard `process.exit` a few seconds
-    // later. It is a syscall again, so the parallelism buys little; it stays for
-    // the same reason the bound above does, which is that neither depends on what
-    // a kill currently costs.
-    //
-    // The liveness probe is gone rather than parallelised: `kill` already
-    // swallows "no such process" (`okExitCodes` plus a `.catch`), so asking
-    // first tripled the cost and changed no decision.
+    // Parallel and bounded by the same budget as the stops.
     await Promise.race([
       Promise.all(handles.map((handle) => this.runtime.kill(handle, "SIGKILL").catch(() => {}))),
       delay(SHUTDOWN_SWEEP_MS),
@@ -8527,12 +3364,7 @@ type OptionPick =
   | { kind: "invalid_option" }
   | { kind: "no_matching_option" };
 
-/**
- * Maps an answer onto an option the agent actually offered.
- *
- * A rejection never degrades into `cancelled`: cancelled means the turn was
- * abandoned, which is a different thing to tell an agent than "the human said no".
- */
+/** A rejection never degrades into cancelled, which means the turn was abandoned. */
 function chooseOption(answer: PermissionAnswer, options: PermissionOptionSummary[]): OptionPick {
   if ("cancel" in answer) return { kind: "ok", response: CANCELLED };
 
@@ -8557,19 +3389,7 @@ function chooseOption(answer: PermissionAnswer, options: PermissionOptionSummary
   return { kind: "no_matching_option" };
 }
 
-/**
- * Whether a `content` object is an answer to this form.
- *
- * Validated against **the projection this daemon sent**, never against the raw
- * `requestedSchema`: the projection is the only thing a client was ever shown, so
- * anything else would refuse answers it was invited to give.
- *
- * **Every problem, never the first.** A form is filled in all at once, and one
- * error per round trip is a phone interaction nobody survives.
- *
- * Module-scope and pure so `daemoncheck` can drive every rule with no session,
- * the same placement `usageWorthAnnouncing` has and for the same reason.
- */
+/** Validated against the projection sent to the client, never the raw schema; reports every problem. */
 export function validateElicitationContent(
   form: ElicitationForm,
   content: Record<string, unknown>,
@@ -8579,9 +3399,7 @@ export function validateElicitationContent(
 
   for (const key of Object.keys(content)) {
     if (byKey.has(key)) continue;
-    // Refused rather than stripped. Stripping silently changes what somebody
-    // answered, and the one thing that produces a stray key is a client that is
-    // out of date — which is exactly when it has to be told.
+    // Refused rather than stripped: a stray key means an outdated client, which must be told.
     problems.push({ key, code: "unknown_field", detail: "this form has no such field" });
   }
 
@@ -8610,16 +3428,13 @@ function validateField(
 
   switch (field.kind) {
     case "string": {
-      // Never coerced. JSON already distinguishes a string from a number, so
-      // accepting `7` for a string field would be the daemon deciding what
-      // somebody meant.
+      // Never coerced.
       if (typeof value !== "string") return bad("wrong_type", "expected a string");
       if (value.length > MAX_ELICITATION_ANSWER_CHARS) {
         return bad("too_long", `answers are limited to ${MAX_ELICITATION_ANSWER_CHARS} characters`);
       }
       if (field.options !== null) {
-        // By identity against the value we sent — never a prefix match, never
-        // case-folded. The permission rule verbatim.
+        // By identity against the value we sent: no prefix match, no case folding.
         if (!field.options.some((option) => option.value === value)) {
           return bad("not_an_option", "that is not one of the choices offered");
         }
@@ -8631,10 +3446,7 @@ function validateField(
       if (field.max !== null && value.length > field.max) {
         return bad("too_long", `at most ${field.max} characters`);
       }
-      // `format` is deliberately not enforced. The canonical email and uri
-      // patterns are wrong in both directions, and refusing `a@b` because our
-      // regex disagrees with the agent's refuses an answer the agent would have
-      // taken. It travels as an input hint and is checked by nobody.
+      // format is deliberately not enforced: the canonical patterns are wrong both ways.
       return;
     }
 
@@ -8660,9 +3472,7 @@ function validateField(
       const seen = new Set<string>();
       for (const entry of value) {
         if (typeof entry !== "string") return bad("wrong_type", "expected a list of strings");
-        // Refused rather than deduped here: a repeated choice reaches the agent
-        // as a repeated label once the adapter joins them, so silently collapsing
-        // it would change the answer without saying so.
+        // Refused rather than deduped, which would change the answer silently.
         if (seen.has(entry)) return bad("duplicate", "the same choice was given twice");
         seen.add(entry);
         if (!(field.options ?? []).some((option) => option.value === entry)) {
@@ -8680,18 +3490,7 @@ function validateField(
   }
 }
 
-/**
- * Turns validated content into the pairs the resolution event carries.
- *
- * Rendered *here*, on the side that still holds the form, because the schema does
- * not ride every event and is gone from memory the moment the question settles.
- * That is what makes `ElicitationResolvedEvent` self-describing and is the one
- * place the permission pair is deliberately not copied — see the event's own
- * docblock for what that copy cost when it was missing.
- *
- * `value` is the chosen option's **label** and never its wire value: a wire value
- * is what the agent recognises, a label is what the person read and tapped.
- */
+/** Rendered here, while the form is held; value is the chosen option's label, never its wire value. */
 function renderAnswers(
   form: ElicitationForm,
   content: Record<string, ElicitationContentValue>,

@@ -2,43 +2,12 @@
 import { parseArgs } from "node:util";
 import { isSettingKey, SECRET_SETTING_KEYS } from "../src/settings.js";
 
-/**
- * The control plane's terminal client.
- *
- * Shaped like the daemon's `scripts/client.ts`: the same `api()` helper, the
- * same `{error:{code,message}}` unwrapping, the same "nothing prints from a
- * library" split. It is the only UI this service has, and it exists because a
- * control plane you can only drive with hand-written curl is a control plane
- * nobody will keep the grants straight in.
- */
-
 const BASE_URL = process.env["REEMOAT_CP_URL"] ?? "http://127.0.0.1:7888";
 const API_KEY = process.env["REEMOAT_CP_KEY"] ?? "";
-/**
- * The fleet provisioning key, which is not anybody's credential.
- *
- * Its own variable rather than overloading `REEMOAT_CP_KEY`, because the two
- * grant very different things and a script that had one where it meant the other
- * should fail rather than half-work.
- */
+// Its own variable, never REEMOAT_CP_KEY: a script holding the wrong one should fail rather than half-work.
 const PROVISION_KEY = process.env["REEMOAT_CP_PROVISION_KEY"] ?? "";
 
-/**
- * The settings whose value may never arrive on argv, **named rather than
- * counted**, and read from the server's own list.
- *
- * `SECRET_SETTING_KEYS` is the same set `GET /v1/admin/settings` consults to
- * decide that a value is reported as two booleans and never returned, and the
- * same one the web form consults to decide it renders a write-only field. This
- * file was the hole in that: `PUT /v1/admin/settings` takes `smtp.password` in
- * `set` like any other key — correctly, because the browser sends it in a
- * body — so the refusal belongs at the one door that puts the value in `ps`
- * output and shell history, which is this one.
- *
- * Imported rather than transcribed so a second secret is covered here by
- * arriving in `settings.ts`, and so USAGE, the refusal and the prompt cannot
- * come to disagree about which keys they are talking about.
- */
+// Imported from settings.ts so any secret is refused on argv here, where it would land in ps and shell history.
 const SECRET_KEYS = [...SECRET_SETTING_KEYS].join(", ");
 
 const USAGE = `cpctl — drive the Reemoat control plane
@@ -190,8 +159,6 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     response = await fetch(new URL(path, BASE_URL), { ...init, headers });
   } catch (error) {
-    // The one failure worth naming: a control plane that is simply not running.
-    // Daemons keep working through this; only issuance stops.
     fail(`could not reach the control plane at ${BASE_URL}: ${describe(error)}`);
   }
 
@@ -218,28 +185,13 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * How long ago something was, as a phrase, or `null` when nothing was recorded.
- *
- * `null` and "never" are deliberately different answers here. A machine that has
- * never held a tunnel has never been seen; a control plane that predates
- * `machine_last_seen` sends no field at all and cannot claim either. Printing
- * "last seen never" for the second would be inventing a fact about a fleet that
- * has been running fine.
- *
- * Coarse on purpose — the question this answers is "did this work today", and a
- * timestamp to the second reads as precision the row does not have.
- */
+/** An absent field (an older control plane) prints nothing rather than "never seen": absence is not a fact about the machine. */
 function agoText(at: number | null | undefined): string | null {
   if (at === undefined) return null;
   if (at === null) return "never seen";
   return `last seen ${coarseAge(at)}`;
 }
 
-/**
- * The bucket table behind both "ago" phrases, so a machine's last dial and a
- * key's last use are coarse in the same way and cannot drift apart.
- */
 function coarseAge(at: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
   if (seconds < 90) return "just now";
@@ -248,20 +200,7 @@ function coarseAge(at: number): string {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
-/**
- * When a key was last presented, as a phrase.
- *
- * **`undefined` and `null` are one answer here, unlike `agoText` above**, and
- * that is Q1.629's decision rather than a shortcut: `lastUsedAt` is optional on
- * the wire, the keys screen says "never used" for both, and cpctl says what the
- * screen says. It holds for a key where it would not for a machine because of
- * what each absence means. A control plane predating `machine_last_seen` may
- * well have seen the machine and simply cannot say; a control plane predating
- * `api_keys.last_used_at` adds the column `NULL` on every existing row the
- * moment it is updated, so a use before the column reads "never" either way —
- * the older control plane is the same statement one deploy earlier, and there
- * is no fact being invented.
- */
+/** Here an absent value and null both mean never used (Q1.629), unlike agoText. */
 function usedText(at: number | null | undefined): string {
   if (at === undefined || at === null) return "never used";
   return `last used ${coarseAge(at)}`;
@@ -282,29 +221,16 @@ const { values, positionals } = parseArgs({
   options: {
     admin: { type: "boolean", default: false },
     name: { type: "string" },
-    /**
-     * `admin adduser --email`: invite instead of generating a password.
-     *
-     * `--with-key` used to live here and is gone with the route behind it: an
-     * admin issuing a permanent credential to somebody else was the third
-     * credential-issuing door, and the one this CLI actually drove.
-     */
     email: { type: "string" },
-    /** `keys --revoke <id>`: retire one of your own. */
     revoke: { type: "string" },
-    /** `admin settings --clear <key>`: drop the override, fall back to the env. */
     clear: { type: "string" },
-    /** Who a machine registered by an admin belongs to. */
     owner: { type: "string" },
-    /** `sessions --all`: sign out everywhere. */
     all: { type: "boolean", default: false },
     /** `admin users --ids`: `<id> <name>` per line, for deploy/install.sh. */
     ids: { type: "boolean", default: false },
-    // Paging for `admin grants`, the one admin list that is users × machines.
     limit: { type: "string" },
     offset: { type: "string" },
     scopes: { type: "string" },
-    /** `admin provisionkey --new`: mint one, retiring the previous. */
     new: { type: "boolean", default: false },
     json: { type: "boolean", default: false },
   },
@@ -317,18 +243,7 @@ function show(value: unknown, render: () => void): void {
   else render();
 }
 
-/**
- * Read a password without putting it anywhere it can be read back.
- *
- * **Never an argument.** `deploy/lib.sh` already goes to the trouble of passing
- * `REEMOAT_CP_KEY` into a container by *name* rather than by value so it never
- * appears in `ps`; taking a password on argv would undo that for the one
- * credential a human chose, and put it in shell history besides.
- *
- * Echo is turned off when there is a terminal. When there is not — a pipe, a
- * script — one line is read from stdin, which is what makes this usable from
- * `install.sh` and testable at all.
- */
+/** Never an argument (it would show in ps and shell history): echo off at a terminal, one line from stdin otherwise. */
 async function readSecret(prompt: string): Promise<string> {
   const { createInterface } = await import("node:readline");
   const input = process.stdin;
@@ -344,8 +259,6 @@ async function readSecret(prompt: string): Promise<string> {
       rl.once("line", (value) => resolve(value));
       return;
     }
-    // Raw mode delivers keystrokes, so the line editor is ours: this is
-    // deliberately the smallest one that works — backspace, Enter, Ctrl-C.
     const onData = (chunk: Buffer): void => {
       for (const byte of chunk) {
         if (byte === 0x03) {
@@ -374,20 +287,6 @@ async function readSecret(prompt: string): Promise<string> {
   return line;
 }
 
-/**
- * The body for a route that asks you to prove the account is still yours.
- *
- * What is left of `selfProof` after `admin passwd` and `admin key` were deleted.
- * Those took a target id because they could be aimed at somebody else; **no
- * command here can be aimed at somebody else any more** — an admin may take a
- * credential away and may never issue one — so this asks about the caller and
- * takes no argument.
- *
- * `hasPassword` is asked for the reason `case "passwd"` asks it: an account
- * carried over from before passwords existed has none to give, the server lets
- * it past on its API key, and prompting for a secret that does not exist would
- * be a dead end rather than a question.
- */
 interface SettingsAnswer {
   settings: {
     key: string;
@@ -402,13 +301,10 @@ interface SettingsAnswer {
   registration: { enabled: boolean; requiresEmail: boolean };
 }
 
-/** One renderer for the read and both writes, so the three cannot drift. */
 function printSettings(body: SettingsAnswer, did: string | null): void {
   if (did !== null) out(did);
   for (const row of body.settings) {
-    // A secret is reported as set or not, and never shown — the same rule
-    // `apiKeyRows` states about a key. `(unset)` rather than an empty string,
-    // because an empty string is itself a legal value here.
+    // A secret prints as set or unset, never its value; (unset) because an empty string is itself a legal value.
     const shown = row.secret ? (row.set === true ? "(set)" : "(unset)") : (row.value ?? "(unset)");
     out(`${row.key.padEnd(30)} ${String(shown).padEnd(34)} ${row.source}`);
   }
@@ -418,22 +314,7 @@ function printSettings(body: SettingsAnswer, did: string | null): void {
   for (const problem of body.mail.problems) out(`  ${problem}`);
 }
 
-/**
- * `{currentPassword}` when the route will read one, `{}` when it will not.
- *
- * One caller now, `email`. `key` used to call it too and stopped, because
- * `POST /v1/me/keys` reads no body (Q1.630) and a prompt the server never reads
- * is a lie about what protects the account. `PUT /v1/me/email` does read it —
- * for an API-key caller (Q1.630, amended 2026-09-05): the reset channel cannot
- * be repointed from a leaked key without the password, so this prompt is the
- * one thing standing between a key sitting in `~/.reemoat/cpctl.env` and the
- * account. cpctl is that caller unless `REEMOAT_CP_KEY` came from `cpctl login`,
- * which prints a session token into the same variable, and the route ignores a
- * password from a session — so `via`, which `/v1/me` answers for exactly this
- * reason, decides whether to ask at all, and a session gets `{}` rather than a
- * prompt for something nothing would read. The other `{}` arm is the account
- * with no password row, which the server lets through on the key alone.
- */
+/** What remains of selfProof: prompts for the current password only for an API-key caller that has one (Q1.630). */
 async function currentPasswordBody(): Promise<string> {
   const me = await api<{ id: string; hasPassword: boolean; via: "api_key" | "session" }>("/v1/me");
   if (!me.hasPassword) return JSON.stringify({});
@@ -442,33 +323,7 @@ async function currentPasswordBody(): Promise<string> {
   return JSON.stringify({ currentPassword });
 }
 
-/**
- * The three lines a daemon is started with.
- *
- * One printer for both routes that mint a code — the owner's and the admin's —
- * because this is text somebody pastes into a shell on another machine and the
- * code inside it is single-use. Two copies that drift means one of them mints a
- * code that is then spent on a typo, and the error arrives at daemon startup
- * talking about enrollment rather than about a variable name.
- *
- * **Both values are single-quoted, and that is not tidiness.** `controlPlaneUrl`
- * is the server's `installOrigin(c, trustedProxyHops)` — `new URL(c.req.url).origin`
- * with the scheme corrected behind declared proxy hops, i.e. derived from
- * the request's own `Host` header, which any caller writes. Measured 2026-08-08
- * through a real `node:http` server, a `Host` of ``a`id`b``, `a$(id)b`, `a'b` and
- * `a;id` all reach `URL.origin` intact; unquoted, the paste executes it —
- * sourcing ``REEMOAT_CONTROL_PLANE=http://a`touch PWNED`b`` created the file and
- * left the variable reading `http://ab`. It is the rule `deploy/lib.sh`'s `sq`
- * already applies to the env file after the measured
- * `REEMOAT_ENROLL_CODE=xy$(touch PWNED)` incident, applied to the other place
- * the same text lands. The `'\''` arm is reachable rather than defensive: an
- * apostrophe survives `URL.origin`, so without it the quoting can be stepped out
- * of. The replacement holds no `$`, so `replaceAll`'s `$&` expansion cannot fire.
- *
- * `packages/web/src/enrollment.ts` prints the same three lines. `webcheck`
- * asserts *that* copy against a literal and **nothing anywhere compares the
- * two** — this comment used to say it pinned the pair, which it never did.
- */
+/** Both values are single-quoted: controlPlaneUrl derives from the caller's Host header, and unquoted the pasted line would execute it. */
 function enrollmentLines(controlPlaneUrl: string, code: string): string {
   const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
   return [
@@ -478,7 +333,6 @@ function enrollmentLines(controlPlaneUrl: string, code: string): string {
   ].join("\n");
 }
 
-/** `--limit`/`--offset` as a query string, or empty when neither was given. */
 function grantQuery(): string {
   const params = new URLSearchParams();
   if (values.limit !== undefined) params.set("limit", values.limit);
@@ -493,11 +347,6 @@ async function main(): Promise<void> {
     out(USAGE);
     return;
   }
-  /*
-   * `login` is the one command that runs without a credential, because it is
-   * where one comes from. Handled above the check for the same reason
-   * `POST /v1/login` sits above the route gate.
-   */
   if (first === "login") {
     const name = rest[0];
     if (!name) fail("usage: cpctl login <name|email>");
@@ -510,23 +359,13 @@ async function main(): Promise<void> {
     const body = (await response.json()) as { token?: string; expiresAt?: number; error?: { message?: string } };
     if (!response.ok) fail(describeError(response.status, body));
     show(body, () => {
-      // Shell-pasteable, like `token`. The same variable an API key goes in —
-      // the control plane accepts either, so nothing downstream has to care.
       out(`export REEMOAT_CP_KEY=${body.token}`);
       out(`# expires ${new Date(body.expiresAt ?? 0).toISOString()}`);
     });
     return;
   }
 
-  /*
-   * `provision` is the second command that runs without `REEMOAT_CP_KEY`, and
-   * for the mirror of `login`'s reason: it carries a credential of its own.
-   *
-   * Handled above the check because that check is about a *person's* key, and
-   * the whole point of the provisioning key is that whoever is installing a host
-   * does not need one. `POST /v1/provision` sits above THE LINE for exactly the
-   * same reason.
-   */
+  // Above the REEMOAT_CP_KEY check, like login: it carries the provisioning key instead of a person's.
   if (first === "provision") {
     const [user, machine] = rest;
     if (!user || !machine) fail("usage: cpctl provision <user> <machine>   (REEMOAT_CP_PROVISION_KEY)");
@@ -554,7 +393,6 @@ async function main(): Promise<void> {
     show(body, () => {
       out(`created ${body.machine?.name} (${body.machine?.id}) for ${body.owner?.name}`);
       if (typeof body.machineLimitRaisedTo === "number") {
-        // The one thing this did outside the machine it was asked for.
         out(`their machine limit was raised to ${body.machineLimitRaisedTo} so it would work.`);
       }
       out("");
@@ -577,11 +415,7 @@ async function main(): Promise<void> {
     }
     case "sessions": {
       if (values.all === true) {
-        // `revokedCount`, not `revoked` — the route was renamed away from the
-        // boolean its two single-session siblings answer with, and only the
-        // browser client followed. `api<T>` casts, so the declared type was a
-        // lie the compiler could not catch and the one command whose entire
-        // output is the count printed "signed out of undefined session(s)".
+        // The route answers revokedCount, unlike its single-session siblings; api casts, so the compiler cannot catch a mismatch.
         const body = await api<{ revokedCount: number }>("/v1/me/sessions", { method: "DELETE" });
         show(body, () => out(`signed out of ${body.revokedCount} session(s)`));
         return;
@@ -605,8 +439,7 @@ async function main(): Promise<void> {
     }
     case "passwd": {
       const me = await api<{ hasPassword: boolean }>("/v1/me");
-      // Only asked for when there is one to give: a user carried over from before
-      // passwords existed sets a first one with their API key as the proof.
+      // Asked only when one exists: an account from before passwords sets its first with its API key as proof.
       const currentPassword = me.hasPassword ? await readSecret("current password") : undefined;
       const newPassword = await readSecret("new password");
       const again = await readSecret("new password (again)");
@@ -621,17 +454,8 @@ async function main(): Promise<void> {
       });
       return;
     }
-    /*
-     * Mint yourself a key. **This replaces `admin key <userId>`**, which is gone
-     * along with every other way one person issues a credential to another.
-     *
-     * It is the only way an API key comes into existence outside the bootstrap in
-     * `main.ts`, which matters because `~/.reemoat/cpctl.env` holds one and
-     * `deploy/install.sh` used to ask an admin to mint it for somebody else.
-     */
     case "key": {
-      // No body, and no prompt: the route reads none (Q1.630), and asking for
-      // a password it would then ignore claimed a protection that was not there.
+      // No body and no prompt: the route reads none (Q1.630).
       const body = await api<{ apiKey: string }>("/v1/me/keys", { method: "POST" });
       show(body, () => {
         out(`API key: ${body.apiKey}`);
@@ -654,10 +478,6 @@ async function main(): Promise<void> {
           out("no API keys. Mint one with: cpctl key");
           return;
         }
-        // Last use beside the state, because "is the one that leaked dead yet"
-        // and "is this one still in use" are the two questions this list
-        // answers (Q1.629), and a revoked row keeps the value the revocation
-        // found it at.
         for (const key of list.keys) {
           out(`${key.id}  ${key.prefix}…  ${(key.revokedAt === null ? "live" : "revoked").padEnd(7)}  ${usedText(key.lastUsedAt)}`);
         }
@@ -665,18 +485,7 @@ async function main(): Promise<void> {
       });
       return;
     }
-    /*
-     * The installations signed in to this account, and retiring one.
-     *
-     * **A read and a revoke, and deliberately no way to register.** The route
-     * that registers refuses an API key outright — a device is a *signed-in
-     * installation*, a key has no session for one to hang off, and this command
-     * is the thing that holds keys. So the list here is an operator's view of a
-     * table somebody else writes, which is `keys`' shape pointed the other way.
-     *
-     * Retiring one from here is the remedy when the app itself is the thing you
-     * have lost, which is exactly the case a terminal is for.
-     */
+    // No way to register a device here: the route refuses an API key, which has no session for a device to belong to.
     case "devices": {
       const retire = values.revoke;
       if (typeof retire === "string") {
@@ -706,9 +515,6 @@ async function main(): Promise<void> {
           return;
         }
         for (const device of list.devices) {
-          // The retired rows are listed rather than filtered, for the route's
-          // own reason: "was that laptop retired, and when" is the question this
-          // gets asked for, and a list one row shorter cannot answer it.
           const state = device.revokedAt === null ? "live" : `retired ${new Date(device.revokedAt).toISOString()}`;
           const seen = device.lastSeenAt === null ? "never used" : `last seen ${new Date(device.lastSeenAt).toISOString()}`;
           out(
@@ -721,10 +527,6 @@ async function main(): Promise<void> {
       });
       return;
     }
-    /*
-     * Your address, which is the only thing that makes `cpctl` able to recover an
-     * account at all — a password reset arrives by mail or not at all.
-     */
     case "email": {
       const address = rest[0];
       if (!address) {
@@ -739,9 +541,6 @@ async function main(): Promise<void> {
         });
         return;
       }
-      // The password stays on this verb: the route asks an API-key caller for
-      // it (Q1.630, amended 2026-09-05), and `currentPasswordBody` is what knows
-      // whether this shell holds one or a session from `cpctl login`.
       const body = await api<{ email: string; verified: boolean }>("/v1/me/email", {
         method: "PUT",
         body: JSON.stringify({ email: address, ...JSON.parse(await currentPasswordBody()) }),
@@ -803,17 +602,6 @@ async function main(): Promise<void> {
       show(body, () => out(`revoked. ${body.enrollmentCodesInvalidated} unused enrollment code(s) burned.`));
       return;
     }
-    /*
-     * Sharing, which replaces `cpctl admin grant`. The owner's own credential
-     * drives it, and a machine they do not own answers 404 rather than 403 — the
-     * same rule every other verb here follows, so that nobody can map the fleet
-     * by watching which ids answer differently.
-     *
-     * The user is named by id because there is no directory an ordinary account
-     * may read: adding a name lookup would be a way for any signed-in person to
-     * test whether an account exists. The other half of the flow is `cpctl me`,
-     * which is where the person being shared with reads their own id.
-     */
     case "shares": {
       const machineId = rest[0];
       if (!machineId) fail("usage: cpctl shares <machineId>");
@@ -837,8 +625,6 @@ async function main(): Promise<void> {
         method: "PUT",
         body: JSON.stringify({ userId, scopes }),
       });
-      // Said out loud, because a grant is not a read-only thing and the default
-      // is not: `session:write` drives sessions and answers agents' questions.
       show(body, () => out(`shared ${machineId} with ${userId}  ${scopes.join(",")}`));
       return;
     }
@@ -854,12 +640,6 @@ async function main(): Promise<void> {
       );
       return;
     }
-    /*
-     * The one grant verb the *other* person can run. `unshare` above resolves
-     * through ownership and answers 404 to a grantee, so before this there was no
-     * way to refuse a share — and a share is written for any user id without
-     * asking them.
-     */
     case "leave": {
       const machineId = rest[0];
       if (!machineId) fail("usage: cpctl leave <machineId>");
@@ -885,20 +665,7 @@ async function main(): Promise<void> {
           enrolled: boolean;
           scopes: string[];
           relayOnline: boolean;
-          /*
-           * Whose enrollment code this machine enrolled with, where that was not
-           * yours: a name, `a provisioning key`, `a deleted account`, or
-           * `somebody this control plane did not record` for a machine that
-           * enrolled before the column existed. `null` is your own code, or a
-           * machine that has never enrolled.
-           *
-           * Printed rather than available on `--json`, because it is the whole
-           * of what stands between an owner and a machine that is not theirs
-           * (`SECURITY.md`, "Machine substitution"), and a disclosure only a
-           * `curl` reader sees is not one. Optional so an older control plane —
-           * which does not send it — prints the row unchanged rather than
-           * `undefined`.
-           */
+          /** Whose enrollment code this machine enrolled with, when not yours; `null` for yours or never enrolled. Optional for older control planes. */
           enrolledBy?: string | null;
         }[];
       }>("/v1/machines");
@@ -911,10 +678,7 @@ async function main(): Promise<void> {
           out(
             `${machine.name.padEnd(20)} ${machine.id}` +
               `${machine.enrolled ? "" : "  [not enrolled]"}` +
-              // Reachability outright now, not one of two paths: a machine with
-              // no tunnel has no other door.
               `${machine.relayOnline ? "  [online]" : "  [offline]"}  ${machine.scopes.join(",")}` +
-              // Last, so it never pushes the columns above it out of line.
               `${machine.enrolledBy ? `  [enrolled by ${machine.enrolledBy}]` : ""}`,
           );
         }
@@ -930,8 +694,6 @@ async function main(): Promise<void> {
         machine: { relayUrl: string | null; relayOnline: boolean };
       }>("/v1/tokens", { method: "POST", body: JSON.stringify({ machine }) });
       show(body, () => {
-        // Shell-pasteable, because that is what this is for. The relay is the
-        // address now; there is no other one to print.
         out(`export REEMOAT_URL=${body.machine.relayUrl ?? ""}`);
         out(`export REEMOAT_TOKEN=${body.token}`);
         out(`# expires ${new Date(body.expiresAt).toISOString()}`);
@@ -958,16 +720,7 @@ async function admin(args: string[]): Promise<void> {
           machineLimit: number;
         }[];
       }>("/v1/admin/users");
-      /*
-       * `--ids` prints `<id> <name>`, one per line, and nothing else.
-       *
-       * For `deploy/install.sh`, which has to put a list of people in front of an
-       * operator so a machine can be registered to one of them. `json_field`
-       * reads a single scalar and `--json` needs a parser the control-plane host
-       * is not required to have — this is the shape `read` and `choose` already
-       * consume. Enabled users only: offering a banned one leads to a machine
-       * registered to somebody who cannot sign in.
-       */
+      // Enabled users only: a banned one would get a machine they cannot sign in to.
       if (values.ids === true) {
         for (const user of body.users) {
           if (!user.disabled) out(`${user.id} ${user.name}`);
@@ -976,9 +729,6 @@ async function admin(args: string[]): Promise<void> {
       }
       show(body, () => {
         for (const user of body.users) {
-          // `machines/limit` on every line, so somebody at their limit — or over
-          // it, which is what a lowering looks like from here — is visible
-          // without asking per user.
           const quota = `${user.machines}/${user.machineLimit}`;
           out(
             `${user.name.padEnd(20)} ${user.id}  ${quota.padEnd(7)}${user.isAdmin ? "  admin" : ""}` +
@@ -1009,8 +759,6 @@ async function admin(args: string[]): Promise<void> {
       show(body, () => {
         out(`created ${name}  ${body.id}`);
         if (body.invited) {
-          // The whole point of the invited arm: no secret exists at any moment,
-          // so there is nothing here to print and nothing to hand over.
           out(`invited ${body.email} — they choose their own password from the link.`);
           if (body.mailQueued === false) out("warning: the message could not be queued. Check: cpctl admin mail");
           return;
@@ -1020,16 +768,6 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    /*
-     * Send an invitation again.
-     *
-     * Here because the state it fixes has no other exit: an invited account holds
-     * no password and an unverified address, so it can neither sign in nor use
-     * the forgotten-password link, and `adduser` answers 409. An invitation that
-     * was never delivered or never opened locked the person out permanently.
-     * Issues nothing to the caller — the link goes to their address, exactly as
-     * it did at creation.
-     */
     case "invite": {
       const userId = rest[0];
       if (!userId) fail("usage: cpctl admin invite <userId>");
@@ -1050,19 +788,6 @@ async function admin(args: string[]): Promise<void> {
       show(body, () => out("enabled. Their old sessions stay signed out."));
       return;
     }
-    /**
-     * Raise or lower one person's machine limit.
-     *
-     * Three forms rather than a flag: `<n>` sets, `default` clears, and no
-     * argument reads. `default` is a literal and deliberately **not** `--clear`
-     * — that global option is a *string* carrying a setting key
-     * (`admin settings --clear smtp.host`), and overloading it to also be a
-     * boolean here is how one option comes to mean two things.
-     *
-     * The read form goes through `GET /v1/admin/users`, which already carries
-     * the number, rather than a route of its own: a second route answering a
-     * question the first already answers is a second thing to keep in agreement.
-     */
     case "provisionkey": {
       if (values.new === true) {
         const body = await api<{ key: string }>("/v1/admin/provisioning-key", { method: "POST" });
@@ -1073,11 +798,7 @@ async function admin(args: string[]): Promise<void> {
         });
         return;
       }
-      /*
-       * A boolean, because nothing anywhere prints this key or any part of it —
-       * not the value, not the prefix, not an id. "There is one" is the whole of
-       * what an admin can act on, since the only act is minting another.
-       */
+      // Only a boolean: nothing ever prints this key or any part of it.
       const body = await api<{ minted: boolean }>("/v1/admin/provisioning-key");
       show(body, () =>
         out(
@@ -1122,10 +843,7 @@ async function admin(args: string[]): Promise<void> {
         body = await api<LimitAnswer>(`/v1/admin/users/${userId}/machine-limit`, { method: "DELETE" });
       } else {
         const parsed = Number.parseInt(value, 10);
-        // Refused here as well as on the route, because `Number.parseInt("five")`
-        // is NaN and a NaN in a JSON body arrives as `null` — which the route
-        // would then report as a missing field, about one this command did fill
-        // in.
+        // Checked here too: parseInt of a word is NaN, which JSON sends as null and the route would report as missing.
         if (!Number.isInteger(parsed) || String(parsed) !== value) {
           fail(`the limit must be a whole number or "default", got "${value}"`);
         }
@@ -1140,9 +858,6 @@ async function admin(args: string[]): Promise<void> {
           `limit is now ${body.maxMachines} (${body.source}; instance default ${body.instanceDefault}), ` +
             `${body.owned} owned`,
         );
-        // The lasting side effect, printed for `deluser`'s reason: it is the one
-        // thing that happens outside the row this wrote, and the operator is the
-        // person who repeats it to somebody.
         if (body.suspended.length > 0) {
           out(`${body.suspended.length} machine(s) are over the limit and stop working now:`);
           for (const machine of body.suspended) out(`  ${machine.id}  ${machine.label}`);
@@ -1160,25 +875,11 @@ async function admin(args: string[]): Promise<void> {
       );
       show(body, () => {
         out(`deleted ${body.name}. There is no enable for this one.`);
-        /*
-         * The one lasting effect outside their own rows, and the reason it is
-         * printed rather than left to be discovered: those daemons stop being
-         * reachable, and getting one back means registering and enrolling it
-         * again on its host.
-         *
-         * They used to be left ownerless and still enrolled, which put them
-         * outside the machine limit and outside the ban check — both being facts
-         * about the owner — so deleting a person was the one act that made a
-         * live machine no rule applied to.
-         */
+        // Revoked rather than left ownerless as the old machinesReleased did: an ownerless machine escapes the limit and the ban check.
         if (body.machinesRevoked > 0) {
           out(`${body.machinesRevoked} machine(s) they registered were revoked and are off the network.`);
           out("Getting one back means enrolling it again on that host.");
         }
-        // Beside it for the same reason, and this is the *stronger* of the two
-        // acts that burn codes — `admin disable` says it and this one did not,
-        // which is the wrong way round. A code that was still live is a machine
-        // identity somebody could have been about to redeem.
         const codes = body.enrollmentCodesInvalidated ?? 0;
         if (codes > 0) {
           out(`${codes} unredeemed enrollment code(s) they minted were invalidated.`);
@@ -1186,13 +887,6 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    /**
-     * Registration and SMTP, with **where each value came from**.
-     *
-     * The source is printed beside every value because a row in
-     * `instance_settings` beats the environment: without it an operator reads
-     * their env file, reads this, and cannot tell which one is live.
-     */
     case "settings": {
       const key = rest[0];
       const value = rest[1];
@@ -1207,27 +901,9 @@ async function admin(args: string[]): Promise<void> {
         return;
       }
       if (key !== undefined) {
-        /*
-         * A secret setting is read, never taken.
-         *
-         * Everything else around this value goes to real trouble to keep it
-         * write-only — the read route returns `value: null` and omits
-         * `envValue`, the admin screen renders a field that never claims to
-         * know it — and this command was the hole: `smtp.password` is an
-         * ordinary member of `SETTING_KEYS`, so it arrived as a positional and
-         * went into `ps` for every process on the host, and into shell
-         * history, on the machine that also holds the fleet's signing key.
-         *
-         * Asked of `SECRET_SETTING_KEYS` and never of the key's spelling, for
-         * the reason that set exists at all. `isSettingKey` first because the
-         * set is typed on `SettingKey`, and because an unknown key must keep
-         * falling through to the server's own `unknown_setting` naming it
-         * rather than being answered here.
-         */
+        // A secret setting is read from the terminal or stdin, never taken as an argument; unknown keys fall through to the server's refusal.
         const secret = isSettingKey(key) && SECRET_SETTING_KEYS.has(key);
         if (secret && value !== undefined) {
-          // Naming the remedy, not just the refusal: an admin told only "no"
-          // puts it straight back on the command line with a shrug.
           fail(
             `${key} is a secret and is never taken as an argument — it would be in \`ps\` for ` +
               `every process on this host, and in your shell history.\n` +
@@ -1236,14 +912,9 @@ async function admin(args: string[]): Promise<void> {
               `   remove it:      cpctl admin settings --clear ${key}`,
           );
         }
-        // The same reader `login` and the password change use: echo off at a
-        // terminal, one line from stdin when there is not one.
         const written = secret ? await readSecret(`value for ${key}`) : value;
         if (written === undefined) fail(`usage: cpctl admin settings ${key} <value>   (or --clear ${key})`);
-        // An empty line is how an empty file and a stray Enter both arrive, and
-        // storing "" would leave a row that wins over the environment while
-        // `mailConfigured` still reports the password as not set. Unsetting has
-        // its own verb, so point at it rather than guessing which was meant.
+        // An empty secret is refused: stored, it would win over the environment while mailConfigured still reports it unset.
         if (secret && written === "") {
           fail(`nothing was read for ${key}. To unset it: cpctl admin settings --clear ${key}`);
         }
@@ -1281,7 +952,6 @@ async function admin(args: string[]): Promise<void> {
         for (const row of body.deliveries) {
           const state = row.sentAt !== null ? "sent" : row.failedAt !== null ? "FAILED" : `queued (${row.attempts})`;
           out(`${new Date(row.createdAt).toISOString()}  ${state.padEnd(12)} ${row.kind.padEnd(16)} ${row.to}`);
-          // The server's own words, which is the whole reason this list exists.
           if (row.error !== null) out(`    ${row.error}`);
         }
         out(`${body.deliveries.length} of ${body.total}`);
@@ -1293,9 +963,6 @@ async function admin(args: string[]): Promise<void> {
         method: "POST",
         body: JSON.stringify(rest[0] === undefined ? {} : { to: rest[0] }),
       });
-      // Queued rather than sent: the route does not hold a socket open for up to
-      // ninety seconds against an admin-supplied host on the process that carries
-      // every relay tunnel. The result lands in the log within a second.
       show(body, () => {
         out(`queued to ${body.to}`);
         out("see what happened with: cpctl admin mail");
@@ -1311,9 +978,6 @@ async function admin(args: string[]): Promise<void> {
       );
       show(body, () => {
         out(`disabled. Tokens already issued keep working for up to ${body.outstandingTokensExpireWithinSeconds}s.`);
-        // Printed for the same reason `deluser` prints `machinesReleased`: a code
-        // that was still live is a machine identity somebody could have been
-        // about to redeem, and `enable` does not give it back.
         if (body.enrollmentCodesInvalidated > 0) {
           out(`${body.enrollmentCodesInvalidated} unredeemed enrollment code(s) they minted were invalidated.`);
         }
@@ -1330,7 +994,6 @@ async function admin(args: string[]): Promise<void> {
           relayOnline: boolean;
           overLimit: boolean;
           owner: { userId: string; label: string } | null;
-          /** Optional so an older control plane reads as "never recorded". */
           lastSeenAt?: number | null;
         }[];
       }>("/v1/admin/machines");
@@ -1341,21 +1004,9 @@ async function admin(args: string[]): Promise<void> {
             machine.revoked ? "REVOKED" : null,
             machine.relayOnline ? "online" : "offline",
             machine.overLimit ? "OVER LIMIT" : null,
-            /*
-             * A machine nobody owns is **unlimited**, because there is no owner
-             * to have a limit — every row registered before ownership existed,
-             * every one created here with no `--owner`, and every one a deleted
-             * user left behind. Printed so that gap is a list an admin can read
-             * and adopt out of rather than an unseen hole.
-             */
+            // Ownerless machines have no limit (there is no owner to hold one), so they are flagged.
             machine.owner === null ? "no owner" : null,
-            /*
-             * **Only when it is offline**, which is the only time it answers a
-             * question. `offline` on its own was the same word for a lid that
-             * closed a minute ago and a host that died last week, and the second
-             * is the one somebody is looking for. Optional on the wire, so an
-             * older control plane prints the flag list it always did.
-             */
+            // Last seen only when offline; optional on the wire for older control planes.
             machine.relayOnline ? null : agoText(machine.lastSeenAt),
           ]
             .filter(Boolean)
@@ -1369,8 +1020,6 @@ async function admin(args: string[]): Promise<void> {
       const body = await api<{
         enabled: boolean;
         url: string | null;
-        // `relayId` optional so an older control plane, which does not send it,
-        // prints `?` rather than `undefined`.
         tunnels: { machineId: string; relayId?: string; since: number; activeStreams: number; requestsProxied: number }[];
         /** Relay ids holding tunnels with no entry in REEMOAT_CP_RELAY_URLS. */
         unmapped?: string[];
@@ -1385,12 +1034,6 @@ async function admin(args: string[]): Promise<void> {
           out("no tunnels connected");
           return;
         }
-        /*
-         * Said **before** the list rather than after it, because it is the
-         * reason to read the list at all: a relay id with no entry in the
-         * routing map sends its machines to the shared name, which keeps
-         * working and is therefore invisible in every other way.
-         */
         for (const id of body.unmapped ?? []) {
           out(
             `warning: relay "${id}" holds tunnels and is not in REEMOAT_CP_RELAY_URLS —\n` +
@@ -1400,13 +1043,7 @@ async function admin(args: string[]): Promise<void> {
         }
         for (const tunnel of body.tunnels) {
           const age = Math.round((Date.now() - tunnel.since) / 1000);
-          /*
-           * The relay id is printed because it is the only shipped way to see
-           * whether `REEMOAT_CP_RELAY_URLS` is right: a wrong entry degrades to
-           * the shared name and keeps working, one request in N slowly, with no
-           * error and no log. In external mode this list merges every relay's
-           * rows, so without the name they are indistinguishable.
-           */
+          // The relay id is the only shipped way to spot a wrong REEMOAT_CP_RELAY_URLS entry, which degrades silently.
           out(
             `${tunnel.machineId.padEnd(14)} ${(tunnel.relayId ?? "?").padEnd(10)} up ${String(age).padStart(6)}s  ` +
               `${tunnel.activeStreams} active  ${tunnel.requestsProxied} proxied`,
@@ -1415,18 +1052,6 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    /*
-     * What every machine is running, connected or not.
-     *
-     * The question a staged rollout is planned from, and the reason the tunnel
-     * handshake carries a version at all. `admin relay` above answers "what is
-     * up right now"; this answers "what is out there", which is a different set
-     * and a strictly larger one — the machine that decides whether a protocol
-     * floor can be raised is the one that has been dark for a month.
-     *
-     * The summary is printed before the list for `admin relay`'s reason: it is
-     * why you would read the list.
-     */
     case "fleet": {
       const body = await api<{
         relay: { protocol: number; oldestAccepted: number };
@@ -1438,7 +1063,6 @@ async function admin(args: string[]): Promise<void> {
           revoked: boolean;
           version: string | null;
           protocol: number | null;
-          /** Absent from a control plane older than the field, which is why it is optional here. */
           agents?: Record<string, string | null> | null;
           seenAt: number | null;
         }[];
@@ -1454,17 +1078,6 @@ async function admin(args: string[]): Promise<void> {
         }
         const seenLine = (seenAt: number | null): string =>
           seenAt === null ? "never seen" : `${Math.round((Date.now() - seenAt) / 86400000)}d ago`;
-        /*
-         * Every machine and what it would launch, as of its last dial. This is the
-         * line "which machines are running a July claude" is answered from, and it
-         * is a per-machine list rather than a count because the answer is a set of
-         * hosts to visit. `not reported` is one silence for three facts — a daemon
-         * older than the header, one that has never dialled, and one with no CLI
-         * for any harness, which sends no header rather than an empty one — and
-         * they are deliberately not told apart here: the only way to would be to
-         * compare the daemon version against the release that added the header,
-         * and that version is branched on by nothing.
-         */
         const live = body.machines.filter((machine) => !machine.revoked);
         if (live.length > 0) {
           out("");
@@ -1480,12 +1093,6 @@ async function admin(args: string[]): Promise<void> {
             out(`  ${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ${clis}  (${seenLine(machine.seenAt)})`);
           }
         }
-        /*
-         * Named rather than counted, because this is the set somebody has to go
-         * and touch. `unknown` is a machine that has not dialled since daemons
-         * began reporting — which is either very old or simply off, and both are
-         * the same job: visit it.
-         */
         const stale = body.machines.filter(
           (machine) => !machine.revoked && (machine.protocol === null || machine.protocol < body.relay.protocol),
         );
@@ -1502,20 +1109,7 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    /*
-     * The fleet's signing keys.
-     *
-     * `schema.sql` has described an overlapping rotation since the table existed
-     * and nothing could perform one: two readers of `retired_at`, no writer, on
-     * the key that mints every token in the fleet. The remedy for a leaked
-     * database was hand-editing SQLite inside a read-only container.
-     *
-     * Three verbs because rotating is genuinely three acts spread over as long
-     * as it takes every daemon to re-enroll — mint, watch, retire — and collapsing
-     * them into one would be the one arrangement that cannot work: a daemon
-     * captures the key set once at enrollment and never asks again, so retiring
-     * the old key before they have all been back takes the fleet off the network.
-     */
+    // Rotation is three acts (mint, re-enroll every daemon, retire): a daemon captures the key set once, at enrollment.
     case "signingkeys": {
       const body = await api<{ keys: { kid: string; createdAt: number; retiredAt: number | null }[] }>(
         "/v1/admin/signing-keys",
@@ -1557,17 +1151,7 @@ async function admin(args: string[]): Promise<void> {
     case "addmachine": {
       const name = rest[0];
       if (!name) fail("usage: cpctl admin addmachine <name> --owner <userId>");
-      /*
-       * **`--owner` is required now, and the whole block that used to explain
-       * how to live without it is gone with the arm behind it.**
-       *
-       * That block printed "no owner: this machine belongs to nobody" and then
-       * three ways to cope. The route refuses it outright instead: a machine
-       * with no owner is outside the machine limit and outside the ban check —
-       * both being facts about the owner — so forgetting one flag produced a
-       * live machine no rule applied to. Refused here as well as on the route so
-       * the message names the flag rather than the field.
-       */
+      // Required here as well as on the route, so the message names the flag.
       if (values.owner === undefined || values.owner.length === 0) {
         fail(
           "usage: cpctl admin addmachine <name> --owner <userId>\n" +
@@ -1582,12 +1166,6 @@ async function admin(args: string[]): Promise<void> {
       show(body, () => out(`created ${name}  ${body.id}  owner ${values.owner}`));
       return;
     }
-    /*
-     * Rename only. This used to carry `--url` and `--no-url` as well, which
-     * between them were the whole routing policy for a machine — with an address
-     * it was probed directly first, without one it was relay-only. There is one
-     * route into a machine now, so there is nothing here to choose.
-     */
     case "setmachine": {
       const machineId = rest[0];
       if (!machineId) fail("usage: cpctl admin setmachine <machineId> --name <name>");
@@ -1619,14 +1197,6 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    /*
-     * The one repair in this file, and it is a repair rather than a policy.
-     *
-     * Its own verb rather than a flag on `setmachine`, which renames and is
-     * documented as touching nothing else: this changes what an app is told to
-     * expect from a machine, and a rename that could do that by accident is a
-     * flag away from somebody losing a fleet's reachability with a typo.
-     */
     case "clearkey": {
       const machineId = rest[0];
       if (!machineId) fail("usage: cpctl admin clearkey <machineId>");
@@ -1635,25 +1205,14 @@ async function admin(args: string[]): Promise<void> {
         { method: "DELETE" },
       );
       show(body, () => {
-        /*
-         * "Nothing was pinned" is a different sentence rather than a failure, for
-         * the route's own reason: the operator asked for this machine to have no
-         * pin and it has none. Saying so stops them going looking for a second
-         * lever that does not exist.
-         */
         if (!body.cleared) {
           out(`${body.machineId} had no encryption key pinned — nothing to clear.`);
         } else {
           out(`cleared the encryption key pinned for ${body.machineId}.`);
-          // The only time this is ever printed anywhere. Nothing else in this
-          // service reports a pin, so an operator who wants a record of what was
-          // there has this line and no other chance at it.
+          // The only place a pinned key is ever printed.
           out(`  was ${body.previousKey ?? ""}`);
         }
         out("Its next dial pins whatever it announces, so start or restart that daemon now.");
-        // Said even when nothing was cleared: an operator who ran this is in the
-        // middle of a machine that will not connect, and the window is the part
-        // that surprises people.
         out("Until that dial nothing can reach it — a token minted now carries no key,");
         out("and there is no unencrypted mode to fall back to. Sessions already open are");
         out("unaffected: the key is read when a token is minted and never again.");
@@ -1683,8 +1242,6 @@ async function admin(args: string[]): Promise<void> {
       }>(`/v1/admin/grants${grantQuery()}`);
       show(body, () => {
         for (const grant of body.grants) out(`${grant.userId}  ->  ${grant.machineId}  ${grant.scopes.join(",")}`);
-        // Said out loud, because a table that quietly stops short reads as the
-        // whole set. Grants are users × machines and this is the list that grows.
         if (body.offset + body.grants.length < body.total) {
           out(`\nshowing ${body.offset + 1}-${body.offset + body.grants.length} of ${body.total}`);
           out(`more: cpctl admin grants --offset ${body.offset + body.grants.length}`);
@@ -1692,18 +1249,7 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    /*
-     * `grant` and `ungrant` used to sit here and are deleted with the routes
-     * they drove. Sharing is `cpctl share` / `cpctl unshare`, run by the machine's
-     * owner — a grant is full access to a machine that runs agents as its owner
-     * with no sandbox, so an admin writing one for a machine they do not own was
-     * one request from arbitrary code execution on somebody's computer.
-     *
-     * Named in the refusal below rather than only removed, because the words are
-     * in scripts and in people's shell history: an unknown-command error that
-     * says nothing sends the reader to the usage text to guess which verb
-     * replaced it.
-     */
+    // Named in a refusal rather than just removed: scripts and shell history still carry these verbs.
     case "grant":
     case "ungrant":
       fail(

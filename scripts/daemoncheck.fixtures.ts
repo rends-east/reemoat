@@ -11,13 +11,6 @@ import { createApp } from "../src/server.js";
 import { publicKeyToJwk, signToken, type TokenClaims } from "../src/token.js";
 import { tmp } from "./tmp.js";
 
-/**
- * An `UploadIndex` with no database behind it.
- *
- * The interface lives in `uploads.ts` and `store/sqlite.ts` implements it, which
- * is what lets the block rules be driven here without a file on disk. The
- * durability half is asserted separately, against the real store.
- */
 export function memoryUploadIndex(): UploadIndex {
   const rows = new Map<string, UploadRow>();
   const key = (sessionId: string, uploadId: string): string => `${sessionId}/${uploadId}`;
@@ -43,25 +36,7 @@ export function memoryUploadIndex(): UploadIndex {
   };
 }
 
-/**
- * A `PluginDataStore` with no database behind it.
- *
- * `memoryUploadIndex`'s shape one subject over, and at module scope rather than
- * inside the section that first needed it because there are two callers now: the
- * scope gate is driven against this, and `SqlitePluginDataStore` is driven
- * against **both**. That pairing is the whole reason `checkPluginWrite` lives in
- * `src/plugins/store.ts` instead of beside the SQL — a quota that holds only
- * where there is a file is a quota nothing drives — and `entries` makes the same
- * claim about paging, which is why the byte accounting below is the real one
- * rather than a row count.
- *
- * ⚠ **Keyed on the pair, because the real one is.** This ignored `pluginId`
- * entirely and held one flat map, so it was structurally incapable of showing a
- * cross-plugin leak — the one property `PluginApi` namespacing every store call
- * on `manifest.id` exists to provide. `dropPlugin` cleared everything for the
- * same reason, which would have made "uninstalling one leaves the other's" pass
- * against a store that dropped both.
- */
+/** Keyed on the (pluginId, key) pair like the real store, so a cross-plugin leak stays observable. */
 export function memoryPluginData(): PluginDataStore {
   const data = new Map<string, string>();
   /** `pluginId` and `key` are two fields, never one string somebody could forge. */
@@ -78,12 +53,7 @@ export function memoryPluginData(): PluginDataStore {
   return {
     get: (id, key) => (data.has(at(id, key)) ? JSON.parse(data.get(at(id, key)) as string) : null),
     set: (id, key, value) => {
-      /*
-       * The shared bound, charged here rather than assumed. A fake that skipped
-       * it would make every quota assertion in this file a claim about SQLite
-       * alone, which is exactly the arrangement `checkPluginWrite` was extracted
-       * to end — and the refusals are what a plugin author actually meets.
-       */
+      // Charges the shared bound through checkPluginWrite, so quota refusals hold against both stores.
       const held = keysOf(id, "");
       checkPluginWrite(key, value, {
         keys: held.length,
@@ -93,9 +63,7 @@ export function memoryPluginData(): PluginDataStore {
       data.set(at(id, key), value);
     },
     delete: (id, key) => void data.delete(at(id, key)),
-    // Sorted, because `keysStmt` is `ORDER BY key` and a driver comparing the two
-    // answers would otherwise be comparing SQLite's collation against a Map's
-    // insertion order.
+    // Sorted to match the SQLite store's key ordering.
     keys: (id, prefix) => keysOf(id, prefix).sort(),
     entries: (id, prefix, after, maxBytes) => {
       const out: { key: string; value: unknown }[] = [];
@@ -103,8 +71,7 @@ export function memoryPluginData(): PluginDataStore {
       for (const key of keysOf(id, prefix).sort()) {
         if (key <= after) continue;
         const text = data.get(at(id, key)) as string;
-        // Charged as the bytes the answer carries, the way SQLite's does, so the
-        // two implementations cut a page at the same place.
+        // Charged in answer bytes like SQLite, minus its per-pair scaffolding, which is why paging fixtures use coarse rows.
         bytes += Buffer.byteLength(text, "utf8") + Buffer.byteLength(JSON.stringify(key), "utf8");
         if (out.length > 0 && bytes > maxBytes) return { entries: out, more: true };
         out.push({ key, value: JSON.parse(text) });
@@ -117,9 +84,7 @@ export function memoryPluginData(): PluginDataStore {
   };
 }
 
-// Realpathed up front: on macOS `/var` is a symlink to `/private/var`, and
-// `resolveCwd` resolves before it compares — so an unresolved fixture would make
-// every expectation below disagree with correct behaviour.
+// Realpathed: on macOS /var is a symlink to /private/var, and resolveCwd resolves before it compares.
 export const sandbox = realpathSync(tmp("daemoncheck-"));
 export const users = join(sandbox, "users");
 // The pair that a bare `startsWith` gets wrong: one id is a prefix of another.
@@ -136,10 +101,6 @@ symlinkSync(uAbcd, escape);
 export const aFile = join(uAb, "notes.txt");
 writeFileSync(aFile, "hello\n");
 
-/* ------------------------------------------------------------------ *
- * Fixtures: a signed identity, a stub store, and a live app
- * ------------------------------------------------------------------ */
-
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const kid = "k_daemoncheck";
 const identity = {
@@ -147,9 +108,7 @@ const identity = {
   issuer: "reemoat-cp",
   keys: [{ kid, jwk: publicKeyToJwk(publicKey) }],
 };
-// The real clock, unlike `authcheck`'s fixed instant. Nothing here tests expiry
-// or skew, and the routes below run against a live app that reads its own clock —
-// a frozen `iat` would make every token not-yet-valid rather than prove anything.
+// The real clock: the app reads its own, so a frozen iat would make every token not-yet-valid.
 export const now = Date.now();
 const iat = Math.floor(now / 1000);
 
@@ -168,14 +127,7 @@ export function tokenWith(sub: string, scp: Scope[], cnf?: { jkt: string }): str
   return signToken(claims, kid, privateKey);
 }
 
-/**
- * A capability bound to one device key, for driving an encrypted session.
- *
- * Separate from `tokenWith` above rather than a parameter on every call site,
- * because only the encrypted path has a channel to bind to — every route driven
- * with `app.request` has none, which is the loopback case and is why those
- * capabilities carry no `cnf` at all.
- */
+/** A capability bound to one device key; only the encrypted path has a channel to bind it to. */
 export function boundToken(sub: string, thumbprint: string): string {
   return tokenWith(sub, ["session:read", "session:write", "machine:admin"], { jkt: thumbprint });
 }
@@ -198,8 +150,7 @@ export function rowFor(
 ): PersistedSession {
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, "notes.txt"), "hi\n", "utf8");
-  // Over `COMPRESS_MIN_BYTES` and trivially compressible, which is what makes the
-  // download route's *exclusion* from gzip drivable rather than merely argued.
+  // Over COMPRESS_MIN_BYTES and compressible, so the download route's exclusion from gzip is drivable.
   writeFileSync(join(root, "big.txt"), "y".repeat(40 * 1024), "utf8");
   return {
     id,
@@ -227,23 +178,16 @@ export function rowFor(
     dropped: 0,
     title: meta.title ?? null,
     pinned: meta.pinned ?? false,
-    // Wherever its age puts it, which is what every row on disk says until
-    // somebody drags one.
     rank: meta.rank ?? null,
-    // Nobody chose, which is what every row on disk says until somebody does.
     ultracode: null,
     customAgent: null,
-    // Nothing remembered: this row's agent never ran in this process, so there is
-    // no state it was offering. The same value every row written before the column
-    // carries.
     agentState: null,
   };
 }
 
 const rows = [
   rowFor("s_one", join(users, "u_alice", "proj")),
-  // Pinned, and second, so a `?limit=1` cut has to reorder to keep it. Both rows
-  // are terminal, so pinning is the only thing separating them.
+  // Pinned and second, so a limit of one has to reorder to keep it.
   rowFor("s_two", join(users, "u_alice", "other"), { pinned: true }),
   rowFor("s_three", join(users, "u_bob", "proj")),
 ];
@@ -251,7 +195,6 @@ const rows = [
 export const registry = new SessionRegistry(new MemoryEventStore(), storeOf(rows));
 registry.restore({ reapOrphans: false });
 
-/** A credential store with no database behind it. */
 const credentialRows = new Map<string, { agent: string; envName: string; secret: string; updatedAt: number }>();
 export const credentials = {
   list() {
@@ -279,8 +222,7 @@ export const { app, injectWebSocket } = createApp({
   startedAt: now,
   credentials,
   roots: [users],
-  // No `logins`: the wizard routes answering 503 with none is the behaviour
-  // under test here, and `LocalRuntime.login` is asserted directly further down.
+  // No logins: the wizard routes answering 503 without one is behaviour under test.
 });
 
 export async function get(path: string, sub: string): Promise<{ status: number; body: any }> {
@@ -291,26 +233,7 @@ export async function get(path: string, sub: string): Promise<{ status: number; 
   return { status: response.status, body: text.length > 0 ? JSON.parse(text) : null };
 }
 
-/**
- * The launch config a stub runtime hands back instead of resolving a real agent.
- *
- * `LocalRuntime.describe` calls `resolveAgent`, which resolves the executable on
- * PATH eagerly and throws `AgentUnavailableError` when it is not there. Both stub
- * runtimes below already override `launch` to answer with in-memory pipes, so that
- * binary is never spawned — resolving it asserted nothing except that whoever ran
- * this driver happened to have `kimi` installed.
- *
- * Measured: `pnpm dockercheck` was green on a developer machine and failed on the
- * first CI run with `kimi not found on PATH`, from `Session.start` at the top of
- * "what the agent says, and what survives". That is exactly the property this
- * file's header disclaims — every driver here is meant to run "offline in one
- * process with no fleet, no agent and no deploy" — and the claim was true of the
- * Docker half and quietly false of this one.
- *
- * Nothing downstream reads these fields: `AcpClient.launch` touches `command` only
- * inside a spawn-failure message and `displayName` only inside handshake errors,
- * neither of which is reachable once `launch` is overridden.
- */
+/** Launch config for stub runtimes that override launch, so no agent binary has to exist on PATH. */
 export function stubAgentConfig(agent: AgentId): AgentLaunchConfig {
   return {
     id: agent,
