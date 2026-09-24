@@ -37,13 +37,13 @@ terminal session, none for a live one) plus `countsAsLive`, separate on purpose 
 a stalled row belongs in Active because a human must act, but must not inflate a
 count drawn beside a green dot. Every one keys on `exit.reason`, never `status`
 alone. Consequences: `StatusDot` goes through `statusTone`, and `POST
-/sessions/:id/prompt` joins `slowRoute`'s 90s budget unconditionally, because
+/sessions/:id/prompt` joins `slowRoute` unconditionally, because
 `request` sees only a method and a path.
 
-**A cancel is two more pure predicates in `wire.ts`.** `canCancelTurn` is
-`turn !== null && !isTerminal && status !== "stopping"` — deliberately **wider
-than `showsWorking` by exactly the blocked case**, because a session parked on a
-question is where somebody most wants out and the daemon takes the cancel there.
+**A cancel is two more pure predicates in `wire.ts`.** `canCancelTurn` is a turn,
+unprompted work or a parked request, `&& !isTerminal && status !== "stopping"` —
+**wider than `showsWorking` by exactly the blocked case**, where somebody most
+wants out and the daemon takes the cancel, turn or not (Q2.232).
 The `stopping` clause is the daemon's *second* refusal (`terminal ||
 stopRequested`) and `isTerminal` does not cover it: a session stopped mid-turn
 carries `{status: "stopping", turn: 5}` for seconds. `cancelInFlight`
@@ -68,7 +68,7 @@ bundle, two shells**: `packages/native` is a Tauri window around this same
 copy and no branch at a call site. `native-shell.md` is that area, and Q3.605 is
 why "no Electron" is narrowed rather than reversed.
 It is **adaptive**: below `lg` one screen at a time, list → detail; at `lg` and
-above the rail becomes permanent and is **two columns** — `MachineColumn`, 72px of
+above the rail becomes permanent and is **two columns** — `MachineColumn`, 80px of
 machines, then the session list. `AppShell` is the only place that knows, and it
 knows **in CSS** — no breakpoint state in JavaScript, so a resized window cannot
 render a rail that is not there. Both columns are inside one `<aside>` on one
@@ -92,10 +92,10 @@ have to enter. These are the rules a change here must not break:
   filter and the needle deliberately, and `webcheck` asserts it as a **superset
   property** over every filter × every tab × a set of queries. Q3.200.
   **`Sheet` draws no waiting count** (Q3.434, reversing Q3.201).
-- **`machineSubline` keeps `blocked` above `offline`**, and an unreachable machine
-  is announced **nowhere in the rail** — it and `MachineTab.reach` have no caller
-  outside `webcheck`. Settings → Machines and the New session picker are the only
-  places reachability shows. An open question, not a settled trade. Q3.202.
+- **`machineSubline` keeps `blocked` above `offline`**, and no row or banner says a
+  machine or the server is unreachable: `ConnectionPill` does, floating at the
+  list's bottom-left (`relay.md`, Q3.659). `MachineTab.reach` has no caller outside
+  `webcheck`. Q3.202.
 - **Nothing in a row mounts sideways into another control.** Three remedies:
   *delete it* when redundant; *reserve its slot* when it is the only copy (the
   pin, the two spinners); *move it off the row* when it is neither (the working
@@ -125,7 +125,7 @@ have to enter. These are the rules a change here must not break:
   nor any weight.
 - **`bg-fg` is the affirmative action inside a decision, and otherwise a *mark*
   under a stated size** — Send and the reversible approval; below that, only things
-  the size of a glyph: the tab underline, the bell dot, a blocked count, a selected
+  the size of a glyph: the bell dot, a blocked count, a selected
   machine's 28px chip. A pill-sized fill is still the loudest object on screen.
   `raised` means **state**: a tab you are on, a toggle on, a chosen menu row.
   Q3.209, Q3.624.
@@ -137,9 +137,9 @@ have to enter. These are the rules a change here must not break:
   Reverses Q3.211.
 - **The menu is a left drawer and the only thing in this app that is not a
   route.** `MenuDrawer`, portaled, `useDismissible("sheet")` — never `"menu"`,
-  which would leave `j`/`k` walking the list behind it. Two triggers, one panel,
-  state in `App`; the `usePathname()` effect is what makes Android's Back close
-  it, at the cost of Back doing two things.
+  which would leave `j`/`k` walking the list behind it. Two triggers and a pull
+  (Q3.657), one panel, state in `App`; the `usePathname()` effect makes Android's
+  Back close it, at the cost of Back doing two things.
   **No ✕, by the owner's call**, so VoiceOver on iOS reaches no exit — `webcheck`
   pins the absence. Q3.628.
 - **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.
@@ -162,8 +162,8 @@ have to enter. These are the rules a change here must not break:
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
   drawing. Q3.15.
-- **Ordered by name until a reader drags a tab (`machine-gestures.md`), and never
-  by reachability or activity.** Both of those flicker on the four-second poll, and
+- **By name, `local` first, until a reader drags (`machine-gestures.md`), and never
+  by reachability or activity.** Both flicker on the four-second poll, and
   a list reordering under a travelling thumb is the one thing this cannot do —
   which is why a *stored* order is allowed where a derived one is not. **Rows inside them are their reader's**:
   `sessions.rank`, a position clock defaulting to `createdAt`, descending. A drag
@@ -274,10 +274,10 @@ have to enter. These are the rules a change here must not break:
 anything, and `resolveMachineRef` picks the owned one. A machine that is not
 yours carries a **`shared` badge**, never a subline; one badge per row, ranked
 **state · `this device` · `shared`**. `this device` is the machine the app runs
-on, read from the announce file through `AppState.localMachineId`, never from
+on, read off the claim and the announce file via `AppState.localMachineId`, never
 `route.kind === "local"` — a preference `setLocalOff` can switch off. The *label*
-is the ordinary host name: "local" is drawn per client, never stored on a row
-every client reads. Q3.543, Q7.139. It also carries **`enrolledBy`**
+is the host name: "local" is drawn per client, never stored on a row every
+client reads. Q3.543, Q7.139. It also carries **`enrolledBy`**
 on a subline of its own — never a badge, never a clause on the truncating
 `standing` line — since nothing else discloses a substitution no route may
 refuse; `enrolledByText` is that one string, `null` where there is nothing to
@@ -407,14 +407,14 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/SessionBrowser.tsx` | The list column: one header row (menu · search · filter · bell, the `<h1>` `sr-only`), the waiting floor, the machine tabs **below `lg` only**, Pinned above the selected machine's folders, orphans, and a footer that is one button. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — plus `Background tasks` in the header's copy, the panel's second door. `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the supervisor's ring for the daemon *this app started on this computer*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the ring of the daemon *this app started for this server*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds
 
 | | |
 |---|---|
-| Web client | 3 live sockets (LRU), **16 MiB held per session, every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling) — no render window; the only cut is the newest `context_cleared`. History pages backwards at **5000** and does not stop until the log's start, that cut, or those bytes; a failed page retries over 37.5s and `attachWanted` re-drives a run that spends it. **60 sessions per machine per poll**, which is why pinned outranks live in the daemon's `listRank`. 4s list poll, 15s re-probe when unreachable, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those spawning a process — which get 90s, `/prompt` unconditionally, because a deadline keyed on session state would be state leaking into the transport. `POST /sessions/:id/cancel` is deliberately *not* one, and `webcheck` pins it absent rather than forgotten. **Every number here is also in `docs/DECISIONS.md`'s Bounds table, which is the copy to change.** Q3.226 |
+| Web client | 3 live sockets (LRU), **16 MiB held per session, every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling) — no render window; the only cut is the newest `context_cleared`. History pages backwards at **5000** and does not stop until the log's start, that cut, or those bytes; a failed page retries over 37.5s and `attachWanted` re-drives a run that spends it. **60 sessions per machine per poll**, which is why pinned outranks live in the daemon's `listRank`. 4s list poll, 15s re-probe when unreachable, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those spawning a process — which get their daemon chain + 30s, 90s at least, `/prompt` unconditionally, because a deadline keyed on session state would be state leaking into the transport. `POST /sessions/:id/cancel` is deliberately *not* one, and `webcheck` pins it absent rather than forgotten. **Every number here is also in `docs/DECISIONS.md`'s Bounds table, which is the copy to change.** Q3.226 |
 
 ## Known gotchas
 

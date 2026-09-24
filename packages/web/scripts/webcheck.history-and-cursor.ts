@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 import {
   type Attach,
   attaches,
@@ -19,63 +20,16 @@ import {
   loadStop,
   nextCut,
   reattachSince,
+  sentText,
   type StoredEvent,
+  VERBATIM_FIELD,
 } from "./webcheck.modules.js";
-
-/* ------------------------------------------------------------------ *
- * Where a transcript is joined
- *
- * The five sections below are one subject: **a transcript that looks contiguous
- * and is not.** Every rule here decides where two runs of events are spliced
- * together, and each of them was, or could be, wrong in the same silent way — a
- * reader cannot tell a conversation with its middle removed from a conversation
- * that was always that short, and nothing on screen says which they are looking
- * at.
- *
- * Two of these shipped. The `openSession` boundary read the tab's own window
- * (20 000) instead of the daemon's replay cap (2 000), so every lag in between
- * asked the socket to replay a hole it would never fill; and `loadAll` anchored
- * `loadedFrom` on a page's *first* event while a byte-capped page keeps its
- * oldest and drops its newest, which spliced the page's last event onto the held
- * window and lost everything between. Both were reachable from an ordinary
- * session open, and neither drew a `Gap`, a marker, or anything else.
- *
- * They were unassertable because they lived in methods on `AppStore`, which this
- * driver cannot construct — there is no control plane, no daemon and no DOM. So
- * the rules are pure functions in `store.ts` now, for the reason CLAUDE.md's
- * "Next" section gives for the other fifty: it is the only form `webcheck` can
- * reach.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwhere a re-attaching socket resumes\n");
 {
-  /*
-   * The bug, stated as two numbers.
-   *
-   * `reattachSince` decides between replaying a lag down the socket and dropping
-   * the held transcript to page it back in, and the boundary has to be the
-   * *daemon's* `ATTACH_REPLAY_MAX` because that is the most `attach` will ever
-   * replay. It read `MAX_TRANSCRIPT_EVENTS` instead — so a lag of, say, 5 000
-   * took the arm chosen *because* it replays exactly the hole, and got the newest
-   * 2 000 with a `lagged{backlog}` frame for the other 3 000. Asking for more
-   * than the daemon replays does not fail. It silently gets less.
-   *
-   * So both numbers are pinned, and pinned as *different* numbers: the failure is
-   * not either value being wrong, it is the two being conflated, and a future
-   * edit that sets one from the other would pass an assertion on the value alone.
-   */
+  // The boundary is the daemon's ATTACH_REPLAY_MAX, the most attach will replay; asking for more silently gets less.
   check("the replay boundary is the daemon's ATTACH_REPLAY_MAX", ATTACH_REPLAY_MAX, 2_000);
-  /*
-   * The other half used to be `ATTACH_REPLAY_MAX < MAX_TRANSCRIPT_EVENTS` — two
-   * numbers pinned as *different* numbers, because the failure was the two being
-   * conflated rather than either value being wrong.
-   *
-   * There is no tab event ceiling to compare against now: it was deleted rather
-   * than raised (`MAX_TRANSCRIPT_BYTES` is the only one, and it is not a count). So
-   * the same protection is asserted the stronger way, off the source — this
-   * function may read the daemon's number and no other bound. An inequality would
-   * have quietly become vacuous the day the second number went away.
-   */
+  // The tab's event cap MAX_TRANSCRIPT_EVENTS is gone, so the conflation is guarded off source: only the daemon's bound may be read here.
   const reattachBody = /export function reattachSince\([\s\S]*?\n\}/.exec(
     readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"),
   )?.[0] ?? "";
@@ -86,22 +40,16 @@ process.stdout.write("\nwhere a re-attaching socket resumes\n");
     false,
   );
 
-  // A lag of exactly the cap is the largest one the socket really will fill.
   check(
     "a lag of exactly ATTACH_REPLAY_MAX replays down the socket",
     reattachSince(1_000, 1_000 + ATTACH_REPLAY_MAX),
     { since: 1_000, keepHeld: true },
   );
-  // One more than the cap is the first lag that cannot, and the transcript is
-  // dropped rather than being asked for down a socket that will not send it.
   check(
     "one more than it drops what is held and restarts at the tail",
     reattachSince(1_000, 1_000 + ATTACH_REPLAY_MAX + 1),
     { since: 1_000 + ATTACH_REPLAY_MAX + 1, keepHeld: false },
   );
-  // The whole span the defect lived in: any of these took the replay arm and got
-  // a hole. Named separately from the boundary case because the boundary is what
-  // an off-by-one moves and this is what a re-conflation moves.
   check(
     "a lag between the two numbers restarts, it does not replay",
     reattachSince(1_000, 6_000),
@@ -113,31 +61,8 @@ process.stdout.write("\nwhere a re-attaching socket resumes\n");
     since: 900,
     keepHeld: true,
   });
-  /*
-   * The row is up to one poll old, so holding *more* than it reports is ordinary
-   * rather than strange, and dropping the transcript for it would throw a
-   * conversation away every four seconds.
-   *
-   * The number is the **held tail**, and that is the assertion rather than
-   * `keepHeld` being true. This arm used to answer the row's 900 and let
-   * `openSession` raise it to 901 with a `Math.max`, which meant the one function
-   * `webcheck` can ask answered a seq the socket never sent — so this line pinned
-   * 900 while the wire carried 901, and a revert that deleted the caller's
-   * correction passed it. Seeded at 900 the socket's `seq <= lastAppliedSeq` skip
-   * cannot fire for the overlap at all and `store.onEvents` appends 901 a second
-   * time: the agent's last sentence drawn twice, perfectly contiguous, so the
-   * hole check sees nothing. The driven section below is the same claim measured
-   * at the socket.
-   */
+  // The row can be a poll old, so holding more is ordinary; the answer must be the held tail or the overlap is appended twice.
   check("holding more than the row reports keeps it too", reattachSince(901, 900), { since: 901, keepHeld: true });
-  /*
-   * And the rule the fold makes true, as a property rather than as one more row:
-   * **whenever the transcript survives, the attach point is exactly what is
-   * held.** That is the whole of what the caller's `Math.max` used to say, and
-   * saying it here is what stops it being restated there. The `keepHeld: false`
-   * arms are deliberately outside it — they have thrown the transcript away, so
-   * there is no held tail left for the socket to be below.
-   */
   check(
     "keeping the transcript always attaches at its own tail",
     (
@@ -154,47 +79,11 @@ process.stdout.write("\nwhere a re-attaching socket resumes\n");
     [700, 900, 901, 1_000],
   );
 
-  /*
-   * No held events is a restart, and the arm exists because of a quieter version
-   * of the same hole: `primeBlocked` can write a transcript whose sixty-event
-   * window came back empty, leaving `loadedFrom` sixty seqs below a tail the
-   * socket — attaching at `daemonLast` — will never send.
-   */
   check("nothing held at all restarts from the tail", reattachSince(null, 900), { since: 900, keepHeld: false });
   check("and on a session with no events yet, that is seq 0", reattachSince(null, 0), { since: 0, keepHeld: false });
 }
 
-/* ------------------------------------------------------------------ *
- * And what the socket is actually started from
- *
- * `reattachSince` answers where to **attach**, and this section is the end-to-end
- * half of that same claim: that the number it answers is the number the socket
- * asks the daemon for.
- *
- * It exists because for a while it was not. The "held ahead of the row" arm
- * answered the row's poll-stale `lastSeq` and `openSession` raised it to the held
- * tail with a `Math.max` — one rule in two places, of which the assertable one
- * was the wrong one. `reattachSince(901, 900)` was pinned at 900 while the wire
- * carried 901, so deleting the caller's correction failed nothing here at all.
- * What that correction is worth: the arm's whole argument is *the socket skips
- * `seq <= lastAppliedSeq`*, which only holds while the cursor is the **held
- * tail**. Seed the stream at the row's number instead and the skip cannot fire
- * for the overlap, `store.onEvents` concatenates with no dedup, and every event
- * between the poll-stale row and the held tail is appended a second time — the
- * agent's last sentence drawn twice, under a React key already in the list,
- * perfectly contiguous so the hole check sees nothing.
- *
- * The fold put that back inside the pure function, and the checks above pin it.
- * This is still worth driving, because "the pure function is right" and "the
- * caller uses it" are two claims and only the second is about `openSession`:
- * `AppStore` is a singleton
- * this driver already imports, its collaborator is the same duck-typed machine
- * every rotation case above uses, and the observable is the `?since=` the socket
- * asks the daemon for — which is the number that was wrong. The three maps it
- * reads are private, so the fixture is written through a cast rather than
- * through a second copy of the rule living somewhere assertable, which is the
- * drift `sessionOf` is named for.
- * ------------------------------------------------------------------ */
+// End to end: openSession must seed the socket with what reattachSince answers; the private maps are written through a cast.
 
 process.stdout.write("\nwhere a re-opened session's socket is seeded\n");
 {
@@ -209,11 +98,6 @@ process.stdout.write("\nwhere a re-opened session's socket is seeded\n");
     event: { type: "text", role: "assistant", thought: false, text: `#${seq} ` },
   });
 
-  /*
-   * The stream's collaborator plus the one method the *store* calls on a
-   * connection: `openSession` ends in `emit()`, and `publish()` maps `state()`
-   * over every connection on the way out.
-   */
   const connection = {
     ...machine,
     state: () => ({
@@ -263,49 +147,21 @@ process.stdout.write("\nwhere a re-opened session's socket is seeded\n");
     attaches.length = 0;
     store.openSession(ref);
     const attach = await nextAttach(1);
-    // `onVanished` is the public door to `forgetSession`, which stops the stream
-    // and drops the row and the transcript — so the next case starts clean rather
-    // than on top of this one's socket.
+    // onVanished stops the stream and drops the row and transcript, so the next case starts clean.
     store.onVanished(ref);
     return attach;
   };
 
-  /*
-   * The case. The row is one poll old and says 900; `onEvents` has already
-   * appended 901. `reattachSince` answers 900 and the socket must still ask from
-   * 901, because 901 is what would otherwise arrive twice.
-   */
   check("a socket asks from the held tail, not from the row the poll left behind", (await openWith([899, 900, 901], 900)).since, 901);
-  // The mirror, and it is why the arm is the *held tail* rather than "always the
-  // newest number anybody named": when the daemon really has moved on, the replay
-  // arm asks from what is held *below* the row and every one of those events is a
-  // hole to be filled.
   check("and from the replay point when the daemon is the one ahead", (await openWith([690, 700], 900)).since, 700);
-  // Nothing held at all is `keepHeld: false`, where there is no tail at all and
-  // the row's own number is the whole answer.
   check("with nothing held it starts at the row", (await openWith([], 900)).since, 900);
 
-  // Left behind, the injected connection would be dropped by the first real
-  // `runResume` below — which is a machine list this fixture is not in.
   internals.connections.delete("m_1");
 }
 
 process.stdout.write("\nthe whole conversation arrives without being asked for\n");
 {
-  /*
-   * ⭐ **Driven end to end, because the pure functions each passed while the
-   * conversation stayed missing.**
-   *
-   * `loadStop`, `fillWindow` and `historyRetry` are asserted individually above,
-   * and none of them can show the thing that was actually reported: reload a
-   * session whose agent is working and the transcript holds nothing but
-   * `working…`. Two separate causes, one run each here — a conversation longer
-   * than the old per-run budget, and a page that fails on the way.
-   *
-   * `daemons` is a private map of `DaemonClient`s and this injects a duck-typed
-   * stub into it, the same `internals` cast the socket fixture above already
-   * uses. Only `events` is ever called on this path.
-   */
+  // daemons is a private map: a duck-typed stub is injected, and only events is called on this path.
   const { store } = await import("../src/store.js");
   const { keyOf, machineId, sessionId } = await import("../src/ids.js");
 
@@ -359,37 +215,17 @@ process.stdout.write("\nthe whole conversation arrives without being asked for\n
     internals.transcripts.get(key) as { events: { seq: number }[]; loadedFrom: number };
 
   {
-    /*
-     * Seven thousand events, against a `MAX_AUTO_HISTORY` of five thousand.
-     *
-     * The old loop stopped dead at the budget and left the remaining two thousand
-     * on the daemon behind "N earlier events did not load — try again". One call
-     * has to reach seq 1 now, with no second call and nothing on screen asking
-     * for one; the constant survives only as the point at which the loop yields
-     * the main thread.
-     */
+    // One call must reach seq 1; MAX_AUTO_HISTORY is only where the loop yields the main thread.
     const stub = daemonHolding(7_000);
     internals.daemons.set("m_2", stub);
     seed(7_000);
     await store.loadAll(ref);
     check("a conversation past the old budget loads in one call", held().loadedFrom, 1);
     check("and every event of it is there, in one run", spanOf(held().events), "1..7000");
-    // Expressed in the constant, not in the arithmetic it happened to produce: this
-    // said "fourteen pages of five hundred" and the page moved.
     check("in one request per window", stub.asked(), Math.ceil(7_000 / HISTORY_PAGE));
   }
 
   {
-    /*
-     * A page dropped mid-run — a radio handing over, a relay blipping.
-     *
-     * This used to be terminal: `catch {}` swallowed it, `SessionView`'s effect
-     * never fires again for the same session, and `attachWanted` skipped any key
-     * that already had a stream. The transcript stayed empty for the life of the
-     * tab and the reader was offered a button. `historyRetry` waits 500ms and
-     * asks the same `since` again, so the block `fillWindow` had already
-     * accumulated is kept and the window resumes rather than restarting.
-     */
     const stub = daemonHolding(1_200, 2);
     internals.daemons.set("m_2", stub);
     seed(1_200);
@@ -404,18 +240,7 @@ process.stdout.write("\nthe whole conversation arrives without being asked for\n
 
 process.stdout.write("\nhow many conversations a tab keeps\n");
 {
-  /*
-   * ⭐ **`MAX_TRANSCRIPT_BYTES` is documented as "the tab's own and **only**
-   * ceiling", and it was per session.** Nothing evicted a transcript, so a tab
-   * that visited N conversations retained N of them, each entitled to 16 MiB, on
-   * a phone. The byte ceiling bounds one conversation; `MAX_HELD_TRANSCRIPTS`
-   * bounds how many are held, and only the two together are what that sentence
-   * claimed.
-   *
-   * The property that makes eviction safe is asserted first and matters most: a
-   * session with a live stream is never dropped, so the conversation on screen
-   * and the ones still arriving cannot be what goes.
-   */
+  // MAX_TRANSCRIPT_BYTES bounds one conversation, MAX_HELD_TRANSCRIPTS how many; one with a live stream is never evicted.
   const { store } = await import("../src/store.js");
   const internals = store as unknown as {
     transcripts: Map<string, unknown>;
@@ -423,8 +248,6 @@ process.stdout.write("\nhow many conversations a tab keeps\n");
     replaceTranscript: (key: string, next: unknown) => void;
     streamOrder: string[];
   };
-  // The store is a singleton shared with every other block in this file, so this
-  // one seeds under its own prefix and clears up after itself.
   const before = new Set(internals.transcripts.keys());
 
   const seed = (key: string): void =>
@@ -439,8 +262,7 @@ process.stdout.write("\nhow many conversations a tab keeps\n");
       unfetched: 0,
     });
 
-  // One session pinned as streaming, well before the cap is reached, so the
-  // eviction below has to walk past it rather than merely not reach it.
+  // Pinned well before the cap, so eviction has to walk past it.
   internals.streams.set("m/keep", {});
   internals.streamOrder.push("m/keep");
   seed("m/keep");
@@ -452,18 +274,7 @@ process.stdout.write("\nhow many conversations a tab keeps\n");
     `${internals.transcripts.size} held after 41 opened, cap ${MAX_HELD_TRANSCRIPTS}`,
   );
   check("and the one with a live stream is never the one dropped", internals.transcripts.has("m/keep"), true);
-  /*
-   * ⚠ **The guard against a vacuous pass, which was itself vacuous.** It asserted
-   * `has("m/s39")` — and `m/s39` is the last `seed()`, so it is the `just` argument
-   * of the very `trimTranscripts` call under test, which skips it unconditionally
-   * (`if (key === just || …) continue`). True by construction whatever the eviction
-   * policy does, including one that threw everything else away.
-   *
-   * `m/s38` is the nearest key with no such protection, and `m/s0` is the oldest
-   * arrival. The pair is what pins the *policy* rather than the bound: newest kept,
-   * oldest gone. Asserting only the first would pass for a store that evicted
-   * nothing; only the second, for one that evicted everything.
-   */
+  // m/s39 is the just argument trimTranscripts always keeps; m/s38 and m/s0 pin the policy: newest kept, oldest gone.
   check("while the most recently arrived at is still there", internals.transcripts.has("m/s38"), true);
   check("and the one arrived at longest ago is what went", internals.transcripts.has("m/s0"), false);
 
@@ -474,23 +285,7 @@ process.stdout.write("\nhow many conversations a tab keeps\n");
 
 process.stdout.write("\nwhat a lagged frame means for the transcript\n");
 {
-  /*
-   * The single most consequential assertion in this file's history sections.
-   *
-   * The daemon has three lagged reasons and only two of them are losses.
-   * `backlog` is `attach` declining to replay past `ATTACH_REPLAY_MAX` — those
-   * events are on disk and `GET /sessions/:id/events` serves them — so drawing it
-   * as a hole is a client reporting its own decision as data loss. Measured
-   * against the live database: a session reporting 3162 events "not shown (beyond
-   * retention)" had every one of them still on the daemon, whose own floor was
-   * thousands of seqs below.
-   *
-   * The opposite regression is just as quiet: answering `backlog` by recording
-   * nothing and paging *backwards* leaves the range above the held window
-   * unfetched for ever, which is the contiguous-looking transcript with the
-   * middle absent. So the arm has to be neither "record" nor "ignore" but
-   * "restart at the far side".
-   */
+  // backlog is attach declining to replay events still on disk, so it restarts at the far side rather than drawing a hole.
   check("a backlog frame is refetched from its far side, not drawn as a hole", gapPlan("backlog", 4_000), {
     kind: "restart",
     loadedFrom: 4_001,
@@ -507,24 +302,7 @@ process.stdout.write("\nwhat a lagged frame means for the transcript\n");
 
 process.stdout.write("\none window of history, filled forwards\n");
 {
-  /*
-   * The second shipped bug, and it fired on ordinary session open.
-   *
-   * `GET /sessions/:id/events` is capped by **bytes** as well as by count
-   * (`EVENTS_PAGE_BYTES` 768 KiB against `EVENTS_PAGE_LIMIT` 5000, and the bytes
-   * are what bite — they are also what keeps a page inside one relay stream
-   * window, Q6.104), and both event
-   * stores fill a page by scanning *ascending* from `since` and breaking — so a
-   * byte-capped page keeps its oldest events and drops its **newest**. The loader
-   * anchored `loadedFrom` on the page's first event, which spliced the page's
-   * *last* event straight onto the held window: no `Gap`, no marker, and
-   * `loadedFrom` now below the hole so paging never came back for it.
-   *
-   * Driven with a stub rather than the daemon, which is the only way this is
-   * assertable at all — the shape being tested is "the page was shorter than the
-   * limit for a reason that is not the end of history", and a real daemon
-   * produces that only with a `file_change` big enough to clear 2 MiB.
-   */
+  // A byte-capped page keeps its oldest events and drops its newest, so a window is filled forwards from the last seq received (Q6.104).
   const ev = (seq: number): StoredEvent => ({
     seq,
     ts: seq * 1_000,
@@ -535,11 +313,6 @@ process.stdout.write("\none window of history, filled forwards\n");
     for (let seq = from; seq <= to; seq += 1) out.push(ev(seq));
     return out;
   };
-  /**
-   * A block as one string, so a hole in it is *named* rather than being a
-   * five-thousand-element diff nobody reads. This is the whole property under
-   * test: one unbroken run, or `"broken at 5020→5002"`, which is the bug.
-   */
   const spanOf = (block: readonly StoredEvent[]): string => {
     if (block.length === 0) return "empty";
     for (let i = 1; i < block.length; i += 1) {
@@ -550,18 +323,7 @@ process.stdout.write("\none window of history, filled forwards\n");
     return `${block[0]!.seq}..${block[block.length - 1]!.seq}`;
   };
 
-  /*
-   * The window under test throughout, **derived from `HISTORY_PAGE` rather than
-   * written out**.
-   *
-   * It was `1_001` against a page of 500, so every expectation below said `501` or
-   * `1000` — and raising the page to 5000 broke seven of them at once while every
-   * property they assert still held. A fixture that has to be re-typed when a
-   * constant moves is a fixture that will be re-typed *wrongly*.
-   *
-   * Two pages up, so the window has a real floor above 1 (`HISTORY_PAGE + 1`) and
-   * the last seq it has to reach is `HISTORY_PAGE * 2`.
-   */
+  // Derived from HISTORY_PAGE so the expectations survive the page size moving; two pages up gives a real floor above 1.
   const loadedFrom = HISTORY_PAGE * 2 + 1;
   const windowFloor = HISTORY_PAGE + 1;
   const windowTop = HISTORY_PAGE * 2;
@@ -582,14 +344,7 @@ process.stdout.write("\none window of history, filled forwards\n");
   }
 
   {
-    /*
-     * The byte-capped page: asked for 500, answered with the oldest 20.
-     *
-     * Two things have to hold and they are separate claims. One page must not
-     * *close* the window — that is what makes committing it a hole — and asking
-     * forward from the last seq received must eventually close it with a block
-     * that is contiguous both internally and with `loadedFrom`.
-     */
+    // One capped page must not close the window; asking forward from the last seq must close it contiguously.
     const asked: number[] = [];
     const capped = async (since: number): Promise<{ events: StoredEvent[]; firstSeq: number }> => {
       asked.push(since);
@@ -604,9 +359,6 @@ process.stdout.write("\none window of history, filled forwards\n");
     const all = await fillWindow(capped, loadedFrom, MAX_AUTO_HISTORY);
     check("asking forward from the last seq received closes it", all.closed, true);
     check("the committed block is one run", spanOf(all.block), wholeWindow);
-    // The bug's exact signature: with `loadedFrom` anchored on the page's first
-    // event, this read `windowFloor + 20` against a held window starting at
-    // `loadedFrom` — the rest of it gone, drawn as nothing at all.
     check("contiguous with the held window, which is the property that failed", all.block.at(-1)!.seq + 1, loadedFrom);
     check(
       "in one request per capped page, each from the last seq it received",
@@ -616,15 +368,7 @@ process.stdout.write("\none window of history, filled forwards\n");
   }
 
   {
-    /*
-     * A daemon that answers with nothing usable — its floor is above this window,
-     * or the session went away under us. There is no next `since` to ask from, so
-     * the window ends rather than asking the same question again.
-     *
-     * The stub would answer this way for ever. Its escape at 50 is deliberate and
-     * is what makes this a red line rather than a hung driver: without the break
-     * the loop is infinite, and a driver that hangs reports nothing at all.
-     */
+    // The escape at 50 turns a spin into a red line rather than a hung driver.
     let asked = 0;
     const stuck = async (): Promise<{ events: StoredEvent[]; firstSeq: number }> => {
       asked += 1;
@@ -635,21 +379,10 @@ process.stdout.write("\none window of history, filled forwards\n");
     const window = await fillWindow(stuck, loadedFrom, MAX_AUTO_HISTORY);
     check("nothing usable ends the window at once, with no spin", [asked, window.closed], [1, false]);
     check("and brings nothing back to commit", window.block, []);
-    // The floor still comes back: it is the honest thing to draw when the start of
-    // a conversation really is gone, and it is the one useful fact such an answer
-    // carries.
     check("the floor it reported is still worth keeping", window.firstSeq, 900);
   }
 
   {
-    /*
-     * The budget is spent **inside** the window, not per window.
-     *
-     * A byte-capped page turns one window into an unknown number of requests, so
-     * a budget that only counted windows would not be a bound at all — three
-     * pages of 20 against a budget of 60 is the whole of it, and the fourth
-     * request must not happen even though the window is nowhere near closed.
-     */
     const asked: number[] = [];
     const capped = async (since: number): Promise<{ events: StoredEvent[]; firstSeq: number }> => {
       asked.push(since);
@@ -661,9 +394,7 @@ process.stdout.write("\none window of history, filled forwards\n");
   }
 
   {
-    // No budget at all asks nothing, and says so with `null` rather than with a
-    // floor of 0 — which `EventList` would draw as the start of the conversation
-    // being gone. The same three-answer discipline as `probeExists`.
+    // null rather than 0: EventList would draw a floor of 0 as the start of the conversation being gone.
     let asked = 0;
     const never = async (): Promise<{ events: StoredEvent[]; firstSeq: number }> => {
       asked += 1;
@@ -675,24 +406,7 @@ process.stdout.write("\none window of history, filled forwards\n");
   }
 
   {
-    /*
-     * ⭐ **A budget of one page always closes a window, and `loadAll` passes
-     * exactly that.**
-     *
-     * This is the property the whole "no more `try again` button" change rests on.
-     * A window spans exactly `HISTORY_PAGE` seqs — `fillWindow` starts its cursor
-     * at `max(0, top - HISTORY_PAGE)` and filters to `> cursor && <= top` — so it
-     * can never yield more than that many events, whatever the daemon's 2 MiB byte
-     * cap does to the page sizes. The budget therefore cannot be the thing that
-     * ends a window, and `!closed` is left meaning only what it is documented to
-     * mean: the daemon cannot go further back.
-     *
-     * It used to be `MAX_AUTO_HISTORY - fetched`, and every 5000th event that
-     * expression went to zero *mid-window* — so the block was discarded whole by
-     * `loadAll`'s `!closed` arm, the run paid for a page it threw away, and the
-     * loss was reported to the reader as a button. Both stubs are asserted because
-     * the byte-capped one is the case that made the old expression bite.
-     */
+    // A window spans exactly HISTORY_PAGE seqs, so a budget of one page can never end one; loadAll passes exactly that.
     const full = async (since: number): Promise<{ events: StoredEvent[]; firstSeq: number }> => ({
       events: run(since + 1, since + HISTORY_PAGE),
       firstSeq: 12,
@@ -714,23 +428,6 @@ process.stdout.write("\none window of history, filled forwards\n");
 
 process.stdout.write("\nwhen the loader stops paging\n");
 {
-  /*
-   * Three of the four ways `loadAll` ends, in the order it asks them. The fourth
-   * is a window that would not close, which is `fillWindow`'s `closed` and is
-   * asserted in the section above — it cannot be known until a window has been
-   * attempted, so restating it here would be a second copy of a rule that already
-   * has one.
-   *
-   * The order is asserted rather than assumed, because it is the part that
-   * decides what the reader is told: a log that has reached its floor and reports
-   * anything else keeps asking for events nobody has.
-   *
-   * **There was a `budget` arm here and it is gone, along with the parameter.**
-   * It fired at `MAX_AUTO_HISTORY` and left the rest of the conversation behind a
-   * "N earlier events did not load — try again" button, i.e. this client
-   * reporting its own bookkeeping to the reader as a failure. That constant is
-   * `loadAll`'s yield chunk now and nothing else.
-   */
   const st = (over: {
     loadedFrom?: number;
     daemonFirstSeq?: number;
@@ -755,14 +452,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
   check("an ordinary window carries on", loadStop(st({})), null);
   check("the start of the log ends it", loadStop(st({ loadedFrom: 1 })), "start_of_log");
   check("the agent's own cut ends it", loadStop(st({ clearedAt: 400 })), "cleared");
-  /*
-   * ⭐ **And nothing carries on past it any more.** There was a second field here,
-   * `revealedBeforeClear`, set by a button at the head of the transcript that
-   * offered to fetch the conversation the agent had been told to forget. Both are
-   * deleted on the owner's word, so a cut is unconditional — asserted, because a
-   * flag re-added to `LoadState` would otherwise be the one change to this
-   * function that no assertion here notices.
-   */
   check(
     "with no way to ask past it, whatever else is true",
     [
@@ -771,36 +460,14 @@ process.stdout.write("\nwhen the loader stops paging\n");
     ],
     ["cleared", "cleared"],
   );
-  /*
-   * ⭐ **The daemon's own floor, which is what makes the 4s re-drive affordable.**
-   *
-   * Nothing here read `daemonFirstSeq` before. That was harmless while `loadAll`
-   * ran once per open — a legacy session whose oldest surviving event is seq 6145
-   * simply spent one fruitless request each time — and it is a permanent request
-   * loop now that `attachWanted` calls this on every poll: `loadedFrom` can never
-   * reach 1, so without this arm the answer is `null` for ever, on exactly the
-   * sessions that can least afford to be asked.
-   *
-   * `max(1, …)` and not the bare field: `daemonFirstSeq` is 0 for "no page has
-   * answered yet", and read literally that says the whole log is already in hand.
-   */
+  // The daemon's floor stops the per-poll re-drive; clamped to 1, since daemonFirstSeq 0 means no page has answered yet.
   check("the daemon's floor is the start of the log too", loadStop(st({ loadedFrom: 6145, daemonFirstSeq: 6145 })), "start_of_log");
   check("one event above it carries on", loadStop(st({ loadedFrom: 6146, daemonFirstSeq: 6145 })), null);
   check("and an unknown floor behaves as seq 1, not as done", [
     loadStop(st({ loadedFrom: 1, daemonFirstSeq: 0 })),
     loadStop(st({ loadedFrom: 2, daemonFirstSeq: 0 })),
   ], ["start_of_log", null]);
-  /*
-   * ⭐ **The tab's own ceiling, and it is bytes — the event count beside it is
-   * deleted rather than raised.**
-   *
-   * Without a ceiling at all, a *terminal* session — which receives no events, so
-   * never reaches the trim `onEvents` does at the other end — grows on every single
-   * open, for ever. With **two**, the wrong one decides: 50 000 events beside
-   * 16 MiB fires at 7 MiB on 140-byte events, which is the truncation that was
-   * reported, moved further out and made harder to notice. So there is one, and the
-   * assertion below is that a count alone — however large — never ends a run.
-   */
+  // The only ceiling is bytes: an event count beside it would be the one that decides.
   check("the tab's own ceiling ends it", loadStop(st({ heldBytes: MAX_TRANSCRIPT_BYTES })), "held_full");
   check("one byte short of that does not", loadStop(st({ heldBytes: MAX_TRANSCRIPT_BYTES - 1 })), null);
   check(
@@ -809,7 +476,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
     null,
   );
 
-  // Order, where two answers are true at once.
   check(
     "the start of the log outranks everything",
     loadStop(st({ loadedFrom: 1, clearedAt: 400, heldBytes: MAX_TRANSCRIPT_BYTES })),
@@ -823,24 +489,7 @@ process.stdout.write("\nwhen the loader stops paging\n");
 
   process.stdout.write("\na transcript missing its beginning says so\n");
   {
-    /*
-     * ⭐ **A conversation holding the newest 500 of 2856 events was drawn exactly as
-     * a complete one, and nothing here could tell.**
-     *
-     * Five booleans in `EventList`'s body decided what went above the rows, and the
-     * ordinary state of a reload fell through every one: `awaitingHistory` wanted
-     * `rows.length === 0`, `showFloor` wanted `unfetched === 0`, `atCeiling` wanted
-     * 20 000 held events, the reveal button wanted a `/clear` marker and "No events
-     * yet." wanted no rows. Rendered under `react-dom/server`, the markup above the
-     * rows was byte-identical for "newest 500 held, still paging", "newest 500 held,
-     * run gave up" and "all 2856 held" — 48 characters, the bare column `<div>` —
-     * and the `role="status"` region was the empty string in all three.
-     *
-     * So the rule is one function and the property below is the assertion that was
-     * missing, not any single arm of it: **while there is history outstanding and no
-     * cut in force, the transcript must say something.** Everything else here is a
-     * consequence.
-     */
+    // While history is outstanding and no cut is in force, the transcript must say something.
     const { transcriptNotice } = await import("../src/store.js");
     const ns = (over: {
       loadedFrom?: number;
@@ -861,11 +510,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
       ...over,
     });
 
-    /*
-     * The state the bug report described, measured off the live database: 2856
-     * events on the daemon, the newest 1500 held, `loadedFrom` frozen at 1357 by a
-     * page that failed. Both halves — a run still going, and a run that gave up.
-     */
     check("a run still paging says it is loading, with the count", transcriptNotice(ns({ loadingHistory: true })), {
       kind: "loading",
       earlier: 1_356,
@@ -875,24 +519,12 @@ process.stdout.write("\nwhen the loader stops paging\n");
       earlier: 1_356,
     });
 
-    // The four that were already drawn, unchanged.
     check("nothing arrived yet is the skeleton", transcriptNotice(ns({ rows: 0 })), { kind: "skeleton" });
     check(
       "the tab's own ceiling outranks both, because that is why paging stopped",
       transcriptNotice(ns({ heldEvents: 120_000, heldBytes: MAX_TRANSCRIPT_BYTES, loadingHistory: true })),
       { kind: "ceiling", held: 120_000 },
     );
-    /*
-     * ⭐ **The ceiling is bytes and there is no second one.**
-     *
-     * 20 000 events meant 49 MiB for a session whose tool call typed its arguments
-     * one token at a time and 2.8 MiB for the same session with those drafts
-     * emptied — one number standing for two completely different tabs, and what it
-     * did in practice was cut a 33 898-event conversation at seq 13 989. So the stop
-     * is bytes, nothing else is a stop, and the sentence names **what is held**
-     * rather than a constant — with two quantities able to raise it, a fixed number
-     * would be a claim about the wrong one.
-     */
     check(
       "a few heavy events stop it as readily as many light ones",
       transcriptNotice(ns({ heldEvents: 130, heldBytes: MAX_TRANSCRIPT_BYTES })),
@@ -924,13 +556,7 @@ process.stdout.write("\nwhen the loader stops paging\n");
       null,
     );
 
-    /*
-     * ⭐ **The property, over every combination.** `null` is only ever allowed for
-     * two reasons — a cut in force, or nothing left to fetch — and the second is the
-     * *same expression* `loadStop` calls `start_of_log`. Anything else answering
-     * `null` is a transcript that begins mid-word with nothing saying why, which is
-     * what was reported.
-     */
+    // null is allowed only for a cut in force or nothing left to fetch.
     let silent = 0;
     let states = 0;
     for (const loadedFrom of [1, 2, 357, 1_357, 6_145]) {
@@ -957,9 +583,7 @@ process.stdout.write("\nwhen the loader stops paging\n");
                 const cutInForce = clearedAt !== null;
                 const outstanding = loadedFrom > Math.max(1, daemonFirstSeq);
                 if (answer === null && !cutInForce && outstanding) silent += 1;
-                // The mirror of it: a `null` must be *justifiable*, never merely
-                // absent — so the only other way to answer nothing is a whole
-                // conversation on screen.
+                // With nothing outstanding, null is allowed only with rows on screen.
                 if (answer === null && !cutInForce && !outstanding && rows === 0) silent += 1;
               }
             }
@@ -970,12 +594,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
     // The count rides the assertion so a shrunk grid cannot pass by covering less.
     check("no state with history outstanding is drawn silently", { states, silent }, { states: 360, silent: 0 });
 
-    /*
-     * And the pair with `loadStop`, which is the invariant in one line: a run that
-     * is still willing to fetch (`loadStop` answers `null`) is a transcript that
-     * owes the reader a sentence. The two functions read the same five fields and
-     * are two hundred lines apart, which is exactly how they would drift.
-     */
     const willing = ns({ loadingHistory: false });
     check("while paging is willing, something is always said", [
       loadStop(willing) === null,
@@ -986,27 +604,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
 
 process.stdout.write("\na page that fails is retried long enough for a daemon to redial\n");
 {
-  /*
-   * ⭐ **`loadAll` answered a failed page with `catch {}`, and nothing re-drove it.**
-   *
-   * One dropped request — a radio handing over, a relay blipping — left the
-   * transcript empty for the life of the tab, because `SessionView`'s effect never
-   * fires again for the same session and `attachWanted` skipped any key that
-   * already had a stream. What the reader was offered instead was a button asking
-   * them to do by hand what the client had given up on.
-   *
-   * ⭐⭐ **And then the schedule was the defect rather than the classification.**
-   * This block used to assert `[500, 2000]` for a transport failure and `null` for
-   * every `ApiError`, on the argument that an answered refusal repeats. Measured
-   * against the live database with the real store, an eight-second relay outage
-   * delivered as *transport* failures — the flavour that schedule did retry — left
-   * a byte-identical truncated transcript (`loadedFrom=1357` of 2878). 2.5s cannot
-   * survive a daemon redialling on its own 1s→30s full-jitter backoff, which is
-   * exactly what recreating the relay container costs.
-   *
-   * The schedule is asserted here rather than driven, so 37.5s of real waits do not
-   * go anywhere near the driver's wall clock.
-   */
   const { historyRetry, HISTORY_RETRY_MS } = await import("../src/store.js");
   const { ApiError, meansLater } = await import("../src/http.js");
   const dropped = new TypeError("Failed to fetch");
@@ -1020,27 +617,13 @@ process.stdout.write("\na page that fails is retried long enough for a daemon to
     historyRetry(5, dropped),
   ], [500, 2_000, 5_000, 10_000, 20_000, null]);
 
-  /*
-   * **The budget is what the number is for**, so it is asserted as one rather than
-   * left implicit in a list: the daemon's reconnect backoff tops out at 30s, and a
-   * schedule that stops before then hands the reader a truncated conversation for
-   * the difference.
-   */
   check(
     "and the whole schedule outlasts the daemon's 30s reconnect cap",
     HISTORY_RETRY_MS.reduce((sum, ms) => sum + ms, 0) >= 30_000,
     true,
   );
 
-  /*
-   * **Three refusals mean *later*, and the other kind still ends the run.** The
-   * split is `meansLater`, out in `http.ts` beside `meansMachineGone` because
-   * `no_tunnel` belongs to both and that has to be sayable in one place: stop
-   * believing this route, *and* ask again in a moment. What must never be retried
-   * is a state only somebody else can change — an admin lowering a machine limit or
-   * banning an owner — because that is a request loop with `loadingHistory` latched
-   * across it.
-   */
+  // Retry only refusals that mean later; a state only somebody else can change would loop with loadingHistory latched.
   check("a relay with no tunnel is retried, because the daemon is redialling", [
     historyRetry(0, new ApiError(503, "no_tunnel", "no daemon")),
     historyRetry(0, new ApiError(503, "unreachable", "not reachable")),
@@ -1059,12 +642,6 @@ process.stdout.write("\na page that fails is retried long enough for a daemon to
     null,
   );
 
-  /*
-   * The predicate itself, in both directions: a transport failure is not an
-   * *answer*, so it must not come back through this arm as well — `historyRetry`
-   * asks `isTransportFailure` first and the two must not overlap into a single
-   * schedule by accident.
-   */
   check("meansLater is about answers only", [meansLater(dropped), meansLater(null), meansLater("nope")], [
     false,
     false,
@@ -1074,29 +651,13 @@ process.stdout.write("\na page that fails is retried long enough for a daemon to
 
 process.stdout.write("\na session with no row yet is loading, not missing\n");
 {
-  /*
-   * ⭐ **The screen said a live session did not exist, on the ordinary path.**
-   *
-   * `SessionView` reads `rowsByKey`, and with nothing there it drew either "That
-   * session is not on this daemon." or "<name> is not reachable right now." —
-   * both of which are claims it cannot support during a cold reload. `bootstrap`
-   * promotes to `phase: "ready"` on the *machine* list, so the view mounts three
-   * round trips before the session list exists (mint a token, drop the route memo
-   * and re-probe it — itself bounded at 1.5s — then `GET /sessions`), and
-   * `resumeMachine` forgets the route first, so `reach` is `unknown` or
-   * `probing` for most of that window.
-   *
-   * The whole matrix, because the interesting cell is one of six: a machine that
-   * is plainly online and has simply never been asked.
-   */
+  // The view mounts before the session list exists, so only an online, listed machine may report a session absent.
   const { missingRowReason } = await import("../src/machine.js");
 
   check("no machine at all is the grant being gone", [
     missingRowReason(null, false),
     missingRowReason(null, true),
   ], ["no_machine", "no_machine"]);
-  // Before any probe has answered, and while one is in flight. Nothing is known
-  // about the session either way, so neither may be reported as an absence.
   check("an unprobed machine is loading", [
     missingRowReason("unknown", false),
     missingRowReason("unknown", true),
@@ -1107,27 +668,12 @@ process.stdout.write("\na session with no row yet is loading, not missing\n");
     missingRowReason("offline", false),
     missingRowReason("offline", true),
   ], ["unreachable", "unreachable"]);
-  /*
-   * The cell that was the bug. `online` says the *daemon* answered a health probe;
-   * it says nothing about whether anybody has asked it for a session list, and
-   * only the second question licenses "that session is not here".
-   */
   check("online but never listed is still loading", missingRowReason("online", false), "loading");
   check("online and listed is the only absence anybody may report", missingRowReason("online", true), "not_here");
 }
 
 process.stdout.write("\nhistory loads itself, and nothing asks the reader to retry\n");
 {
-  /*
-   * ⭐ **Read off disk, because what was deleted is the assertion.**
-   *
-   * Three separate mechanisms had to line up for a reloaded session to draw its
-   * conversation, and each of them is invisible to a pure function: a button that
-   * must not come back, a window budget that must stay non-binding, and the one
-   * line that re-drives a run which gave up. The `gateOffer`/`showsGateLink`
-   * lesson applies exactly — a rule asserted only where it is *stated* is a rule
-   * that gets re-derived somewhere else and lost.
-   */
   const strip = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   const eventList = strip(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"));
   const sessionView = strip(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
@@ -1137,55 +683,15 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   check("and carries no prop for one", /onLoadEarlier/.test(eventList), false);
   check("nor does the view pass one", /onLoadEarlier/.test(sessionView), false);
 
-  /*
-   * The one sentence that must survive the deletion: a loss no amount of fetching
-   * undoes. The agent's own cut used to have a second one beside it, offering the
-   * conversation back — the assertions below are that both the offer and the state
-   * behind it are **gone**, which is the direction that needs pinning now. A
-   * control re-added here is a client re-reading what the agent was told to forget.
-   */
   check("real retention loss still says so", /the start of this conversation is gone/.test(eventList), true);
   check("nothing offers the conversation from before a /clear", /from before \/clear/.test(eventList), false);
   check("and no view wires a reveal", [/onReveal/.test(eventList), /revealBeforeClear/.test(sessionView)], [false, false]);
   check("nor does the store hold a flag for one", /revealedBeforeClear/.test(storeSrc), false);
-  /*
-   * The marker row is what speaks there instead, and both halves of it are
-   * asserted: the command that caused the cut, and the words. Read off disk
-   * because `webcheck` has no DOM and this is a JSX arm.
-   */
   check("the marker draws the command that caused it", /<UserBubble text="\/clear" \/>/.test(eventList), true);
   check("and says the context was cleared", /Context cleared/.test(eventList), true);
   check("and no longer claims anything is above it", /forgotten everything above/.test(eventList), false);
 
-  /*
-   * ⭐ **What a person may select in their own message, and where the selectable
-   * block's edges are — which is the whole property and is not where it was
-   * first put.**
-   *
-   * The row is full-column-width so that a `w-fit` bubble can be right-aligned,
-   * which leaves empty column either side that a drag can reach, and the bubble
-   * is padded. WebKit fills the selection gap to the bottom of the block the
-   * selection ends in, so a selectable block with padding paints that padding.
-   *
-   * ⚠ **The first repair put `select-text` on the padded bubble and did nothing
-   * at all.** Measured in a real `WKWebView` — the engine `packages/native`
-   * ships, and the one the report came from — driving actual `NSEvent` drags
-   * rather than a `Range`, because a programmatic range ignores `user-select` by
-   * specification and paints identically either way:
-   *
-   *   gesture              no classes    select-text on the box    on the inner content
-   *   drag past the end    255x31        255x31                    248x20
-   *   triple-click         255x31        255x31                    255x20
-   *
-   * 20px is the line box and nothing more. `display: inline` on the paragraph was
-   * measured too and painted 31 — so the property is where the selectable block's
-   * edges are, never what the paragraph is.
-   *
-   * Hence the three rows below: the row and the padded box are both out, and the
-   * selectable region is inside the padding. ⚠ The middle one is the load-bearing
-   * one — putting `select-text` back on the box is the repair that looks right,
-   * reads right and was measured to do nothing.
-   */
+  // Only the inner content is selectable: WebKit paints a selectable block's padding, so select-text on the padded box does nothing.
   const bubble = strip(readFileSync(new URL("../src/ui/Bubble.tsx", import.meta.url), "utf8"));
   const bubbleRow = /className="my-4 flex justify-end[^"]*"/.exec(bubble)?.[0] ?? "";
   const bubbleBox = /className="[^"]*\bml-auto w-fit[^"]*"/.exec(bubble)?.[0] ?? "";
@@ -1196,50 +702,16 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
     [true, true],
   );
   check("and the padding is not inside what is selectable", /\bselect-text\b/.test(bubbleBox), false);
-  check("while something inside it is", /className="select-text"/.test(bubble), true);
+  check("while something inside it is", /className="select-text\b/.test(bubble), true);
 
-  /*
-   * ⭐ **Only the text is painted, and it is one property in three places.**
-   *
-   * WebKit paints *selection gaps* — the run from a selected line's end to the
-   * block's content edge, and the vertical space between two selected blocks — so
-   * a drag through a conversation painted one solid rectangle: the empty half of
-   * every short line, the margin between paragraphs, and the whole blank column
-   * beside a right-aligned bubble. A block WebKit treats as a **selection root**
-   * paints none of them. Measured with real `NSEvent` drags in WKWebView over a
-   * page carrying every markdown shape this app draws: `748px@900w` before, and
-   * after it per-line bands with `-1w` — nothing painted at all — in every gap.
-   * Chromium is byte-identical either way, idle *and* selected, and so is the
-   * copied string. Q3.638.
-   *
-   * ⚠ **Three placements, because a flex container between the root and the text
-   * puts the fill back.** Measured against controls on one DOM: nesting depth,
-   * horizontal padding and `w-fit` change nothing, `display: flex` alone
-   * re-introduced it — `46px@199w` against `22px@199w 24px@51w`. So the markdown
-   * body, the bubble (which hangs in a flex row) and the transcript column each
-   * name it, and all three are asserted against the one rule that reads them.
-   */
+  // sel-root makes each block a WebKit selection root so selection gaps are not painted; a flex container between puts the fill back (Q3.638).
   const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
   const selRoot = /\n\.sel-root[^{]*\{[^}]*\}/.exec(css)?.[0] ?? "";
   check("a rule makes a block its own selection root", selRoot !== "", true);
-  /*
-   * ⚠ **`column-span`, and not the transform that was found first.** Both make
-   * the root, and in WebKit the two measure identically — same band profile, same
-   * byte-identical idle page. But a transform also makes a *stacking context*,
-   * and a `td` inside one composites its `border-edge/60` against a different
-   * backdrop: one 1px row under a markdown table's header moved `#E6E4E0` →
-   * `#ECEAE7` in Chromium 153. Named here because "just use a transform" is
-   * exactly the simplification this would attract.
-   */
+  // column-span, not a transform: a transform adds a stacking context that shifts table borders.
   check("with a property that makes no stacking context", /column-span:\s*all/.test(selRoot), true);
   check("and not with a transform", /transform/.test(selRoot), false);
-  /*
-   * ⚠ **The descendants are an ablation rather than a guess.** Without them the
-   * code fence painted `60px@863w` and the table `65px@855w` instead of their
-   * lines — and nothing *above* the cells substitutes: `table`, `thead`, `tbody`
-   * and `tr` each leave the whole table filled. `li` and `blockquote` were in the
-   * list and came back out, their profiles unchanged band for band.
-   */
+  // pre, td and th need the rule themselves: nothing above the cells substitutes.
   check(
     "and the three shapes it cannot reach from above name themselves",
     ["pre", "td", "th"].filter((tag) => !new RegExp(`\\.sel-root ${tag}\\b`).test(selRoot)),
@@ -1249,119 +721,43 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   check("every markdown body is one", /className=\{`sel-root text-sm wrap-anywhere/.test(markdown), true);
   check("so is the bubble, which hangs in a flex row", /\bsel-root\b/.test(bubbleBox), true);
   check("and so is the column, which owns the space between messages", /className=\{`sel-root \$\{COLUMN\}/.test(eventList), true);
-  /*
-   * ⚠ **And the rule it replaced is gone rather than kept beside it.** A trailing
-   * `::after { content: "\200B" }` ended the *last* line of a block and nothing
-   * else; it needed a `:not(:has(…))` guard that had already grown three real
-   * shapes by 24px each, and every case it covered this one covers. Asserted as
-   * an absence so the two cannot end up stacked.
-   */
   check("and the zero-width space it replaced is not still there", /content: "\\200B"/.test(strip(css)), false);
 
-  /*
-   * ⭐ **The box is sized to the text it ended up holding, and CSS cannot do it.**
-   *
-   * `fit-content` is `min(max-content, available)`, and wrapped text has a
-   * max-content wider than available — so the bubble sits at its `max-w` however
-   * far short of it the longest line falls. Measured in WebKit on the DOM this
-   * ships: the selection's intermediate line filled `584w` against a longest line
-   * of 545, and `554w` once the box was trimmed. The arithmetic is asserted here;
-   * the reads around it are asserted as placement, below, because `webcheck` has
-   * no DOM.
-   */
+  // CSS fit-content cannot hug wrapped text, so the width is computed from the line rects.
   check("a bubble is as wide as its longest line plus its chrome", hugWidth([120, 300.2, 80], 28), 329);
   check("and the rounding is up, never down", hugWidth([300.05], 0), 301);
-  /*
-   * ⚠ **Rounding down is a box that walks itself narrower one pass at a time**:
-   * a width a sub-pixel under what the line needs re-wraps the text, which
-   * measures narrower again. Both `null`s are "leave the box alone", which is the
-   * rendering that shipped before this existed — a hidden element answers zero
-   * rects, and a negative chrome is not a width anybody should write.
-   */
+  // Round up: a sub-pixel short re-wraps the text and walks the box narrower each pass.
   check("nothing to measure leaves the box alone", [hugWidth([], 28), hugWidth([0, 0], 28), hugWidth([100], -1)], [null, null, null]);
 
   const hug = strip(readFileSync(new URL("../src/ui/hug.ts", import.meta.url), "utf8"));
-  /*
-   * ⚠ **The three passes may not interleave, and that is the performance
-   * property rather than a tidiness one**: read-then-write per bubble forces a
-   * layout between every pair, measured at 33.6ms for 300 bubbles against 2.8ms
-   * batched. Asserted as the shape — every box is reset, then a `map` produces
-   * every width, then a `forEach` writes them — because a driver with no DOM
-   * cannot time it.
-   */
+  // Reset, measure all, then write all: interleaving forces a layout per bubble.
   check("every box is reset before any is measured", /bubble\.style\.width = "";[\s\S]*boxes\.push/.test(hug), true);
   check("and every width is computed before any is written", /const widths = boxes\.map[\s\S]*boxes\.forEach/.test(hug), true);
-  /*
-   * ⚠ **One observer for the transcript, not one per message.** A conversation is
-   * drawn whole here, so per-message would be hundreds of them on a screen.
-   */
   check("there is one observer and it is shared", (hug.match(/new ResizeObserver/g) ?? []).length, 1);
   check("and it watches the row rather than the bubble", /observer\.observe\(row\)/.test(hug), true);
-  /*
-   * ⚠ **The lines are measured per text node.** `getClientRects()` answers a rect
-   * for every *element* in a range as well as for every line box, so one range
-   * over the wrapper returns the wrapper's own border box — which is the number
-   * being replaced. Measured: it wrote the box its own width back and nothing
-   * moved.
-   */
+  // Measured per text node: a range over the wrapper also returns the wrapper's own box.
   check("lines are walked as text nodes", /SHOW_TEXT/.test(hug), true);
   check("and no range is taken over the wrapper itself", /selectNodeContents\(inner\)/.test(hug), false);
 
-  // The skeleton is what replaced the empty screen; without it the reader is back
-  // to a lone `working…` over a conversation that has not arrived.
   check("a conversation still arriving is drawn as one", /<TranscriptSkeleton \/>/.test(eventList), true);
   check("and so is a session whose row has not landed", /<TranscriptSkeleton \/>/.test(sessionView), true);
 
-  /*
-   * The window budget. `MAX_AUTO_HISTORY - fetched` is the precise expression
-   * that made a chunk boundary discard a page it had already paid for; naming it
-   * is a lower-fragility check than trying to describe the call.
-   */
   check("a window is never given a budget that can cut it short", /MAX_AUTO_HISTORY - fetched/.test(storeSrc), false);
   check("and no stop is spelled `budget` any more", /return "budget"/.test(storeSrc), false);
 
-  /*
-   * The self-healing line, which nothing else in this file can see. `attachWanted`
-   * is called from `refreshMachineSessions` — the one place `rows` is filled, and
-   * reached by both the 4s poll and the wake sequence — so this is what turns a
-   * run that spent its retries into one that resumes on its own.
-   */
+  // attachWanted runs on every session listing, poll and wake, which is what re-drives a run that gave up.
   const attachWanted = /private attachWanted\(id: MachineId\): void \{[\s\S]*?\n  \}/.exec(storeSrc)?.[0] ?? "";
   check("an open session's history is re-driven on every list", /loadAll/.test(attachWanted), true);
 
-  /*
-   * ⭐ **The notice is one rule with one voice, and both halves are source-level.**
-   *
-   * `transcriptNotice` is asserted as a pure function above; what cannot be reached
-   * from there is whether this file *asks* it, or quietly re-derives the same
-   * arithmetic into a fifth boolean — which is the shape the defect had. Five
-   * separate gates, individually plausible, together leaving the ordinary state of
-   * a reload with nothing drawn at all.
-   */
+  // EventList must ask transcriptNotice rather than re-derive the rule into booleans of its own.
   check("the transcript asks for its notice rather than deriving one", /transcriptNotice\(\{/.test(eventList), true);
   check("and computes no `unfetched` of its own", /unfetched\s*=/.test(eventList), false);
   check("nor keeps the booleans it replaced", /showFloor|atCeiling|awaitingHistory/.test(eventList), false);
 
-  /*
-   * The pair. The live region was gated on the skeleton's own `rows.length === 0`,
-   * so in the state the notice exists for it read the empty string — the truncation
-   * was inaudible as well as invisible. One value feeds the visible line and the
-   * region, so they cannot part company again; pinned by source text because
-   * `webcheck` has no DOM and this is a JSX prop.
-   */
   const liveRegion = /role="status"[\s\S]{0,200}?<\/p>/.exec(eventList)?.[0] ?? "";
   check("the live region says whatever the notice says", /noticeSays/.test(liveRegion), true);
   check("and is no longer gated on the skeleton's own condition", /awaitingHistory/.test(liveRegion), false);
-  /*
-   * `>= 1` and it was `>= 2`, which counted a structure rather than the property.
-   *
-   * There were two visible copies while `loading` and `stalled` were drawn at the
-   * foot and `floor`/`ceiling` at the head; both arms are above the rows again
-   * (Q3.423), so there is one visible `<p>` and the count fell with it. What has to
-   * hold is unchanged and is the pair *visible line ↔ live region*, asserted here
-   * and one check above: neither may go back to a literal of its own, which is the
-   * drift that left the region silent in the one state the line exists for.
-   */
+  // One visible line since both arms sit above the rows (Q3.423); it and the live region share one string.
   check(
     "the visible line reads the same string as the live region",
     (eventList.match(/\{noticeSays\}/g) ?? []).length >= 1,
@@ -1369,17 +765,70 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   );
 }
 
+process.stdout.write("\na person's message, exactly as they sent it\n");
+{
+  // Drawn, never parsed: `1)` stays text rather than a list marker nobody can select, `**x**` stays asterisks (Q3.646).
+  const bubble = stripComments(srcFile("ui/Bubble.tsx"));
+  const drawn = /<div className="([^"]*)">\{text\}<\/div>/.exec(bubble)?.[1] ?? "";
+  check("the bubble draws the text itself, as one node", drawn !== "", true);
+  check(
+    "keeping every space and line break, and wrapping a long token",
+    ["select-text", "whitespace-pre-wrap", "wrap-anywhere"].filter((name) => !drawn.split(" ").includes(name)),
+    [],
+  );
+  check("and hands nothing to the markdown renderer", [/from "\.\/Markdown"/.test(bubble), /<Markdown\b/.test(bubble)], [false, false]);
+  check("which has no tone for a person any more", /"user"/.test(stripComments(srcFile("ui/Markdown.tsx"))), false);
+
+  const events = stripComments(srcFile("ui/EventList.tsx"));
+  check(
+    "every place a person's words are drawn is that bubble",
+    [
+      /<UserBubble text=\{echo\.text\}/.test(events),
+      /<UserBubble\s+text=\{event\.text\}/.test(events),
+      /role === "user"\) return <UserBubble text=\{text\} \/>/.test(events),
+    ],
+    [true, true, true],
+  );
+  check(
+    "and a typed answer to a question keeps its line breaks too",
+    (events.match(/className="whitespace-pre-wrap wrap-anywhere">\{answer\.value\}/g) ?? []).length +
+      (/className="whitespace-pre-wrap wrap-anywhere">\s*\{answers\.length > 1/.test(events) ? 1 : 0),
+    2,
+  );
+
+  // Blank lines around a message and whitespace after it are not content; the first line's indentation is (Q3.646).
+  check("an indented first line keeps its indentation", sentText("  indented\n    more"), "  indented\n    more");
+  check("the blank lines around a message go", sentText("\n \t\r\n  code\n\n"), "  code");
+  check("and so does whitespace after it", sentText("hello   "), "hello");
+  check("but not the blank lines inside it", sentText("a\n\n\nb"), "a\n\n\nb");
+  check("whitespace alone is nothing", sentText(" \n\t "), "");
+  const typed = "\u201Cquoted\u201D \u00ABёлки\u00BB \"straight\" it's -- --flag \u2014 1) one\n2) two **bold** `x`";
+  check("and no character is ever normalised", sentText(typed), typed);
+  const composer = stripComments(srcFile("ui/Composer.tsx"));
+  check("the composer sends that", [/send\(sentText\(text\), false\)/.test(composer), /send\(text\.trim\(\)/.test(composer)], [true, false]);
+
+  // The input never rewrites a keystroke: in WebKit, smart quotes, dashes and text replacements sit behind `spellcheck` (Q3.647).
+  check("the fields an agent reads opt out of both", VERBATIM_FIELD, { spellCheck: false, autoCorrect: "off" });
+  const textareas = srcFiles()
+    .filter((file) => file.endsWith(".tsx"))
+    .flatMap((file) =>
+      stripComments(srcFile(file))
+        .split("<textarea")
+        .slice(1)
+        .map((tail) => ({ file, opts: /^\s[^]*?\{\.\.\.VERBATIM_FIELD\}/.test(tail.slice(0, 120)) })),
+    );
+  check("every textarea there is was found", textareas.length >= 2, true);
+  check("and every one of them opts out", textareas.filter((one) => !one.opts).map((one) => one.file), []);
+  const card = stripComments(srcFile("ui/ElicitationCard.tsx"));
+  const own = (card.match(/placeholder="Type your own answer here"/g) ?? []).length;
+  // Two: one component draws every typed answer, as lines or as one line (Q3.652).
+  check("every free-text answer on the ask card was found", own >= 2, true);
+  check("and opts out as the composer does", (card.match(/\{\.\.\.VERBATIM_FIELD\}/g) ?? []).length, own);
+}
+
 process.stdout.write("\na /clear arriving down the socket\n");
 {
-  /*
-   * The cut is the same fact whether it was found by paging or arrived live, and
-   * which side of the socket it came from is precisely what the reader must not
-   * be able to tell. So `onEvents` runs the same rule the loader does.
-   *
-   * Newest in the batch wins. It used to take a `revealedBeforeClear` flag with
-   * it, and that flag is gone with the control that set it — `nextCut` answers one
-   * number now, so the two halves that could disagree are one.
-   */
+  // onEvents runs the loader's cut rule; the newest marker in a batch wins.
   const ev = (seq: number): StoredEvent => ({
     seq,
     ts: seq,
@@ -1394,15 +843,7 @@ process.stdout.write("\na /clear arriving down the socket\n");
   check("a batch with no marker changes nothing", nextCut(7, [ev(8), ev(9)]), 7);
   check("an empty batch changes nothing either", nextCut(7, []), 7);
   check("a marker moves the cut", nextCut(7, [ev(8), cut(9)]), 9);
-  // Two in one batch is not exotic: a batch is whatever the socket delivered
-  // since the last frame, and a wake after two `/clear`s delivers both.
   check("the newest marker in a batch wins", nextCut(null, [cut(3), ev(4), cut(5)]), 5);
-  /*
-   * Last, not highest. A live batch cannot in practice carry a marker below the
-   * cut already held — but the rule CLAUDE.md states is "whichever came last
-   * decides", and `Math.max` is the plausible wrong shape that agrees with every
-   * case above and disagrees with this one. Written down so the two cannot be
-   * confused for each other by somebody tidying.
-   */
+  // Last, not highest: Math.max agrees with every case above and fails this one.
   check("what the batch last said decides, rather than the largest seq in it", nextCut(9, [cut(5)]), 5);
 }

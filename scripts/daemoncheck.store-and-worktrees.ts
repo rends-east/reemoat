@@ -17,6 +17,7 @@ import {
   listChanges,
   type FileChange,
 } from "../src/changes.js";
+import type { BackgroundTask } from "../src/acp/asynctasks.js";
 import { containedIn } from "../src/paths.js";
 import { GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
 import { SessionRegistry } from "../src/registry.js";
@@ -46,27 +47,25 @@ import {
   credentials,
 } from "./daemoncheck.fixtures.js";
 
-/* ------------------------------------------------------------------ *
- * The database, across a restart
- * ------------------------------------------------------------------ */
-
-/**
- * The store the daemon actually runs on, which no driver had ever opened.
- *
- * Every other section here builds a registry from a stub `SessionStore`, so
- * `openStores` had exactly one call site in the repository — `scripts/daemon.ts`
- * — and `migrate()`, the schema-version guard, the widened upsert and the credential
- * store were reached only by starting a real daemon.
- *
- * That matters more than it sounds because `put()`'s failure handler is a bare
- * `catch {}`, deliberately: it runs on the agent's state-change path, where a
- * bookkeeping fault must not unwind a turn. The cost is that a placeholder in the
- * statement that no key of `toParams` answers to would make **every session write
- * fail, silently and permanently**, and the daemon would look perfectly healthy
- * until it restarted with nothing to restore. Only a reopen can see that, so this
- * writes with one bundle and reads with a second.
- */
+/** The real store through a reopen: put swallows its own failures, so a broken statement fails every write silently and only a reopen shows it. */
 process.stdout.write("\nthe database, across a restart\n");
+
+const keptTask: BackgroundTask = {
+  id: "t",
+  name: "npm test",
+  taskType: "shell",
+  description: "runs the suite",
+  state: "completed",
+  summary: "passed",
+  lastToolName: null,
+  usage: { totalTokens: 10, toolUses: 1, durationMs: 5 },
+  canStop: true,
+  showInTranscript: false,
+  outputFilePath: "/tmp/x/tasks/t.output",
+  toolCallId: "toolu_1",
+  startedAt: 1_000,
+  endedAt: 2_000,
+};
 
 const badState: [string, string][] = [
   ["notobject", "[]"],
@@ -74,13 +73,9 @@ const badState: [string, string][] = [
   ["nullcommands", '{"config":{"modes":null,"options":[]},"commands":null}'],
   ["optionsnotarray", '{"config":{"modes":null,"options":{}},"commands":{"commands":[],"dropped":0}}'],
   ["listnotarray", '{"config":{"modes":null,"options":[]},"commands":{"commands":{},"dropped":0}}'],
-  // The one that reached `snapshot()`: an object, so `typeof` passed, with no
-  // `available` for `config.modes.available.map` to walk.
   ["modesnoavailable", '{"config":{"modes":{"current":"plan"},"options":[]},"commands":{"commands":[],"dropped":0}}'],
   ["modesnotobject", '{"config":{"modes":3,"options":[]},"commands":{"commands":[],"dropped":0}}'],
   ["optionnull", '{"config":{"modes":null,"options":[null]},"commands":{"commands":[],"dropped":0}}'],
-  // `choices` is what `clipChoices` reads `.length` off and `reduceAgentState`
-  // `.map`s on the way back out.
   ["optionnochoices", '{"config":{"modes":null,"options":[{"id":"model","kind":"select","value":"opus"}]},"commands":{"commands":[],"dropped":0}}'],
   ["choicenotobject", '{"config":{"modes":null,"options":[{"id":"model","kind":"select","value":"opus","choices":[7]}]},"commands":{"commands":[],"dropped":0}}'],
   ["commandnoname", '{"config":{"modes":null,"options":[]},"commands":{"commands":[{}],"dropped":0}}'],
@@ -108,34 +103,15 @@ const badState: [string, string][] = [
       model: "kimi-k2-thinking",
       createdAt: now,
     });
-    // A session started on it, so the reference survives a restart alongside the
-    // preset it names.
     first.sessions.put({ ...persisted("s_routed"), customAgent: "ca_abcd1234" });
-    /*
-     * ⚠ **Rows naming things this build cannot resolve, written by hand.** They
-     * are what a database from a build that knew a fourth harness or a fifth
-     * system looks like, and there is no other way to produce one. What is being
-     * driven is that they come back as *nothing* rather than as well-typed values
-     * `resolveAgent` fails on later, with a worktree already made — Q7.31's
-     * precondition, which this work reaches.
-     */
+    // Rows naming a harness and a system this build cannot resolve, written by hand: they must come back as nothing, not values resolveAgent fails on later (Q7.31).
     first.db.exec(
       "INSERT INTO custom_agents (id, name, harness, system, model, created_at) " +
         "VALUES ('ca_future1', 'from tomorrow', 'gemini', 'moonshot', 'x', 1), " +
         "('ca_future2', 'also', 'claude', 'bedrock-direct', 'x', 1)",
     );
     first.db.exec("INSERT INTO system_credentials (system, secret, updated_at) VALUES ('gemini', 's', 1)");
-    /*
-     * ⚠ **The one copy of agent state that outlives the process that learned it.**
-     *
-     * Its own rows for the same reason the one below has one: what is being driven
-     * is a *column*, and a dropped or mangled row would otherwise fail an
-     * assertion about a title. The pair is the whole rule — one blob comes back,
-     * and one that cannot be read comes back as `null` **without taking the
-     * session with it**, which is the half that matters: `fromRow`'s own catch
-     * drops the whole row, and applying it here would cost somebody a conversation
-     * to save a faint strip.
-     */
+    // An unreadable blob comes back null without taking the session with it (fromRow's own catch drops the whole row).
     first.sessions.put({
       ...persisted("s_remembered"),
       agentState: {
@@ -154,45 +130,31 @@ const badState: [string, string][] = [
           ],
         },
         commands: { commands: [{ name: "context", description: "Show current context usage", hint: null }], dropped: 0 },
+        // Hand-written like the rest: a live row is one no restart can honour, so it is dropped and its neighbour kept (Q2.234).
+        tasks: [
+          { ...keptTask, id: "t_done" },
+          { ...keptTask, id: "t_live", state: "running", endedAt: null },
+        ],
       },
     });
+    first.sessions.put(persisted("s_tasks_unreadable"));
+    first.db.exec(
+      `UPDATE sessions SET agent_state_json = '{"config":{"modes":null,"options":[]},"commands":{"commands":[{"name":"context","description":"","hint":null}],"dropped":0},"tasks":5}' WHERE id = 's_tasks_unreadable'`,
+    );
     first.sessions.put(persisted("s_unreadable"));
     first.db.exec("UPDATE sessions SET agent_state_json = '{not json' WHERE id = 's_unreadable'");
-    /*
-     * ⚠ **The blobs that *parse*, which is the half the containers-only check
-     * waved through and the half with the teeth.** A half-written file fails
-     * `JSON.parse` and was already covered by the row above; what was not is a
-     * well-formed object whose *elements* are wrong — `modes` missing `available`
-     * is the measured one. Adopted, it throws inside `snapshot()`, which
-     * `GET /sessions` maps over every session with no per-row guard (one bad row
-     * 500s the listing for the whole machine) and which `touchSafe` swallows in
-     * its own catch (that session silently stops persisting and stops fanning
-     * out, for ever, with nothing logged).
-     *
-     * A row each, and the second assertion on every one of them is that the
-     * *session* came back — the whole contract of `toAgentState`'s inner `try` is
-     * that a blob it cannot vouch for costs a faint strip and never a
-     * conversation.
-     */
+    // Blobs that parse with wrong elements: adopted, they throw inside snapshot and break GET /sessions, so each is forgotten while its session comes back.
     for (const [name, blob] of badState) {
       first.sessions.put(persisted(`s_bad_${name}`));
       first.db.exec(`UPDATE sessions SET agent_state_json = '${blob}' WHERE id = 's_bad_${name}'`);
     }
-    /*
-     * And the one that must *survive*: `modes` absent entirely. `JSON.stringify`
-     * omits an `undefined` key, so a build that ever makes the field optional has
-     * every stored blob arrive this way — and discarding the record over it would
-     * take the option list and the command list with it. `compatibility.md` rule
-     * 2: degrade to today's behaviour, which is `modes: null`.
-     */
+    // modes absent entirely must survive as null: JSON.stringify omits an undefined key (compatibility.md rule 2).
     first.sessions.put(persisted("s_nomodes"));
     first.db.exec(
       `UPDATE sessions SET agent_state_json = '{"config":{"options":[]},"commands":{"commands":[{"name":"context","description":"","hint":null}],"dropped":0}}' WHERE id = 's_nomodes'`,
     );
 
-    // A row of its own rather than rewriting one of the fixtures above: those
-    // are the controls for the title, the pin and the sweep, and a dropped row
-    // would make three unrelated assertions fail for a reason none of them names.
+    // A row of its own: the fixtures above are the controls for the title, the pin and the sweep.
     first.sessions.put(persisted("s_future"));
     first.db.exec("UPDATE sessions SET agent = 'gemini' WHERE id = 's_future'");
     first.uploads.insert({
@@ -208,17 +170,7 @@ const badState: [string, string][] = [
     first.close();
   }
 
-  /*
-   * ⚠ **The drops are *reported* now, and for a release they were silent.** Three
-   * rows below are unreadable on purpose — a session naming a fourth agent, two
-   * presets naming a harness and a system this build lacks, and a key for an
-   * unknown system — and `list()` returning one fewer row is not a symptom
-   * anybody can act on. The session one is the case with teeth: `restore()` walks
-   * `list()`, so a dropped row is never announced and its recorded agent handle
-   * never reaches the only `reap` in `src/`, leaving a process alive after the
-   * daemon that spawned it died. This file's own convention for exactly this
-   * class of fact is `onDegraded`, which the plugin record store already uses.
-   */
+  // Drops are reported through onDegraded: a dropped session's agent handle never reaches reap, so a shorter list is not enough.
   const degraded: string[] = [];
   const second = openStores({
     path: dbPath,
@@ -229,10 +181,7 @@ const badState: [string, string][] = [
   const aboutFuture = degraded.filter((one) => one.includes("s_future"));
   check(
     "a dropped session says so, with its id and the agent it names",
-    // Deduplicated on the *message*, not counted: `openStores` walks the table
-    // itself before this driver does, so the same row is reported more than once
-    // and the count is an implementation detail. What must hold is that every
-    // report names the agent, which is the half an operator acts on.
+    // Deduplicated on the message, not counted: openStores walks the table itself first, so a row is reported more than once.
     [aboutFuture.length > 0, aboutFuture.every((one) => one.includes("gemini"))],
     [true, true],
   );
@@ -241,14 +190,7 @@ const badState: [string, string][] = [
     degraded.some((one) => one.includes("s_future") && one.includes("reaped")),
     true,
   );
-  /*
-   * The assertion that catches a swallowed write: the rows are *there at all*.
-   *
-   * ⚠ **`s_future` is absent and that is the new half.** It was written above and
-   * then rewritten to name an agent this build does not have, and `fromRow` drops
-   * it rather than casting. The three rows beside it are the positive control — a
-   * reader that dropped everything would pass a check written the other way round.
-   */
+  // Catches a swallowed write: every row written above is back, except s_future, which fromRow drops rather than casts.
   check(
     "a session written by one daemon is there for the next",
     rows.map((r) => r.id).sort(),
@@ -259,6 +201,7 @@ const badState: [string, string][] = [
       "s_plain",
       "s_remembered",
       "s_routed",
+      "s_tasks_unreadable",
       "s_unreadable",
     ].sort(),
   );
@@ -299,25 +242,8 @@ const badState: [string, string][] = [
   check("read one at a time, the same", second.customAgents.get("ca_future1"), null);
   check("both halves of that, not just the harness", second.customAgents.get("ca_future2"), null);
 
-  /*
-   * ⚠ **The mirror of all three drops above, in a store of its own — because these
-   * rows must *survive* and the fixtures above are controls for retention.**
-   *
-   * This is the asymmetry the whole plugin-contribution feature rests on.
-   * Membership is checked where nothing has been created yet — `POST /sessions`,
-   * `POST /custom-agents` — so a refusal there costs nothing and no worktree is
-   * made. **Shape** is checked here, because everything below runs through
-   * `openStores` at boot: before anything is on screen, and *before the plugin host
-   * has opened at all*, so "is that plugin installed" is not a question this read
-   * can answer. A membership test would therefore delete every session, preset and
-   * saved key belonging to a plugin somebody had switched off an hour ago — and
-   * switching it back on would not bring them back. What refuses an unrunnable one
-   * is `resolveAgent`, at the launch, with a sentence naming the plugin.
-   *
-   * Driven against the **real** store rather than a `Map`, for the reason the
-   * upsert case one block down is: `fromRow` and `readCustomAgent` are the readers
-   * under test, and a memory store has neither.
-   */
+  // Plugin rows must survive: shape is checked at boot, before the plugin host opens, so a membership test would delete a switched-off plugin's rows.
+  // Against the real store, since fromRow and readCustomAgent are the readers under test.
   {
     const path = join(tmp("plugin-rows-"), "d.db");
     const first = openStores({ path, instanceId: "i_plugin_w" });
@@ -342,12 +268,7 @@ const badState: [string, string][] = [
       next.customAgents.get("ca_plugin"),
       { id: "ca_plugin", name: "Acme · Llama", harness: "acme:gemini", system: "acme:groq", model: "llama-4", createdAt: 1 },
     );
-    /*
-     * ⚠ **And so does the key — which is what keeps the one control that can
-     * delete it on screen.** `prune()` sweeps neither credential table, so a row
-     * dropped from this listing is a plaintext secret nothing lists and nothing
-     * collects.
-     */
+    // prune sweeps neither credential table, so a key dropped from this listing is a secret nothing lists or collects.
     check(
       "and a key saved for a provider one adds",
       [next.systemCredentials.list().map((one) => one.system), next.systemCredentials.get("acme:groq")],
@@ -357,21 +278,8 @@ const badState: [string, string][] = [
     next.close();
   }
 
-  /*
-   * ⚠ **Saving an assembled agent that is already there is an *upsert*, and only
-   * the real store can say so.** The route section at the foot of this file stands
-   * a `Map` in for `customAgents`, and `Map.set` is an upsert by construction — so
-   * `PATCH /custom-agents/:id` satisfies every route assertion there while
-   * `SqliteCustomAgentStore.save` remains the bare `INSERT` it was written as, and
-   * a real daemon answers the edit `500 internal_error` out of
-   * `SQLITE_CONSTRAINT_PRIMARYKEY`. It was a bare insert for as long as a preset
-   * was write-once, which is exactly why nothing had ever saved the same id twice.
-   *
-   * The `createdAt` handed in is deliberately wrong. `created_at` must be absent
-   * from the `DO UPDATE SET` list, so that the age of a preset cannot move even
-   * when a caller of this port gets it wrong — and the route is such a caller by
-   * design, since it reconstructs the whole row rather than patching columns.
-   */
+  // Only the real store shows a second save upserts (the route section's Map always does).
+  // The createdAt passed is deliberately wrong: created_at must stay out of the update so a preset's age never moves.
   let refusedSecondSave: string | null = null;
   try {
     second.customAgents.save({
@@ -383,8 +291,6 @@ const badState: [string, string][] = [
       createdAt: 1,
     });
   } catch (error) {
-    // Caught rather than thrown: an uncaught throw here takes every assertion
-    // after it down with it, and the message is the answer being looked for.
     refusedSecondSave = error instanceof Error ? error.message : String(error);
   }
   check("saving an assembled agent that is already there does not refuse", refusedSecondSave, null);
@@ -394,40 +300,25 @@ const badState: [string, string][] = [
     [{ id: "ca_abcd1234", name: "Codex · GPT", harness: "codex", system: "openai", model: "gpt-5-codex", createdAt: now }],
   );
   const named = rows.find((r) => r.id === "s_named");
-  // The record's mutable preferences — the ones a later touch is *supposed* to
-  // rewrite, and therefore the ones a `DO UPDATE` clause has to carry. What may
-  // never be in that clause is identity, which is the property that paragraph is
-  // actually about.
   check("a title survives the restart", named?.title, "Fix the reconnect");
   check("and so does a pin", named?.pinned, true);
-  /*
-   * And so do the agent's own controls, for the one class of session that keeps
-   * them. Measured 2026-09-19: every parked row on this machine answered
-   * `revision 0, count 0` after a deploy, so the strip drew `—` and the `/` menu
-   * was empty — permanently, since nothing publishes again until somebody types.
-   */
   {
     const remembered = rows.find((row) => row.id === "s_remembered");
     check("the agent's controls survive the restart", remembered?.agentState?.config.options[0]?.value, "opus");
     check("and the mode with them", remembered?.agentState?.config.modes?.current, "plan");
     check("and the command list, which is what the `/` menu is", remembered?.agentState?.commands.commands[0]?.name, "context");
-    /*
-     * ⚠ **The unreadable half, and the half of *that* which is the actual rule.**
-     * `fromRow`'s own catch drops the whole row; reaching it here would cost
-     * somebody a conversation to save a faint strip, so `toAgentState` has a
-     * `try` of its own and answers `null`.
-     */
+    check("and the finished background rows, a live one dropped alone", remembered?.agentState?.tasks, [{ ...keptTask, id: "t_done" }]);
+    const tasksUnreadable = rows.find((row) => row.id === "s_tasks_unreadable");
+    check(
+      "a task list this build cannot read costs the tasks, never the controls beside them",
+      [tasksUnreadable?.agentState?.commands.commands[0]?.name, tasksUnreadable?.agentState?.tasks],
+      ["context", undefined],
+    );
     const unreadable = rows.find((row) => row.id === "s_unreadable");
-    // ⚠ Not `?? "<sentinel>"`, which `null` itself would trip — the value under
-    // test *is* `null`, so the row's presence is asserted separately below.
+    // Not a sentinel fallback: the value under test is null, so the row's presence is asserted separately.
     check("a blob this build cannot read is forgotten", unreadable?.agentState, null);
     check("and the session it belongs to is not", unreadable?.id, "s_unreadable");
-    /*
-     * ⚠ **Both halves per row, and the second is the one that matters.** A guard
-     * that answered `null` by *throwing* would satisfy the first assertion here
-     * and lose the session to `fromRow`'s catch, which is the exact trade
-     * `toAgentState`'s inner `try` exists to refuse.
-     */
+    // Both halves per row: a guard that threw would pass the first and lose the session to fromRow's catch.
     const kept = badState.map(([name]) => rows.find((row) => row.id === `s_bad_${name}`));
     check(
       "a blob that parses but is not the declared shape is forgotten, every kind of it",
@@ -439,59 +330,26 @@ const badState: [string, string][] = [
       kept.map((row) => row?.id ?? "<lost>"),
       badState.map(([name]) => `s_bad_${name}`),
     );
-    // The other direction, so the sweep above is a gate rather than a blanket.
     const noModes = rows.find((row) => row.id === "s_nomodes");
     check("a blob with no modes at all degrades to null rather than being dropped", noModes?.agentState?.config.modes, null);
     check("keeping everything beside it", noModes?.agentState?.commands.commands[0]?.name, "context");
   }
-  /*
-   * A position outlives the process, and it outlives it as a **fraction**. The
-   * column is REAL because a drop between two adjacent milliseconds has to land
-   * strictly between them; stored as INTEGER it would round to a tie, and a tie is
-   * a row that appears not to have moved.
-   */
+  // rank is REAL: a drop between adjacent milliseconds must land strictly between them, and INTEGER would round to a tie.
   check("and so does a position, fraction included", named?.rank, 1_700_000_000_123.5);
   const plain = rows.find((r) => r.id === "s_plain");
   // `null` and `false`, never `"null"` and `true`: the columns are NULL for every
   // row written before v5, and `String(null)` would name a session "null".
   check("a session written without them reads back unnamed", plain?.title, null);
-  /*
-   * `null`, never 0 — `Number(null)` is 0, which is not "no position" but the
-   * *oldest* one there is, so a coercion on the way out would move every row that
-   * predates this column to the bottom of its folder.
-   */
+  // null, never 0: Number of null is 0, the oldest position, which would sink every row that predates the column.
   check("and one nobody positioned follows its age rather than leading the list", plain?.rank, null);
   check("and unpinned", plain?.pinned, false);
 
   check("the file is stamped with the version it now matches", Number(second.db.prepare("PRAGMA user_version").get()?.["user_version"]), SCHEMA_VERSION);
 
-  /*
-   * The half that decides SQLite over a map, and it is not the transcript half.
-   *
-   * A `prompt` event carries name/mime/bytes, so an attachment is describable
-   * from the log alone — an in-memory registry would pass that test. What it
-   * fails is the **accounting**: a restart would reset every session's byte total
-   * to zero, and a daemon restart is the ordinary outcome of `deploy.sh`, so one
-   * session could write the whole 100 MiB quota again after every one.
-   *
-   * These two assertions are what fail the day somebody simplifies the index
-   * into a `Map`.
-   */
+  // Why SQLite over a Map: the byte accounting must survive a restart, or a session could spend its quota again after every deploy.
   check("a staged upload survives the restart", second.uploads.get("s_named", "u_keepme")?.name, "shot.png");
-  /*
-   * `consumed_at` round-trips, and this is asserted against the **real** store on
-   * purpose.
-   *
-   * It was hardcoded `NULL` in the insert while `keepAgentImage` set it, so every
-   * image an agent returned counted as unconsumed and the 24-hour sweep would
-   * have deleted it out from under a transcript still pointing at it. The
-   * in-memory `UploadIndex` used elsewhere in this driver honours the field, so
-   * the stub passed while the thing that ships did not — which is the whole
-   * argument for checking the durable path here rather than only the fake one.
-   */
+  // consumed_at round-trips against the real store: the in-memory UploadIndex honours it even where the shipped insert did not.
   check("an unconsumed upload reads back unconsumed", second.uploads.get("s_named", "u_keepme")?.consumedAt, null);
-  // A session of its own, so this does not perturb the byte-budget assertion
-  // two lines up — the counters here are per session and shared fixtures drift.
   second.uploads.insert({
     sessionId: "s_agentimg",
     uploadId: "a_agentimage",
@@ -503,21 +361,16 @@ const badState: [string, string][] = [
     consumedAt: now,
   });
   check("and a consumed one reads back consumed", second.uploads.get("s_agentimg", "a_agentimage")?.consumedAt, now);
-  // The consequence the field exists for: the TTL sweep must not see it.
   check(
     "so the unconsumed sweep never sees it",
     second.uploads.expired(now + 1).map((r) => r.uploadId),
     ["u_keepme"],
   );
   check("and so does what it spends of the session's budget", second.uploads.bytesFor("s_named"), 4096);
-  // Keyed on the pair: an id belonging to another session reads as missing rather
-  // than as somebody else's file, which is what lets the routes answer without
-  // choosing between a 403 and a leak.
+  // Keyed on the pair: another session's id reads as missing, so the routes need not choose between a 403 and a leak.
   check("but not under another session's id", second.uploads.get("s_plain", "u_keepme"), null);
 
-  // v6 rekeyed this table to (agent, env_name). `envFor` is the one method that
-  // hands a secret out, and it is keyed on the agent for that reason: the answer
-  // is "what does *this* agent read", never "what is stored".
+  // envFor is the one method that hands a secret out, keyed on the agent: what this agent reads, never what is stored.
   check("a credential comes back as its agent's environment", second.credentials.envFor("claude"), {
     CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01",
   });
@@ -531,25 +384,7 @@ const badState: [string, string][] = [
   check("removing one leaves the other", second.credentials.list().map((c) => c.agent), ["claude"]);
   check("and really removes it", second.credentials.envFor("kimi"), {});
 
-  /*
-   * **A pin survives the inactivity sweep**, and once it did not survive the age
-   * sweep this replaced.
-   *
-   * `server.ts`'s `listRank` already treats a pin as durable — "a `?limit=` cut
-   * that dropped it would make the pin a lie" — and the old statement made it a
-   * lie by a slower route: the API cut kept a pinned session and the startup
-   * prune deleted it, with its whole transcript, at seven days. Two halves of one
-   * system disagreeing about what a pin means, and the destructive half was the
-   * one that disagreed. The bound is not lost, it moves to the count cap, where
-   * pins rank first — so this asserts both directions on rows of exactly the
-   * same age.
-   *
-   * Both rows are *inactive* (`rowFor` writes `stopped`) and aged by
-   * `updated_at`, which `put` stamps with the clock and so has to be set behind
-   * it, because since Q2.222 the sweep reads activity rather than creation and
-   * takes only a session nobody is coming back to. `minSessions: 0` so the
-   * floor is not what keeps either; the floor has its own section below.
-   */
+  // Pins rank first and survive the inactivity sweep; both rows are inactive and aged by updated_at (Q2.222), with minSessions 0 so the floor keeps neither.
   second.sessions.put({ ...persisted("s_old_pinned", { pinned: true }), createdAt: old });
   second.sessions.put({ ...persisted("s_old_plain"), createdAt: old });
   second.db.prepare("UPDATE sessions SET updated_at = ? WHERE id IN ('s_old_pinned', 's_old_plain')").run(old);
@@ -559,51 +394,19 @@ const badState: [string, string][] = [
   check("and an old pinned one of the same age is kept", afterAge.includes("s_old_pinned"), true);
   check("while a recent session is untouched either way", afterAge.includes("s_plain"), true);
 
-  /*
-   * A pasted credential survives everything `prune()` does, and that is the rule.
-   *
-   * ⚠ **This section used to assert the opposite, and the reversal is Q7.124.**
-   * Both tables had an age-plus-emptiness sweep. It went because `updated_at`
-   * moves only on a paste, so the age half was permanently true of any key in
-   * real use and the condition collapsed to "no sessions left" — eight idle days,
-   * since unpinned sessions aged out at seven then, by creation. What that cost was a machine put
-   * down over a holiday coming back with its tokens gone; what it bought was
-   * argued away, since deleting a local copy revokes nothing at the vendor and
-   * `identity.tunnel_key` sits unswept in the same file regardless.
-   *
-   * Driven in the state the old sweep was written for and would have fired in —
-   * everything aged past every horizon this file has, and not one session left —
-   * because an assertion taken with a session still present would pass against
-   * the sweep as well and prove nothing.
-   */
+  // A pasted credential survives everything prune does (Q7.124), with every row aged and then with no session left.
   second.db.prepare("UPDATE agent_credentials SET updated_at = ?").run(old);
   second.db.prepare("UPDATE system_credentials SET updated_at = ?").run(old);
   second.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
   check("an aged credential is kept while any session remains", second.credentials.list().length, 1);
   check("and so is an aged system key", second.systemCredentials.list().length, 1);
 
-  /*
-   * Now empty the table of sessions, which was the other half of the old
-   * condition and is the state the sweep existed to fire in.
-   *
-   * ⚠ **A row `fromRow` drops is still a row.** `s_future` names an agent this
-   * build does not have, so `list()` does not return it and this loop cannot
-   * reach it — while SQL sees it perfectly. That asymmetry mattered while the
-   * sweep read `NOT EXISTS (SELECT 1 FROM sessions)`; with no sweep it is only
-   * the session count that is affected, and the row is still deliberately kept:
-   * deleting one this build cannot read would destroy a session a rollback could,
-   * which `compatibility.md` forbids.
-   */
+  // s_future is invisible to list but still a row, so the table is emptied in SQL.
   for (const row of second.sessions.list()) second.sessions.remove(row.id);
   second.db.prepare("UPDATE sessions SET created_at = ?, updated_at = ?").run(old, old);
   second.db.exec("DELETE FROM sessions");
   second.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
   check("with no session left at all, the table is really empty", second.sessions.list(), []);
-  /*
-   * The four assertions the whole reversal rests on. Proven by putting either
-   * `DELETE` back into `prune()` and watching them go red — which is how the
-   * sweep they replace was proven in the first place.
-   */
   check("a pasted CLI credential outlives every sweep", second.credentials.list().length, 1);
   check("and a system key does too", second.systemCredentials.list().map((one) => one.system), ["moonshot"]);
   check("with the secret still readable", second.systemCredentials.get("moonshot"), "sk-moonshot");
@@ -616,26 +419,8 @@ const badState: [string, string][] = [
     [[], null],
   );
 
-  /* ---------------------------------------------------------------- *
-   * What the startup prune may delete, and the 2026-09-04 incident
-   *
-   * On host `cloud-09fce7b571` the restart for the v0.6.0 deploy logged
-   * `SIGTERM: stopping 6 session(s)` at 14:46:17 UTC and `restored 1
-   * session(s)` at 14:46:20, and the five in between were deleted by `prune()`
-   * inside `openStores`, with their transcripts — ~50 MB — because the age
-   * sweep read `created_at < now - 7d AND pinned = 0`. Five of the six had
-   * been opened before 2026-08-28, every one of them had been written to
-   * seconds earlier by the daemon's own SIGTERM handler with `daemon_shutdown`,
-   * and nothing was logged. Q2.222 is the decision; this section is each of
-   * its three rules driven alone, the incident replayed first, and then what
-   * the verification round found the first cut of the three still doing.
-   *
-   * Its own database and its own `onPruned` collector, because the section
-   * above ends with the sessions table emptied and the `degraded` array is
-   * asserted on elsewhere — a prune report is deliberately *not* a degradation,
-   * and a driver that found one among them would be the first thing to say so.
-   * `put` stamps `updated_at` with the clock, so both dates are set behind it.
-   * ---------------------------------------------------------------- */
+  // The startup prune's three rules (Q2.222), each driven alone on its own database and onPruned collector.
+  // put stamps updated_at with the clock, so both dates are set behind it.
   {
     const reports: string[] = [];
     const own = openStores({
@@ -643,16 +428,11 @@ const badState: [string, string][] = [
       instanceId: "i_pruner",
       onPruned: (detail) => reports.push(detail),
     });
-    // One directory, reused by every row below: what is driven is the table,
-    // and a workspace per row would be two hundred directories for nothing.
     const template = persisted("s_prune_template");
     const DAY = 24 * 60 * 60 * 1000;
     const eightDaysAgo = now - 8 * DAY;
     const minuteAgo = now - 60 * 1000;
-    // `gaveUp: true` writes the one value `resume_gave_up` ever holds — the
-    // registry persists nothing else there (`resumeGiveUpPersists`). A string
-    // is written verbatim, which is how a row from a build that persists a
-    // second value is made, since nothing in this build will write one.
+    // gaveUp true writes the one value resume_gave_up holds; a string is written verbatim to fake a build that persists another.
     const row = (id: string, exit: ExitReason | "live", meta: { pinned?: boolean; gaveUp?: boolean | string } = {}): PersistedSession => ({
       ...template,
       id,
@@ -685,16 +465,6 @@ const badState: [string, string][] = [
     const orphansLeft = (): number =>
       Number(own.db.prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = 's_nobody'").get()?.["n"]);
 
-    /*
-     * The incident, row for row: five sessions opened eight days ago and one
-     * opened four days ago (`s_bd274666`, 2026-08-31 — the survivor), all six
-     * written a minute ago with `daemon_shutdown`, the SIGTERM write. The old
-     * statement read `created_at` and took exactly the five, which is the
-     * journal's "stopping 6 … restored 1"; a rule that reads activity and the
-     * exit takes none. ⚠ The sixth row was seeded live and eight days idle
-     * once, so the replay lost six where the incident lost five, under a
-     * comment saying "row for row".
-     */
     reset();
     for (let i = 0; i < 5; i += 1) {
       seed(row(`s_inc_${i}`, "daemon_shutdown"), { created: eightDaysAgo, updated: minuteAgo });
@@ -707,43 +477,8 @@ const badState: [string, string][] = [
     check("and none with the floor in place either", ids(), incident);
     check("and nothing is reported, because nothing was pruned", reports, []);
 
-    /*
-     * Rule 1 alone, under a floor of zero so the floor cannot be what kept a
-     * row. Every `ExitReason` — the record is exhaustive both ways, so a tenth
-     * reason is a compile error here until somebody says which side it is on
-     * — plus a live row, a pin, two exits `isActiveRow` cannot read, and a row
-     * touched this minute. One prune, and the survivors read off the table.
-     *
-     * The sides are decisions, not a remainder (rule 1 in `prune()`'s
-     * docblock): a person ended `stopped` and `agent_signed_out` — the sign-out
-     * has exactly one writer, `signOutSessions` under the logout route — the
-     * agent ended `agent_exited`, `start_failed` and `start_timeout` never had
-     * a conversation, and `agent_kill_failed` is a legacy value `autoResumable`
-     * brings back on no trigger, so no promise is broken by taking it. ⚠ Four
-     * of the nine were swept with nothing saying so, and none of the four was
-     * seeded here.
-     *
-     * And the one row the exit alone misreads: a `daemon_shutdown` row the
-     * daemon has since given up on (`resume_gave_up` set, which the registry
-     * writes only when the agent says it no longer holds the conversation).
-     * The exit is the daemon's promise; the column is the daemon recording
-     * that it cannot be kept, and `resumeSettled` keeps the row out of both
-     * automatic paths. So it is inactive and swept, while its twin with the
-     * column NULL is kept. ⚠ Read off `exit_json` alone it was active for
-     * ever — swept by no age and counted under no cap (D27, 2026-09-05).
-     *
-     * And two the column alone misreads. A *live* row carrying it — the shape
-     * `doResume` leaves on disk for the length of every recreate, exit cleared
-     * and column not yet — is kept, because the next boot comes back to it
-     * first: ⚠ the column was read before the exit for one round, so a crash
-     * inside that window left a row the next boot's prune deleted under a
-     * sentence saying a live session never is. And a `daemon_shutdown` row
-     * whose column holds a value this build does not honour is kept, the way
-     * `s_b_unknown` is kept on the other column: the registry reads such a
-     * value as "not given up" and puts an agent back on the row at boot, so a
-     * prune that read any non-NULL as inactive — ⚠ it did, for one round —
-     * deleted on a rollback exactly what the boot pass was coming back to.
-     */
+    // Rule 1 alone, under a floor of zero: every ExitReason (the Record is exhaustive, so a new reason must pick a side).
+    // Plus the rows the exit or resume_gave_up alone would misread: given up is inactive, but a live row or an unknown value is kept.
     reset();
     const stale = { created: eightDaysAgo, updated: eightDaysAgo };
     const byReason: Record<ExitReason, "swept" | "kept"> = {
@@ -756,21 +491,7 @@ const badState: [string, string][] = [
       daemon_shutdown: "kept",
       daemon_restarted: "kept",
       config_changed: "kept",
-      /*
-       * ⚠ **Kept, and it is the reason this table is a `Record` rather than a
-       * list.** `parked` is the daemon letting an idle agent go while keeping the
-       * conversation, so the row is one somebody is expected to come back to —
-       * the strongest case there is for keeping it. But it is deliberately *not*
-       * in `DAEMON_EXIT_REASONS` (the boot pass must not un-park), and
-       * `isActiveRow` read that narrow predicate: so on the day the reason was
-       * added, every parked session became inactive, swept by age and ranked
-       * under the cap. Q2.222's incident, re-aimed at the quiet sessions.
-       *
-       * Nothing else would have caught it. `isActiveRow` has no `switch` to go
-       * non-exhaustive and the prune has no other assertion about a reason it has
-       * never seen; this line is the whole net, and it was red before
-       * `keepsItsConversation` existed.
-       */
+      // parked keeps its conversation but is not in DAEMON_EXIT_REASONS, so isActiveRow must not read that list; this line is the only net (Q2.222).
       parked: "kept",
     };
     const reasons = Object.keys(byReason) as ExitReason[];
@@ -813,19 +534,7 @@ const badState: [string, string][] = [
       [...reasons.filter((reason) => byReason[reason] === "swept").map((reason) => `s_b_${reason}`), "s_b_gave_up"].sort(),
     );
 
-    /*
-     * Rule 2. Forty-nine rows every one of which rule 1 would take, under a
-     * floor of fifty: nothing goes, while an event belonging to no session is
-     * swept regardless, since that is not a deletion anybody can see. Then the
-     * fiftieth row — and still nothing, because the floor is on what is *left*,
-     * not a gate on the count. ⚠ It was the gate, and this pin read "the
-     * fiftieth row is what lets the sweep run, and it takes the forty-nine
-     * stale ones": fifty rows to one in one boot, under a rule file saying
-     * "never under 50 rows" (Q2.222). Then ten more, so sixty: the ten least
-     * recently touched stale rows go and fifty stay — the live row first, since
-     * the floor ranks active rows above recency, then the forty-nine most
-     * recently touched, however stale.
-     */
+    // Rule 2: the floor is on what is left, not a gate on the count; an orphan event is swept regardless (Q2.222).
     reset();
     const pad = (i: number): string => String(i).padStart(2, "0");
     for (let i = 0; i < 49; i += 1) {
@@ -852,15 +561,7 @@ const badState: [string, string][] = [
     );
     check("and fifty are left — the live row and the forty-nine most recently touched", [ids().length, ids().includes("s_floor_49")], [50, true]);
 
-    /*
-     * The floor outranks the cap, whatever either is set to. Sixty fresh
-     * inactive rows under a floor of fifty and a cap of thirty: the cap alone
-     * would cut thirty, the floor lets it cut ten, and the table is left at
-     * fifty. Three hundred under a floor of three hundred and a cap of two
-     * hundred: nothing at all. ⚠ Measured the other way in the verification
-     * round — sixty cut to thirty, three hundred cut to two hundred — while the
-     * constant's docblock said the two bounds "never meet".
-     */
+    // The floor outranks the cap, whatever either is set to.
     reset();
     for (let i = 0; i < 60; i += 1) seed(row(`s_fc_${pad(i)}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
     const underFloor = own.sessions.prune({ retainMs: week, maxSessions: 30, minSessions: 50 }).sort();
@@ -870,24 +571,8 @@ const badState: [string, string][] = [
     for (let i = 0; i < 300; i += 1) seed(row(`s_fx_${String(i).padStart(3, "0")}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
     check("and a floor above the cap leaves the cap nothing to cut", own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 300 }), []);
 
-    /*
-     * Rule 3. Two hundred and eight rows, every one older than any window,
-     * with a retention so long that only the cap can act: index 0 pinned, 1–3
-     * `daemon_shutdown`, the rest `stopped`. Row i was *updated* eightDaysAgo
-     * + i seconds and *created* now − i seconds, so the least recently updated
-     * rows are the most recently created: a cap that still ranked by
-     * `created_at` cuts 203–207, and one that ranks the rows nobody is coming
-     * back to by activity cuts 4–8, leaving the table at the cap plus the
-     * three interrupted rows that sit outside it.
-     *
-     * Beside them, eight rows the cap may not touch, each touched *less*
-     * recently than any of the two hundred and eight, so that a cap which so
-     * much as ranked them cuts them first: a live row, and seven whose exit
-     * `isActiveRow` cannot read — not JSON, a reason this build cannot name,
-     * and five shapes that are valid JSON and still say nothing. ⚠ The SQL
-     * `CASE` this replaced tested `json_valid` and then a reason list, so it
-     * ranked six of the eight as inactive and cut them (Q2.222).
-     */
+    // Rule 3: rows are updated oldest-first but created newest-first, so a cap still ranking by creation cuts 203-207 instead of 4-8 (Q2.222).
+    // The eight untouchable rows are touched least recently of all, so a cap that ranked them would cut them first.
     reset();
     for (let i = 0; i < 208; i += 1) {
       const id = `s_cap_${String(i).padStart(3, "0")}`;
@@ -922,17 +607,7 @@ const badState: [string, string][] = [
       [],
     );
 
-    /*
-     * And a table whose active rows alone exceed the cap: a hundred and fifty
-     * `daemon_shutdown` rows and fifty-one live ones, and nothing goes. Then
-     * two hundred and one pins beside three daemon-stopped rows and two live
-     * ones: the cap takes the least recently touched *pin*, and an unpinned
-     * inactive row added afterwards goes before any pin does. ⚠ The cap this
-     * replaced ranked `pinned DESC, active DESC` across the whole table and cut
-     * past two hundred regardless: it took the interrupted row in the first
-     * table, and in the second it took all five active rows and kept the pins,
-     * under a report sentence saying they were "cut last" (Q2.222).
-     */
+    // Active rows alone over the cap lose nothing; among pins the least recently touched goes, and an unpinned inactive row before any pin (Q2.222).
     reset();
     for (let i = 0; i < 150; i += 1) seed(row(`s_int_${String(i).padStart(3, "0")}`, "daemon_shutdown"), { created: eightDaysAgo, updated: minuteAgo - i * 1000 });
     for (let i = 0; i < 51; i += 1) seed(row(`s_live_${pad(i)}`, "live"), { created: eightDaysAgo, updated: now - i * 1000 });
@@ -955,19 +630,7 @@ const badState: [string, string][] = [
       ["s_pin_plain"],
     );
 
-    /*
-     * A row the daemon has given up on, under the cap. Two hundred fresh
-     * inactive rows, and beside them two `daemon_shutdown` twins touched less
-     * recently than any of them and identical bar `resume_gave_up`. The one
-     * the daemon will not put an agent back on by itself ranks with the
-     * inactive rows — last, on its date — and is the one row the cap cuts; the
-     * one the daemon is still coming back to is not ranked at all. ⚠ Read off
-     * `exit_json` alone both were active, so a given-up row was counted under
-     * no cap and swept by no age, for ever (D27, 2026-09-05). Beside them,
-     * touched less recently still, the two rows the column alone misreads
-     * (rule 1 above): a live row carrying it, and a `daemon_shutdown` row
-     * carrying a value this build cannot name. Neither is ranked.
-     */
+    // A given-up daemon_shutdown row ranks with the inactive rows; its twin, a live row carrying the column and an unknown value are never ranked.
     reset();
     for (let i = 0; i < 200; i += 1) seed(row(`s_gu_${String(i).padStart(3, "0")}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
     seed(row("s_gu_given_up", "daemon_shutdown", { gaveUp: true }), { created: eightDaysAgo, updated: eightDaysAgo - 1000 });
@@ -986,11 +649,6 @@ const badState: [string, string][] = [
       [true, true],
     );
 
-    /*
-     * What it says. Both rules in one prune, so the split can be read: three
-     * rows idle past the window and two hundred and two fresh but inactive ones,
-     * so the age sweep takes three and the cap takes two more.
-     */
     reset();
     for (let i = 0; i < 3; i += 1) seed(row(`s_say_idle_${i}`, "stopped"), stale);
     for (let i = 0; i < 202; i += 1) {
@@ -1006,24 +664,13 @@ const badState: [string, string][] = [
       (reports[0] ?? "").includes("A live session, or one the daemon is still coming back to, is never pruned"),
       true,
     );
-    // The floor half of the same sentence, since this is the copy that ships in
-    // the journal: ⚠ it said "the N most recent rows are kept" for a round
-    // while the floor ranked active rows and pins above recency, and with
-    // nothing pinned on it the wording could go stale again unnoticed.
     check(
       "and what the floor keeps, in rank order",
       (reports[0] ?? "").includes("rows stay at any age — active first, then pins, then the most recently touched"),
       true,
     );
 
-    /*
-     * A sink that throws. ⚠ `onPruned` was called inside the transaction's
-     * `try`, after the COMMIT, so a throw ran ROLLBACK against a committed
-     * transaction, skipped `reclaim()` and returned `[]` over rows that were
-     * gone — and `daemon.ts` sweeps upload directories from that list. Read
-     * rather than hit, since `console.log` does not throw; pinned so that the
-     * returned list means what `prune()`'s docblock says whatever the sink does.
-     */
+    // A throwing sink must not change the returned list: daemon.ts sweeps upload directories from it.
     const loud = openStores({
       path: join(sandbox, "store", "prune-loud.db"),
       instanceId: "i_pruner_loud",
@@ -1040,14 +687,7 @@ const badState: [string, string][] = [
     check("and are really gone", Number(loud.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()?.["n"]), 50);
     loud.close();
 
-    /*
-     * The floor and the window the daemon actually runs under: `openStores`
-     * with neither option given, which is `DEFAULT_MIN_SESSIONS` and
-     * `DEFAULT_RETAIN_MS`, and the prune it runs at open. ⚠ Only the constant's
-     * value was pinned, so a bundle that defaulted the floor to zero passed
-     * every pin (the verification round's M16). Forty-nine rows eight days idle
-     * survive an open; sixty do not, and what the open takes is ten.
-     */
+    // The daemon's own defaults, through an open with neither option: pinning the constant alone passes a bundle that defaults the floor to zero.
     const defaults = join(sandbox, "store", "prune-defaults.db");
     let bundle = openStores({ path: defaults, instanceId: "i_pruner_defaults" });
     const seedDefault = (i: number): void => {
@@ -1070,11 +710,7 @@ const badState: [string, string][] = [
     check("and leaves fifty", Number(bundle.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()?.["n"]), 50);
     bundle.close();
 
-    /*
-     * The floor is fifty, and the daemon reads it from the environment beside
-     * the cap — off the entry script's text, since no in-process driver reaches
-     * `scripts/daemon.ts`. And the report has its own line, not the degraded one.
-     */
+    // Read off the entry script's text, since no in-process driver reaches scripts/daemon.ts.
     check("the floor is fifty", DEFAULT_MIN_SESSIONS, 50);
     const daemonWiring = readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8");
     check(
@@ -1090,17 +726,7 @@ const badState: [string, string][] = [
     own.close();
   }
 
-  /* ---------------------------------------------------------------- *
-   * The agent strip, against a real store
-   *
-   * ⚠ **The route section stands an array in for this port, and an array cannot
-   * show you a transaction.** That is the same blindness recorded at
-   * `SqliteCustomAgentStore`'s upsert from the other side — the stand-in there is
-   * a `Map`, and `Map.set` is an upsert by construction, so only the real store
-   * could report the missing `ON CONFLICT`. Here the two things only a database
-   * can be wrong about are that `replace` empties before it refills *atomically*,
-   * and that the order survives a file being closed and opened.
-   * ---------------------------------------------------------------- */
+  // The route section stands an array in for the strip; only a real store shows that replace is atomic and the order survives a reopen.
   {
     const order = [
       { kind: "custom" as const, ref: "ca_11112222", hidden: false },
@@ -1109,15 +735,7 @@ const badState: [string, string][] = [
     ];
     second.agentStrip.replace(order);
     check("a strip written to a real file reads back in order", second.agentStrip.list(), order);
-    /*
-     * ⚠ **`rank` and not insertion order**, which is what the tie-break in `list`
-     * is for and what nothing else here could catch: SQLite is free to hand rows
-     * back in any order at all without an `ORDER BY`, and on a fresh table
-     * insertion order is the one it usually picks — so a missing clause passes
-     * every assertion above it and shuffles a strip months later. Written back in
-     * reverse, so a store that had forgotten to order would return the *new*
-     * insertion order and disagree.
-     */
+    // Written back in reverse: without ORDER BY rank SQLite tends to return insertion order, which would disagree here.
     second.agentStrip.replace([...order].reverse());
     check("and the order it comes back in is the one it was given", second.agentStrip.list().map((one) => one.ref), [
       "claude",
@@ -1133,9 +751,7 @@ const badState: [string, string][] = [
       })(),
       ["custom:ca_11112222", "harness:claude"],
     );
-    // Forgetting something that was never there is not an error: the caller is
-    // `DELETE /custom-agents/:id`, which runs for a row this build may not be able
-    // to resolve and must not start refusing because of it.
+    // Forgetting a missing position is not an error: DELETE /custom-agents/:id calls it for rows this build may not resolve.
     check(
       "and forgetting one that is not there changes nothing",
       (() => {
@@ -1148,13 +764,7 @@ const badState: [string, string][] = [
       second.agentStrip.replace([]);
       return second.agentStrip.list();
     })(), []);
-    /*
-     * ⚠ **The hidden flag is a boolean on both sides of an INTEGER column.** It is
-     * stored as 1/0 and read back through `!== 0`; a store that handed the number
-     * straight out would put `1` where the client's `hidden` is typed `boolean`,
-     * which compiles on both sides and is truthy — so every screen would look right
-     * and the `PUT` echo would carry a shape the wire says is impossible.
-     */
+    // hidden is stored as 1/0 and must read back as a boolean: a raw 1 compiles and is truthy but breaks the wire shape.
     second.agentStrip.replace([{ kind: "harness", ref: "codex", hidden: true }]);
     check(
       "hidden survives the round trip as a boolean",
@@ -1165,14 +775,7 @@ const badState: [string, string][] = [
 
   second.close();
 
-  /*
-   * ⚠ **And it is still there on the next open**, which is the half the two
-   * `second.*` blocks above cannot claim: everything up to here happened inside one
-   * process holding one handle. The strip is the newest table in this file and the
-   * only one created by `schema.sql` alone — no `migrate()` step, no
-   * `SCHEMA_VERSION` bump — so "the CREATE TABLE really ran, on a file that already
-   * existed" is a claim about this release specifically.
-   */
+  // A reopen: the strip table comes from schema.sql alone, with no migrate step, so it must be created on an existing file.
   const third = openStores({ path: dbPath, instanceId: "i_reopen" });
   check("the strip outlives the process that wrote it", third.agentStrip.list(), [
     { kind: "harness", ref: "codex", hidden: true },
@@ -1180,59 +783,19 @@ const badState: [string, string][] = [
   third.close();
 }
 
-/* ------------------------------------------------------------------ *
- * The machine's own X25519 static
- * ------------------------------------------------------------------ */
-
-/**
- * The key an app authenticates this machine by, which had no driver at all.
- *
- * ⚠ **Nothing in `scripts/` or `packages/web/scripts/` reached
- * `SqliteMachineKeyStore` or `ensureMachineKey` before this section, and the cost
- * of that gap is asymmetric with every other store in this file.** A session row
- * that comes back wrong is one conversation; a credential that comes back wrong is
- * one re-paste. This one is generated **once in the life of a machine** and the
- * control plane pins the first key it is told about — `pinMachineKey` answers
- * `mismatch` and the dial is refused, rather than adopting the new one, which is
- * trust-on-first-use chosen on purpose. So a bug that mints a fresh key on the
- * *second* start darkens the machine permanently, and does it on the one path
- * nobody is watching: the daemon comes up, dials in, announces a static the
- * Authority will not take, and every app that tries to reach it fails a handshake
- * that has no key to send a refusal under. Re-enrollment is the only way back and
- * nothing says that is what is needed.
- *
- * So the subject here is not the SQL. It is the two properties the whole E2EE
- * design rests on — **the key survives a restart unchanged**, and **`active()`
- * names exactly one row** — driven against a real store on a real **file**, opened
- * twice. An in-memory store cannot tell "held in a `Map` for the life of this
- * process" from "written to disk", and that is precisely the distinction being
- * asserted.
- */
+// The machine key is minted once and pinned by the control plane on first use, so a fresh key on a second start darkens the machine for good.
+// Hence a real file, opened twice: a memory store cannot tell a Map from disk.
 process.stdout.write("\nthe machine's own key\n");
 {
   const keyPath = join(sandbox, "machinekey", "reemoat.db");
 
   const first = openStores({ path: keyPath, instanceId: "i_mk_a" });
-  // Before anything generates one. A machine enrolled before this table existed
-  // starts here rather than migrating: it generates at its next start and
-  // announces at its next dial, with nobody touching the host.
   check("a machine that has never run answers no key at all", first.machineKeys.active(), null);
   const minted = ensureMachineKey(first.machineKeys, now);
   check("and generating one makes it the answer", first.machineKeys.active(), minted);
   first.close();
 
-  /*
-   * The whole property, in one comparison: a second daemon on the same file gets
-   * the same key back rather than a new one.
-   *
-   * **The private half is compared too, and that is not belt-and-braces.**
-   * `ensureMachineKey` reads back from the store after writing instead of
-   * returning the object it just built — because `save` is `DO NOTHING` on
-   * conflict, so a process that lost a race wrote nothing and would otherwise be
-   * handed a secret the database does not hold. Comparing `kth` alone would pass
-   * with that read-back deleted, since the thumbprint of a key nobody stored is
-   * still a thumbprint.
-   */
+  // The private half is compared too: ensureMachineKey reads back after a save that does nothing on conflict, and kth alone passes without that read-back.
   const second = openStores({ path: keyPath, instanceId: "i_mk_b" });
   check("the same key comes back on the next start", ensureMachineKey(second.machineKeys, now + 60_000), minted);
   check(
@@ -1241,18 +804,7 @@ process.stdout.write("\nthe machine's own key\n");
     1,
   );
 
-  /*
-   * Two TEXT columns holding raw key material, so the encoding *is* the contract:
-   * `src/e2ee.ts` decodes these into a 32-byte static and the handshake has no
-   * other length.
-   *
-   * ⚠ **The length is the assertion because the decoder is lenient.**
-   * `Buffer.from(value, "base64url")` does not throw on a character it does not
-   * recognise — it drops it and answers a short buffer — so a value mangled by the
-   * TEXT round trip decodes to *something* and only its size says so. The
-   * re-encode comparison is the other half: it is what catches a value that
-   * happens to decode to 32 bytes while not being the string that was stored.
-   */
+  // The length is the assertion because base64url decoding drops bad characters silently; the re-encode catches a different 32-byte string.
   for (const [half, value] of [
     ["public", minted.publicKey],
     ["private", minted.privateKey],
@@ -1265,50 +817,18 @@ process.stdout.write("\nthe machine's own key\n");
     );
   }
 
-  /*
-   * And that the row's name is *derived from* the key rather than stored beside
-   * it. `kth` is what the Authority pins, what the tunnel dial announces and what
-   * an operator compares by eye against `cpctl`; a row whose id does not hash to
-   * its own public half is a machine pinned under a name nothing else computes.
-   */
   check(
     "the row's name is the thumbprint of its own public half",
     minted.kth,
     jwkThumbprint(x25519Jwk(Buffer.from(minted.publicKey, "base64url"))),
   );
 
-  /*
-   * `active()` is `WHERE retired_at IS NULL ORDER BY created_at DESC, kth ASC
-   * LIMIT 1`, and every clause of that is load-bearing for a rotation **that does
-   * not exist yet** — which is exactly why it is asserted now. The store's own
-   * docblock says the plural is there because "the only safe rotation is an
-   * overlap, and an overlap needs two rows"; an ordering nothing executes is an
-   * ordering that is right by inspection only, and inspection is what put `kth
-   * ASC` there in the first place.
-   *
-   * The overlap rows are inserted by hand, because there is no supported way to
-   * produce one: `ensureMachineKey` refuses to mint a second key while one is
-   * live, which is the property asserted three lines up.
-   */
+  // The ordering of active is load-bearing for a rotation that does not exist yet; overlap rows are inserted by hand, since ensureMachineKey refuses a second live key.
   const insert = second.db.prepare(
     "INSERT INTO machine_keys (kth, public_key, private_key, created_at, retired_at) VALUES (?, ?, ?, ?, ?)",
   );
 
-  /*
-   * ⚠ **First, the thing that made the overlap below impossible to write.**
-   * `machine_keys_one_live` is a partial unique index over `retired_at IS NULL`,
-   * created by `migrate()` rather than by `schema.sql`, and it is the ONLY
-   * mechanism by which a daemon that lost a startup race learns that it lost:
-   * `kth` is the thumbprint of the key generated one line earlier, so two racers
-   * hash to two different primary keys and the `kth` conflict absorbs nothing.
-   * Before it, both racers wrote, `active()` answered the newer by
-   * `created_at DESC`, and the machine announced a key the Authority had not
-   * pinned — refused 409 at every dial, for ever, repairable only by
-   * `cpctl admin clearkey`.
-   *
-   * This assertion is that fix's negative control and belongs above the overlap
-   * rather than after it, because the overlap has to destroy the index to exist.
-   */
+  // machine_keys_one_live is the only way a daemon that lost a startup race learns it lost (two racers hash to different kth); asserted before the overlap drops it.
   let refusedSecondLive: string | null = null;
   try {
     insert.run("k_racer", "pub_racer", "sec_racer", now + 1, null);
@@ -1322,47 +842,20 @@ process.stdout.write("\nthe machine's own key\n");
   );
   check("and the machine's key is still the one it minted", second.machineKeys.active()?.kth, minted.kth);
 
-  /*
-   * ⚠ **The index is dropped for the rest of this section, deliberately.**
-   * Everything below asserts `active()`'s `ORDER BY created_at DESC, kth ASC` and
-   * `retire()`'s fall-through, which exist for a rotation that does not exist
-   * yet — and a rotation is an overlap, which is exactly the state the index now
-   * forbids. Two honest options: delete these assertions with the capability, or
-   * keep pinning the ordering the future rotation will depend on and pay for it
-   * by dropping the index in this one fixture. The second is chosen because "an
-   * ordering nothing executes is an ordering that is right by inspection only"
-   * is this section's own argument, and inspection is what put `kth ASC` there.
-   *
-   * Whoever builds rotation has to confront the index and decide what replaces
-   * it. That is the intended outcome and better than leaving a door open today
-   * so that an accident can walk through it.
-   */
+  // The index is dropped for the rest of this section, deliberately: the ordering is pinned for a future rotation, which is an overlap the index forbids.
   second.db.exec("DROP INDEX machine_keys_one_live");
   insert.run("k_newer", "pub_newer", "sec_newer", now + 1_000, null);
   check("a newer live row is the one a handshake answers on", second.machineKeys.active()?.kth, "k_newer");
-  // Same instant, two rows. Two keys generated on one millisecond still have to
-  // rank, or "the current key" is whatever SQLite felt like returning and two
-  // reads of one database can disagree.
   insert.run("k_aaa", "pub_aaa", "sec_aaa", now + 1_000, null);
   check("a same-millisecond tie is broken by the name, ascending", second.machineKeys.active()?.kth, "k_aaa");
-  // A retired row is skipped rather than merely deprioritised, which is a
-  // different statement: it is the newest row in the table and must lose anyway.
   insert.run("k_zzz", "pub_zzz", "sec_zzz", now + 9_000, now + 9_500);
   check("a retired row is skipped however new it is", second.machineKeys.active()?.kth, "k_aaa");
 
-  /*
-   * `retire()` has no caller in `src/` at all — a rotation would be its first —
-   * so this is the only thing in the repository that executes it. What it owes is
-   * narrow and total: take one row out of the answer and leave the next live one
-   * standing, which is the whole of what an overlap is.
-   */
   second.machineKeys.retire("k_aaa", now + 2_000);
   check("retiring the active key falls through to the next live row", second.machineKeys.active()?.kth, "k_newer");
   second.machineKeys.retire("k_newer", now + 2_000);
   check("and again, down to the key this machine generated", second.machineKeys.active()?.kth, minted.kth);
-  // The `AND retired_at IS NULL` half of the UPDATE: retiring something twice
-  // must not move the moment it was retired, because that moment is the only
-  // record of when a key stopped being announced.
+  // Retiring twice must not move retired_at: that moment is the only record of when a key stopped being announced.
   second.machineKeys.retire("k_aaa", now + 3_000);
   check(
     "and retiring one twice leaves the first answer standing",
@@ -1370,12 +863,7 @@ process.stdout.write("\nthe machine's own key\n");
     now + 2_000,
   );
 
-  /*
-   * `save` is `ON CONFLICT DO NOTHING` rather than an upsert, and the reason is in
-   * the primary key: `kth` is a hash *of the public half*, so a conflict means
-   * this exact key is already here. An upsert would let a second caller overwrite
-   * a private key that the first caller has already handed to a live session.
-   */
+  // save does nothing on conflict: kth hashes the public half, and an upsert could overwrite a private key a live session already holds.
   second.machineKeys.save({
     kth: minted.kth,
     publicKey: "not-the-stored-public-half",
@@ -1386,43 +874,8 @@ process.stdout.write("\nthe machine's own key\n");
   second.close();
 }
 
-/* ------------------------------------------------------------------ *
- * The file that lost the two-daemon startup race
- * ------------------------------------------------------------------ */
-
-/**
- * `migrateMachineKeysToOneLive`'s **destructive** half, which nothing drove.
- *
- * ⚠ **The section above is not this one, and the difference is the whole
- * point.** It asserts the index refusing a second INSERT and then `DROP`s the
- * index to pin `active()`'s ordering — so it never opens a store over a file
- * that *already holds two live rows*, which is the only state the repair is
- * observable in at all. Every line of the repair could be deleted and that
- * section stays green.
- *
- * The fixture is a file from before the index existed, because it has to be: the
- * index is what forbids the state, so it is dropped, two live rows are inserted,
- * and the file is closed. Reopening it through the **real** `openStores` is what
- * runs `migrate()`, and therefore the repair, and therefore the `CREATE UNIQUE
- * INDEX` that could not have run on this file a statement earlier.
- *
- * **What is asserted is not only which row won.** A repair that kept the right
- * row and deleted the loser would pass a `kth` comparison and would have thrown
- * away the private half that `promote` — and therefore the whole 409 rotation —
- * depends on. So the loser's secret is compared byte for byte against what went
- * in, beside a `retired_at` that is not null, and a second open has to leave that
- * timestamp exactly where it was: that moment is the only record of when a key
- * stopped being announced, and the `AND retired_at IS NULL` on the UPDATE is the
- * only thing keeping a second run from rewriting it.
- *
- * Then the half that makes the migration's guess survivable. It keeps the
- * **oldest** live row, which is right for a machine nobody repaired and
- * backwards for one whose operator already ran `cpctl admin clearkey` — that one
- * had the *newest* pinned and works today. Neither timestamp knows which; the
- * Authority does, and it says so with a 409. So `machineKeyRotation` is driven
- * here over a real store: one promotion, in the direction the migration got
- * wrong, and then `null` for ever.
- */
+// The repair in migrateMachineKeysToOneLive, over a file already holding two live rows, which the section above never opens.
+// The loser must be retired with its private half intact, and machineKeyRotation then promotes it once, where the migration guessed wrong.
 process.stdout.write("\ntwo live machine keys, and who decides which one wins\n");
 {
   const racePath = join(sandbox, "machinekey-race", "reemoat.db");
@@ -1430,11 +883,7 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
 
   const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
   const kthOf = (key: { publicKey: Uint8Array }): string => jwkThumbprint(x25519Jwk(key.publicKey));
-  // Real X25519 keypairs rather than the string fixtures the section above uses,
-  // because `machineKeyRotation` hands its answer to `localStaticKey`, which
-  // derives a public key from the bytes and refuses anything that is not 32 of
-  // them. A fixture that cannot be announced would assert the walk and not the
-  // thing the walk produces.
+  // Real X25519 keypairs: machineKeyRotation hands its answer to localStaticKey, which refuses anything that is not 32 bytes.
   const older = generateStaticKey();
   const newer = generateStaticKey();
 
@@ -1464,8 +913,6 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
     raw.close();
   }
 
-  // stderr is captured for `migrateCredentialsToV6`'s reason: this is a repair
-  // that retires somebody's key, and the print is the only moment anybody is told.
   const said: string[] = [];
   const realError = console.error;
   console.error = (...args: unknown[]) => void said.push(args.map(String).join(" "));
@@ -1512,10 +959,6 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
     retiredAt,
   );
 
-  /*
-   * And now the dial's half. `all()` is what makes a retirement reversible by
-   * code rather than only by hand, so it has to answer the retired row too.
-   */
   check(
     "every key this machine has ever held is still readable, oldest first",
     again.machineKeys.all().map((key) => key.kth),
@@ -1529,39 +972,16 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
   check("and hands back the public half the next dial announces", promoted?.machineKey, b64(newer.publicKey));
   check("the store answers the promoted key from here on", again.machineKeys.active()?.kth, kthOf(newer));
   check("with exactly one row live throughout", liveCount(again.db), 1);
-  // Finite, and the reason this can never be a redial loop: the key the daemon
-  // booted announcing is in `tried` from the start, and every candidate is added
-  // before it is promoted.
+  // Finite: the booted key is in tried from the start and every candidate is added before promotion, so this can never loop.
   check("and nothing is ever offered twice", rotate(), null);
 
-  /*
-   * ⚠ **The `ROLLBACK` arm, which is the sharpest assertion in this section.**
-   * `promote` retires the incumbent and then un-retires the candidate — that
-   * order is forced, because the reverse leaves two live rows for the width of a
-   * statement and the index refuses it. Written as two bare `run` calls, a `kth`
-   * naming no row leaves the incumbent retired and nothing live: `active()`
-   * answers `null`, `ensureMachineKey` mints a *fresh* static the Authority has
-   * never seen, and the machine is 409'd for ever by the code that was trying to
-   * stop exactly that.
-   */
+  // promote retires the incumbent before un-retiring the candidate (the index forbids the reverse), so an unknown kth must roll back or leave no live key.
   check("promoting a key that is not in the table answers false", again.machineKeys.promote("k_nobody"), false);
   check("and leaves the live row standing", again.machineKeys.active()?.kth, kthOf(newer));
   check("rather than leaving this machine with no key at all", liveCount(again.db), 1);
 
-  /*
-   * `save`'s swallow of the live-row conflict, which no driver could reach.
-   *
-   * ⚠ **The existing `save` assertion runs after the `DROP INDEX` and re-saves
-   * the same `kth`**, which `ON CONFLICT(kth) DO NOTHING` resolves before any
-   * index is consulted — so the `catch` in `save` was never entered by anything
-   * in this repository. A *different* `kth` while a live row stands is the only
-   * way in, and it is exactly the shape a daemon that lost the startup race
-   * produces: `kth` is a hash of a key generated one line earlier, so two racers
-   * never collide on the primary key.
-   */
+  // A different kth while a live row stands is the only way into save's conflict catch, and exactly what a daemon that lost the race produces.
   const stranger = generateStaticKey();
-  // Caught rather than called bare, so a `save` that stopped absorbing reports as
-  // one failed assertion instead of taking the rest of this driver down with it.
   let absorbed: string | null = null;
   try {
     again.machineKeys.save({
@@ -1583,11 +1003,7 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
     0,
   );
 
-  /*
-   * The negative control for that swallow, and the reason `isLiveMachineKeyConflict`
-   * matches a name and not only an errcode: anything else must still throw, or a
-   * store that cannot hold a key says nothing about it.
-   */
+  // Negative control: isLiveMachineKeyConflict matches the index name, so any other constraint must still throw.
   let otherFailure: string | null = null;
   try {
     again.machineKeys.save({
@@ -1606,15 +1022,6 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
   );
   again.close();
 
-  /*
-   * ⚠ **And the population that must not notice any of this.** Every legitimate
-   * 409 the tunnel's docblock names — a host restored from backup, a wiped
-   * `~/.reemoat`, a machine id reused for a rebuilt box — is a machine holding
-   * exactly one key. It has nothing to promote, so the rotation answers `null` on
-   * its first call, the tunnel prints the sentence it always printed, and nothing
-   * on disk moves. A rotation that retired the only key here would darken a
-   * machine whose only problem was a message.
-   */
   const lonePath = join(sandbox, "machinekey-lone", "reemoat.db");
   mkdirSync(dirname(lonePath), { recursive: true });
   const lone = openStores({ path: lonePath, instanceId: "i_lone" });
@@ -1625,44 +1032,11 @@ process.stdout.write("\ntwo live machine keys, and who decides which one wins\n"
   lone.close();
 }
 
-/* ------------------------------------------------------------------ *
- * The dial's half of that, which no offline driver reaches
- * ------------------------------------------------------------------ */
-
-/**
- * The rotation above is a capability, and a capability nothing calls is a dead
- * one — **which is this repository's own worst failure mode, measured four
- * reviews running**: a driver green over code nobody could reach. Everything
- * asserted above would stay green with `rotateMachineKey` deleted from
- * `scripts/daemon.ts`, and the machines it exists for would go on being refused
- * for ever.
- *
- * So the wiring is read off the files that place it, for the reason the
- * `REEMOAT_MIN_SESSIONS` census above gives: no in-process driver reaches
- * `scripts/daemon.ts`, and the 409 arm lives inside a `ws.on`
- * ("unexpected-response") closure that needs a relay answering 409 to enter.
- * ⚠ **Over a comment-stripped copy**, because this codebase deliberately
- * restates code facts in prose and every one of these patterns is written out in
- * the docblocks a few lines above the code — matching one of those is the exact
- * shape this repository keeps producing.
- *
- * The third assertion is the one that is not about presence. `machineKey` and
- * `staticKey` are the public and private halves of **one** key: the dial
- * announces the first and `serveSecureSession` opens message 1 with the second,
- * so a rotation that moves one and leaves the other reading `this.options` is a
- * machine that is up, visible, and fails every handshake with no key to send a
- * refusal under. Asserted as an **absence** — no `this.options.machineKey` and no
- * `this.options.staticKey` anywhere in the file — because that is the only form
- * that catches a *future* read of the stale value rather than today's two.
- */
+// Read off the files, comment-stripped, since no in-process driver reaches scripts/daemon.ts or the tunnel's 409 arm.
+// machineKey and staticKey are one key's halves, so nothing may read the pair the tunnel was started with.
 process.stdout.write("\nwhere the promoted key is actually announced\n");
 {
-  /*
-   * Block comments and whole-line `//` comments only, deliberately: a naive
-   * strip to end-of-line would eat the `https://` inside a string literal and
-   * shorten lines this census then reads. Nothing below is being looked for in a
-   * trailing comment, and everything below is written out in a docblock.
-   */
+  // Block and whole-line comments only: stripping to end of line would eat the https:// inside a string.
   const withoutComments = (source: string): string =>
     source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const daemonEntry = withoutComments(readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8"));
@@ -1690,12 +1064,7 @@ process.stdout.write("\nwhere the promoted key is actually announced\n");
     !/this\.options\.machineKey/.test(tunnelSrc) && !/this\.options\.staticKey/.test(tunnelSrc),
     "the dial header and the Noise responder both read the rotated fields",
   );
-  /*
-   * The non-vacuity half of all four: a stripper that ate the file, or a path
-   * that read nothing, would satisfy every absence above and three of the
-   * presences would be the only thing standing. Both files are named in it
-   * because reading the wrong one is the failure that looks identical.
-   */
+  // Non-vacuity for all four: a stripper that ate the file would satisfy every absence above.
   report(
     "and both files really were read",
     daemonEntry.includes("RelayTunnel.start({") && tunnelSrc.includes("export class RelayTunnel"),
@@ -1703,45 +1072,8 @@ process.stdout.write("\nwhere the promoted key is actually announced\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * And the same thing again, behaviourally, over a relay that says 409
- * ------------------------------------------------------------------ */
-
-/**
- * What the census above cannot see, driven against a socket instead.
- *
- * ⚠ **The section above is a source census and was the *only* evidence the
- * rotation works.** It proves the option is passed and that both halves of the
- * pair move together in the file; it cannot prove the thing the whole change
- * exists for, which is that the **second dial carries the promoted public key**.
- * A rotation that updated `this.machineKey` after the header object had already
- * been built would satisfy every regex up there and announce the refused key for
- * ever — and this repository's worst failure mode, four reviews running, is a
- * driver green over code nobody could reach. So a real `RelayTunnel` dials a real
- * listener that answers 409 to every upgrade, and the headers it received are
- * read back.
- *
- * **`random: () => 0` is what makes this finish.** `reconnectDelayMs` is full
- * jitter, so a zero collapses the backoff to the same tick and dial 2 happens
- * immediately; the same seam `relaycheck` uses to walk the curve without waiting
- * on it. The generator returns `1` afterwards so that a tunnel this section has
- * finished with parks on a long timer rather than spinning until `stop()` lands.
- *
- * Three tunnels, because the three behaviours are different and only one of them
- * is the happy path:
- *
- *   1. A rotator with something to offer. Dial 1 announces the key the daemon
- *      booted on, dial 2 announces the promoted one. This is the unproven fact.
- *   2. No rotator at all — every machine with one key, which is every legitimate
- *      409. The sentence is pinned **verbatim** against a constant, because "an
- *      operator reads these words and does what they say" is the entire value of
- *      the arm and a paraphrase is a different instruction.
- *   3. A rotator that throws, which is the guard `tunnel.ts` grew for
- *      `SQLITE_BUSY`. Without it the throw escapes `ws.on("unexpected-response")`
- *      as an uncaught exception and takes this process down — so the negative
- *      control for this one is that the driver *runs at all*, and the assertions
- *      are that the cause is said and that the terminal sentence still follows.
- */
+// Only a real dial shows the second dial carries the promoted key: tunnels with a rotator, with none, and with one that throws.
+// random returns 0 once to collapse the first backoff, then 1 so a finished tunnel parks.
 process.stdout.write("\nthe second dial, against a relay that answers 409\n");
 {
   /** The words an operator reads when there is nothing left to try. Pinned, not paraphrased. */
@@ -1759,10 +1091,7 @@ process.stdout.write("\nthe second dial, against a relay that answers 409\n");
   relay.on("upgrade", (request, socket) => {
     const header = request.headers[MACHINE_KEY_HEADER];
     announced.push(Array.isArray(header) ? header.join(",") : header);
-    // A raw status line rather than `response.writeHead`: this is an upgrade
-    // request, so there is no `ServerResponse` — and a 409 written here is
-    // exactly what the relay's tunnel endpoint sends, which is what puts the
-    // client into `unexpected-response` rather than into `open`.
+    // A raw status line: an upgrade has no ServerResponse, and a 409 here is what puts the client into unexpected-response.
     socket.write("HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
     socket.end();
   });
@@ -1811,7 +1140,6 @@ process.stdout.write("\nthe second dial, against a relay that answers 409\n");
     await tunnel.stop();
     report("a relay answering 409 is dialled twice", reached, `${announced.length} dials, ${said.length} said`);
     check("the first dial announces the key the daemon booted on", announced[0], b64(booted.publicKey));
-    // The whole point of the change, and the one fact no source census can see.
     check("and the second announces the promoted one", announced[1], b64(other.publicKey));
     report(
       "the operator is told which key is live now",
@@ -1831,8 +1159,7 @@ process.stdout.write("\nthe second dial, against a relay that answers 409\n");
       local: { host: "127.0.0.1", port: 1 },
       machineKey: b64(booted.publicKey),
       staticKey: localStaticKey(booted.secretKey),
-      // Absent rather than `() => null`, because absent is what a daemon that
-      // predates the rotation passes and the two must be indistinguishable.
+      // Absent rather than a rotator returning null: a daemon predating the rotation passes nothing, and the two must be indistinguishable.
       random: collapseFirstBackoff(),
       onEvent: (kind, detail) => {
         if (kind === "rejected") said.push(detail);
@@ -1867,9 +1194,7 @@ process.stdout.write("\nthe second dial, against a relay that answers 409\n");
         if (kind === "rejected") said.push(detail);
       },
     });
-    // ⚠ Reaching this line at all is the assertion. Without the guard in
-    // `tunnel.ts`'s 409 arm the throw leaves `ws`'s emit uncaught and this
-    // process is gone before `until` resolves — measured by deleting the `try`.
+    // Reaching this line is the assertion: without the guard in the tunnel's 409 arm the throw is uncaught and the process dies.
     const reached = await until(() => said.length >= 2);
     await tunnel.stop();
     report("a rotator that throws does not take the daemon with it", reached, said.join(" | ") || "nothing was said");
@@ -1889,32 +1214,7 @@ process.stdout.write("\nthe second dial, against a relay that answers 409\n");
   await new Promise<void>((resolve) => relay.close(() => resolve()));
 }
 
-/* ------------------------------------------------------------------ *
- * The daemon lock's compare-and-set
- * ------------------------------------------------------------------ */
-
-/**
- * `takeDaemonRow`, which was exported as a seam for a driver nobody wrote.
- *
- * ⚠ **Its own docblock said `scripts/daemoncheck.*` was its other caller and
- * that this was "the entire reason this is not a closure inside
- * `claimDaemonLock`".** Nothing outside `sqlite.ts` called it, so the
- * compare-and-set that replaced a read-then-unconditional-write — the race that
- * let two daemons both mint a machine key, which is the failure the whole section
- * above exists to repair — was asserted by nothing at all.
- *
- * **Both halves, because neither discriminates alone.** A *stale* observation
- * must answer `false` with the racer's row still standing, which an unconditional
- * `DO UPDATE` turns `true`; and a *matching* observation must answer `true`,
- * which is what fails against a statement that never updates anything. Pass
- * either one on its own and a broken statement is still green.
- *
- * The interleave this exists for cannot be produced through `openStores` at all,
- * which always makes its own read immediately before its own write. Standing in
- * for the losing racer means passing an observation that is deliberately out of
- * date, and only a caller that owns the observation can do that — which is the
- * seam.
- */
+// takeDaemonRow's compare-and-set, both halves: a stale observation must lose with the racer's row standing, and a matching one must win.
 process.stdout.write("\nthe daemon lock's compare-and-set\n");
 {
   const lockPath = join(sandbox, "daemon-cas", "reemoat.db");
@@ -1933,8 +1233,6 @@ process.stdout.write("\nthe daemon lock's compare-and-set\n");
   check("opening the store claimed the row", winner?.instanceId, "i_cas_winner");
 
   const claimant: DaemonRow = { instanceId: "i_cas_loser", pid: process.pid, startedAt: now };
-  // The exact interleave: a second daemon read the table before the first wrote,
-  // so what it observed is *nothing*, and by the time it writes there is a row.
   check("a claim from a racer that observed an empty table loses", takeDaemonRow(held.db, claimant, null), false);
   check(
     "and so does one that observed a row that has since moved",
@@ -1947,23 +1245,7 @@ process.stdout.write("\nthe daemon lock's compare-and-set\n");
   held.close();
 }
 
-/*
- * ⚠ **And the file every machine already enrolled is about to be opened as.**
- *
- * `machine_keys` was added to `schema.sql` with no `SCHEMA_VERSION` bump — which
- * is correct, and the v6 section below carries the argument — so `migrate()` does
- * not mention the table and the only thing that creates it is `CREATE TABLE IF NOT
- * EXISTS` re-applied on every open. That is a real upgrade path with a real
- * failure: were the schema not re-applied, `active()` would throw `no such table`
- * on the first start after an update and the daemon would not come up at all,
- * because `SqliteMachineKeyStore` prepares its statements in its constructor and
- * every method there throws rather than swallowing.
- *
- * The second assertion is the one with teeth. A machine that upgrades must have
- * **no key yet** — it generates at this start and announces at its next dial, and
- * the Authority pins it then — so a build that somehow found a row here would be
- * announcing a static somebody else generated.
- */
+// machine_keys comes from schema.sql re-applied on every open, with no SCHEMA_VERSION bump: an upgraded file must gain the table and hold no key yet.
 {
   const upgradeDir = join(sandbox, "pre-machinekeys");
   const upgradePath = join(upgradeDir, "reemoat.db");
@@ -1971,17 +1253,13 @@ process.stdout.write("\nthe daemon lock's compare-and-set\n");
   {
     const raw = new DatabaseSync(upgradePath);
     raw.exec("PRAGMA journal_mode = WAL");
-    // Stamped at the version this build is at, with the table simply absent —
-    // which is exactly the shape of a file written by the release before
-    // `machine_keys` existed, since adding it moved no version.
+    // Stamped at this build's version with the table absent: the shape of a file from the release before machine_keys.
     raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     raw.close();
   }
   const tableCount = (db: DatabaseSync): unknown =>
     db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='machine_keys'").get()?.["n"];
   {
-    // The non-vacuity half: without it this whole block would pass against a file
-    // that already had the table, and would be asserting nothing about upgrading.
     const raw = new DatabaseSync(upgradePath);
     check("the fixture really is a file with no machine_keys table", tableCount(raw), 0);
     raw.close();
@@ -2003,61 +1281,19 @@ process.stdout.write("\nthe daemon lock's compare-and-set\n");
   upgraded.close();
 }
 
-/* ------------------------------------------------------------------ *
- * The v6 migration, which is the only step here that destroys data
- * ------------------------------------------------------------------ */
-
-/*
- * A hand-built v5 file, opened by this daemon, inspected afterwards.
- *
- * What a session changed, against a real repository.
- *
- * `changes.ts` had no driver at all — and `server.ts` carries
- * `maxChangedFiles`/`maxDiffBytes` with the comment "both tunable so the
- * truncation paths can be exercised without 2000 files", seams built for tests
- * nobody wrote. This uses them.
- *
- * A real `git` rather than a stub runner, deliberately. Every rule worth
- * asserting here is a rule about what git actually *prints* — two commands that
- * disagree about field order, an exit status that means success, a header whose
- * replacement string has its own grammar — and a stub would be this driver
- * asserting its own idea of git's output.
- */
+// Real git rather than a stub: every rule here is about what git actually prints.
 process.stdout.write("\nwhat a session changed\n");
 {
   const repo = join(sandbox, "repo");
   mkdirSync(repo, { recursive: true });
-  /*
-   * `-c` for identity rather than a written config, and `--initial-branch` because
-   * a host whose git predates the default-branch flag would otherwise print a
-   * hint to stderr and pick something this driver did not choose.
-   */
+  // -c for identity and --initial-branch, so the host's git defaults cannot pick a branch this driver did not choose.
   const git = (...args: string[]): void => {
     execFileSync("git", ["-C", repo, "-c", "user.name=daemoncheck", "-c", "user.email=d@example.invalid", ...args], {
       stdio: "pipe",
     });
   };
   execFileSync("git", ["init", "--quiet", "--initial-branch=main", repo], { stdio: "pipe" });
-  /*
-   * **Pinned in the repository's own config, because otherwise this fixture reads
-   * the developer's `~/.gitconfig`.** `gitEnv` forwards `HOME` and
-   * `XDG_CONFIG_HOME` and `gitArgs` prepends only `-C <dir>`, so every setting a
-   * person carries in their global config reaches `hostGit` — and three of them
-   * change what the parsers below are handed:
-   *
-   *   `diff.renames=false`      the rename becomes an add plus a delete, and the
-   *                             `2` record this fixture exists to parse never
-   *                             appears at all
-   *   `diff.noprefix=true`      `--no-index` emits `+++ fresh.txt` with no `b/`,
-   *                             so the header-rewrite assertions read a header
-   *                             that was never in the shape being asserted
-   *   `diff.mnemonicPrefix`     `a/`+`b/` become `i/`+`w/`, same failure
-   *
-   * Local config outranks global, so four lines here make this driver measure
-   * `changes.ts` rather than measuring whoever is running it. Set on the fixture
-   * rather than by clearing `HOME`, because the point is to pin the values the
-   * parsers were written against, not to have no values.
-   */
+  // Pinned in the repo's own config: gitEnv forwards HOME, so a global diff.renames, diff.noprefix or diff.mnemonicPrefix would change what the parsers see.
   git("config", "diff.renames", "true");
   git("config", "status.renames", "true");
   git("config", "diff.noprefix", "false");
@@ -2086,7 +1322,6 @@ process.stdout.write("\nwhat a session changed\n");
     createdAt: now,
   };
 
-  // One of each shape the parsers have to tell apart.
   writeFileSync(join(repo, "kept.txt"), "one\nTWO CHANGED\nthree\n");
   execFileSync("git", ["-C", repo, "mv", "moves.txt", "moved.txt"], { stdio: "pipe" });
   execFileSync("git", ["-C", repo, "rm", "--quiet", "gone.txt"], { stdio: "pipe" });
@@ -2094,12 +1329,9 @@ process.stdout.write("\nwhat a session changed\n");
   // The name that broke the header rewrite. `$&` is the whole match in a string
   // replacement, so a path carrying it spliced the absolute path back in.
   writeFileSync(join(repo, "a$&b.txt"), "dollar ampersand\n");
-  // An untracked file with a NUL in it, which is git's own binary heuristic and
-  // the one answer `--numstat` cannot give: an untracked path has no blob, so it
-  // appears in no diff and nothing but reading the bytes can classify it.
+  // An untracked file with a NUL: an untracked path has no blob, so only reading its bytes can classify it.
   writeFileSync(join(repo, "blob.bin"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
   symlinkSync(join(repo, "kept.txt"), join(repo, "link.txt"));
-  // Two links, because git tells us about them differently — see below.
   symlinkSync(join(repo, "kept.txt"), join(repo, "staged-link.txt"));
   execFileSync("git", ["-C", repo, "add", "staged-link.txt"], { stdio: "pipe" });
 
@@ -2119,49 +1351,17 @@ process.stdout.write("\nwhat a session changed\n");
     check("an edit is modified", byPath.get("kept.txt")?.status, "modified");
     check("a file the agent made is untracked rather than added", byPath.get("fresh.txt")?.status, "untracked");
 
-    /*
-     * ⚠ **This answer used to be computed inside the parser, synchronously.**
-     * `mergeStatus` called `lstatSync` + `openSync` + `readSync` + `closeSync`
-     * once per untracked record, on the event loop, on a tree this daemon did not
-     * create — up to the file cap before the cap even applies, and unbounded on a
-     * mount that pauses. `stall.ts`'s own docblock cited it as an acceptable
-     * exception because these are "paths git has just reported"; git having
-     * listed a path says nothing about whether the *next* syscall returns, and
-     * for a `plain` session the root is a directory the caller named.
-     *
-     * It is `markBinary` now — after the cap, through `probeBinary`'s deadline.
-     * The behaviour has to be identical, which is what these two assert: new
-     * files are the bulk of what an agent produces, and reporting every one of
-     * them as text would offer a diff of a PNG.
-     */
+    // Untracked binary detection runs in markBinary after the cap, through probeBinary's deadline, never synchronously in the parser.
     check("an untracked file with a NUL in it is binary", byPath.get("blob.bin")?.binary, true);
     check("and an untracked text file is not", byPath.get("fresh.txt")?.binary, false);
     check("a removal is deleted", byPath.get("gone.txt")?.status, "deleted");
 
-    /*
-     * The rename, and the reason a shared "read two path tokens" helper would be
-     * a bug rather than a simplification: `status --porcelain=v2` emits
-     * `<newPath>` then `<origPath>`, while `diff --raw -z` and `--numstat -z`
-     * emit `<srcPath>` then `<dstPath>`. `changes.ts` parses both, so one helper
-     * would invert every rename in exactly one of them.
-     */
+    // A shared path-token helper would be a bug: porcelain v2 emits new then orig, while diff --raw and --numstat emit src then dst.
     check("a rename is renamed", byPath.get("moved.txt")?.status, "renamed");
     check("naming where it came from, not just where it went", byPath.get("moved.txt")?.oldPath, "moves.txt");
     check("and never the other way round", byPath.get("moves.txt"), undefined);
 
-    /*
-     * **The listing knows a symlink only when git tells it the mode**, and git
-     * tells it only for a path it is tracking: `symlink` comes off the worktree
-     * mode of a porcelain-v2 `1`/`2`/`u` record, and an untracked path is a `?`
-     * record with no mode at all. So the flag is a hint on the listing rather
-     * than a guarantee — asserted in both directions, because a reader who found
-     * only the `true` case would reasonably conclude it can be trusted.
-     *
-     * Nothing security-relevant rests on it. `diffFile` decides with its own
-     * `lstat` on the path, which is what actually stops a link being followed,
-     * and that is asserted below for the *untracked* one — the case this flag
-     * gets wrong.
-     */
+    // symlink comes only from a tracked path's mode (untracked records carry none), so it is a hint; diffFile's own lstat is what stops a link being followed.
     check("a tracked symlink is reported as one, from its mode", byPath.get("staged-link.txt")?.symlink, true);
     check("an untracked one is not, because git sends no mode for it", byPath.get("link.txt")?.symlink, false);
     check("and every path here can be asked about over JSON", listed.files.every((file) => file.addressable), true);
@@ -2187,12 +1387,7 @@ process.stdout.write("\nwhat a session changed\n");
   }
 
   {
-    /*
-     * A file git has never seen goes through `diff --no-index`, which **exits 1
-     * when the files differ** — that is the success case here, and the path every
-     * newly created file takes. Treating it as a failure would make the diff
-     * unavailable for exactly the files an agent just wrote.
-     */
+    // diff --no-index exits 1 when the files differ, which is the success case for every new file.
     const diff = await diffFile(workspace, changeFor("fresh.txt"), diffOpts);
     check("an untracked file still diffs, though git exits 1 saying so", diff.kind, "text");
     check("as all additions", diff.patch?.includes("+brand new"), true);
@@ -2205,40 +1400,14 @@ process.stdout.write("\nwhat a session changed\n");
   }
 
   {
-    /*
-     * The `$&` case, measured: `String.replace(pattern, replacement)` expands
-     * `$&`, `` $` ``, `$'` and `$$` in a **string** replacement, and the
-     * replacement here is a path the agent chose. `a$&b.txt` rewrote to
-     * `--- a/atmp/wt/a$&b.txtb.txt` — the absolute path the rewrite exists to
-     * remove, spliced back into the one header that has to be right. A function
-     * replacement has no such grammar.
-     */
+    // A function replacement: a string replacement expands $& and friends, and the path is the agent's choice.
     const diff = await diffFile(workspace, changeFor("a$&b.txt"), diffOpts);
     check("a path with $& in it rewrites to itself", diff.patch?.includes("+++ b/a$&b.txt"), true);
     check("and does not splice the absolute path back in", diff.patch?.includes(repo), false);
   }
 
   {
-    /*
-     * ⚠ **git C-quotes a path, and the prefix test did not know it.** A name
-     * containing a non-ASCII byte, a `"` or a `\` comes back as
-     * `+++ "b/…"` with octal escapes — measured against real git on
-     * `réz"me.txt`:
-     *
-     * ```
-     * diff --git "a/r\303\251z\"me.txt" "b/r\303\251z\"me.txt"
-     * --- /dev/null
-     * +++ "b/<the daemon's absolute path>"
-     * ```
-     *
-     * `startsWith("+++ b/")` matches neither, so that line was left alone while
-     * the `diff --git` line above it *was* rewritten (it is replaced outright).
-     * The patch came out **self-contradicting** — one header line naming the
-     * relative path, the next the absolute one — which is un-appliable, and
-     * leaks the daemon's layout in the exact header this rewrite exists to
-     * clean. Both path lines are replaced outright now, so quoting cannot
-     * matter.
-     */
+    // git C-quotes non-ASCII, quote and backslash names, so both header path lines are replaced outright rather than prefix-matched.
     const odd = 'réz"me.txt';
     writeFileSync(join(repo, odd), "unicode and a quote\n");
     const listed = await listChanges(workspace, {
@@ -2252,49 +1421,28 @@ process.stdout.write("\nwhat a session changed\n");
     if (change) {
       const diff = await diffFile(workspace, change, diffOpts);
       check("its patch names it the way a patch has to", diff.patch?.includes(`+++ b/${odd}`), true);
-      // The half that was broken: the header agreed with itself only because the
-      // `diff --git` line is replaced rather than matched.
       check("and the two header lines agree", diff.patch?.includes(`diff --git a/${odd} b/${odd}`), true);
       check("with the absolute path nowhere in it", diff.patch?.includes(repo), false);
     }
   }
 
   {
-    /*
-     * Never content-diffed. `git diff --no-index` *follows* the link, so
-     * `ln -s ~/.ssh/id_rsa x` would otherwise serve the target's bytes to anyone
-     * holding the bearer token. `lstat`, never `stat`.
-     */
+    // Never content-diffed: diff --no-index follows the link, so a link to ~/.ssh/id_rsa would serve its bytes; lstat, never stat.
     const diff = await diffFile(workspace, changeFor("link.txt"), diffOpts);
     check("a symlink is never content-diffed", diff.kind, "symlink");
     check("it reports where it points instead", diff.symlinkTarget, join(repo, "kept.txt"));
     check("and carries no patch at all", diff.patch, null);
-    /*
-     * **The bytes of the target, checked as bytes.** This line used to read
-     * `check(…, diff.patch === null, true)` — the same fact as the line above it,
-     * spelled a second way, under a comment promising something stronger. What
-     * has to be true is that the *content* of `kept.txt` reaches no field of the
-     * answer, not merely that one named field is null, because a regression that
-     * followed the link could surface it anywhere. `TWO CHANGED` is the string
-     * written into the target at the top of this fixture.
-     */
+    // The target's content must reach no field of the answer, not merely leave patch null.
     check("so the target's contents are not served, in any field", JSON.stringify(diff).includes("TWO CHANGED"), false);
   }
 
   {
-    // Both caps, through the seams `server.ts` exposes for exactly this.
     const capped = await listChanges(workspace, { runner: hostGit, base: "session", includeIgnored: false, limit: 2 });
     check("a file cap cuts the list", capped.supported && capped.files.length, 2);
     check("and says so rather than reading as complete", capped.supported && capped.truncated?.reason, "file_limit");
     check("naming the limit it hit", capped.supported && capped.truncated?.limit, 2);
 
-    /*
-     * A cut patch is cut **at the last complete line**, so it can never fabricate
-     * a final line the file does not have — which is why a cap tight enough that
-     * no whole line survives yields nothing rather than half of the `diff --git`
-     * header. Both ends of that rule, because only asserting the roomy one would
-     * pass for an implementation that simply sliced at the byte.
-     */
+    // A cut patch ends at the last complete line, so a cap too tight for one line yields nothing; both ends asserted.
     const clipped = await diffFile(workspace, changeFor("kept.txt"), { ...diffOpts, maxBytes: 120 });
     check("a byte cap cuts a patch", clipped.truncated, true);
     check("and what is left is shorter than the whole", (clipped.patch?.length ?? 0) < (await diffFile(workspace, changeFor("kept.txt"), diffOpts)).patch!.length, true);
@@ -2302,8 +1450,6 @@ process.stdout.write("\nwhat a session changed\n");
 
     const starved = await diffFile(workspace, changeFor("kept.txt"), { ...diffOpts, maxBytes: 16 });
     check("a cap too tight for one whole line carries no patch", starved.patch, null);
-    // And it says which kind of nothing, rather than leaving a client to tell an
-    // empty patch from a file that genuinely did not change.
     check("reporting itself as empty rather than as a patch of nothing", starved.kind, "empty");
     check("while still admitting it was cut", starved.truncated, true);
   }
@@ -2322,37 +1468,12 @@ process.stdout.write("\nwhat a session changed\n");
     check("with a reason a client can render", none.supported === false && none.reason, "not_a_git_repository");
   }
 
-  /* -- a plain session rooted in a *subdirectory* of a repository --------- */
-
   {
-    /*
-     * ⚠ **The two git commands this file parses do not agree about what a path
-     * is, and the whole API broke where they disagree.** `git diff` reports
-     * **repo-root-relative**; `git status` reports **cwd-relative**
-     * (`status.relativePaths` defaults to true). Those are the same string
-     * whenever `root` *is* the repo root — every worktree session, and every
-     * plain session opened at the top of a repository — which is exactly why
-     * nothing caught it.
-     *
-     * Open a plain session in a subdirectory and one modified file becomes
-     * **two rows**: `subdir/kept.txt` carrying the numstat and `kept.txt`
-     * carrying the status, each missing half its fields. And both are
-     * unaskable — `safeRelPath` resolves against `root`, so the first names a
-     * file that is not there and the second never matches the first — which is
-     * `GET /sessions/:id/changes/diff` returning `path_not_changed` for
-     * everything, permanently, for that shape of session.
-     *
-     * Driven through real git in that exact shape, because the defect is what
-     * the *commands* do rather than what the parsers do — both parsers were
-     * correct about the bytes they were handed.
-     */
+    // git diff reports repo-root-relative paths and git status cwd-relative ones; they differ only for a plain session in a subdirectory, driven here.
     const nested = join(repo, "nested");
     mkdirSync(nested, { recursive: true });
     writeFileSync(join(nested, "inner.txt"), "one\n");
-    // `git(...)`, not a bare `execFileSync`: the helper carries `-c user.name`
-    // and `-c user.email`, and a commit without them fails with "Author identity
-    // unknown" on any host that has no global git config. A laptop has one and
-    // CI does not, which is the whole reason that helper exists.
+    // The git helper, not a bare execFileSync: a commit without its -c identity fails on a host with no global git config, such as CI.
     git("add", "-A");
     git("commit", "--quiet", "-m", "nested");
     const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim();
@@ -2377,39 +1498,16 @@ process.stdout.write("\nwhat a session changed\n");
     const paths = listed.supported ? listed.files.map((f) => f.path).sort() : [];
     check("one changed file is one row, not one per command", paths.filter((p) => p.endsWith("inner.txt")), ["inner.txt"]);
     check("and it is named relative to the session's own root", paths.includes("nested/inner.txt"), false);
-    /*
-     * Both halves land on that single row, which is the property the duplicate
-     * hid: the numstat comes from `diff` and the `xy` from `status`, so a row
-     * carrying only one of them is the split reappearing.
-     */
     const inner = listed.supported ? listed.files.find((f) => f.path === "inner.txt") : undefined;
-    /*
-     * The row's existence is its own line, and every assertion below it names
-     * `inner !== undefined` rather than reaching through `inner?.`. Optional
-     * chaining answers `undefined` for a row that is not there, and
-     * `undefined !== null` is *true* — so the three assertions here passed
-     * loudest in exactly the case they exist to catch, a listing that produced no
-     * `inner.txt` row at all.
-     */
+    // Asserted through inner !== undefined, never optional chaining: undefined !== null is true, so a missing row would pass.
     check("the listing has that row at all", inner !== undefined, true);
     check("carrying the numstat that only `diff` knows", inner !== undefined && inner.added !== null && inner.deleted !== null, true);
     check("and the status that only `status` knows", inner !== undefined && inner.xy !== null, true);
     check("an untracked file in the same tree is addressable", listed.supported && listed.files.find((f) => f.path === "new.txt")?.addressable, true);
-    /*
-     * A file changed outside the tree is still *reported* — the agent touched
-     * something and hiding it would be the lie this module is written against —
-     * and marked unaskable, because `safeRelPath` refuses a `..` segment and
-     * every route that serves bytes would answer `400 invalid_path`.
-     */
     const outside = listed.supported ? listed.files.find((f) => f.path.startsWith("../")) : undefined;
     check("a change outside the tree is still shown", outside !== undefined, true);
     check("and marked as one nobody can ask about", outside?.addressable, false);
 
-    /*
-     * And the diff route answers, which is the whole point: this returned
-     * `path_not_changed` for every path in the listing before, so the feature
-     * was not degraded but absent for this shape of session.
-     */
     if (inner) {
       const patch = await diffFile(sub, inner, diffOpts);
       check("the diff route answers for a path from that listing", patch.kind, "text");
@@ -2419,24 +1517,8 @@ process.stdout.write("\nwhat a session changed\n");
   }
 }
 
-/* ------------------------------------------------------------------ *
- * Making a worktree under a root that traverses a symlink
- *
- * `containedIn(root, worktreeRoot)` compared a leaf that **cannot exist yet** —
- * a fresh session id — against a root that resolves fully. `resolved()` falls
- * back to the literal string when `realpath` throws, which is right where a path
- * is merely not created yet and wrong when only *one* of the two sides is in
- * that state, which is exactly this call. On any host whose worktree root
- * traverses a symlink the two answers are in different namespaces, the prefix
- * test fails, and **every** session creation is refused with an error accusing
- * the daemon's own configured root of sitting outside itself.
- *
- * It is invisible on an ordinary Linux host and unavoidable on this one: `/tmp`
- * is a symlink to `/private/tmp` on macOS, which is also where every driver in
- * this file puts its sandbox — so the fixture below is the ordinary case rather
- * than a contrived one, and it is built explicitly rather than relying on that,
- * because CI is Linux and would otherwise assert nothing at all.
- * ------------------------------------------------------------------ */
+// A worktree root that traverses a symlink must still accept a leaf that does not exist yet.
+// Built explicitly: /tmp is a symlink on macOS but not on the Linux CI.
 
 process.stdout.write("\nmaking a worktree under a root that is a symlink\n");
 {
@@ -2470,9 +1552,6 @@ process.stdout.write("\nmaking a worktree under a root that is a symlink\n");
         runner: hostGit,
       }), code: null as string | null };
     } catch (error) {
-      // Reported as a value rather than rethrown: a regression here refuses
-      // *every* session, so it has to fail one line rather than take the rest of
-      // this file's coverage down with it.
       return { made: null, code: error instanceof WorktreeError ? error.code : String(error) };
     }
   };
@@ -2482,21 +1561,9 @@ process.stdout.write("\nmaking a worktree under a root that is a symlink\n");
   check("and the session really gets a worktree", first.made?.workspace.mode, "worktree");
   check("under the root it was asked for, as written", first.made?.workspace.root.startsWith(`${linkedRoot}/`), true);
   check("on a branch this daemon created", first.made?.workspace.git?.createdBranch, true);
-  // The post-add check is untouched by any of this and runs against the tree that
-  // now exists, so a creation that reported success really is inside the root.
   check("and it resolves inside the real one too", containedIn(first.made?.workspace.root ?? "", realRoot), true);
 
-  /*
-   * The guard that is **not** relaxed, kept as the control.
-   *
-   * `repoKey` is `<basename>-<sha256(commonDir)[0:8]>`, computable by an agent
-   * that has read its own worktree's gitfile — so replacing that one directory
-   * with a symlink redirects the *next* session's checkout anywhere this daemon
-   * can write, and `existsSync(root)` never catches it because the leaf is a
-   * fresh session id. The refusal is by `lstat` on the component rather than by
-   * resolving it, because the question is whether this component *is* a link and
-   * a resolving check would follow it and answer about the target.
-   */
+  // The control: a per-repository directory replaced by a symlink is refused by lstat on the component, since an agent can compute repoKey.
   const repoDir = dirname(first.made?.workspace.root ?? join(linkedRoot, "none"));
   execFileSync("git", ["-C", repo, "worktree", "remove", "--force", "--", first.made?.workspace.root ?? ""], {
     stdio: "pipe",
@@ -2507,26 +1574,11 @@ process.stdout.write("\nmaking a worktree under a root that is a symlink\n");
   check("but a per-repository directory that is a symlink is still refused", second.code, "outside_worktree_root");
 }
 
-/* ------------------------------------------------------------------ *
- * Removing one, and the counts that are not zero
- *
- * `count()` and `countStatus` collapse a 5s/15s timeout, a 128 from a stale
- * gitfile, oversized output and an unparseable number into one `null`, and
- * `removeWorkspace` read that with `?? 0`. So "could not tell" became "nothing
- * to lose": a non-forced `DELETE …/workspace?deleteBranch=1` reached `git branch
- * -D` over commits that exist in no other ref and on no remote, and a failed
- * `git status` skipped the dirty refusal standing in front of the one `rmSync`
- * in this codebase. Both are refusals now, and `--force` still overrides both.
- *
- * The runner is scripted rather than real, and that is the point: what has to be
- * driven is git *failing to answer*, which a healthy repository will not do on
- * request. Every case ends by asking the filesystem whether the work is still
- * there, because that — not the return value — is what the defect destroyed.
- * ------------------------------------------------------------------ */
+// count and countStatus answer null for could-not-tell, and removeWorkspace must refuse on it rather than read zero; force overrides both.
+// The runner is scripted because git has to fail to answer; each case ends by checking the work is still on disk.
 
 process.stdout.write("\nrefusing to remove a worktree on a count nobody could take\n");
 {
-  /** git as a script, plus every argv it was handed. */
   const scriptedGit = (answers: {
     status: "empty" | "throw";
     revList: string | "throw";
@@ -2569,7 +1621,6 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
   };
 
   const removalRoot = join(sandbox, "removals");
-  /** A checkout that really is on disk, holding a file the refusals are about. */
   const worktreeOf = (id: string): SessionWorkspace => {
     const root = join(removalRoot, "repo-abc", id);
     mkdirSync(root, { recursive: true });
@@ -2589,7 +1640,6 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
       createdAt: now,
     };
   };
-  /** `code:about` per refusal, which is the whole shape a client keys on. */
   const refusalsOf = (result: Awaited<ReturnType<typeof removeWorkspace>>): string[] =>
     result.kind === "refused"
       ? result.refusals.map((refusal) => `${refusal.code}${"about" in refusal ? `:${refusal.about}` : ""}`)
@@ -2598,11 +1648,7 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
     argv.some((args) => args[0] === verb && (sub === undefined || args[1] === sub));
 
   {
-    /*
-     * The commit count, which is the one that was irreversible. `rev-list`
-     * answers `null` and there are no remotes, so `orphaned` is unknown — and
-     * with `?? 0` that is "nothing to lose" one line above `git branch -D`.
-     */
+    // The commit count, the irreversible one: rev-list fails and there are no remotes, so orphaned is unknown right before branch deletion.
     const workspace = worktreeOf("s_rm_commits");
     const git = scriptedGit({ status: "empty", revList: "throw", remotes: "" });
     const result = await removeWorkspace({
@@ -2614,22 +1660,13 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
     });
     check("a commit count nobody could take refuses the removal", result.kind, "refused");
     check("saying which count it was", refusalsOf(result), ["counts_unknown:commits"]);
-    // The assertion the return value cannot make: the work is still on disk.
     check("the checkout is still there", existsSync(join(workspace.root, "work.txt")), true);
     check("git was never asked to remove it", ran(git.argv(), "worktree", "remove"), false);
-    // The irreversible half, and the only copy of those commits.
     check("and the branch was never deleted", ran(git.argv(), "branch"), false);
   }
 
   {
-    /*
-     * The dirty count, whose failure was silent in the other direction: `git
-     * status` not answering skipped the refusal standing in front of the guarded
-     * `rmSync`, so the removal went ahead over changes nobody had been told about.
-     * `exists === true` is the precondition — a directory that is genuinely gone
-     * has nothing to hold, and refusing there would make the state this path
-     * exists to clean up the one state it cannot.
-     */
+    // A failing status must refuse too, but only while the directory exists: a genuinely gone one has nothing to hold.
     const workspace = worktreeOf("s_rm_dirty");
     const git = scriptedGit({ status: "throw", revList: "0", remotes: "" });
     const result = await removeWorkspace({
@@ -2644,18 +1681,7 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
   }
 
   {
-    /*
-     * **git refusing is not a partial removal**, and the fall-through treated it
-     * as one: the failure was pushed onto `warnings` and execution carried
-     * straight on into `rmSync(recursive, force)`, deleting exactly what git had
-     * declined to delete — and answering `200 {removed: true}`. So somebody who
-     * deliberately did not pass `force` got the forced behaviour with the refusal
-     * reduced to a warning nobody has to read.
-     *
-     * Recognised by git's own words rather than by the call having failed, on the
-     * same reasoning as `classifyAddFailure`: every *other* way this can fail is
-     * precisely what the guarded rm and the prune exist to clean up.
-     */
+    // git declining the removal is a refusal, never a warning followed by rm; recognised by git's own words, as classifyAddFailure does.
     const workspace = worktreeOf("s_rm_refused");
     const git = scriptedGit({
       status: "empty",
@@ -2676,7 +1702,6 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
       result.kind === "refused" && result.refusals[0]?.code === "remove_refused" && result.refusals[0].stderr.includes("use --force"),
       true,
     );
-    // **The one that matters.** Falling through deleted this.
     check("and the work git would not delete is still on disk", existsSync(join(workspace.root, "work.txt")), true);
     // Skipping the prune is safe and deliberate: a worktree git has just declined
     // to remove is still registered and still present, so there is nothing stale.
@@ -2684,11 +1709,7 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
   }
 
   {
-    /*
-     * The control, without which every assertion above passes for a
-     * `removeWorkspace` that refuses everything. Counts that answer, a git that
-     * agrees, and the removal happens — including the branch.
-     */
+    // The control: without it every assertion above passes for a removeWorkspace that refuses everything.
     const workspace = worktreeOf("s_rm_ok");
     const git = scriptedGit({ status: "empty", revList: "0", remotes: "" });
     const result = await removeWorkspace({
@@ -2704,11 +1725,6 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
   }
 
   {
-    /*
-     * And `--force` still overrides both new refusals, which is what keeps them
-     * from being a wall: the remedy `scripts/client.ts` already prints is the
-     * remedy that has to work.
-     */
     const workspace = worktreeOf("s_rm_forced");
     const git = scriptedGit({ status: "throw", revList: "throw", remotes: "" });
     const result = await removeWorkspace({
@@ -2723,41 +1739,12 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
     check("and the directory is gone", existsSync(workspace.root), false);
   }
 
-  /* ---------------------------------------------------------------- *
-   * And what the route says about a refusal, which is the only text
-   * anybody reads
-   *
-   * `scripts/client.ts` prints `error.message` and walks nothing else — no
-   * caller anywhere reads `detail.refusals` — so the sentence this route picks
-   * *is* the answer. It picked one sentence for every refusal, "this worktree
-   * still holds work", and `counts_unknown` exists precisely to say the daemon
-   * could not tell whether it does. The `?? 0` that was removed from
-   * `removeWorkspace` one level down is the same defect: a count nobody could
-   * take turned into a claim. Restating it here put it straight back at the
-   * boundary — and then invited an operator to force-delete on that evidence,
-   * since the CLI's "pass --force" hint hangs off the code beside it.
-   *
-   * Driven through the real route rather than against the mapping, because the
-   * mapping is three lines and the thing that can rot is the route reaching for
-   * it.
-   * ---------------------------------------------------------------- */
+  // scripts/client.ts prints only error.message, so the route's sentence is the answer: an unmeasured count must not claim work is here.
 
-  /**
-   * Whichever scripted git the next route call should see.
-   *
-   * It starts as one that answers everything, so a case which forgets to set its
-   * own fails as a `200 {removed: true}` rather than quietly inheriting the
-   * previous case's refusals and asserting them twice.
-   */
+  // Starts as a git that answers everything, so a case that forgets its own fails as a 200 rather than inheriting refusals.
   let routeGit: GitExec = scriptedGit({ status: "empty", revList: "0", remotes: "" }).runner;
   class ScriptedGitRuntime extends LocalRuntime {
-    /*
-     * Delegating per call rather than handing back `routeGit` itself, and that is
-     * not a detail: `createApp` reads `registry.sessionRuntime.git()` **once**,
-     * when the app is built, so a runtime returning the current value binds the
-     * app to whichever script existed at construction — measured here first, as a
-     * `200 {removed: true}` for a case whose whole point is a refusal.
-     */
+    // Delegates per call: createApp reads the runtime's git once, at construction.
     override git(): GitExec {
       return {
         run: (args, options) => routeGit.run(args, options),
@@ -2766,11 +1753,7 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
     }
   }
 
-  /*
-   * A restored row whose workspace is a worktree. `rowFor` already ends
-   * `stopped`, which is the precondition: the route refuses a live session
-   * before it ever asks git anything.
-   */
+  // rowFor ends stopped, the precondition: the route refuses a live session before asking git anything.
   const removalRow = (id: string): PersistedSession => ({
     ...rowFor(id, join(sandbox, "rm-routes", id)),
     workspace: worktreeOf(id),
@@ -2809,27 +1792,18 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
   };
 
   {
-    // `rev-list` will not answer and the branch is ours to delete, so the only
-    // refusal is the one that means "I could not tell".
     routeGit = scriptedGit({ status: "empty", revList: "throw", remotes: "" }).runner;
     const refused = await deleteWorkspace("s_rm_route_unknown", "deleteBranch=1");
     check("a refusal nobody could measure is still a 409", refused.status, 409);
     check("but not one that claims there is work here", refused.code, "workspace_uncertain");
     check("and the sentence says which of the two it is", refused.message, "could not tell whether removing this worktree would lose work; force removes it anyway");
-    // The remedy travels in the sentence rather than beside it, because the CLI
-    // hangs its hint off `workspace_dirty` and a code it has never seen would
-    // otherwise take the remedy away along with the lie.
+    // The remedy travels in the sentence: the CLI hangs its hint off workspace_dirty, which this code is not.
     check("with the remedy in it, which the code no longer carries", refused.message.includes("force"), true);
     check("and the refusals themselves still ride along", refused.refusals, ["counts_unknown"]);
   }
 
   {
-    /*
-     * The mixed case, which is what decides the rule rather than restating it: a
-     * count nobody could take *and* commits that really are unpushed. The
-     * definite refusal wins, because "this worktree still holds work" is then
-     * true and is the sentence worth reading.
-     */
+    // The mixed case: a definite refusal wins over an unmeasured one, since "still holds work" is then true.
     routeGit = scriptedGit({ status: "throw", revList: "3", remotes: "" }).runner;
     const refused = await deleteWorkspace("s_rm_route_mixed", "deleteBranch=1");
     check("a refusal that did measure something says so", [refused.status, refused.code], [409, "workspace_dirty"]);
@@ -2838,16 +1812,6 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
   }
 }
 
-/*
- * The transcript on disk, which is the half of the log nothing reached.
- *
- * Every registry case in this file backs its sessions with `MemoryEventStore`,
- * so the store that actually holds somebody's conversation across a restart was
- * never named by a driver. The three rules below are the ones whose failure is
- * *invisible* — a client is handed the wrong events under numbers it already
- * holds, with nothing on the wire to say so — which is exactly the class this
- * subsystem exists to prevent and the class a driver has to catch.
- */
 process.stdout.write("\nthe transcript on disk\n");
 {
   const evPath = join(sandbox, "events", "reemoat.db");
@@ -2875,7 +1839,6 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    // The whole point of the store: a different process, the same transcript.
     const store = openStores({ path: evPath, instanceId: "i_ev2" });
     check(
       "another daemon reads what the first one wrote",
@@ -2887,17 +1850,7 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    /*
-     * Eviction takes a **prefix**, and that is what `dropped = firstSeq - 1`
-     * rests on — the counters are rebuilt by deriving them at load rather than
-     * persisting them, and deriving is only correct while the surviving rows are
-     * contiguous and end at the newest.
-     *
-     * The numbers are asserted as *relationships* rather than as literals: the
-     * slack is clamped to a quarter of the window precisely so a tiny log can be
-     * driven, so pinning "exactly six survive" would be pinning the clamp rather
-     * than the rule.
-     */
+    // Eviction takes a prefix, which the counters derived at load rely on; asserted as relationships, since the slack clamp sets the literal counts.
     const evictPath = join(sandbox, "evict", "reemoat.db");
     const store = openStores({ path: evictPath, instanceId: "i_evict", maxEventsPerSession: 8 });
     for (let n = 1; n <= 10; n += 1) store.events.append("s_full", text(n));
@@ -2906,21 +1859,11 @@ process.stdout.write("\nthe transcript on disk\n");
     check("the newest seq is every event ever appended", stats.lastSeq, 10);
     check("something was evicted", stats.count < 10, true);
     check("and everything is accounted for, dropped plus kept", stats.dropped + stats.count, 10);
-    /*
-     * The two halves of "a strict prefix": what survives starts exactly one past
-     * what was dropped, and it runs to the end without a hole.
-     */
     check("what survives begins one past what was dropped", stats.firstSeq, stats.dropped + 1);
     const survivors = store.events.read("s_full", 0, 100, 1 << 20);
     check("and runs contiguously to the newest", survivors.map((stored) => stored.seq), [
       ...Array.from({ length: survivors.length }, (_, i) => stats.firstSeq + i),
     ]);
-    /*
-     * The direction, which is the assertion a "count is bounded" test would pass
-     * without: the oldest went and the newest stayed. Evicting the wrong end
-     * bounds the log just as well and throws away the conversation somebody is
-     * looking at.
-     */
     check("the oldest event is gone", (survivors[0]?.event as { text: string }).text !== "e1", true);
     check("and the newest is not", (survivors.at(-1)?.event as { text: string }).text, "e10");
     // Never the last row: `lastSeq = MAX(seq)` has to stay derivable at load.
@@ -2929,26 +1872,7 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    /*
-     * **And by default it never runs at all**, which is the assertion the block
-     * above cannot make: it passes an explicit `maxEventsPerSession: 8`, so it
-     * pins the mechanism and says nothing about what anybody actually gets.
-     *
-     * A session's log is not truncated. The old default was 5000 events / 8 MiB
-     * evicting a *prefix*, and what that meant was measured rather than reasoned
-     * about: a live session on the development machine reached `dropped: 6144`,
-     * so its oldest surviving event was an agent `text` chunk containing the two
-     * characters `" for"` — a conversation somebody was still working in had lost
-     * its beginning, mid-word, permanently.
-     *
-     * Driven past **both** old defaults rather than at some round number, because
-     * those are the two numbers that have to no longer bite — and they are
-     * separate `break` conditions in `evict`, so a run that only exceeds the
-     * event count leaves the byte bound completely undriven. 6000 events carrying
-     * 2 KiB each is past 5000 *and* past 8 MiB; the padding is what makes the
-     * second half of that sentence true, and without it this case is 360 KB and
-     * asserts nothing about bytes at all.
-     */
+    // By default eviction never runs: driven past 5000 events and past 8 MiB, since count and bytes are separate conditions in evict.
     const keepPath = join(sandbox, "keep", "reemoat.db");
     const store = openStores({ path: keepPath, instanceId: "i_keep" });
     const padding = "x".repeat(2_048);
@@ -2969,16 +1893,7 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    /*
-     * **The floors, which are the case `firstSeq` alone cannot answer.**
-     *
-     * A session whose events are gone entirely — pruned, or a disk that rejected
-     * every insert — leaves a table that knows nothing about it while the
-     * session row still records how far the log got. Without `seedFloors` such a
-     * session restarts at seq 1, and a client reconnecting with `since=500` is
-     * clamped to 0 and replayed: it receives *different events under numbers it
-     * has already seen*, and neither end can detect it.
-     */
+    // Without seedFloors a session whose events are all gone restarts at seq 1, and a reconnect replays different events under seen numbers.
     const floorPath = join(sandbox, "floors", "reemoat.db");
     {
       const store = openStores({ path: floorPath, instanceId: "i_floor" });
@@ -2998,19 +1913,7 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    /*
-     * `oldestAvailable`, and the measurement that put it in the shared
-     * vocabulary rather than in one caller.
-     *
-     * `firstSeq` is 0 when the table holds no row for a session, so
-     * `since < firstSeq - 1` is `since < -1` — false for every cursor, on the one
-     * path where *everything* was lost. Measured: stats
-     * `{firstSeq: 0, lastSeq: 500, count: 0}` answered a `since=0` attach with
-     * `gap: false`, no backlog and `caught_up: 0`, then the next live event at
-     * seq 501. Three places have to agree on this — the gap predicate, the
-     * `firstSeq` on the wire, and the `firstSeq` on the snapshot — which is why
-     * it is a function rather than an expression written out three times.
-     */
+    // firstSeq is 0 with no rows, so the gap predicate, the wire and the snapshot must all go through oldestAvailable.
     check("with rows, the oldest readable seq is the oldest row", oldestAvailable({ firstSeq: 7, lastSeq: 20, count: 14 }), 7);
     check(
       "with none, it is one past the end rather than minus one",
@@ -3021,22 +1924,8 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    /*
-     * A failed write becomes a placeholder at the **same** seq, never a hole and
-     * never the real event.
-     *
-     * A cycle is the failure SQLite adds that the memory store does not have: it
-     * survives `truncateEvent` — `jsonSize` swallows it and reports a few KiB, so
-     * nothing is shrunk — and then throws in `JSON.stringify`.
-     *
-     * Both halves matter. A hole cannot spin the attach loop, because `read` is
-     * `seq > ?` — it does something worse, since `lagged` is derived from
-     * firstSeq/lastSeq and a hole in the *middle* is invisible on the wire. And
-     * the placeholder is what `append` **returns**: handing a live client the
-     * real text at a seq while a reconnecting client gets a placeholder there
-     * makes the two disagree about what that seq is, undetectably. Both losing it
-     * is better than diverging, because the loss is visible.
-     */
+    // A failed write becomes a placeholder at the same seq, and append returns it: a hole is invisible, and a live/replay mismatch undetectable.
+    // A cycle survives truncateEvent and then throws in JSON.stringify.
     const cyclePath = join(sandbox, "cycle", "reemoat.db");
     const store = openStores({ path: cyclePath, instanceId: "i_cycle" });
     store.events.append("s_cycle", text(1));
@@ -3071,13 +1960,7 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 
   {
-    /*
-     * The per-event ceiling is applied *at the store boundary*, which is where
-     * retention is owned — `session.ts` passes through what the agent sent and
-     * does not decide how much of it is kept. Truncation is visible rather than
-     * silent, because a transcript that quietly stops mid-sentence reads as
-     * something the agent said.
-     */
+    // The per-event ceiling is applied at the store boundary, and truncation is marked so it never reads as something the agent said.
     const bigPath = join(sandbox, "big", "reemoat.db");
     const store = openStores({ path: bigPath, instanceId: "i_big", maxEventBytes: 2048 });
     const stored = store.events.append("s_big", { type: "text", role: "agent", thought: false, text: "x".repeat(20_000) , messageId: null });
@@ -3089,33 +1972,13 @@ process.stdout.write("\nthe transcript on disk\n");
   }
 }
 
-/*
- * Everything else in this driver asserts that a thing still works. This asserts
- * that an *upgrade* does not silently take something away — and the two tables it
- * touches are the two that hold secrets, so getting it wrong is unrecoverable
- * rather than inconvenient.
- *
- * Two behaviours, and they are deliberately different:
- *
- *   `agent_credentials` is **rewritten**. A pasted OAuth token is as useful as it
- *   ever was, so losing it would be gratuitous. SQLite cannot drop a primary-key
- *   member, hence create-copy-drop-rename. The copy collapses duplicates — which
- *   only exist in a file written by a multi-tenant daemon — and newest wins.
- *
- *   `forge_accounts` is **dropped**, because of what is in it: plaintext push
- *   tokens that do not expire and that nothing can now revoke, since the routes
- *   that could went with the feature. Leaving the table would leave those secrets
- *   on disk with no code path able to end one, so this is the last moment anybody
- *   can be told — and `migrate()` says so on stderr.
- */
+// An upgrade that touches the secret tables: agent_credentials is rewritten (duplicates collapse, newest wins).
+// forge_accounts is dropped, since nothing can revoke its tokens any more, and migrate says so on stderr.
 process.stdout.write("\nthe v6 migration\n");
 {
   const v5Path = join(sandbox, "v5", "reemoat.db");
   mkdirSync(join(sandbox, "v5"), { recursive: true });
 
-  // The v5 shape, written by hand rather than by an old checkout: what matters is
-  // the columns this migration keys on, and inlining them keeps the driver
-  // runnable without git archaeology.
   {
     const raw = new DatabaseSync(v5Path);
     raw.exec("PRAGMA journal_mode = WAL");
@@ -3143,9 +2006,7 @@ process.stdout.write("\nthe v6 migration\n");
     raw.close();
   }
 
-  // stderr is captured, because the drop and the collapse are the two places this
-  // upgrade destroys something and the only place anybody is told. A count that
-  // silently became zero would look identical to a clean migration.
+  // stderr is captured: the drop and the collapse are the only places this upgrade tells anybody it destroyed something.
   const said: string[] = [];
   const realError = console.error;
   console.error = (...args: unknown[]) => void said.push(args.map(String).join(" "));
@@ -3160,23 +2021,11 @@ process.stdout.write("\nthe v6 migration\n");
     "claude:CLAUDE_CODE_OAUTH_TOKEN",
     "kimi:KIMI_API_KEY",
   ]);
-  // Newest wins, and this is the assertion that would catch the collapse choosing
-  // by row order instead: `sk-OLD` is inserted first.
   check("a collision keeps the newer secret", migrated.credentials.envFor("claude"), {
     CLAUDE_CODE_OAUTH_TOKEN: "sk-NEWER",
   });
 
-  /*
-   * A new *table* needs `schema.sql` and nothing else, and the version must not
-   * move for it.
-   *
-   * `schema.sql` is re-applied on every open and is all `CREATE ... IF NOT
-   * EXISTS`, which is idempotent for whole tables and useless for a new column —
-   * that asymmetry is why `migrate()` exists. Leaving `SCHEMA_VERSION` alone is
-   * the deliberate half: `refuseNewerSchema` throws on a file stamped newer than
-   * the running build, so a bump here would turn every rollback into a daemon
-   * that will not start, in exchange for nothing.
-   */
+  // A new table needs only schema.sql, and SCHEMA_VERSION must not move: refuseNewerSchema would make every rollback fail to start.
   migrated.uploads.insert({
     sessionId: "s_x",
     uploadId: "u_x",
@@ -3218,25 +2067,7 @@ process.stdout.write("\nthe v6 migration\n");
   check("a second open changes nothing", again.credentials.list().length, 2);
   again.close();
 
-  /*
-   * **Refuse-newer, and that it happens before anything is written.**
-   *
-   * The SCHEMA_VERSION docblock calls this direction "load-bearing rather than
-   * advisory" for v6 and nothing asserted it. It is also an *ordering* property,
-   * not just a guard: `openStores` used to run `migrate()` first, so a file from
-   * a newer daemon had `agent_credentials` rebuilt and `forge_accounts` dropped
-   * before the refusal it was supposed to get. Stamping a table this build would
-   * touch and checking it survives is what makes the order observable rather than
-   * a matter of reading the two lines in the right sequence.
-   */
-  /*
-   * The tiebreak, which nothing asserted and which a rewrite would silently lose.
-   *
-   * The collapse orders by `updated_at DESC, owner_subject ASC`. The first key is
-   * covered above; the second only decides when two people updated a credential
-   * in the same millisecond, so without a fixture that forces a tie a build that
-   * dropped it — and became dependent on SQLite's row order — passes everything.
-   */
+  // The tiebreak on owner_subject only decides same-millisecond updates, so it needs a forced tie.
   const tiePath = join(sandbox, "v5-tie", "reemoat.db");
   mkdirSync(join(sandbox, "v5-tie"), { recursive: true });
   {
@@ -3268,7 +2099,7 @@ process.stdout.write("\nthe v6 migration\n");
   {
     const raw = new DatabaseSync(v7Path);
     raw.exec("PRAGMA journal_mode = WAL");
-    // A table a v6 `migrate()` would drop on sight, so its survival is the proof.
+    // A table a v6 migrate would drop on sight: its survival proves a newer file is refused before anything is written.
     raw.exec(
       "CREATE TABLE forge_accounts (owner_subject TEXT NOT NULL, host TEXT NOT NULL, " +
         "secret TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (owner_subject, host))",

@@ -105,398 +105,30 @@ import {
   type MachineSettingsPort,
 } from "./registry.js";
 
-/**
- * Outbound queue bounds.
- *
- * These used to be justified as "deliberately larger than the log, so a `since=0`
- * attach to a full log can never overflow on arrival". That argument is gone with
- * the log's window — a session's log is unbounded now (see `DEFAULT_MAX_EVENTS`),
- * so there is no size to be larger than. What replaces it is `ATTACH_REPLAY_MAX`:
- * the *attach* is bounded instead of the history, which is the right way round —
- * a socket is a live channel and a transcript is a record, and it was only ever
- * the socket that could not carry an arbitrary amount at once.
- */
 const MAX_QUEUE_EVENTS = 8_000;
 const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
-/**
- * How much history one attach will replay down the socket.
- *
- * Well under `MAX_QUEUE_EVENTS`, because `attach` drains its whole backlog into
- * that queue in one synchronous block and everything past the bound would
- * `collapse()` — reporting `lagged{slow_consumer}` about a client that had not
- * been given the chance to be slow. That lie is exactly what this constant exists
- * to prevent, and it used to be prevented by capping the log instead.
- *
- * Below this the socket carries everything, which is every ordinary attach: a
- * client attaches at its own cursor and is a handful of events behind. Above it,
- * the events are **still there** and the client is told to fetch them over HTTP —
- * see the `backlog` reason. Nothing is destroyed and nothing is silently skipped.
- *
- * **It bounds the count and `MAX_QUEUE_BYTES` bounds the bytes, and only one of
- * those two is this constant's to give.** 2000 events of transcript is well under
- * 8000, but at 128 KiB an event it is 250 MiB against a 16 MiB queue: a phone
- * waking 1200 tool-call bodies behind crosses the byte ceiling on the drain and
- * `collapse()` fires anyway. That is not a slow consumer — nothing has been sent
- * yet — so the collapse takes the reason from *who is enqueuing*: a replay says
- * `backlog`, which is the frame that is true, and the client refetches over HTTP
- * instead of drawing "events lost" over a conversation the daemon still holds
- * every byte of. Which is what this constant promises and could not deliver on
- * its own.
- */
+// Well under MAX_QUEUE_EVENTS so a replay cannot collapse on count; one past MAX_QUEUE_BYTES still collapses, reported as backlog.
 const ATTACH_REPLAY_MAX = 2_000;
 const BATCH_MAX_EVENTS = 200;
-/**
- * The largest `events` frame this socket will write, **in the bytes it writes**.
- *
- * ⚠ **This was an estimate, and the gap between the estimate and the wire was a
- * permanent transcript stall.** `flush` accumulated `estimateBytes`, which charges
- * `String.length` — UTF-16 units of the *unescaped* string — while what goes out
- * is `JSON.stringify` in UTF-8. Replaying that arithmetic over real events: four
- * `text` events of CJK are charged 469 KiB and are **1406 KiB** on the wire, and
- * four `agent_log` lines of ESC — which is what a coding CLI's stderr is made of,
- * escaping to `\u001b`, six bytes per charged unit — are charged the same 469 KiB
- * and are **2813 KiB**. Both are past `MAX_SOCKET_MESSAGE_BYTES`, so on the
- * encrypted path the far end's `MessageAssembler` refused the message,
- * `e2ee.ts` failed the whole channel, and `stream.ts` reconnected **with the
- * cursor unchanged** onto the same batch, which split the same way and failed
- * again: a transcript that never moves, with nothing logged, on large sessions
- * only and never on loopback.
- *
- * So the number accumulated in {@link StreamConnection.flush} is
- * `Buffer.byteLength` of the very string that is about to be sent, and each event
- * is encoded **once** — the pieces are kept and joined rather than measured and
- * then stringified a second time, which is the arrangement {@link controlItem}
- * already makes for a control frame.
- *
- * **The first event is still taken whatever it weighs, and that is what keeps
- * this from wedging in a different way.** A cut that could refuse every event
- * would emit an empty batch for ever and drain nothing — the same stall with a
- * different cause. Nothing is added once the running total is past this bound, so
- * a batch is `max(this, one event)` rather than this plus one.
- *
- * **Half of `MAX_SOCKET_MESSAGE_BYTES`, and the half is the headroom that
- * exemption spends.** `truncateEvent` clips an event toward
- * `DEFAULT_MAX_EVENT_BYTES` — 128 KiB *charged*, so at most ~768 KiB once every
- * unit escapes to six bytes — which fits inside the remaining half.
- *
- * ⚠ **That is a property of *some* of `truncateEvent`'s arms, and the hedge that
- * used to stand here — "several of its arms deliberately keep an unshrinkable
- * field and rely on an ingest bound instead" — described one group of three.**
- * Re-counted 2026-09-17: **19 `case` labels over 14 return branches**, against a
- * 19-member `SessionEvent` union, with no `default`, so the switch is exhaustive
- * by the compiler. What the arms do partitions them three ways.
- *
- * *Cut to the budget here — 9 labels, 8 branches.* `text`, `prompt` (whose text
- * budget is reduced by what its attachments already spend), `agent_log`,
- * `file_change` (half each to `oldText` and `newText`), `tool_call`, `other`,
- * `error`, and the `permission_request`/`permission_resolved` pair. These do
- * converge on `maxBytes`.
- *
- * *Budgeted **per item** against a 64-byte floor — 4 labels, 4 branches.*
- * `tool_call_update`'s content blocks, `plan`'s entries, `workspace`'s warnings
- * and `agent_config`'s descriptions. What these charge scales with an item
- * **count** rather than with `maxBytes`, so the floor is the bound and not the
- * budget: at n entries `plan` charges `128 + Σ(content.length + 32)` however
- * small the per-item budget goes.
- *
- * *Returned unchanged — 6 labels, 2 branches.* `context_cleared`,
- * `session_started`, `status`, `turn_end`, and the
- * `elicitation_request`/`elicitation_resolved` pair.
- *
- * ⚠ **The unshrinkable fields, and which of them an ingest bound actually
- * covers.** Real, each verified: `text`'s `messageId` (`MAX_MESSAGE_ID_CHARS`,
- * 256); `prompt`'s attachments (`MAX_PROMPT_ATTACHMENTS`, 10, plus `uploads.ts`'s
- * name and mime caps); both tool arms' `parentToolCallId`
- * (`MAX_PARENT_ID_CHARS`, 256) and `locations` (`MAX_TOOL_LOCATIONS`, 64, and
- * cut here as well); the update's `images` (`MAX_IMAGES_PER_UPDATE`, 8) and its
- * blocks' total (`MAX_TOOL_OUTPUT_BYTES`, 32 KiB, with a visible `break` at
- * ingest); the permission pair's `options` (`MAX_PERMISSION_OPTIONS`, 24, under
- * an 8 KiB `MAX_PERMISSION_SNAPSHOT_BYTES` refusal over `{title, options}`
- * together); `elicitation_resolved`'s answers (`MAX_ELICITATION_ANSWER_CHARS`,
- * 2048, clipped in `registry.ts` and refused on the route); and `agent_config`'s
- * ids, names, values and *counts* (`toConfigOptions`, `session.ts` — the
- * `MAX_CONFIG_*` family, under a `MAX_CONFIG_BYTES` backstop that cuts and marks
- * `truncated` rather than refusing). `status` and `turn_end` need none — union
- * literals and numbers.
- *
- * ⚠ **That `agent_config` clause is the newest and it was missing from this list
- * while this list was being written**, which is the failure this whole inventory
- * exists to prevent: the paragraph below said `plan.entries` was "the one door
- * that reaches 1 MiB" on the same day {@link fitSnapshotFrame}'s residue note in
- * this file said `agentConfig`'s choice ids were bounded nowhere. ⚠ **This list is
- * still hand-derived and may still be short.** What is not hand-derived is the
- * outcome: `daemoncheck.after-the-turn-and-config` replays every `truncateEvent`
- * arm against `MAX_SOCKET_MESSAGE_BYTES` and differences the labels against
- * `SessionEvent`'s union, so a field this paragraph forgets shows up there as a row
- * over the ceiling.
- *
- * ⚠ **Two rely on nothing at all, and that is the correction.**
- * `context_cleared` carries two agent-minted session ids whose real length
- * `estimateBytes` charges, so this function is entered and has nothing to do —
- * there is no `MAX_AGENT_SESSION_ID` anywhere in `src/`. `session_started` is
- * sharper still: an agent-minted `sessionId`, the adapter's `agentInfo` and its
- * `modes`, charged a **flat 192**, so the function is never entered on it at
- * all. **It was four**, and the two that came back are the elicitation pair.
- * `elicitation_request`'s own comment said its `message` was "clipped at ingest
- * in `session.ts`" while `MAX_ELICITATION_MESSAGE_CHARS` was retired and
- * `MAX_ELICITATION_FORM_BYTES` weighed the *form*, of which `message` is not a
- * field — an arm naming a bound that did not exist, and the one field on this
- * whole path that could be a frame by itself. The clip is restored at 4096 code
- * units (`clipElicitationMessage`, `session.ts`), which is what makes the
- * paragraph below hold for this arm as well. **And
- * `elicitation_resolved` was the fourth**, easy to miss because it shares
- * `truncateEvent`'s arm with `elicitation_request` (`events.ts:2085`, `return
- * event`) while having its *own* `estimateBytes` case that charges
- * `256 + message.length` plus every answer's key, label and value at their real
- * lengths — so it carries strictly more than the request it answers and is
- * shrunk by exactly as little. It is fixed by the same clip and not by a second
- * one: both its call sites in `registry.ts` copy the `message` off the *parked*
- * record, which is the string `onElicitation` already cut, so there is one
- * bound for the pair rather than two numbers that can disagree. `plan.entries` is a
- * fifth of a different kind: `session.ts` pushes the agent's array through
- * uncapped, so the count that arm divides by is itself unbounded. **`agent_config`
- * was a sixth, of that same cardinality kind and worse** — its arm nulls
- * descriptions and leaves the ids, names and values it divides nothing by, so at
- * 20 000 choices it weighed 1 318 159 bytes *after* truncation and its cliff sat
- * at **7 766 choices**, below `plan`'s ~9 500. Closed at ingest on 2026-09-19;
- * `plan.entries` is what is left of the two.
- *
- * The conclusion the old sentence reached is unchanged and only its premise was
- * wrong: one event over the wire ceiling is still **sent** rather than dropped,
- * because dropping it wedges the client's own cursor (see {@link encodeStored})
- * and the transcript is what the daemon is for.
- *
- * ⚠ **What this inventory is worth to the reader on the other side, and the one
- * sentence that may not be written from it.** `MAX_SOCKET_MESSAGE_BYTES` in
- * `packages/protocol` describes the other half of this bound — 1 MiB against the
- * 512 KiB here — as headroom, on the strength of a ~768 KiB worst case that is
- * `DEFAULT_MAX_EVENT_BYTES` escaped six bytes to the unit. That figure is honest
- * for the nine labels above that converge on `maxBytes` and for no others, so the
- * headroom sentence is true of *those* and must be qualified rather than
- * generalised. It was generalised once, on 2026-09-17, to "every arm that refuses
- * to shrink is bounded at ingest" — written in the same change as the two
- * paragraphs above saying `context_cleared` and `session_started` rely on nothing
- * at all, so one commit carried both halves of a contradiction. It is corrected
- * there rather than here, against numbers measured 2026-09-18 by replaying
- * `truncateEvent` and weighing UTF-8: `plan.entries` at 10 000 entries is
- * **1 100 027 bytes after truncation**, because the per-item budget floors at 64
- * bytes and bounds an entry rather than the count — 3 entries of a megabyte each
- * come out at 131 148. The two ids are the smaller hazard and cost more to close:
- * bounding them at ingest was refused, since an agent session id is `AcpClient`'s
- * routing key and rides every `session/prompt`, `session/cancel` and
- * `session/close`, so a clip addresses a conversation that does not exist and a
- * refusal at `session/new` turns a large event into a session that cannot start.
- *
- * ⚠ **On 2026-09-18 that sentence read "and is the one door that reaches 1 MiB",
- * and it was wrong the day it was written.** `agent_config` was a nearer one —
- * **7 766 choices** at a realistic value and name against `plan`'s ~9 500 — and it
- * is named as unbounded three thousand lines further down this same file, in
- * {@link fitSnapshotFrame}'s residue note, which was true and untouched while this
- * paragraph said otherwise. One file carrying both halves of a contradiction, for
- * the second time in two days. The `agent_config` half is closed now
- * (`toConfigOptions`, `src/session.ts`), and what replaces the *count* is a driver
- * rather than a better sentence: `daemoncheck.after-the-turn-and-config` replays
- * every arm of `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES`, weighs each against
- * `MAX_SOCKET_MESSAGE_BYTES`, and differences the labels it swept against
- * `SessionEvent`'s own union in both directions. **Run it to enumerate the doors.
- * Do not count them here, and do not write "the one" about a set nothing sweeps** —
- * three comments in this tree did, and all three missed the same arm.
- *
- * ⚠ **Nothing compares this to `MAX_SOCKET_MESSAGE_BYTES`**, which lives in
- * `packages/protocol`: `packages/web` may not import `src/`, so the app's copy is
- * a literal, and deriving this one from the import while the app's stayed a
- * literal would hide the pair rather than tie it. What holds this end is
- * `daemoncheck.stream-and-events.ts`'s *"the outbound batch, cut on bytes rather
- * than on an estimate"*, which reads `data.length` off a real `ws` client rather
- * than re-serialising at the call site — measured 432,364 bytes widest with this
- * cut and 3,026,371 with the estimate one restored. Driven on the **direct** path
- * deliberately: over a channel the overflow is answered by `fail()`, which ends
- * the stream, so exactly one frame crosses either way and no count taken at the
- * peer could tell a refusal from a healthy socket.
- *
- * `log.read`'s third argument in `attach` is this number in the **store's** units
- * — a different unit for the same idea, deliberately left alone: there it only
- * decides how many rows one turn of a `for(;;)` that runs until the log is
- * drained will materialise, so it bounds nothing.
- */
+// Largest events frame in UTF-8 bytes actually written, half of MAX_SOCKET_MESSAGE_BYTES.
 const BATCH_MAX_BYTES = 512 * 1024;
-/**
- * The largest **control** frame this socket will write, in the bytes it writes.
- *
- * The same number as {@link BATCH_MAX_BYTES} and against the same ceiling, which
- * only the *receiver* enforces: past `MAX_SOCKET_MESSAGE_BYTES` the far end's
- * `MessageAssembler` refuses the message, `e2ee.ts` fails the whole channel, and
- * `stream.ts` reconnects with its cursor unchanged onto the frame that just
- * failed. On the event arm that was a transcript that stopped partway. Here it is
- * worse: `hello` is **always the first frame of an attach** — see
- * {@link StreamConnection.attach} — and it carries `managed.snapshot()`, so the
- * transcript never starts at all, on whichever machine has the most going on.
- *
- * ⚠ **The control arm had no size test whatever**, and the ~93 KB a snapshot is
- * quoted at elsewhere in this tree is the *background-task* bound rather than the
- * whole record. Field by field, with the bound that actually applies to each:
- *
- * - `queuedPrompts` — `MAX_QUEUED_PROMPTS` (8) entries of `{id, seq, at}`, tens
- *   of bytes each.
- * - `backgroundTasks` — `MAX_TRACKED_ASYNC_TASKS` (32) × the 2 888 characters
- *   `acp/asynctasks.ts`'s clips allow. That product *is* the ~93 KB, and it is
- *   the largest **bounded** thing on the record.
- * - `agentConfig` — `snapshotConfig` drops every description but the selected
- *   one, clips that to 120 characters, and cuts each option's choices to
- *   `MAX_SNAPSHOT_CHOICES` (40). Bounded in the two dimensions measured to grow.
- * - `title` (`MAX_TITLE_CHARS`, 120), `exit.detail` (`MAX_EXIT_DETAIL_CHARS`,
- *   512), `resume` (64 + 512). Scalars otherwise.
- * - `pendingPermissions` — **unbounded in count.** One entry is at most 8 KiB of
- *   `{title, options}` (`MAX_PERMISSION_SNAPSHOT_BYTES`, a refusal weighed in
- *   real UTF-8 by `jsonBytes`) plus `rawInput` and `content` at
- *   `MAX_PERMISSION_BLOB_BYTES` (8 KiB) each — about 24 KiB. The only gate on how
- *   many may be parked at once is `refusalReason()`, which asks whether a turn is
- *   running and never how many are already waiting, and nothing stops an agent
- *   issuing them in parallel inside one turn. At 24 KiB an entry, 22 of them
- *   pass this bound and 43 pass the ceiling it protects.
- * - `pendingElicitations` — **unbounded in count** by the identical gate, which
- *   `resolveElicitation` reuses verbatim, but bounded per entry: the form is not
- *   on this record at all, and `message` is clipped at ingest to
- *   `MAX_ELICITATION_MESSAGE_CHARS` (4096 code units, at most 16 KiB of UTF-8).
- *   ⚠ It was **unbounded per entry as well** — `MAX_ELICITATION_FORM_BYTES`
- *   weighs the **form**, `message` is not a field of it, and the clip had been
- *   retired — so one question could be arbitrarily large on its own and defeat
- *   every rung of the ladder below, whose halving floors at one row. That is the
- *   worst case this bound was restored to remove.
- * - `agentSessionId` and `agentHandle` — agent-minted, bounded nowhere.
- *
- * So {@link controlItem} **fits** the frame instead of guessing at it, and
- * {@link fitSnapshotFrame} is the ladder. ⚠ Nothing compares this to
- * `MAX_SOCKET_MESSAGE_BYTES`, for the reason {@link BATCH_MAX_BYTES} already
- * gives from the other side: `packages/web` may not import `src/`, so the app's
- * copy is a literal, and deriving one end while the other stayed a literal would
- * hide the pair rather than tie it. This is the third literal in the fleet.
- */
+/** Largest control frame in bytes written: past MAX_SOCKET_MESSAGE_BYTES the receiver fails the channel, so fitSnapshotFrame fits hello under it. */
 export const CONTROL_MAX_BYTES = 512 * 1024;
-/**
- * `JSON.stringify({ type: "events", events })`, split at the seam so
- * {@link StreamConnection.flush} can join the encoded events itself and know the
- * byte count as it goes. Both are ASCII, so `length` is the byte length — and the
- * concatenation is byte-for-byte what stringifying the whole object would return,
- * which is the property that lets the measurement replace the serialization
- * rather than be added to it.
- */
 const EVENTS_FRAME_OPEN = '{"type":"events","events":[';
 const EVENTS_FRAME_CLOSE = "]}";
 const SOCKET_HIGH_WATER = 1024 * 1024;
 const PING_INTERVAL_MS = 20_000;
 const COLLAPSE_WINDOW_MS = 30_000;
-/**
- * Events a history page may carry, and it is **`EVENTS_PAGE_BYTES` that bounds a
- * page** — this only decides how many round trips a conversation costs.
- *
- * A client's window spans this many seqs (`HISTORY_PAGE`, mirrored), so at 500 a
- * 33 898-event session was 68 sequential requests, each a full relay round trip
- * before the next could be asked for. Measured on the fleet's largest conversation:
- * 4.53 MiB across 33 898 events, 140 B mean — so the byte cap was nowhere near
- * biting and the count was spending sixty-odd round trips for nothing. At 5000 the
- * same session is seven requests.
- *
- * Raising it costs no memory here: `read` fills a page through `iterate()` and
- * breaks on the byte budget, so it materialises the byte cap plus one row whatever
- * this says. A heavy conversation therefore degrades to exactly the request count
- * it costs today, because the byte cap is what governs it.
- */
 export const EVENTS_PAGE_LIMIT = 5_000;
-/**
- * ⚠ **Coupled to `STREAM_WINDOW_BYTES`, and smaller than it on purpose.** Never
- * raise this one alone.
- *
- * A relayed response crosses one h2 stream, whose window is credit-based — and a
- * response *larger than one window* depends on a `WINDOW_UPDATE` that Node does
- * not reliably produce for a stream being read through `http.request`'s socket
- * interface, which is what the relay does. Q6.104 has the mechanism and the
- * measurements; the short version is that a page bigger than a window can wedge,
- * and a page that fits cannot.
- *
- * This bounds the page **before** gzip and gzip cannot meaningfully expand its
- * input (deflate's stored-block worst case is ~0.01%), so `768 KiB < 1 MiB` holds
- * for the compressed bytes that actually cross the tunnel — with 256 KiB spare for
- * the response headers riding the same stream.
- *
- * ⚠ **That argument is stated in *bytes* and this number is charged UTF-16
- * units, and the step between them is deliberately left open.** The budget is
- * spent per row against `retained.bytes` in `MemoryEventStore.read`, and against
- * the `bytes` column in `sqlite.ts`'s — both of which are `estimateBytes`, which
- * charges `String.length` of the **unescaped** string. So an escape-heavy
- * conversation makes a 768 KiB page some 4.6 MiB of UTF-8: the identical
- * charged-vs-wire mismatch {@link BATCH_MAX_BYTES} was repaired for.
- *
- * **It is not the same defect, and "making the two consistent" would be a
- * behaviour change rather than a fix.** That one bounded a WebSocket *frame*,
- * where `MAX_SOCKET_MESSAGE_BYTES` is enforced by the receiver's
- * `MessageAssembler`: over the ceiling the far end refused the message, the
- * channel failed, and the client reconnected onto the same batch for ever.
- * **There is no reassembler on this path.** A page body is an HTTP response;
- * nothing refuses it for being large, and what is left is the h2 window above —
- * a wedge risk that gzip closes, with the 437 390 bytes below as the only
- * measurement on record. Recut on `Buffer.byteLength` this would shrink a page
- * to a fraction of {@link EVENTS_PAGE_LIMIT} events and multiply round trips,
- * which is exactly the cost that constant's own docblock says was just bought
- * back — 68 requests down to 7. The unit is left as it is, knowingly, and this
- * paragraph is here so the next reader does not spend that to fix a stall that
- * cannot happen.
- *
- * It was 2 MiB, and at 2 MiB a real 2000-event page compressed to 437 390 bytes —
- * past the old 256 KiB window, which is how this was found. The cost of the change
- * is round trips and nothing else: the fleet's largest conversation (4.53 MiB) goes
- * from three requests to six, against the 68 it cost before `EVENTS_PAGE_LIMIT`
- * rose. Nothing is truncated and no history becomes unreachable — `fillWindow`
- * already treats a byte-capped page as an unknown number of requests and spends
- * its budget per request rather than per window.
- */
+// Must stay below STREAM_WINDOW_BYTES: a relayed page larger than one h2 window can wedge (Q6.104). Never raise it alone.
 const EVENTS_PAGE_BYTES = 768 * 1024;
 const MAX_PROMPT_CHARS = 100_000;
-/**
- * Ceiling on a pasted credential or a typed login code.
- *
- * Generous — a `claude setup-token` OAuth token is a few hundred bytes — but
- * present, because both of these end up as an argv element or a stdin write and
- * neither has any business being megabytes.
- */
 const MAX_CREDENTIAL_CHARS = 8_192;
 
-/**
- * Ceiling on a model id in an assembled agent.
- *
- * Nothing validates the *content* — for a native pairing the list belongs to a
- * CLI that updates on its own schedule, for a routed one to somebody else's API
- * — so a bound on the length is the only thing this route can honestly assert.
- * Real ids are tens of characters; this is room for an ARN.
- */
 const MAX_MODEL_CHARS = 256;
 
-/** Ceiling on what somebody calls an agent they assembled. */
 const MAX_AGENT_NAME_CHARS = 80;
 
-/**
- * What each machine setting will accept, and the sentence it refuses with.
- *
- * ⚠ **A `Record` over the key union rather than one `if` inside the loop, for the
- * reason `MACHINE_SETTING_MEMBERS` is a `Record` and not an array.** The loop used
- * to apply *this* setting's semantics — a whole number of minutes, `0` to
- * {@link MAX_IDLE_RELEASE_MINUTES} — to every `MachineSettingKey` there is, and
- * interpolate the offending key's name into a sentence about minutes. Today that
- * is right by coincidence, the union having one member; the day a second key is
- * added it silently inherits a range it has nothing to do with and a refusal that
- * describes the wrong thing, and nothing catches it, because the union is closed
- * and compile-checked while the rule beside it was neither.
- *
- * Written this way a key added to the union is a compile error here until its rule
- * is written — which is the whole discipline `MACHINE_SETTING_MEMBERS` exists for,
- * applied to the half that actually varies per key.
- *
- * `null` means the value is acceptable; anything else is the refusal, already
- * worded for the caller. Indexed only with a key `isMachineSettingKey` has
- * narrowed — that guard is an `Object.hasOwn`, so a body carrying `__proto__` or
- * `constructor` is refused as unknown before it can reach this table and read a
- * member off `Object.prototype`.
- */
 const MACHINE_SETTING_RULES: Record<MachineSettingKey, (value: unknown) => string | null> = {
   idleReleaseMinutes: (value) =>
     typeof value === "number" &&
@@ -507,231 +139,47 @@ const MACHINE_SETTING_RULES: Record<MachineSettingKey, (value: unknown) => strin
       : `idleReleaseMinutes must be a whole number of minutes between 0 and ${MAX_IDLE_RELEASE_MINUTES}`,
 };
 
-/**
- * Ceiling on how many positions the agent strip may remember.
- *
- * Not a limit on how many agents a machine may have. It is the bound on what a
- * *body* may ask this daemon to write in one statement, which is a different
- * question and the only one a route can answer.
- *
- * ⚠ **It has to sit clear of what the client always sends, and at 200 it did
- * not.** `custom_agents` is deliberately unbounded and the strip screen writes the
- * **whole** list on every action — that is what makes the next read stable — so a
- * machine holding 198 assembled agents would have had every drag, every hide and
- * every removal answered `400`, leaving that screen permanently read-only with an
- * error line and no way out of it. A thousand is past any plausible fleet and
- * still far short of a transaction worth noticing.
- */
+// Must stay clear of the whole custom_agents list, which the strip screen writes on every action.
 const MAX_STRIP_ENTRIES = 1_000;
 
-/**
- * Ceiling on one remembered `ref`.
- *
- * The strip stores an id it never validates — that is the whole design, see
- * `AgentStripEntry` — so this is the only thing standing between an unknown id
- * and an essay in a row. Real ones are `ca_` plus eight hex, a one-word harness
- * id, or a harness a plugin added.
- *
- * ⚠ **It was 64 and that is one short of the longest legal id.** A contributed
- * harness is `<pluginId>:<localId>` and `manifest.ts` bounds each half at 32, so
- * the longest is 65 — which this route would have refused with `400 bad_request`,
- * on the one write the whole strip screen makes, leaving it permanently unable to
- * save an order. The number is not derived from the manifest's bound because that
- * bound is somebody else's subject; what this is, is comfortably past every id
- * shape that exists.
- */
+// Must fit the longest contributed harness id, pluginId:localId at 32 chars each.
 const MAX_STRIP_REF_CHARS = 96;
 
-/**
- * How long a write route may spend asking a harness what it accepts.
- *
- * ⚠ **Under the client's own budget on purpose.** `packages/web/src/machine.ts`
- * gives `POST`/`PATCH /custom-agents` `SLOW_ROUTE_TIMEOUT_MS`, 90s; `agentask.ts`
- * would let one of these run for `ASK_TIMEOUT_MS`, 120s. A handler outliving its
- * caller on a route that *creates* a row is how a retry makes a duplicate preset,
- * and `custom_agents` has no uniqueness constraint to catch one. Refusing at 60s
- * leaves room for the answer and for the refusal to get back.
- */
+// Under the client's slow-route budget for this write (slowRouteTimeout), so a retried create cannot make a duplicate preset.
 const CAPABILITY_READ_BUDGET_MS = 60_000;
-/** A single path segment. Generous next to any filesystem's own limit. */
 const MAX_DIR_NAME_CHARS = 255;
-/** A whole path. `PATH_MAX` is 4096 on Linux and 1024 on macOS; this is neither
- *  filesystem's limit, it is a ceiling on what a request may hand to `realpath`. */
 const MAX_PATH_CHARS = 4_096;
 
-/**
- * The largest file this daemon will serve.
- *
- * **It happens to equal `MAX_UPLOAD_BYTES` now, and that is a coincidence rather
- * than a coupling** — the two bound different things and neither may be changed
- * by reading the other. This said "deliberately a different number", which was
- * true while uploads were 25 MiB and stopped being true when they became 100 MiB;
- * the *reasons* are what were different and they are unchanged. That one bounds
- * what a client may push onto this machine's disk, against a session budget and
- * an inode ceiling that both survive the request. This bounds a
- * bearer-token-readable read of an entire workspace, where the cost of no bound
- * is one tunnel stream held open for as long as somebody likes — and there are
- * 256 of them per machine, shared with every session's WebSocket. The client
- * refuses at the same number, from `content-length`, before it pulls a `Blob`
- * into a phone's memory.
- */
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
-/**
- * The most any request other than an upload may carry.
- *
- * ⚠ **This daemon had no request-body bound at all**, and the control plane added
- * one for exactly the reason that applies here more strongly. Every JSON route
- * reads the whole body before it looks at it, and this process owns the agent
- * subprocesses, the event log and the relay tunnel — so an unbounded body is one
- * caller deciding how much memory the thing running their agents holds.
- *
- * `REEMOAT_AUTH` decides *who* may ask, which is a different question from *how
- * much*: a grant is full access, and the machine is reached from a phone over a
- * relay. "The caller has a credential" is not a bound.
- *
- * 1 MiB, wider than the control plane's 256 KiB because the bodies here are
- * legitimately larger — a prompt with several attachment references, a
- * permission answer carrying an agent's own option list — and small enough to
- * still be a number. The largest non-upload body any route reads today is a
- * prompt, and `MAX_PROMPT_CHARS` bounds it well under this.
- *
- * **The streaming routes are excluded and must stay excluded**, and there are
- * three: `POST /sessions/:id/uploads` streams to disk against
- * `MAX_UPLOAD_BYTES` (100 MiB) with its own counter, `POST /fs/import` does the
- * same against `MAX_IMPORT_BYTES`, and `POST /plugins` against
- * `PLUGIN_LIMITS.maxBytes`. Wrapping any of them here would refuse every
- * legitimate request at 1 MiB, or buffer the whole thing to check a limit the
- * route is already enforcing a better way. What replaces the bound for them is
- * the release below — see the middleware that grants the exemption.
- */
+// Every route but the streaming ones (isStreamingRoute), which count their own bytes.
 const MAX_BODY_BYTES = 1024 * 1024;
 
-/**
- * The routes that read their body as a stream, and so may not be bounded above.
- *
- * A predicate rather than a condition inlined into the middleware, because there
- * are three of them now and the rule they share — *this route counts its own
- * bytes, and its body is released however it is refused* — is the kind that gets
- * half-applied when a fourth arrives. All three are POST; matching the method as
- * well keeps a GET on the same path from inheriting the exemption.
- *
- * **Adding a route here is the whole of adding a route here.** The second half of
- * the rule used to be the handler's to keep, one `refuse()` wrapper per route,
- * which is why it was kept for the three handlers and by nothing above them; it
- * now hangs off this predicate, so a fourth string in this `return` buys both
- * halves at once.
- */
+// POST routes that stream their body and count their own bytes: exempt from MAX_BODY_BYTES, and their body is cancelled whoever answers.
 function isStreamingRoute(method: string, path: string): boolean {
   if (method !== "POST") return false;
-  // `POST /plugins` is the third, and it owes what the other two owe: its own
-  // counter (`PLUGIN_LIMITS.maxBytes`, charged before each write) and a body
-  // cancelled on every refusal. See `PluginHost.install`.
   return /^\/sessions\/[^/]+\/uploads$/.test(path) || path === "/fs/import" || path === "/plugins";
 }
 
-/**
- * Hono's per-request variables. `principal` is set by the auth gate and read by
- * every route that needs to know who is asking, so no handler ever sees a raw
- * token.
- */
 type AppEnv = { Variables: { principal: Principal } };
 
 export interface ServerOptions {
   registry: SessionRegistry;
-  /**
-   * Decides who is asking. The shared secret and control-plane-signed tokens
-   * are both implementations of this — the server does not know which it has.
-   */
   verifier: TokenVerifier;
   instanceId: string;
   startedAt: number;
-  /** Both tunable so the truncation paths can be exercised without 2000 files. */
   maxChangedFiles?: number;
   maxDiffBytes?: number;
-  /**
-   * Where a pasted agent credential is kept.
-   *
-   * Optional because the offline drivers run without a database and have no
-   * business growing one. Absent, the paste routes answer 503 rather than
-   * pretending to save.
-   */
   credentials?: AgentCredentialStore;
-  /**
-   * Where a system's key is kept, and where assembled agents live.
-   *
-   * One option rather than two because the two are one screen and one absence:
-   * a daemon with no database can neither hold a key nor hold a preset, and
-   * splitting them would let half the feature answer 503 while the other half
-   * looked live. Absent, every route below answers `503 systems_unavailable`
-   * **except `GET /systems`**, whose table is compiled in rather than stored:
-   * it answers honestly with `keySet: false` everywhere rather than refusing,
-   * and `daemoncheck` skips it by name in the no-store sweep for that reason.
-   * A client on a store-less daemon therefore sees a 200 here beside a 503
-   * from `GET /custom-agents`, which is the pair the New session strip reads.
-   */
+  // Absent, every systems route answers 503 except GET /systems, whose table is compiled in.
   systems?: SystemStores;
-  /**
-   * Where this machine's own preferences live, or nothing.
-   *
-   * Absent — every offline driver that builds no store — `GET /settings` answers
-   * with what is in force, and `PATCH` refuses `503`. That asymmetry is deliberate: a person on a store-less daemon
-   * can still be *told* how long a quiet conversation keeps its agent, which is a
-   * fact about the machine either way; what they cannot do is change it, and a
-   * refusal says so where an empty form would not.
-   */
   machineSettings?: MachineSettingsPort;
-  /**
-   * Where a sessionless agent question runs, or nothing.
-   *
-   * Needed by `GET /agents/capabilities`, which spawns an agent to read what it
-   * offers. Absent — every offline driver — that route answers 503 and the
-   * screen that assembles an agent says the machine cannot be asked, rather than
-   * drawing an empty picker that looks like an answer.
-   */
   asks?: AgentCapabilityReader;
-  /**
-   * Interactive agent logins in progress.
-   *
-   * Optional for the same reason. Note what it is not: this is only the run
-   * registry. Whether a login can be *driven* is `SessionRuntime.loginSupported`,
-   * because that is a question about the host having a pty to allocate rather
-   * than about whether there is somewhere to record the run.
-   */
   logins?: AgentLoginRuns;
-  /**
-   * Installing a harness onto this machine, in progress.
-   *
-   * Optional exactly as `logins` is, and read by the same two shapes: the routes
-   * answer `503` without it, and `agentRowExtras` folds its absence into
-   * `installable` so a client with no route to press never draws the button.
-   */
   installs?: AgentInstallRuns;
-  /**
-   * Files staged for a prompt.
-   *
-   * Optional for the same reason as the two above: the offline drivers run with
-   * no database and no upload root, and the routes answer 503 rather than
-   * pretending to store anything. A prompt naming an attachment without one is a
-   * 400, not a silently text-only turn.
-   */
   uploads?: Uploads;
-  /**
-   * What `GET /fs/roots` offers and `GET /fs/list` will show.
-   *
-   * A narrowing of the browse surface, never a boundary — an agent runs as this
-   * user and can reach anything they can, so `resolveCwd` is deliberately not
-   * confined to these. Defaults to the daemon user's home.
-   */
+  // Narrows the browse surface only; resolveCwd is deliberately not confined to these.
   roots?: string[];
-  /**
-   * Where plugins live, or nothing.
-   *
-   * Optional like `credentials`, `logins` and `uploads`, and for their reason: a
-   * daemon built without one answers `503` on the plugin routes rather than
-   * pretending there are none. `REEMOAT_PLUGINS=0` is what produces that on a real
-   * machine, and every driver that does not care gets it by omission.
-   */
   plugins?: PluginHost | null;
 }
 
@@ -755,97 +203,17 @@ export function createApp(options: ServerOptions): AppBundle {
   const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   const app = new Hono<AppEnv>();
   const { injectWebSocket, upgradeWebSocket, wss } = createNodeWebSocket({ app });
-  /*
-   * ⚠ **The third `ws` surface in this fleet, and the last one still unbounded.**
-   * `MAX_TUNNEL_MESSAGE_BYTES` caps what the relay assembles from a daemon and what
-   * a daemon assembles from the relay; this socket — the browser's own
-   * `/sessions/:id/stream` — terminates *here*, because the relay pipes CONNECT
-   * bytes without parsing them. `@hono/node-ws` builds `new WebSocketServer({
-   * noServer: true })` with no `maxPayload`, so `ws`'s 100 MiB default stood.
-   *
-   * What that allowed is the same shape documented on `MAX_TUNNEL_MESSAGE_BYTES`:
-   * a client sending a fragmented message that never sets FIN parks up to 100 MiB
-   * inside `ws`, while control frames keep the heartbeat answering. At
-   * `MAX_STREAMS_PER_SUBJECT` sockets, in the process that owns the agent
-   * subprocesses, the event log and the SQLite store, on a machine with no
-   * container and no memory limit.
-   *
-   * **Any inbound message at all is already a protocol violation** — this socket is
-   * read-only by design (`.claude/rules/relay.md`: "Everything that mutates state is
-   * an HTTP request, because `ws.send()` into a half-open socket succeeds
-   * silently"), and the handler below registers `onOpen`, `onClose` and `onError`
-   * with no `onMessage`. So the bound is not a capacity question and gets no number
-   * of its own: `MAX_BODY_BYTES` is what this daemon already says one request may
-   * carry, and it is orders of magnitude above anything that should arrive here.
-   *
-   * Assigned rather than passed because the server is constructed inside the
-   * adapter; `ws` reads `this.options.maxPayload` at `completeUpgrade`, so this
-   * takes effect for every connection.
-   */
+  // This socket is read-only, so any inbound message is a protocol violation; bound it at MAX_BODY_BYTES rather than the ws 100 MiB default.
   wss.options.maxPayload = MAX_BODY_BYTES;
 
-  /*
-   * The last resort, and **only** after every per-route mapping has declined.
-   *
-   * Hono's default handler answers a plain-text `Internal Server Error` with no
-   * body shape at all — and `packages/web/src/http.ts` says out loud that every
-   * client in this system reads a refusal by its `error.code`. So an unmapped
-   * throw was not merely a 500; it was a 500 that `ApiError` cannot parse,
-   * `meansMachineGone` cannot classify and `errorText` cannot render, which is
-   * how "something went wrong" reaches a phone with nothing to act on. It is
-   * reachable today: `gitError` rethrows anything that is neither a
-   * `WorktreeError` nor a `GitError`, and both `/fs/*` routes rethrow once
-   * `errnoError` returns null.
-   *
-   * ⚠ **This is deliberately not the thing Q1.50 refused.** That argument is
-   * about the *control plane* and about an envelope renderer used
-   * **instead of** per-route mapping: there, a catch-all lets the next unmapped
-   * constraint violation land as a generic 500 that nobody notices, so the fix
-   * was to map `users.name UNIQUE` at the route. Nothing is unmapped here as a
-   * result of this: every existing mapping stays exactly where it is and runs
-   * first, and this fires only where all of them have already declined. The code
-   * is `internal_error` precisely so that it stays legible as "nothing mapped
-   * this" — a signal that a mapping is missing, not a substitute for one.
-   *
-   * An `HTTPException` is returned as its own response rather than rewritten:
-   * that carries a status somebody chose on purpose, and a backstop that
-   * overwrites an intent is a replacement. Nothing in this daemon throws one
-   * today, which is exactly why the arm is written rather than assumed.
-   *
-   * Silent, because nothing in `src/` writes to stderr — this replaces Hono's
-   * own `console.error`, so the message travels in the envelope instead.
-   */
+  // Last resort, after every per-route mapping has declined: internal_error signals a missing mapping (not the catch-all Q1.50 refused).
   app.onError((error, c) => {
     if (error instanceof HTTPException) return error.getResponse();
-    // `c.json` rather than `jsonError`: 500 is deliberately not in `ErrorStatus`,
-    // which is the list of statuses a route may *refuse* with. Reaching here is
-    // not a refusal — it is this daemon failing to answer — and widening that
-    // union would offer 500 to every route as a normal outcome.
+    // 500 is deliberately not in ErrorStatus: this is a failure to answer, not a refusal.
     return c.json(errorEnvelope("internal_error", describeError(error)), 500);
   });
 
-  /**
-   * Cross-origin access, mounted **before** the auth gate.
-   *
-   * A preflight carries no credential — that is what a preflight is — so it has to
-   * be answered before anything asks for one. Hono's `cors()` short-circuits
-   * `OPTIONS` itself and returns 204 without calling `next()`, so the gate below
-   * never sees one. On every other method it only sets response headers, which
-   * survive onto the gate's own 401 because Hono copies headers forward when a
-   * handler replaces the response — and a 401 nobody can read is a 401 nobody can
-   * act on.
-   *
-   * See `cors.ts` for why the origin is `*`: there are no cookies here, so there
-   * is no ambient authority for a wildcard to leak.
-   */
-  /*
-   * gzip first, so it wraps everything below including the auth gate's refusals.
-   *
-   * The one thing it must not touch is a download, and it does not: `compressible`
-   * keys on the response's content type, and those routes send
-   * `application/octet-stream` — see the predicate for why the client's own
-   * `content-length` guard depends on that.
-   */
+  // gzip, then CORS, both before the auth gate: a preflight carries no credential, and a 401 without CORS headers is unreadable.
   app.use("*", gzipResponses());
 
   app.use(
@@ -859,27 +227,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }),
   );
 
-  /*
-   * The body bound, registered after gzip and CORS so a refusal is compressed and
-   * *labelled* like every other error, and *before* the auth gate: an
-   * unauthenticated caller pushing bytes is the case this exists for, and making
-   * them buy a credential first would be a bound on the wrong thing.
-   *
-   * ⚠ **CORS has to come first, and this sat above it for a release.** `onError`
-   * answers without calling `next()`, so every middleware registered below it is
-   * skipped — including the one that writes `access-control-allow-origin`. The
-   * relay does not repair that: `proxy.ts` pipes the daemon's own headers through
-   * untouched, by design. So the browser saw an opaque network failure instead of
-   * the `payload_too_large` envelope it can read, on the one refusal whose whole
-   * value is that a client can tell what happened. Nothing catches this, because a
-   * driver calls `app.fetch` directly and reads a body no browser would have
-   * shown it.
-   *
-   * The streaming routes carry their own — see `MAX_BODY_BYTES` — so they are
-   * skipped by path rather than by re-registering this on every other route,
-   * which would be a list that silently stops covering a route somebody adds
-   * later.
-   */
+  // After CORS so a 413 is readable cross-origin; before auth because an unauthenticated caller pushing bytes is the case this bounds.
   const boundedBody = bodyLimit({
     maxSize: MAX_BODY_BYTES,
     onError: (c) =>
@@ -887,93 +235,23 @@ export function createApp(options: ServerOptions): AppBundle {
         limit: MAX_BODY_BYTES,
       }),
   });
-  /*
-   * The exemption and the obligation it creates, in one middleware, because they
-   * are one rule: **a route nothing bounds above must have its body released, by
-   * whoever ends up answering.**
-   *
-   * ⚠ **The obligation used to live in the three handlers and therefore did not
-   * hold.** Each of them wraps its refusals in a `refuse()` that cancels first,
-   * and that half was complete. The gap was everything *above* a handler: the
-   * auth gate and `requireScope` both answer with a bare
-   * `return jsonError(...)`, having never touched the stream. So a caller with an
-   * expired token, or a valid one lacking `machine:admin`, could open `POST
-   * /plugins` — or `/fs/import`, or an upload — with an arbitrarily large body,
-   * be refused in about a millisecond, and leave every byte of it unread. The
-   * relay grants a stream's h2 window **on consumption**, so a reader that stops
-   * parks the sender at one `STREAM_WINDOW_BYTES` (1 MiB); the next valve is the
-   * tunnel's `MAX_TUNNEL_BUFFERED_BYTES` (8 MiB) socket check, and that closes the
-   * **whole tunnel for this machine** — every other session on it goes too. One
-   * caller may hold `MAX_STREAMS_PER_SUBJECT` (64) streams to spend on it.
-   *
-   * **Here rather than inside each middleware, and that is the point of the
-   * shape.** Cancelling in the auth gate and in `requireScope` fixes today's two
-   * refusals and is silently incomplete the day a third middleware refuses above
-   * a handler — the same half-application `isStreamingRoute`'s docblock worries
-   * about one axis over. Attached to the exemption, the two halves cannot come
-   * apart: whatever earns the exemption on the way down pays for it on the way
-   * up, for every answer produced by anything below this line, and a fourth
-   * streaming route inherits both by adding one string to the predicate.
-   *
-   * `finally` rather than a line after `await next()`, because `next()` is not
-   * guaranteed to return normally and the throwing path is the one where the body
-   * is least likely to have been read. Stated as the property rather than as a
-   * claim about how `compose` routes a particular error — the mechanism differs by
-   * whether what was thrown is an `Error`, and `finally` is correct without
-   * needing to know which.
-   *
-   * Unconditional rather than "only when the answer is a refusal", and measured
-   * on this adapter (`@hono/node-server` 1.19.17) rather than assumed: cancelling
-   * a body the handler already drained resolves in 0 ms and changes nothing — a
-   * fully-read `IncomingMessage` is `complete`, so the `destroy()` underneath
-   * never reaches the socket — and cancelling one a handler left locked rejects
-   * with `TypeError: Invalid state: ReadableStream is locked`, which `cancelBody`
-   * swallows. ⚠ **That last one is the state where this guard silently does not
-   * release the body**, and it is harmless only because every streaming handler
-   * reads with `for await`, which releases its reader at the end. A handler that
-   * took a `getReader()` and abandoned it would leave a parked sender that looks
-   * exactly like the defect this guard exists to prevent. A 64 MiB body refused 403 by a middleware that cancels here still
-   * arrives at the client as that 403 and not as a reset connection, which is the
-   * property that lets this be unconditional at all. Testing the status instead
-   * would be a second copy of "which answers are refusals", and this needs none.
-   *
-   * The `.catch` is not superstition. This runs on the **response** path, where a
-   * throw does not merely fail a request that was going to fail anyway: it
-   * replaces a refusal the client can read with `internal_error`. `cancelBody` is
-   * `async`, so it converts even a synchronous throw from `cancel()` into a
-   * rejection, and this is where that rejection stops.
-   */
+  // Streaming routes skip the body bound, and their body is always cancelled afterwards: an unread body parks the relay stream and can close the machine's tunnel.
   app.use("*", async (c, next) => {
     if (!isStreamingRoute(c.req.method, c.req.path)) return boundedBody(c, next);
     try {
       await next();
     } finally {
       await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null).catch(() => {
-        // Deliberately nothing: see above. A body we could not release is a
-        // parked sender, which is bad, but an unreadable answer is worse and
-        // there is nothing in `src/` to print it to either way.
+        // Nothing else to do: an unreadable answer would be worse than a parked sender.
       });
     }
   });
 
-  /**
-   * Authentication, on everything but `/health`. Authorization is per route,
-   * below — this gate establishes *who*, and `requireScope` decides *whether*.
-   *
-   * The query parameter exists because browsers cannot set headers on a
-   * WebSocket handshake. It carries the same credential either way — and it is
-   * read *only* on an upgrade, which is `readCredential`'s job to enforce and
-   * used to be nobody's.
-   */
   app.use("*", async (c, next) => {
     if (c.req.path === "/health") return next();
 
     const result = verifier.verify(readCredential(c));
     if (!result.ok) {
-      // The specific code, not a flat "unauthorized". A client that cannot tell
-      // "your clock is wrong" from "you were revoked" cannot do anything useful
-      // about either, and `skewMs` is the difference between a mystery and a
-      // fixable problem.
       const detail =
         result.skewMs === undefined
           ? null
@@ -985,31 +263,11 @@ export function createApp(options: ServerOptions): AppBundle {
     return next();
   });
 
-  /**
-   * The session an id names, or nothing.
-   *
-   * **Renamed from `owned`, deliberately.** That name asserted a property this
-   * daemon no longer has: while it served several people, every per-session route
-   * went through a filter and "no such id" and "not yours" were the same 404. The
-   * filter is gone with the tenancy — a grant on this machine is now access to
-   * everything on it, which is stated in `CLAUDE.md`'s Identity section rather
-   * than left to be inferred from a helper's name.
-   *
-   * The 404 for an unknown id stays, and never depended on tenancy.
-   */
   const sessionOf = (c: Context<AppEnv>): ManagedSession | undefined =>
     registry.get(c.req.param("id") ?? "");
 
-  /** Where git runs. One answer, so no route picks its own. */
   const git = registry.sessionRuntime.git();
 
-  /**
-   * One scope, checked after authentication.
-   *
-   * Registered per route rather than derived from a method-and-path table. A
-   * table is one edit away from describing routes that have since moved, and
-   * the failure mode of that drift is a route silently losing its check.
-   */
   const requireScope =
     (scope: Scope): MiddlewareHandler<AppEnv> =>
     async (c, next) => {
@@ -1024,40 +282,12 @@ export function createApp(options: ServerOptions): AppBundle {
   const write = requireScope("session:write");
   const admin = requireScope("machine:admin");
 
-  /**
-   * What this machine offers, read at every request rather than captured.
-   *
-   * ⚠ **A thunk for `elicitationAllowed`'s reason and one of its own.** `createApp`
-   * runs once, at boot, and `PluginHost` replaces the registry's catalogue on every
-   * install, update, remove and enable — so a value captured here would go on
-   * refusing a harness that had been installed twenty minutes ago, over a screen
-   * that was already offering it. `registry.machineCatalogue` is the one copy.
-   */
+  // A thunk, never captured: PluginHost replaces the catalogue on every install, update, remove and enable.
   const machineOf = () => registry.machineCatalogue;
-  /** Whether this machine offers this harness right now. Never a shape test. */
   const offeredHarness = (id: string): boolean => machineOf().harnessState(id) === "enabled";
 
-  /**
-   * Whether an import is already unpacking. See `POST /fs/import`.
-   *
-   * Per app rather than per module, so two daemons in one driver process do not
-   * block each other — every driver in this repository builds several.
-   */
   let importing = false;
 
-  /**
-   * A handler that only runs for a session that exists.
-   *
-   * The `const managed = sessionOf(c); if (!managed) return notFound(c);` pair was
-   * written out at seventeen routes. Collapsing it is not only tidiness: it is one
-   * place where "an unknown session id is a 404" is enforced, rather than
-   * seventeen places where it happens to be.
-   *
-   * Deliberately **not** applied to two routes that resolve the session
-   * themselves: `POST /sessions/:id/uploads`, whose `refuse()` wrapper has to
-   * cancel the request body *before* anything else answers, and the stream route,
-   * which resolves twice on purpose.
-   */
   const withSession =
     <P extends string>(
       handler: (c: Context<AppEnv, P>, managed: ManagedSession) => Response | Promise<Response>,
@@ -1068,33 +298,9 @@ export function createApp(options: ServerOptions): AppBundle {
       return handler(c, managed);
     };
 
-  /**
-   * A JSON object body, or the 400 that says so.
-   *
-   * Returns the `Response` rather than throwing, so a caller reads
-   * `if (body instanceof Response) return body;` and the refusal stays on the
-   * route rather than in a catch somewhere above it.
-   */
   const requireJson = async (c: Context<AppEnv>): Promise<Record<string, unknown> | Response> =>
     (await readJsonObject(c)) ?? jsonError(c, 400, "bad_request", "expected a JSON object body");
 
-  /**
-   * The workspace-relative path a caller asked for, or the refusal.
-   *
-   * Twelve identical lines at `changes/diff` and at `files`, `diff`-confirmed
-   * identical before they were merged. Both are the same question — "name a file
-   * inside this session's tree" — and the containment answer must not be able to
-   * differ between them.
-   *
-   * **Async because the containment half is.** `safeRelPath` used to finish with
-   * `realpathSync` on `<workspace.root>/<what the caller typed>`, which is a
-   * synchronous filesystem call on a path this daemon did not create — the exact
-   * thing `stall.ts` exists to prevent, and not one `workspaceReady` above can
-   * catch, since it probes the root while the stalled mount is underneath it.
-   * `probeContained` answers the same question through the same bounded probe
-   * every other caller-named path here goes through, and its third answer gets
-   * the same 503 shape `workspaceReady` gives.
-   */
   const requestedPath = async (
     c: Context<AppEnv>,
     managed: ManagedSession,
@@ -1107,15 +313,7 @@ export function createApp(options: ServerOptions): AppBundle {
         reason: safe.reason,
       });
     }
-    /*
-     * `probeRequestable` rather than `probeContained`, and the extra answer is
-     * the point: `safeRelPath` above refuses a `.git` *segment the caller typed*,
-     * which one symlink walks past — `g -> .git` makes `?path=g/config` a request
-     * with no `.git` in it, pointing at a file that really is inside the
-     * workspace. Both checks passed and `.git/config` went out to any
-     * `session:read` grant. The re-test happens on the resolved path, where the
-     * link has already been followed.
-     */
+    // probeRequestable re-tests the resolved path, so a symlink cannot walk past the .git refusal in safeRelPath.
     const answer = await probeRequestable(managed.workspace.root, safe.full);
     if (answer === null) {
       return jsonError(c, 503, "path_unresponsive", "the filesystem holding that path did not answer", {
@@ -1123,9 +321,6 @@ export function createApp(options: ServerOptions): AppBundle {
       });
     }
     if (answer !== "ok") {
-      // The same status and the same code as the syntactic refusal, with the
-      // reason saying which rule it met — a caller who typed `.git` and a caller
-      // who followed a link into one are asking for the same thing.
       return jsonError(c, 400, "invalid_path", "that path is not inside this session's tree", {
         reason: answer,
       });
@@ -1133,92 +328,23 @@ export function createApp(options: ServerOptions): AppBundle {
     return { rel: safe.rel, full: safe.full };
   };
 
-  /* ---------------------------------------------------------------- *
-   * Introspection
-   * ---------------------------------------------------------------- */
-
   app.get("/health", (c) => {
-    // Liveness only, and deliberately less than it used to say.
-    //
-    // This is the one route without a token. On a single-person daemon the
-    // per-status counts and the blocked-for timer were harmless; across tenants
-    // they are an unauthenticated readout of how many sessions other people are
-    // running and how long one of them has been waiting on an approval. That is
-    // a small leak, but it is a leak to *anyone who can reach the port*, and
-    // nothing consumes it — `packages/web` polls `GET /sessions` for the list and
-    // `scripts/client.ts` only ever reads `ok` and `time`.
+    // Liveness only: this route is unauthenticated, so it exposes no per-session state.
     return c.json({
       ok: true,
       instanceId,
       startedAt,
       uptimeMs: Date.now() - startedAt,
       shuttingDown: registry.isShuttingDown,
-      // Deliberately unauthenticated, like the rest of this route. A clock is
-      // not a secret, and short-lived signed tokens make clock skew a real way
-      // to be locked out — so the one number that diagnoses it has to be
-      // readable by a client that cannot get a token yet.
       time: Date.now(),
       authMode: verifier.mode,
-      /*
-       * What build this is, and what it speaks.
-       *
-       * Unauthenticated for the same reason the clock is: a client that cannot
-       * get a token yet is exactly the client that needs to know whether the
-       * thing it is pointed at is older than it. `packages/web` ships inside the
-       * control plane's image, so a weekly deploy hands every browser a client
-       * newer than most of the daemons in the fleet — and until this field
-       * existed there was **nothing anywhere** a client could read to find that
-       * out. It already fetches and stores this object per machine.
-       *
-       * Neither number is a secret: the source URL and version of the control
-       * plane are already served to anybody on `GET /v1/instance`, because the
-       * AGPL requires it, and a daemon's build is less than that.
-       *
-       * ⚠ **Announced, not negotiated.** Nothing may branch on `version` — it is
-       * a label, and a client that behaves differently for `0.1.0` than for
-       * `0.2.0` re-creates the lockstep this exists to remove. `protocol` is the
-       * one that carries capability, and it is the same number the tunnel
-       * handshake negotiates.
-       */
+      // Announced, not negotiated: nothing may branch on version; protocol is the one that carries capability.
       version: DAEMON_VERSION,
       protocol: RELAY_PROTOCOL_VERSION,
     });
   });
 
-  /**
-   * Asked of the runtime, not of this host's filesystem.
-   *
-   * Through the runtime rather than calling `resolveAgent` here: what "available"
-   * means is the runtime's question, and it also answers the second one nothing
-   * else can — whether the agent is signed *in*, which used to be discovered at
-   * the first prompt with a `502` after a worktree had already been made.
-   */
-  /**
-   * Whether *this* agent's login can be driven here, in one place for both routes.
-   *
-   * ⚠ **It is on `GET /agents` as well as `GET /agent-auth`, and that is the whole
-   * of what an agent needing no sign-in cost.** The screens that pick an agent read
-   * the cheap route; the one that configures a credential reads the expensive one.
-   * With the fact on only the second of them, the New Session tile had nothing to
-   * say about opencode but "state unknown" — a sentence about a probe that failed,
-   * under an agent that runs perfectly — and so it grew its own four-state
-   * vocabulary and said the wrong thing in it for a release. The cost is four
-   * `findOnPath` calls on a route that already spawns a CLI per agent.
-   *
-   * ⚠ **`supported` and `blocked` are one answer written twice and must not drift**
-   * — `AgentLoginSupport.supported` is documented as `blocked === null` and nothing
-   * else. The daemon-wide half (`logins === null`: there is nowhere to record a
-   * run, which is a fact about this process rather than about the agent or the
-   * platform) is folded in as `no_script`, the closest of the existing reasons,
-   * rather than by inventing a fourth code the client would have to be taught.
-   *
-   * ⚠ **It is folded in *underneath* the agent's own reason, and the order is
-   * load-bearing.** This read `logins === null ? "no_script" : support.blocked`,
-   * which overwrote `no_flow` — the one reason that is not a limitation — with an
-   * apology about the host, on a daemon with no login store. That is precisely the
-   * inversion `loginBlockedReason` puts `no_flow` first to prevent, reintroduced
-   * one layer up, where nothing was looking.
-   */
+  // supported must stay equal to blocked being null; the no-store no_script folds in under the agent's own reason, never over no_flow.
   const loginSupportOf = (agent: AgentId): AgentLoginSupport => {
     const support = registry.sessionRuntime.loginSupport(agent);
     const blocked = support.blocked ?? (logins === null ? "no_script" : null);
@@ -1230,46 +356,12 @@ export function createApp(options: ServerOptions): AppBundle {
     };
   };
 
-  /**
-   * The fields an agent row carries that `availability()` does not, added in one
-   * place because there are now two routes that answer one.
-   *
-   * ⚠ **This exists because the second field repeated the first field's mistake.**
-   * `POST /agent-auth/:agent/recheck`'s own docblock already says it: `login` is
-   * built here and spread on by hand, *"so a third route answering an agent row
-   * has to spread it too"*. `settingsMode` was added to `GET /agents` alone, and
-   * the client replaces the whole row from the recheck answer — so one tap on
-   * *Check again* for the claude row erased the provenance line until a full
-   * re-read. A helper rather than a second hand-written spread, so the next field
-   * cannot make it three.
-   *
-   * ⚠ **Read once per answer, and only for claude.** `~/.claude/settings.json` is
-   * on the home directory, so it goes through `probeText`'s deadline rather than a
-   * `readFile` that could hold a route open for as long as a sleeping mount does;
-   * and it is claude's file, so asking it per agent would be three pointless
-   * probes. See {@link claudeSettingsMode} for why the daemon reports it at all:
-   * it sends no mode, so nothing else on any screen can explain a session that
-   * opened in one.
-   */
   const agentRowExtras = async (): Promise<
     (agent: { id: AgentId; installable?: boolean }) => Record<string, unknown>
   > => {
     const settingsMode = await claudeSettingsMode();
     return (agent) => ({
       login: loginSupportOf(agent.id),
-      /*
-       * ⚠ **Two questions folded into one field, exactly as `loginSupportOf`
-       * folds `logins === null` into `blocked`.** The runtime answers the first —
-       * is this absence one `deploy/agents.sh` repairs — and it knows nothing
-       * about whether this daemon will run one. A row that said yes to the first
-       * and no to the second is a button that answers `503`, which is the defect
-       * `loginSupported` exists to prevent, arriving a second time.
-       *
-       * ⚠ **`=== true`, so a runtime that has not learned the field yet is read
-       * as `false`.** The field is required on `AgentAvailability`, so this can
-       * only be reached by a stub; the direction to be wrong in is the one that
-       * draws no control.
-       */
       installable: agent.installable === true && installs !== null,
       ...(agent.id === "claude" && settingsMode !== null ? { settingsMode } : {}),
     });
@@ -1285,43 +377,13 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   });
 
-  /* ---------------------------------------------------------------- *
-   * Systems, and the agents assembled out of them
-   *
-   * A *system* is who serves a model and who you sign in to; a *harness* is the
-   * CLI that runs the loop. They were the same thing while each of the three
-   * agents spoke only to its own vendor, and `acp/systems.ts` is where they come
-   * apart.
-   *
-   * ⚠ **Nothing here accepts a URL, a header name or a variable name.** A request
-   * names a `SystemId` and a table resolves it — the same property
-   * `AGENT_LOGIN` claims about the program a login runs, and for the same reason:
-   * this daemon is reachable from the internet through the relay, and a caller
-   * able to name an endpoint could point somebody's key at a host of its own.
-   *
-   * ⚠ **And the table is now assembled rather than compiled in, which is a real
-   * change to that property and is stated rather than glossed.** A base URL still
-   * never arrives on a *request*. It arrives in a `plugin.json`, inside an archive
-   * fetched from one hardcoded host at a full 40-hex commit, after somebody read
-   * the origin on a consent screen and pressed a named button about it — and it is
-   * then fixed for the life of that install. Every link in that chain already
-   * existed. What is no longer true is that the set of hosts this daemon can be
-   * pointed at is a compile-time constant of this repository; `agent-systems.md`
-   * carries the argument in full.
-   * ---------------------------------------------------------------- */
+  // No route here accepts a URL, header name or variable name: a request names a SystemId and a table resolves it.
 
   const systemIdParam = (c: Context<AppEnv>): SystemId | null => {
     const value = c.req.param("system") ?? "";
     return registry.machineCatalogue.systemState(value) === "enabled" ? value : null;
   };
 
-  /**
-   * What a path parameter naming a system this machine does not offer earns.
-   *
-   * {@link noSuchHarness}'s rule, one table over: a provider a plugin added and
-   * somebody switched off is a `503` naming the switch, never a `400` naming the
-   * caller. Reached only where `systemIdParam` already answered `null`.
-   */
   const noSuchSystem = (c: Context<AppEnv>): Response =>
     registry.machineCatalogue.systemState(c.req.param("system") ?? "") === "disabled"
       ? jsonError(
@@ -1332,102 +394,33 @@ export function createApp(options: ServerOptions): AppBundle {
         )
       : jsonError(c, 400, "invalid_system", "unknown system");
 
-  /**
-   * Every system this daemon knows, and whether a key is saved for each.
-   *
-   * ⚠ **Cheap on purpose — it spawns nothing.** The picker that draws a strip of
-   * agents reads this on every open, and the question "which systems are there"
-   * is answered by a table. What *does* cost a process is
-   * `GET /agents/capabilities` below, and keeping them apart is what stops the
-   * New session sheet paying for a screen nobody opened.
-   *
-   * The secret is never in this answer and there is no route that returns one.
-   */
   app.get("/systems", read, (c) => {
     const machine = registry.machineCatalogue;
     const saved = new Map((systems?.credentials.list() ?? []).map((one) => [one.system, one]));
     return c.json({
-      /*
-       * ⚠ **The built-ins in `SYSTEM_IDS` order, then whatever plugins added, and
-       * a *disabled* plugin's provider is not here at all.** This array is the
-       * reading order: `groupModels` groups by first appearance rather than by
-       * sorting and `readyFirst` orders each of its two halves by position, so
-       * contributed rows appearing *after* every built-in is a group appearing
-       * rather than a group moving under somebody's thumb. `Contributions` sorts
-       * by plugin id so the order does not depend on what was installed when.
-       */
       systems: machine.systemIds().flatMap((id) => {
         const spec = machine.system(id);
-        // Unreachable — `systemIds()` is where these ids came from — and answered
-        // rather than asserted, because the alternative is a `TypeError` on a
-        // polled route to satisfy a claim the type system already makes.
         if (spec === null) return [];
         const held = saved.get(id);
         return [{
           id,
           displayName: spec.displayName,
           apiType: spec.apiType,
-          /*
-           * Whether anything can be *pointed* at it, said outright rather than
-           * inferred from the model list being non-empty — which is what the
-           * client did, and which conflates "no endpoint to route to" with "no
-           * models written down yet".
-           */
           routable: spec.baseUrl !== null,
           nativeHarness: spec.nativeHarness,
           loginVia: spec.loginVia,
-          // Empty for a natively-reached system, where the *agent* publishes the
-          // list. Not a gap — see `SystemConfig.models`.
           models: spec.models,
-          /*
-           * The prefix the native harness puts on a model id, or `null`. Sent
-           * because the client reads *two* lists for this system — the endpoint's
-           * own catalogue and whatever the native harness published — and without
-           * it the same model appears twice under one heading, once per spelling.
-           * A prefix is not an endpoint, a header name or a variable name, so the
-           * rule this section opens with is untouched.
-           */
           nativeModelPrefix: spec.nativeModelPrefix,
           keyEnv: spec.keyEnv,
-          /*
-           * ⚠ **The *effective* answer, off the same function the start reads.**
-           * A system whose native harness already holds its key needs no second
-           * one — `systemSecretFor` says so, and this asking the store directly is
-           * how the picker came to offer a routed pairing that `applySystem` then
-           * refused, over a machine that plainly had a key saved.
-           */
           keySet:
             systemSecretFor(
               id,
               systems?.credentials.get(id) ?? null,
               (agent: AgentId) => credentials?.envFor(agent) ?? {},
-              /*
-               * ⚠ **The catalogue, and leaving it off is the same defect Q3.485
-               * records arriving through a new door.** `systemSecretFor` is one
-               * function precisely so that this answer and the one `applySystem`
-               * reads at the start cannot disagree — and it resolves the row
-               * through whatever catalogue it is handed. Defaulted, it would answer
-               * `null` for every provider a plugin added, so a machine holding the
-               * key on that provider's own harness would draw "No <provider> key on
-               * this machine" under models the start would run perfectly.
-               */
+              // The live catalogue, so this answers exactly what applySystem reads at start; defaulted, every plugin provider would read as keyless (Q3.485).
               machine,
             ) !== null,
-          /*
-           * Only ever the *system* row's own timestamp, so `null` beside a
-           * `keySet` of `true` is the client's way of reading "this one is
-           * borrowed" — which is what stops the screen offering a Clear for a
-           * secret that is not stored here.
-           */
           keyUpdatedAt: held?.updatedAt ?? null,
-          /*
-           * Which plugin added this, or absent for a row this repository ships.
-           *
-           * Sent so the settings screen can say where a provider came from and so
-           * a refusal can name the plugin rather than the id. It is a *label*
-           * beside the row and nothing branches on it — the same standing
-           * `DAEMON_VERSION` has.
-           */
           ...(spec.contributedBy === undefined ? {} : { contributedBy: spec.contributedBy }),
         }];
       }),
@@ -1445,25 +438,11 @@ export function createApp(options: ServerOptions): AppBundle {
     if (typeof token !== "string" || token.trim().length === 0) {
       return jsonError(c, 400, "bad_request", "token is required and must be non-empty");
     }
-    // The same bound a pasted agent credential gets, and deliberately the same
-    // constant: what is being pasted is the same *kind* of thing, and two limits
-    // for one act is two numbers to keep in step.
     if (token.length > MAX_CREDENTIAL_CHARS) {
       return jsonError(c, 400, "bad_request", `token exceeds ${MAX_CREDENTIAL_CHARS} characters`);
     }
     systems.credentials.save(system, token.trim());
-    /*
-     * ⚠ **No `forgetAvailability`, and no restart sweep — unlike the agent
-     * credential routes one section down, which do both.**
-     *
-     * Those two exist because an agent credential is injected at *spawn*, so a
-     * token saved under a running agent reaches it never and the badge would
-     * turn green over a chat still failing to authenticate. A system key is not
-     * in any environment: it is handed to `providers/set` during a launch, so a
-     * session started after this save picks it up with nothing to invalidate,
-     * and one already running was routed with the key it was given. There is no
-     * stale cache here to drop.
-     */
+    // No availability flush or restart: a system key is handed to providers/set at launch, never injected at spawn.
     return c.json({ saved: true, system });
   });
 
@@ -1471,154 +450,39 @@ export function createApp(options: ServerOptions): AppBundle {
     if (systems === null) {
       return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
     }
-    /*
-     * ⚠ **Removed before it is validated, which `DELETE /custom-agents/:id` below
-     * already argues at length and this route did the other way round.**
-     * `SqliteSystemCredentialStore.list` drops a row naming a system this build
-     * cannot resolve — a key written by a newer daemon, read after a downgrade —
-     * so gating the delete on `isSystemId` made exactly those rows undeletable:
-     * unlistable, unreadable, and — since Q7.124 removed the sweep — unswept for
-     * ever, which is what makes the ordering here load-bearing rather than tidy. A
-     * plaintext third-party key with no code path able to end it is the one
-     * outcome worth bending the input rule for, and the id never reaches anything
-     * but a parameterized `DELETE`.
-     *
-     * `removed` is what the *listing* could see, so a caller still learns that it
-     * named something this build does not know — the same honest-but-narrow answer
-     * the preset route gives, and the same reason: a `404` here would break the
-     * replay this verb is whitelisted for.
-     */
+    // Removed before validation, so a row this build cannot resolve stays deletable (Q7.124).
     const named = c.req.param("system") ?? "";
     const system = systemIdParam(c);
     systems.credentials.remove(named as SystemId);
-    // Presets naming this system are deliberately left alone. A key can be
-    // replaced in the next minute, and deleting somebody's named agents because
-    // they rotated a token would be this daemon destroying their work to keep a
-    // list tidy. Starting one without a key refuses by name, before a worktree.
+    // Presets naming this system are deliberately kept; starting one without a key refuses by name.
     return c.json({ removed: system !== null, system: named });
   });
 
-  /**
-   * What each harness offers, and what each will let us point it at.
-   *
-   * ⚠ **This starts an agent per harness.** No prompt is sent, so no quota is
-   * spent, but it is a subprocess plus an ACP handshake — which is why it is a
-   * route of its own rather than a field on `GET /agents`, and why only the
-   * screen that assembles an agent calls it. `AgentAskRuns` bounds and caches
-   * it: ten minutes, two at a time for the whole daemon.
-   *
-   * Per agent failures are answered rather than thrown: one harness that is not
-   * installed must not take down a picker that could still offer the other two.
-   */
+  // Spawns one agent per harness, with no prompt; AgentAskRuns bounds and caches it. Per-harness failures are answered, never thrown.
   app.get("/agents/capabilities", read, async (c) => {
     if (asks === null) {
       return jsonError(c, 503, "model_unavailable", "this daemon cannot read agent capabilities");
     }
-    /*
-     * ⚠ **Asked all at once, and the bound is kept by the queue rather than by
-     * the order.**
-     *
-     * This was a serial loop, and a `Promise.all` before that. The `Promise.all`
-     * was measured wrong: `MAX_CONCURRENT_ASKS` is 2 for the whole daemon and
-     * `admit` **threw** when full, so the *third* harness always lost the race and
-     * `GET /agents/capabilities` on a cold cache answered "codex: this machine is
-     * already running 2 model requests" every time — codex permanently greyed out
-     * in the builder with a sentence about load that had nothing to do with it.
-     * Serial was the workaround, and it could not trip the bound because it never
-     * approached it.
-     *
-     * ⚠ **What it cost was measured too, and it is not "a second or two".** Driven
-     * against the real harnesses with the real saved credentials, 2026-08-28:
-     * claude 1162 ms, kimi 627 ms, codex 2260 ms, opencode 1237 ms — **5286 ms**
-     * serially, against **2531 ms** with all four overlapped, which is codex's own
-     * start-up and nothing else. Per-harness cost is the same either way; there is
-     * no contention to pay for.
-     *
-     * The fix is in `admit`, not here: the capability path **queues** for a slot
-     * instead of being refused one, so the sweep cannot lose a race against a
-     * bound it is itself holding. The cap is unchanged and still 2 — this is four
-     * requests metered through it rather than four spawns at once.
-     */
-    /*
-     * ⚠ **What this machine offers, not `AGENT_IDS`** — the five this repository
-     * ships plus whatever plugins added, and a *disabled* plugin's harness is not
-     * in it. The bound on how long the sweep can get is
-     * `MAX_CONTRIBUTED_HARNESSES`, refused at install rather than trimmed here:
-     * a partial read would need a third wire state, because an empty
-     * `{models: [], routing: null, error: null}` is indistinguishable from an
-     * agent that answered nothing — which `hostable` reads as a real refusal.
-     */
+    // Asked all at once: the capability path queues for an ask slot, so the sweep cannot lose a race against its own bound.
     const machine = machineOf();
-    /**
-     * Whether this harness can be told which model to run on somebody else's
-     * system.
-     *
-     * ⚠ **Sent because the client cannot work it out and had been guessing by
-     * omission.** `hostable` has four arms and the browser's mirror could only
-     * express three: `ROUTED_MODEL_ENV` is a table in `src/`, and the client had a
-     * paragraph saying nothing on the wire stood for it. So the picker offered a
-     * pairing `POST /custom-agents` then refused — harmless while the one harness
-     * that could be routed was also the only one with an arm, and not harmless the
-     * moment a plugin contributes a harness that names no model variable.
-     *
-     * On `routing` rather than beside it, so `hostable`'s signature — and every
-     * fixture built on it — is untouched; and **absent means `true`** on that side,
-     * which is safe for the one reason that matters: a daemon too old to send it
-     * has no plugin catalogue, so it has no harness this could be false for.
-     */
     const pinsModel = (id: string): boolean => routedModelNaming(id, machine) !== null;
     const entries = await Promise.all(
       machine.harnessIds().map(async (id): Promise<readonly [string, unknown]> => {
       try {
-        /*
-         * ⚠ **The caller's signal, and it protects less than it did — said here
-         * rather than left reading as though it still did.** When this was a
-         * serial loop the signal stopped the harnesses the loop had not reached
-         * yet. Fanned out, all four run their one `stopIfGone` in the same tick,
-         * so what it can still refuse is only a spawn that has not begun *at
-         * that instant*; a sweep abandoned a moment later runs its handshakes to
-         * completion.
-         *
-         * That is bounded and it is not a leak: no prompt is sent and no quota is
-         * spent, `SLOT_WAIT_MS` bounds any queued member, and the answers land in
-         * the ten-minute cache — so the `GET` the transport replays is served from
-         * it rather than paying for the spawn a second time, which is strictly
-         * better than the serial loop, whose abandoned tail was neither spawned
-         * nor cached.
-         */
         const answer = await asks.capabilities(id, c.req.raw.signal, true);
         return [
           id,
           {
             models: answer.models,
             routing: answer.routing === null ? null : { ...answer.routing, pinsModel: pinsModel(id) },
-            /*
-             * Which build published the list above. Sent beside it rather than on
-             * `GET /agents`, so the version a client draws cannot describe a
-             * different spawn than the rows it draws it under.
-             *
-             * ⚠ **Projected rather than spread, and the dropped field is the
-             * point.** `AgentCliChoice.path` is an absolute path on this host; the
-             * screen draws a program name and a version and has no use for it, so
-             * sending it would put the filesystem layout on a route for nobody,
-             * readable by anything holding the `model` scope. What is on the wire
-             * is what is drawn.
-             */
+            // Projected: the CLI's absolute path is deliberately not sent.
             cli: answer.cli === null ? null : { version: answer.cli.version, source: answer.cli.source },
             error: null,
           },
         ] as const;
       } catch (error) {
-        // Per agent, never thrown: one harness that is not installed must not
-        // take down a picker that could still offer the other three.
         return [
           id,
-          /*
-           * `cli: null` on the failing arm, and it is the honest value rather than
-           * a gap: nothing was spawned, so nothing published a list and there is no
-           * build to name. A version carried through here would be a claim about a
-           * read that did not happen.
-           */
           { models: [], routing: null, cli: null, error: error instanceof Error ? error.message : String(error) },
         ] as const;
       }
@@ -1634,67 +498,12 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ customAgents: systems.customAgents.list() });
   });
 
-  /**
-   * The four fields somebody chose, checked, or the refusal to hand straight back.
-   *
-   * ⚠ **One function because two routes decide the same predicate.** Creating a
-   * preset and editing one differ only in what happens to the answer — one mints
-   * an id, the other keeps the stored row's — and every check before that point
-   * is the same question asked of the same body. Written out twice they drift the
-   * first time one of the bounds moves, and the drift is silent in the direction
-   * that matters: an edit that accepts what a create refuses puts the unstartable
-   * row into the store by the back door. `requestedPath` above was merged out of
-   * two copies for exactly this, and the copies there had already been confirmed
-   * identical rather than assumed to be.
-   *
-   * ⚠ **All four are required on both paths: an edit is a replace, not a merge.**
-   * A subset body is the friendlier-looking shape and it is the one that can be
-   * wrong. The pairing is a fact about the *row*, so it would have to be weighed
-   * against the merge of body and stored row — and a handler that weighs it
-   * against the body alone accepts `{ "system": "moonshot" }` on a codex preset,
-   * refusing at creation and saving at edit, which is the failure this daemon
-   * already refuses `POST` to have. With nothing to merge there is nothing to get
-   * that wrong. It costs the caller nothing either: the edit screen is the
-   * assembly screen with a stored row loaded into it, so it holds all four before
-   * anybody touches anything.
-   *
-   * `Omit<CustomAgent, "id" | "createdAt">` rather than a shape of its own: those
-   * two are precisely the fields the wire may not name, and saying it in the type
-   * means a sixth field added to `CustomAgent` fails to compile here instead of
-   * being quietly dropped by whichever route was not updated.
-   *
-   * ⚠ **What this predicate weighs is the *row*, and the sessions already
-   * pointing at it are not in it.** "An edit cannot put an unstartable row into
-   * the store" is the claim, and it is the whole claim: `PATCH` can still move
-   * `harness` out from under a live session, whose `sessions.agent` column does
-   * not move with it, and that is answered by demoting the session rather than by
-   * refusing the edit — see the `PATCH` docblock below and
-   * `ManagedSession.assembled` for where it lands. Reading this as "no edit can
-   * leave anything broken" is the reading that stopped being true.
-   */
+  // Shared by create and edit so they cannot drift; an edit is a replace, so all four fields are required.
   const readAssembledAgent = async (
     c: Context<AppEnv>,
   ): Promise<Omit<CustomAgent, "id" | "createdAt"> | Response> => {
     const body = await readJsonObject(c);
-    /*
-     * ⚠ **The list is no longer written into the sentence, and that is a bound
-     * rather than a style choice.** It was `one of ${AGENT_IDS.join(", ")}` — four
-     * short words — and a machine may now offer any number of harnesses under
-     * names a manifest chose, so the sentence grew without limit and landed on a
-     * phone. What a caller needs is which of the two things is wrong; `offers`
-     * carries the list in the error's own detail, where it is not prose.
-     */
-    /*
-     * ⚠ **Two states, not one, and `offeredHarness` is the helper that erases the
-     * difference.** `harnessState` and `systemState` are three-valued because
-     * *unknown* and *disabled* need opposite sentences — the interface's own
-     * docblock states it, and `POST /sessions` splits them. Collapsing both into
-     * `400` here is reachable from a screen rather than theoretical:
-     * `readCustomAgent` validates a stored preset by *shape*, so one naming a
-     * contributed harness stays in `GET /custom-agents` after its plugin is
-     * switched off — the edit screen loads it, and a pure rename came back blaming
-     * the caller for a machine state one toggle fixes.
-     */
+    // Unknown is 400, switched off is 503: a stored preset can name a harness whose plugin was since disabled.
     const harness = body?.["harness"];
     if (typeof harness !== "string" || machineOf().harnessState(harness) === "unknown") {
       return jsonError(c, 400, "invalid_agent", "harness must be one this machine offers", {
@@ -1737,42 +546,8 @@ export function createApp(options: ServerOptions): AppBundle {
     if (name.length > MAX_AGENT_NAME_CHARS) {
       return jsonError(c, 400, "bad_request", `name exceeds ${MAX_AGENT_NAME_CHARS} characters`);
     }
-    /*
-     * ⚠ **The pairing is refused here, not only in the picker.**
-     *
-     * The client greys out an impossible combination, and that is a courtesy
-     * rather than the gate: these routes are reachable from the internet and a
-     * saved preset that cannot start is a row whose only button answers 502
-     * every time it is pressed, days after anybody could connect the two. That
-     * is as true of an edit as of a create — more so, since an edit can take a
-     * row that started fine yesterday and leave it in that state.
-     *
-     * ⚠ **And the routing half is read from the agent rather than assumed.**
-     * `hostable` needs to know which protocols this harness accepts, which only
-     * the harness can say — so this spawns one, through the same cached, bounded
-     * path `GET /agents/capabilities` uses. `null` from a failed read is passed
-     * through as "cannot be routed", which refuses a cross-system preset and
-     * leaves a native one alone.
-     */
-    /*
-     * ⚠ **A machine that is busy is not a pairing that is impossible, and this
-     * folded the two.** The rejection arm was `() => null`, so `model_busy` from
-     * the two-slot bound — or a spawn timeout, or a shutdown — became
-     * `routing: null`, which `hostable` turns into "This agent only runs its own
-     * models." That is a false statement about `claude`, delivered as a `400` on
-     * the screen the design calls the gate, with no retry offered. Two plugin
-     * model calls in flight were enough to produce it.
-     *
-     * `null` is now reserved for a harness that *answered* and answered nothing,
-     * which is the state `hostable` was written to read. Anything else is this
-     * daemon's own condition and answers `503`, which is retryable and says so.
-     *
-     * ⚠ **Bounded below the client's budget.** `ASK_TIMEOUT_MS` is 120s and the
-     * client's `SLOW_ROUTE_TIMEOUT_MS` is 90s, so a slow cold read let the phone
-     * abort while this handler went on to write the row — and `POST` mints a fresh
-     * id, so the obvious retry made a second preset with no uniqueness constraint
-     * to catch it. Refusing first is the honest half of that pair.
-     */
+    // The pairing is refused here, not only in the picker, and routing is read from the harness itself.
+    // A busy or failed read is 503, never routing null, which means the harness answered nothing.
     let routing: Awaited<ReturnType<AgentCapabilityReader["capabilities"]>>["routing"] = null;
     if (asks !== null) {
       try {
@@ -1788,19 +563,7 @@ export function createApp(options: ServerOptions): AppBundle {
         );
       }
     }
-    /*
-     * ⚠ **`machineOf()`, and leaving it off made every contributed pairing
-     * unsaveable.** `hostable`'s fourth parameter defaults to `BUILTIN_CATALOGUE`,
-     * whose `system()` answers `null` for every `<plugin>:<local>` id — so a
-     * preset on a provider a plugin added was refused *"This provider is no longer
-     * on this machine."* about a provider `GET /systems` was listing two lines
-     * above, and one on a contributed harness was refused for a routed-model
-     * variable `ROUTED_MODEL_ENV` was never going to hold. Both checks above this
-     * one already read the live catalogue, and `session.ts` passes it at launch, so
-     * the create-time and launch-time gates disagreed about the same pairing: what
-     * would start could not be stored. This is the same defect Q3.485 records
-     * arriving through a new door, which `GET /systems` warns about by name.
-     */
+    // The live catalogue: the default BUILTIN_CATALOGUE refuses every plugin pairing that would start (Q3.485).
     const refusal = hostable(harness, system, routing, machineOf());
     if (refusal !== null) {
       return jsonError(c, 400, "incompatible_pairing", refusal, { harness, system });
@@ -1814,25 +577,9 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const draft = await readAssembledAgent(c);
     if (draft instanceof Response) return draft;
-    /*
-     * ⚠ **Minted against the store rather than trusted, and this became load-bearing
-     * when `save` became an upsert.** It was a bare `INSERT`, so a repeated id was a
-     * `SQLITE_CONSTRAINT_PRIMARYKEY` — a loud 500 nobody ever saw. `PATCH` needs the
-     * upsert, and the upsert turns the same collision silent: it would replace an
-     * existing preset's name, harness, system and model, and because
-     * `sessions.custom_agent` is a *reference* re-read at every launch, every session
-     * on that id would come back on a triple nobody chose.
-     *
-     * Four bytes is `s_`'s width and is kept, because the id is read by people and by
-     * `MAX_STRIP_REF_CHARS`; the birthday bound is what the loop replaces. The mint,
-     * the lookup and the write are synchronous with no `await` between them, so on a
-     * single-process daemon this is atomic — the awaits all happened above, in
-     * `readAssembledAgent`.
-     */
+    // Minted against the store: save is an upsert, so a colliding id would silently overwrite a preset.
     let id = `ca_${randomBytes(4).toString("hex")}`;
     for (let attempt = 0; systems.customAgents.get(id) !== null; attempt += 1) {
-      // Bounded so a store that answered every id — a wedged wrapper, never the real
-      // one — is a refusal rather than a spin on the daemon's only thread.
       if (attempt >= 8) {
         return jsonError(c, 503, "systems_unavailable", "could not mint an id for this agent");
       }
@@ -1843,46 +590,7 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ customAgent: one }, 201);
   });
 
-  /**
-   * Renaming an assembled agent, or pointing it somewhere else.
-   *
-   * ⚠ **Without this a preset is write-once, and `sessions.custom_agent` was
-   * built on the assumption that it is not.** That column holds a *reference*
-   * rather than a copy, and `ManagedSession.assembled` re-reads it at every
-   * launch, deliberately — so that editing a preset changes what its sessions
-   * come back as, which is what anybody expects of a preset. For one release the
-   * only way to change one was to delete it and create another, which the
-   * reference design turns into the worst available outcome: every session on the
-   * old id silently drops to the bare harness at its next resume, with no system
-   * and no model pin, while a new row that looks identical sits beside it.
-   *
-   * ⚠ **Three of the four fields reach those sessions. `harness` does not, and
-   * the demotion is deliberate.** `sessions.agent` is written when the session is
-   * created and never moves — it names the CLI whose transcript this is, whose
-   * resume id this is, and whose process would be spawned again — so a preset
-   * re-pointed from `claude` to `codex` would otherwise resume an existing
-   * conversation against a harness that has never heard of it, which is a 502 on
-   * every resume rather than a changed model. `ManagedSession.assembled` weighs
-   * the resolved preset's harness against the session's own column and answers
-   * `{}` when they differ: the same honest demotion the deleted-preset arm
-   * already takes, and for the same reason — a session whose preset no longer
-   * describes it comes back as the bare harness it has always been rather than as
-   * a pairing nobody chose. Nothing is refused here. A preset is somebody's to
-   * re-point, and the row this writes is startable for everything started after
-   * the edit; what it stops being is a description of the sessions started before.
-   *
-   * ⚠ **`PATCH` with every field required.** See `readAssembledAgent` for why an
-   * edit is a replace. It is not a `PUT` because the body is not the whole
-   * resource: `id` and `createdAt` are the daemon's and are taken from the stored
-   * row below rather than from anything a caller sent, so a body that names either
-   * is answered with them unchanged rather than refused — there is no field to
-   * refuse, only a key nothing reads.
-   *
-   * The 404 comes before the body is read: a preset deleted from another phone a
-   * second ago should be answered "no such agent" rather than a complaint about a
-   * field, and the two answers are indistinguishable to somebody holding a stale
-   * list.
-   */
+  // Every field required. A harness edit demotes existing sessions to the bare harness, see ManagedSession.assembled.
   app.patch("/custom-agents/:id", write, async (c) => {
     if (systems === null) {
       return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
@@ -1893,25 +601,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const draft = await readAssembledAgent(c);
     if (draft instanceof Response) return draft;
-    // `stored.id` rather than the path parameter, which is equal to it by
-    // construction: taking both immutable fields off the row is what makes "a
-    // client cannot set either" a property of the shape rather than an argument
-    // about the fields nothing happens to read.
-    //
-    // `save` is an upsert keyed on the id — `SqliteCustomAgentStore` writes
-    // `ON CONFLICT(id) DO UPDATE`, and leaves `created_at` out of the SET list so
-    // that the age of a preset cannot move even if a caller of this port gets it
-    // wrong. It was a bare `INSERT` while nothing could edit a row, and this route
-    // is what makes the difference observable.
-    /*
-     * ⚠ **Looked up again, because `save` is an upsert and the gap is wide.**
-     * `readAssembledAgent` above awaits a capability read that can spawn an agent,
-     * so seconds pass between the 404 check and this write — and
-     * `ON CONFLICT(id) DO UPDATE` means an `INSERT` of a row deleted in that window
-     * succeeds and puts it back, under its original `createdAt`. Two phones, one
-     * deleting while the other edits, and the delete silently loses. The second
-     * lookup is cheap and the window after it is one statement.
-     */
+    // Looked up again: the capability read above takes seconds, and the upsert would resurrect a row deleted meanwhile.
     if (systems.customAgents.get(stored.id) === null) {
       return jsonError(c, 404, "custom_agent_not_found", "no such agent");
     }
@@ -1920,140 +610,26 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ customAgent: one });
   });
 
-  /**
-   * Wanting the row gone, and being able to say so twice.
-   *
-   * ⚠ **An id with nothing under it is `200 {removed: false}` and never a 404,
-   * because this is a `DELETE` and the transport replays those.** `isReplayable`
-   * in `packages/web/src/machine.ts` whitelists `GET` and `DELETE` on a stated
-   * property this route is inside, and `slowRoute` deliberately leaves the verb
-   * off — its own docblock calls this "a lookup plus a delete", so it runs on the
-   * ordinary 15s budget, which is precisely the budget `settleTransport` names as
-   * the one a phone dropping to LTE earns. The failure a 404 makes is a removal
-   * that *worked* and whose answer was lost on the wire: the replay lands after
-   * the row is already gone, and `AgentBuilder` draws `errorText` over an act that
-   * did exactly what was asked. `removed` is what tells the two sends apart.
-   *
-   * ⚠ **`DELETE /plugins/:pluginId` in this same daemon already answers this way,
-   * with this argument, and `daemoncheck` already pins it.** Two conventions for
-   * one verb in one daemon is how one of them rots — and the one that rots is the
-   * one whose failure is invisible offline, which is this one: a 404 here is
-   * correct on every developer machine and wrong only over a relay.
-   *
-   * The cost is the same trade that route already took: a mistyped id is no
-   * longer refused. A wrong id costs a person one confusing line; a 404 costs
-   * whoever hit a dropped packet a delete that reads as having failed.
-   *
-   * ⚠ **`removed` is what the lookup said, and the `remove` runs either way.**
-   * `SqliteCustomAgentStore.get` drops a row whose `harness` or `system` this
-   * version cannot parse — a preset written by a newer daemon, read after a
-   * downgrade — so gating the delete on the lookup would make exactly those rows
-   * undeletable, which is the failure the plugin route avoids by removing rather
-   * than finding. Such a row is deleted and reported `false`, the one dishonest
-   * answer here and the smaller of the two: the store port returns `void`, so
-   * this line has nothing better to read.
-   */
+  // An unknown id is 200 removed false, never 404: the transport replays DELETE.
+  // The remove runs either way, so a row this build cannot parse stays deletable.
   app.delete("/custom-agents/:id", write, (c) => {
     if (systems === null) {
       return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
     }
     const id = c.req.param("id") ?? "";
     const removed = systems.customAgents.get(id) !== null;
-    /*
-     * Sessions started on it are left alone and keep resuming: `sessions.agent`
-     * holds the harness, so the conversation comes back on that with no system
-     * and no model pin. Ending somebody's chats because they tidied a list would
-     * be the worse of the two surprises.
-     *
-     * ⚠ **That demotion is what the confirm on the other side has to say, and it
-     * is a claim about `ManagedSession.assembled` rather than about this line.**
-     * That getter resolves `sessions.custom_agent` through `customAgents` at every
-     * launch and returns `{}` for an id it cannot find — so the loss lands at the
-     * *next* start or resume and not here. An agent already running keeps the
-     * system and model it was spawned with until something restarts it, which is
-     * why the honest sentence is about what a session comes back as rather than
-     * about what it is doing now.
-     *
-     * `PATCH` above is the *less* destructive half of the same intent rather than
-     * the non-destructive one, and that sentence used to overclaim: re-pointing a
-     * preset's name, system or model reaches every session on it through the same
-     * getter with nothing to demote, but re-pointing its `harness` lands those
-     * sessions on this same `{}` — see that route's docblock. A delete is for
-     * wanting the row gone; a harness edit demotes without being asked to.
-     */
     systems.customAgents.remove(id);
-    /*
-     * And its position in the strip goes with it.
-     *
-     * Not correctness — `orderStrip` in the client drops a `ref` that resolves to
-     * nothing, so an orphan row is invisible either way. It is the only thing
-     * standing between `agent_strip` and unbounded growth on a machine where
-     * presets are assembled and thrown away and the strip screen is never opened,
-     * and it is one statement.
-     *
-     * Unconditional on `removed`, like the remove above it and for the same
-     * reason: a row this build cannot resolve is not found by `get` and must
-     * still be deletable.
-     */
     systems.strip.forget("custom", id);
     return c.json({ removed, id });
   });
 
-  /* ---------------------------------------------------------------- *
-   * The strip
-   *
-   * Which agents the New session screen offers on this machine, and in what
-   * order. Two routes and no third: the screen that writes this holds the whole
-   * list, so a reorder is one `PUT` rather than a verb per row.
-   *
-   * ⚠ **This daemon does not merge and does not resolve.** It stores
-   * `(kind, ref, rank, hidden)` and hands it back; which of those refs is a
-   * harness that is installed, an assembled agent that still exists, or neither,
-   * is decided by the client against `GET /agents` and `GET /custom-agents` —
-   * the two lists it already reads to draw the row. Deciding it here would mean
-   * a third read on every strip fetch and a rule written down twice, and the
-   * rule is not this daemon's: what may have a tile is `shownHere`'s answer, and
-   * `shownHere` is a screen.
-   * ---------------------------------------------------------------- */
+  // The strip is stored and returned as sent; which refs still name something is the client's decision.
 
-  /**
-   * How long a conversation may sit untouched before its agent is shut down.
-   *
-   * ⚠ **The first daemon setting with a control on a screen, and the rule it does
-   * not break is that the daemon's *config* is env only.** `REEMOAT_*` is read in
-   * `scripts/daemon.ts`, nothing in `src/` touches `process.env`, and an operator
-   * provisioning a fleet still writes an env file. What this is, is the narrower
-   * class whose owner is the person *using* the machine: their own trade between
-   * memory and a 1.3s wait, on their own machine. Q2.225.
-   *
-   * A saved value **overrides** `REEMOAT_IDLE_PARK_MINUTES`, which is therefore the
-   * default for a machine nobody has set rather than a policy the screen has to
-   * explain itself against. The answer carried a `source` for one round saying
-   * which of the two was in force; it is gone with the line it fed — see the
-   * `PATCH` below and `MachineSettingsView`.
-   */
+  // A saved value overrides REEMOAT_IDLE_PARK_MINUTES, which is only the default (Q2.225).
   app.get("/settings", read, (c) => {
     return c.json({ settings: registry.machineSettings() });
   });
 
-  /**
-   * Change one, or give it back.
-   *
-   * `PATCH` rather than `PUT`, and the difference from `/agent-strip` one route
-   * down is the body: that one is a whole list and replacing it wholesale is the
-   * only coherent write, while this is a table of independent settings where a
-   * client sending the ones it happens to know would silently reset the ones it
-   * does not. An older client must be able to write this without erasing a key a
-   * newer daemon has.
-   *
-   * ⚠ **There is no "give it back".** This accepted `null`, which forgot the stored
-   * value so `REEMOAT_IDLE_PARK_MINUTES` applied again — and the only thing that
-   * could express it was a line on the settings screen saying which of the two was
-   * in force, which the owner removed as noise about env files on a screen that
-   * mentions none. With no reader the branch was a capability nothing could reach.
-   * The variable is the default for a machine nobody has set; the way back to it
-   * is typing the number.
-   */
   app.patch("/settings", write, async (c) => {
     if (machineSettings === null) {
       return jsonError(c, 503, "settings_unavailable", "this daemon has no durable store for settings");
@@ -2061,33 +637,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    /*
-     * ⚠ **The whole body is weighed before any of it is written, and the two
-     * loops are the point rather than a tidier shape.**
-     *
-     * This was one loop that validated and wrote each key as it went, so a body
-     * whose *second* key was bad persisted the first and then answered `400` — and
-     * the early return skipped `applyMachineSettings` on the way out, so the
-     * durable table and the running daemon disagreed until the next restart. The
-     * comment below promises the exact opposite of that, and a refused request
-     * silently changing machine-wide policy at the next boot is the worst version
-     * of it: nothing on any screen would say the number had moved.
-     *
-     * Reachable today, with one key in the union, as `{idleReleaseMinutes: 5,
-     * anythingElse: 1}` — the unknown key is refused *after* the known one is
-     * written. Every refusal the drivers had was a single-key body, which is why
-     * "none of which changed what is stored" passed over it.
-     *
-     * A `PATCH` naming several settings is therefore all-or-nothing **against a
-     * refusal**, which is the only coherent reading of a route whose own docblock
-     * is written for older clients sending subsets.
-     *
-     * ⚠ **Against the store it is not, and the distinction is stated rather than
-     * implied.** `MachineSettingsPort` is two methods with no transaction seam, so
-     * a `write` that threw on the second key would still leave the first — the same
-     * drift by a different door. Unreachable while `MachineSettingKey` has one
-     * member, and the seam to close it if that changes is the port, not this loop.
-     */
+    // The whole body is validated before any key is written, so a refusal changes nothing.
     const wanted: [MachineSettingKey, string][] = [];
     for (const [key, value] of Object.entries(body)) {
       if (!isMachineSettingKey(key)) {
@@ -2098,9 +648,6 @@ export function createApp(options: ServerOptions): AppBundle {
       wanted.push([key, String(value)]);
     }
     for (const [key, value] of wanted) machineSettings.write(key, value);
-    // Applied to the running daemon before the answer, so the value the caller
-    // reads back is one that is already in force rather than one that will be at
-    // the next restart.
     registry.applyMachineSettings();
     return c.json({ saved: true, settings: registry.machineSettings() });
   });
@@ -2112,30 +659,7 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ entries: systems.strip.list() });
   });
 
-  /**
-   * The whole strip, checked, or the refusal to hand straight back.
-   *
-   * ⚠ **`PUT` and not `PATCH`, because the body is the whole list.** `POST`/
-   * `PATCH /custom-agents` are about one row each and their verbs carry the
-   * difference between adding and editing; here there is one resource — the
-   * order — and every write replaces it. That also makes the route idempotent,
-   * which matters more than it looks: `isReplayable` in `packages/web/src/
-   * machine.ts` whitelists GET and DELETE only, so a lost answer is *not* resent
-   * — but a person tapping twice on a flaky link should not be able to produce a
-   * shape a merge would have to decide about.
-   *
-   * ⚠ **The duplicate check is here rather than left to the primary key.** Two
-   * entries naming the same `(kind, ref)` is a client bug, and SQLite would
-   * report it as `SQLITE_CONSTRAINT_PRIMARYKEY` out of the middle of a
-   * transaction — a `500 internal_error` on a body this route can see is wrong at
-   * a glance. It is the same lesson `SqliteCustomAgentStore`'s upsert records
-   * from the other direction: a constraint reaching a caller as a 500 is a
-   * refusal that was never written down.
-   *
-   * What is *not* checked is whether a `ref` names anything. See
-   * `AgentStripEntry`: the row is the memory, and forgetting a position because
-   * an agent is signed out today is the one behaviour somebody would notice.
-   */
+  // PUT replaces the whole list. Duplicates are refused here rather than as a primary-key 500; refs are never validated.
   const readStripEntries = async (c: Context<AppEnv>): Promise<AgentStripEntry[] | Response> => {
     const body = await readJsonObject(c);
     if (body === null) return jsonError(c, 400, "bad_request", "expected a JSON object body");
@@ -2183,54 +707,15 @@ export function createApp(options: ServerOptions): AppBundle {
     const entries = await readStripEntries(c);
     if (entries instanceof Response) return entries;
     systems.strip.replace(entries);
-    /*
-     * The saved list is echoed rather than answered `{ saved: true }` alone, and
-     * it is what the store now holds rather than what arrived: they are the same
-     * today, and a caller that reads the answer instead of trusting its own copy
-     * keeps being right if that ever stops being true.
-     */
     return c.json({ saved: true, entries: systems.strip.list() });
   });
 
-  /* ---------------------------------------------------------------- *
-   * Logging an agent in
-   *
-   * Every agent authenticates out of band and reads its credentials from disk,
-   * and the point of these routes is that the person putting something there is
-   * holding a phone. Two paths, because neither alone is enough: a guided flow
-   * that runs the agent's own login under a pty, and a paste box for a token
-   * minted elsewhere (`claude setup-token`). The second always works; the first
-   * is nicer when it does, and `loginSupported` says which.
-   * ---------------------------------------------------------------- */
-
-  /**
-   * The harness a route names, or `null`.
-   *
-   * ⚠ **Membership in what this machine offers, not shape** — the opposite call
-   * from `fromRow`, and both are right. Nothing has been created yet at any of
-   * these call sites, so a refusal costs nothing; and a route that accepted a
-   * harness this machine does not have would store a credential under a name
-   * nothing will ever read.
-   */
   const agentIdParam = (c: Context<AppEnv>): AgentId | null => {
     const value = c.req.param("agent") ?? "";
     return registry.machineCatalogue.harnessState(value) === "enabled" ? value : null;
   };
 
-  /**
-   * What a path parameter naming a harness this machine does not offer earns.
-   *
-   * ⚠ **Three answers collapsed into two is what this exists to undo.**
-   * `harnessState` is three-valued on purpose — see its own docblock, which states
-   * the rule: *unknown* is "fix your request", *disabled* is "this was correct
-   * yesterday and somebody switched the plugin off", and the second may never be
-   * answered with the `400` that tells an operator their own address is wrong.
-   * `agentIdParam` answers `null` for both, so every route reading it said the
-   * wrong one. `POST /sessions` has always split them; these had not.
-   *
-   * Reached only where `agentIdParam` already answered `null`, so the `enabled`
-   * arm is unreachable and the two states left are the two this chooses between.
-   */
+  // Switched off is 503 naming the switch, never the 400 that blames the caller.
   const noSuchHarness = (c: Context<AppEnv>): Response =>
     registry.machineCatalogue.harnessState(c.req.param("agent") ?? "") === "disabled"
       ? jsonError(
@@ -2245,31 +730,8 @@ export function createApp(options: ServerOptions): AppBundle {
     const availability = await registry.sessionRuntime.availability();
     const stored = credentials?.list() ?? [];
     return c.json({
-      // `loginSupported` rather than letting the client infer it from the
-      // runtime kind: whether a login can be driven is the runtime's decision,
-      // and a client that guessed would offer a wizard that answers 503.
-      //
-      // **Both halves, and it used to be only the first.** `logins !== null` says
-      // there is somewhere to record a run; `runtime.loginSupported` says the
-      // host has a `script` to allocate a pty with. On a host without one this
-      // field answered `true` and `POST /agent-auth/:agent/login` then answered
-      // `503 login_unsupported` — which is precisely the outcome the comment
-      // above says the field exists to prevent, in the one place a person goes
-      // when their agent has just refused a prompt.
+      // Both halves: somewhere to record a run, and a host that can allocate a pty.
       loginSupported: logins !== null && registry.sessionRuntime.loginSupported,
-      /*
-       * What this host is, so the client can name it when it has to explain a
-       * refusal that is the platform's doing.
-       *
-       * `login.blocked === "interactive_pty"` is returned for **every** BSD, and
-       * a client that hardcoded "macOS" would be telling a FreeBSD operator
-       * something false about their own machine. The daemon is the only end that
-       * knows, so it says; the client maps it to a name a person uses.
-       *
-       * Reported and never branched on — `blocked` is what decides anything, and
-       * this is a label beside it. The distinction `compatibility.md` draws for
-       * `DAEMON_VERSION` is the same one.
-       */
       os: process.platform,
       agents: availability.map((agent) => {
         return {
@@ -2278,23 +740,9 @@ export function createApp(options: ServerOptions): AppBundle {
             const row = stored.find(
               (entry) => entry.agent === agent.id && entry.envName === envName,
             );
-            // The secret is never in this response and there is no route that
-            // returns it. `set` and `updatedAt` are everything a UI needs to draw
-            // the difference between "not configured" and "configured, replace?".
+            // The secret is never in this response.
             return { envName, set: row !== undefined, updatedAt: row?.updatedAt ?? null };
           }),
-          /**
-           * Whether *this* agent's login can be driven, and what its flow needs.
-           *
-           * Beside the daemon-wide `loginSupported` rather than instead of it, so
-           * an older client still reads what it knows. What this adds is the two
-           * facts that field cannot carry: an agent whose CLI does not resolve
-           * used to get an enabled button and a `503` after the tap, and every
-           * agent got an input box whether or not anything reads one.
-           *
-           * The same object `GET /agents` carries — see `loginSupportOf`, which is
-           * where both of them are decided.
-           */
           login: loginSupportOf(agent.id),
         };
       }),
@@ -2324,30 +772,10 @@ export function createApp(options: ServerOptions): AppBundle {
     }
 
     credentials.save(agent, envName, token.trim());
-    // The availability cache now holds a stale `loggedIn: false` for this agent.
-    // Dropping it costs one probe on the next read and is the difference between
-    // the UI updating and the UI insisting you are still logged out.
     registry.sessionRuntime.forgetAvailability();
-    /*
-     * ⚠ **And the refused start, which is a separate record and is cleared by
-     * three of the six `forgetAvailability` call sites.** A key arriving is one of
-     * them, a login run *finishing* is another, and an explicit
-     * `POST /agent-auth/:agent/recheck` is the third — all three are evidence about
-     * a harness that would not start. The other three are sign-out-ward — a key
-     * being *deleted*, a sign-out, and a login cancelled — and none of those is a
-     * reason to believe a harness has started working. Deleting a key must not
-     * erase the record of the refusal that key was pasted against.
-     */
+    // Only a credential arriving clears the refused start; sign-out-ward events must not.
     registry.sessionRuntime.forgetStartRefusal(agent);
-    /*
-     * **And the conversations already running on this agent, which the save alone
-     * does not reach.** Secrets are injected at spawn, so a token saved while an
-     * agent is running reaches it never: the badge turned green and the chat in
-     * front of somebody went on failing to authenticate, with nothing on the
-     * screen connecting the two. Started rather than awaited — see
-     * `reloadCredentials`, and `whenRestarted`, which is what makes typing into a
-     * restarting session a wait rather than a refusal.
-     */
+    // Secrets are injected at spawn, so running sessions on this agent are restarted to pick the token up.
     const restarting = registry.reloadCredentials(agent);
     return c.json({ saved: true, agent, envName, restarting });
   });
@@ -2356,26 +784,7 @@ export function createApp(options: ServerOptions): AppBundle {
     if (credentials === undefined) {
       return jsonError(c, 503, "credentials_unavailable", "this daemon has no durable store for credentials");
     }
-    /*
-     * ⚠ **`DELETE /systems/:system`'s shape, and taking half of it was worse than
-     * taking none.** That route removes before it validates *and answers `200` with
-     * what the lookup saw* — never an error — precisely so a row this build can no
-     * longer place is still deletable. Removing first and then answering `400` is
-     * the shape with neither property: the row is gone, the caller is told its
-     * request was wrong, and the two invalidation steps below are skipped — leaving
-     * a cached `loggedIn: true` over a harness whose only credential has just been
-     * deleted, and a running session still holding the secret in its environment.
-     *
-     * A harness a plugin added stops being offered the moment somebody switches
-     * that plugin off, and `GET /agent-auth` stops listing it in the same tick. So
-     * the one control that can reach its saved key must not be the one that
-     * disappears with it.
-     *
-     * The slot is still checked where the harness *does* resolve, because there a
-     * name it does not read is a caller's mistake worth naming. Where it does not,
-     * there is nothing to check against and nothing to be right about: the row is
-     * removed and `removed` says whether there was one.
-     */
+    // Removes before validating and answers what the lookup saw, so a switched-off plugin's key stays deletable.
     const named = c.req.param("agent") ?? "";
     const envName = c.req.query("envName") ?? "";
     if (named.length === 0 || envName.length === 0) {
@@ -2390,41 +799,12 @@ export function createApp(options: ServerOptions): AppBundle {
     const had = credentials.list().some((one) => one.agent === named && one.envName === envName);
     credentials.remove(named, envName);
     registry.sessionRuntime.forgetAvailability();
-    /*
-     * Removing one is the same fact as saving one *for the sessions still
-     * running*: the agents already up still hold it in their environment, and
-     * only a relaunch takes it away.
-     *
-     * ⚠ **It is the opposite fact for the ones already ended, which is what the
-     * `false` says.** Left to default, this resumed every conversation carrying
-     * `agent_signed_out` — conversations this daemon ended *because the
-     * credential went away* — and handed each a fresh agent with nothing to
-     * authenticate with. Deleting a credential is a sign-out's second half, not
-     * its reversal.
-     */
+    // Not revived: removing a credential is a sign-out's second half, never its reversal.
     const restarting = registry.reloadCredentials(named, false);
     return c.json({ removed: had, agent: named, envName, restarting });
   });
 
-  /**
-   * Signs the agent's own CLI out, and forgets the token we were holding for it.
-   *
-   * **Both halves, and the second is what makes the first mean anything.** The
-   * login probe deliberately runs with the pasted credential in its environment,
-   * so a sign-out that ran the CLI's logout and left `agent_credentials` alone
-   * would answer 200, re-probe, still find a token, and report `loggedIn: true`
-   * — a button that looks broken while doing exactly what it said.
-   *
-   * Credentials first, so the logout itself runs without them — and if the CLI
-   * then fails, the token stays cleared. That is the right way round: a partial
-   * sign-out that dropped the credential we were holding is closer to what was
-   * asked than one that dropped nothing, and the `502` says which half happened.
-   *
-   * `503 logout_unsupported` where the CLI has no such verb — measured, kimi has
-   * none — using the same status and sentence shape as `login_unsupported` two
-   * routes down, because it is the same kind of answer: the request is fine and
-   * this daemon will not do it.
-   */
+  // Clears our stored credential first, so it stays cleared if the CLI logout fails; the 502 says which half happened.
   app.post("/agent-auth/:agent/logout", write, async (c) => {
     const agent = agentIdParam(c);
     if (agent === null) return noSuchHarness(c);
@@ -2448,19 +828,10 @@ export function createApp(options: ServerOptions): AppBundle {
     const result = await registry.sessionRuntime.logout(agent);
     registry.sessionRuntime.forgetAvailability();
     if (result === null) {
-      // `canSignOut` said otherwise a moment ago, so the table and the runtime
-      // disagree. Reported rather than smoothed over.
       return jsonError(c, 503, "logout_unsupported", `${agent} has no sign-out command`);
     }
     if (!result.ok) return jsonError(c, 502, "logout_failed", result.detail ?? "the CLI refused");
-    /*
-     * **And every conversation running on it, which the CLI's own logout cannot
-     * reach.** A credential is read at spawn, so an agent started while signed in
-     * keeps answering for an account somebody has just revoked. Awaited, unlike
-     * the relaunch a *saved* credential triggers: signing out is a request to
-     * stop, and answering before it has stopped would be reporting a state that
-     * is not true yet.
-     */
+    // Awaited: signing out is a request to stop, and the answer must not precede it.
     const ended = await registry.signOutSessions(agent);
     return c.json({
       signedOut: true,
@@ -2471,60 +842,13 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   });
 
-  /**
-   * Ask this harness again, after somebody has fixed it somewhere this daemon
-   * cannot see.
-   *
-   * ⚠ **This is what the New session strip owes for hiding a tile.** A harness
-   * that refused to open a session loses its tile — `offersTile`'s established
-   * trade, argued in `agentCard.ts` — and the settings row it keeps is where the
-   * badge says why. But the commonest remedy for a harness with no sign-in wizard
-   * is *not* on any screen: it is running the CLI once in a terminal on the
-   * machine itself, which is exactly what a contributed harness's own `authHint`
-   * asks for. Nothing about that reaches this process, so without a control the
-   * only way back would be waiting out `START_REFUSAL_TTL_MS`.
-   *
-   * ⚠ **And it may not refuse where `login` and `logout` do, which is why it is
-   * not modelled on either.** Both of those answer `503` for a harness with no
-   * such verb — and a harness with no such verb is precisely the one this exists
-   * for. It asks nothing of the agent and takes nothing away: it drops what this
-   * daemon remembered and answers the fresh row, so the next listing is a real
-   * measurement rather than a recollection.
-   *
-   * ⚠ **Under `/agent-auth/` rather than beside `/agents`, and that placement is
-   * load-bearing rather than tidy.** This route calls `availability()`, which runs
-   * the login probe — a CLI spawn per harness. The browser's `slowRoute` matches
-   * `/agent-auth` by **prefix** (and `/agents` only on `GET`), so a `POST` here
-   * inherits the 90s budget; named anywhere else it would have taken the ordinary
-   * 15s, and an abort there is a *transport* failure, which is `forgetRoute` and a
-   * perfectly healthy machine drawn as unreachable everywhere at once. That is the
-   * defect `GET /agents/capabilities` shipped with, recorded in `machine.ts` at
-   * the predicate itself.
-   */
+  // Must answer for harnesses with no login or logout verb. Under /agent-auth so the client's slowRoute prefix gives it the long budget.
   app.post("/agent-auth/:agent/recheck", write, async (c) => {
     const agent = agentIdParam(c);
     if (agent === null) return noSuchHarness(c);
     registry.sessionRuntime.forgetStartRefusal(agent);
     registry.sessionRuntime.forgetAvailability();
     const found = (await registry.sessionRuntime.availability()).find((one) => one.id === agent) ?? null;
-    /*
-     * The row rather than `{ok: true}`, and the lookup rather than an assumption:
-     * this is `DELETE /systems/:system`'s shape — do the thing, then answer with
-     * what the listing now says — so a screen that redraws from this response
-     * cannot disagree with the one that redraws from `GET /agents`.
-     *
-     * ⚠ **Including `login`, which `availability()` does not carry and which is
-     * therefore the field this shape drops by default.** It is built in
-     * `loginSupportOf` and spread onto the two listings by hand, so a third route
-     * answering an agent row has to spread it too — and the cost of not doing so
-     * is measured and specific: with no `login` object, `no_flow` is gone and both
-     * this client's ladder and the browser's fall to *cannot check*, which is the
-     * permanent-wrong-badge failure `local.ts` returns `no_flow` to prevent. The
-     * sentence above would then have been false of the very first field a reader
-     * of this response looks at.
-     */
-    // Through `agentRowExtras` rather than spreading `login` by hand, which is what
-    // let `settingsMode` go missing here — see that helper's ⚠.
     const extras = await agentRowExtras();
     return c.json({
       agent,
@@ -2560,34 +884,12 @@ export function createApp(options: ServerOptions): AppBundle {
     if (logins === null) return jsonError(c, 404, "login_not_found", "no such login");
     const since = Number(c.req.query("since") ?? 0);
     const chunk = logins.read(c.req.param("loginId"), Number.isFinite(since) ? since : 0);
-    // A superseded run's id no longer resolves, which is what stops a wizard that
-    // has not noticed it was replaced from reading its successor's transcript —
-    // and that transcript can contain a one-time code.
+    // A superseded run's id no longer resolves, so a stale wizard cannot read its successor's one-time code.
     if (chunk === null) return jsonError(c, 404, "login_not_found", "no such login");
-    // The flow just ended, so whatever we last believed about "is this agent
-    // signed in" is stale — and this is the exact moment the client learns it,
-    // so it is the moment to make the next answer fresh. Without it the badge
-    // beside a successful login kept reading "not signed in".
     if (chunk.done) {
       registry.sessionRuntime.forgetAvailability();
-      /*
-       * ⚠ **And the refused start, because a finished sign-in is a credential
-       * arriving through the other door.** The rule this route is an exception to
-       * — that only `PUT /agent-auth/:agent` clears the record — was written
-       * against the four *sign-out-ward* events, and a wizard that has just run to
-       * completion is not one of them. Without this the whole flow ends wrong:
-       * `agentStance` puts `start_refused` above `signed_in`, so somebody who
-       * signed in inside the app kept the badge *would not start*, kept no tile,
-       * and lost the sign-in door itself — `signInOffered` wants
-       * `loggedIn === false` — with `POST /sessions` still refusing on the stale
-       * message for the rest of the budget.
-       *
-       * Cleared on the run *ending* rather than on it succeeding, deliberately:
-       * this route has no verdict to read, and the two failure modes are not
-       * symmetric. A wrongly cleared record costs one start attempt, which
-       * re-records it; a wrongly kept one costs ten minutes of a screen
-       * contradicting the wizard the reader just finished.
-       */
+      // A finished sign-in is a credential arriving, so it clears the refused start; kept, start_refused outranks signed_in once signInOffered has gone false.
+      // Cleared on the run ending, not on its success.
       registry.sessionRuntime.forgetStartRefusal(chunk.agent);
     }
     return c.json(chunk);
@@ -2603,15 +905,10 @@ export function createApp(options: ServerOptions): AppBundle {
     if (text.length > MAX_CREDENTIAL_CHARS) {
       return jsonError(c, 400, "bad_request", `text exceeds ${MAX_CREDENTIAL_CHARS} characters`);
     }
-    // HTTP rather than the stream, deliberately: a login code is sent once and
-    // is unrecoverable if it evaporates, which is precisely what `ws.send()`
-    // into a half-open socket does. The response is the confirmation.
+    // HTTP rather than the stream: a login code is sent once and needs a confirmed delivery.
     const result = logins.write(c.req.param("loginId"), text);
     if (result.kind === "not_found") return jsonError(c, 404, "login_not_found", "no such login");
     if (result.kind === "not_interactive") {
-      // A device-code flow spawned with no stdin — see `loginStdio`. It used to
-      // be a silent no-op that answered 200, so a code typed into the box went
-      // nowhere and the response said it had landed.
       return jsonError(
         c,
         400,
@@ -2630,71 +927,13 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ cancelled: true });
   });
 
-  /* ---------------------------------------------------------------- *
-   * Installing a harness onto this machine
-   *
-   * ⚠ **`machine:admin` on the writes, and the precedent is `POST /plugins`.**
-   * Putting new programs on somebody's computer is an act on the *machine*, and
-   * `packages/web/src/install.ts` already states the rule this follows: a grant
-   * that can drive every session on a host all day may not put code on it.
-   * Downloading and running a vendor's installer as this uid is at least that. A
-   * machine's owner holds every scope, so the button works for them; a shared
-   * grant gets `403`.
-   *
-   * ⚠ **The poll is `read`, unlike a login's.** A login transcript carries a
-   * one-time code; this one carries a vendor installer's output and a version
-   * number.
-   *
-   * ⚠ **Every handler here answers in milliseconds**, which is why none of them
-   * needs an entry in the client's `slowRoute` table: the start spawns and
-   * returns an id. A handler that held the connection for the length of an
-   * install would outlive the 15s budget, and a client abort there is a
-   * *transport* failure — which drops the route memo and draws a perfectly
-   * healthy machine as unreachable everywhere at once.
-   * ---------------------------------------------------------------- */
+  // Installing a harness: machine:admin on the writes, read on the poll; every handler answers in milliseconds.
 
-  /** The run this daemon is holding, for a client that reloaded and has no id. */
   app.get("/agent-install", read, (c) =>
     c.json({ supported: installs !== null, run: installs?.live() ?? null }),
   );
 
-  /**
-   * Start one, for the harnesses this repository ships and no others.
-   *
-   * ⚠ **`agentIdParam` is wider than the button, and that width reached the
-   * script.** It answers on `harnessState(value) === "enabled"`, and that is true
-   * of a harness a *plugin* contributed — `PluginContributions.harnessIds`
-   * returns the built-ins followed by its own — while `deploy/agents.sh` has never
-   * heard of one: it validates `--only` against its own five names and exits 2 by
-   * name for anything else. Nothing was ever injected (`spawn` takes an
-   * argv array and no shell), but the refusal landed in the wrong place and in the
-   * wrong shape. `spawnAgentsScript` maps every status but 3 to `"running"`, so
-   * `settle` went and asked the machine and reported the script's own by-name
-   * refusal as a **failed install** — a screen offering a retry for a name that
-   * can never work. And each attempt paid `onFinished` on the way out, which is
-   * `forgetAvailability()` plus a full `resumeInterrupted()` pass, so one HTTP
-   * request bought a fleet-wide cache flush and an auto-resume sweep.
-   *
-   * ⚠ **`isBuiltinAgentId` rather than the row's own `installable`, and the
-   * difference is a process.** `installable` is a fact out of `availability()`,
-   * which probes a CLI per harness; reading it here would put a spawn behind a
-   * handler this section's docblock promises answers in milliseconds, and it is
-   * `false` for a harness that is already present — so it would also refuse a
-   * deliberate re-install. The set that matters is the script's own argument list,
-   * and this predicate is exactly it.
-   *
-   * ⚠ **A `503` with a code of its own, and the three-valued discipline above is
-   * untouched.** An id nothing has heard of still earns {@link noSuchHarness}'s
-   * `400`, a plugin somebody switched off still earns its `503` naming the switch,
-   * and neither may become the other. This is the fourth state — a real, enabled
-   * harness this daemon will never install — so the `login_unsupported` /
-   * `logout_unsupported` pair under `/agent-auth/` is the precedent for both the
-   * status and the sentence shape: the request is fine and this daemon will not
-   * do it. A code distinct from `install_unsupported` because that one means the
-   * daemon installs *nothing*, and the two remedies are different sentences: run
-   * the script on that machine, against install it the way the plugin that added
-   * it says to.
-   */
+  // Built-in harnesses only: deploy/agents.sh knows its own five names and nothing a plugin added.
   app.post("/agent-install/:agent", admin, (c) => {
     if (installs === null) {
       return jsonError(
@@ -2717,14 +956,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const started = installs.start(agent);
     if (started.kind === "busy") {
-      /*
-       * ⚠ **`409` rather than `503`, and the difference is whether waiting helps.**
-       * This daemon answers `503` for "it does not do that" — `login_unsupported`,
-       * `harness_unavailable` — and `409` for a state conflict that passes on its
-       * own. One code carrying `holder` rather than two codes: the sentence differs
-       * between "the daily refresh is running" and "codex is installing", and the
-       * remedy is identical.
-       */
       return jsonError(
         c,
         409,
@@ -2757,44 +988,13 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ cancelled: true });
   });
 
-  /* ---------------------------------------------------------------- *
-   * Picking a working directory
-   * ---------------------------------------------------------------- */
-
-  /**
-   * Where the picker starts, from `REEMOAT_ROOTS` or the daemon user's home.
-   *
-   * Daemon-wide again. It was per-tenant while one daemon answered for several
-   * people, because a shared root list is then a listing of other people's
-   * projects; there is one person now, and these are their own directories.
-   *
-   * A narrowing of the *listing* and nothing more — `resolveCwd` is deliberately
-   * not confined to it, so a repository kept outside these is still somewhere a
-   * session can start.
-   */
-
   app.get("/fs/roots", read, (c) =>
     c.json({
       roots,
-      /*
-       * Unfiltered, and that is the change rather than an oversight.
-       *
-       * This used to drop any recent cwd outside the caller's own tree, because a
-       * row could name a directory a confined `resolveCwd` would then refuse —
-       * offering a button that answers 403. Nothing is confined now, so every
-       * recent directory is one a session really can start in, and filtering to
-       * the browse roots would hide exactly the ones somebody keeps outside them.
-       */
       recent: registry.recentCwds(),
     }),
   );
 
-  /**
-   * Makes one directory, so a session can start somewhere that does not exist yet.
-   *
-   * `session:write` rather than `read`: this is the only route under `/fs` that
-   * changes anything.
-   */
   app.post("/fs/mkdir", write, async (c) => {
     const body = await readJsonObject(c);
     const parent = body?.["parent"];
@@ -2805,10 +1005,6 @@ export function createApp(options: ServerOptions): AppBundle {
     if (name.length > MAX_DIR_NAME_CHARS) {
       return jsonError(c, 400, "bad_request", `name exceeds ${MAX_DIR_NAME_CHARS} characters`);
     }
-    // `parent` was bounded by nothing at all while `name` was bounded carefully,
-    // and it is the one that reaches `realpath`. A path is many segments, hence
-    // the larger ceiling; having one at all is the point, since this route is
-    // reachable through the relay.
     if (parent.length > MAX_PATH_CHARS) {
       return jsonError(c, 400, "bad_request", `parent exceeds ${MAX_PATH_CHARS} characters`);
     }
@@ -2824,28 +1020,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   });
 
-  /**
-   * Bring a codebase onto this machine.
-   *
-   * Registered here rather than under `/sessions` because it happens **before**
-   * there is a session: it is how somebody gets a folder worth starting one in,
-   * and `POST /fs/mkdir` above is the precedent — the other mutating, session-free
-   * `/fs` route. `session:write` for the same reason it does.
-   *
-   * The archive's filename rides `?name=` rather than a header, for the reason
-   * the upload route gives at length: `CORS_ALLOW_HEADERS` is `authorization` and
-   * `content-type` only, the relay imports that same constant to answer
-   * preflights from it, and a new header would need a control-plane redeploy
-   * before a browser could send it at all.
-   *
-   * **Every refusal cancels the body**, which is why this route does its own
-   * argument checking through `refuse()` instead of reading like the ones above
-   * it. The relay grants a stream's window on consumption, so a handler that
-   * answers 400 and walks away parks the sender at one `STREAM_WINDOW_BYTES` —
-   * and the next valve is
-   * the tunnel's 8 MiB socket check, which closes the whole tunnel for this
-   * machine and takes every other session on it down too.
-   */
   app.post("/fs/import", write, async (c) => {
     const refuse = async <T>(answer: () => T): Promise<T> => {
       await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
@@ -2862,9 +1036,6 @@ export function createApp(options: ServerOptions): AppBundle {
       return refuse(() => jsonError(c, 400, "bad_request", `path exceeds ${MAX_PATH_CHARS} characters`));
     }
 
-    // Sanitized with the uploads route's own function: this string is a *label*
-    // here too — it only ever names the folder when the archive does not name one,
-    // and `importFolderName` narrows it again to what may be a directory name.
     const requested = c.req.query("name") ?? "";
     const named = sanitizeUploadName(requested);
     if (!named.ok) {
@@ -2873,12 +1044,7 @@ export function createApp(options: ServerOptions): AppBundle {
       );
     }
 
-    /*
-     * Honoured to refuse, never to accept — the same rule the upload route
-     * states. Refusing on a `content-length` we believe costs nothing; *trusting*
-     * one would mean a body that lies walks past the counter that is actually
-     * enforcing this.
-     */
+    // Content-length is honoured to refuse, never to accept.
     const declared = Number.parseInt(c.req.header("content-length") ?? "", 10);
     if (Number.isFinite(declared) && declared > MAX_IMPORT_BYTES) {
       return refuse(() =>
@@ -2889,35 +1055,14 @@ export function createApp(options: ServerOptions): AppBundle {
       );
     }
 
-    /*
-     * One at a time, for the whole daemon.
-     *
-     * The relay allows 256 concurrent streams and this route has no per-session
-     * accounting to fall back on the way uploads do — nothing here is charged
-     * against a budget that outlives the request. Two hundred and fifty-six
-     * simultaneous imports is 12 GiB of archive and 125 GiB of unpacked tree, so
-     * the bound has to be arrival rather than size. A person imports a codebase
-     * about as often as they start a project, so serialising it costs nothing
-     * real, and `409` with a sentence is a better answer than a machine that has
-     * filled its disk.
-     */
+    // One import at a time daemon-wide: nothing here is charged against a budget, so the bound is arrival.
     if (importing) {
       return refuse(() =>
         jsonError(c, 409, "import_busy", "this machine is already unpacking an import"),
       );
     }
 
-    /*
-     * ⚠ **Claimed here, before the first `await`, and that placement is the whole
-     * guard.** The check above and this line used to have `resolveCwd` between
-     * them, which is a `realpath` — a real suspension, and one `stall.ts` records
-     * as able to queue for ever against a mount that has gone away. Every request
-     * that arrived while it was in flight read `importing` as `false`, so the
-     * bound this is here to enforce did not hold for the case it was written for:
-     * the 256 the relay allows arriving together all passed. Nothing between the
-     * test and the set may suspend, so everything that can is below it, inside
-     * the `finally` that releases it.
-     */
+    // Claimed before the first await: nothing between the test and the set may suspend.
     importing = true;
     try {
       let target: string;
@@ -2979,9 +1124,6 @@ export function createApp(options: ServerOptions): AppBundle {
     const path = c.req.query("path") ?? null;
     const showHidden = c.req.query("hidden") === "1";
     try {
-      // Awaited, and the `async` on the handler is not cosmetic: `c.json()` of an
-      // unawaited promise serializes as `{}`, and a `try` around a promise that is
-      // never awaited catches nothing.
       return c.json(await listDirs(path, { roots, showHidden }));
     } catch (error) {
       if (error instanceof PathError) {
@@ -2993,10 +1135,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   });
 
-  /* ---------------------------------------------------------------- *
-   * Sessions
-   * ---------------------------------------------------------------- */
-
   app.post("/sessions", write, async (c) => {
     if (registry.isShuttingDown) {
       return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
@@ -3004,17 +1142,6 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    /*
-     * The harness, and where it comes from.
-     *
-     * ⚠ **`customAgent` and `agent` are not alternatives, and this route does not
-     * make the caller keep them in step.** A preset already names its harness, so
-     * when one is given that is what `agent` becomes — a body sending both and
-     * disagreeing cannot produce a session running something neither field named.
-     * `machineOf().harnessState(agent)` guards the other arm below, and since the
-     * union widened it is the only door into what this machine offers that a
-     * request can reach.
-     */
     let customAgent: string | null = null;
     let agent: string | undefined;
     const namedPreset = body["customAgent"];
@@ -3026,37 +1153,13 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
       }
       const preset = systems.customAgents.get(namedPreset);
-      /*
-       * ⚠ **Its own code, because `not_found` already means something else on this
-       * route.** A `cwd` that does not exist reaches the `PathError` arm below and
-       * answers `400 not_found`; this is `404 not_found`. `docs/API.md` says read
-       * the code and never the status, so two refusals sharing a code with
-       * opposite remedies — "pick a different folder" against "that preset was
-       * deleted on another device" — is the one thing that convention cannot
-       * absorb. Every other 404 in this daemon is already `*_not_found`.
-       */
+      // custom_agent_not_found, because not_found already means a missing cwd on this route.
       if (preset === null) {
         return jsonError(c, 404, "custom_agent_not_found", "no such agent");
       }
       customAgent = preset.id;
       agent = preset.harness;
-      /*
-       * ⚠ **The preset's *system* is weighed here, on the axis the fence below
-       * does not cover.** `create` already refuses a harness that would not start
-       * before `createWorkspace`, and the reason it gives is the one that applies
-       * word for word here: an `applySystem` failure lands *after* the worktree,
-       * the branch and the session row are made, so every press on a preset whose
-       * provider is switched off was permanent growth inside somebody's own
-       * repository followed by a `502`. Nothing upstream caught it — `startableHere`
-       * in the browser weighs only the harness, so the tile draws enabled and can
-       * be the machine's default, and `readCustomAgent` keeps the row by *shape*,
-       * so the preset survives its plugin being switched off exactly as designed.
-       *
-       * Only for a preset, and only for a *contributed* system: a built-in always
-       * answers `enabled`, and a bare start names no system at all. `503` rather
-       * than `400` for the reason the paragraph below gives — this is the machine's
-       * state and one toggle fixes it.
-       */
+      // A preset's system is weighed before any worktree is made: an applySystem failure lands after it.
       if (machineOf().systemState(preset.system) !== "enabled") {
         return jsonError(
           c,
@@ -3074,14 +1177,6 @@ export function createApp(options: ServerOptions): AppBundle {
       const named = body["agent"];
       agent = typeof named === "string" ? named : undefined;
     }
-    /*
-     * ⚠ **Three answers rather than two, because "switched off" and "never
-     * existed" have opposite remedies.** A `400` says *fix your request*, which is
-     * the truth for an id nobody has ever offered and a lie for one that worked
-     * yesterday and whose plugin somebody disabled this morning — that is the
-     * machine's state, not the caller's mistake, and it is the shape
-     * `system_not_routable` already has.
-     */
     if (typeof agent !== "string" || machineOf().harnessState(agent) === "unknown") {
       return jsonError(c, 400, "invalid_agent", "agent must be one this machine offers", {
         offers: machineOf().harnessIds(),
@@ -3100,8 +1195,6 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 400, "bad_request", "cwd is required");
     }
 
-    // `true`/`false` are the shorthands a human types; "auto" is the default and
-    // "require" is for a caller that would rather fail than run without isolation.
     const raw = body["worktree"];
     let worktree: WorktreePolicy | undefined;
     if (raw === true) worktree = "require";
@@ -3118,41 +1211,20 @@ export function createApp(options: ServerOptions): AppBundle {
     const branch = typeof branchRaw === "string" ? branchRaw : null;
 
     try {
-      // The owner comes from the verified principal, never from the body. A
-      // client able to name its own owner would make the field a decoration.
-      //
-      // It is now the tenant id rather than the raw subject, so it is never null
-      // — the shared secret writes `local`. That matters because the owner is
       const managed = await registry.create({ agent, customAgent, cwd, worktree, branch });
       return c.json({ session: managed.snapshot() }, 201);
     } catch (error) {
       if (error instanceof PathError) {
-        // `outside_roots` is a refusal, not a malformed body — the same answer
-        // `/fs/list` gives for the same fact. The rest really are bad input.
         return jsonError(c, pathErrorStatus(error, 400), error.code, error.message);
       }
       if (error instanceof WorktreeError) {
         return worktreeError(c, error);
       }
       if (error instanceof SystemRoutingError) {
-        /*
-         * 502 and its own code, beside `agent_auth_required` rather than among
-         * the 400s: the request was well formed and named a preset this daemon
-         * holds — what failed is the agent, or a key that is not there. The
-         * remedies are "save a key" and "pick a different pairing", and neither
-         * is "fix your request".
-         */
         return jsonError(c, 502, "system_not_routable", error.message);
       }
       if (error instanceof SessionLimitError) {
-        /*
-         * 429, and the code says which bound refused because the remedies differ:
-         * `too_many_sessions` is "stop one", `session_rate_limited` is "wait".
-         * `retryAfterSeconds` rides the detail rather than a header for the reason
-         * the control plane's own `tooManyAttempts` gives — a parsed `ApiError`
-         * carries the body and never the headers, so a number in a header is one
-         * no client here can read.
-         */
+        // retryAfterSeconds rides the detail: clients parse the body, never the headers.
         return jsonError(c, 429, error.reason, error.message, {
           retryAfterSeconds: error.retryAfterSeconds,
         });
@@ -3167,52 +1239,14 @@ export function createApp(options: ServerOptions): AppBundle {
         });
       }
       const message = describeError(error);
-      /*
-       * ⚠ **Through `isAuthRequiredMessage`, which is where that concession is
-       * supposed to live and where its own docblock already claims it does.** The
-       * rewrap in `session.ts` throws a plain `Error`, so reading the sentence is
-       * all any caller can do — and this was the fourth hand-written copy of the
-       * pattern, uncounted by the docblock that says there are two. It matters
-       * more now: `registry.create` re-throws a *remembered* refusal so a second
-       * press costs no worktree, and that answer has to land on this same arm with
-       * the same code, or the two presses report the same failure differently.
-       */
+      // Through isAuthRequiredMessage, so a remembered refusal gets the same code as the first.
       const code = isAuthRequiredMessage(message) ? "agent_auth_required" : "agent_launch_failed";
       return jsonError(c, 502, code, message);
     }
   });
 
-  /**
-   * Every session on this daemon, or a bounded, priority-ordered page of them.
-   *
-   * Unbounded by default, because that is what it has always been and
-   * `scripts/client.ts` prints the result in creation order. But retention is 200
-   * sessions and each row is a full snapshot, so a phone polling this every four
-   * seconds per machine moves on the order of a hundred megabytes an hour on LTE
-   * for a list whose interesting part is a handful of rows. `?limit=` is the fix,
-   * and it is opt-in so no existing caller changes behaviour.
-   *
-   * **Truncation is only safe because the order changes with it.** With a `limit`
-   * the list is returned blocked-first, then pinned, then everything else still
-   * live, then the most recent terminal sessions — so dropping the tail can only
-   * ever drop the rows nobody is waiting on. (`pinned` was missing from this
-   * sentence for as long as it has been in `listRank`. A *position* is absent from
-   * both on purpose — see the note there.) Returning creation order and cutting it would let a
-   * limit hide the one blocked session the whole product exists to surface. The
-   * reorder therefore happens exactly when a cut can happen, and not otherwise.
-   *
-   * `total` and `truncated` are always present. A client that prunes state for
-   * sessions missing from the response has to know the difference between "gone"
-   * and "outside the window", and a list that quietly stops short reads as
-   * complete.
-   */
+  // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.
   app.get("/sessions", read, (c) => {
-    // `listing`, which is what takes `outputFilePath` off every background-task
-    // row: this is the four-second poll the paragraph above is about, and that
-    // field is the largest thing in a record no client draws. `GET /sessions/:id`
-    // still carries it whole — see `ManagedSession.snapshot`. The socket carries
-    // it too, except on a frame `fitSnapshotFrame` had to reduce: its first rung
-    // nulls the same field, so that is a second site and it is conditional.
     const all = registry.list().map((session) => session.snapshot({ listing: true }));
     const limitParam = c.req.query("limit");
     const limit = limitParam === undefined ? null : Math.max(0, boundedInt(limitParam, 0));
@@ -3232,15 +1266,6 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   });
 
-  /*
-   * ⚠ **The one read that carries the *whole* model list**, and the browser
-   * depends on it. `GET /sessions` cuts the choices of every option to
-   * `MAX_SNAPSHOT_CHOICES` because sixty of those records ride a four-second poll
-   * to a phone; a keyed opencode publishes 362 models, so without the cut the list
-   * response is dominated by menus nobody is looking at. This route is one session,
-   * asked for on purpose, and is not polled — so it answers in full, and
-   * `truncated` on the polled copy is what tells a picker to come here.
-   */
   app.get("/sessions/:id", read, withSession((c, managed) => {
     return c.json({ session: managed.snapshot({ fullConfig: true }) });
   }));
@@ -3250,23 +1275,11 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ session: managed.snapshot() });
   }));
 
-  /**
-   * Reattaches a fresh agent to a session that ended.
-   *
-   * A route rather than anything on the stream, because the WS is read-only:
-   * everything that mutates state is an HTTP request. Mirrors POST /sessions in
-   * both its error codes and its shape, since it is the same launch underneath.
-   */
   app.post("/sessions/:id/resume", write, withSession(async (c, managed) => {
     if (registry.isShuttingDown) {
       return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
     }
 
-    // The workspace is checked here for the same reason the auto-resume pass
-    // checks it: claude's adapter refuses a nonexistent `cwd` with
-    // `invalidParams`, so a manual resume of a removed worktree used to surface
-    // as a baffling `502 agent_launch_failed` from inside the agent instead of
-    // the `409 workspace_missing` this daemon already knows how to say.
     const gate = await workspaceReady(c, managed);
     if (gate) return gate;
 
@@ -3274,9 +1287,6 @@ export function createApp(options: ServerOptions): AppBundle {
       await managed.resume();
       return c.json({ resumed: true, session: managed.snapshot() });
     } catch (error) {
-      // One mapping, shared with the automatic path in `registry.ts`. Two would
-      // mean the button and the boot pass explaining the same failure with
-      // different words to the same client.
       const failure = describeResumeFailure(error);
       const detail: Record<string, unknown> =
         error instanceof StartTimeoutError
@@ -3300,8 +1310,6 @@ export function createApp(options: ServerOptions): AppBundle {
       if (!Array.isArray(attachments)) {
         return jsonError(c, 400, "bad_request", "attachments must be an array of upload ids");
       }
-      // Length checked *before* iterating. `readJson` is `c.req.json()` with no
-      // bound, so an array that arrives is whatever the caller sent.
       if (attachments.length > MAX_PROMPT_ATTACHMENTS) {
         return jsonError(c, 400, "too_many_attachments", `at most ${MAX_PROMPT_ATTACHMENTS} files per message`, {
           limit: MAX_PROMPT_ATTACHMENTS,
@@ -3318,9 +1326,7 @@ export function createApp(options: ServerOptions): AppBundle {
     let staged: UploadRow[] = [];
     if (ids.length > 0) {
       if (!uploads) return jsonError(c, 503, "uploads_unavailable", "this daemon has no upload store");
-      // Resolved here, synchronously, so an unknown id is refused before any
-      // state moves. Keyed on the pair, so an id belonging to another session is
-      // *missing* rather than forbidden.
+      // Keyed on session and id, so another session's upload is missing rather than forbidden.
       const found = uploads.resolve(managed.id, ids);
       if (!found.ok) {
         return jsonError(c, 400, "unknown_attachment", "no such upload on this session", {
@@ -3330,19 +1336,7 @@ export function createApp(options: ServerOptions): AppBundle {
       staged = found.rows;
     }
 
-    /*
-     * Text is required **unless** files came with it.
-     *
-     * A message that is only a screenshot is an ordinary thing to send, and this
-     * route refused it — validated before it had even looked at `attachments`,
-     * which is why the order above is now attachments first. The client is
-     * deliberately not allowed to paper over it by inventing "here is a file":
-     * that puts words in the operator's mouth inside the model's context, and the
-     * model reads them as instructions.
-     *
-     * Still refused when there is nothing at all: an empty prompt with no files
-     * is a mis-tap, and answering it would start a turn about nothing.
-     */
+    // Text is required unless files came with it; the client must not invent text for a file-only message.
     const text = body?.["text"];
     if (typeof text !== "string") {
       return jsonError(c, 400, "bad_request", "text must be a string");
@@ -3354,130 +1348,17 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 400, "bad_request", `text exceeds ${MAX_PROMPT_CHARS} characters`);
     }
 
-    /*
-     * A message to a session the daemon ended brings it back first.
-     *
-     * This is what makes "you wait out the deploy and go on talking" true for
-     * the session the boot pass missed, gave up on, or has not reached yet — and
-     * for `agent_exited`, which the boot pass deliberately leaves alone because
-     * nobody asked it to. Here rather than in `ManagedSession.prompt`, which is
-     * synchronous by contract: it answers a 202 carrying `{turn, seq}` and calls
-     * `safeAppend`, so there is nowhere in it to put an await. The route already
-     * owns every other pre-flight, and it is the only layer that can choose its
-     * own latency budget — the client puts this path on the 90s slow-route
-     * timeout precisely because of these lines.
-     *
-     * **After** body validation, so a mis-tap never spawns an agent.
-     *
-     * A failure falls through to the `terminal` arm below rather than answering
-     * with something new. The client already knows `409 session_terminal`; a
-     * transparent step that failed should not invent an error surface for a
-     * request that, from the caller's side, is exactly the one they always sent.
-     */
-    /*
-     * A restart this daemon started is waited out, not refused.
-     *
-     * `applyUltracode` stops the agent and puts a new one in front of the same
-     * conversation, and for those seconds `ManagedSession.prompt` answers
-     * `409 turn_in_flight`. From the composer that is somebody flipping a setting,
-     * typing, and being told no — about work they did not ask for and cannot see,
-     * now that the strip draws the restart as already done.
-     *
-     * Here rather than in `ManagedSession.prompt`, which is synchronous by
-     * contract: it sets `turn` before any await, and that is what makes its own
-     * 409 exact. This is the same shape as the resume below — a transparent step
-     * in front of the request the caller actually sent — and it is deliberately
-     * **first**, so everything after it reads a settled session rather than one
-     * mid-restart.
-     *
-     * Bounded by the restart's own budget (`stop`'s teardown plus `resume`'s 45s
-     * start timeout), inside this route's 90s slow-route allowance. It cannot
-     * reject, so a restart that failed falls through to the arms below and is
-     * reported as the state it left behind.
-     */
-    /*
-     * **There is deliberately no "is this agent signed in" probe here.**
-     *
-     * An earlier version asked the agent's CLI before every message. It cost a
-     * process spawn on the hot path, could only ever be as fresh as its 3s cache,
-     * and — the reason it is gone — made the offline drivers depend on whether
-     * the person running them happened to be signed in, because a stub runtime
-     * inherits the real probe and `resolveLoginBinary` found the copy this
-     * repository vendored then under `node_modules`. CI is signed in to nothing,
-     * so it refused a prompt two assertions expected to land.
-     *
-     * The two real cases are covered without asking. A sign-out *through this
-     * daemon* ends the conversations itself (`signOutSessions`). A credential
-     * that went away some other way — revoked elsewhere, or expired — is reported
-     * by the agent, at the only moment that cannot be stale: `isAuthFailure` on
-     * the event pump, which puts a **fresh agent** under the same conversation and
-     * leaves the error in the transcript for somebody to read and send again.
-     *
-     * ⚠ **This said the pump "ends the session with the same reason", and that
-     * has been false since Q7.99.** It described `stop("agent_signed_out")`, which
-     * was removed for being wrong about what it had measured — a token with 1.4
-     * hours left on it, under a conversation that could never come back. The
-     * sentence mattered because it is the argument for there being no probe here:
-     * the argument survives, and it is `restartAgent` rather than a terminal
-     * status that carries it. See `onAgentUnusable`.
-     */
+    // A restart this daemon started is waited out rather than answered turn_in_flight, and first, so everything below reads a settled session.
+    // Deliberately no signed-in probe: signOutSessions and the pump's isAuthFailure cover both cases (Q7.99).
     await managed.whenRestarted();
 
-    /*
-     * **The folder has to still be there, and this is asked on every message
-     * rather than only before a resume.**
-     *
-     * ⚠ It guarded the resume branch alone, so a session whose workspace vanished
-     * *while it was open* had a live agent standing in a directory that no longer
-     * existed — and the first anybody heard of it was the agent's own words in the
-     * transcript: `Internal error: Path "…/worktrees/…/s_282fc818" does not
-     * exist`. A raw internal error, in the conversation, with no remedy anywhere
-     * on the screen and nothing saying which of the many things it could mean it
-     * was. Reported from a phone, with a screenshot, after exactly that happened.
-     *
-     * It is not exotic: `rmworkspace` is a route, `git worktree remove` is a
-     * command somebody runs, and a worktree under `~` is a directory a person can
-     * delete. What makes it worth a check on the hot path is that the failure is
-     * otherwise indistinguishable from the agent breaking.
-     *
-     * The cost is one `probeExists` — bounded, three-valued, and the reason
-     * `stall.ts` exists — per message a human types, against a prompt that is
-     * about to spawn or wake a process and hold a 90-second budget. `409
-     * workspace_missing` and `503 workspace_unresponsive` are sentences a client
-     * already draws, and telling a stalled mount from a deleted directory is the
-     * whole reason that function has three answers rather than two.
-     */
+    // The workspace is checked on every message: a folder deleted while open otherwise surfaces as an agent's internal error.
     const workspace = await workspaceReady(c, managed);
     if (workspace) return workspace;
 
-    /*
-     * Wake it if it needs waking. The whole condition — including why `parked` sits
-     * outside `REEMOAT_AUTO_RESUME` — is `SessionRegistry.wakeForPrompt`, which
-     * lives there because the plugin API's `sessions.prompt` is the second caller
-     * and reached `ManagedSession.prompt` without it.
-     */
     await registry.wakeForPrompt(managed);
 
-    /*
-     * `/clear` is carried out here, not forwarded.
-     *
-     * Measured 2026-08-05: sending it to claude's CLI makes it fork to a fresh
-     * conversation *underneath* ACP — our session id does not change, the file
-     * it names keeps the pre-clear history, and the live conversation gets an id
-     * nobody tells us. The next boot's resume then reattached to the abandoned
-     * one and handed back a codeword somebody had cleared. Opening the new
-     * session ourselves removes the cause: the id is in the response.
-     *
-     * The menu entry was already ours — claude's adapter filters `clear` out of
-     * what it advertises, and this daemon restored it — so implementing it is
-     * consistent rather than an interception of somebody else's command. It also
-     * makes it work on kimi, which has no `/clear` and answers "Unknown ACP
-     * command".
-     *
-     * Exact match only, and no attachments. `/clear` takes no argument, so
-     * anything after it is somebody typing something else — forwarded as text,
-     * which is what an unrecognised slash command has always done.
-     */
+    // /clear is carried out here, not forwarded: claude forks underneath ACP and never reports the new id. Exact match only.
     if (text.trim() === "/clear" && staged.length === 0) {
       const cleared = await managed.clearContext(text.trim());
       switch (cleared.kind) {
@@ -3505,21 +1386,7 @@ export function createApp(options: ServerOptions): AppBundle {
     switch (result.kind) {
       case "accepted":
         return c.json({ accepted: true, turn: result.turn, seq: result.seq, session: managed.snapshot() }, 202);
-      /*
-       * **A turn is running, and that is no longer a refusal.**
-       *
-       * ⚠ It answered `409 turn_in_flight` for four releases, and the whole of
-       * this feature is that it does not: the message is taken, and how it
-       * reaches the agent depends on what the agent can do. `sendMidTurn` is
-       * async — `Session.steer` is an RPC — which is why the split is a second
-       * method rather than a branch inside `ManagedSession.prompt`, whose
-       * synchronous contract is the guard everything else here depends on.
-       *
-       * Both landings are a **202** carrying the same `seq`, because both really
-       * did accept the message: the difference is only whether the agent has it
-       * yet. A client reads `steered`/`queued` to decide what to say, never the
-       * status code — the daemon has not refused anything.
-       */
+      // A running turn is not a refusal: sendMidTurn steers or queues, both a 202 carrying the seq.
       case "turn_in_flight": {
         const mid = await managed.sendMidTurn(text, staged);
         switch (mid.kind) {
@@ -3541,14 +1408,8 @@ export function createApp(options: ServerOptions): AppBundle {
               202,
             );
           case "accepted":
-            // The turn ended underneath us. An ordinary send, answered the
-            // ordinary way — a refusal here would be about a state that has
-            // already gone.
             return c.json({ accepted: true, turn: mid.turn, seq: mid.seq, session: managed.snapshot() }, 202);
           case "queue_full":
-            // 429 rather than 409: nothing about this session is wrong and
-            // nothing needs answering first, there is simply a ceiling and the
-            // remedy is to wait. The same shape `POST /sessions` uses at its own.
             return jsonError(c, 429, "prompt_queue_full", "too many messages are already waiting or in flight for this session", {
               limit: mid.limit,
             });
@@ -3569,11 +1430,7 @@ export function createApp(options: ServerOptions): AppBundle {
         break;
       }
       case "busy":
-        // A `/clear` or a restart, which really is a refusal: the agent's session
-        // id is being replaced and nothing may address it. The code stays
-        // `turn_in_flight` — it is what every deployed client reads, and
-        // `daemoncheck` pins it — even though the honest reading of it narrowed
-        // when the arm above stopped sharing this one.
+        // The code stays turn_in_flight: deployed clients read it and daemoncheck pins it.
         return jsonError(c, 409, "turn_in_flight", "a turn is already in flight", {
           status: result.status,
           pendingPermissions: managed.snapshot().pendingPermissions,
@@ -3591,36 +1448,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /**
-   * Stop the turn in flight, and leave the session running.
-   *
-   * `write` and not `admin`, beside `/prompt` rather than beside `DELETE
-   * /sessions/:id`: this destroys nothing that outlives the request. Whoever may
-   * start a turn may stop one, and a grant that could set an agent going on your
-   * machine and then not call it off would be the worse of the two halves.
-   *
-   * **A 200 rather than a 202, and a body that says which of two things happened.**
-   * A prompt answers 202 because the work it names is only beginning; a cancel is
-   * a request the daemon has finished acting on by the time it answers — the
-   * notification is out, anything parked on a human has been settled, and what
-   * remains is the agent's own unbounded business, reported as `settled` and
-   * never waited for past `CANCEL_SETTLE_MS`.
-   *
-   * **No body is read.** There is nothing a caller could say: the turn to stop is
-   * the one that is running, and taking a turn number would mean answering
-   * requests about turns that ended — a refusal somebody would have to handle for
-   * no gain, since the only honest reaction to it is the one this route already
-   * gives for free.
-   *
-   * The one shape worth reading twice is `no_turn`, which is a **200 with
-   * `cancelled: false`** rather than a 409. Nothing was stopped and nothing is
-   * wrong: the caller asked for an agent that is not working, and it is not
-   * working. That state is reachable by losing an ordinary race — the tap and the
-   * turn's own end are two events nobody orders — and a red error there would
-   * make the control look broken at the exact moment it got what it wanted.
-   * `terminal` and `not_ready` stay 409s, because those say something the caller
-   * does not know: there is no agent at all.
-   */
+  // No body is read. no_turn is a 200 with cancelled false, a lost race; terminal and not_ready stay 409.
   app.post("/sessions/:id/cancel", write, withSession(async (c, managed) => {
     const result = await managed.cancelTurn();
     switch (result.kind) {
@@ -3628,19 +1456,12 @@ export function createApp(options: ServerOptions): AppBundle {
         return c.json({
           cancelled: true,
           turn: result.turn,
-          // Deliberately not folded into `cancelled`. One says what this daemon
-          // did, which always happened; the other says whether the agent had
-          // finished by the time we stopped watching, which is an observation and
-          // may be `false` on a cancel that is working perfectly.
           settled: result.settled,
           session: managed.snapshot(),
         });
       case "no_turn":
         return c.json({ cancelled: false, turn: null, settled: true, session: managed.snapshot() });
       case "busy":
-        // The same code and the same sentence `/config` answers in this window,
-        // and for the same reason: nothing is in flight that a caller could wait
-        // on, the agent's conversation is simply being replaced underneath it.
         return jsonError(c, 409, "session_busy", "this session's context is being cleared", {
           status: result.status,
         });
@@ -3656,21 +1477,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /*
-   * Stop one piece of background work, without touching the turn.
-   *
-   * **The task id is a path parameter and is looked up in the set this session
-   * announced** — never a method name from a body, which is the rule the login
-   * command table states and the reason there is nothing here a caller could aim
-   * at a program of their choosing. `ManagedSession.stopBackgroundTask` does the
-   * lookup; this route only maps its answers.
-   *
-   * `stopped: false` is a **200**, deliberately: the task finished on its own
-   * between the tap and the request, which is losing an ordinary race — the same
-   * judgement `/cancel`'s `no_turn` makes, and for the same reason. A `404` is
-   * kept for an id this session never announced, which is a different sentence:
-   * not "you lost a race" but "there is no such task here".
-   */
+  // The task id is looked up in the set this session announced. stopped false is a 200, a lost race; 404 only for an id never announced.
   app.post("/sessions/:id/async-tasks/:taskId/stop", write, withSession(async (c, managed) => {
     const result = await managed.stopBackgroundTask(c.req.param("taskId"));
     switch (result.kind) {
@@ -3692,38 +1499,8 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /*
-   * Stage a file for a later prompt.
-   *
-   * Raw body, and the filename rides `?name=`. That is forced rather than
-   * aesthetic: `CORS_ALLOW_HEADERS` is `authorization` and `content-type`, the
-   * relay imports that same constant and answers preflights with it, and
-   * `relaycheck` asserts the two agree — so a custom `x-filename` would need this
-   * file, both drivers *and a control-plane redeploy* before any browser could
-   * send one, and the control plane is a separate deployment from this daemon.
-   * The one prefix somebody would otherwise reach for, `reemoat-*`, is exactly
-   * what the relay strips. A query parameter rides the URL, which the relay
-   * forwards verbatim and which `pathOf` already keeps out of its logs.
-   *
-   * Per session, so `sessionOf` makes an upload against an id that does not exist
-   * impossible and there is no orphan namespace to reconcile. A **terminal**
-   * session still accepts one, deliberately: `resume` exists, and "it stopped,
-   * let me give it a screenshot and start it again" is the ordinary flow rather
-   * than an edge case.
-   */
+  // The filename rides the name query parameter: CORS_ALLOW_HEADERS is shared with the relay and admits no new header. A terminal session still accepts uploads.
   app.post("/sessions/:id/uploads", write, async (c) => {
-    /*
-     * **Every refusal on this route releases the body first.**
-     *
-     * `Uploads.receive` spends a paragraph on why, and every word of it applies
-     * a layer earlier: these refusals happen with a whole `MAX_UPLOAD_BYTES` in
-     * flight and used to return without ever touching the stream. A body nobody
-     * reads parks the sender against the relay's per-stream window, and the valve
-     * above that closes the whole tunnel for this machine — every other session
-     * with it. `invalid_name` is not hypothetical: `pastedName` exists precisely
-     * because a nameless paste 400s here, and `upload_too_large` is by
-     * construction the path with the largest body behind it.
-     */
     const refuse = async <T>(answer: () => T): Promise<T> => {
       await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
       return answer();
@@ -3751,18 +1528,7 @@ export function createApp(options: ServerOptions): AppBundle {
       return refuse(() => jsonError(c, 400, "invalid_mime", "content-type must be type/subtype"));
     }
 
-    /*
-     * Honoured to refuse, never to accept.
-     *
-     * The byte counter in `Uploads.receive` is what actually bounds the body, and
-     * it is the only such bound anywhere in this system. But refusing a
-     * *half-read* body means destroying the request stream, which through the
-     * relay destroys the HTTP/2 CONNECT stream carrying it — and that surfaces at
-     * the browser as the relay's own `502 tunnel_failed` rather than as the 413
-     * written here. Reading the header first keeps the honest status for every
-     * client that declares a length, and leaves the counter for chunked bodies
-     * and for clients that lie.
-     */
+    // Honoured to refuse, never to accept: the Uploads.receive counter bounds the body, and the header keeps an honest 413 over the relay.
     const declared = Number.parseInt(c.req.header("content-length") ?? "", 10);
     if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
       return refuse(() =>
@@ -3790,8 +1556,6 @@ export function createApp(options: ServerOptions): AppBundle {
             upload: {
               uploadId: result.row.uploadId,
               name: result.row.name,
-              // Echoed once, which is what makes shortening a long name safe
-              // rather than a silent loss: the client can say "saved as …".
               originalName: result.row.origName,
               mime: result.row.mime,
               bytes: result.row.bytes,
@@ -3817,25 +1581,9 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 409, "upload_limit", "this session already holds too many staged files", {
           limit: MAX_UPLOADS_PER_SESSION,
         });
-      /*
-       * The one refusal here that expires on its own, so it says when.
-       *
-       * `Retry-After` in whole seconds, rounded **up** and never below 1, which
-       * is the rule `throttle.ts` already states one package over: a
-       * `Retry-After: 0` invites the immediate retry it is refusing. The same
-       * number rides the detail in milliseconds, because a client drawing "try
-       * again in a moment" wants the real one and a second's resolution is not
-       * enough to say a moment.
-       */
       case "rate": {
         const seconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
         c.header("Retry-After", String(seconds));
-        /*
-         * The wait is in the **message**, not only in the detail, because the
-         * message is the whole of what a person sees: a failed chip carries
-         * `errorText(cause)` and nothing else, beside a retry button. "Too much
-         * lately" with no number is a control somebody presses again immediately.
-         */
         return jsonError(
           c,
           429,
@@ -3851,18 +1599,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   });
 
-  /**
-   * Changes one of the agent's own controls: mode, model, reasoning effort.
-   *
-   * One route for both because ACP's two calls answer very differently —
-   * `session/set_config_option` returns the refreshed option set,
-   * `session/set_mode` returns nothing at all — and a client should not have to
-   * know which one its agent prefers. Either body shape lands on the same
-   * response, which is always the agent's *own* view afterwards rather than an
-   * echo of the request: setting model rebuilds the available modes and can
-   * reset the current one, so what was asked for and what is now true differ
-   * often enough to matter.
-   */
   app.post("/sessions/:id/config", write, withSession(async (c, managed) => {
 
     const body = await requireJson(c);
@@ -3894,9 +1630,6 @@ export function createApp(options: ServerOptions): AppBundle {
         result = await managed.setConfigOption(configId, value);
       }
     } catch (error) {
-      // The agent refused or went quiet. Its own message is the useful part —
-      // "model X is not available on this account" is the agent's to say — so it
-      // is passed through rather than replaced with a generic failure.
       const message = describeError(error);
       return jsonError(c, 502, "agent_config_failed", message, { session: managed.snapshot() });
     }
@@ -3917,21 +1650,11 @@ export function createApp(options: ServerOptions): AppBundle {
           modes: result.modes,
         });
       case "busy":
-        // Not `turn_in_flight`, which is what a *prompt* refused in this same
-        // window answers: nothing is in flight — a clear burns no turn and the
-        // status beside this still reads `idle` — and a caller told a turn is
-        // running would wait for a `turn_end` that is never coming. What is true
-        // is that the agent's conversation is being replaced and this control
-        // would land on the wrong one, which is over in about the time it takes
-        // to tap again.
+        // session_busy, not turn_in_flight: a clear runs no turn, so nothing would ever end one.
         return jsonError(c, 409, "session_busy", "this session's context is being cleared", {
           status: result.status,
         });
       case "turn_in_flight":
-        // The one control here that needs the agent restarted, and a turn is
-        // what a restart would destroy. `turn_in_flight` rather than
-        // `session_busy` because for once it really is a turn, and the caller can
-        // act on that: wait, or stop the turn first.
         return jsonError(c, 409, "turn_in_flight", "this change restarts the agent; the turn must end first", {
           status: result.status,
         });
@@ -3944,24 +1667,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /**
-   * Names a session, or pins it to the top of the list.
-   *
-   * `POST` on a sub-resource rather than `PATCH` on the session, following
-   * `/config` directly above, for no gain over a `POST` that already reads
-   * naturally. The cost that used to be half this argument is spent: `PATCH` is
-   * in `CORS_ALLOW_METHODS` now — `PATCH /custom-agents/:id` put it there — so
-   * the verb no longer buys a preflight failure in every browser. What is left is
-   * only that this route names a sub-resource rather than editing the session,
-   * and a `PATCH` on `/sessions/:id` would have to.
-   *
-   * `write` and not `admin`: a rename destroys nothing. `machine:admin` guards
-   * `DELETE /sessions/:id/workspace`, which deletes files.
-   *
-   * The tenant boundary is the first two lines, as everywhere else: `owned`
-   * resolves through `registry.getFor`, so an id that is not yours and an id that
-   * does not exist are the same 404.
-   */
   app.post("/sessions/:id/meta", write, withSession(async (c, managed) => {
 
     const body = await requireJson(c);
@@ -3974,9 +1679,6 @@ export function createApp(options: ServerOptions): AppBundle {
       if (title !== null && typeof title !== "string") {
         return jsonError(c, 400, "bad_request", "title must be a string or null");
       }
-      // Measured against the *raw* string, before normalization collapses
-      // whitespace and clips. A caller who sends 400 characters is told they sent
-      // too many rather than being answered 200 with a silently different title.
       if (typeof title === "string" && title.length > MAX_TITLE_CHARS) {
         return jsonError(c, 400, "bad_request", `title must be at most ${MAX_TITLE_CHARS} characters`);
       }
@@ -3989,16 +1691,7 @@ export function createApp(options: ServerOptions): AppBundle {
       change.pinned = pinned;
     }
 
-    /*
-     * Where this session sits in the list. `null` clears it back to "follows its
-     * age", exactly as `title: null` clears a name.
-     *
-     * ⚠ **`Number.isFinite`, not `typeof === "number"`.** `JSON.parse` answers
-     * `Infinity` for `1e400` and this value is compared against every other
-     * session's on every render — an infinite one pins a row to the top of its
-     * folder for ever, and `NaN` makes the comparator answer 0 for every pair,
-     * which is a total order the sort silently stops being.
-     */
+    // Finite only: Infinity or NaN would break the list's sort order.
     if ("rank" in body) {
       const rank = body["rank"];
       if (rank !== null && !(typeof rank === "number" && Number.isFinite(rank))) {
@@ -4011,9 +1704,6 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"}, {"pinned"} or {"rank"}');
     }
 
-    // The whole snapshot, never an echo — same reason `/config` above answers this
-    // way. A title is normalized on the way in, so what was asked for and what is
-    // now true are not the same string.
     return c.json({ session: managed.setMeta(change) });
   }));
 
@@ -4041,9 +1731,7 @@ export function createApp(options: ServerOptions): AppBundle {
           optionId: result.optionId,
           by: "client",
           repeat: false,
-          // "recorded", not "the agent continued": once the agent's connection is
-          // gone the SDK swallows the send, so delivery cannot be proven here.
-          // Only a subsequent event in the log proves effect.
+          // Recorded, not proven delivered: a send to a gone agent is swallowed; only a later event proves effect.
           delivered: result.delivered,
           seq: result.seq,
           session: managed.snapshot(),
@@ -4077,20 +1765,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /*
-   * The form behind a pending question.
-   *
-   * Off the snapshot deliberately, and this is the same shape `GET
-   * /sessions/:id/commands` has: `SessionSnapshot` says only *that* a question is
-   * waiting, because `GET /sessions` returns sixty of those every four seconds
-   * and a form is agent-shaped. The rule a pending permission passes and this one
-   * does not is "a blocked session has to be answerable from the list" — you
-   * cannot fill a form in from a list, so the fields are fetched when a card
-   * opens.
-   *
-   * 404 once it is settled, which is honest rather than awkward: the form is held
-   * on the pending record and there is nothing to fill in any more.
-   */
   app.get("/sessions/:id/elicitations/:elicitationId", read, withSession((c, managed) => {
     const form = managed.elicitationForm(c.req.param("elicitationId"));
     if (!form) {
@@ -4122,17 +1796,12 @@ export function createApp(options: ServerOptions): AppBundle {
           action: result.action,
           by: "client",
           repeat: false,
-          // The same honesty the permission route carries: "recorded", not "the
-          // agent continued". Only a later event in the log proves effect.
           delivered: result.delivered,
           seq: result.seq,
           session: managed.snapshot(),
         });
       case "already_answered":
-        // A 409 carrying a *success*-shaped body, with no `error` key — the
-        // answer really did land, and a retry from a phone on a flaky connection
-        // is the commonest way to get here. `action` is the one that **won**, not
-        // the one just sent.
+        // A 409 with a success-shaped body: the answer landed, and action is the one that won.
         return c.json(
           {
             recorded: true,
@@ -4148,8 +1817,6 @@ export function createApp(options: ServerOptions): AppBundle {
       case "expired":
         return jsonError(c, 409, "elicitation_expired", "that question was settled and forgotten");
       case "invalid_content":
-        // `fields` rides along for the reason `invalid_option` returns `options`:
-        // a client that is out of date can redraw rather than guess.
         return jsonError(c, 400, "invalid_content", "that is not an answer to this form", {
           problems: result.problems,
           fields: result.fields,
@@ -4166,9 +1833,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const stats = managed.log.stats();
     return c.json({
       events: managed.log.read(since, limit, EVENTS_PAGE_BYTES),
-      // The derived floor, not the raw `firstSeq`: they differ exactly when the
-      // log is empty but the sequence is not, which is the one case a paging
-      // client must not be told history begins at 1.
+      // The derived floor, not raw firstSeq: they differ when the log is empty but the sequence is not.
       firstSeq: oldestAvailable(stats),
       lastSeq: stats.lastSeq,
       dropped: stats.dropped,
@@ -4176,33 +1841,10 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   }));
 
-  /**
-   * What this session's agent will answer to a leading slash.
-   *
-   * Its own route rather than a field on the snapshot, because `GET /sessions`
-   * returns that record for up to sixty sessions every four seconds and a command
-   * list is only ever wanted inside one composer — the full argument is on
-   * {@link SessionSnapshot.commandsRevision}, which is what tells a client to come
-   * here at all.
-   *
-   * No `session_not_ready` and no `terminal` refusal: nothing is asked of the
-   * agent, this reads a field, and an empty list is the honest answer for a
-   * session that has none. A 409 would make the composer draw an error where the
-   * truth is "no commands".
-   *
-   * The revision is echoed in the response so a client can tell the list moved
-   * while its fetch was in flight, rather than caching what it got under a
-   * revision that has already been superseded.
-   */
   app.get("/sessions/:id/commands", read, withSession((c, managed) => {
     const { commands, dropped } = managed.agentCommands;
     return c.json({ revision: managed.commandsRevision, commands, dropped });
   }));
-
-  /* ---------------------------------------------------------------- *
-   * What the agent changed. Shells out to git, which is fine here:
-   * these are request handlers, entirely off the agent's event path.
-   * ---------------------------------------------------------------- */
 
   app.get("/sessions/:id/changes", read, withSession(async (c, managed) => {
     const gate = await workspaceReady(c, managed);
@@ -4230,10 +1872,7 @@ export function createApp(options: ServerOptions): AppBundle {
 
     const base = c.req.query("base") === "head" ? "head" : "session";
     try {
-      // Recomputed here rather than trusted from a previous listing. This is the
-      // strongest containment rule in the API — the set of servable paths is
-      // exactly the set git itself just reported — and it also closes the race
-      // between listing a file and asking for its diff.
+      // Recomputed, not trusted: the servable paths are exactly what git just reported.
       const changes = await listChanges(managed.workspace, {
         runner: git,
         base,
@@ -4263,22 +1902,9 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /*
-   * The bytes of one file in the session's tree.
-   *
-   * The gap this fills is narrow and real: `changes/diff` deliberately refuses
-   * binary — `git diff --no-index` would have to be trusted with a symlink, and a
-   * patch of a PNG is not a thing — so a chart, a build artifact or a screenshot
-   * the agent produced was visible in the transcript as a path and unreachable as
-   * bytes. It is deliberately **not** restricted to the change set the way
-   * `changes/diff` is: somebody asking an agent for a file often means one that
-   * was already there, and this widens no real authority, because the agent can
-   * `cat` anything under this root already and does so on request.
-   */
+  // Not limited to the change set on purpose: the agent can already read anything under this root.
   app.get("/sessions/:id/files", read, withSession(async (c, managed) => {
-    // Not optional, and not a formality. For a `plain` session `workspace.root`
-    // *is* the `cwd` the caller named, so skipping this is the event-loop death
-    // that `stall.ts` exists for, reached by a third route.
+    // Mandatory: for a plain session the root is the caller's own cwd, which may be a stalled mount.
     const gate = await workspaceReady(c, managed);
     if (gate) return gate;
 
@@ -4288,20 +1914,6 @@ export function createApp(options: ServerOptions): AppBundle {
     return serveFile(c, safe.full, safe.rel.slice(safe.rel.lastIndexOf("/") + 1));
   }));
 
-  /*
-   * The bytes of a file somebody staged for a prompt.
-   *
-   * A second route rather than a case of the one above, because uploads live
-   * outside `workspace.root` on purpose — a worktree can be removed and a `plain`
-   * session's root is the caller's own repository. Without this the attachment
-   * chip on a message a person sent themselves would be the one thing in the
-   * transcript that cannot be opened.
-   *
-   * No `safeRelPath`: the path is built entirely from a row we wrote, so there is
-   * no caller-supplied component to contain. What it shares is `serveFile`, so
-   * the two cannot drift on the headers, which are the part that has to be
-   * identical.
-   */
   app.get("/sessions/:id/uploads/:uploadId", read, withSession(async (c, managed) => {
     if (!uploads) return jsonError(c, 503, "uploads_unavailable", "this daemon has no upload store");
 
@@ -4314,9 +1926,6 @@ export function createApp(options: ServerOptions): AppBundle {
 
   app.get("/sessions/:id/workspace", read, withSession(async (c, managed) => {
     try {
-      // Deliberately answers even when the directory is gone: this is what a UI
-      // reads *before* offering a Remove button, so it has to be able to say
-      // "there is nothing there" rather than fail.
       return c.json({ workspace: managed.workspace, status: await inspectWorkspace(managed.workspace, git) });
     } catch (error) {
       return gitError(c, error);
@@ -4324,31 +1933,7 @@ export function createApp(options: ServerOptions): AppBundle {
   }));
 
   app.delete("/sessions/:id/workspace", admin, withSession(async (c, managed) => {
-    /*
-     * Checked first: removing a worktree out from under a running agent breaks it
-     * in a way that is hard to diagnose from the inside.
-     *
-     * ⚠ **`keepsItsConversation` rather than `!terminal`, and the widening is a
-     * repair.** `terminal` used to mean two things at once — "there is no process"
-     * and "this conversation is over" — and parking split them: a parked session
-     * is terminal with no process, and the daemon has promised to bring it back on
-     * the next message. So this guard, which is about the *second* meaning, began
-     * admitting exactly the conversations somebody is most likely to return to.
-     *
-     * Removing that worktree is unrecoverable rather than merely rude:
-     * `workspaceReady` runs **before** the resume block in `POST
-     * /sessions/:id/prompt`, so every later message answers `409
-     * workspace_missing` and the wake is never attempted; the boot probe's `false`
-     * is settled and never retried; and no route re-creates a worktree for a
-     * session that already exists. The row is `keepsItsConversation`, so the prune
-     * will not take it either — unreachable and undeletable.
-     *
-     * The same reading covers `interrupted`, which the old guard also admitted: a
-     * session the daemon is bringing back at the next boot is stranded by this in
-     * the identical way. Both are now refused with the sentence that was always
-     * the remedy — **Stop it first**, which writes a reason that keeps no
-     * conversation and makes the worktree removable.
-     */
+    // keepsItsConversation too: removing a parked or interrupted session's worktree would strand it for good.
     if (!managed.terminal || keepsItsConversation(managed.exit)) {
       return jsonError(c, 409, "session_live", "stop this session before removing its worktree", {
         status: managed.status,
@@ -4359,12 +1944,7 @@ export function createApp(options: ServerOptions): AppBundle {
       const result = await removeWorkspace({
         runner: git,
         workspace: managed.workspace,
-        // The same root `POST /sessions` created it under, so the containment
-        // check that guards the `rmSync` can agree with the creation. When the
-        // two disagreed it refused every time, silently, while the route still
-        // reported success — masked because `git worktree remove` usually deletes
-        // the directory itself, so the guard only bit on the paths that had
-        // already failed, which is exactly where it was meant to help.
+        // The root POST /sessions created it under, so the containment check guarding the rmSync agrees with creation.
         worktreeRoot: registry.workspacePolicy.worktreeRoot,
         force: c.req.query("force") === "1",
         deleteBranch: c.req.query("deleteBranch") === "1",
@@ -4372,13 +1952,8 @@ export function createApp(options: ServerOptions): AppBundle {
 
       switch (result.kind) {
         case "not_applicable":
-          // A DELETE that silently succeeds without doing anything is worse than
-          // a refusal that says why.
           return jsonError(c, 409, "not_a_worktree", "this session runs in a plain directory we did not create");
         case "refused": {
-          // Both halves come from the refusals themselves; see
-          // {@link removalRefusalAnswer} for why one fixed sentence here was a
-          // lie about the one refusal that exists to say "I could not tell".
           const answer = removalRefusalAnswer(result.refusals);
           return jsonError(c, 409, answer.code, answer.message, {
             refusals: result.refusals,
@@ -4386,23 +1961,7 @@ export function createApp(options: ServerOptions): AppBundle {
           });
         }
         case "removed": {
-          /*
-           * The files nobody sent go with the checkout — and **only** those.
-           *
-           * This used to call `forgetSession`, which drops every row including
-           * consumed ones. But removing a worktree is not deleting a session:
-           * the row survives, the transcript survives, and every `prompt` event
-           * in it still names its attachments. So the effect was that an
-           * ordinary cleanup made the transcript describe files that could no
-           * longer be fetched — the one outcome `uploads.ts`'s opening docblock
-           * says the disjoint roots exist to prevent ("an upload is staged input
-           * that has to outlive that"), and the opposite of the lifetime
-           * `schema.sql` states for a consumed row.
-           *
-           * A failure here is a warning rather than a failed DELETE: the
-           * worktree really is gone, so reporting the request as failed would
-           * invite somebody to run it again against a session that has none.
-           */
+          // Only unconsumed uploads go: the session and its transcript survive and still name consumed ones. A failure is a warning.
           const warnings = [...result.warnings];
           if (uploads) {
             try {
@@ -4426,40 +1985,10 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   }));
 
-  /**
-   * Every worktree under the managed root, owned or not.
-   *
-   * Without this, a worktree left behind by a daemon that crashed is invisible —
-   * there is no session to ask about it. With it, cleaning up is a human reading
-   * a list. Read-only on purpose: no bulk delete.
-   */
   app.get("/worktrees", read, async (c) => {
     const known = registry.list();
     const worktreeRoot = registry.workspacePolicy.worktreeRoot;
-    /*
-     * Resolved once, through the bounded probe, and outside the loop.
-     *
-     * `containedIn` resolved *both* sides with `realpathSync` on every iteration,
-     * and one of those sides is `entry.path` — a path git reported, which by
-     * construction is not one this daemon made: filtering those out is the whole
-     * purpose of the call. `git worktree add ~/nas/review` on a mount whose
-     * server then pauses made this route an uninterruptible event-loop stop, with
-     * nothing recorded anywhere to stop the next request repeating it.
-     *
-     * The root itself is ours, so it may legitimately not exist yet; `missing`
-     * falls back to the literal, which is what `resolved()` did.
-     *
-     * **`null` is the third answer and gets its own arm rather than that
-     * fallback**, which is the distinction the probe exists to make and which
-     * collapsing the two back together threw away here. Comparing resolved entry
-     * paths against an *unresolved* root matches nothing, and every
-     * `probeRealpath(entry.path)` below would then be answering `null` too and be
-     * dropped — so a managed root on a paused mount answered `200 {worktrees:
-     * []}`, i.e. "there are none", for a filesystem that could not be asked. That
-     * is the same lie `probeExists`'s three answers stop `removeWorkspace`
-     * telling, and the same 503 `workspaceReady` and `pathErrorStatus` already
-     * answer for a directory that did not reply.
-     */
+    // The root is resolved once through the bounded probe; a root that did not answer is 503, never an empty list.
     const rootReal = await probeRealpath(worktreeRoot);
     if (rootReal === null) {
       return jsonError(c, 503, "worktree_root_unresponsive", "the filesystem holding the worktree root did not answer", {
@@ -4475,7 +2004,6 @@ export function createApp(options: ServerOptions): AppBundle {
       }
     }
 
-    // Only repos this tenant has actually opened. Deriving the set from every
     const repos = new Set<string>();
     for (const session of known) {
       const repoRoot = session.workspace.git?.repoRoot;
@@ -4493,19 +2021,7 @@ export function createApp(options: ServerOptions): AppBundle {
       }
       for (const entry of listed) {
         if (entry.path === repoRoot) continue;
-        // Resolved before comparing. A textual prefix test against an unresolved
-        // root silently returned an empty list on any host whose root traverses a
-        // symlink, and it is the same drift `browse.ts` carried. The comparison
-        // stays `containedInResolved`, so the property the old comment was about
-        // survives: a sibling whose name merely starts with the root —
-        // `…/worktrees-old` against `…/worktrees` — is not inside it, because the
-        // comparison is segment-wise.
-        //
-        // A path that did not answer is dropped rather than waited on: this is a
-        // listing, and one worktree on a sleeping NAS must not cost the daemon
-        // its event loop. `missing` is compared as written, which is what a
-        // prunable worktree whose directory is already gone looks like — and
-        // those are exactly the rows this route exists to show.
+        // Resolved, then compared segment-wise; a path that did not answer is dropped, and a missing one is compared as written.
         const seen = await probeRealpath(entry.path);
         if (seen === null) continue;
         if (!containedInResolved(seen.kind === "path" ? seen.value : entry.path, realRoot)) continue;
@@ -4515,42 +2031,8 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ root: worktreeRoot, worktrees: entries });
   });
 
-  /* ---------------------------------------------------------------- *
-   * Plugins
-   *
-   * Seven routes, and the scope on each is written here rather than derived
-   * from the manifest — a table mapping method and path to a scope is one
-   * edit away from describing routes that have moved, which is the argument
-   * `requireScope` already makes above.
-   *
-   * ⚠ **Two axes of authorization meet here and neither implies the other.**
-   * These scopes decide what the *caller* may do. `manifest.scopes` decides
-   * what the *plugin* may do, and it is the only one that applies inside a
-   * hook, where nobody called anything. A read-only grant can look at a
-   * plugin's screen and cannot press anything on it; a plugin without
-   * `sessions.write` cannot send a prompt however the caller got here.
-   * ---------------------------------------------------------------- */
+  // Plugins: these scopes decide what the caller may do, manifest.scopes what the plugin may do; neither implies the other.
 
-  /**
-   * A handler that only runs where there *is* a plugin host.
-   *
-   * `withSession`'s shape, for `withSession`'s reason, and it is now what its
-   * docblock claimed: this used to be a call-site helper one of six routes went
-   * through, while the other five hand-wrote the identical 503 — a "shared"
-   * refusal that five copies were free to drift away from, which is the failure
-   * `sessionOf` was collapsed into `withSession` to stop.
-   *
-   * A wrapper rather than a middleware because `plugins` is a closure variable
-   * rather than a request property: a middleware would have to put the host on
-   * `c.var` and every handler would read it back out untyped, which is a longer
-   * way to say `(c, host)`.
-   *
-   * **`POST /plugins` goes through it too, with no streaming variant**, and that
-   * is the exemption middleware paying for itself: the body of a request refused
-   * here is released on the way back up, by the same guard that covers the auth
-   * gate and `requireScope`. A cancel-first copy of this helper would be a fourth
-   * place that has to be remembered, for a refusal that is already covered.
-   */
   const withPlugins =
     <P extends string>(
       handler: (c: Context<AppEnv, P>, host: PluginHost) => Response | Promise<Response>,
@@ -4560,33 +2042,9 @@ export function createApp(options: ServerOptions): AppBundle {
       return handler(c, plugins);
     };
 
-  /**
-   * The other refusal three of these routes share.
-   *
-   * It was written out four times, with the sentence retyped each time. It is one
-   * answer — "no such plugin on this machine" — and a client reads the code, so
-   * independently-typed copies of the message are that many chances for one of
-   * them to say something slightly different about the same state. The fourth
-   * copy is gone rather than collapsed: `DELETE /plugins/:pluginId` stopped
-   * refusing an unknown id at all, for the replay reason stated there.
-   */
   const pluginNotFound = (c: Context<AppEnv>): Response =>
     jsonError(c, 404, "plugin_not_found", "no such plugin on this machine");
 
-  /**
-   * A handler that only runs for a plugin that is loaded, by the id in the path.
-   *
-   * The view and action routes had this preamble written out verbatim — find,
-   * 404, then their own work — which is `withSession`'s argument a second time.
-   *
-   * **Deliberately not applied to `DELETE /plugins/:pluginId` or to the state
-   * route.** `find` answers from `live`, and `remove` deliberately reaches
-   * further: it also removes a plugin whose tree is installed but unreadable,
-   * which is never in `live` and which this wrapper would answer 404 for. The
-   * state route is left alone for an ordering reason instead — it validates its
-   * body before it looks the plugin up, so wrapping it would turn a request that
-   * is wrong in both ways from a `400` into a `404`.
-   */
   const withPlugin =
     <P extends string>(
       handler: (c: Context<AppEnv, P>, plugin: LivePlugin) => Response | Promise<Response>,
@@ -4603,24 +2061,6 @@ export function createApp(options: ServerOptions): AppBundle {
     withPlugins((c, host) => c.json({ plugins: host.list(), api: PLUGIN_API_VERSION })),
   );
 
-  /**
-   * Install a plugin, or update one — one verb, because they are one act.
-   *
-   * A separate `PUT` would need the caller to know whether the plugin is already
-   * there, which is a question the archive answers on arrival: the id is in the
-   * manifest, and whether a row exists is this daemon's business rather than the
-   * caller's. `replaced` on the answer is what says which of the two happened.
-   *
-   * Streaming, so `isStreamingRoute` exempts it from the 1 MiB body bound and
-   * `PluginHost.install` carries its own counter. Every refusal below cancels the
-   * body first, for the reason the upload and import routes state at length: the
-   * relay grants a stream's window on consumption, so a reader that stops parks
-   * the sender, and the valve after that closes the whole tunnel for this machine.
-   * `refuse()` is kept where the refusals are large and local; what it never
-   * covered — an answer from a middleware above this handler — is the exemption
-   * middleware's `finally`, which is also what lets `withPlugins` wrap a
-   * streaming route with no variant of its own.
-   */
   app.post(
     "/plugins",
     admin,
@@ -4634,10 +2074,6 @@ export function createApp(options: ServerOptions): AppBundle {
         return refuse(() => jsonError(c, 503, "shutting_down", "the daemon is shutting down"));
       }
 
-      // The same sanitizer the upload and import routes use, and for the same
-      // reason: this string is a *label* — it is recorded beside the row and never
-      // becomes a path — but it is echoed back, and a control character in an echoed
-      // string is the response-splitting the sanitizer exists to refuse.
       const named = sanitizeUploadName(c.req.query("name") ?? "");
       if (!named.ok) {
         return refuse(() =>
@@ -4645,11 +2081,7 @@ export function createApp(options: ServerOptions): AppBundle {
         );
       }
 
-      /*
-       * Honoured to refuse, never to accept. Refusing on a `content-length` we
-       * believe costs nothing; trusting one would let a body that lies walk past the
-       * counter that is actually enforcing this.
-       */
+      // Honoured to refuse, never to accept.
       const declared = Number.parseInt(c.req.header("content-length") ?? "", 10);
       if (Number.isFinite(declared) && declared > PLUGIN_LIMITS.maxBytes) {
         return refuse(() =>
@@ -4674,26 +2106,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }),
   );
 
-  /**
-   * Install a plugin this daemon fetches for itself, from a commit somebody named.
-   *
-   * **The same act as `POST /plugins`, arriving by a different door**, which is
-   * why it answers in the same shapes down to `replaced` and the 201/200 split:
-   * a client that can read one answer can read the other, and `PluginHost.install`
-   * is literally the same function underneath.
-   *
-   * ⚠ **Not a streaming route, and it must not become one.** The body is a small
-   * JSON object, so it belongs under the ordinary bound like every other route
-   * here — `isStreamingRoute` exempts `POST /plugins` because the archive arrives
-   * *in* the request, and here the archive arrives on a socket this daemon opened.
-   * The obligation that exemption creates — cancel the body on every refusal —
-   * therefore does not apply, and adding this path to it would take on a duty
-   * nothing here owes.
-   *
-   * ⚠ **The address is built by `source.ts` from `repo` and `commit` alone.**
-   * Nothing here accepts a URL, and that is the fence: a caller who could name the
-   * host would have a daemon that fetches arbitrary addresses as its owner.
-   */
+  // Not a streaming route: the body is small JSON. The address is built from repo and commit alone; no URL is accepted.
   app.post(
     "/plugins/source",
     admin,
@@ -4706,12 +2119,6 @@ export function createApp(options: ServerOptions): AppBundle {
       const source = readSource(body["source"] ?? body);
       if (isSourceRefusal(source)) return jsonError(c, 400, source.code, source.message);
 
-      /*
-       * `null` when the caller sent none, and that is a real state rather than a
-       * client bug: `pnpm client` has no consent screen to have shown anybody, and
-       * `PluginHost.install` skips the check for exactly that caller. What the web
-       * client sends is what it drew, and the daemon refuses anything beyond it.
-       */
       const consent = readConsent(body["consent"]);
 
       const outcome = await host.installFromSource(source, consent);
@@ -4725,60 +2132,18 @@ export function createApp(options: ServerOptions): AppBundle {
     }),
   );
 
-  /*
-   * `remove` rather than a `withPlugin` lookup, and the difference is load-bearing:
-   * it also removes a plugin whose tree is on disk and unreadable, which never
-   * reached `live` and which a `find` would answer 404 for while leaving the
-   * directory and the row behind. "Nothing of that id anywhere" is a wider claim
-   * than the wrapper's, and the only one that makes an uninstall able to finish.
-   *
-   * ⚠ **An id with nothing under it is `200 {removed: false}` and never a 404,
-   * because this is a `DELETE` and the transport replays those.** `isReplayable`
-   * in `packages/web/src/machine.ts` whitelists `GET` and `DELETE` on a stated
-   * property this route is inside: "the daemon's are idempotent — stopping an
-   * already-stopped session or removing an already-removed workspace answers the
-   * same way twice". The failure a 404 makes is a removal that *worked* and whose
-   * answer was lost on the wire — the replay lands after the row, the data and the
-   * tree are already gone, and `pluginFailure` renders `plugin_not_found` as "That
-   * plugin is not installed on this machine any more.", which is true, is exactly
-   * what the caller asked for, and reads as the act having failed. `MachineInstalls`
-   * says the same thing from the other end: a remove "inherits its retry from
-   * `machine.ts` one layer down". `removed` is what tells the two sends apart, and
-   * the client already typed this answer `{removed: boolean}` for it.
-   *
-   * The cost is that a mistyped id is no longer refused, and `pnpm client plugin
-   * remove` prints "removed" over one. That is the trade a replayable verb makes:
-   * a wrong id costs a person one confusing line, and a 404 costs whoever hit a
-   * dropped LTE packet an uninstall that looks like it failed on every machine in
-   * a fan-out.
-   */
+  // remove rather than a lookup, so an unreadable install is removable too.
+  // An unknown id is 200 removed false, never 404: the transport replays DELETE.
   app.delete(
     "/plugins/:pluginId",
     admin,
     withPlugins(async (c, host) => {
       const removed = await host.remove(c.req.param("pluginId") ?? "");
-      // The same 409 `POST /plugins` answers, for the same fact: one mutation at a
-      // time for the whole daemon. It is the one refusal left here, and it is a
-      // refusal rather than a `false` because nothing was removed *and* the answer
-      // would be different a moment later — which is not what `removed: false` says.
       if (removed === "busy") return jsonError(c, 409, "plugin_busy", "this machine is already installing a plugin");
       return c.json({ removed });
     }),
   );
 
-  /**
-   * Switched on or off, without losing anything.
-   *
-   * A route rather than two (`/enable`, `/disable`) because the body is the state
-   * a caller wants rather than the transition it thinks it is making — which is
-   * what makes it idempotent, and therefore what makes a client that lost the
-   * answer safe to send it again.
-   *
-   * Not `withPlugin`, and the reason is ordering rather than reach: the body is
-   * validated before the id is looked up, so a request that names an unknown
-   * plugin *and* sends a body without `enabled` is a `400`. Hoisting the lookup
-   * into a wrapper would quietly turn that into a `404`.
-   */
   app.post(
     "/plugins/:pluginId/state",
     admin,
@@ -4794,15 +2159,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }),
   );
 
-  /**
-   * What one of a plugin's screens looks like right now.
-   *
-   * `GET`, and therefore replayable — `isReplayable` lets the transport repeat it
-   * after a failure that said nothing about whether the daemon acted. So a view is
-   * a **read** by contract, and a plugin that writes in one has a bug a retry will
-   * find. Nothing here can enforce that; what it can do is tell the child which
-   * kind of call this is, which `runner.ts` passes on.
-   */
   app.get(
     "/plugins/:pluginId/views/:viewId",
     read,
@@ -4811,27 +2167,7 @@ export function createApp(options: ServerOptions): AppBundle {
       if (viewId !== "screen" && viewId !== "settings") {
         return jsonError(c, 404, "view_not_found", "a plugin draws a screen and a settings pane, and no other view");
       }
-      /*
-       * ⚠ **And it has to be one *this* plugin declared.** The pair above is the
-       * vocabulary; `contributes` is which of the two this plugin said it draws,
-       * and they are different questions. The action route just below makes this
-       * exact argument against the same field, and it applies here unchanged: a
-       * view id is a string somebody put in a URL.
-       *
-       * Without it, `settings` on a plugin declaring `settings: false` reaches the
-       * child, `runner.ts` finds no such export and throws "this plugin exports no
-       * settings", `PluginApiError` makes that `plugin_failed`, and
-       * {@link pluginErrorStatus} defaults it to a `502` — whose own stated reason
-       * is "something downstream of this daemon answered badly". Nothing answered
-       * badly: the manifest already says that view is not there, so this is a 404
-       * about the request rather than a 502 about the plugin. The web client
-       * narrows both surfaces already (`screenPlugins`, `settingsBlockFor`'s
-       * `no_pane`), so what arrives here is `pnpm client plugin view` or a
-       * hand-typed `/p/:machineId/:pluginId` — exactly the traffic that must not be
-       * told a working plugin is broken. `view_not_found` carries a second sentence
-       * rather than a second code, because the code is the client's contract and
-       * these are two ways of naming a view that is not there.
-       */
+      // Must be a view this plugin declares, or the child throws and a working plugin is reported as a 502.
       const contributes = plugin.record.manifest.contributes;
       const declares = viewId === "settings" ? contributes.settings : contributes.screen !== null;
       if (!declares) return jsonError(c, 404, "view_not_found", "this plugin declares no such view");
@@ -4846,23 +2182,10 @@ export function createApp(options: ServerOptions): AppBundle {
       const actionId = c.req.param("actionId") ?? "";
       const body = await requireJson(c);
       if (body instanceof Response) return body;
-      /*
-       * The action must be one the manifest declared, and that check is here rather
-       * than inside the plugin: an action id reaching a plugin's `action` export is
-       * a string somebody put in a URL, and a plugin author writing a `switch` over
-       * their own ids should not also have to defend against ones they never
-       * declared. `contributes.actions` is the list a person approved at install.
-       */
+      // Only actions the manifest declared; a plugin need not defend against ids it never declared.
       if (!plugin.record.manifest.contributes.actions.some((one) => one.id === actionId)) {
         return jsonError(c, 404, "action_not_found", "this plugin declares no such action");
       }
-      /*
-       * Three optional pieces of context, and the plugin gets whichever the surface
-       * had: `session` when the press came from a session's menu, `row` when it came
-       * from a row on the plugin's own screen, `form` when it was a form's submit.
-       * All three are passed through as sent — they are the plugin's own vocabulary,
-       * and this daemon validating them would be validating a shape it does not own.
-       */
       return pluginAnswer(c, () =>
         plugin.invoke("action", actionId, {
           action: actionId,
@@ -4874,10 +2197,7 @@ export function createApp(options: ServerOptions): AppBundle {
     }),
   );
 
-  /* ---------------------------------------------------------------- *
-   * The stream. Read-only: everything that mutates is an HTTP request,
-   * because a send into a half-open socket succeeds silently.
-   * ---------------------------------------------------------------- */
+  // The stream is read-only: everything that mutates is an HTTP request.
 
   app.get(
     "/sessions/:id/stream",
@@ -4887,21 +2207,15 @@ export function createApp(options: ServerOptions): AppBundle {
       return next();
     },
     upgradeWebSocket((c) => {
-      // Checked again rather than carried over from the guard: the upgrade
-      // closure resolves the session itself, and a second unchecked lookup here
-      // would be a way past the guard the day this route grows another branch.
       const managed = sessionOf(c);
       const sinceParam = c.req.query("since");
       const since = sinceParam === undefined ? null : boundedInt(sinceParam, 0);
-      // Read here, in the handshake, where the principal still exists. The
-      // socket outlives this request context.
+      // Read in the handshake: the socket outlives this request context.
       const expiresAt = c.get("principal").expiresAt;
       let connection: StreamConnection | null = null;
 
       return {
         onOpen(_event, ws) {
-          // The guard above already 404'd an unknown id; this covers the session
-          // being stopped and dropped between that check and the upgrade.
           if (!managed) {
             ws.close(4404, "session not found");
             return;
@@ -4924,36 +2238,8 @@ export function createApp(options: ServerOptions): AppBundle {
   return { app, injectWebSocket: guardedInjectWebSocket(injectWebSocket) };
 }
 
-/**
- * `injectWebSocket`, with the request targets the URL parser rejects answered
- * rather than thrown.
- *
- * ⚠ **`@hono/node-ws`'s upgrade handler opens with an unguarded `new
- * URL(request.url ?? "/", "http://localhost")`**, and llhttp and the WHATWG
- * parser do not agree about what a request target is: `GET //% HTTP/1.1` reaches
- * a `node:http` handler with `req.url === "//%"`, and `new URL("//%", …)` throws.
- * So do `/\` and `//[`. The throw leaves the socket with nothing written to it
- * and nothing destroying it — `requestTimeout` is already cleared and
- * `keepAliveTimeout` only arms once a response is sent — so it is one leaked fd
- * per line, against the listener the relay forwards the internet to.
- *
- * **This is the guard `relay/proxy.ts` already carries** at `readToken` and
- * `pathOf`, with a comment describing this exact failure, and it did not protect
- * this end: that function reads the `Authorization` header *without touching the
- * URL*, so a request carrying a valid bearer never reaches the relay's own `new
- * URL` and `path: req.url` is forwarded verbatim. Any token for this machine —
- * `session:read` is enough — plus one malformed target.
- *
- * **Here rather than in `scripts/daemon.ts`**, for two reasons that point the
- * same way: a caller cannot forget it, and `daemoncheck` drives a real listener
- * through this same function, so the rule is assertable rather than a copy of one
- * living in an entry point no driver runs.
- *
- * **Wrapped rather than prepended.** Every `upgrade` listener runs, so a guard
- * registered first would answer the socket and then watch the unguarded handler
- * throw on the same request anyway. Taking the listener off and putting it back
- * behind the check is the only arrangement where the bad target never reaches it.
- */
+// Answers upgrade targets the URL parser rejects with a 400: a throw leaks the socket, since keepAliveTimeout arms only after a response.
+// Wrapped rather than prepended: every upgrade listener runs.
 function guardedInjectWebSocket(inject: (server: Server) => void): (server: Server) => void {
   return (server) => {
     inject(server);
@@ -4967,12 +2253,7 @@ function guardedInjectWebSocket(inject: (server: Server) => void): (server: Serv
       try {
         new URL(request.url ?? "/", "http://localhost");
       } catch {
-        /*
-         * Before the write, for `relay/proxy.ts`'s reason: Node removes its own
-         * socket error handler *before* emitting `upgrade`, so this socket
-         * starts with zero listeners and an `'error'` with none is an uncaught
-         * exception. The refusal path writes to it, so it needs one too.
-         */
+        // Node removes its socket error handler before emitting upgrade, so one is needed before writing.
         socket.on("error", () => socket.destroy());
         try {
           socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
@@ -4989,23 +2270,9 @@ function guardedInjectWebSocket(inject: (server: Server) => void): (server: Serv
 
 type QueueItem =
   | { kind: "event"; stored: StoredEvent; bytes: number }
-  /**
-   * ⚠ **Encoded at enqueue rather than at send, and that is what makes `bytes`
-   * the truth.** A control frame carries a whole `SessionSnapshot`, and there is
-   * no way to ask how large one will be without building the string — so the
-   * choice was either to serialize twice or to keep the string. It is kept; see
-   * {@link controlItem}.
-   */
   | { kind: "control"; payload: string; bytes: number };
 
-/**
- * One attached client.
- *
- * The contract with the agent is that nothing here can ever slow it down: the
- * listener is a synchronous array push, so the emit path from the agent's RPC
- * handler is O(1) and never waits on a socket. A client that cannot keep up gets
- * degraded — told exactly what it lost — but never at anyone else's expense.
- */
+// Nothing here may slow the agent: the log listener is a synchronous push, and a lagging client is degraded at nobody else's cost.
 class StreamConnection {
   private readonly queue: QueueItem[] = [];
   private queuedBytes = 0;
@@ -5023,11 +2290,7 @@ class StreamConnection {
     private readonly managed: ManagedSession,
     private readonly ws: WSContext<RawWebSocket>,
     private readonly instanceId: string,
-    /**
-     * When the credential that opened this stream stops being valid, or `null`
-     * for one that never expires. Checked on the heartbeat, not at attach —
-     * the point is to catch the moment it passes while the socket is open.
-     */
+    // Checked on the heartbeat, so an expiry while the socket is open closes it; null never expires.
     private readonly expiresAt: number | null = null,
   ) {}
 
@@ -5035,32 +2298,12 @@ class StreamConnection {
     return this.ws.raw;
   }
 
-  /**
-   * Seeds the client and goes live, in one synchronous block.
-   *
-   * There is no `await` between reading the backlog and registering the listener,
-   * so there is no window in which an appended event could land in neither. That
-   * is the whole of "no gaps, no duplicates" — the `seq <= cursor` filter in
-   * `emit` makes it idempotent even if the two ever did overlap.
-   */
+  // No await between reading the backlog and subscribing, so no event lands in neither; the seq filter in emit makes an overlap harmless.
   attach(sinceParam: number | null): void {
     const stats = this.managed.log.stats();
     const asked = sinceParam === null ? stats.lastSeq : Math.min(sinceParam, stats.lastSeq);
 
-    /*
-     * The socket replays at most `ATTACH_REPLAY_MAX`, and skips rather than drops.
-     *
-     * A session's log is no longer bounded, so "attach at 0" can now mean fifty
-     * thousand events — and `attach` drains its whole backlog into the outbound
-     * queue in one synchronous block, which past `MAX_QUEUE_EVENTS` collapses and
-     * reports `slow_consumer` about a client that never got to be slow.
-     *
-     * So the *attach* is bounded where the *history* used to be. The cursor moves
-     * forward to the newest `ATTACH_REPLAY_MAX`, and the client is told what it
-     * skipped and where to get it: `reason: "backlog"`, which is the one lagged
-     * reason that is not a loss. Those events are on disk and
-     * `GET /sessions/:id/events` serves them.
-     */
+    // Replays at most ATTACH_REPLAY_MAX; the rest is reported as lagged backlog, which GET /sessions/:id/events serves.
     const floor = Math.max(asked, stats.lastSeq - ATTACH_REPLAY_MAX);
     const since = Math.max(asked, Math.min(floor, stats.lastSeq));
     this.cursor = since;
@@ -5068,27 +2311,15 @@ class StreamConnection {
 
     const oldest = oldestAvailable(stats);
     const gap = asked < oldest - 1;
-    // Always the first frame, and it carries pendingPermissions — which is how a
-    // client attaching ten minutes after the fact learns the session is blocked
-    // without replaying anything.
     this.control({
       type: "hello",
       instanceId: this.instanceId,
       session: this.managed.snapshot(),
-      // The derived floor, so `hello` and the snapshot inside it agree.
       firstSeq: oldest,
       lastSeq: stats.lastSeq,
       since,
       gap,
     });
-    /*
-     * `evicted` first, because it is the one that is a loss.
-     *
-     * With no retention window this can only be a session whose prefix an *older*
-     * daemon destroyed before the bound was removed — the floors are on the
-     * session row and survive, so those sessions go on reporting it honestly for
-     * ever rather than pretending they are whole.
-     */
     if (gap) {
       this.control({
         type: "lagged",
@@ -5098,9 +2329,6 @@ class StreamConnection {
         reason: "evicted",
       });
     }
-    // And then what this attach declined to replay, which is not a loss at all:
-    // it is on disk and the route serves it. `Math.max(asked, oldest - 1)` so the
-    // two frames describe adjacent ranges rather than overlapping ones.
     const skippedFrom = Math.max(asked, oldest - 1) + 1;
     if (since >= skippedFrom) {
       this.control({
@@ -5115,10 +2343,6 @@ class StreamConnection {
     for (;;) {
       const slice = this.managed.log.read(this.cursor, BATCH_MAX_EVENTS, BATCH_MAX_BYTES);
       if (slice.length === 0) break;
-      // `replaying`, so an overflow here is reported as what it is. This block is
-      // synchronous and the first `send` callback has not run, so nothing has
-      // drained: a collapse on the byte ceiling is the daemon deciding not to
-      // replay this much down a socket, not a client failing to keep up.
       for (const stored of slice) this.emit(stored, true);
     }
 
@@ -5131,18 +2355,8 @@ class StreamConnection {
       raw.on("pong", () => {
         this.alive = true;
       });
-      // A closed laptop lid leaves a half-open socket that TCP alone will not
-      // notice. Nothing else here would ever free that connection's resources.
       this.heartbeat = setInterval(() => {
-        // Re-authorization, on the timer that already exists.
-        //
-        // A stream is authenticated once, at the upgrade, and then lives for as
-        // long as the client keeps it open. Without this a five-minute token
-        // would buy an unbounded-lifetime connection, and revocation — which is
-        // bounded by the token lifetime and nothing else, because the daemon
-        // never asks the control plane anything — would never reach an attached
-        // client at all. `expiresAt` is null under the shared secret, so that
-        // path is untouched.
+        // Re-authorization: otherwise a short-lived token buys an unbounded connection that revocation never reaches.
         if (this.expiresAt !== null && Date.now() > this.expiresAt + AUTH_LEEWAY_MS) {
           this.close(4401, "token expired");
           return;
@@ -5163,25 +2377,13 @@ class StreamConnection {
     this.flush();
   }
 
-  /**
-   * `replaying` is the attach's own drain saying so, and it decides nothing but
-   * the honesty of a collapse. See {@link ATTACH_REPLAY_MAX}.
-   *
-   * ⚠ **`bytes` here is charged heap and is deliberately *not* the number the
-   * batch is cut on.** It feeds `MAX_QUEUE_BYTES`, which bounds what this process
-   * is **holding** for a client that has stopped reading — so UTF-16 units of the
-   * strings in memory is the right unit, the same argument {@link controlItem}
-   * makes about `length`. What goes on the wire is measured where it is written;
-   * see {@link BATCH_MAX_BYTES}. Making these two "consistent" would put the
-   * wrong unit on one of them.
-   */
+  // bytes is retained heap for MAX_QUEUE_BYTES, deliberately not the wire bytes a batch is cut on.
   private emit(stored: StoredEvent, replaying = false): void {
     if (this.closed || stored.seq <= this.cursor) return;
     this.cursor = stored.seq;
     this.enqueue({ kind: "event", stored, bytes: estimateBytes(stored.event) + 64 }, replaying);
   }
 
-  /** Queue one control frame, weighed rather than guessed — see {@link controlItem}. */
   private control(frame: unknown): void {
     if (this.closed) return;
     this.enqueue(controlItem(frame));
@@ -5196,41 +2398,19 @@ class StreamConnection {
     this.flush();
   }
 
-  /** The half of {@link enqueue} that is not the ceiling. See {@link collapse}. */
   private push(item: QueueItem): void {
     this.queue.push(item);
     this.queuedBytes += item.bytes;
   }
 
-  /**
-   * Drops everything queued and jumps to the head of the log.
-   *
-   * The client is told the exact seq range it lost and handed a fresh snapshot,
-   * so it is degraded rather than confused — and the agent never noticed.
-   *
-   * **The reason is an argument because the two callers are different events.**
-   * A live socket that fell behind is `slow_consumer`, which the client draws as
-   * a hole because it is one. An attach that overflowed its own drain is
-   * `backlog` — every byte is still on disk and `GET /sessions/:id/events` serves
-   * it, so the client restarts its history there instead. Handing the second one
-   * the first one's word is the lie `ATTACH_REPLAY_MAX` exists to prevent, and it
-   * was reachable through the byte ceiling that constant does not bound.
-   */
+  // The reason matters: slow_consumer is a hole, while backlog is still on disk and refetched over HTTP.
   private collapse(reason: "slow_consumer" | "backlog"): void {
     const head = this.managed.log.stats().lastSeq;
     const from = this.lastSentSeq + 1;
     this.queue.length = 0;
     this.queuedBytes = 0;
 
-    /*
-     * Weighed like every other frame now — the snapshot below is the largest
-     * control frame this socket ever sends and was the one charged at 512 bytes —
-     * but pushed rather than `enqueue`d, because these two frames **are** the
-     * response to the ceiling. Routing the recovery back through the check that
-     * just fired is a `collapse` inside a `collapse`, and the queue it would be
-     * measuring is the one this method emptied two statements ago. The count is
-     * still kept, so the socket's next `enqueue` sees what is really waiting.
-     */
+    // Pushed, not enqueued: these frames are the response to the ceiling.
     if (head >= from) {
       this.push(controlItem({ type: "lagged", from, to: head, dropped: head - from + 1, reason }));
     }
@@ -5238,10 +2418,7 @@ class StreamConnection {
     this.lastSentSeq = head;
     this.push(controlItem({ type: "snapshot", session: this.managed.snapshot() }));
 
-    // Only a real slow consumer is counted towards the disconnect. A backlog is a
-    // statement about how much history was asked for, so recording it here would
-    // let a big enough attach close the socket for a client that has not yet been
-    // given a single frame to be slow about.
+    // Only a real slow consumer counts toward the disconnect.
     if (reason !== "slow_consumer") return;
     const now = Date.now();
     this.collapses = this.collapses.filter((at) => now - at < COLLAPSE_WINDOW_MS);
@@ -5253,8 +2430,6 @@ class StreamConnection {
     if (this.closed || this.sending) return;
     const raw = this.raw;
     if (!raw || raw.readyState !== 1 /* OPEN */) return;
-    // Let the kernel buffer drain before handing it more; the send callback
-    // below brings us straight back here.
     if (raw.bufferedAmount > SOCKET_HIGH_WATER) return;
 
     const head = this.queue[0];
@@ -5264,30 +2439,8 @@ class StreamConnection {
     if (head.kind === "control") {
       this.queue.shift();
       this.queuedBytes -= head.bytes;
-      // Already encoded — and already *fitted* to {@link CONTROL_MAX_BYTES} — by
-      // `controlItem`, which is where both the string and the byte count came
-      // from. Encoding it again here is what that arrangement exists to avoid,
-      // and the fit cannot move down here for the same reason: this method holds
-      // the payload string and nothing else. Keeping the frame *object* on the
-      // `QueueItem` so it could be fitted late would retain the whole snapshot
-      // the payload replaced, for as long as the queue holds it — which is the
-      // retention `MAX_QUEUE_BYTES` exists to stop.
       payload = head.payload;
     } else {
-      /*
-       * ⚠ **Measured, not estimated — see {@link BATCH_MAX_BYTES}.** Each event
-       * is encoded once here and the pieces are joined, so `bytes` is exactly
-       * `Buffer.byteLength(payload, "utf8")` and the cut happens on the number
-       * the far end's `MessageAssembler` will accumulate rather than on a count
-       * of the UTF-16 units inside it. The join is byte-for-byte what
-       * `JSON.stringify({ type: "events", events })` returned, so nothing
-       * downstream can tell the difference.
-       *
-       * The one event this breaks on is re-encoded on the next flush, and that
-       * is the whole cost of knowing the size of a string before writing it. It
-       * is paid back by no longer building the intermediate `StoredEvent[]` and
-       * by `safeStringify` no longer walking the same batch a second time.
-       */
       const encoded: string[] = [];
       let bytes = EVENTS_FRAME_OPEN.length + EVENTS_FRAME_CLOSE.length;
       let lastSeq: number | null = null;
@@ -5295,10 +2448,8 @@ class StreamConnection {
         const next = this.queue[0]!;
         if (next.kind !== "event") break;
         const one = encodeStored(next.stored);
-        // `+ 1` for the comma that separates it from the event before it.
         const size = Buffer.byteLength(one, "utf8") + (encoded.length > 0 ? 1 : 0);
-        // The first is taken whatever it weighs, or one oversized event would
-        // produce an empty batch for ever — see {@link BATCH_MAX_BYTES}.
+        // The first event is taken whatever it weighs, or one oversized event would stall the batch forever.
         if (encoded.length > 0 && bytes + size > BATCH_MAX_BYTES) break;
         this.queue.shift();
         this.queuedBytes -= next.bytes;
@@ -5345,47 +2496,9 @@ class StreamConnection {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * Helpers
- * ------------------------------------------------------------------ */
-
-/**
- * The credential, from the header or the query string.
- *
- * A *present* `Authorization` header is authoritative even when it is malformed:
- * this used to fall through to `?token=` whenever the header did not start with
- * exactly `Bearer `, so `authorization: bearer x` — lowercase, which some HTTP
- * clients produce — took the no-header path and was reported as a missing
- * token. Returning `""` instead makes a broken header a failed authentication
- * rather than an ignored one.
- *
- * The scheme is matched case-insensitively because RFC 7235 says it is
- * case-insensitive; the credential after it is not touched.
- *
- * **`?token=` is read only on a handshake that cannot carry a header**, which is
- * the justification the parameter has always been given and was not the rule the
- * code held. This function is called from one place — the `app.use("*")` gate —
- * so the query credential authenticated *every* route: `GET
- * /sessions/:id/files?path=chart.png&token=<jws>` returned the bytes, and that
- * URL then sits in browser history, in the `Referer` of anything the page loads
- * next, and in every intermediary's log, while the origin that minted it holds
- * `reemoat.credential` in `localStorage`. The download rules in `CLAUDE.md`
- * refuse an `<a href="…&token=">` partly on the grounds that it "would widen the
- * `?token=` exception" — nothing widened it because nothing had narrowed it,
- * which is the `sessionOf` shape again: a property the code appears to have and
- * nothing enforces.
- *
- * The `upgrade` header rather than the stream route's path, because the reason is
- * about the *handshake* and not about one URL: a route reader would have to be
- * kept in step with the routes, and the day it fell behind it would fail open.
- * A caller who deliberately sets `Upgrade: websocket` on an ordinary GET gains
- * nothing — it is holding the token either way — and the leak this closes is the
- * URL a browser follows, which never carries that header.
- */
+// A present Authorization header is authoritative even when malformed; the token query parameter is read only on a WebSocket handshake.
 function readCredential(c: Context): string | null {
-  // `=== null` rather than falsiness: `bearerToken` answers `""` for a header
-  // that is present and malformed, and that must *not* fall through to the query
-  // — see its docblock for the `authorization: bearer x` case this protects.
+  // Null check, not falsiness: a present but malformed header yields an empty string and must not fall through to the query.
   const fromHeader = bearerToken(c.req.header("authorization"));
   if (fromHeader !== null) return fromHeader;
   if (c.req.header("upgrade")?.toLowerCase() !== "websocket") return null;
@@ -5412,22 +2525,7 @@ function parseAnswer(body: Record<string, unknown>): PermissionAnswer | null {
   return null;
 }
 
-/**
- * The three things a client may say about a question.
- *
- * Exactly one form, like {@link parseAnswer}, so an ambiguous body is never
- * silently resolved one way.
- *
- * `decline` and `cancel` are both here because they are genuinely different acts
- * rather than a symmetry: measured against claude's adapter, `decline` runs the
- * tool with empty answers and the turn *carries on* — the model is told the
- * person skipped — while `cancel` aborts the tool call. Collapsing them would
- * take one of the two away from whoever is holding the phone.
- *
- * `content` gets its own object guard. `readJson` already refuses a non-object
- * *body*, and that says nothing about this field: `null` and `[]` are both
- * `typeof "object"`.
- */
+// Exactly one form. decline runs the tool with empty answers and the turn carries on; cancel aborts the tool call.
 function parseElicitationAnswer(body: Record<string, unknown>): ElicitationAnswerBody | null {
   const content = body["content"];
   const isObject = typeof content === "object" && content !== null && !Array.isArray(content);
@@ -5439,180 +2537,30 @@ function parseElicitationAnswer(body: Record<string, unknown>): ElicitationAnswe
   return { cancel: true };
 }
 
-/**
- * One control frame, encoded and weighed.
- *
- * ⚠ **The encoding happens here, at enqueue, and that is what makes `bytes` the
- * truth rather than a guess.** This used to be a flat `bytes: 512` while `emit`
- * beside it charged `estimateBytes(event) + 64` — so a `snapshot` frame carrying
- * `MAX_TRACKED_ASYNC_TASKS` background tasks, around 93 KB on the wire, was
- * accounted at 512 bytes: 180x under. `MAX_QUEUE_BYTES` exists to stop a client
- * that has stopped reading from holding this daemon's heap, and under-counting by
- * that factor lets `MAX_QUEUE_EVENTS` frames queue while `queuedBytes` still
- * reads a few MiB — hundreds of megabytes retained before the ceiling that exists
- * for exactly this ever trips. A phone behind a relay on LTE is the ordinary way
- * to get there.
- *
- * There is no way to ask how large a frame will be without building the string,
- * so the string is **kept**: `flush` sends it verbatim rather than encoding it a
- * second time. What it costs is a frame `collapse()` later throws away having
- * been encoded for nothing, which is the case this bound exists to make rare.
- *
- * `+ 64` for the frame overhead, the same term `emit` adds, and `length` is
- * UTF-16 code units rather than bytes — `jsonSize` measures the event side the
- * same way, and a ceiling on retained heap wants the string this process is
- * holding rather than what the socket will put on the wire.
- *
- * ⚠ **And the frame is *fitted* here as well as weighed, because the wire has a
- * second ceiling this arm was not checked against at all.** `bytes` above is
- * charged heap for `MAX_QUEUE_BYTES`; {@link CONTROL_MAX_BYTES} is the number the
- * far end's `MessageAssembler` will accumulate, and a control frame past it fails
- * the channel. The two are different units for different questions and both are
- * now asked — the heap one off whatever string survives the fit, so `queuedBytes`
- * still measures what is really held.
- *
- * The ordinary frame pays **one `Buffer.byteLength` over a string already in
- * hand** and nothing else: no second encode, and {@link fitSnapshotFrame} is not
- * entered. That gate matters because this runs on the emit path — `touchSafe()`
- * fans a snapshot out to every attached client — which this class's own contract
- * says may never slow the agent down.
- */
+// Encoded once here so bytes is the retained heap, then fitted under CONTROL_MAX_BYTES; an ordinary frame pays one byteLength.
 function controlItem(frame: unknown): QueueItem {
   const built = safeStringify(frame);
   if (Buffer.byteLength(built, "utf8") <= CONTROL_MAX_BYTES) return heldFrame(built);
   return heldFrame(fitSnapshotFrame(frame, built));
 }
 
-/** {@link controlItem}'s `+ 64` and its `length`, off the payload that survived the fit. */
 function heldFrame(payload: string): QueueItem {
   return { kind: "control", payload, bytes: payload.length + 64 };
 }
 
 /**
- * A control frame over {@link CONTROL_MAX_BYTES}, reduced until it fits.
- *
- * ⚠ **Exported for `daemoncheck` and for nothing else.** Every rung below is
- * reached only by a snapshot no offline fixture can assemble — pending
- * permissions are minted by an ACP agent, and a driver that can raise one raises
- * exactly one, well under this ceiling. So the alternative to exporting was a
- * ladder nothing executes: measured, deleting this function and calling
- * `safeStringify` alone left every driver in this repository green. That is the
- * same shape as the plan-mode curation that stayed green for months over a card
- * nobody could reach, and `CipherState.at` is the precedent for opening a seam
- * rather than shipping one. Nothing in `src/` calls it but {@link controlItem}.
- *
- * Two rungs, each one re-encoded and re-measured on `Buffer.byteLength` rather
- * than estimated — charging an estimate against a wire ceiling is the defect
- * {@link BATCH_MAX_BYTES} records, and repeating it here would repeat it on the
- * one frame that cannot afford it. The rung before both of them is the frame
- * exactly as built, so **every frame that fits is byte-identical to what this
- * daemon sent before** and no session that worked can tell this function exists.
- *
- * ⚠ **That rung is stated twice on purpose, and it stopped being redundant when
- * the reduction became visible.** {@link controlItem} tests it first as a *gate*
- * — an ordinary frame must pay one `Buffer.byteLength` over a string already in
- * hand and nothing else, on the emit path `touchSafe()` fans out — and this
- * function tests it again as its *contract*, because it is exported and because
- * what it returns now carries {@link SessionSnapshot.reduced}. A caller reaching
- * past the gate with a frame that fits would otherwise get a snapshot marked as
- * cut with nothing cut out of it, and "marked means reduced" is the whole of what
- * the client reads.
- *
- * **The first rung here reduces, and every shape it produces is one the client
- * already handles.** `backgroundTasks[].outputFilePath` goes to `null` —
- * precisely the projection `snapshot({listing: true})` already makes, and the one
- * field in that record nothing draws. Each pending permission's `rawInput` and `content` become
- * `clampBlob(…, 0)`, which is the `{truncated: true, bytes}` stand-in
- * `PendingPermissionSnapshot` already declares both of them may be; `0` rather
- * than a fresh literal because `clampBlob`'s own note forbids a second,
- * subtly-different idea of what truncation looks like, and `jsonSize` of any
- * non-nullish value is at least 1, so the bound always bites. What survives is
- * every row with its title and its options — everything an Approve button needs,
- * so a frame reduced this far is still answerable from the list.
- *
- * **The second halves the two parked lists until they fit, floor one each.** Both
- * are `[...map.values()]` in insertion order and `raisedAt` is stamped at
- * insertion, so a prefix is the *oldest* and `oldestWait` still names the real
- * one; keeping at least one of a non-empty list keeps `needsHuman` true and keeps
- * the card `SessionView` draws the right one. What is lost is real and visible
- * rather than hidden — `waitingCount` under-reports, and the rows past the cut
- * are gone from the frame — and it is recoverable: every one of them is in the
- * log as a `permission_request` or `elicitation_request` event the transcript
- * draws, and answering the oldest shrinks the next frame, so the cut lifts as
- * work is done. Halved rather than cut flat to one, so a list that would nearly
- * have fitted keeps nearly all of it, at a cost of at most ⌈log2 n⌉ encodes over
- * a payload that halves as it goes.
- *
- * ⚠ **Measured 2026-09-17, this ladder run outside the daemon over a synthetic
- * `hello`** carrying 32 background tasks at `acp/asynctasks.ts`'s clip ceilings
- * and n permissions at theirs — 8 KiB of `{title, options}`, 8 KiB of `rawInput`,
- * 8 KiB of `content`. n=5 is 184 392 bytes and goes out **byte-identical**; n=20
- * is 546 917 and rung one alone brings it to 206 101 with **all twenty rows
- * kept**; n=30 is 788 607 → 288 231, again all thirty, still rung one; n=60 is
- * 1 513 677 and **one** halving brings it to 288 231 with 30 kept; n=200 is
- * 4 897 537 and **two** halvings bring it to 452 491 with 50 kept. So the cut is
- * proportional and not down to a single row: it spends the whole 512 KiB.
- *
- * ⚠ **The ladder terminates in practice and not in principle, and the residue is
- * named rather than papered over.** `agentSessionId` and `agentHandle` are
- * agent-minted and bounded nowhere (see {@link CONTROL_MAX_BYTES}), so a hostile or
- * broken ACP binary defeats every rung with one enormous string. The fix for those
- * is an ingest bound in `session.ts`, not another number here — which is exactly what **a surviving
- * elicitation's `message` got**: it was on that list, and it was the sharpest
- * member of it, because the halving rung floors at one row (`while (keep > 1)`
- * never runs at `keep === 1`) so a single oversized question could not be cut by
- * any rung at all. `clipElicitationMessage` bounds it at ingest now; the list
- * above is what is left.
- *
- * ⚠ **`agentConfig`'s choice ids and names were on that list until 2026-09-19, and
- * the way they came off is worth the sentence.** This note was right about them
- * and stayed right while `BATCH_MAX_BYTES`'s own paragraph, three thousand lines
- * up in this same file, said `plan.entries` was "the one door that reaches 1 MiB" —
- * so a reader checking one half of this file against the other would have caught
- * it, and nobody did. They are bounded at ingest now by `toConfigOptions` in
- * `src/session.ts`, the same repair `clipElicitationMessage` is and for the same
- * reason. What stays true of them here is only that this ladder could never have
- * cut them: the bound is upstream of the frame, not a rung on it.
- *
- * What this ladder guarantees is that the **reachable** case — an agent parking
- * permissions in parallel inside one turn — no longer wedges the attach. Whatever
- * the last rung produced is sent rather than dropped, for {@link BATCH_MAX_BYTES}'s
- * reason one arm over: a `hello` that never arrives is a transcript that never starts, which
- * is the stall, not the cure for it.
- *
- * ⚠ **And what the ladder reduced is now *said on the frame*, which is a wire
- * change rather than a tidy-up.** Every rung here
- * produces a `session` that is a **lossy projection** of the one
- * `GET /sessions/:id` serves whole, and nothing on the frame used to mark it.
- * `store.ts` writes both into one `row.snapshot` — the 4s poll and `onSnapshot` —
- * so past this ceiling `waitingCount`, the `more` count and `PermissionCard`'s
- * *"Part of this request was too large to keep"* banner flipped on every
- * poll/frame alternation, each flip re-arming an effect that fires
- * `store.loadAll`. {@link SessionSnapshot.reduced} is set by the rungs that lose
- * something and absent otherwise, so a client can add the cut rows back to a
- * count and decline to clobber a fuller list it already holds. Marked rather than
- * degrading the HTTP route to match, which is the conservative direction: a route
- * cut to the frame's shape loses data no client can get back.
+ * Exported for daemoncheck only. Rung one clamps permission blobs and outputFilePath; rung two halves the parked lists, floor one each.
+ * The last rung is sent whatever it weighs: agentSessionId and agentHandle are bounded nowhere.
  */
 export function fitSnapshotFrame(frame: unknown, built: string): string {
   const session = snapshotOnFrame(frame);
   if (session === null) return built;
-  // See the docblock: the gate in `controlItem` is a fast path and this is the
-  // contract. Nothing may come back marked as reduced without having been.
+  // The contract: nothing comes back marked reduced without having been.
   if (Buffer.byteLength(built, "utf8") <= CONTROL_MAX_BYTES) return built;
   const rest = frame as Record<string, unknown>;
 
   const trimmed: SessionSnapshot = {
     ...session,
-    /*
-     * Written on the first rung rather than on the one that cuts rows, because
-     * the first rung already loses something — every permission's `rawInput` and
-     * `content` — and a frame that says nothing about that is the lossy
-     * projection this field exists to end. The counts are the record's **true**
-     * lengths, taken before either rung runs, so the halving below can slice the
-     * arrays without touching them; `...trimmed` carries this through every
-     * iteration of that loop.
-     */
     reduced: {
       pendingPermissions: session.pendingPermissions.length,
       pendingElicitations: session.pendingElicitations.length,
@@ -5628,9 +2576,6 @@ export function fitSnapshotFrame(frame: unknown, built: string): string {
   let payload = safeStringify({ ...rest, session: trimmed });
   if (Buffer.byteLength(payload, "utf8") <= CONTROL_MAX_BYTES) return payload;
 
-  // Both lists halve on the same counter: `slice` on the shorter one is a no-op
-  // once it is past its length, so the longer one goes on shrinking without a
-  // second loop, and a list of one is never cut to none.
   let keep = Math.max(trimmed.pendingPermissions.length, trimmed.pendingElicitations.length);
   while (keep > 1) {
     keep = Math.floor(keep / 2);
@@ -5647,17 +2592,6 @@ export function fitSnapshotFrame(frame: unknown, built: string): string {
   return payload;
 }
 
-/**
- * The snapshot a control frame carries, or `null` where it carries none.
- *
- * Hand-written, and it checks the three collections the rungs map over rather
- * than only the `session` key: a frame whose `session` were some other shape
- * falls back to being sent as built instead of throwing on the emit path. `hello`
- * and `snapshot` are the two frames that reach the first answer today — and
- * `collapse`'s own recovery snapshot is one of them, which is the frame that
- * follows an overflow and had the same hole. `lagged`, `caught_up` and the rest
- * reach the second and are nowhere near the bound.
- */
 function snapshotOnFrame(frame: unknown): SessionSnapshot | null {
   if (typeof frame !== "object" || frame === null) return null;
   const session = (frame as { session?: unknown }).session;
@@ -5670,31 +2604,11 @@ function snapshotOnFrame(frame: unknown): SessionSnapshot | null {
     : null;
 }
 
-/**
- * One stored event, encoded, and **never a hole**.
- *
- * {@link safeStringify}'s stand-in is a whole *frame* — `{type:"error",…}` — and
- * this string goes **inside** a frame's `events` array, where that object is not a
- * `StoredEvent` and `stream.ts`'s reducer would carry it as one. Nor may the event
- * simply be dropped: the client checks `seq === lastAppliedSeq + 1` on **every**
- * event in a batch and answers a hole by reconnecting at its own cursor, which
- * replays the same event, which is skipped again — a reconnect loop with no end,
- * i.e. the permanent stall {@link BATCH_MAX_BYTES} exists to remove, put back by
- * the repair itself. So the seq is kept and the *event* becomes the stand-in,
- * which is the same substitution `MemoryEventStore.append` already makes for an
- * event it cannot weigh, in the same shape.
- *
- * Unreachable in practice — every event is parsed JSON out of an adapter or out of
- * SQLite, so there is nothing cyclic and no `bigint` to throw on — which is
- * precisely why it must not be the one path that stalls. The stand-in's own
- * `JSON.stringify` cannot throw: every value in it is a primitive.
- */
+// Never a hole: a dropped seq makes the client reconnect onto the same batch forever, so the event becomes an error stand-in.
 function encodeStored(stored: StoredEvent): string {
   try {
     return JSON.stringify(stored);
   } catch (error) {
-    // See above: not reachable from a parsed event, and a dropped seq is a client
-    // that reconnects onto the same batch for ever.
     return JSON.stringify({
       seq: stored.seq,
       ts: stored.ts,
@@ -5715,44 +2629,7 @@ function notFound(c: Context): Response {
   return jsonError(c, 404, "session_not_found", "no such session on this daemon");
 }
 
-/**
- * The status a {@link PathError} deserves, in the one place all three fs routes
- * read it from.
- *
- * They disagreed on the fallback and that is legitimate — a bad `name` on
- * `mkdir` is a 400 and a missing `path` on a listing is a 404 — but they must
- * not disagree on the two codes that are about something other than the request
- * being wrong. `unresponsive` is a 503 rather than a 404: the directory is
- * there, it is a stalled mount, and a client that reads it as "gone" will prune
- * a perfectly good recent-directory row for it.
- */
-/**
- * What a refused worktree removal is called, and what it says it refused for.
- *
- * The status and the remedy are the same for every refusal — a 409, cured by
- * `?force=1`, which is what `RemoveRefusal`'s own docblock promises — so those
- * are fixed here. **The sentence is not, and it used to be.** This arm answered
- * every refusal `workspace_dirty` / "this worktree still holds work", and one of
- * the refusals says the opposite of that: `counts_unknown` exists precisely to
- * record that the daemon **could not tell** whether there is work there, because
- * `git status` timed out or answered 128 off a stale gitfile. Removing
- * `removeWorkspace`'s `?? 0` one level down was the whole point — a count nobody
- * could take is not a count of zero — and restating it as a claim at the boundary
- * put the defect back at the only place anybody reads it: `scripts/client.ts`
- * prints `error.message` and walks nothing else, so an operator was told a
- * worktree definitely holds work and invited to force-delete it on that evidence.
- *
- * `locked` gets its own words for the same reason in miniature: a locked worktree
- * is a fact about a lock rather than about work.
- *
- * **Both definite shapes keep the `workspace_dirty` code deliberately**, because
- * that string is what `scripts/client.ts` keys its "pass --force to remove it
- * anyway" hint on, and force really is the remedy for a lock as much as for a
- * dirty tree. The uncertain arm has to be a new code — a client that reads
- * `workspace_dirty` as "there is work here" would be reading a lie — so it
- * carries the remedy in its own sentence instead, rather than losing the remedy
- * along with the falsehood.
- */
+// counts_unknown means the daemon could not tell, so it gets its own code; definite refusals keep workspace_dirty, which scripts/client.ts keys its force hint on.
 function removalRefusalAnswer(refusals: readonly RemoveRefusal[]): { code: string; message: string } {
   const definite = refusals.filter((refusal) => refusal.code !== "counts_unknown");
   if (definite.length === 0) {
@@ -5761,9 +2638,6 @@ function removalRefusalAnswer(refusals: readonly RemoveRefusal[]): { code: strin
       message: "could not tell whether removing this worktree would lose work; force removes it anyway",
     };
   }
-  // A lock is only the answer when it is the *only* definite refusal: a tree that
-  // is both dirty and locked is a tree that holds work, and that is the sentence
-  // worth reading.
   const holdsWork = definite.some((refusal) => refusal.code !== "locked");
   return {
     code: "workspace_dirty",
@@ -5777,17 +2651,6 @@ function pathErrorStatus(error: PathError, fallback: 400 | 404): 400 | 403 | 404
   return fallback;
 }
 
-/**
- * An errno from a filesystem call, as this system's one error envelope.
- *
- * The `/fs` routes rethrow anything that is not a `PathError`, which was fine
- * while every call they made was funnelled through one that converted. They make
- * more calls than that now — a `stat` and a `readdir` on the directory itself —
- * and an `EACCES` or an `ENOTDIR` out of those left the handler as a raw throw,
- * i.e. a 500 with no `error.code`. Every client in this system parses `code`
- * (`packages/web/src/http.ts` says so out loud), so an uncoded 500 is the one
- * shape none of them can say anything useful about.
- */
 function errnoError(c: Context, error: unknown, fallback: 400 | 404): Response | null {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   if (typeof code !== "string") return null;
@@ -5799,110 +2662,21 @@ function errnoError(c: Context, error: unknown, fallback: 400 | 404): Response |
   return jsonError(c, fallback, "invalid_path", message);
 }
 
-/**
- * Sort key for a bounded `GET /sessions`: lower is kept.
- *
- * Blocked first because a pending permission is the only thing on this list that
- * is waiting on a human. Then anything pinned. Then everything else that is still
- * live. Terminal sessions last, because they will never change again and a client
- * that wants their transcript asks for them by id.
- *
- * Blocked still outranks pinned, and that ordering is the point rather than an
- * accident: a pin is a preference somebody expressed once, and a pending
- * permission is somebody being waited on right now. A pinned *terminal* session
- * outranking an unpinned live one is likewise intended — the person said to keep
- * it, and a `?limit=` cut that dropped it would make the pin a lie.
- *
- * ⚠ **`rank` is deliberately not read here, and it was for one release.** A tier
- * of its own sat between the pin and liveness, on the argument that dragging a row
- * is the pin's statement made through a different gesture. Two measurements took
- * it back out, and both are about a position not being the rare, deliberate,
- * per-row thing a pin is:
- *
- * - **It outranked liveness, and the window is sixty rows.** `SESSION_LIST_LIMIT`
- *   in `packages/web/src/store.ts` is 60 per machine, so sixty positioned
- *   *terminal* rows hid every running session on that machine from the rail. A pin
- *   cannot reach that count by hand; a position can, because `resolveDrop`'s
- *   re-space writes one to a whole folder at once.
- * - **Which also made "they said something about this row" false of the row.**
- *   After a re-space the daemon holds a `rank` for rows nobody touched, so reading
- *   one as an expressed preference is exactly the inference the paragraph below
- *   forbids.
- *
- * **A position is the reader's display order and buys no retention.** The startup
- * prune in `store/sqlite.ts` reads `pinned` and never `rank`, and that is the
- * agreed answer rather than a divergence somebody should close: a pin says "keep
- * this", a position says "show it here". Restoring the tier means teaching the
- * prune at the same time — the two have to move together, or this route promises a
- * durability the sweep does not honour and a transcript goes at seven days.
- *
- * This is the daemon's *truncation* order, which is a different question from the
- * client's *display* order (`orderSessions` in `packages/web`). They are allowed to
- * differ: this decides what survives a cut, that decides what a person reads first
- * — and since the client's order is the reader's own, nothing here may be derived
- * from it at all.
- *
- * Derived from the pending arrays rather than from `status === "blocked"` so it
- * stays right if the derived status ever gains a state that also has something
- * outstanding — and through `awaitingHuman`, so an approval and a question count
- * the same here without this line having to know there are two kinds.
- */
+// Truncation order: waiting on a human, pinned, live, terminal. rank is deliberately not read: a position buys no retention.
 function listRank(session: SessionSnapshot): number {
   if (awaitingHuman(session)) return 0;
   if (session.pinned) return 1;
   return session.exit === null ? 2 : 3;
 }
 
-/**
- * Refuses a changes request when the session's directory is not there.
- *
- * An empty file list would be a lie: "nothing changed" and "I cannot see the tree
- * any more" are different answers and only one of them is safe to render.
- */
-/**
- * Serve one file's bytes, and never anything a browser will render.
- *
- * Containment happened before this: `/files` ran `safeRelPath`, and the upload
- * route built its path entirely out of a row we wrote. What this owns is the two
- * things both routes must answer identically — what may be served, and under
- * which headers.
- *
- * **The headers are the security of this route, and they are not decoration.**
- * The reason used to be stated as `readCredential` accepting `?token=` on any
- * route, so that a download opened in a tab carried a live daemon token in
- * `location.search` for script in a rendered response to read. That door is shut
- * — the query credential is now read only on a WebSocket handshake, see
- * `readCredential` — and the headers are not one bit less load-bearing for it,
- * because the credential is not the only thing worth stealing here. This route
- * serves **any regular file under a session's workspace**: a rendered HTML or SVG
- * response executes on the daemon's own origin, where it can read every other
- * route with whatever credential the page it is embedded in holds, and where a
- * `blob:` URL made from it would inherit the creating origin. So:
- *
- * - `application/octet-stream` **always**, never sniffed, never the mime the
- *   uploader declared (a claim about a different surface), and never derived from
- *   an extension — a table would be wrong often and right often enough that
- *   somebody later "improves" it into emitting `text/html`.
- * - `attachment`, which is what actually makes a browser save rather than render.
- * - `nosniff`, which is not redundant beside it: it also stops anything *in front*
- *   of this daemon — a proxy, or a CDN somebody later puts on the relay —
- *   re-typing the body into something renderable.
- * - `no-store`, because the response is a private file fetched under a bearer
- *   credential, and a cacheable one is that file sitting in a shared cache.
- */
+// Always octet-stream, attachment, nosniff and no-store: a rendered HTML or SVG response would run on the daemon's origin.
 async function serveFile(c: Context, full: string, name: string): Promise<Response> {
-  // `lstat` under a bounded probe, so a symlink is refused by *shape* rather than
-  // by where it points, and a file on a sleeping mount is a 503 rather than a
-  // confident 404 about somebody's work. See `probeFile`.
   const probe = await probeFile(full);
   if (probe === null) {
     return jsonError(c, 503, "file_unresponsive", "the filesystem holding that file did not answer", {
       timeoutMs: DESCRIBE_TIMEOUT_MS,
     });
   }
-  // Symlinks, directories, fifos, sockets and devices in one refusal, because the
-  // answer to all of them is the same. A 404 rather than a 403 for the reason
-  // `sessionOf` 404s: the refusal should not confirm what is there.
   if (probe.kind !== "file") {
     return jsonError(c, 404, "not_a_regular_file", "that path is not a regular file");
   }
@@ -5913,36 +2687,12 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
     });
   }
 
-  /*
-   * **Opened once, with `O_NOFOLLOW`, and everything else read off that handle.**
-   *
-   * The probe above is a bounded `lstat`, and it is still what answers 503 on a
-   * stalled mount and 404 on a path that is not a regular file. What it cannot
-   * do is decide anything about the bytes: it resolves a *path*, and re-opening
-   * that path resolves it a second time. Between the two, anything running as
-   * this uid — which is every agent, by design — can replace the leaf with a
-   * symlink, and `createReadStream` follows it.
-   *
-   * `changes.ts` records the measurement this repeats: `ln -s ~/.ssh/id_rsa x`
-   * inside a workspace, served to anyone holding the bearer token. The rule
-   * written there is "`lstat` first, always", and a route that serves raw bytes
-   * for any path under the workspace is the general case of it — so "always" has
-   * to mean the handle the bytes come from, not a path checked a moment earlier.
-   * `O_NOFOLLOW` refuses at `open`, which is the only place the answer cannot go
-   * stale; `ELOOP` is a symlink and reads as the same 404 the probe gives.
-   *
-   * `fstat` on the handle then answers kind and size about **this** file
-   * description. That also closes the framing bug the probe's size had: a file
-   * that grew between the two would have emitted more bytes than the declared
-   * `content-length`, which the relay forwards as opaque bytes and cannot fix.
-   */
+  // Opened once with O_NOFOLLOW and everything read off that handle: an agent could swap the leaf for a symlink after the probe.
   let handle: Awaited<ReturnType<typeof openFile>>;
   try {
     handle = await openFile(full, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch {
-    // ELOOP (a symlink), EISDIR, ENOENT, EACCES — the answer to all of them is
-    // the one the probe already gives, and saying which would confirm what is
-    // there. Same reasoning as `sessionOf`'s 404.
+    // Every errno gets the probe's 404: saying which would confirm what is there.
     return jsonError(c, 404, "not_a_regular_file", "that path is not a regular file");
   }
 
@@ -5976,12 +2726,7 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
   }
 
   const stream = handle.createReadStream();
-  // **First, before the stream is handed anywhere.** A `Readable` that emits
-  // `'error'` with no listener is an uncaught exception, and an EACCES or a stale
-  // handle mid-read is exactly that event — the same fact the relay's
-  // `handleUpgrade` invariant records, one layer down. Destroying it is enough:
-  // the response is already streaming, so the transfer fails visibly rather than
-  // completing short. Destroying the stream closes the handle with it.
+  // The error listener first: an unhandled stream error is an uncaught exception.
   stream.on("error", () => stream.destroy());
 
   return new Response(Readable.toWeb(stream) as ReadableStream, {
@@ -5989,10 +2734,6 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
     headers: {
       "content-type": "application/octet-stream",
       "content-disposition": contentDispositionFor(name),
-      // From the handle's own `fstat`, so it describes the bytes being sent
-      // rather than a path that was checked earlier: a file that shrinks fails
-      // the transfer instead of arriving silently short, and one that grows
-      // cannot overrun the length that was declared for it.
       "content-length": String(size),
       "x-content-type-options": "nosniff",
       "cache-control": "no-store",
@@ -6001,24 +2742,7 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
 }
 
 async function workspaceReady(c: Context, managed: ManagedSession): Promise<Response | null> {
-  /*
-   * **`existsSync`, and it was the whole daemon.**
-   *
-   * For a `plain` session `workspace.root` *is* the `cwd` the caller named, so
-   * this was a synchronous filesystem call on a path somebody else chose, sitting
-   * in front of `GET /sessions/:id/changes` and reachable with `session:read`. On
-   * a hard network mount whose server has paused it blocks inside the kernel and
-   * cannot be interrupted — which stops the event loop, which is every session,
-   * every socket and `/health` with it. That is the exact death `browse.ts` was
-   * rewritten to eliminate, still reachable through a different route; the rule
-   * that module established is not about browsing, so it lives in `stall.ts` now
-   * and this is one of its callers.
-   *
-   * And three answers rather than two, because they are genuinely different
-   * things to tell somebody: gone is a 409 about their workspace, not answering
-   * is a 503 about the filesystem under it — and calling the second one "no
-   * longer exists" is a confident lie about work that is very probably fine.
-   */
+  // Never a synchronous check: for a plain session the root is the caller's cwd and may be a stalled mount. Gone is 409, not answering 503.
   const present = await probeExists(managed.workspace.root);
   if (present === true) return null;
   if (present === null) {
@@ -6035,7 +2759,6 @@ async function workspaceReady(c: Context, managed: ManagedSession): Promise<Resp
   });
 }
 
-/** Maps a git failure onto the same status codes the agent failures already use. */
 function gitError(c: Context, error: unknown): Response {
   if (error instanceof WorktreeError) return worktreeError(c, error);
   if (error instanceof GitError) {
@@ -6045,8 +2768,6 @@ function gitError(c: Context, error: unknown): Response {
     if (error.code === "git_timeout") {
       return jsonError(c, 504, "git_timeout", error.message);
     }
-    // `error.code`, not a hardcoded "git_failed": `git_output_too_large` is a
-    // different problem and the caller should be able to tell them apart.
     return jsonError(c, 502, error.code, error.message, { stderr: error.stderr.trim() });
   }
   throw error;
@@ -6054,7 +2775,6 @@ function gitError(c: Context, error: unknown): Response {
 
 function worktreeError(c: Context, error: WorktreeError): Response {
   switch (error.code) {
-    // Environment problems, matching how `agent_unavailable` already uses 503.
     case "git_missing":
     case "worktree_root_unwritable":
       return jsonError(c, 503, error.code, error.message, error.detail);
@@ -6063,10 +2783,6 @@ function worktreeError(c: Context, error: WorktreeError): Response {
     case "git_failed":
     case "git_output_too_large":
       return jsonError(c, 502, error.code, error.message, error.detail);
-    // `outside_worktree_root` deliberately has no arm and falls to the 409 below.
-    // It was a 403 when it meant "the repository git resolved is not yours to
-    // open"; what it means now is that the managed worktree root refuses a path,
-    // which is a conflict rather than a refusal of permission.
     default:
       return jsonError(c, 409, error.code, error.message, error.detail);
   }
@@ -6074,15 +2790,6 @@ function worktreeError(c: Context, error: WorktreeError): Response {
 
 export type { SessionSnapshot };
 
-/**
- * A plugin's answer, or the refusal it turned into.
- *
- * One place, because there are two routes and the interesting part is identical:
- * a plugin can be missing, stopped, broken, slow, or simply wrong about what it
- * returns, and every one of those has to become an error envelope somebody can
- * read rather than a 500 with a stack in it. `PluginApiError` carries the code;
- * anything else is this daemon's own fault and reaches `app.onError`.
- */
 async function pluginAnswer(c: Context, run: () => Promise<PluginResult>): Promise<Response> {
   try {
     const result = await run();
@@ -6095,46 +2802,17 @@ async function pluginAnswer(c: Context, run: () => Promise<PluginResult>): Promi
   }
 }
 
-/**
- * Which status a plugin's refusal is.
- *
- * ⚠ Read the **code**, never the status — this function exists so the statuses
- * are at least not misleading, not so anybody branches on them. The split is by
- * *whose problem it is*: a plugin that is off or broken is `503`, because the
- * remedy is on this machine and the request itself was fine; everything else is a
- * `502`, because something downstream of this daemon answered badly.
- */
+// Read the code, never the status: off or broken is 503, remedy on this machine; anything else 502.
 function pluginErrorStatus(code: string): 403 | 413 | 502 | 503 | 504 {
   if (code === "plugin_unavailable") return 503;
   if (code === "plugin_timeout") return 504;
-  // Busy rather than broken, and the remedy is to ask again — which is what 503
-  // says and 502 does not.
   if (code === "plugin_overloaded") return 503;
   if (code === "plugin_scope_denied") return 403;
-  /*
-   * ⚠ **The one code the split above has no arm for, and it fell to the wrong
-   * half.** With no entry here it took the `502` default, whose stated reason is
-   * "something downstream of this daemon answered badly" — and nothing downstream
-   * answered at all: the message never reached the child, because it does not fit
-   * one IPC frame. It is neither this machine's fault nor the plugin's; the
-   * remedy is on the caller's side, which is what `413` says and is already this
-   * daemon's word for it at `payload_too_large`, `import_too_large` and
-   * `import_unpacked_too_large`. `docs/API.md` said `503`, which was a third
-   * answer agreeing with neither.
-   */
+  // 413: the message never reached the child because it does not fit one IPC frame.
   if (code === "plugin_request_too_large") return 413;
   return 502;
 }
 
-/**
- * Which status an install refusal is.
- *
- * `413` for the bounds, so a client can tell "too big" from "wrong", `409` for a
- * plugin that will not start — the tree is unchanged and the old version is still
- * running, which is a conflict rather than a failure — and `400` for everything
- * about the archive or the manifest, all of which are things the person who built
- * it can fix.
- */
 function pluginInstallStatus(code: string): 400 | 409 | 413 | 502 | 503 {
   switch (code) {
     case "plugin_too_large":
@@ -6142,24 +2820,10 @@ function pluginInstallStatus(code: string): 400 | 409 | 413 | 502 | 503 {
     case "plugin_too_many_entries":
       return 413;
     case "plugin_start_failed":
-    /*
-     * A conflict for `plugin_start_failed`'s own reason: nothing was changed.
-     * The commit asks for authority nobody granted, so this daemon refused it
-     * before the plugin ran — whatever was installed before is still installed
-     * and still running, and the remedy is a person looking at what changed.
-     */
     case "plugin_consent_broken":
       return 409;
     case "plugin_write_failed":
       return 503;
-    /*
-     * ⚠ **`502`, because nothing about the request was wrong.** GitHub was
-     * unreachable, or answered something other than a tarball. A `400` here would
-     * send somebody hunting for a typo in a commit that is perfectly good, and a
-     * `503` would claim this daemon is the thing that is unwell. `404` from the
-     * far end keeps its own code, because "that commit is not there, or the
-     * repository is private" is the one refusal on this path a person can act on.
-     */
     case "plugin_source_unavailable":
     case "plugin_source_not_found":
       return 502;

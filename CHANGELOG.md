@@ -25,8 +25,174 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **A dark theme.** The menu has a **Dark theme** switch under everything else; the app stays light until you turn it on. The choice belongs to this device rather than an account: every account on it shares it, and signing out keeps it. Every colour was re-chosen for a dark background rather than inverted, and text, borders, the diff and the question card keep the contrast they have in the light theme. The page is dark from its first frame, and in the desktop app the window's title bar follows the switch too.
+
+### Security
+
+- **Continuous deployment no longer trusts the deploy host's key on first use.** `deploy/ci-deploy.sh` pins the new `DEPLOY_KNOWN_HOSTS` secret with `StrictHostKeyChecking=yes` and refuses to deploy without it. Add the secret before the next dispatch: the host's keys as `ssh-keyscan -H <DEPLOY_HOST>` prints them, checked against the host's own fingerprints.
+
 ### Fixed
 
+- `install.sh` printed the id of the default control-plane image rather than the one `REEMOAT_CP_IMAGE` in `control-plane.env` named.
+- A control plane whose `mail.public_url` is its own origin no longer warns that it serves no browser UI: it serves `/confirm`, `/reset` and `/verify` from the gate bundle. The warning remains for a control plane running without that bundle.
+- A mail failure from TLS or the socket is stored truncated and stripped of CR/LF, as SMTP replies already were, so it can no longer stretch or split the Email settings banner.
+- The login throttle key no longer cuts the tail of a long address when the name is a maximal email address: its ceiling is derived from the longest key any builder writes.
+- **"Use another account" appears on the forced password change again.** It was never drawn there, so someone with several accounts could only sign out.
+- A message sent while an earlier send on the same session was still in flight could have its echo cleared early by the earlier one's late answer or refusal.
+- The server log view keeps following new lines while you are at the bottom, however many lines one refresh adds. It now opens on the newest line.
+- A tool call whose only argument is its content (`content`, `text`, `new_string`) is shown with that content rather than as a call with no input.
+- A one-shot agent ask (a capability or model read) keeps its concurrency slot until the agent process has actually exited, and daemon shutdown waits for it; the slot used to free during the agent's teardown.
+- The idle sweep's wedged-turn reap runs even when parking an idle session throws in the same tick.
+- Raising `REEMOAT_SESSION_CREATE_BURST` takes effect at once instead of leaving the old ceiling in place until the bucket refilled; lowering it still clamps.
+- An unreachable machine no longer flickers into view every 15 seconds while it is re-checked: a re-check keeps the last answer until the new one arrives.
+- **grok's questions, plan approvals and MCP forms reach the question card** instead of failing with "Method not found": its own `_x.ai/ask_user_question`, `_x.ai/exit_plan_mode` and `_x.ai/mcp/elicit` requests are answered in the shapes grok accepts, and grok is started with its 30-minute question timeout switched off, so a question waits for you.
+- **A question or plan the agent raises between turns is no longer cancelled on arrival.** When claude kept working after its turn ended (after a background workflow finished), every question and plan approval it raised was answered "no turn to answer into" instantly, and one still waiting when a turn ended was cancelled too. A request now waits until you answer it, dismiss it, press Stop, or the agent goes away. A plan raised between turns offers only the grant that works there: claude cannot restart into a cleared context outside a turn.
+- **The working line shows whenever the agent is working**, including work claude starts by itself after background tasks finish, and counts the tokens streamed since the last tool call (`working… · 3m · ↓ 1.2k tokens`). Stop works there too.
+- **Finished background tasks survive an effort change.** Switching effort away from ultracode restarts the agent, and the list of finished tasks went with it. It is now kept across an agent restart, a park and a clean daemon restart; a task still running when its agent is replaced is shown as stopped.
+- **A message is sent and shown exactly as typed.** The macOS app no longer turns quotes into «» or “”, `--` into a dash, or text-replacement shortcuts into their expansions, and the message box and the question card's own-answer box switch off spelling substitution. Your own messages are drawn as plain text, so a numbered list stays text you can select, and the first line's indentation is no longer trimmed.
+- **Sending a message always brings the conversation to the bottom**, even while the agent is streaming; the conversation no longer drops off the bottom by itself, and a line wrapping in the message box no longer shifts it.
+- **The box for your own answer on a question card no longer draws a dark rectangle** sticking out past its row.
+- **Bottom sheets close with a swipe on Android**, including a quick flick and a fully expanded picker, and leave from where your finger let go instead of jumping back first. Every sliding panel shares one gesture and one animation.
+- **A sliding panel no longer flickers or stutters while it moves**: the drag is one composited transform per frame, so the grab bar stays crisp. New session can be dragged from anywhere on it, as the pickers can.
+- **Your own answer on a question card can hold line breaks**: Shift+Enter on a keyboard (Enter moves the card on), Enter on a phone.
+- **Sending while the agent is answering no longer makes the conversation jump or blink**: the message is never drawn twice, and the working line keeps its place when a queued message is handed over or a turn ends.
+- **Send and Stop cross-fade instead of swapping instantly**, and a tap during the swap always lands on the button that is appearing.
+- **The Android launcher icon has the same margin as the macOS one** instead of filling the whole circle.
+- **Swiping between machines on a phone turns the page like Telegram's folders**: the neighbouring machine's list slides in beside the current one and the release carries both on, instead of springing back and then jumping to the new machine.
+- **The machine names in the phone's top strip are one pixel smaller** (15px).
+- **Flicking quickly through several machines on a phone keeps moving**: a flick made while the previous page is still settling carries the pages on to the next machine instead of being lost.
+- **The selected machine is marked by a pill that travels with the page**, stretching from one tab to the next as you swipe, tap or return to All, instead of an underline that jumped.
+- **On a phone, swiping right on the All page pulls out the side menu**, following your finger, as Telegram does on its first folder; the left edge stays the system's Back.
+- **Pulling the session list down refreshes it**: every machine is re-dialled and re-listed while a gap with the working mark holds open, and it closes when the answers are in.
+- **Connection trouble is a small spinner at the bottom-left** that expands into its words on hover or tap, instead of banners above the list and the conversation. A reconnect under a second shows nothing, and a machine that is simply switched off does not hold it on the All tab.
+- **A drag that starts on the dimmed area beside an open panel moves the panel**: the side menu slides back with your finger, and a bottom sheet slides down, the same as dragging the panel itself. Tapping a picker's dimmed area no longer also taps what is under it.
+- **On a phone, dragging a conversation to the right takes you back to the list**: the conversation follows your finger with the list revealed underneath, and lands on the same list the back button gives. A code block that can still scroll keeps the drag, and a field, a selection or an open menu never starts one.
+- **Resizing the window while the agent streams keeps the conversation at the bottom** instead of dropping off it, and the scroller is re-synced after a resize so what is painted and what the mouse hovers stay in the same place.
+- **The desktop machine column is wider (80px, Telegram's width) with larger buttons**, and its menu button is tall enough that the menu bar macOS slides over a full-screen window no longer covers it.
+- **Renaming a session no longer shifts the header**: the box is drawn where the name stands, hugs the text, and has no heavy focus ring. The session name shows the text caret on hover.
+- **Text on a phone or tablet is two pixels larger throughout** (conversation and session titles 16px instead of 14px); a desktop keeps its size.
+- **The menu button at the top left of the phone list is larger** (a 44px button with a 20px glyph), as is the back button at the top of a conversation.
+- The app no longer gives up on a slow request before the machine's own budget for it runs out. Each slow route waits for its daemon's budget plus 30 seconds (a new session up to 215s, a prompt 150s, an agent capability read 290s) instead of a flat 90s, which drew a healthy machine as unreachable.
+
+## [0.11.0] - 2026-09-23
+
+### Added
+
+- **Several accounts in one app.** The menu now opens on your face, your name and
+  the server the account is on; pressing the name lists every account on this
+  computer, the current one ringed, then **Add account**. Tapping another account
+  switches to it — on a Mac at once and exactly as you left it, with the work in the
+  account you left still running; on Windows, Linux and Android the app reloads
+  onto it. **Add account** signs in to another account, on the same server or
+  another one, while the others stay signed in — up to ten.
+- **Every account gets this computer as a machine of its own**: its own daemon,
+  database, sessions and working copies, running from when the app opens until it
+  quits whichever account is on screen, and using one of that account's machine
+  slots. The first account on a server keeps that server's folder; each further one
+  lives in `~/.reemoat/servers/<server>@<user id>/`.
+- **The server step opens on the server the app was built for**, greyed, with a
+  pencil beside it to change it. An app built without one opens on an empty box, as
+  before.
+
+### Removed
+
+- **The "Rent a machine" link.** An instance whose control plane set
+  `REEMOAT_CP_MACHINES_OFFER_URL` drew it under the one-line installer — on the
+  home screen of an empty fleet and in Settings → Machines. It is gone from the app
+  and from `GET /v1/instance`, and the variable no longer does anything: a control
+  plane that still finds it in its environment says so once at startup, and the
+  line can be deleted. Adding a machine is unchanged — the one-line installer is
+  still on all three screens, and so is the sentence shown in its place when the
+  machine limit is reached. An app from an earlier release stops drawing the link
+  as soon as its control plane is updated.
+
+### Changed
+
+- **New session no longer installs or signs in to an agent.** When nothing on a
+  machine can start, the screen says why in one sentence and offers one button,
+  **Agent settings**, which opens that machine's Agents list. Coming back returns
+  to New session with the folder and the chosen agent as they were.
+- **The Agents list can finish the job.** A row that is not installed, not signed
+  in or would not start now has **Set up <agent>** in its menu. It opens that
+  agent's own screen: install with the installer's output, then sign in. The
+  list's own Install, which ran with no output, is gone.
+- **Settings → Account → Server address shows your account's server and no longer
+  changes it.** Another server is another account: add it from the menu. A wrong
+  address typed while signing in is still corrected from **‹ Server** on the
+  sign-in screen.
+- **Signing out signs out of the account on screen and takes it off this
+  computer**, stopping its daemon; the app moves to the account you used before it,
+  or to the sign-in for that server if it was the last. Signing in as that person
+  again later brings back the same device and the same machine. An account whose
+  session ends by itself stays in the menu, marked *signed out*, and its sign-in
+  screen offers a way back to your other accounts and a way to remove it.
+- **Updating keeps you signed in.** The first launch asks the server whose sign-in
+  this computer holds and moves it to that account; the device and the machine
+  beside it move only where the server confirms they are that account's. Going
+  back to an earlier release afterwards asks you to sign in again. ⚠ **Where the
+  one-line installer set this computer up, update with its daemon running.** If it
+  has not answered by the time the app asks, the app sets the computer up again as
+  a second machine, and the first — with its sessions — stays offline.
+
+### Fixed
+
+- **The computer the app runs on is called "local" and comes first in the machine
+  list.** The machine strip, the desktop rail and New session named it by its
+  host name ("MacBook-Pro…") and sorted it among the others by name. On this
+  computer they now say "local" and list it first — from the moment the app
+  opens, before its daemon has started, and without changing back while the
+  daemon restarts — and New session picks it by default whenever it is reachable.
+  Everywhere else — your phone,
+  another computer, anybody you share it with — it keeps its real name, and
+  Settings → Machines still shows the real name with "this device" beside it, so it
+  can be renamed there as before. Another machine that is itself named "local",
+  such as one an earlier version of the app set up, is shown with its id added
+  ("local-2405b5ea…") so only this computer reads "local". If you have dragged it
+  somewhere in the list, it stays where you put it; if you had rearranged the
+  machines before this release, it stays where it was until you move it.
+- **The app can set a computer up for more than one server, and for more than one
+  account on each.** Signed in to a second server it used to refuse ("This
+  computer could not be set up"), because the daemon settings in `~/.reemoat` named
+  the first. Each account now gets its own daemon, database, sessions and working
+  copies — `~/.reemoat` stays with the server its `daemon.env` names, a server's
+  first account otherwise lives under `~/.reemoat/servers/<server>/`, and each
+  further account on a server under `~/.reemoat/servers/<server>@<user id>/`, on a
+  port the system picks. Every account that is set up has its daemon started when
+  the app opens, and all of them stop together when it quits. Switching accounts
+  interrupts nothing: the other account's daemon, its running turns and pending
+  approvals, and a phone's way to this computer through it stay up while the app
+  runs. A new account's daemon starts empty — no plugins, system keys, custom agents
+  or pasted keys of its own — while the agent CLIs' sign-ins are shared by every
+  account. `REEMOAT_AGENT_UPDATES`, `REEMOAT_AGENT_SOURCE` and
+  `REEMOAT_AGENT_CHANNEL` in `~/.reemoat/daemon.env` do not yet reach the daemons
+  for other servers and accounts.
+- **A daemon running here for this server that the app did not start is no longer
+  met with silence.** One whose machine is in your list is adopted as before; one
+  your account cannot see is named in the setup notice.
+- **The app no longer creates a second machine for a daemon already running on
+  this computer** with its settings file somewhere else (`REEMOAT_ENV_FILE`,
+  `pnpm daemon` from a checkout); it adopts it.
+- **A daemon's clean stop no longer deletes another daemon's announcement.** Every
+  daemon removed `daemon.json` on its way out, whoever had written it; now only the
+  one that wrote it does.
+- `install.sh --uninstall --purge` names the desktop app's daemons for other
+  servers and accounts before deleting them, and `--uninstall` lists them among the
+  data it keeps.
+- **The model chip read "Newer version availa…" after Claude Code moved its
+  `opus` alias.** Claude Code 2.1.280 describes a conversation resumed on a model
+  an alias has since moved past with a notice instead of the model's name, and the
+  chip showed the start of that notice. It now shows the model the row names,
+  "Opus 5". The notice stays in the menu under that row, where it tells you to pick
+  Opus for Opus 5.5.
+- **A Claude Code update the daemon did not install was picked up only ten minutes
+  later.** When something other than the daemon updated the CLI (its own updater,
+  another daemon, or `deploy/deploy.sh`), the new-agent screen kept naming the
+  previous build, and listing its models, for up to ten minutes. The daemon now
+  checks which file it would run each time it uses it, so the new build's version
+  and models appear the next time you open the new-agent screen. A session that is
+  asleep still shows its old list until it wakes.
 - **The Android app would not install on a OnePlus 13 by tapping the APK.** The
   phone's own installer — OxygenOS, Android 16 — answered "App not installed as
   package appears to be invalid", while the same file installed on a Pixel, and
@@ -40,7 +206,6 @@ it — so a citation here would be the one kind nothing checks.
   too; the same APK signed twice with one key, with and without the JAR
   signature, and tapped on that phone, does. A release now also refuses to
   publish an APK missing either signature.
-
 - **Starting a session in the macOS app put blank "exec" icons in the Dock.**
   Every MCP server an agent started through `npx` appeared there as an application
   of its own — a blank tile labelled "node" — because macOS counted the Node

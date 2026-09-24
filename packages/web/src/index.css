@@ -1,98 +1,19 @@
 @import "tailwindcss";
 
-/*
- * **The rail's width, and it lives here so that the first paint is already right.**
- *
- * `ui/rail.ts` owns the number and `AppShell` writes it onto `documentElement`
- * from an effect — which runs *after* the first paint, so without a value here the
- * rail would mount at whatever `w-[var(--rail-w)]` falls back to and jump one
- * frame later. The declared value is `RAIL_DEFAULT`, i.e. the width this shipped
- * at, so a browser that has never been dragged never sees the variable change at
- * all.
- *
- * On `:root` rather than in `@theme`: a theme entry generates utilities, and there
- * is no `w-rail-w` anybody should be writing. This is one value read by one
- * `w-[var(…)]`, and it is *mutated at runtime* — which is the whole reason it is a
- * custom property rather than a Tailwind class in the first place.
- *
- * **`px` and not `19.5rem`, which is the same number only at a 16px root.** It was
- * written `19.5rem` to match the `w-[19.5rem]` this replaced, and that quietly made
- * the sentence above false for anybody who has changed their browser's font size:
- * nothing here sets a root `font-size` — the only `font-size` in this file is the
- * iOS form-control rule — so `1rem` is the reader's own setting, and `AppShell`
- * writes `${width}px` unconditionally. At Chrome's "Large" (20px) the first paint
- * was 390px and the effect rewrote it to 312px, a 78px snap on every reload,
- * i.e. precisely the jump this declaration exists to prevent, appearing only for
- * the readers least able to ignore it. Same unit on both sides is the whole fix,
- * and `webcheck` now derives this literal from `RAIL_DEFAULT` so the two cannot
- * drift apart again.
- *
- * The consequence worth stating rather than discovering: the bounds in `rail.ts`
- * are device pixels, so the rail is the one box here that does **not** grow with
- * the reader's type. That is accepted rather than overlooked — a drag produces
- * device pixels and `RAIL_MIN` is a floor somebody can always drag away from, not
- * a fixed width — but it does mean `RAIL_MIN`'s "enough of a name to tell two
- * sessions apart" is a claim about a 16px root and gets tighter above it.
- *
- * ⚠ **This measures the whole rail, which is now two columns** — the machine
- * folders plus the session list — and `rail.ts` states every bound as
- * `MACHINE_COLUMN_PX` plus the number it used to be. The `312` quoted above is
- * history: it is what the snap was measured at, on the build that had one column,
- * and it is left as written for the reason every measurement in this repository is.
- */
+/* RAIL_DEFAULT, in px because AppShell writes px (webcheck asserts). */
 :root {
-  --rail-w: 384px;
-  /*
-   * **And the background panel's, which is the second draggable pane and the
-   * first one with two declared answers.**
-   *
-   * `ui/taskWidth.ts` owns the bounds, `AppShell` writes a *chosen* width onto
-   * `documentElement` from the same effect, and `TaskPanel` spends this through
-   * `md:w-[var(--task-fit)]` with `SessionView` opening
-   * `md:pr-[calc(var(--task-fit)+0.75rem)]` beside it — the panel's width plus the
-   * 12px it stands off the edge, which is the subtraction that used to be two
-   * literals in two files.
-   *
-   * ⚠ **Two declarations, and the later one wins by *source order alone*.** Both
-   * are unlayered `:root`, and `@media` adds no specificity — which is this file's
-   * own post-mortem three hundred lines down, where every phone animation shipped
-   * onto the desktop for exactly this reason. So the override below is not
-   * stronger than this, it is merely later, and `webcheck` asserts the order
-   * rather than the values: written above this block it would silently never
-   * apply.
-   */
+  --rail-w: 392px;
+  /* Must stay before the xl override, which wins by source order alone (webcheck asserts). */
   --task-w: 320px;
-  /*
-   * ⚠ **And the width actually spent, because the two panes' clamps are
-   * independent and their sum is not bounded anywhere.**
-   *
-   * `TASK_MAX` is 512 and `RAIL_MAX` is 552, and both are one ordinary gesture away
-   * at any width. Measured in a real browser at a 1024px window with both dragged
-   * to their maxima: the conversation column's content box floored at **0px**, its
-   * header title measured 0px wide, and the docked card lay 52px **over** the
-   * session rail. Neither module can see the other and neither can see the window —
-   * `webcheck` bans `matchMedia`/`innerWidth`/`clientWidth` in `TaskPanel.tsx` by
-   * literal, and a JavaScript clamp there would be a second source of truth for a
-   * width CSS already knows.
-   *
-   * So the clamp is here, where the viewport is. `--task-w` stays the *stored*
-   * number — it is what `PaneHandle` writes, reads back through `getComputedStyle`
-   * and announces — and `--task-fit` is what the panel and the gutter actually
-   * spend. `15.75rem` is a 240px floor for the conversation plus the 12px the card
-   * stands off the edge, so the floor is the conversation's own content and not the
-   * gap beside it.
-   *
-   * ⚠ **`var()` substitutes lazily, which is the whole reason this can be declared
-   * before the things it depends on.** Redefining `--task-room` in the `lg` block
-   * and `--task-w` in the `xl` block re-resolves `--task-fit` at use time; it is not
-   * frozen here. That is the one place in this pair where source order does *not*
-   * decide, and it is worth saying beside the ⚠ above where it does.
-   *
-   * The rail term only exists where the rail does: below `lg` the aside is
-   * `hidden`, so the room is the whole window.
-   */
   --task-room: 100vw;
   --task-fit: min(var(--task-w), calc(var(--task-room) - 15.75rem));
+  /* Every sheet, drawer and scrim, arriving and leaving: SHEET_MS and SHEET_EASE in sheetMotion.ts (webcheck, Q3.650). */
+  --sheet-ms: 260ms;
+  --sheet-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  /* The shadows' colour and strength: plain properties because Tailwind inlines a shadow's value into its utility (Q3.669). */
+  --shade: 60 52 38;
+  --shade-k: 1;
+  color-scheme: light;
 }
 
 @media (min-width: 64rem) {
@@ -101,264 +22,39 @@
   }
 }
 
-/*
- * 26rem where there is room for the rail and both panes.
- *
- * The conversation's width is **not monotonic in the window's**, which is why this
- * is a step rather than one number: at `lg` the rail arrives and takes
- * `RAIL_DEFAULT`, so the 20rem panel leaves 308px at 1024 — narrower than the 436px
- * the same panel leaves at 768 with no rail at all. 20rem where the row is shared and
- * 26rem where it is not, and the `lg` row is the tight one, accepted rather than
- * hidden: the panel is opened, never opened *for* somebody, and closing it gives
- * the whole width back.
- *
- * `80rem` is `xl`, written as Tailwind writes it. It is a breakpoint in CSS and
- * nowhere else, which is `AppShell`'s standing rule — a resized window cannot end
- * up drawing a docked panel over a conversation that made room for a different
- * one. The two px values here are asserted against `TASK_DEFAULT`/`TASK_WIDE`, the
- * same pin `--rail-w` carries after `19.5rem` and `312` agreed only at a 16px
- * root.
- */
 @media (min-width: 80rem) {
   :root {
     --task-w: 416px;
   }
 }
 
-/*
- * A control surface for a phone in daylight, and for a desktop browser beside it.
- *
- * **One palette, and it is monochrome apart from four named exceptions.** Light,
- * warm, paper-coloured, with the whole app drawn in values of a single
- * near-black. The exceptions are `danger`, the diff's `add`/`del`, and `offer`;
- * each is argued at its own declaration below, and the count is the point — a
- * hue here is a thing somebody decided, not a thing somebody reached for. There is no dark block any more and
- * `prefers-color-scheme: dark` is deliberately ignored: everything that used to be
- * carried by colour — a waiting session, a failed one, a removed diff line, a
- * keyword in a code fence — is carried by fill, ring, weight, motion or shape
- * instead, and each of those had to be *designed*. A second palette would mean
- * designing all of it twice, and the second copy is the one nobody looks at, which
- * is exactly what went wrong with the light mode this file used to claim to have.
- *
- * Every colour is still a variable, and that is what makes a restyle a one-file
- * change: a component writes `bg-surface`, never a hex.
- */
 @theme {
-  /* Four surfaces, not three. A sidebar sitting beside cards needs one more
-     step than a single scrolling column did.
-
-     `ink` is the plane things sit on (the page, the rail, a well); `surface` is
-     a thing on that plane (a card, a pane, a menu); `raised` is a mark on a
-     thing (a chip, a hover tint, a code span). Those three sentences are the
-     whole rule, and they are unchanged from the dark palette — which is why no
-     component had to be re-read when the values moved.
-
-     **Almost all of the colour came back out, and that is the third and final
-     position rather than a retreat to the first.** The version before this went
-     the other way — it pushed `ink` *up* in chroma to 0.026 so the rail would
-     read unmistakably beige beside a near-white pane — and beige at that strength
-     is a decision the whole app then wears: the user's own message was a beige
-     block, a tool card was a beige block, and what should have read as paper read
-     as a colour scheme. Chroma is now 0.003–0.006 across all three, so these are
-     **greys with a memory of warmth**: enough that the app is not clinical, far
-     too little to be called beige by anybody looking at it.
-
-     Two things follow from the values, and both are load-bearing.
-     `surface` is now plain `#ffffff`, so the conversation is white and nothing
-     composites over a tint. And `ink` at 1.06:1 against it is **too small a step
-     to divide two panes**, which is why `border-r` came back onto the rail in
-     `AppShell` after being deleted twice: at this delicacy a line is the divider
-     and the tone is only a hint.
-
-     What the three still mean is unchanged — `ink` is the plane, `surface` is a
-     thing on it, `raised` is a mark on a thing — but the *transcript* now spends
-     `raised` at two strengths rather than reaching for `ink`: `bg-raised` for the
-     message you wrote (1.22:1 on the pane, and grey) and `bg-raised/50` for a
-     tool card (1.10:1), which is the "both grey, yours louder" ranking with one
-     token instead of a fourth surface.
-
-     Every text token was re-measured against all three and the floors below are
-     the *new* numbers. They all went **up**, because the grounds got lighter. */
   --color-ink: #f9f8f6;
   --color-surface: #ffffff;
   --color-raised: #eae8e4;
 
-  /* Two weights of line, and the split is load-bearing rather than tidy.
-
-     `edge` is a decorative hairline (1.23:1 on `ink`) and **may never be the sole
-     identification of a control**. `edge-strong` is a control's own boundary and
-     is held at ≥3:1 on all three surfaces (4.14 / 4.40 / 3.59) because WCAG 1.4.11
-     asks that of a non-text control with no fill — which is now **most controls in
-     this app**, and by request rather than by accident: a field or a button is
-     drawn in the colour of the thing it sits on, so the border is the whole of
-     what says a control is there. That is why `edge` is not an alternative to it.
-
-     The consequence a builder has to apply: **hover moves a fill, never a border.**
-     `hover:border-edge-strong` was fine when the gap was small; here it is a jump
-     from #E3E1DD to #7B7873, louder than the press itself. */
+  /* edge is decorative; edge-strong is a control's only boundary (3:1, WCAG 1.4.11). */
   --color-edge: #e3e1dd;
   --color-edge-strong: #7b7873;
 
-  /* 16.37 on `ink`, 17.37 on `surface`, 14.20 on `raised`. */
   --color-fg: #1c1a16;
-  /* 7.30 / 7.75 / 6.33. */
   --color-muted: #57524a;
-  /* The quietest text in the app, and almost every use of it is 12px — which is
-     small text, so WCAG AA wants 4.5:1 rather than the 3:1 that would be enough
-     for a large heading. So this value is bounded by measurement, not by taste.
-     5.87 on `ink`, 6.23 on `surface`, and 5.09 on `raised` — that last one is
-     still the binding case and still the reason this is not lighter, though the
-     margin grew when the grounds did. Every consumer goes through the token, so
-     only the floor moved. */
   --color-faint: #676051;
 
-  /*
-   * The one colour in the app, and it is here because irreversibility is the one
-   * failure a second look cannot repair.
-   *
-   * A dark oxblood on the same warm axis as the paper rather than beside it —
-   * 8.08 / 8.57 / 7.01, so it is a *value* first and a hue second. Rules for it:
-   * `text-danger` and `border-danger` on an outlined control only, **never a
-   * fill**, and never more than one control in a view.
-   *
-   * It **had** one non-control use that was argued for: the worktree notice on the
-   * session header, the one line in the app that said work you can see is *not*
-   * in the session you are looking at. It qualified on the same grounds as
-   * irreversibility — a thing a second look does not repair, because the second
-   * look shows the same wrong thing — and it was text, so the `never a fill` half
-   * was untouched. The banner was deleted on request. Kept in the record rather
-   * than cut, because the *category* it established is the one a future
-   * non-control use has to argue itself into.
-   *
-   * ⚠ **This used to end "so this token is back to controls only", and that was
-   * false when it was written.** `text-danger` appears 34 times across 16 files
-   * under `ui/`, and not all of them are controls: the transcript alone draws two
-   * plain paragraphs with it — the daemon `error` row and the orphaned failed
-   * update, both in `EventList.tsx`, neither of which anybody can press. Those are
-   * defensible on the same "a second look does not repair it" grounds the worktree
-   * notice was, and they were never argued for; they simply appeared. Corrected
-   * rather than re-litigated, because a docblock stating a rule the file does not
-   * keep is worse than no rule: the next person reads it, believes it, and either
-   * removes a use that was fine or adds one thinking the rule allows it.
-   *
-   * The half that **is** still absolute and is worth keeping absolute: `danger` is
-   * never a fill, and never more than one control in a view.
-   *
-   * `warn` and `ok` were retired rather than joining it. `warn`'s only job was
-   * "something needs you", which is now a filled dot with a permanent ring, a
-   * semibold row title and a count on the folder — three signals against one.
-   * Every `ok` site already carried a `Check` glyph.
-   */
+  /* Never a fill, and never more than one control in a view. */
   --color-danger: #7e362b;
 
-  /*
-   * Names were retired here, and the grep gate in `webcheck` is what made deleting
-   * them safe.
-   *
-   * `--color-accent`, `--color-accent-ink`, `--color-warn` and `--color-ok` are
-   * gone. The reason they left in two steps — retargeted to `fg`/`muted` first,
-   * deleted only once nothing named them — is that **Tailwind v4 emits no rule at
-   * all for a utility whose token does not exist**. `bg-warn` without
-   * `--color-warn` is not an error, not a build warning and not a type failure;
-   * the background simply never paints. Measured on the commit that introduced
-   * this palette: a deliberate `bg-nonexistent` built green and produced no CSS.
-   *
-   * So a missed call site would have lost its background silently, and the only
-   * thing that can catch that is a source-text assertion. It lives in
-   * `webcheck.ts` beside the two that already read `SessionBrowser.tsx` and
-   * `Composer.tsx` off disk.
-   *
-   * **`--color-add` and `--color-del` were on that list and have come back**, with
-   * real values this time, and the gate now asserts their *presence* as well as
-   * the others' absence — the same property from the other side, because the
-   * failure it exists to catch is a utility with no token behind it, whichever
-   * direction the two drifted apart in.
-   */
-
-  /*
-   * The diff's two colours, and the only ones in the app besides `danger`.
-   *
-   * `danger`'s rules are `text`/`border` on an outlined control, never a fill, and
-   * never more than one in a view. None of them is being bent, because none of them
-   * is about this: those bound a colour that identifies a **control**, and these
-   * tint **content**. A diff is many lines of it by construction, so "one per view"
-   * is not a sentence that can be said here.
-   *
-   * What keeps them from being a licence: **the fill is tinted and the text is not.**
-   * A changed line renders `text-fg` on `bg-add`/`bg-del` — 14.68 and 14.34, against
-   * 17.37 on plain `surface` — so nothing about legibility rests on the hue, and no
-   * reader depends on telling green from red to know what happened: the `+`/`−` in
-   * the gutter and the two line-number columns say it without colour, which is the
-   * arrangement the monochrome palette was chosen to force. Context lines keep
-   * `text-muted` (6.54 on `add`).
-   *
-   * `-ink` is the sigil and the word-level mark (at `/20`), never body text: 7.06 on
-   * `add` and 7.57 on `del`. Both sit on the same warm axis as `danger` and are
-   * deliberately quiet — a transcript is twenty of these down a column, and a
-   * saturated pair would make the machinery the loudest thing on a screen whose job
-   * is the conversation. Measured against the palette's own grades, the tints are
-   * 1.184 and 1.211 from `surface`, i.e. between a tool card (1.10) and the message
-   * you wrote (1.22).
-   *
-   * **They are measured against `surface` because that is where they must be drawn**,
-   * and that is a constraint rather than a note: on `raised` they are 1.034 and 1.010,
-   * i.e. invisible. So `DiffView`'s body paints `bg-surface` even inside a card whose
-   * frame is `raised` — the same move the tool card already makes for the well its
-   * child steps sit in, and for the same reason.
-   */
+  /* Content tints: text stays fg, and they must be drawn on surface (invisible on raised). */
   --color-add: #e4efe2;
   --color-add-ink: #2c5730;
   --color-del: #f6e6e2;
   --color-del-ink: #77332a;
 
-  /*
-   * The third hue, and the first one on a **control** rather than on content.
-   *
-   * ⚠ **The paragraph above bounds hue to content and says so in as many words;
-   * this is the exception to it, and it is the owner's call of 2026-09-06 rather
-   * than a case the argument covers.** Writing that down instead of quietly
-   * widening the rule is the point: the next reader should find one named
-   * exception, not a paragraph that has stopped being true.
-   *
-   * What keeps it from being a licence is the constraint the diff tints are held
-   * to, applied unchanged: **the fill is tinted and the text is not.** The label
-   * is `text-fg` — 14.74 on this, against `add`'s 14.68 — so nothing about
-   * legibility rests on the hue, and the control says what it is without it: the
-   * word `Or` on the rule above it, a border, an external-link glyph, and a verb
-   * for a label. In greyscale it reads exactly the same.
-   *
-   * **Bounded to one control in the app**, which `webcheck` asserts by sweeping
-   * for the utility. One is what a fill this size can be: `danger`'s "never more
-   * than one in a view" is the same sentence about a different colour, and the
-   * reason both need saying is that a second tinted control turns a palette into
-   * a decoration scheme.
-   *
-   * Measured against the palette's own grades, on the same warm axis as
-   * everything else here and deliberately quiet — 1.179 from `surface`, between
-   * `add` (1.184) and a tool card (1.10). Warm sand rather than a green or a red,
-   * because those two are spoken for one paragraph up and a buyer's button that
-   * reads as an added diff line is a worse joke than a grey one.
-   *
-   * ⚠ **Measured from `ink` as well, and that is a constraint the diff tints do
-   * not carry.** They are drawn on `surface` only and their own docblock records
-   * that on `raised` they vanish (1.034, 1.010). This one is drawn on `ink` in
-   * the rail *and* on `surface` in the pane and the settings sheet, so it has to
-   * survive both: 1.110 from `ink`, which is a tool card's step and reads.
-   *
-   * `-ink` is the glyph and the border alone, never the label: 7.17 on the tint,
-   * beside `add-ink`'s 7.06 and `del-ink`'s 7.57.
-   */
-  --color-offer: #f2ecdd;
-  --color-offer-ink: #5f4a1e;
+  --color-caution: #5f4a1e;
 
-  /* A scale, replacing the `text-[11px]` / `text-[10px]` arbitrary values that
-     were scattered through every component with no relationship between them.
+  /* Behind every sheet and the drawer; fg at a quarter here, never fg itself, since fg turns light in the dark palette. */
+  --color-scrim: rgb(28 26 22 / 0.25);
 
-     Everything moved up about a notch with looser leading, because the previous
-     scale was drawn for a dense bordered list and this one separates rows with
-     whitespace. `--text-xl` is the one addition and the brief required it: with a
-     17px ceiling, a pop-up's title was the same size as a row in the list behind
-     it. */
   --text-2xs: 0.75rem;
   --text-2xs--line-height: 1.125rem;
   --text-xs: 0.8125rem;
@@ -377,145 +73,33 @@
   --radius-lg: 0.875rem;
   --radius-xl: 1.25rem;
 
-  /*
-   * Warm shadows, because Tailwind's default is neutral black and neutral black
-   * over paper reads as cold grey — the one thing that makes a beige page look
-   * like a beige page with a bug rather than a beige page.
-   */
-  --shadow-sm: 0 1px 2px 0 rgb(60 52 38 / 0.06);
+  --shadow-sm: 0 1px 2px 0 rgb(var(--shade) / calc(0.06 * var(--shade-k)));
   --shadow-md:
-    0 2px 6px -1px rgb(60 52 38 / 0.08), 0 1px 2px -1px rgb(60 52 38 / 0.06);
+    0 2px 6px -1px rgb(var(--shade) / calc(0.08 * var(--shade-k))),
+    0 1px 2px -1px rgb(var(--shade) / calc(0.06 * var(--shade-k)));
   --shadow-lg:
-    0 8px 20px -6px rgb(60 52 38 / 0.12), 0 2px 6px -2px rgb(60 52 38 / 0.07);
+    0 8px 20px -6px rgb(var(--shade) / calc(0.12 * var(--shade-k))),
+    0 2px 6px -2px rgb(var(--shade) / calc(0.07 * var(--shade-k)));
   --shadow-xl:
-    0 16px 36px -10px rgb(60 52 38 / 0.16), 0 4px 10px -4px rgb(60 52 38 / 0.08);
-  --shadow-2xl: 0 28px 60px -16px rgb(60 52 38 / 0.22);
+    0 16px 36px -10px rgb(var(--shade) / calc(0.16 * var(--shade-k))),
+    0 4px 10px -4px rgb(var(--shade) / calc(0.08 * var(--shade-k)));
+  --shadow-2xl: 0 28px 60px -16px rgb(var(--shade) / calc(0.22 * var(--shade-k)));
 
-  /*
-   * The face the brief asked for, first, and the four it will actually resolve to.
-   *
-   * `Microsoft YaHei UI` before `Microsoft YaHei`: the UI cut is the one Microsoft
-   * ships for chrome, with tight vertical metrics. Asking for plain YaHei on
-   * Win10/11 gets the print cut, whose line gap blows out a 44px row — and every
-   * row in this app is 44px. `微软雅黑` is the local name, which is what a
-   * Chinese-locale Windows resolves when the Latin lookup misses.
-   *
-   * `-apple-system` before any CJK face, not after: on a Mac that is SF Pro, and
-   * putting PingFang ahead of it would take the *Latin* too and render a Mac UI in
-   * a Chinese face. There is no webfont here and there will not be one — YaHei and
-   * Segoe UI are Microsoft's and cannot be shipped, and a free CJK substitute is
-   * 2–4 MB of woff2 out of the control plane's own container to a phone on LTE,
-   * which is not a trade this app makes anywhere else.
-   *
-   * **The CJK tail is load-bearing rather than thorough.** SF Pro has no Hanzi, so
-   * without naming PingFang a Chinese session title — or a Chinese sentence in an
-   * agent's reply — falls to the browser's last resort, which on macOS is a
-   * *serif*. A serif Chinese paragraph inside a sans UI, in a transcript.
-   */
+  /* YaHei UI before YaHei (the print cut breaks 44px rows), -apple-system before any CJK face; the CJK tail avoids a serif fallback. */
   --font-sans:
     "Microsoft YaHei UI", "Microsoft YaHei", 微软雅黑, -apple-system,
     BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Noto Sans SC", system-ui, sans-serif;
-  /* Same shape of fix on the mono side: `Cascadia Mono` is the modern Windows
-     face (Consolas is the floor), and the CJK mono tail exists because a Chinese
-     comment inside a code fence otherwise falls to last resort and breaks the
-     grid the fence is drawn on. */
   --font-mono:
     ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono", Consolas,
     "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace;
 
-  /*
-   * "An agent is working", as the one piece of motion in this app.
-   *
-   * Tailwind's own `animate-pulse` is 2s between full and half opacity, which is
-   * tuned for a page of skeleton placeholders — a whole screen of it, breathing
-   * gently, deliberately not asking for attention. A status dot is the opposite
-   * job: it is 8px, there is one of it per row, and it has to be readable as
-   * *moving* from a phone lying on a desk. At that size a fade to 50% over two
-   * seconds is, in practice, a dot that looks static and slightly dim.
-   *
-   * So: faster, deeper, and brighter at the top of the cycle. The glow is what
-   * carries the colour half — a plain opacity fade only ever subtracts, so the
-   * peak of the old animation was just the dot's own flat fill. `currentColor`
-   * rather than a named token, so this stays one keyframe for every state that
-   * uses it; the caller sets `text-*` beside its `bg-*`.
-   *
-   * `ease-in-out` and not `linear`: a linear blink reads as a hardware fault
-   * light, which is a thing to say about a broken machine and not about an agent
-   * that is working normally.
-   */
+  /* Uses currentColor: the caller sets text-* beside its bg-*. */
   --animate-blink: blink 1.2s ease-in-out infinite;
 
-  /*
-   * …and what carries the colour half now that there is no colour.
-   *
-   * The old keyframe was a `box-shadow` **glow** — `0 0 7px 1px currentColor`,
-   * a soft halo that reads as light on a dark ground and as a smudge on paper.
-   * This is a hard **ring** that grows from nothing instead, which survives the
-   * inversion and, more importantly, is a different *shape* from the thing it has
-   * to be told apart from.
-   *
-   * That pairing is deliberate and it is the whole reason the two states are still
-   * distinguishable with the hue gone. `blocked` carries a **permanent** ring, as
-   * a static utility class. `running` carries an **animated** ring, from zero. At
-   * rest they differ (one has a ring, one is mid-fade); in motion they obviously
-   * differ.
-   *
-   * And under `prefers-reduced-motion` the block at the bottom of this file
-   * collapses the animation to 0.01ms with no `animation-fill-mode`, so `running`
-   * settles back to a **plain filled dot** carrying no ring at all — still clearly
-   * not `blocked`. The dark palette could not do that without the hue, which makes
-   * this one of the few places the monochrome version is strictly better.
-   */
-
-  /*
-   * A card arriving, rather than appearing.
-   *
-   * The second keyframe in this app, and the bar for adding one is the complaint
-   * it answers: the permission card mounted between the transcript and the
-   * composer with no warning at all, at full amber, and that is most of what made
-   * it feel like an alarm rather than a question.
-   *
-   * **It moves now, and that is a reversal with a reason.** This said "opacity
-   * only", because a `translateY` had been tried and rejected: the card was a
-   * static-position sibling directly above the composer, so a transform painted
-   * over the composer for the duration. The card is `absolute` inside the
-   * conversation region now and paints above everything there by design, so the
-   * objection is simply gone — the thing it was protecting is what the card is
-   * deliberately doing. Six pixels, which is a card sliding into place rather
-   * than a card that has to be watched.
-   *
-   * The `prefers-reduced-motion` block below zeroes this, and that degradation is
-   * correct rather than merely acceptable: unlike the `blocked` dot, nothing about
-   * this card's *state* is carried by the motion. It is still there and still
-   * saying the same thing.
-   */
   --animate-rise: rise 140ms ease-out;
 
-  /*
-   * The third keyframe, and the bar for one is stated two paragraphs up: it has to
-   * answer a complaint. This one answers "the agent is working" with the product's
-   * own mark instead of a borrowed dot — the three bars blinking in sequence, which
-   * is the typing indicator every messenger draws and which nobody has to be taught
-   * to read.
-   *
-   * **Opacity only, and it bottoms out at 0.25 rather than at 0.** Three bars going
-   * fully out and coming back is a mark that keeps *disassembling*, which reads as
-   * a rendering fault at the foot of a conversation; a floor keeps it one object
-   * that is breathing. It is deeper than `blink`'s 0.35 because there is no ring
-   * here to carry the other half — this glyph has no room for one.
-   *
-   * 1.05s against `blink`'s 1.2s, and the two are deliberately not the same number:
-   * a rail full of dots and one mark in the transcript beating in lockstep would
-   * read as one mechanism driving both, which they are not, and which the note on
-   * `WorkingMark` explains at length.
-   *
-   * The stagger is **not** here: it is three `[animation-delay:…]` utilities on the
-   * rects, because Tailwind emits a class only for a literal it finds in the source
-   * and a delay computed from an index emits nothing at all — the failure being
-   * three bars pulsing in unison, which is a different animation that still looks
-   * deliberate.
-   */
+  /* The stagger is literal [animation-delay:…] classes on the rects: Tailwind emits nothing for a computed one. */
   --animate-bar: bar 1.05s ease-in-out infinite;
 
   @keyframes bar {
@@ -535,31 +119,7 @@
     }
   }
 
-  /*
-   * A sheet arrives from the edge it is anchored to.
-   *
-   * The fourth keyframe, and it answers the same complaint the third did, one
-   * screen over: settings *appeared*, which on a phone reads as the app having
-   * been replaced rather than as a panel having been opened over what you were
-   * looking at. `SHEET_PANEL` carried `animate-rise` — six pixels — which is the
-   * right amount for a card materialising at the centre of a desktop and is
-   * nothing at all for a panel covering 92% of a phone.
-   *
-   * So the two cases are two utilities on the same element: `animate-sheet
-   * sm:animate-rise`. Below `sm` the sheet is bottom-anchored (`Sheet.tsx` uses
-   * `justify-end`) and travels its own height; at `sm` and above it is a centred
-   * card and `rise` is unchanged, because a card in the middle of the screen has
-   * no edge to have come from and sliding it up from the bottom of a desktop
-   * would be a much longer journey to the same place. The breakpoint is a class
-   * string, which is `AppShell`'s rule about widths staying in CSS.
-   *
-   * 260ms against `rise`'s 140, and the easing is not `ease-out`: it travels a
-   * screen instead of six pixels, and a fast tail is what makes that read as a
-   * panel being placed rather than as one being thrown. No opacity — a sheet that
-   * fades *and* slides is two statements about one object, and the slide already
-   * says everything.
-   */
-  --animate-sheet: sheet 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-sheet: sheet var(--sheet-ms) var(--sheet-ease);
 
   @keyframes sheet {
     from {
@@ -567,24 +127,7 @@
     }
   }
 
-  /**
-   * The menu drawer, which is the sheet's movement on the other axis.
-   *
-   * **The same duration and the same curve, deliberately, and `webcheck` asserts
-   * the two numbers equal rather than pinning 260 twice.** A drawer arriving from
-   * the left and a sheet arriving from the bottom are one gesture in this app —
-   * "a layer covers the app" — and a second easing would be a second decision
-   * about it, made by whoever typed the second rule rather than argued anywhere.
-   *
-   * ⚠ **A distinct keyframe rather than `sheet` with a different transform**,
-   * because a keyframe here is a *name* a utility is generated from: Tailwind v4
-   * emits `animate-drawer` from `--animate-drawer` and nothing composes a
-   * direction onto it. `sheet-out`'s own docblock, ten lines down, records what
-   * happens to the nearest shortcut — `reverse` on an arrival plays once and
-   * never plays back.
-   *
-   */
-  --animate-drawer: drawer 260ms cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-drawer: drawer var(--sheet-ms) var(--sheet-ease);
 
   @keyframes drawer {
     from {
@@ -592,26 +135,8 @@
     }
   }
 
-  /**
-   * And the way back out, which is a **separate keyframe** rather than the arrival
-   * reversed.
-   *
-   * ⚠ `animate-drawer` with a `reverse` composed onto it is the shortcut, and
-   * `sheet-out` twelve lines down records what it does: it slides out and does not
-   * slide back. An arrival plays once; naming the direction does not give you the
-   * departure.
-   *
-   * **`both`, and that is the half that is invisible when it is missing.** Without
-   * a fill the panel snaps back to its resting position for the frames between the
-   * animation ending and React dropping the element — a flash of the full drawer
-   * after it has already left. `MenuDrawer` waits exactly this long before it
-   * unmounts, and `webcheck` reads this duration out of the stylesheet and asserts
-   * it against that constant, because neither file can see the other's number.
-   *
-   * The easing is `sheet-out`'s rather than the arrival's, for the reason that one
-   * gives: leaving is quick at the start and settles, arriving is the opposite.
-   */
-  --animate-drawer-out: drawer-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+  /* Not a reversed drawer: a reversed arrival never replays. */
+  --animate-drawer-out: drawer-out var(--sheet-ms) var(--sheet-ease) both;
 
   @keyframes drawer-out {
     to {
@@ -619,15 +144,7 @@
     }
   }
 
-  /*
-   * And the ground behind it darkens rather than switching.
-   *
-   * The fifth, and the smallest: a scrim that snaps to full while the panel is
-   * still travelling reads as two unrelated things happening, and it is the half
-   * that says the screen behind is no longer the one you are using. Opacity only,
-   * on the same clock as the panel, so they land together.
-   */
-  --animate-scrim: scrim 260ms ease-out;
+  --animate-scrim: scrim var(--sheet-ms) var(--sheet-ease);
 
   @keyframes scrim {
     from {
@@ -635,41 +152,8 @@
     }
   }
 
-  /*
-   * The same two movements leaving, and they need **names of their own**.
-   *
-   * `sheet-close` two hundred lines down takes a leaving panel off the screen
-   * through a view transition, and it can only do that because `router.ts` wraps
-   * the navigation that unmounts it: the old frame still exists to animate.
-   * `AgentConfigBar`'s config picker has no route — see its own docblock for why
-   * it cannot be a `Sheet` — so nothing holds a snapshot of it, and it has to keep
-   * itself mounted for the length of its own exit instead.
-   *
-   * ⚠ **This was `sheet … reverse` and `scrim … reverse`, and it never played.**
-   * Reusing the arrival's keyframes and flipping the direction is the tidier
-   * description of one movement, and here it is a no-op: an element keeps its
-   * running animation for as long as the `animation-name` list is unchanged, so
-   * swapping `animate-sheet` for `animate-sheet-out` on the **same node** edits
-   * the direction and fill of an animation that finished 260ms ago rather than
-   * starting one. It stays in its after phase, and `both` then holds what
-   * reversal has made the final frame — the 0% keyframe, off the bottom of the
-   * screen. So the panel vanished in a single frame, on a phone, with every check
-   * green and the utility emitted: reported as *"it slides out but does not slide
-   * back"*. Distinct names restart it, and that is the whole of the fix.
-   *
-   * The numbers are therefore written twice after all, and what keeps the two
-   * halves one movement is that the easing is the arrival's curve **mirrored**
-   * — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` — rather than a curve chosen
-   * again. `both` because the last frame has to hold, or the panel snaps back up
-   * between the animation ending and React unmounting it.
-   *
-   * ⚠ **260ms is also a number in `AgentConfigBar.tsx`**, which is what times the
-   * unmount. `webcheck` reads this file and asserts the two agree — a timer
-   * shorter than the animation cuts it off mid-slide, and a longer one leaves a
-   * finished panel sitting on the screen — and that neither exit names the
-   * keyframes its arrival does, which is the assertion the frame above cost.
-   */
-  --animate-sheet-out: sheet-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+  /* Own keyframe names: a reversed arrival on the same node never restarts. No `from`: a dragged panel leaves from where it was let go. */
+  --animate-sheet-out: sheet-out var(--sheet-ms) var(--sheet-ease) both;
 
   @keyframes sheet-out {
     to {
@@ -677,7 +161,7 @@
     }
   }
 
-  --animate-scrim-out: scrim-out 260ms ease-in both;
+  --animate-scrim-out: scrim-out var(--sheet-ms) var(--sheet-ease) both;
 
   @keyframes scrim-out {
     to {
@@ -685,32 +169,6 @@
     }
   }
 
-  /*
-   * And `rise` leaving, which is the third of these pairs and arrived last.
-   *
-   * `TaskPanel` is a bottom sheet on a phone and a card docked beside the
-   * conversation from `md`, and it carried `md:animate-none` — no arrival there at
-   * all, which was fine while a close was an unmount in one frame. It is not fine
-   * once `animationend` is what ends the exit: an element carrying
-   * `animation: none` never fires one, so the exit falls to the backstop and a
-   * **fully visible** card sits over the conversation for the whole of it. Every
-   * variant that can be on screen owes an outgoing animation, which is the rule
-   * `leaving.ts` states and this token is what lets that panel keep it.
-   *
-   * So the docked card arrives on `rise` — `SHEET_PANEL`'s own answer for "a card
-   * at a width where there is no edge to have come from" — and leaves on this. 140ms
-   * either way, against the sheet's 260: it travels six pixels rather than a
-   * screen. ⚠ **A travel of six pixels rather than a slide, and that is measured
-   * against what happens beside it.** The conversation's gutter collapses in the
-   * same frame the panel starts leaving, so a card that *moved* any real distance
-   * would cross text that is reflowing underneath it.
-   *
-   * `both`, for `sheet-out`'s reason: without a fill the card snaps back to full
-   * opacity for the frames between the animation ending and React dropping it. The
-   * easing is the arrival's curve mirrored rather than a curve chosen again —
-   * `ease-out` and `ease-in` are each other's reflection, which is the same
-   * relation `sheet-out` spells out with a `cubic-bezier`.
-   */
   --animate-rise-out: rise-out 140ms ease-in both;
 
   @keyframes rise-out {
@@ -733,20 +191,61 @@
   }
 }
 
+/* Two pixels up the whole scale under a finger, each step's line-height with it (Q3.662); the scale itself stays the six above. */
+@layer theme {
+  @media (pointer: coarse) {
+    :root,
+    :host {
+      --text-2xs: 0.875rem;
+      --text-2xs--line-height: 1.3125rem;
+      --text-xs: 0.9375rem;
+      --text-xs--line-height: 1.4375rem;
+      --text-sm: 1rem;
+      --text-sm--line-height: 1.5rem;
+      --text-base: 1.0625rem;
+      --text-base--line-height: 1.6875rem;
+      --text-lg: 1.25rem;
+      --text-lg--line-height: 1.875rem;
+      --text-xl: 1.5rem;
+      --text-xl--line-height: 2rem;
+    }
+  }
+}
+
 /*
- * There is no second palette, and `prefers-color-scheme` is read nowhere in this
- * file.
- *
- * A dark block used to live here. It is gone rather than dormant, because with
- * the hue removed every state is now encoded in fill, ring, weight or shape, and
- * each of those inverts differently on a dark ground — the diff's band, the
- * blocked dot's ring, the semibold-versus-regular split in a code fence. Keeping
- * a dark copy would mean designing all of that twice and reviewing it once.
- *
- * `data-theme` is not read either, for the reason it never was: there is no theme
- * switcher, and the one thing worse than a single palette is a palette that
- * disagrees with what is on screen because a stale localStorage key said so.
+ * The dark palette: the same names, so no component knows which one is on. Each token keeps its light
+ * twin's job and its ratio to surface; elevation reads lighter, text stops short of white (Q3.669).
+ * Unlayered, like the :root block it overrides. data-theme is set before the first paint by public/theme.js
+ * and afterwards by theme.ts.
  */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-ink: #11100e;
+  --color-surface: #171614;
+  --color-raised: #292724;
+  --color-edge: #312f2c;
+  --color-edge-strong: #7b7874;
+  --color-fg: #e9e6e1;
+  --color-muted: #afaaa3;
+  --color-faint: #9c9689;
+  --color-danger: #df8878;
+  --color-add: #1d2e1e;
+  --color-add-ink: #97ca9a;
+  --color-del: #38221e;
+  --color-del-ink: #e59c8f;
+  --color-caution: #d5ba86;
+  --color-scrim: rgb(0 0 0 / 0.55);
+  /* A shadow on a dark ground has to be black and heavier to read at all; the edge still carries most of it. */
+  --shade: 0 0 0;
+  --shade-k: 3;
+}
+
+/* For the frames a palette swap takes, so .tap's colour fades do not smear it; the switch keeps its own motion (theme.ts). */
+:root[data-theme-swap] *:not([data-keeps-motion]),
+:root[data-theme-swap] *::before,
+:root[data-theme-swap] *::after {
+  transition: none !important;
+}
 
 html,
 body,
@@ -754,33 +253,7 @@ body,
   height: 100%;
 }
 
-/*
- * No rubber-band, and **it has to be on `html`** — this is the whole of the fix and
- * the reason the previous one did nothing.
- *
- * It lived in the `body` block below for a long time, as `overscroll-behavior-y`,
- * with a comment about the iOS bounce revealing white behind the page. WebKit never
- * read it. `LocalFrameView::horizontalOverscrollBehavior()` resolves the viewport's
- * behaviour from `document->documentElement()` and has no `body` fallback at all,
- * so on iOS that declaration was inert from the day it was written. Gecko is the
- * same; Chrome read it from `body` as a longstanding bug and stopped in Chrome 140,
- * which is the CSSWG resolution — viewport properties propagate from the **root**.
- * `overflow` propagates from `body`; this does not, and the two being different is
- * exactly what makes it easy to get wrong twice.
- *
- * On iOS this maps straight onto `UIScrollView`'s per-axis bounce flags, and the
- * predicate is `!= none` — so **`contain` would not do it**: `contain` blocks
- * chaining out, `none` additionally blocks the local bounce, which is the thing you
- * can see. Safari has honoured it since 16.0, and since **16.4** specifically for a
- * page too small to scroll, which is this app on the sign-in screen.
- *
- * Nothing else is needed and the alternatives all cost something: `overflow: hidden`
- * here does not touch the bounce flag at all and stays scrollable whenever the
- * keyboard is up (the visual viewport shrinks under the layout one), `position:
- * fixed` on the body loses scroll position and collides with `viewport-fit=cover`,
- * and `touch-action: none` on the root would kill pinch-to-zoom app-wide while not
- * even reaching a touch that lands inside `main`.
- */
+/* On html, not body: WebKit and Gecko read viewport overscroll from the root only; none, not contain, stops the bounce. */
 html {
   overscroll-behavior: none;
 }
@@ -790,27 +263,10 @@ body {
   background: var(--color-ink);
   color: var(--color-fg);
   font-family: var(--font-sans);
-  /* The bounce this used to try to stop is handled on `html` above, where WebKit
-     actually reads it. Kept as a pointer rather than a duplicate declaration: a
-     second copy here would be inert on every engine shipping today and would
-     re-teach the next reader the thing that was wrong. */
   -webkit-text-size-adjust: 100%;
-  /*
-   * `light` alone, and it is not cosmetic.
-   *
-   * This is what the browser reads to decide the colour of everything the page
-   * does not paint itself. Left as `dark light`, a viewer whose OS is in dark mode
-   * gets a dark UA scrollbar, dark form-control chrome, and — the one that
-   * actually matters — a dark `-internal-light-dark` **autofill** fill painted
-   * over the two beige inputs on the sign-in form, which is the first screen
-   * anybody sees.
-   */
-  color-scheme: light;
 }
 
-/* The approve buttons sit at the bottom of the session screen, which is exactly
-   where the iPhone home indicator is. Both this and `viewport-fit=cover` in the
-   HTML are needed; either alone does nothing. */
+/* Needs viewport-fit=cover in index.html too. */
 .pb-safe {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
@@ -818,147 +274,27 @@ body {
   padding-top: max(0.5rem, env(safe-area-inset-top));
 }
 
-/*
- * The inline-start inset, and it exists for exactly one surface.
- *
- * Both rules above are block-axis, because until now every edge this app pins to
- * is the top or the bottom of the screen. The menu drawer is the first thing
- * anchored to `inset-y-0 left-0`, and on a landscape iPhone with the notch on the
- * left `env(safe-area-inset-left)` is around 44px — so its rows sit under the
- * sensor housing with `viewport-fit=cover` set, which it is, in `index.html`.
- *
- * ⚠ **Here, beside the other two, and never inside the fade-scrollbar block
- * further down.** `webcheck.strip-chosen-tile.ts` slices this file between two of
- * that block's selectors with `indexOf` and asserts the slice declares no
- * `width`/`height`/`scrollbar-width`; a rule inserted there is swallowed into that
- * slice and re-anchors the assertion onto something else. The edge-fade rule
- * already carries the same ⚠ for the same reason — this is the second instance,
- * which is what makes it a rule about this file rather than a note about one class.
- *
- * ⚠ **And this paragraph may not spell those selectors**, which is a second,
- * sharper instance of the same thing: the driver's anchors are plain `indexOf`
- * calls over the raw file, so a comment quoting the string being searched for is
- * found *before* the rule it describes. Written out once, it moved all three of
- * that block's assertions onto this docblock and failed them — the exact shape
- * `webcheck.composer-and-config-bar.ts` records about its own counts, arriving
- * from the other side.
- */
+/* Keep outside the scrollbar-fade rules: webcheck.strip-chosen-tile.ts slices them by indexOf over the raw file, so never quote their selectors in a comment. */
 .pl-safe {
   padding-left: max(0rem, env(safe-area-inset-left));
 }
 
-/*
- * Tap targets on a phone. 44px is the platform minimum and the approve buttons
- * are the reason it matters here; `manipulation` is what removes the 300ms
- * double-tap-to-zoom wait on all of them.
- *
- * ⚠ **Inside `@layer base`, and it was not — which made `touch-none` a dead class
- * on every button in this app.** The focus ring's docblock further down states the
- * rule this broke: Tailwind emits every utility inside `@layer utilities`, an
- * unlayered rule beats a layered one *regardless of specificity*, and this one was
- * unlayered. Measured on the built stylesheet: `.touch-none{touch-action:none}` at
- * byte 18486 inside the utilities layer, `button{touch-action:manipulation}` at
- * 46097 outside every layer — so the utility lost, the effective value on a
- * `touch-none` button stayed `manipulation`, and `manipulation` still permits
- * panning. The agent-strip drag handle could not start a drag on a phone at all:
- * the browser took the vertical gesture for the scroller and fired `pointercancel`
- * before a single `pointermove` arrived. On a desktop it worked, because a mouse
- * is not gated by `touch-action` — which is exactly the shape of bug that ships.
- *
- * This is a **default**, not a decision, and `base` is where a default goes. That
- * sentence used to be borrowed from the rule below, which set the mouse's shape on
- * every pressable element and has since been removed outright — so the argument is
- * written out here, where it is now the only copy: an unlayered rule beats every
- * utility regardless of specificity, so a bare-element default written at the top
- * level makes the matching utility a dead class wherever somebody needs one.
- * Nothing else in this app overrides `touch-action` today, so moving it changes one
- * control's behaviour and no other's.
- */
+/* In @layer base so a utility like touch-none can win: an unlayered rule beats every utility. */
 @layer base {
   button {
     touch-action: manipulation;
   }
 }
 
-/*
- * **Nothing in this client changes the mouse but one named control, and the
- * rule that used to is gone by the owner's call.**
- *
- * The exception is the column-resize shape on `ui/PaneHandle.tsx`'s separator,
- * whose whole affordance is the shape. `webcheck`'s `CURSOR_ALLOWED` is the
- * list, and it holds that one file — so this is an allow-list of one rather
- * than a total absence, and a reader here must not delete it as an offender.
- *
- * ⚠ **The class is not spelled here on purpose.** That sweep reads comments
- * too, so naming it in prose *about* it puts this file on the offenders list —
- * measured, by writing it and watching the check go red.
- *
- * There was an `@layer base` block here setting the hand shape on every enabled
- * `button`, every `[role="button"]` and the one `<summary>` — restored on purpose
- * after Tailwind v4's preflight dropped it, on the argument that with the accent
- * colour gone an unfilled button is drawn in the colour of what it sits on, so
- * the shape of the mouse was the one thing left separating a control from a
- * caption. That argument was true and it is not the decision: the owner's
- * instruction is that no module here changes the mouse from its default, and
- * nothing is to make it react.
- *
- * **What is left as the cue, so that nobody re-adds this to fix a report.** Every
- * pressable thing in this app already answers hover — `.tap` carries a 120ms
- * colour transition, rows take `hover:bg-raised`, captions take `hover:text-fg`,
- * and the two resize separators thicken their line under the pointer. That is a
- * cue on the control rather than on the pointer, which is the trade being made.
- *
- * ⚠ **The ban is a sweep over `src/`, not the absence of a rule here**, because
- * three different wrong states satisfy a regex on this file alone: the
- * declaration written unlayered, the same declaration with other whitespace, and
- * a utility class in a `.tsx` — which Tailwind emits from *source text*, so it
- * never appears in this stylesheet at all. `webcheck` walks both extensions and
- * holds an allow-list, so a second exception is a failing check rather than a
- * precedent somebody finds later.
- *
- * ⚠ **Anchors are not in scope and cannot be.** The eight real `<a>` elements get
- * the hand from every user-agent stylesheet, and taking it back would mean this
- * file setting a cursor — the thing being banned — on the only elements whose
- * shape is universally understood. The claim is about what this app sets.
- *
- * The `@layer base` block above survives with its own argument intact; it used to
- * borrow half of one from here. The reason a bare-element default belongs in
- * `base` is stated there now, where it is load-bearing.
- */
+/* Only PaneHandle's separator and the session title may change the mouse shape (CURSOR_ALLOWED); that sweep reads comments too. */
 
-/*
- * 16px in every form control, decoupled from the reading scale above.
- *
- * iOS Safari zooms the viewport when a text field whose font is under 16px takes
- * focus, and it does not zoom back out afterwards — the app is left panned and
- * oversized until you pinch it back by hand, on every single tap into the
- * composer. `--text-sm` is 14px and `--text-xs` is 13px, and every input,
- * textarea and select in this app is one of those, so that is every field —
- * still under 16px after the scale moved up a notch, which is what keeps this
- * rule load-bearing rather than historical.
- *
- * The other cure is `maximum-scale=1` (or `user-scalable=no`) in the viewport
- * tag, which fixes it by switching pinch zoom off for everybody — including the
- * person who needs it to read a diff. This costs a slightly larger field on a
- * phone instead, which is the right side of that trade.
- *
- * These rules are deliberately unlayered: Tailwind's utilities live in a cascade
- * layer, unlayered author styles beat any layer regardless of specificity, so
- * this wins over the `text-sm` on the element without `!important`. `1em` is the
- * *parent's* size, so a control that is already larger than 16px keeps its size.
- */
+/* 16px stops iOS focus zoom; unlayered on purpose so it beats text-sm. */
 input,
 textarea,
 select {
   font-size: max(16px, 1em);
 }
 
-/*
- * …and on a pointer that cannot trigger that behaviour, hand the size back to
- * whatever utility class the component wrote. `revert-layer` from an unlayered
- * rule rolls the property back to the utilities layer, which is the only way to
- * undo the rule above without hardcoding a second copy of the type scale here.
- */
 @media (pointer: fine) {
   input,
   textarea,
@@ -980,20 +316,11 @@ kbd {
   background: var(--color-raised);
 }
 
-/* A transcript is mostly long unbroken strings — paths, commands, JSON. Without
-   this they force the whole page to scroll sideways. */
 .wrap-anywhere {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
-/*
- * A scrollbar that does not repaint the page.
- *
- * Once there were two panes side by side, the default one on a desktop browser
- * drew a light gutter down the middle of a dark app. Only styled where the
- * pointer is fine: on a phone the bars are overlays and already invisible.
- */
 @media (pointer: fine) {
   * {
     scrollbar-width: thin;
@@ -1001,87 +328,17 @@ kbd {
   }
 }
 
-/*
- * A box that scrolls without saying so.
- *
- * For one shape only: a strip you drag sideways, whose contents already announce
- * that there is more of them by being cut off at the edge. The machine tab bar is
- * the only one, and the bar it would otherwise draw is a permanent classic
- * scrollbar (see the rule above — `scrollbar-width: thin` opts every container in
- * this app out of macOS's overlay bars) painted under the pills, eight pixels
- * from the bottom of the rail.
- *
- * It hides the bar and keeps the scrolling: `scrollbar-width: none` is the
- * standard property, and the `::-webkit-scrollbar` rule is what Safari still
- * needs. Never put this on a vertical list — there a bar is the only thing saying
- * how much more there is.
- *
- * ⚠ **Overruled for exactly two vertical scrollers, by the owner's call on
- * 2026-09-06 (Q3.553): the rail and the pane of the settings sheet, and of the
- * market sheet that mirrors it string for string.** On a fine pointer the rule
- * above draws a permanent classic bar on every scroller in the app, and the owner
- * weighed the cue a bar gives against a bar down the edge of every settings
- * screen and wants none inside that pop-up; scrolling is unchanged. The
- * `overscroll-behavior-x: contain` below is harmless on a vertical scroller —
- * it governs an axis those boxes never move in. Everywhere else the sentence
- * above still stands.
- */
 .no-scrollbar {
   scrollbar-width: none;
-  /* Dragged past its end, this strip does not hand the gesture to the page. `contain`
-     and not `none`: the strip's own bounce is the thing that says you have reached
-     the last tab, and it is the only feedback there is with the bar hidden. The root
-     rule above is the backstop, because WebKit does not put a box that is not
-     currently overflowing into the scrolling tree at all, so this has no effect
-     until there are enough tabs to scroll. */
   overscroll-behavior-x: contain;
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
 
-/*
- * A bar that is there while you are moving and fades once you stop.
- *
- * ⚠ **The fourth answer, and the first one that is this app's own pixels.**
- * `.no-scrollbar` hid it outright — a phone idiom, and on a desktop that left a
- * horizontal strip with no way to move it and nothing saying it could be moved.
- * Taking the class off gave the permanent classic bar the `pointer: fine` rule
- * draws, a dark rule under a row of tiles, reported the moment it shipped. The
- * third reserved that bar's thickness and animated only the thumb's colour — and
- * it **did not fade**, which is the report this rule answers.
- *
- * ⚠ **Why a styled native bar cannot fade here.** Since Chrome 121 the standard
- * properties **override** the pseudo-elements: `scrollbar-width` or
- * `scrollbar-color` at anything but `auto` and every `::-webkit-scrollbar-*` rule
- * on that element is ignored. The `pointer: fine` rule above sets **both, on `*`**,
- * at `thin` and a colour — so a `transition` written on a thumb pseudo-element is
- * dead on arrival everywhere in this app, not only here. What is left switching is
- * `scrollbar-color`, and no engine interpolates it: the bar vanished between one
- * frame and the next.
- *
- * So the native bar is hidden and the app draws its own — an ordinary `div` with
- * an `opacity` transition, which every engine animates and which the
- * `prefers-reduced-motion` block at the foot of this file already zeroes.
- * `AgentStrip` sets its width and offset from the box's own scroll metrics; this
- * file owns only when it is visible.
- *
- * ⚠ **Out slowly, in at once, and one declaration does both.** `is-scrolling`
- * carries the shorter duration with it, so the bar is there with the first notch
- * and takes half a second to go. A single duration in both directions reads as
- * lag: the bar arriving after the row has already moved.
- *
- * It costs no layout in either state, which is the property the third answer had
- * and this one keeps. The rail is a sibling **below** the row with a height of its
- * own, so nothing moves when the thumb appears — the jolt `.scroll-stable` exists
- * against, avoided here by not putting the bar inside the box at all.
- */
+/* Hidden because the thin scrollbar rule on * disables ::-webkit-scrollbar styling; AgentStrip draws its own fading thumb. */
 .fade-scrollbar {
   scrollbar-width: none;
-  /* Dragged past its end, this strip does not hand the gesture to the page.
-     `.no-scrollbar` above states the same thing at length, and for the same
-     reason: with no bar of the browser's, the strip's own bounce is the only
-     thing that says you have reached the end. */
   overscroll-behavior-x: contain;
 }
 .fade-scrollbar::-webkit-scrollbar {
@@ -1096,37 +353,7 @@ kbd {
   transition-duration: 100ms;
 }
 
-/*
- * The gradient at the cut edge of a strip you drag sideways.
- *
- * ⚠ **It answers the one thing the bar above cannot: that there is more, before
- * anybody has touched anything.** `.fade-thumb` reports a *position* and is
- * invisible until the row moves, so a first paint says nothing at all — and the
- * agent strip's contents do not say it either. `.no-scrollbar`'s docblock names
- * the shape that does: "a strip whose contents already announce that there is
- * more of them by being cut off at the edge". That is a half-drawn tile. The
- * agent strip ends in a *fully* drawn control, which reads as the row's
- * deliberate end, and losing that cue is exactly why the strip stopped using
- * `.no-scrollbar` in the first place.
- *
- * ⚠ **A class rather than the four utilities `SessionView` writes inline, and the
- * `opacity` is why.** That fade is mounted and unmounted by a condition that
- * changes rarely; this one changes at the end of every flick, so it transitions —
- * and `webcheck` asserts the substring `opacity` appears nowhere inside
- * `AgentStrip`, for a reason about *tiles* that this would otherwise trip. The
- * gradient itself stays at the call site, because which edge and which ground it
- * fades to are the caller's.
- *
- * ⚠ **Placed after `.fade-thumb.is-scrolling` rather than beside `.fade-scrollbar`
- * above.** `webcheck` reads this file and slices it between those two selectors by
- * `indexOf`; a rule inserted between them re-anchors every assertion about the
- * scrollbar onto this one.
- *
- * Out slowly and in at once, which is `.fade-thumb`'s asymmetry and its reason: a
- * single duration in both directions reads as lag, the gradient arriving after the
- * row has already moved. It costs no layout in either state — the element is
- * `absolute` and `pointer-events-none` at its one call site.
- */
+/* Keep after the scrollbar-thumb rules, which webcheck slices by indexOf; a class because webcheck bans opacity in AgentStrip. */
 .edge-fade {
   opacity: 0;
   transition: opacity 500ms ease;
@@ -1136,70 +363,16 @@ kbd {
   transition-duration: 100ms;
 }
 
-/*
- * A scroll box whose content width does not depend on whether it is scrolling.
- *
- * `scrollbar-width: thin` above is a *classic* scrollbar: it takes layout width
- * rather than floating over the content the way a phone's does. So the moment a
- * box crosses from fitting to not fitting, `clientWidth` drops by about eight
- * pixels — and everything centred inside it re-centres by half of that.
- *
- * In the transcript that is a visible jolt with an obvious trigger: expanding a
- * tool call or a subagent card adds height, height crosses the threshold, and the
- * "before /clear" button's label, the turn-end line, a gap marker, the
- * context-cleared divider and the right-hand edge of every message bubble all
- * slide left together. Nothing moved horizontally; the box got narrower under
- * them. Left-aligned rows sit still, which is why it reads as *some* things
- * shifting and makes it hard to place.
- *
- * Reserving the gutter always is the whole fix. Applied to the box whose width
- * other things are measured against rather than to `*`: on every scroll container
- * it would also pad the inside of every popover and every `<pre>` in a tool card,
- * where nothing is centred and there is nothing to steady.
- *
- * **One box, and it used to be two.** `AppShell`'s content pane carried this as
- * well, on the argument that its reserved strip "lands against the window's own
- * edge and nobody can see it". That holds only while nothing inside the pane
- * paints out to that edge, and two things do: the session header and the
- * composer, both full-bleed with a fill and a rule. So the strip was visible as a
- * header that stopped ten pixels short — and it was bought for nothing, because
- * that pane never scrolls. It is the transcript's box alone now.
- */
 .scroll-stable {
   scrollbar-gutter: stable;
 }
 
-/*
- * Syntax highlighting, in a palette with one colour in it.
- *
- * Still hand-written rather than importing one of `highlight.js`'s themes, and
- * the original reason has only got stronger: every shipped theme hardcodes its own
- * background and its own foreground, so a code block would be the one rectangle on
- * the page ignoring the tokens above — and none of them is monochrome, so there is
- * nothing to import even if that were acceptable.
- *
- * **Six colour classes became three value/weight classes, and two distinctions
- * were genuinely lost.** On paper at 13px there are about four separable slots —
- * three text values times regular/semibold, minus the combinations that read the
- * same — and six things wanted one. What is gone: a string no longer differs from
- * a number, and a function name no longer differs from a keyword.
- *
- * What is kept is the two that carry *reading* rather than lookup:
- * comment-versus-code, and literal-versus-structure. Everything else inherits `fg`
- * at regular weight, which was already the right answer for the majority of tokens
- * — `attr`, `variable`, `type`, `built_in` were all a blend of `fg` before.
- *
- * If a third of the tokens in semibold turns out to read as busy, the graceful
- * minimum is the first rule alone. That is a decision to make against a real
- * TypeScript fence in a transcript, not in advance.
- */
 .hljs-comment,
 .hljs-quote,
 .hljs-meta {
   color: var(--color-faint);
   font-style: italic;
 }
-/* Structure: what the code *does*. */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -1213,7 +386,6 @@ kbd {
   color: var(--color-fg);
   font-weight: 600;
 }
-/* Literals: what the code *contains*. */
 .hljs-string,
 .hljs-regexp,
 .hljs-addition,
@@ -1232,59 +404,7 @@ kbd {
   font-weight: 600;
 }
 
-/*
- * **A screen that replaces another one is drawn arriving, on a phone.**
- *
- * Opening a conversation below `lg` used to be a swap — the list was there and
- * then it was not — with nothing saying which way you had gone or that going back
- * was a direction at all. This is that, and it is the one place in this app where
- * motion carries meaning rather than polish.
- *
- * **The mechanism is the browser's own view transitions**, driven from
- * `router.ts`, which writes `data-nav` on the document for the length of one
- * navigation. The argument for it over holding the outgoing screen mounted is
- * there rather than here; what belongs here is what that buys this file: the old
- * frame is a *snapshot*, so nothing below has to worry about two `SessionView`s
- * existing at once, and the `transform`s are on pseudo-elements outside the
- * document, so no `position: fixed` or `sticky` inside the app resolves against
- * one. `Sheet` portals to the body precisely to avoid a transformed ancestor and
- * is unaffected here for the same reason.
- *
- * **Two keyframes for four movements**, via `animation-direction: reverse`, and
- * that is not brevity for its own sake: a back that is not exactly the forward
- * played backwards is a back that feels like a second forward, and writing four
- * sets of numbers is how the two drift apart. The leaving screen goes only 22% and
- * dims — it is still there, underneath, which is the whole reason the gesture
- * reads as a stack.
- *
- * `mix-blend-mode: normal` is required rather than tidy. The UA stylesheet sets
- * `plus-lighter` on both snapshots so its default cross-fade stays even at the
- * midpoint; with a slide, the two overlap while both are opaque and that blend
- * makes them glow through each other.
- *
- * **At `lg` and above there is no motion**, and it is refused in CSS rather than
- * in JavaScript — `AppShell` is explicit that no breakpoint may be read there,
- * and a resized window must not be able to animate a layout that is not the one
- * on screen. Above that width the rail is permanent and only the pane changes, so
- * there is no screen arriving to draw. `animation: none` rather than a zero
- * duration, which is what makes the transition finish on the next frame and
- * behave exactly as it did before any of this existed.
- *
- * ⚠ **That exemption did nothing for two releases**, and the four rules below are
- * why: they are `:root[data-nav="…"]::view-transition-old(root)` at `(0,2,1)`, and
- * the `@media` block that overrules them had been written as a bare
- * `::view-transition-old(root)` at `(0,0,1)`. A media query gates *when* a rule
- * applies and adds no specificity to it. Every selector here is keyed on
- * `data-nav` for that reason, which puts the whole file at one specificity where
- * source order decides — and `webcheck` asserts that as a property over
- * `index.css` rather than over the two gates that were wrong.
- *
- * The `prefers-reduced-motion` block at the foot of this file had the same hole
- * and is repaired the same way. The refusal that actually works is in
- * `router.ts`, which declines to start a transition at all; that block is the
- * belt beside this brace, and it is here because the reason it looks redundant is
- * the reason it is easy to delete.
- */
+/* Every selector is keyed on data-nav so all share one specificity and source order decides (webcheck asserts). */
 @keyframes nav-enter {
   from {
     transform: translateX(100%);
@@ -1310,12 +430,6 @@ kbd {
   animation: nav-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
-/*
- * Going back, the screen you are leaving has to paint **over** the one you are
- * returning to — it is the thing sliding away, and the one underneath was there
- * all along. The default order is the opposite (the new snapshot is the later
- * sibling), so this is the one place the pair is not symmetric.
- */
 :root[data-nav="pop"]::view-transition-old(root) {
   animation: nav-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
   z-index: 1;
@@ -1324,28 +438,7 @@ kbd {
   animation: nav-under 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
 }
 
-/*
- * **Inside a sheet, the sheet moves and the screen behind it does not.**
- *
- * Tapping a section in Settings replaced the panel's contents where they stood,
- * and Back replaced them again — the "windows teleporting" the rest of this
- * block exists to remove, one layer in. It is the same push and pop, scoped: the
- * root is pinned so the conversation behind the scrim stays exactly where it is,
- * and `view-transition-name: sheet-body` on the panel's body is what gives the
- * pane its own pair of snapshots to slide.
- *
- * Naming the **body** rather than the panel is half of it. The frame — the
- * rounded top, the head with "Settings" and the ✕ — is not what changed and must
- * not travel; only the part whose contents were swapped does.
- *
- * **The other half is in `bits.tsx`, and without it this drew two screens at
- * once.** Being named lifts the body out of the panel's snapshot, so it stops
- * inheriting the panel's fill and both of its own snapshots are transparent
- * images of glyphs. Measured mid-slide at 390px: the leaving list's rows and the
- * arriving section's fields were both entirely legible, one over the other. The
- * animation was right the whole time — a pane that arrives has to *cover* the one
- * it replaces, and that is `bg-surface` on `SHEET_BODY`, not a keyframe.
- */
+/* SHEET_BODY's bg-surface (bits.tsx) is what hides the pane being replaced. */
 :root[data-nav="section-push"]::view-transition-old(root),
 :root[data-nav="section-push"]::view-transition-new(root),
 :root[data-nav="section-pop"]::view-transition-old(root),
@@ -1367,81 +460,24 @@ kbd {
   animation: nav-under 220ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
 }
 
-/*
- * **A sheet leaves the way it arrived.**
- *
- * `animate-sheet` brings it up on mount and nothing took it back down — closing
- * Settings simply stopped drawing it, which on a phone is a panel covering 92% of
- * the screen vanishing between two frames. This is that animation played
- * backwards, which is why it reuses the same keyframe with `reverse` rather than
- * writing a second set of numbers that can drift from the first.
- *
- * The root is pinned again: what is behind the sheet was there all along and is
- * not arriving. The scrim gets its own name so it can fade on its own clock —
- * without one it belongs to the root snapshot and would still be dark under a
- * panel that has already gone.
- *
- * **The panel travels as one object, and the body giving up its name is what
- * makes that true.** A `view-transition-name` does not nest: a named descendant
- * is *lifted out of* its ancestor's snapshot into a sibling group, so with the
- * body named here the panel's image was the frame with the contents cut out of
- * it, and the contents sat in a group of their own with nothing moving them.
- * Measured at 390px, two fifths of the way down: the head and the rounded top had
- * travelled and every row inside was exactly where it started. Silencing that
- * group's fade — which is what stood here — makes the contents hold still
- * *sharply* instead of thinning out, and holding still was the defect. The name
- * is dropped for the length of this navigation instead, down beside the rule that
- * grants it.
- */
 :root[data-nav="sheet-close"]::view-transition-old(root),
 :root[data-nav="sheet-close"]::view-transition-new(root) {
   animation: none;
 }
 :root[data-nav="sheet-close"]::view-transition-old(sheet) {
-  animation: sheet 260ms cubic-bezier(0.32, 0.72, 0, 1) both reverse;
+  animation: var(--animate-sheet-out);
   z-index: 1;
 }
 :root[data-nav="sheet-close"]::view-transition-old(scrim) {
-  animation: scrim 260ms ease-out both reverse;
+  animation: var(--animate-scrim-out);
 }
 
-/*
- * **And two different pop-ups swap in place.**
- *
- * There is one `[data-sheet-panel]` for every route-backed pop-up (`OverlaySheet`
- * in `App.tsx`), so Settings → Plugins changes what is *inside* a panel that does
- * not move. Both named groups therefore have identical old and new boxes, and the
- * default cross-fade on each is exactly the movement: the head dissolves from
- * "Settings" to "Plugins" and the body with it. Nothing is declared here for them.
- *
- * What has to be declared is the *absence* below: the screen behind the scrim was
- * there all along and is not arriving, which is the same pin `section-*` and
- * `sheet-close` take. Without it the root pair slides, because
- * `:root[data-nav]::view-transition-old(root)` has no default of `none`.
- *
- * Before this, the two pop-ups were two panels: one unmounted, the other mounted
- * and replayed `animate-sheet` from off-screen, with a frame showing neither.
- * Q3.484.
- */
+/* Pin the root; the named groups' default cross-fade is the swap (Q3.484). */
 :root[data-nav="sheet-swap"]::view-transition-old(root),
 :root[data-nav="sheet-swap"]::view-transition-new(root) {
   animation: none;
 }
 
-/*
- * At `sm` and above a sheet is a centred card with the section list beside the
- * section, so neither slide describes what happens: the pane changes next to a
- * list that stays, and the card has no edge to have come from. `rise` is what
- * brings it in there, and this is the matching absence.
- *
- * **A card leaves the way `rise` brought it**, and that half was missing: the
- * close was written for the phone and gated at no width at all, so a desktop
- * dialog threw itself a full screen height downwards out of the middle of the
- * window. Measured at 1280px, `document.getAnimations()` mid-close reported
- * `sheet` running on `::view-transition-old(sheet)` — the one slide left anywhere
- * above these breakpoints. The scrim is deliberately not gated with it: it fades
- * *in* at every width, and a fade is not the thing being refused here.
- */
 @media (min-width: 40rem) {
   :root[data-nav="section-push"]::view-transition-old(sheet-body),
   :root[data-nav="section-push"]::view-transition-new(sheet-body),
@@ -1451,28 +487,11 @@ kbd {
   }
 
   :root[data-nav="sheet-close"]::view-transition-old(sheet) {
-    animation: rise 140ms ease-out both reverse;
+    animation: var(--animate-rise-out);
   }
 }
 
-/*
- * **And above `lg` the screen does not move, which is what this always claimed
- * and never did.**
- *
- * ⚠ `@media` adds **no specificity**, and that is the whole post-mortem. This
- * block was written as a bare `::view-transition-old(root)` — one pseudo-element,
- * `(0,0,1)` — against the `:root[data-nav="push"]::view-transition-old(root)` it
- * had to overrule, which is `(0,2,1)`. The wrapper reads like a stronger
- * statement and is not one, so the desktop kept every phone animation it was
- * supposed to be exempt from: measured at 1280px, a synthetic `data-nav="push"`
- * had `nav-enter` and `nav-under` running on the root pair. A rail user opening
- * their first conversation had the whole window slide in from the right.
- *
- * `:root[data-nav]` matches the attribute without naming a value, which costs the
- * same `(0,2,1)` and wins on order — so this stays one rule for all four
- * movements rather than four copies to keep in step. The same repair is at the
- * foot of this file, where `prefers-reduced-motion` had the identical hole.
- */
+/* :root[data-nav] keeps the specificity: @media adds none, so a bare pseudo-element loses. */
 @media (min-width: 64rem) {
   :root[data-nav]::view-transition-old(root),
   :root[data-nav]::view-transition-new(root) {
@@ -1480,14 +499,6 @@ kbd {
   }
 }
 
-/*
- * The sheet's own names, which exist only while a transition is running.
- *
- * On the elements rather than in the class strings because `Sheet` is portaled to
- * the body and there is exactly one of it: a `view-transition-name` has to be
- * unique in the document, and a utility class is an invitation to put a second
- * one somewhere.
- */
 [data-sheet-panel] {
   view-transition-name: sheet;
 }
@@ -1498,32 +509,11 @@ kbd {
   view-transition-name: scrim;
 }
 
-/*
- * …and the body gives its name back for a close, so it rides down inside the
- * panel instead of being a sibling of it.
- *
- * This works at all because `router.ts` writes `data-nav` **before** it calls
- * `startViewTransition`, and a name is read at capture rather than declared for
- * the document's lifetime — so which elements are their own snapshot is a
- * decision each navigation gets to make. There is nothing to undo: the attribute
- * is gone by the time anything else is captured.
- *
- * Only the close. A *section* needs the body named — that group is the whole
- * animation — and only the close asks the panel to move as a single object.
- */
+/* A close drops the body's name so it travels inside the panel; router.ts sets data-nav before capture. */
 :root[data-nav="sheet-close"] [data-sheet-body] {
   view-transition-name: none;
 }
 
-/*
- * The belt beside `router.ts`'s brace — which had the `lg` block's bug and so was
- * neither. `:root[data-nav]` is the same `(0,2,1)` every rule above carries; the
- * bare pseudo-elements that stood here were `(0,0,1)` and overruled nothing.
- *
- * It stays a belt: `announce` declines to start a transition at all under reduced
- * motion, so this can only matter if that check is ever removed. It is here
- * because the reason it looks redundant is the reason it is easy to delete.
- */
 @media (prefers-reduced-motion: reduce) {
   :root[data-nav]::view-transition-old(root),
   :root[data-nav]::view-transition-new(root),
@@ -1537,34 +527,11 @@ kbd {
   }
 }
 
-/*
- * An ordered list wears the delimiter it was written with.
- *
- * `list-style-type: decimal` draws `1.` and has no other setting — `1)` is not a
- * list style, it is a *marker*, and `content` on `::marker` is the only thing
- * that can put one there. `counter(list-item)` is the browser's own implicit
- * list counter, so `<ol start>` and a per-item `value` are both honoured with
- * nothing here having to know about them.
- *
- * Which lists get it is decided in `ui/mdlist.ts`, from the markdown source,
- * because mdast throws the character away — see the docblock there.
- *
- * **The fallback is the whole reason `list-decimal` stays on the element.** A
- * browser that will not style `::marker` ignores this rule and draws `1.`, which
- * is the rendering this replaced; there is no third state where the marker goes
- * missing. Unlayered like every other rule in this file, so it does not have to
- * out-specify the utility it is overriding.
- */
 ol.md-paren > li::marker {
   content: counter(list-item) ") ";
 }
 
-/*
- * Transitions are opt-in, per property, on the elements that want them.
- *
- * A blanket `transition: all` is how a list that re-renders on every event
- * becomes a smear, and this list re-renders on every event.
- */
+/* Transitions are opt-in per property: a blanket one smears a list that re-renders on every event. */
 .tap {
   transition:
     background-color 120ms ease,
@@ -1572,61 +539,18 @@ ol.md-paren > li::marker {
     color 120ms ease;
 }
 
-/*
- * The config sheet's whole geometry, as four custom properties with defaults.
- *
- * **A class rather than utilities, and properties rather than a `style` prop, for
- * `AppShell`'s reason one control further in.** The rail's drag writes
- * `--rail-w` straight onto the node instead of going through React, because a
- * pointer moves sixty times a second and the alternative is sixty renders. This
- * sheet is the same gesture over a worse list: opencode publishes 362 model rows
- * and every one of them is a `<button>` this component draws, so a render per
- * frame is a render of all of them, and the finger would arrive somewhere the
- * panel had not.
- *
- * So the defaults **are** the resting sheet — content height, capped at 60dvh, no
- * offset — and everything else is written on top of them by the gesture. React
- * sets no `style` on this element at all, which is also what keeps the two out of
- * each other's way: an inline property and a utility class settle by specificity
- * and emission order, and this file's `FIELD` note is about exactly that trap.
- *
- * `--sheet-min` is not decoration. A `max-height` alone does nothing to a panel
- * already shorter than it, so a four-row effort picker could not be pulled open
- * while a model list could — one row, two chips, two behaviours.
- *
- * ⚠ **The duration is a literal and the *switching off* is an inline
- * `transition: none`, which is a correction.** It was a fifth property,
- * `--sheet-settle`, substituted into this shorthand and set to `0s` for the length
- * of a gesture. A `var()` inside a shorthand makes every longhand it expands to a
- * pending-substitution value, resolved after the cascade, and that is a thin place
- * in more than one engine — it is also simply harder to reason about than a
- * property nothing has to substitute. `AgentConfigBar` writes `style.transition`
- * directly instead, which is one inline longhand that cannot lose to anything.
- *
- * 300 rather than `--animate-sheet`'s 260 because this is a settle from wherever a
- * hand let go rather than a fixed journey, and that curve reads as abrupt over
- * twenty pixels.
- */
+/* Unlayered, so it beats bg-raised: while the pill travels, the tabs' own pills stand down (Q3.656). */
+[data-pill-travel] [data-tab-pill] {
+  background-color: transparent;
+}
+
+/* AgentConfigBar writes these onto the node, never through React; no transition here, since only a settle may animate them. */
 .config-sheet {
   height: var(--sheet-h, auto);
   min-height: var(--sheet-min, 0);
   max-height: var(--sheet-max, 60dvh);
-  transform: translateY(var(--sheet-y, 0));
-  transition:
-    height 300ms ease-out,
-    min-height 300ms ease-out,
-    max-height 300ms ease-out,
-    transform 300ms ease-out;
 }
 
-/*
- * Press feedback, as a second class rather than by widening `.tap`.
- *
- * `transform` deliberately stays out of the list above: `.tap` is on every row of
- * a list that re-renders on every event, and that is the exact combination the
- * comment above is about. This goes on buttons only — a thing you aim at and
- * push — never on a list row.
- */
 .press {
   transition: transform 90ms ease;
 }
@@ -1634,43 +558,30 @@ ol.md-paren > li::marker {
   transform: scale(0.97);
 }
 
-/*
- * A row standing aside to make room for one being dragged past it.
- *
- * ⭐ **This exists because `.tap` above refuses `transform`, and refusing it is
- * that rule's entire point.** Transitions here are opt-in per property, so `.tap`
- * writes the `transition` *shorthand* — which resets `transition-property` to
- * exactly the three colours it names. An element carrying `tap` therefore ignores
- * Tailwind's `transition-transform` completely, and the neighbours in a reorder
- * jump to their new position instead of sliding to it.
- *
- * ⚠ **Specificity has nothing to do with it and chasing that is the wrong
- * repair.** `.transition-transform` lives inside `@layer utilities` and every rule
- * in this file is unlayered on purpose, so `.tap` wins outright however the class
- * string is written. Measured on the built stylesheet: the utilities layer spans
- * bytes 9909–51781 with `.transition-transform` at 43519 inside it, against `.tap`
- * at 56918 outside. That is the same trap `agent-strip.md` records for
- * `touch-none`, one property to the left — and the reason it was not caught twice
- * is that both lists which already reorder, the session rows and the agent strip,
- * carry **no** `.tap` on the element that shifts.
- *
- * So the opt-in gains a second member rather than `.tap` gaining a fourth
- * property: `transform` on every `.tap` in the app would put a 150ms interpolation
- * on every row of a list that re-renders on every event, which is the smear the
- * docblock above exists to prevent. This one is applied **only while a drag is
- * live**, and never to the row under the pointer — that one's transform is
- * rewritten every frame, and a transition restarts the interpolation on each
- * write, so it crawls after the finger instead of following it.
- *
- * ⚠ **The three colour declarations are `.tap`'s, restated because a shorthand
- * cannot extend one.** They must stay in step with the rule above; `webcheck`
- * compares them. It sits after `.press` as well as after `.tap` so that an element
- * wearing both still slides — no such element exists today, and this is here so
- * that one arriving does not have to rediscover any of the above.
- *
- * `prefers-reduced-motion` needs nothing: the block at the foot of this file
- * zeroes `transition-duration` on `*` with `!important`.
- */
+/* The send slot's swap, on rise's clock and curves (SWAP_MS, Q3.654). Arriving never scales its box, only its glyph, so a tap lands at full size. */
+.swap-in {
+  transition: opacity 140ms ease-out;
+}
+.swap-in svg {
+  transition: transform 140ms ease-out;
+}
+@starting-style {
+  .swap-in {
+    opacity: 0;
+  }
+  .swap-in svg {
+    transform: scale(0.5);
+  }
+}
+.swap-out {
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 140ms ease-in,
+    transform 140ms ease-in;
+}
+
+/* Repeats tap's colours (a shorthand cannot extend one; webcheck compares) and must follow it. Only during a live drag, never on the dragged row. */
 .slides {
   transition:
     background-color 120ms ease,
@@ -1679,51 +590,7 @@ ol.md-paren > li::marker {
     transform 150ms ease;
 }
 
-/*
- * One focus ring for the whole app.
- *
- * Per-component focus styling is how the fifth copy of a control ends up with
- * none, which is what happened to every icon button here: hover was colour-only
- * and focus was nothing at all, so a keyboard had no way to show where it was.
- *
- * `:focus-visible` and not `:focus`, so pressing a button with a mouse does not
- * leave a ring behind.
- *
- * **`:where()` does not make this overridable from a component, and the comment
- * here used to say it did.** Zero specificity is only half the cascade: Tailwind
- * emits every utility inside `@layer utilities`, this rule is unlayered, and
- * unlayered styles beat layered ones *regardless of specificity*. So no utility
- * class can win against it — measured, `outline-none` and even
- * `focus-visible:outline-none` (specificity 0,2,0 against this rule's 0,1,0) both
- * lose, and the composer went on drawing an accent ring around its input while
- * two comments over there claimed it did not.
- *
- * Hence `.no-focus-ring`, an opt-out declared here where the rule is, which is
- * the only place that can grant one. It sits *inside* `:where()` so this rule's
- * own specificity stays at zero.
- *
- * It is an opt-out and not a general escape hatch: a control that suppresses this
- * is taking on the job of showing a keyboard user where they are. The composer's
- * textarea is the one place that holds, because a text caret is a focus indicator
- * in its own right — nothing else here should use it.
- *
- * **A `tabindex` container is deliberately *not* in this list, and `AskCard`'s
- * panel is the case.** It is a `role="dialog"` that takes the caret when a request
- * parks, and what it was drawing was the **browser's** own ring, not this one — so
- * the instrument there is a plain `outline-none` utility, which beats a UA default
- * without needing anything from here. `.no-focus-ring` would have been a no-op on
- * it. The line between the two is worth keeping: this rule owns every control a
- * keyboard can reach, and a programmatically-focused container is not one.
- *
- * **`[role="separator"][tabindex]` is in the list rather than styling its own**,
- * which is this rule's whole argument applied the first time something new arrived
- * to test it. The rail's drag handle is not a `button` and matches nothing else
- * here, so it would have had no ring at all — and the `focus-visible:outline-none`
- * written on it in the first draft was the *dead* utility this docblock exists to
- * warn about, silently losing to an unlayered rule that was never going to fire on
- * it anyway. Qualified on `[tabindex]` because a decorative separator is a common
- * thing to write and must not become focusable-looking by joining this list.
- */
+/* Unlayered, so it beats every utility; opt out only with no-focus-ring, beside outline-none or WebKit's own ring returns. */
 :where(
   button,
   a,
@@ -1735,10 +602,6 @@ ol.md-paren > li::marker {
   textarea,
   select
 ):not(:where(.no-focus-ring)):focus-visible {
-  /* `fg`, named directly rather than through the retired accent: this is the
-     highest-contrast thing the palette has (14.2:1 on `ink`), which is what a
-     focus ring on paper needs, and it is the same ink the filled primary button
-     uses — so "the app is pointing at this" is one value everywhere. */
   outline: 2px solid var(--color-fg);
   outline-offset: 2px;
 }
@@ -1753,63 +616,7 @@ ol.md-paren > li::marker {
   }
 }
 
-/*
- * ⚠ **Only the text is selected, and one property is the whole of it.**
- *
- * WebKit paints *selection gaps*: the run from the end of a selected line to the
- * block's content edge, and the vertical space between two selected blocks. So a
- * drag through a conversation painted one solid rectangle — the empty half of
- * every short line, the margin between paragraphs, and the whole blank column
- * beside a right-aligned bubble. Reported four times. Blink dropped gap painting
- * with LayoutNG and never had it, which is why this reads correct in a browser
- * and wrong in the app `packages/native` ships.
- *
- * A block WebKit treats as a **selection root** paints none of them, and
- * `RenderBlock::isSelectionRoot` answers yes to a handful of unrelated things —
- * among them any transformed block, and any block whose `column-span` is `all`.
- *
- * ⚠ **`column-span` rather than a transform, and the difference is measured in
- * another engine.** Both make the root, and in WebKit the two are identical: the
- * same band profile over a page carrying every markdown shape, and an unselected
- * page byte-identical to no rule at all. But a transform also makes a **stacking
- * context**, and a `td` in one composites its `border-edge/60` against a
- * different backdrop — one 1px row under a markdown table's header moved
- * `#E6E4E0` → `#ECEAE7` in Chromium 153. `column-span: all` makes no stacking
- * context and no containing block, and outside a multi-column container it lays
- * nothing out differently: Chromium is byte-identical under it, idle *and*
- * selected, and so is the copied string. Neither trigger is specified behaviour;
- * this one costs nothing when it is ignored, which is the whole argument for
- * preferring it.
- *
- * ⚠ **A flex container between the root and the text puts the fill back**, which
- * is why three elements name this and not one. Measured against controls on one
- * DOM: nesting depth, horizontal padding and `w-fit` all change nothing, and
- * `display: flex` alone re-introduced the fill — `46px@199w` against
- * `22px@199w 24px@51w`. `UserBubble` hangs in a flex row, so the bubble carries
- * its own; the transcript column carries one for the space *between* messages,
- * which no message can reach; and every markdown body carries one so agent prose
- * is covered wherever it is drawn.
- *
- * `pre`, `td` and `th` are the descendants that need their own, and the list is
- * an ablation rather than a guess: drop them and the code fence paints
- * `60px@863w` and the table `65px@855w` instead of their lines. Nothing above the
- * cells works — `table`, `thead`/`tbody` and `tr` all leave the whole table
- * filled. `li` and `blockquote` were in the list and came back out, their
- * profiles unchanged band for band.
- *
- * ⚠ **What this cannot reach is an *anonymous* block**, which is what a tight
- * list item holding a nested list wraps its own text in: no selector names it,
- * so no property can be put on it. `remarkListItemBlocks` is the other half of
- * that one shape, and it works by giving the run a real box instead.
- *
- * What stood here was a trailing `::after { content: "\200B" }` on every block.
- * It ended the **last** line of a block and nothing else, and it is superseded
- * rather than kept beside this: measured, the two agree everywhere the
- * zero-width space worked, and only this one covers the intermediate lines, the
- * gaps between blocks and the column beside a bubble. It also cost a
- * `:not(:has(…))` guard that had already grown three real shapes by 24px each.
- * Q3.638.
- */
+/* column-span: all makes a WebKit selection root, which paints no selection gaps; pre, td and th each need their own (Q3.638). */
 .sel-root,
 .sel-root pre,
 .sel-root td,

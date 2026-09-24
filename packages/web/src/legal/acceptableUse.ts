@@ -1,26 +1,7 @@
 import type { LegalDocument } from "../legal";
 import { OPERATOR } from "./operator";
 
-/**
- * The Acceptable Use Policy, adapted from `github/site-policy` (CC0 1.0, so no
- * attribution is owed) and from the 37signals Use Restrictions policy (CC BY
- * 4.0, which is owed and is rendered on the page).
- *
- * ⚠ **Two carve-outs here are load-bearing and read like holes.** Both come
- * straight from GitHub's wording, and removing either turns this policy into one
- * that forbids what a large part of this product's own audience does for a
- * living:
- *
- *   - **The bug-bounty sentence** under unauthorised access. Without it,
- *     "do not test systems you do not own" prohibits authorised penetration
- *     testing, which is a job.
- *   - **The dual-use sentence** under malware. Without it, possessing or writing
- *     a proof-of-concept exploit is a breach, and security research stops.
- *
- * The closing "what this does not prohibit" section exists for the same reason
- * and is not padding: this is a tool for people with a shell, and a policy that
- * reads as hostile to their ordinary work gets ignored wholesale.
- */
+/** Adapted from github/site-policy (CC0) and 37signals (CC BY 4.0, credited on the page); the bug-bounty and dual-use carve-outs are deliberate. */
 export const ACCEPTABLE_USE_EN: LegalDocument = {
   doc: "acceptable-use",
   lang: "en",

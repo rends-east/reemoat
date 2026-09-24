@@ -10,14 +10,16 @@
   `@tauri-apps/cli` writes on 2026-09-19. It points `<background>` at
   `@mipmap/ic_launcher_background`; this points it at
   `@color/ic_launcher_background`, the dark badge colour next door in
-  `values/ic_launcher_background.xml`. And it adds a `<monochrome>` layer, which
-  this file does not carry.
+  `values/ic_launcher_background.xml`. And its `<monochrome>` names
+  `ic_launcher_monochrome`, which nothing here draws; this one reuses the
+  foreground, the mark alone on transparency already being what Android 13 tints.
 
-  `nativecheck` asserts the `@color` form and the colour it resolves to, against
-  comment-stripped source in both files. `.claude/rules/native-packaging.md` has
-  the census and the recipe.
+  The PNGs are `packages/native/scripts/icons.mjs`'s; this file is not (Q4.128).
+  `nativecheck` asserts all three layers and the colour, against comment-stripped
+  source in both files. `.claude/rules/native-packaging.md` has the census.
 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
   <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
   <background android:drawable="@color/ic_launcher_background"/>
+  <monochrome android:drawable="@mipmap/ic_launcher_foreground"/>
 </adaptive-icon>

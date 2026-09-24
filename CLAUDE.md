@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1014 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1059 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -224,7 +224,11 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   gives it up, that the two storage keys are different names
                                      #   and neither is a swept legacy one, and that the id is kept
                                      #   in the shell's config rather than its keyring — read off
-                                     #   both languages, since nothing typed can hold it
+                                     #   both languages, since nothing typed can hold it.
+                                     #   And the dark palette: a twin for every token and the
+                                     #   contrast both owe, computed in both; no colour outside
+                                     #   the palette; one key for the two writers of `data-theme`;
+                                     #   and the drawer's switch as its last row
 pnpm nativecheck                     # packages/native: the Boot payload's keys against NativeBoot's,
                                      #   which is the census a missing `serde(rename)` slips past in
                                      #   five checkers at once; that the frontend is a path inside the
@@ -293,8 +297,9 @@ pnpm --dir packages/native install   # the native shell's own node_modules. **Th
                                      #   a daemon host and a Tauri bump never moves the root lockfile
 pnpm native                          # tauri dev: Vite on 5173, the window over it
 pnpm native:build                    # → a macOS .app with packages/web inside the binary.
-                                     #   REEMOAT_DEFAULT_SERVER is the only build-time input and is
-                                     #   unset here, so a fork inherits no address; docs/NATIVE.md. **No .dmg**:
+                                     #   REEMOAT_DEFAULT_SERVER is the only build-time input, and no
+                                     #   file here gives it a value — release.yml forwards a repository
+                                     #   variable — so a fork inherits no address; docs/NATIVE.md. **No .dmg**:
                                      #   `bundle.targets` is `["app"]`, because tauri's `bundle_dmg.sh`
                                      #   drives Finder over AppleScript and times out anywhere nobody is
                                      #   logged in — `docs/NATIVE.md` has the measurement and the one-line
@@ -304,9 +309,14 @@ pnpm native:build                    # → a macOS .app with packages/web inside
                                      #   rustup; `docs/NATIVE.md` has the rest
 ```
 
-State lives in one SQLite file (`REEMOAT_DB`, default `~/.reemoat/reemoat.db`)
-and each session gets its own git worktree under `~/.reemoat/worktrees/…`. A
-daemon restart leaves every session it did not stop on purpose `interrupted` and
+State lives in one SQLite file per daemon (`REEMOAT_DB`, default
+`$REEMOAT_HOME/reemoat.db`; `REEMOAT_HOME` is `~/.reemoat` unless set) and each
+session gets its own git worktree under that root's `worktrees/`. One database is
+one machine for one account on one server, so the desktop app runs one daemon per
+account it holds — a server's first account keeps `~/.reemoat` (for the server its
+`daemon.env` names) or `~/.reemoat/servers/<server>/`, and each further account on
+that server gets `~/.reemoat/servers/<server>@<user id>/` — starts every one that is
+set up when it launches, and stops them all when it quits (Q7.148, Q7.149). A daemon restart leaves every session it did not stop on purpose `interrupted` and
 puts an agent back on each by itself — see `.claude/rules/daemon-sessions.md`.
 
 **Traffic to a remote daemon is end-to-end encrypted and there is no other
@@ -467,6 +477,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `daemon-bounds.md` | the same globs | Every number the daemon holds and what moves each · what the log is bounded by and what it is not · what a ceiling releases rather than refuses · why this is a file of its own |
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
+| `acp-extensions.md` | `src/acp/xai.ts`, `src/acp/client.ts` | The three requests grok sends that ACP has no method for, measured · which door each is routed onto and how each is answered · how grok withdraws one, and why a handler's position decides it · its own question timeout, and the tool withdrawn when questions are off |
 | `agent-login.md` | `src/agentauth.ts`, `src/runtime/`, `packages/web/src/ui/login.ts` | How a credential reaches the host with no terminal · the pty and the two `script`s · what each CLI's status probe prints and on which stream |
 | `agent-install.md` | `src/agentinstall.ts`, `agentscript.ts`, `transcript.ts`, `packages/web/src/ui/agentInstall.ts`, `settings/AgentsPanel.tsx`, `deploy/agents.sh` | Why nothing puts a CLI on a machine but a press · `installable` against `!available` · why the verdict is a measurement and never an exit status · one run daemon-wide, and the two phases a Stop may not signal into · the two lock layers, and which one is first come, first served |
 | `files-paths-git.md` | `src/changes.ts`, `src/worktree.ts`, `src/uploads.ts`, `src/stall.ts`, `src/paths.ts`, `src/git.ts` | Attachments in, files out · containment, symlinks and the one `rmSync` · why no synchronous filesystem call may touch a path this daemon did not create · how git is parsed |
@@ -475,7 +486,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `http-and-routes.md` | `src/server.ts`, `src/http.ts`, `src/cors.ts`, `packages/web/src/http.ts`, `packages/control-plane/src/app.ts` | The error envelope every service answers in · which non-2xx is not an error · what a route retry may replay · every `pnpm client` verb |
 | `auth-and-tokens.md` | `src/auth.ts`, `src/token.ts`, `src/enroll.ts`, `packages/control-plane/src/keys.ts` | What a signature proves and what it does not · why the daemon makes exactly one control-plane request, ever · every credential this fleet mints and how each stops being one |
 | `authority.md` | `packages/control-plane/src/app.ts`, `main.ts`, `store.ts`, `schema.sql` | What this service is responsible for and what may never arrive in it · the two ratchets that hold that line, and the one exception named by literal · why it serves no browser UI by default · the three rules a migration owes |
-| `cp-devices.md` | `packages/control-plane/src/devices.ts`, `sessions.ts`, `packages/web/src/ui/settings/DevicesSection.tsx`, `packages/native/src-tauri/src/config.rs` | What a device is and what it deliberately decides nothing about · why a retired id is ignored rather than refused · why the device check is a second statement and never a join · where the id lives on the client, and why not the keyring |
+| `cp-devices.md` | `packages/control-plane/src/devices.ts`, `sessions.ts`, `packages/web/src/ui/settings/DevicesSection.tsx`, `packages/native/src-tauri/src/config.rs` | What a device is and what it deliberately decides nothing about · why a retired id is ignored rather than refused · why the device check is a second statement and never a join · where the id lives on the client, why not the keyring, and why per account |
 | `cp-accounts.md` | `packages/control-plane/src/app.ts`, `settings.ts`, `registration.ts`, `packages/web/src/ui/gate/` | Who may exist and who may sign up · disable against delete · the settings table and which side won · every `cpctl` verb |
 | `cp-credentials.md` | `packages/control-plane/src/password.ts`, `sessions.ts`, `throttle.ts`, `net.ts` | The positional gate · what a password change must prove · what a guessing counter is keyed on and what the address half is worth · which 401 signs you out |
 | `cp-machines.md` | `packages/control-plane/src/machines.ts`, `quota.ts`, `packages/web/src/quota.ts` | Who owns a machine and what a name may collide with · the ceiling against the limit · what a revoke gives back · adding a daemon for somebody else |
@@ -485,11 +496,13 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `ask-card.md` | `packages/web/src/ui/AskCard.tsx`, `PermissionCard.tsx`, `ElicitationCard.tsx`, `packages/web/src/permission.ts`, `ask.ts`, `elicitation.ts` | The one card for "the agent is waiting on you" · where it sits and what it may cover · which plan-mode requests are curated and which are drawn as sent · what may be picked, how many, and why nothing you typed is ever erased |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
-| `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server's origin · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
+| `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server and an account · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
+| `native-accounts.md` | `packages/native/src-tauri/src/accounts.rs`, `seats.rs`, `commands.rs`, `config.rs`, `daemon.rs`, `packages/web/src/slot.ts`, `native.ts`, `store.ts`, `ui/MenuDrawer.tsx`, `ChooseServer.tsx`, `SignIn.tsx` | What an account is on this computer, and why its key is the server *and* the user · why the host decides which account a call is about and the page never names one · the bridge contract, in one table · a document rather than a label, and what a generation refuses · a webview per account on macOS, a rebind and a reload everywhere else · what adding, switching and signing out each keep and give up · a daemon per account, and which one keeps `~/.reemoat` · what the first launch after the update moves, and only on proof |
 | `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
+| `dark-theme.md` | `packages/web/src/index.css`, `theme.ts`, `public/theme.js`, both HTML shells, `ui/MenuDrawer.tsx` | What a dark token owes its light twin · what may not hold a colour, and the three traps · which palette is on, who writes `data-theme`, and why before the first paint · why light until the switch says dark, and whose choice it is |
 | `docked-panels.md` | `packages/web/src/ui/paneWidth.ts`, `rail.ts`, `taskWidth.ts`, `PaneHandle.tsx`, `leaving.ts`, `TaskPanel.tsx` | How wide a draggable pane is, and which custom property the panel actually spends · who owns the separator's keyboard path · how a layer leaves |
-| `machine-gestures.md` | `packages/web/src/machineOrder.ts`, `ui/machineDrag.ts`, `machineSwipe.ts`, `MachineColumn.tsx`, `SessionBrowser.tsx` | What orders the machines until a reader drags one · why the reorder is a hook and not a component · where the merge is applied and which memo is load-bearing · swiping between machines, on the list and not on the strip · the tabs' own numbers |
+| `machine-gestures.md` | `packages/web/src/machineOrder.ts`, `ui/machineDrag.ts`, `machineSwipe.ts`, `MachineColumn.tsx`, `SessionBrowser.tsx` | What orders the machines until a reader drags one, and why this computer's leads · what this computer's own is called, and on which screens · why the reorder is a hook and not a component · where the merge is applied and which memo is load-bearing · swiping between machines, on the list and not on the strip · the tabs' own numbers |
 | `native-panels.md` | `packages/web/src/ui/NewSession.tsx`, `download.ts`, `packages/web/src/native.ts`, `packages/native/src-tauri/src/commands.rs`, `packages/web/scripts/webcheck.native-bridge.ts`, `local-route.ts` | Why a cancel is neither a failure nor an answer · `(async)` as a rule and now a mechanism · why the folder panel is the one thing here that is per *machine* · what this loosens and what it does not · the browser arm, which is not a gap |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |
@@ -529,21 +542,13 @@ what a process holding none of the daemon's callbacks can say. Everything else
 reports through an injected callback (`onDegraded`, `onWarning`); only `scripts/`
 print.
 
-An empty `catch` always carries a comment saying why. **Comments explain *why*,
-often naming the empirical behaviour that motivated the code** — and a correction
-belongs at the code it is about, not in this file.
+## Comments
 
-**The comment layer is the specification, and no shortening pass owns it.** There
-is no test framework here, so what a change was *supposed* to do lives in the
-drivers and in these docblocks and nowhere else. An invariant stated in prose that
-the code quietly stopped holding is how five of one review's heaviest findings were
-found — `systems.ts`'s fixity claim, `Settings.tsx`'s "has to be a compile error",
-`MarketEntry`'s consent reset, `Toast.tsx`'s live-region measurement. A tool or a
-mode asking for the shortest diff, *deletion over addition*, or *no boilerplate
-nobody asked for* is talking about **code**, and may not be read as licence to
-compress a docblock. What may still go is a comment that is *wrong*: stale,
-orphaned by the function it used to describe, or a second copy of a measurement
-`docs/DECISIONS.md` already holds.
+- Default to no comment. Write one only when a reader would get the code wrong without it: hidden constraint, invariant, workaround, surprising behaviour. One line, two at most.
+- The why, with its measurements and alternatives, lives in docs/DECISIONS.md. In code, cite it as Q<group>.<n> instead of retelling it.
+- No history of past versions, no restating code, no banners, no ⚠ or bold emphasis, no commented-out code, no TODO without a ticket.
+- An empty catch carries a one-line reason.
+- When you change code, fix or delete the comment next to it.
 
 ## Next
 

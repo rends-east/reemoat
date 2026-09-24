@@ -4,25 +4,7 @@ import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as Plu
 import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, SETTINGS_HEADING, Spinner } from "./bits";
 import { Trash2 } from "lucide-react";
 
-/**
- * A plugin's screen, drawn with this app's own components.
- *
- * **No plugin code runs in this origin, ever.** A plugin sends a description and
- * this file draws it, which is the one real security boundary the whole plugin
- * subsystem has: `reemoat.credential` sits in this origin's `localStorage`, and a
- * plugin bundle executing here would have it. Everything else about plugins — the
- * child process, the scope table, the stripped environment — is hygiene by
- * comparison, because the plugin already runs as this user on its own machine.
- *
- * It also buys three things that are not security and are worth as much daily: a
- * plugin screen matches the rest of the app without its author thinking about it,
- * works on a phone without its author thinking about it, and cannot make the
- * session list slow.
- *
- * Everything here is fed by `plugins.ts`, which has already dropped what it could
- * not read. So there is no unknown-block arm below: by the time a block arrives
- * here it is one of the five.
- */
+/** A plugin's view drawn with this app's components: no plugin code ever runs in this origin, which holds the credential. */
 
 export function PluginView({
   view,
@@ -34,7 +16,6 @@ export function PluginView({
   busy: boolean;
   /** A press. `row` is set from a row's action, `form` from a form's submit. */
   onAction: (actionId: string, context: { row?: string; form?: Record<string, string> }) => void;
-  /** A row tapped. `null` from a caller with nowhere to go, which leaves rows inert. */
   onOpen?: ((where: PluginOpen) => void) | undefined;
 }): ReactNode {
   if (view.blocks.length === 0) {
@@ -43,27 +24,14 @@ export function PluginView({
   return (
     <div className="flex flex-col gap-5">
       {view.blocks.map((block, index) => (
-        // Index as the key, deliberately. A block carries no id — the vocabulary
-        // has none, because a plugin re-renders its whole view on every read
-        // rather than patching it — so position is the only honest identity, and
-        // inventing one from the contents would reorder text under somebody's
-        // cursor the first time two blocks matched.
+        // Index as key: a block has no id, and a content-derived key would reorder text under the cursor.
         <PluginBlockView key={index} block={block} busy={busy} onAction={onAction} onOpen={onOpen} />
       ))}
     </div>
   );
 }
 
-/**
- * One block, drawn.
- *
- * ⚠ **Exported for the settings pane, which draws blocks that came from *different
- * machines* and cannot hand this component a single `PluginView`.** It needs the
- * same `notice` — the same box, the same danger ink, the same `text-sm` — because
- * a settings pane is a plugin's whole diagnostic channel when it has no screen of
- * its own, and a second copy of that markup is how the danger arm gets lost in one
- * of them. Q3.460.
- */
+/** Exported for the settings pane, which draws blocks from several machines and needs the same notice markup (Q3.460). */
 export const PluginBlockView = memo(function PluginBlockView({
   block,
   busy,
@@ -77,9 +45,7 @@ export const PluginBlockView = memo(function PluginBlockView({
 }): ReactNode {
   switch (block.type) {
     case "text":
-      // `whitespace-pre-wrap`, so a plugin's own line breaks survive — and no
-      // markdown. Markdown here would mean a link, and a link whose href a plugin
-      // chose is the sink `Markdown.tsx` already refuses for agent output.
+      // No markdown: a link whose href a plugin chose is the sink Markdown.tsx refuses.
       return (
         <p className={`text-sm whitespace-pre-wrap wrap-anywhere ${block.tone === "muted" ? "text-muted" : "text-fg"}`}>{block.text}</p>
       );
@@ -107,26 +73,9 @@ export const PluginBlockView = memo(function PluginBlockView({
       );
 
     case "columns":
-      /*
-       * Columns side by side above `sm`, stacked below it — in CSS, never in
-       * JavaScript. `AppShell`'s rule holds here for its reason: a breakpoint read
-       * in JS renders a layout the viewport does not have the moment a window is
-       * resized, and this screen is drawn on a phone more often than not.
-       *
-       * `overflow-x-auto` on the strip and `min-w-0` inside it: a board with six
-       * columns scrolls itself rather than making the page scroll sideways.
-       */
       return (
         <div className="flex flex-col gap-4 overflow-x-auto sm:flex-row">
           {block.columns.map((column, index) => (
-            /*
-             * `min-w-40` rather than `min-w-56`, measured: the sheet's pane is
-             * 672px, so at 224px a *three*-column board already overflowed and the
-             * last column's actions were clipped by the panel edge. The strip
-             * scrolls by design — a board may have eight columns — but it must not
-             * scroll for the ordinary case. At 160px three fit with room and four
-             * fit exactly; past that it scrolls, which is the honest answer.
-             */
             <section key={index} className="min-w-0 flex-1 sm:min-w-40">
               <h3 className={`mb-1.5 ${SETTINGS_HEADING}`}>{column.title}</h3>
               {column.rows.length === 0 ? (
@@ -148,28 +97,7 @@ export const PluginBlockView = memo(function PluginBlockView({
   }
 }, sameBlockProps);
 
-/**
- * One row of a plugin's list or column, drawn.
- *
- * Memoised on {@link sameRowProps}, for the reason `EventList`'s `TailRow` states
- * one file over: `readView` hands back a fresh object graph on every read, so
- * `React.memo`'s own shallow compare — which asks whether `row` is the *same
- * object* — answers "no" for every row on every tick, and memoising with it would
- * achieve exactly nothing while adding a comparison. The comparator is what makes
- * it work.
- *
- * ⚠ **What it is worth is set by what a plugin may send.** `PLUGIN_VIEW_LIMITS`
- * allows 8 columns of 200 rows, and `PLUGIN_REFRESH_MIN_MS` is 2s — so a board
- * plugin at the ceiling re-rendered 1600 of these every two seconds on a phone,
- * for a poll that usually changed nothing. `PluginBlockView` above is memoised for
- * the same reason and takes most of that: where a whole column is unchanged, its
- * rows are never reached at all. This one is what saves the other 199 in the
- * column that *did* change.
- *
- * The `useState` below survives it — `memo` declines to re-render and does not
- * unmount — so a confirmation somebody has opened stays open while the board
- * refreshes underneath it.
- */
+/** Memoised on sameRowProps, since readView hands back a fresh object graph on every read. */
 const Row = memo(function Row({
   row,
   busy,
@@ -181,52 +109,15 @@ const Row = memo(function Row({
   onAction: (actionId: string, context: { row?: string }) => void;
   onOpen?: ((where: PluginOpen) => void) | undefined;
 }): ReactNode {
-  /*
-   * The two-step confirmation, per row, exactly as a settings row does it — and
-   * for the measured reason: both groups lay out in the same box so the last child
-   * occupies the same pixels, `setConfirming` is synchronous, and `.tap` removes
-   * the double-tap delay, so a second tap aimed at a button that looked inert
-   * lands on **Cancel** rather than on the irreversible half. Cancel is last for
-   * that reason and must stay there.
-   *
-   * Per-row state, because this list re-renders whenever the plugin redraws.
-   */
+  // Cancel stays last, so a second tap aimed at an inert-looking button lands on it rather than on the irreversible half.
   const [confirming, setConfirming] = useState<string | null>(null);
   const pending = row.actions.find((action) => action.id === confirming) ?? null;
 
-  /*
-   * Tappable only when there is both somewhere to go and somebody to take it
-   * there. A row whose plugin named a destination but whose *caller* passed no
-   * `onOpen` — the settings pane, which is inside a sheet the destination would
-   * have to close — stays inert rather than drawing an affordance that does
-   * nothing.
-   */
   const where = onOpen !== undefined && row.open !== null ? row.open : null;
 
   const body = (
     <>
       <div className="flex min-w-0 items-baseline gap-2">
-          {/*
-           * `break-words` rather than `truncate`, and it is not a preference.
-           *
-           * A row title is whatever a plugin put there, and the first real one was
-           * an absolute path — a single unbreakable token, which `min-w-0` cannot
-           * help with: measured in a three-column board, it ran straight through
-           * the column beside it and under the next one's heading. `truncate` is
-           * the app's answer for a *session* title, where the body opens to the
-           * whole thing; a plugin row has nothing to open to, so cutting it would
-           * throw the identifying half of a path away with nowhere to get it back.
-           * Wrapping keeps every character and costs a line.
-           */}
-          {/*
-           * The tone, as a dot rather than as the row's colour.
-           *
-           * A plugin says what a row *means* and this decides the ink — which is
-           * the whole answer to "why can a plugin not send CSS". Drawn as a shape
-           * beside the title rather than applied to the text, because the palette
-           * is monochrome and a coloured title would be the loudest object on a
-           * screen whose attention budget belongs to the session list.
-           */}
           {row.tone !== null && <Dot tone={row.tone === "ok" ? "on" : row.tone === "warn" ? "pending" : "off"} />}
           <span className="min-w-0 text-sm break-words">{row.title}</span>
           {row.badge !== null && (
@@ -238,37 +129,11 @@ const Row = memo(function Row({
   );
 
   return (
-    /*
-     * **Wraps, and that is what makes one row shape work in both blocks.**
-     *
-     * A `list` is the full width of the sheet and a `columns` block divides that
-     * by up to eight, so the same row has to hold a title and its actions beside
-     * each other in one and stack them in the other. Measured at 672px with three
-     * columns: the actions won, the title was squeezed to about six characters a
-     * line, and `Forget` was still clipped by the panel's edge.
-     *
-     * `flex-wrap` with a basis on the body is the whole fix, and it is CSS —
-     * `AppShell`'s rule holds here for its reason: a width read in JavaScript
-     * renders a layout the viewport does not have the moment anything resizes,
-     * and this screen is drawn on a phone more often than not.
-     */
     <li className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-1.5 border-b border-edge py-2 last:border-b-0">
       {where === null ? (
         <div className="min-w-0 flex-1 basis-40">{body}</div>
       ) : (
-        /*
-         * A `<button>` rather than an `<a>`, because the destination is decided by
-         * `pluginDestination` at the call site rather than being a href a plugin
-         * wrote — there is no URL here for a middle-click to open, and pretending
-         * there is would be the one thing this shape exists to refuse.
-         *
-         * ⚠ **`min-h-11` spelled out, because `tap` does not carry it.** `.tap` in
-         * `index.css` is three `transition` properties and nothing else — no
-         * height, no padding, no `::after` growth — so this said it had the 44px
-         * reach while being one line of `text-sm`, about 20px, on the control that
-         * navigates to a session from a phone. The `<li>` is `items-start`, so the
-         * button does not stretch to the row either.
-         */
+        // A button, not a link: the destination comes from pluginDestination, never from an href a plugin wrote.
         <button
           type="button"
           className="tap min-h-11 min-w-0 flex-1 basis-40 text-left"
@@ -300,16 +165,6 @@ const Row = memo(function Row({
             </>
           ) : (
             row.actions.map((action) =>
-              /*
-               * ⚠ **`sm` keeps the desktop density and the coarse-pointer floor
-               * puts the 44px back.** `BUTTON_SIZE`'s docblock licenses `sm` for
-               * one shape — "a confirmation that has replaced the controls on a
-               * settings row, so it is the only thing on that row and has nothing
-               * adjacent to mis-hit" — which is the *confirming* branch above, not
-               * this one. These are several resting controls, `gap-1.5` apart, and
-               * a plugin may mark any of them destructive. `AgentsPanel` already
-               * spells the same escape at its own `sm` button.
-               */
               action.confirm !== null && action.tone === "destructive" ? (
                 <DangerButton
                   key={action.id}
@@ -350,19 +205,7 @@ function Form({
   busy: boolean;
   onAction: (actionId: string, context: { form: Record<string, string> }) => void;
 }): ReactNode {
-  /*
-   * Seeded once per mount, from the fields as they arrived.
-   *
-   * ⚠ **Once per mount is the whole contract, and the re-seed is the caller's.**
-   * This said it was "keyed on what the plugin sent" and nothing keyed it — the
-   * only ancestor key is `Block`'s positional index — so a plugin that normalised
-   * a value on save showed the un-normalised one until reload. The key is not put
-   * here because this component also draws a plugin's *screen*, which
-   * `PluginScreen` re-reads on `refreshMs`: a content-derived key there would wipe
-   * what somebody was typing every two seconds. `PluginSettings` has no timer and
-   * remounts this on its own save counter, which is the only moment a re-seed is
-   * both wanted and safe.
-   */
+  // Seeded once per mount; a re-seed is the caller's remount, since a content key would wipe typing on every refresh.
   const [values, setValues] = useState<Record<string, string>>(() => seedForm(block.fields));
   const set = (key: string, value: string): void => setValues((held) => ({ ...held, [key]: value }));
 
@@ -370,8 +213,6 @@ function Form({
     <form
       className="flex flex-col gap-4"
       onSubmit={(event) => {
-        // A real `<form>`, so Enter submits natively and a password manager can see
-        // a password field — `SignIn` makes the same argument for the same reason.
         event.preventDefault();
         onAction(block.action, { form: values });
       }}
@@ -380,24 +221,12 @@ function Form({
         <Field
           key={field.key}
           field={field}
-          /*
-           * `Object.hasOwn`, never a bare read — `PluginConsent`'s `said` for the
-           * same reason. The key is a plugin's own string that `clampField` only
-           * clips, and `set` above spreads into an object literal, so a field
-           * keyed `__proto__` would otherwise read back `Object.prototype`: an
-           * object, which `?? ""` lets through and React refuses as a child.
-           */
+          // Object.hasOwn: a field keyed __proto__ would otherwise read back Object.prototype.
           value={Object.hasOwn(values, field.key) ? (values[field.key] ?? "") : ""}
           onChange={(value) => set(field.key, value)}
         />
       ))}
       <div>
-        {/*
-          The spinner, not just `disabled`'s dimming: an action goes over the
-          relay against the daemon's 10s call deadline, so Save can sit unchanged
-          for seconds. `AgentsPanel`'s own submit and `InstallPlugin` one file
-          over both swap the label the same way.
-        */}
         <Button type="submit" tone="primary" disabled={busy}>
           {busy ? <Spinner /> : block.submit}
         </Button>
@@ -419,11 +248,6 @@ function Field({
 
   if (field.kind === "toggle") {
     return (
-      /*
-       * The same coarse-pointer floor every other field gets through `FIELD`. A
-       * toggle drawn without it is a ~20px target sitting beside 44px text inputs
-       * in the same form.
-       */
       <label className="flex items-start gap-3 [@media(pointer:coarse)]:min-h-11">
         <input
           type="checkbox"
@@ -440,39 +264,10 @@ function Field({
   }
 
   if (field.kind === "select") {
-    /*
-     * ⚠ **`Dropdown`, never a bare `<select>`.** This was one, wearing `FIELD` —
-     * and a native select keeps the platform's own chrome unless *every* one of
-     * `appearance`, the border, the radius and the arrow is overridden, so what
-     * shipped was a heavy system-drawn outline sitting in a form of `edge-strong`
-     * boxes, opening a menu in the operating system's colours rather than this
-     * app's. The screenshot that ended it read as a stylesheet that had failed to
-     * load.
-     *
-     * `Dropdown` is the one popover picker here: it takes Escape through
-     * `overlay.ts` rather than owning the key itself, keeps the whole listbox ARIA
-     * set, draws group headings and per-row descriptions, and gets 44px rows at
-     * every pointer. A plugin's options are unbounded up to
-     * `PLUGIN_VIEW_LIMITS.options`, which is exactly the case its own docblock
-     * says a dropdown is for.
-     *
-     * ⚠ **A value the plugin did not offer is drawn as itself rather than as
-     * nothing.** `Dropdown`'s trigger is a node this caller supplies, so a
-     * `value` outside `options` — an old stored setting, a list that changed under
-     * somebody — shows as the raw string instead of silently reading as the first
-     * option. A native select drops it, which is the same fail-open rule
-     * `plugins.ts` keeps everywhere else, in the direction that lies.
-     */
+    // Dropdown, never a native select; a value outside the options is drawn as itself.
     const chosen = field.options.find((option) => option.value === value) ?? null;
     return (
-      /*
-       * ⚠ **`help` sits outside the `<label>`, and that is a hit-target fix rather
-       * than markup tidying.** A `<label>` activates its first labelable descendant
-       * from anywhere inside it, and `Dropdown`'s trigger is a `<button>` — so with
-       * the help paragraph inside, every word of it opened the picker. Reported as
-       * the field being "clickable much lower than it actually is", which is exactly
-       * what it was: the label's box ran to the bottom of a three-line explanation.
-       */
+      // help sits outside the label: inside it, every word of the help opened the picker.
       <div className="flex flex-col gap-1">
       <label className="flex flex-col gap-1">
         <span className="text-sm">{field.label}</span>
@@ -500,9 +295,6 @@ function Field({
     <label className="flex flex-col gap-1">
       <span className="text-sm">{field.label}</span>
       <input
-        // An unknown kind arrives here as `text` — `plugins.ts` has already made
-        // that substitution, so a field a newer plugin invented is still readable
-        // and still round-trips rather than vanishing.
         type={field.kind === "password" ? "password" : field.kind === "number" ? "number" : "text"}
         className={FIELD}
         value={value}
@@ -515,25 +307,7 @@ function Field({
   );
 }
 
-/* ── what a memo above compares ───────────────────────────────────────────── */
-
-/**
- * Whether two rows would draw the same thing.
- *
- * ⚠ **Field by field, and it must stay total.** A field added to `PluginRow` and
- * not to this is a row that silently stops redrawing — the one way a memo fails
- * that leaves the screen *wrong* rather than slow, and nothing in this file would
- * notice. That is why it is the same shape as `sameNode` in `tail.ts` rather than
- * a deep-equality helper: the list is meant to be read beside the type.
- *
- * ⚠ **It was exported "so a driver can reach it", for `sameNode`'s reason, and
- * no driver ever did** — nothing in `packages/web/scripts` imports either
- * comparator, so the totality both docblocks call load-bearing was asserted by
- * nobody. Local again rather than exported-and-unused: the claim to be enforced
- * is a real gap, and an export that pretends it is covered hides it. Reaching
- * for the enforcement means exporting these *and* sweeping them the way
- * `sameNode` is.
- */
+// Field by field and total: a PluginRow field missing here is a row that silently stops redrawing.
 function samePluginRow(a: PluginRow, b: PluginRow): boolean {
   if (a === b) return true;
   return (
@@ -557,20 +331,7 @@ function samePluginRow(a: PluginRow, b: PluginRow): boolean {
   );
 }
 
-/**
- * Whether two blocks would draw the same thing.
- *
- * ⚠ **Total over the five, and `type` is compared first** — the switch above has
- * an arm for each, so a block that changed shape must never compare equal to the
- * one it replaced. Local with {@link samePluginRow} and for its reason: both were
- * exported "so a driver can reach it" and no driver ever did, and an export that
- * pretends the claim is covered hides the gap.
- *
- * A `form`'s `value`s are compared even though {@link Form} reads them only once
- * per mount: what is being answered here is whether the *block* changed, and
- * deciding that from a subset of it is how the next field added to `PluginField`
- * becomes invisible.
- */
+// Total over the five block types, with type compared first.
 function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
   if (a === b) return true;
   if (a.type !== b.type) return false;
@@ -612,13 +373,9 @@ function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
   }
 }
 
-/** Where a row goes, which is one of two shapes or nothing at all. */
 function sameOpen(a: PluginOpen | null, b: PluginOpen | null): boolean {
   if (a === null || b === null) return a === b;
   if ("session" in a) return "session" in b && a.session === b.session;
-  // `{ screen: true }` carries no second value, so having the key is the whole of
-  // it — and a row whose destination changed from a session to the screen is
-  // caught by the arm above rather than here.
   return !("session" in b);
 }
 
@@ -647,15 +404,7 @@ function sameField(a: PluginField, b: PluginField): boolean {
   );
 }
 
-/**
- * The props of one row, compared.
- *
- * `onAction` and `onOpen` by identity, which is why `PluginScreen` hoists both
- * into `useCallback`: a caller that rebuilds either per render makes this answer
- * `false` every time, and then the whole file's memoising is a cost with no
- * return. That is the failure a comparator cannot see about itself, so it is
- * written down at both ends — here, and at the `useCallback` that prevents it.
- */
+// Callbacks compared by identity, which is why PluginScreen hoists both into useCallback.
 function sameRowProps(
   a: { row: PluginRow; busy: boolean; onAction: unknown; onOpen?: unknown },
   b: { row: PluginRow; busy: boolean; onAction: unknown; onOpen?: unknown },
@@ -665,7 +414,6 @@ function sameRowProps(
   );
 }
 
-/** The props of one block, compared. Same rule about the two callbacks. */
 function sameBlockProps(
   a: { block: PluginBlock; busy: boolean; onAction: unknown; onOpen?: unknown },
   b: { block: PluginBlock; busy: boolean; onAction: unknown; onOpen?: unknown },

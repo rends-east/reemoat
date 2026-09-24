@@ -7,6 +7,8 @@ paths:
   - packages/web/src/machine.ts
   - packages/web/src/localRoute.ts
   - src/announce.ts
+  - packages/web/src/ui/connection.ts
+  - packages/web/src/ui/ConnectionPill.tsx
   - scripts/relaycheck.ts
 ---
 
@@ -25,10 +27,12 @@ nothing in `server.ts`, `session.ts` or `registry.ts` changed for it. Q1.25.
 The direct path is **deleted, not disabled**, and **loopback binding is the
 lever** — `REEMOAT_HOST` defaults to `127.0.0.1` and the `baseUrl` column is gone
 rather than left null. Q1.21. `REEMOAT_PORT` stays 7887 because what
-addresses it is on the same machine: `pnpm client` under the shared secret, the
-deploy script's `/health` probe, and — since Q7.137 — the desktop app on that
-machine. `REEMOAT_PORT=0` still works for a relay-only daemon, and is announced
-like any other. Q1.22.
+addresses it is on the same machine: `pnpm client` under the shared secret and the
+deploy script's `/health` probe. The desktop app reads the port out of the
+announcement rather than addressing one, so `REEMOAT_PORT=0` still works for a
+relay-only daemon, is announced like any other, and is what the app gives every
+daemon it runs for a server other than the one `~/.reemoat/daemon.env` names —
+the `~/.reemoat` daemon keeps 7887 for the two above. Q1.22, Q7.148.
 
 **There is one exception and it is not that feature coming back.** The desktop app
 reaches a daemon on the **same computer** over loopback. No address a server names
@@ -49,8 +53,13 @@ a way the old direct path went wrong:
   never needed. `/health` is asked afterwards, never before: it is unauthenticated,
   so a 200 from it is a stranger's 200.
 - **A daemon says where it is; nothing guesses.** `src/announce.ts` writes
-  `~/.reemoat/daemon.json` at 0600 in a 0700 directory. ⚠ **The file is the
-  security argument, not a convenience.** Probing a well-known port was built and
+  `daemon.json` at 0600 into its state root — `~/.reemoat`, or
+  `~/.reemoat/servers/<server>/` for a daemon the app runs for a second server, or
+  `servers/<server>@<user id>/` for a further account on one, every level 0700 —
+  and a clean stop removes it only if its own `instanceId` is in it. The host reads
+  the calling account's file, then `~/.reemoat`'s — the second only for a server's
+  owner or a legacy seat, never for another account on it. Q7.148, Q7.149.
+  ⚠ **The file is the security argument, not a convenience.** Probing a well-known port was built and
   taken back out: the probe has to carry a machine token to prove anything, so it
   hands a 300-second bearer — spendable through the relay from anywhere — to
   whichever process won the race for that port. A file another uid cannot write
@@ -131,6 +140,38 @@ already took, with a **staleness window that errs toward *present***: a stale
 `forgetRoute()`, while a stale `false` draws a reachable machine as offline with
 nothing to correct it. `relay_id` is a slot rather than a process, so a dead
 relay's rows are cleared by its replacement at boot. Q4.35.
+
+## What the app says when a connection is down
+
+**One pill, bottom-left, and no banner above any conversation.** The server
+unreachable, a machine the wire cannot reach, the open conversation's stream
+reattaching and a first probe are all `connectionTrouble`'s answer, drawn by
+`ConnectionPill` — a 36px circle with a spinner that opens into its words on hover
+(`pointer-fine`), on focus, or on a tap. The banner over the list, the line that
+replaced the conversation's workspace subtitle and the `reconnecting` line over the
+transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
+
+- **Connection trouble only.** An offline reason is the wire's only when it is
+  `no_route`, `cp_unreachable` or unset; `over_limit`, `owner_disabled`,
+  `not_enrolled`, `no_token` and the two key refusals need somebody to act, and
+  stay where they are drawn. So do the session's own notices — a daemon re-attaching
+  its agent is not this client's socket.
+- **What this screen reads, not the fleet.** The list's tab, plus the open
+  conversation's machine and its stream. Under All a probe counts and a machine
+  that is off does not — it would hold the pill for as long as it stays off. The
+  server outranks a machine, and a machine its own stream.
+- **A spell, then a second.** `troubleSince` keeps one spell across a change of
+  kind; `troubleShown` waits `TROUBLE_GRACE_MS`, so a reconnect under a second never
+  draws it. The live region is mounted for good and changes only with the words:
+  a spell is announced once, a retry never.
+- **The shield only down the relay.** A stream over the relay is Noise
+  (`e2ee.md`); the server is TLS and loopback is plaintext by design, so neither
+  earns it.
+- **Where it floats.** In the list's pager window, so it is over the rows and above
+  New session, which it never covers; a row's target runs its full width. Below
+  `lg` a conversation draws its own, `lg:hidden`, over the transcript's foot and
+  lifted over a parked card; above `lg` the list's reads that conversation too.
+  Exactly one is ever displayed, so one live region speaks.
 
 ## Invariants
 

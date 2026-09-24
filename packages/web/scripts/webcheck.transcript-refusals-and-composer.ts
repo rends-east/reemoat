@@ -24,15 +24,9 @@ import {
   sublineWarns,
   takeKeyNav,
   toolSummary,
+  workStartedAt,
+  workingUnprompted,
 } from "./webcheck.modules.js";
-
-/* ------------------------------------------------------------------ *
- * What the transcript refuses to draw
- *
- * Every type below had **no fixture at all** before this block existed, which is
- * why the rules were extracted into `showsInTranscript` rather than left as arms
- * of a `switch` nothing could reach.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwhat the transcript refuses to draw\n");
 {
@@ -87,10 +81,6 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     [
       "prompt",
       "file_change",
-      // Answers `true` from the event alone; whether it is *merged away* is
-      // `nodeFor`'s separate question, driven four cases below. Listed so the
-      // three groups here cover all seventeen `SessionEvent` members rather
-      // than sixteen, which is what makes the union claim below literal.
       "permission_request",
       "permission_resolved",
       "plan",
@@ -99,47 +89,24 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     ].map((type) => drawn({ type })),
     [true, true, true, true, true, true, true],
   );
-  // The divider that landed after every single agent reply, saying only that the
-  // paragraph you had just finished reading had finished.
   check("an ordinary turn ending is not news", drawn({ type: "turn_end", stopReason: "end_turn" }), false);
-  /*
-   * ⚠ **`abandoned` is in this list and not in the silent one below**, which is
-   * the asymmetry between the daemon's two reasons of its own. `agent_error` is
-   * silent because the `error` it ends sits immediately above it saying the same
-   * thing; a turn nobody answered leaves no row at all, so this is the only thing
-   * in the conversation that accounts for the gap. Q2.231.
-   */
+  // `abandoned` draws a row: an unanswered turn leaves nothing else to account for the gap (Q2.231).
   check(
     "but a turn that did not finish is",
     ["max_tokens", "refusal", "cancelled", "abandoned"].map((reason) => drawn({ type: "turn_end", stopReason: reason })),
     [true, true, true, true],
   );
-  /*
-   * ⭐ The **second** reason with no row, and silent for the opposite argument to
-   * `end_turn`'s. The daemon writes `agent_error` for a turn that ended in an
-   * `error` — it had written nothing at all, so four prompts produced three ends —
-   * and the row immediately above it is that error, in the agent's own words. A
-   * line under it saying the turn ended states one fact twice, the second time
-   * worse. What it must still do is cut `taskFloor`, asserted beside it.
-   */
   check(
     "and a turn the agent rejected is not, because the error above it already said so",
     drawn({ type: "turn_end", stopReason: "agent_error" }),
     false,
   );
-  // Handled by their own node kinds long before this is reached; answered honestly
-  // anyway, so this reads as a statement about the union rather than the leftovers.
   check(
     "the three with their own node kinds are not silent",
     ["text", "tool_call", "tool_call_update"].map((type) => drawn({ type })),
     [true, true, true],
   );
 
-  /*
-   * Driven through `buildTail` as well as through the predicate, because a
-   * predicate passing while nothing actually changed is the failure this file
-   * already records elsewhere.
-   */
   {
     seq = 0;
     const tail = buildTail([status("idle"), workspace(), prompt("hello"), turnEnd("end_turn")], []);
@@ -150,54 +117,27 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     seq = 0;
     const tail = buildTail([status("starting"), status("idle"), prompt("a"), prompt("b")], [], 3);
     check("a suppressed event draws no row above the cut either", tail.rows.map((r) => r.key), ["e3", "e4"]);
-    /*
-     * And `hidden` counts what it has always counted: **events**, not rows, which
-     * the cut block above pins from the other side. So the two status events below
-     * the cut are counted as hidden even though showing them would draw nothing.
-     *
-     * Recorded rather than fixed, and it matters less than it did: `hidden` is now
-     * only ever read for the one control offering back a cleared conversation, and
-     * a real one has plenty of real content in it. The alternative is a second walk
-     * over everything below the cut on every render to make a number marginally
-     * more honest.
-     */
     check("while `hidden` goes on counting events rather than rows", tail.hidden, 2);
   }
 
   {
-    /*
-     * The row stays cut, and now nothing else draws it either.
-     *
-     * This block used to assert that cutting the transcript row did not cut the
-     * *warning*, because `SessionView`'s banner read the events directly and was
-     * the only thing keeping `dirty_source` on screen. The banner was deleted on
-     * request, so the second half of that pair has nothing left to hold and
-     * `latestWorkspaceWarnings` went with it. What is still worth pinning is the
-     * half that survives: a `workspace` event earns no row, so re-adding a reader
-     * for these warnings is a decision somebody makes rather than something that
-     * falls out of the transcript by itself.
-     */
+    // A workspace event earns no row, and nothing reads its warnings since latestWorkspaceWarnings was removed.
     seq = 0;
     const events = [
       workspace({ code: "dirty_source", message: "uncommitted work is not in this session" }),
     ];
     check("a workspace event draws no row", buildTail(events, []).rows.length, 0);
-    // By name, not by side effect: the row count above is 0 for anything that
-    // fails to parse too, so the set membership is what says this is a decision.
     check("because the type is suppressed by name", TRANSCRIPT_SILENT.has("workspace"), true);
   }
 
   {
-    // The merge. Through the daemon a parked request keeps `decision: null` for its
-    // whole life, so a rule reading that field would have got this exactly backwards.
+    // Through the daemon a parked request keeps a null decision for life, so the merge must not key on that field.
     seq = 0;
     const settled = buildTail([asked("p1"), answered("p1")], []);
     check("a request whose answer follows is drawn once, by the answer", settled.rows.map((r) => r.key), ["e2"]);
   }
 
   {
-    // A daemon restart with an approval in flight: no `permission_resolved` is
-    // synthesized on restore, so this row is the only trace of it.
     seq = 0;
     const lost = buildTail([asked("p1"), prompt("still there?")], []);
     check("a request nothing ever answered keeps its row", lost.rows.map((r) => r.key), ["e1", "e2"]);
@@ -215,14 +155,7 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     check("a request with no id is never merged away", buildTail([asked(null)], []).rows.length, 1);
   }
 
-  /*
-   * What the surviving row says the answer *was*.
-   *
-   * `outcome: "selected"` means an option was chosen, not that permission was
-   * granted — every `reject_*` option produces it too. Since the request row is
-   * now merged away, a renderer keyed on `outcome` drew a check mark against a
-   * refused command and that was the only surviving record of it.
-   */
+  // A selected outcome also covers every reject option, so a refusal is read from the chosen option's kind.
   {
     const withOptions = (permissionId: string): never =>
       ev({
@@ -256,14 +189,11 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     const allowed = permissionDecisions([withOptions("p2"), answeredWith("p2", "o-yes")]);
     check("an approval is not", [allowed.get("p2"), refused(allowed.get("p2"))], ["allow_once", false]);
 
-    // The id is the agent's, so it is joined by identity and never pattern-matched.
-    // An option the request never offered is "cannot tell", which draws as neither.
     seq = 0;
     const strange = permissionDecisions([withOptions("p3"), answeredWith("p3", "o-elsewhere")]);
     check("an option the request never offered is unknown", strange.has("p3"), false);
     check("and unknown is never treated as a refusal", refused(strange.get("p3")), false);
 
-    // A cancellation carries no option at all, and is handled by `outcome`.
     seq = 0;
     check(
       "a cancelled request records no option",
@@ -271,8 +201,6 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
       false,
     );
 
-    // The request can sit above the render window while its answer is on screen,
-    // which is why this walks the loaded events rather than the drawn rows.
     seq = 0;
     check(
       "a resolution with no request in the window is unknown rather than approved",
@@ -282,32 +210,7 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
   }
 }
 
-/* ------------------------------------------------------------------ *
- * An event nobody draws does not break the message
- *
- * The section above says which events draw no row. This one says what that
- * absence costs the run around them, and the two answers are different — which
- * is the whole reason `buildTail`'s flush is keyed on `TRANSCRIPT_SILENT` rather
- * than on `showsInTranscript`, and the reason a single fixture cannot cover it.
- *
- * `flush()` is what puts a boundary between two agent messages. For a
- * `tool_call`, a `context_cleared` or a `turn_end: end_turn` that boundary is
- * real — something happened between them, and for the turn end the message after
- * it belongs to a different turn. For `agent_log` and `other` it is not: the row
- * costs no slot and appears nowhere, so cutting the run there split one streamed
- * message into two independently parsed `<Markdown>` blocks with nothing on
- * screen to explain the break. Both types genuinely interleave with `text` inside
- * one turn — an `agent_log` is a line the agent wrote to stderr, and codex emits
- * `session_info_update` (an `other`) about five times a turn.
- *
- * Parts join with **no separator**, so the visible cost is a word cut in half
- * across two paragraphs — `"here is the pl"` then `"an:"` — and, on a fenced code
- * block whose chunks straddle one, an unterminated fence followed by a stray
- * paragraph. The trap is the mirror of that: a dropped **thought** must go on
- * flushing, or the last sentence before the reasoning block runs into the first
- * word after it. That half is asserted in "the tail is built backwards"; this
- * section is the other half, and each would pass with the other's rule installed.
- * ------------------------------------------------------------------ */
+// buildTail's flush keys on TRANSCRIPT_SILENT, not showsInTranscript: a silent event must not split a streamed message.
 
 process.stdout.write("\nan event nobody draws does not break the message\n");
 {
@@ -316,8 +219,6 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
     ({ seq: (seq += 1), ts: seq * 1000, event }) as never;
   const say = (text: string): never => at({ type: "text", role: "agent", thought: false, text });
   const log = (line: string): never => at({ type: "agent_log", line });
-  // codex's ~5-a-turn thread status, which falls into `onUpdate`'s `default:` arm
-  // on the daemon and arrives here as an `other`.
   const other = (): never => at({ type: "other", sessionUpdate: "session_info_update", raw: null });
   const status = (value: string): never => at({ type: "status", status: value, exit: null });
   const turnEnd = (stopReason: string): never => at({ type: "turn_end", stopReason, usage: null });
@@ -337,9 +238,6 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
     buildTail(events, []).rows.map((row) => (row as { text?: string }).text ?? `[${row.kind}]`);
 
   {
-    // The measured shape: an agent writing to stderr mid-sentence. Reverting the
-    // flush to unconditional gives ["here is the pl", "an:"] — two paragraphs, no
-    // row between them, and nothing on screen to say why the word broke.
     seq = 0;
     check(
       "an agent_log between two chunks does not split the sentence",
@@ -351,24 +249,7 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
   }
 
   {
-    /*
-     * **A suppressed plan still flushes, and that is provably free.**
-     *
-     * The worry is real of the *wrong* rule: a row that draws nothing and still
-     * cuts the run splits one streamed message into two independently parsed
-     * `<Markdown>` blocks with nothing on screen to explain the break — which is
-     * the whole point of the two cases above. It cannot happen here, and the
-     * proof is the collapse rule itself: a plan is suppressed only when
-     * `collected` did not grow between it and its successor, and `flush()` runs
-     * *before* the node decision — so an open text run is pushed at that exact
-     * moment and the older plan is drawn. A plan with a message on either side of
-     * it is always a real boundary.
-     *
-     * Asserted as a **pair**, because each half passes with the other's rule
-     * installed: the first is what fails if `plan` is added to
-     * `TRANSCRIPT_SILENT` to "make the suppressed one stop flushing", and the
-     * second is what fails if the suppression is moved above the flush.
-     */
+    // Asserted as a pair: the first fails if plan joins TRANSCRIPT_SILENT, the second if suppression moves above the flush.
     const plan = (): never => at({ type: "plan", entries: [] });
     seq = 0;
     check(
@@ -385,11 +266,6 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
   }
 
   {
-    /*
-     * codex's own case, and the one that fires several times per turn. A fenced
-     * block is the fixture rather than a plain sentence because it is the visible
-     * worst case: split here, the first half renders as an unterminated fence.
-     */
     seq = 0;
     check(
       "nor does codex's session_info_update",
@@ -399,20 +275,12 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
   }
 
   {
-    // Every member of the set, not just the two that happen today: a `status` or
-    // a `workspace` landing mid-turn has exactly the same claim on the run.
     seq = 0;
     check("a status line does not either", texts([say("one "), status("running"), say("two")]), ["one two"]);
   }
 
   {
-    /*
-     * The run keeps the **older** event's key, which is the risk this change
-     * carries and is worth pinning rather than discovering: two nodes became one,
-     * so the key of the surviving row is the first chunk's seq. Anything keyed on
-     * the newer half would remount the message on every arriving token, which is
-     * what shuts a card the reader had opened inside it.
-     */
+    // The merged run keeps its first chunk's key; keying on the newer half would remount the message on every token.
     seq = 0;
     check(
       "the merged run is one row, keyed by its first event",
@@ -422,12 +290,6 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
   }
 
   {
-    /*
-     * The boundaries that are real, and this is the half that fails if the flush
-     * is keyed on `showsInTranscript` instead of on the set. `turn_end: end_turn`
-     * draws no row *and* is a boundary — the message after it is a different
-     * turn's — so the two rules disagree on exactly this fixture and only here.
-     */
     seq = 0;
     check(
       "a turn ending still separates two turns",
@@ -443,9 +305,6 @@ process.stdout.write("\nan event nobody draws does not break the message\n");
   }
 
   {
-    // Two silent events in a row, which is the ordinary case rather than a corner
-    // — codex sends several a turn — and a rule that flushed on the second would
-    // still look right on a single-event fixture.
     seq = 0;
     check(
       "a burst of them is still one message",
@@ -465,18 +324,11 @@ process.stdout.write("\nwhat a machine's header says on its trailing edge\n");
   check("an unreachable machine says so", machineSubline(group({ reach: "offline" })).kind, "offline");
   check("a cached token says so", machineSubline(group({ tokenDegraded: true })).kind, "degraded");
 
-  /*
-   * The precedence, which is the whole reason this is a function. "5 live" must
-   * not be the sentence that hides a session waiting on a human — a collapsed
-   * section showing it is the one failure this screen exists to prevent.
-   */
   check(
     "waiting beats a live count",
     machineSubline(group({ blockedCount: 2, liveCount: 5 })),
     { kind: "blocked", count: 2 },
   );
-  // Deliberate: the header's own `Dot` still carries reachability, so nothing is
-  // lost by this, and a hidden approval would be.
   check(
     "and beats an unreachable machine, whose dot still says offline",
     machineSubline(group({ blockedCount: 1, reach: "offline" })).kind,
@@ -493,7 +345,6 @@ process.stdout.write("\nwhat a machine's header says on its trailing edge\n");
     "degraded",
   );
 
-  // The two that earn the header's one warn colour.
   check(
     "only waiting and a cached token are warn-toned",
     (["blocked", "offline", "degraded", "idle", "live"] as const).map((kind) =>
@@ -511,11 +362,6 @@ process.stdout.write("\nwhose focus is worth keeping\n");
     ...over,
   });
 
-  /*
-   * The clause that made autofocus dead on Chromium at `lg`: a session row is a
-   * `<button>`, Chromium focuses buttons on click, and the old test was "anything
-   * is focused at all". Confirmed not working in practice before it was narrowed.
-   */
   check("a row button that merely took a click is not worth keeping", focusWorthKeeping(el({})), false);
   check("nor is nothing at all", [focusWorthKeeping(null), focusWorthKeeping(undefined)], [false, false]);
   check(
@@ -524,8 +370,6 @@ process.stdout.write("\nwhose focus is worth keeping\n");
     [true, true, true],
   );
   check("so is a contenteditable", focusWorthKeeping(el({ isContentEditable: true })), true);
-  // An *open* disclosure only. A collapsed one reads `"false"` and is a plain
-  // button again, which is the distinction that keeps row buttons falling through.
   check(
     "an open menu is, and a closed one is not",
     [
@@ -535,10 +379,6 @@ process.stdout.write("\nwhose focus is worth keeping\n");
     [true, false],
   );
 }
-
-/* ------------------------------------------------------------------ *
- * Who is working, what the box says, and who gets the caret
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwho is working, and what the box says\n");
 {
@@ -555,8 +395,35 @@ process.stdout.write("\nwho is working, and what the box says\n");
 
   check("a turn with nothing waiting on you is working", showsWorking(session({})), true);
   check("no turn is not", showsWorking(session({ turn: null })), false);
-  // Raised mid-turn, so `turn` is still set while the agent is in fact waiting —
-  // and the permission card two rows down says the opposite at full size.
+
+  // Q2.233: claude works with no turn of ours once background work comes back, and the daemon says so.
+  const unprompted = (over: Record<string, unknown> = {}): never =>
+    session({ turn: null, turnStartedAt: null, unpromptedSince: 5, ...over });
+  check("work nobody prompted is working", [workingUnprompted(unprompted()), showsWorking(unprompted())], [true, true]);
+  check(
+    "a daemon too old to say, or one saying no, is not",
+    [workingUnprompted(session({ turn: null })), workingUnprompted(unprompted({ unpromptedSince: null }))],
+    [false, false],
+  );
+  check(
+    "and it waits on you exactly as a turn does",
+    showsWorking(unprompted({ status: "blocked", pendingPermissions: [{ permissionId: "p" }] })),
+    false,
+  );
+  check(
+    "and does not outlive the session",
+    ["exited", "failed", "interrupted"].map((status) => showsWorking(unprompted({ status }))),
+    [false, false, false],
+  );
+  check(
+    "its clock starts at the turn, else at the unprompted work, else nowhere",
+    [
+      workStartedAt(session({ turnStartedAt: 3, unpromptedSince: 5 })),
+      workStartedAt(unprompted()),
+      workStartedAt(session({ turn: null, turnStartedAt: null })),
+    ],
+    [3, 5, null],
+  );
   check(
     "a pending permission is not working, it is waiting for you",
     showsWorking(session({ status: "blocked", pendingPermissions: [{ permissionId: "p" }] })),
@@ -569,14 +436,6 @@ process.stdout.write("\nwho is working, and what the box says\n");
     [false, false, false],
   );
 
-  /*
-   * The Stop control's own predicate, and the one difference from `showsWorking`
-   * that matters: a session parked on a question is exactly where somebody most
-   * wants out, and the daemon takes a cancel there — sweeping whatever is
-   * parked — so a control drawn on `showsWorking` alone would be missing from the
-   * state it exists for. Everything else the two agree about, which is what makes
-   * the blocked row the whole assertion.
-   */
   check("there is a turn to stop while the agent works", canCancelTurn(session({})), true);
   check(
     "and while it waits on you, which is where showsWorking says no",
@@ -588,45 +447,39 @@ process.stdout.write("\nwho is working, and what the box says\n");
   );
   check("nothing to stop with no turn", canCancelTurn(session({ turn: null })), false);
   check(
+    "but something to stop with no turn while the agent works or waits (Q2.232)",
+    [
+      canCancelTurn(unprompted()),
+      canCancelTurn(session({ turn: null, status: "blocked", pendingElicitations: [{ elicitationId: "e" }] })),
+    ],
+    [true, true],
+  );
+  check(
+    "and still nothing once the session is over or going",
+    ["exited", "stopping"].map((status) => canCancelTurn(unprompted({ status }))),
+    [false, false],
+  );
+  check(
     "and nothing to stop on a session that has ended",
     ["exited", "failed", "interrupted"].map((status) => canCancelTurn(session({ status }))),
     [false, false, false],
   );
-  /*
-   * The one `isTerminal` does not cover, and it is not a moment: `turn` is
-   * cleared in `pump`'s `finally`, which cannot run until the prompt generator
-   * unwinds inside `dispose()` — a 5s cancel grace and a 2s close later. So a
-   * session somebody stopped mid-turn carries `{status: "stopping", turn: 5}` for
-   * seconds, the daemon refuses a cancel on it (`terminal || stopRequested`), and
-   * a predicate reading `isTerminal` alone armed Stop across all of it onto a
-   * guaranteed 409 and a red toast.
-   */
+  // A stopping session keeps its turn for seconds while dispose unwinds, and the daemon refuses a cancel there.
   check("nor on one somebody is already stopping", canCancelTurn(session({ status: "stopping" })), false);
   check("which isTerminal does not say", isTerminal("stopping"), false);
 
-  /*
-   * Whether somebody has already asked. Read off the daemon's snapshot rather
-   * than held in the tab, because the turn routinely outlives the request that
-   * asked for it — an agent notices a cancel when it next looks up — and a button
-   * that re-armed on the answer would invite a second tap at every stop.
-   */
   check("nobody has asked yet", cancelInFlight(session({})), false);
   check("somebody has", cancelInFlight(session({ cancelRequestedAt: 1 })), true);
-  /*
-   * The migration, and it is the whole of it: an older daemon does not send the
-   * field, and `undefined` has to read as "that daemon cannot say" rather than as
-   * a cancel nobody asked for.
-   */
   check("an older daemon that cannot say reads as no cancel", cancelInFlight(session({ cancelRequestedAt: undefined })), false);
-  /*
-   * Cleared with the turn on the daemon's side, so the pair cannot disagree —
-   * asserted here because a client trusting `cancelRequestedAt` alone would draw
-   * a permanently disabled Stop on an idle session.
-   */
   check(
     "and a stale marker with no turn is not a cancel in flight",
     cancelInFlight(session({ turn: null, cancelRequestedAt: 1 })),
     false,
+  );
+  check(
+    "while a cancel of unprompted work is, until that work ends",
+    [cancelInFlight(unprompted({ cancelRequestedAt: 1 })), cancelInFlight(unprompted({ cancelRequestedAt: 1, unpromptedSince: null }))],
+    [true, false],
   );
 
   const say = (over: Record<string, boolean>): string =>
@@ -638,30 +491,8 @@ process.stdout.write("\nwho is working, and what the box says\n");
       hasCommands: true,
       ...over,
     });
-  /*
-   * The idle line, and the pair is the assertion rather than either half. It
-   * teaches `/` — the one affordance in the composer nothing else advertises —
-   * and it may only do so where the key would open something. A session whose
-   * agent is away publishes no commands and has no `agentConfig` for the three
-   * synthesized controls to be built from, so an unconditional hint would be the
-   * box promising a key that does nothing on every restored session.
-   */
   check("an idle box teaches the one key nothing else does", say({}), "Type / for commands");
   check("but only where that key opens something", say({ hasCommands: false }), "Message…");
-  /*
-   * ⚠ **Every placeholder this box can draw is sentence-cased, and the split that
-   * used to govern them is gone.**
-   *
-   * It was: an *instruction* took a capital, a *caption about the state* stayed a
-   * lowercase fragment. Argued at length here, and withdrawn on the owner's word —
-   * the six appear one at a time, seconds apart, in the same few pixels, so a
-   * reader meets them as a sequence rather than as a table and a register split
-   * nobody can see reads as five strings somebody forgot to capitalise.
-   *
-   * Asserted over **every** state rather than on two samples, so a seventh
-   * placeholder has to declare itself here rather than arriving lowercase and
-   * looking like the others.
-   */
   {
     const every: string[] = [];
     for (const blocked of [false, true])
@@ -675,58 +506,22 @@ process.stdout.write("\nwho is working, and what the box says\n");
     check("and each of them starts with a capital", distinct.filter((line) => !/^[A-Z]/.test(line)), []);
   }
   check("a working one says so", say({ working: true }), "Agent is working…");
-  // Wins over `working`: it is the rarer fact, and the one explaining the spinner.
   check(
     "an in-flight send during a restart explains the wait",
     say({ working: true, reconnecting: true }),
     "Reconnecting the agent…",
   );
-  // Wins over both: nothing typed here moves until the card above is answered.
   check(
     "and a blocked one points at the request above",
     say({ working: true, reconnecting: true, blocked: true }),
     "Answer the request above first",
   );
-  /*
-   * ⚠ **And it stops saying that where the box no longer waits, which is the one
-   * arm of this function that reads a capability rather than a state.**
-   *
-   * "Answer the request above first" is an *instruction*, and it was true only
-   * while the daemon refused everything sent inside a parked turn. On a daemon
-   * that takes a mid-turn message it is not: the message goes — claude's steering
-   * delivers it at the adapter's `later` priority precisely so a parked request
-   * is not interrupted — and Send beside it is live. A box telling somebody to
-   * wait, over a button that does not, is the composer arguing with itself.
-   *
-   * The fall-through is `working`, deliberately, so this costs no seventh string:
-   * the count above is what makes that a decision rather than an oversight.
-   */
-  /*
-   * ⚠ **And that sentence stands on every agent, including one that takes a
-   * mid-turn message.** It was briefly gated on the agent being steerable, on the
-   * reasoning that an instruction to wait argues with a live Send. It does not:
-   * the instruction is about the *turn*, not the box — a parked request keeps the
-   * turn open whatever else happens, so answering it is still the only thing that
-   * lets the agent get anywhere.
-   */
   check(
     "and it says so however the daemon would deliver a message sent now",
     say({ blocked: true }),
     "Answer the request above first",
   );
 
-  /*
-   * ⚠ **The grid may only contain states `Composer` can build, and this is the
-   * assertion that keeps it honest.**
-   *
-   * A gate was added here whose documented fall-through was `working` — and it
-   * could never be reached, because `blocked` is `needsHuman` while `working` is
-   * `showsWorking`, which carries `!needsHuman`. So the fall-through was actually
-   * the **idle** line, drawn over a session with a question parked, and the grid
-   * was green because it enumerates `blocked` and `working` independently and
-   * that pair covered for it. Asserted against the two predicates themselves
-   * rather than restated, so it cannot drift from what the composer computes.
-   */
   {
     const parked = session({ turn: 4, status: "blocked", pendingPermissions: [{ permissionId: "p" }] });
     check(
@@ -740,13 +535,6 @@ process.stdout.write("\nwho is working, and what the box says\n");
       say({ blocked: true, working: true }),
     );
   }
-  /*
-   * **And a plan outranks even that, because it is the one blocked state where
-   * this box is an answer rather than something to wait behind.** A message
-   * written in front of a plan stops the turn and goes, which refuses the plan
-   * and says why in one gesture — so telling somebody to go and answer the card
-   * above would be pointing them away from the control they are already in.
-   */
   check(
     "a plan on screen asks for the correction instead",
     say({ blocked: true, revising: true }),
@@ -758,25 +546,7 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "Say what to change…",
   );
 
-  /* ---- whether the daemon takes a mid-turn message at all ---- */
-
-  /*
-   * ⚠ **The whole compatibility story for sending mid-turn, and it was asserted
-   * nowhere.**
-   *
-   * `midTurnDelivery` is a field an older daemon does not send, and its *absence*
-   * is what has to mean "this daemon still answers `409 turn_in_flight`". Every
-   * other check in this file pins the shape of the gate that reads it, and all of
-   * them stay green over an `acceptsMidTurn` that answers the wrong way:
-   * measured, `session.midTurnDelivery ?? "queue"` — the plausible "give it a
-   * sensible default" edit — passes `webcheck` and `tsc` and hands a live Send to
-   * every un-updated daemon in the fleet, which `compatibility.md` says is the
-   * normal fleet between a release and the last owner running `deploy.sh`. That
-   * is the exact red-toast defect `attach.ts` records having shipped once.
-   *
-   * Four snapshots, because the two "no" answers arrive by different routes: a
-   * daemon that has never heard of the field, and one that has no agent to ask.
-   */
+  // An absent midTurnDelivery must read as a daemon that still refuses mid-turn sends; defaulting it hands old daemons a live Send.
   {
     const snap = (over: Record<string, unknown>): never =>
       ({ status: "running", turn: 1, pendingPermissions: [], exit: null, agentSessionId: "a", resume: null, ...over }) as never;
@@ -787,11 +557,6 @@ process.stdout.write("\nwho is working, and what the box says\n");
       [acceptsMidTurn(snap({ midTurnDelivery: "steer" })), acceptsMidTurn(snap({ midTurnDelivery: "queue" }))],
       [true, true],
     );
-    /*
-     * And the seqs the transcript draws its line against. `undefined` becoming
-     * `[]` is stated in `wire.ts` as happening in exactly one place, which is
-     * what lets `EventList` ask `has(seq)` without knowing about old daemons.
-     */
     check("no queue on the wire is no seqs", queuedSeqs(snap({})).size, 0);
     check(
       "and a queued message is named by the seq of the prompt it already is",
@@ -800,45 +565,18 @@ process.stdout.write("\nwho is working, and what the box says\n");
     );
   }
 
-  /* ---- the three places that state has to hold together ---- */
-
-  /*
-   * All source-text, in the idiom this file already uses for class strings:
-   * these are JSX-level decisions with no pure function behind them, and the
-   * failure mode is silent — a gate left reading `blocked || working` refuses the
-   * send that this whole state exists to allow, and nothing else would notice.
-   */
+  // Source-text checks: these are JSX-level decisions with no pure function behind them.
   const composerSrc = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
   check(
     "a plan lifts the send gate rather than being gated by it",
     /const sessionRefused = revising\s*\n\s*\? false/.test(composerSrc),
     true,
   );
-  /*
-   * ⚠ **And that the gate is read off the daemon at all.** Every clause below
-   * pins the *shape* of `sendRefused`, and all of them stay green over a
-   * `midTurnOk` that is a constant — which is exactly what a "sensible default"
-   * on the other side of `acceptsMidTurn` produces. Measured: `?? "queue"` in
-   * `wire.ts` passes `webcheck` and `tsc` and puts a live Send in front of every
-   * daemon that still answers `409 turn_in_flight`.
-   */
   check(
     "and the gate is the daemon's own answer rather than a constant",
     /const midTurnOk = acceptsMidTurn\(session\);/.test(composerSrc),
     true,
   );
-  /*
-   * ⚠ **And the rest of that gate is what a mid-turn message costs, asserted
-   * clause by clause because each one is a separate way to break it.**
-   *
-   * `blocked || working` used to be the whole of it and is now the *fallback*:
-   * it applies only where the daemon says it cannot take a mid-turn message, and
-   * pinning `!midTurnOk &&` in front of it is what stops a well-meaning
-   * simplification putting the old refusal back for everybody. The `stopping`
-   * clause is the one refusal that survives on every daemon — `stopRequested`
-   * answers `409 session_terminal` — and it is separate because it is not about
-   * the turn at all.
-   */
   check(
     "and where the daemon cannot take one, the old refusal is still exactly that",
     /!midTurnOk && \(blocked \|\| working\)/.test(composerSrc),
@@ -849,21 +587,7 @@ process.stdout.write("\nwho is working, and what the box says\n");
     /session\.status === "stopping"/.test(composerSrc),
     true,
   );
-  /*
-   * ⚠ **The send slot, decided by one predicate — the same one that says whether
-   * Send would work.**
-   *
-   * It read a separate `draftPresent` for a while, and the two did not partition
-   * the slot: every state where a draft exists and cannot be sent drew a
-   * **disabled Send over a live turn**, taking away the only turn-cancel this
-   * client has. An upload in flight, a failed chip, and — shipping to the whole
-   * fleet — a daemon not yet updated, where a parked question is the worst
-   * instance, since `canCancelTurn` is deliberately wider than `showsWorking` to
-   * reach exactly that state.
-   *
-   * Both halves pinned: that the slot reads `slotSends`, and that `slotSends` is
-   * `sendable` and nothing else.
-   */
+  // The slot follows slotSends alone; a separate draftPresent drew a disabled Send over a live turn and hid Stop.
   check(
     "the slot is decided by whether Send would work",
     /const slotSends = sendable\(text, attachments, sendRefused\);/.test(composerSrc),
@@ -876,54 +600,29 @@ process.stdout.write("\nwho is working, and what the box says\n");
     ),
     true,
   );
-  /*
-   * ⚠ **The one exception, and it is the other half of the same argument.**
-   *
-   * Where the draft cannot send but the *daemon would take a message* — an
-   * attachment still going up, one that failed, or `/clear` typed mid-turn —
-   * handing the slot to Stop puts a destructive control under a thumb aimed at
-   * Send, and then swaps it back on its own when the upload lands. There the
-   * answer is the disabled Send with its own sentence, which is otherwise
-   * unreachable. `!sessionRefused` is what keeps this from undoing the rule
-   * above: against a daemon too old to take a mid-turn message the person can do
-   * nothing about the draft, and Stop stays.
-   */
   check(
     "except where the refusal is about the draft, which keeps its own sentence",
     /const draftAnswerable = !sessionRefused && !slotSends &&/.test(composerSrc),
     true,
   );
-  /*
-   * ⚠ **`/clear` is the one text the daemon still refuses mid-turn**, and the
-   * route carries it out itself rather than forwarding it — so `clearContext`'s
-   * `turn !== null` refusal reaches the composer as a guaranteed
-   * `409 turn_in_flight`. Lifting the mid-turn gate made that state reachable for
-   * the first time, on claude, whose command list this client restores `/clear`
-   * into. Pinned because nothing else can see it: the daemon is right to refuse,
-   * and the only fix is here.
-   */
   check(
-    "and the one command the daemon still refuses mid-turn is refused here too",
-    /const clearRefused = !revising && session\.turn !== null && text\.trim\(\) === "\/clear";/.test(composerSrc),
+    "and the one command the daemon still refuses while the agent works or waits is refused here too",
+    /const clearRefused = !revising && canCancelTurn\(session\) && text\.trim\(\) === "\/clear";/.test(composerSrc),
     true,
   );
-  /*
-   * And a sendable draft outranks the cancel spinner. Without this, somebody who
-   * taps Stop and then types has a `role="status"` spinner where the button
-   * should be for the whole of a cancel the turn routinely outlives — while
-   * `submit` sends on Enter, so the guard and the drawn control disagreed, and on
-   * a coarse pointer there was no way to send at all.
-   */
+  // The occupant is one pure function now (Q3.654); the composer only says which facts it is given.
+  const { slotOccupant } = await import("../src/ui/slotSwap.js");
   check(
     "and a sendable draft outranks the stopping spinner",
-    /\(stopping \|\| pendingCancel\) && !slotSends/.test(composerSrc),
+    slotOccupant({ sending: false, stopping: true, sends: true, stoppable: false }),
+    "send",
+  );
+  check(
+    "which is asked with a cancel in flight counted as stopping",
+    /slotOccupant\(\{ sending: busy, stopping: stopping \|\| pendingCancel, sends: slotSends, stoppable \}\)/.test(composerSrc),
     true,
   );
-  /*
-   * The ordering that makes it land: the daemon refuses a prompt inside a turn,
-   * and a parked permission is one. Measured — rejecting the plan does *not* end
-   * the turn, so the cancel is what the operator was pressing by hand.
-   */
+  // Rejecting a plan does not end the turn, so a send from that state cancels first.
   check(
     "and a send from that state cancels the turn first",
     /const settled = revising\s*\n\s*\? daemon\.cancelTurn\(/.test(composerSrc),
@@ -934,29 +633,13 @@ process.stdout.write("\nwho is working, and what the box says\n");
     /\.then\(\(\) => daemon\.prompt\(sessionRef\.sessionId, body, sending\)\)/.test(composerSrc),
     true,
   );
-  // And the blur rule stands down, or the caret is taken out from under somebody
-  // the placeholder has just invited to type.
   check(
     "a plan does not release the caret",
     /needsHuman\(row\.snapshot\) && !revising;/.test(composerSrc),
     true,
   );
 
-  /*
-   * ⚠ **Every hook in `SessionView` runs before its guard clause, and nothing
-   * else in this repository checks that.**
-   *
-   * There is no eslint, `tsc` does not model hook order, and this driver has no
-   * DOM — a sentence `Composer.tsx` already writes over its own release effect,
-   * and which was true in the worst way: a `useMemo` added below `row.snapshot`
-   * sat *after* `if (row === undefined) return`, so a cold-opened session
-   * rendered three hooks while it said "loading" and four once its row landed.
-   * That is React #310, thrown the moment the row arrives, and it takes the whole
-   * screen down.
-   *
-   * `SessionView` is the one component in this package with a guard clause
-   * between its hooks and its body. A second one owes this check.
-   */
+  // Nothing else checks hook order here (no eslint, no DOM): a hook after the guard throws React #310 when the row lands.
   const sessionViewSrc = readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8");
   const body = sessionViewSrc.slice(
     sessionViewSrc.indexOf("export function SessionView("),
@@ -967,26 +650,7 @@ process.stdout.write("\nwho is working, and what the box says\n");
   const late = [...body.matchAll(/\buse[A-Z]\w*\(/g)].filter((m) => (m.index ?? 0) > guard);
   check("no hook runs after SessionView's guard clause", late.map((m) => m[0]), []);
 
-  /*
-   * ⚠ **`revising` may not wait for a transcript, and this is the one state where
-   * that is a dead end rather than a delay.**
-   *
-   * `openSession` returns *without* creating a transcript when the machine has no
-   * connection, which is why `PermissionCard` beside this reads `transcript?.events
-   * ?? []` and says so at length. `awaitingPlan` was reading `events !== undefined`
-   * instead: same screen, same request, opposite answer — the plan drawn, and the
-   * composer beneath it saying *answer the request above first* about the request
-   * it is the answer to.
-   *
-   * ⚠ **And the state it was switching the composer off in is the *worst* one, not
-   * a dead end** — which is the correction this comment exists to carry. With no
-   * window `planControls` answers `null` (the kind rides the `tool_call`), so the
-   * curated two-button card is not drawn at all and the fallback puts every option
-   * the agent sent on screen as rows, in its own 46-character wording. That is the
-   * layout the curation exists to avoid, and it was the one screen where the box
-   * that says *what to change* had been turned off. The plan comes off the snapshot
-   * either way; an empty window costs the markdown and never the state.
-   */
+  // openSession may create no transcript, so plan detection must not wait on events; the snapshot carries the plan.
   check(
     "a plan is recognised before its transcript exists",
     /permissionContext\(pendingAsk, events \?\? \[\]\)\.plan !== null/.test(sessionViewSrc),
@@ -997,6 +661,162 @@ process.stdout.write("\nwho is working, and what the box says\n");
     /events=\{transcript\?\.events \?\? \[\]\}/.test(sessionViewSrc),
     true,
   );
+}
+
+process.stdout.write("\nthe send slot swaps rather than jumps\n");
+{
+  // One live occupant, the ones it replaced fading beneath it, inert (Q3.654).
+  const { exitEnded, refocusBox, SLOT_ORDER, slotHolding, slotOccupant, SWAP_MS, swapTo } = await import(
+    "../src/ui/slotSwap.js"
+  );
+  type Occupant = (typeof SLOT_ORDER)[number];
+  const drawn = (state: { shown: Occupant; leaving: readonly { occupant: Occupant }[] }): string[] => [
+    `live:${state.shown}`,
+    ...state.leaving.map((one) => `out:${one.occupant}`),
+  ];
+
+  check(
+    "a send in flight holds the slot whatever else is true",
+    slotOccupant({ sending: true, stopping: true, sends: true, stoppable: true }),
+    "sending",
+  );
+  check(
+    "a cancel in flight draws its spinner over an empty box",
+    slotOccupant({ sending: false, stopping: true, sends: false, stoppable: true }),
+    "stopping",
+  );
+  check(
+    "then Stop where the turn can be cancelled, and Send the rest of the time",
+    [
+      slotOccupant({ sending: false, stopping: false, sends: false, stoppable: true }),
+      slotOccupant({ sending: false, stopping: false, sends: false, stoppable: false }),
+    ],
+    ["stop", "send"],
+  );
+  check("every occupant has one place in the layers' order", [...SLOT_ORDER].sort(), ["send", "sending", "stop", "stopping"]);
+
+  const idle = slotHolding("send");
+  check("the same occupant is no swap at all", swapTo(idle, "send", true) === idle, true);
+  const toStop = swapTo(idle, "stop", true);
+  check("a swap draws the new occupant live and the old one leaving", drawn(toStop), ["live:stop", "out:send"]);
+  const back = swapTo(toStop, "send", true);
+  // Send -> Stop -> Send inside one swap: the returning occupant is not also left fading.
+  check("a flip back inside the swap draws each occupant once", drawn(back), ["live:send", "out:stop"]);
+  check(
+    "and three swaps inside one leave two fading and one live",
+    drawn(swapTo(swapTo(idle, "sending", true), "stop", true)),
+    ["live:stop", "out:send", "out:sending"],
+  );
+  check("reduced motion jumps and leaves nothing fading", drawn(swapTo(idle, "stop", false)), ["live:stop"]);
+  check("and so does a jump over an occupant already there", drawn(swapTo(toStop, "stop", false)), ["live:stop"]);
+  check("an exit ending takes its own layer away", drawn(exitEnded(toStop, toStop.swap)), ["live:stop"]);
+  check("and a late end of an earlier swap takes nothing", exitEnded(back, toStop.swap) === back, true);
+
+  // Every sequence of four swaps, each animated or not, with every exit ending or not: never two live, never none.
+  const broken: string[] = [];
+  const seqs: Occupant[][] = [[]];
+  for (let depth = 0; depth < 4; depth += 1) {
+    for (const seq of [...seqs]) if (seq.length === depth) for (const one of SLOT_ORDER) seqs.push([...seq, one]);
+  }
+  for (const seq of seqs) {
+    for (let mask = 0; mask < 1 << (seq.length * 2); mask += 1) {
+      let state = slotHolding("send");
+      seq.forEach((one, i) => {
+        const before = state.swap;
+        state = swapTo(state, one, (mask >> (i * 2)) % 2 === 0);
+        if ((mask >> (i * 2 + 1)) % 2 === 1) state = exitEnded(state, before);
+        const out = state.leaving.map((l) => l.occupant);
+        const ok =
+          state.shown === one && !out.includes(state.shown) && new Set(out).size === out.length && out.length <= 3;
+        if (!ok) broken.push(`${seq.join(">")}#${mask}`);
+      });
+    }
+  }
+  check("over every sequence of four swaps, one live occupant and no occupant drawn twice", broken, []);
+  check("and the walk was taken", seqs.length, 341);
+
+  check(
+    "a swap that takes the focused control away hands focus to the box, on a desktop only",
+    [refocusBox(true, false), refocusBox(true, true), refocusBox(false, false)],
+    [true, false, false],
+  );
+
+  // One clock: SWAP_MS, the two classes, and the popover's rise it borrows.
+  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector: string): string =>
+    new RegExp(`\\n${selector.replace(/[.*]/g, "\\$&")} \\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+  const swapIn = rule(".swap-in");
+  const swapOut = rule(".swap-out");
+  const glyphIn = rule(".swap-in svg");
+  check("the three swap rules were found", [swapIn !== "", swapOut !== "", glyphIn !== ""], [true, true, true]);
+  const clocks = [swapIn, swapOut, glyphIn].flatMap((body) => [...body.matchAll(/(\d+)ms/g)].map((m) => Number(m[1])));
+  const rises = [...css.matchAll(/--animate-rise(?:-out)?: rise(?:-out)? (\d+)ms/g)].map((m) => Number(m[1]));
+  check("every swap duration is SWAP_MS", [clocks.length >= 4, clocks.every((ms) => ms === SWAP_MS)], [true, true]);
+  check("and SWAP_MS is rise's clock, arriving and leaving", [rises.length, rises.every((ms) => ms === SWAP_MS)], [2, true]);
+  check(
+    "arriving eases out and leaving eases in, as rise does",
+    [/ease-out/.test(swapIn) && /ease-out/.test(glyphIn), /ease-in\b/.test(swapOut) && !/ease-out/.test(swapOut)],
+    [true, true],
+  );
+  // The arriving button's box never scales, so a tap in the first frame lands on it at full size.
+  check("the arriving layer only fades", /transform/.test(swapIn), false);
+  const starting = /@starting-style \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? "";
+  check(
+    "and starts from nothing, its glyph from half size",
+    [/\.swap-in \{\s*opacity: 0;\s*\}/.test(starting), /\.swap-in svg \{\s*transform: scale\(0\.5\);\s*\}/.test(starting)],
+    [true, true],
+  );
+  check("the leaving one fades and shrinks", [/opacity: 0;/.test(swapOut), /transform: scale\(0\.6\);/.test(swapOut)], [
+    true,
+    true,
+  ]);
+
+  const slotSrc = readFileSync(new URL("../src/ui/SendSlot.tsx", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const leavingTag = /<div\s+key=\{one\}\s+inert[\s\S]*?>/.exec(slotSrc)?.[0] ?? "";
+  check(
+    "a leaving layer is inert, hidden from assistive technology and takes no pointer",
+    [/\binert\b/.test(leavingTag), /aria-hidden="true"/.test(leavingTag), /pointer-events-none/.test(leavingTag), /swap-out/.test(leavingTag)],
+    [true, true, true, true],
+  );
+  check(
+    "and what it draws can do nothing",
+    [/onClick=\{live \? onStop : undefined\}/.test(slotSrc), /type=\{live \? "submit" : "button"\}/.test(slotSrc)],
+    [true, true],
+  );
+  check("the live layer paints on top", /className=\{`z-1 col-start-1 row-start-1 \$\{fading \? "swap-in" : ""\}`\}/.test(slotSrc), true);
+  check("in one fixed order, since a moved node restarts its transition", /\{SLOT_ORDER\.map\(\(one\) =>/.test(slotSrc), true);
+  check(
+    "the swap is decided before paint, with reduced motion and another session jumping",
+    [
+      /useLayoutEffect\(\(\) => \{\s*if \(occupant === held\.slot\.shown && scope === held\.scope\) return;/.test(slotSrc),
+      /const still = scope !== held\.scope \|\| window\.matchMedia\("\(prefers-reduced-motion: reduce\)"\)\.matches;/.test(slotSrc),
+      /swapTo\(held\.slot, occupant, !still\)/.test(slotSrc),
+    ],
+    [true, true, true],
+  );
+  check(
+    "focus is read while the old control still holds it, and given to the box",
+    /refocusBox\(here\.current\?\.contains\(document\.activeElement\) \?\? false, window\.matchMedia\("\(pointer: coarse\)"\)\.matches\)\)\s*\{\s*box\.current\?\.focus\(\{ preventScroll: true \}\);/.test(
+      slotSrc,
+    ),
+    true,
+  );
+  check(
+    "an exit ends on its own opacity, with a backstop",
+    [/event\.propertyName !== "opacity"/.test(slotSrc), /SWAP_MS \* 2/.test(slotSrc)],
+    [true, true],
+  );
+  check("nothing in the slot is a hand-rolled button", /<button\b/.test(slotSrc), false);
+
+  const composerCode = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
+  check(
+    "the composer hands the slot its occupant and draws none itself",
+    [/<SendSlot\s+occupant=\{occupant\}/.test(composerCode), /icon=\{Square\}|icon=\{ArrowUp\}/.test(composerCode)],
+    [true, false],
+  );
+  check("and the refusal line follows the same answer", /const sendDrawn = occupant === "send";/.test(composerCode), true);
 }
 
 process.stdout.write("\nwho gets the caret on a session switch\n");
@@ -1011,13 +831,6 @@ process.stdout.write("\nwho gets the caret on a session switch\n");
       ...over,
     });
 
-  /*
-   * **The missing half.** Declining to *take* the caret does nothing about one
-   * taken a moment earlier: on a desktop the composer focuses itself when a
-   * session opens, and a request that parks after that finds it already holding
-   * focus — so `isTypingInto` switches every shortcut on the card off and the
-   * numbers beside the answers do nothing.
-   */
   check(
     "a parked request hands the caret back",
     shouldReleaseComposer({ blocked: true, focused: true, draftEmpty: true }),
@@ -1038,13 +851,11 @@ process.stdout.write("\nwho gets the caret on a session switch\n");
   );
 
   check("a desktop switch onto a live session takes it", ask({}), true);
-  // Each of these is a way it is *wrong*, so each is asserted on its own.
   check("an ended session has no box to focus", ask({ hasBox: false }), false);
   check("a phone would raise the keyboard over half the screen", ask({ pointerCoarse: true }), false);
   check("something that already has focus keeps it", ask({ focusHeldElsewhere: true }), false);
   check("a blocked session points at the request instead", ask({ blocked: true }), false);
-  // The one that is not obvious: `isTypingInto` switches every bare shortcut off
-  // once the composer has focus, so autofocusing after `j` breaks the next `j`.
+  // isTypingInto disables bare shortcuts once the composer has focus, so autofocus after j would break the next j.
   check("and `j`/`k` keep working for the next hop", ask({ fromKeyboardNav: true }), false);
 
   check("the flag starts down", takeKeyNav(), false);
@@ -1053,15 +864,8 @@ process.stdout.write("\nwho gets the caret on a session switch\n");
   check("and reading it puts it down, so it cannot suppress the next switch", takeKeyNav(), false);
 }
 
-/* ------------------------------------------------------------------ *
- * The two helpers the extraction moved, and nothing asserted
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\nwhat a collapsed row says, and what a fence hides\n");
 {
-  // Tool output is rendered in a `<pre>` rather than through the markdown
-  // renderer — deliberately, since it is untrusted text from a repository — so an
-  // unstripped fence reaches a person as three literal backticks.
   check("a fence wrapping the whole block is removed", stripFence("```console\nhi-there\n```"), "hi-there");
   check("a lone fence line is not a wrapper", stripFence("```"), "```");
   check(
@@ -1086,24 +890,6 @@ process.stdout.write("\nwhat a collapsed row says, and what a fence hides\n");
     detail: null,
   });
 
-  /*
-   * **The row shortens a path and never a command**, and the second half is the one
-   * worth pinning.
-   *
-   * Reported off a phone: every session works inside one directory, so a `Read` row
-   * drew that directory again on every line and `truncate` then removed the end —
-   * the part that says which file. The three sites this was fixed at first
-   * (`ChangeRow`, the `locations` list, the diff header) all missed *this* one,
-   * which is where a reader actually looks, so the sentence "paths are relative now"
-   * was true and useless.
-   *
-   * The refusal is the safety half. `COMMAND_FIELDS` is the string the agent ran;
-   * rewriting it would draw a command that was never executed, which is the same
-   * judgement `PermissionCard` makes when it renders one through a raw `<pre>`.
-   */
-  // The real `relFor`, not a stand-in: the rule under test is what a reader sees,
-  // and a hand-written relativiser here could agree with the assertion while
-  // disagreeing with `SessionView`, which wires this exact function in.
   const { relativeTo: relTo } = await import("../src/paths.js");
   const under = (root: string) => (path: string) => relTo(root, path);
   const ROOT = "/Users/me/proj";
@@ -1118,17 +904,11 @@ process.stdout.write("\nwhat a collapsed row says, and what a fence hides\n");
     toolSummary(null, [{ path: `${ROOT}/notes.txt`, line: 3 }], under(ROOT)).summary,
     "notes.txt:3",
   );
-  /*
-   * ⚠ The one that must never change. `ls -la /Users/me/proj/src` is what ran, and a
-   * row reading `ls -la src` is a row describing a command nobody issued.
-   */
   check(
     "a command is drawn as it ran, prefix and all",
     toolSummary({ command: `ls -la ${ROOT}/src` }, [{ path: `${ROOT}/src`, line: null }], under(ROOT)).summary,
     `ls -la ${ROOT}/src`,
   );
-  // `TARGET_FIELDS` holds `url` and `uri` beside the path names and needs no special
-  // case: nothing outside the root is relative to it, so it falls through unchanged.
   check(
     "a URL is not a path and is left alone",
     toolSummary({ url: "https://example.com/a/b" }, [], under(ROOT)).summary,
@@ -1139,30 +919,13 @@ process.stdout.write("\nwhat a collapsed row says, and what a fence hides\n");
     toolSummary({ file_path: "/etc/hosts" }, [], under(ROOT)).summary,
     "/etc/hosts",
   );
-  // The default answers `null` for everything, so the two callers that have no
-  // `FileAccess` — `nameOfTool` among them — get exactly what they got before.
   check(
     "with no relativiser at all, nothing moves",
     toolSummary({ file_path: `${ROOT}/src/a.ts` }, []).summary,
     `${ROOT}/src/a.ts`,
   );
 
-  /*
-   * ⚠ **And the call site, because everything above passes without it.**
-   *
-   * The default third argument answers `null` for everything, which is what makes
-   * the two callers with no `FileAccess` safe — and it is also what makes dropping
-   * the argument at the one call site that *has* one completely silent. Measured:
-   * with the relativiser deleted from `EventList`, every assertion above stayed
-   * green and the row went back to drawing `/Users/rends/remoslop_agent…`, which is
-   * the screenshot this whole change came from.
-   *
-   * That is the same shape as the defect itself. Three sites were fixed by reading
-   * the code and this fourth was missed, so a pure-function check that cannot see
-   * call sites would have certified the fix and shipped the bug. `webcheck` already
-   * reads files off disk for exactly this class — see the notice, the fold and the
-   * palette gate — and this joins them.
-   */
+  // Pins the EventList call site: the default relativiser answers null, so dropping it leaves every check above green.
   const eventList = readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
@@ -1170,29 +933,16 @@ process.stdout.write("\nwhat a collapsed row says, and what a fence hides\n");
   check("and never takes the two-argument form", /toolSummary\(rawInput, locations\)/.test(eventList), false);
 }
 
-/* ------------------------------------------------------------------ *
- * Which files the composer will take
- *
- * Two client-side limits and nothing else. The per-session byte budget is the
- * daemon's, deliberately: this client cannot know it across a reload, so a
- * half-tracked copy would be wrong more often than useful and the daemon's own
- * refusal is what a chip shows instead.
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\nwhich files the composer will take\n");
 {
   const { admitFiles } = await import("../src/attach.js");
   const { MAX_UPLOAD_BYTES } = await import("../src/wire.js");
 
-  // `File` needs a DOM; a plain object with the two fields the rule reads is the
-  // honest stand-in in a driver that stubs `window` and nothing else.
   const file = (name: string, size: number): File => ({ name, size }) as File;
   const chip = (state: string, uploadId: string | null = null): never =>
     ({ state, uploadId }) as never;
 
   const ten = Array.from({ length: 10 }, (_, i) => chip("ready", `u_${i}`));
-  // The boundary, not the middle: ten is the limit, so the eleventh is refused
-  // while the first ten are not.
   const eleventh = admitFiles(ten, [file("k.txt", 10)]);
   check("the eleventh file is refused", eleventh.accepted.length, 0);
   check("and says why", eleventh.refused[0]?.reason, "too_many");
@@ -1205,56 +955,26 @@ process.stdout.write("\nwhich files the composer will take\n");
   // A directory dropped on a picker arrives as a zero-byte entry.
   check("an empty file is refused", admitFiles([], [file("d", 0)]).refused[0]?.reason, "empty");
 
-  // A picker handing back twelve when there is room for three must attach three
-  // and say so, not refuse all twelve and make somebody pick again.
   const straddle = admitFiles(ten.slice(0, 8), [file("a", 1), file("b", 1), file("c", 1), file("d", 1)]);
   check("a batch over the limit accepts a prefix", straddle.accepted.map((f) => f.name), ["a", "b"]);
   check("and names the rest", straddle.refused.map((f) => f.file.name), ["c", "d"]);
 
-  // The rule that would otherwise be decided differently in two places: a failed
-  // chip is not going to be sent, so it must not hold a slot.
   const failed = Array.from({ length: 10 }, () => chip("failed"));
   check("a failed chip does not occupy a slot", admitFiles(failed, [file("a", 1)]).accepted.length, 1);
   check("an uploading one does", admitFiles(Array.from({ length: 10 }, () => chip("uploading")), [file("a", 1)]).accepted.length, 0);
 }
 
-/* ------------------------------------------------------------------ *
- * A file attached while the send was in flight
- *
- * `send` empties the chip list optimistically and `restoreAttachments` puts it
- * back when the daemon refuses — and that restore used to be an **assignment**,
- * which is only correct if nothing can be attached in between. Nothing stops it:
- * `onPaste`, `onDrop` and the paperclip all stay live, and `POST
- * /sessions/:id/prompt` is on the 90s slow-route budget, so the window is up to
- * a minute and a half wide.
- *
- * What an assignment cost is worse than a lost chip. The upload behind it keeps
- * streaming to completion against the daemon's per-session 100 files / 100 MiB,
- * and the entry carried the `cancel` closure — so `removeAttachment` and
- * `forgetAttachments` have nothing left to abort with, and there is no chip on
- * screen to press anyway. The person then retries the send and it goes without
- * the screenshot they attached, with nothing anywhere saying so.
- *
- * Driven through the module's own state rather than a copy of it: the map, its
- * version counter and the merge are the subject, and `restoreAttachments` is
- * exported precisely so this is assertable without a composer.
- * ------------------------------------------------------------------ */
+// restoreAttachments must merge, not assign: a chip attached during the in-flight send would lose its upload and cancel.
 
 process.stdout.write("\na file attached while the send was in flight\n");
 {
   const { addAttachments, attachmentsFor, forgetAttachments, restoreAttachments } = await import("../src/attach.js");
 
   const key = "m_1/s_1" as never;
-  // Only the fields the merge reads. `File` needs a DOM, and the rule under test
-  // never touches it — same stand-in the admission cases one section up use.
   const chip = (localId: string, state = "ready"): never => ({ localId, state, uploadId: `u_${localId}` }) as never;
   const ids = (): string[] => attachmentsFor(key).map((item) => item.localId);
 
   {
-    // The failure exactly: two chips are cleared by the optimistic send, a third
-    // is pasted while the prompt is in flight, and the refusal restores. Under
-    // the assignment this answered ["a","b"] — `c` gone from the map with its
-    // upload still running and its `cancel` unreachable.
     forgetAttachments(key);
     addAttachments(key, [chip("c")]);
     restoreAttachments(key, [chip("a"), chip("b")]);
@@ -1262,8 +982,6 @@ process.stdout.write("\na file attached while the send was in flight\n");
   }
 
   {
-    // Restored first, because they were attached first and that is the order the
-    // refused message had them in — the one the retry has to reproduce.
     forgetAttachments(key);
     addAttachments(key, [chip("late")]);
     restoreAttachments(key, [chip("early")]);
@@ -1271,20 +989,12 @@ process.stdout.write("\na file attached while the send was in flight\n");
   }
 
   {
-    // The ordinary path, where nothing was attached in between: a plain restore.
-    // Asserted so the merge cannot be read as changing what the common case does.
     forgetAttachments(key);
     restoreAttachments(key, [chip("a"), chip("b")]);
     check("with nothing live it is the list as it was", ids(), ["a", "b"]);
   }
 
   {
-    /*
-     * Deduplicated by `localId`. Two restores can genuinely overlap — a refusal
-     * arriving while a previous refusal's restore is on screen — and without this
-     * one file is drawn twice under the same React key, which is the one shape a
-     * list must never take.
-     */
     forgetAttachments(key);
     addAttachments(key, [chip("a"), chip("c")]);
     restoreAttachments(key, [chip("a"), chip("b")]);
@@ -1292,56 +1002,19 @@ process.stdout.write("\na file attached while the send was in flight\n");
   }
 
   {
-    // An empty restore is not a clear. `send` calls this with whatever it captured,
-    // and a text-only message captured nothing — which must not delete a file
-    // attached since.
     forgetAttachments(key);
     addAttachments(key, [chip("a")]);
     restoreAttachments(key, []);
     check("restoring nothing leaves what is there", ids(), ["a"]);
   }
 
-  // Module state, shared with every later section that imports this file. Left as
-  // it was found.
+  // Module state shared with later sections: leave it as found.
   forgetAttachments(key);
   check("and the fixture leaves nothing behind", attachmentsFor(key).length, 0);
 }
 
-/* ------------------------------------------------------------------ *
- * Which of the composer's writes may land late
- *
- * At `lg` a session switch does **not** remount `Composer`, so `text`, `echo`,
- * `busy`, `applying` and `dismissed` are one shared instance while `drafts` and
- * `attach.ts` are keyed. Everything that resolves after an await therefore has to
- * be split: the keyed halves are correct from anywhere, the shared ones belong to
- * whichever session is actually on screen. `onScreen()` is that question.
- *
- * Three callbacks in `Composer.tsx` need that split — `send`'s two continuations,
- * `applyValue`'s `.then`, and the one-tap callback `choose` hands it — and the
- * first got its guards while the two a few lines above it did not. `applyValue`'s
- * `.then` closed a **different** session's `/` menu when a config change landed
- * (`closeMenu` sets `dismissed`), and `choose`'s one-tap branch wrote A's
- * completion into B's visible box through `update` and then moved B's caret to
- * A's offset — after which an Enter aimed at retrying A's gesture sent A's text
- * to B's agent, since `submit` reads the live render's `sessionRef`. Both run
- * behind `POST /sessions/:id/config` on the 90s slow route, which is long enough
- * for a person to move.
- *
- * And the fourth site is the opposite defect: `send` is reachable from **both**
- * doors, and asking `onScreen()` on the synchronous one made the ordinary Send
- * depend on the `[key]` effect having flushed. In that window the message goes to
- * the daemon while the box is left full, no echo is drawn and no spinner lights —
- * "it did not send", and a duplicate. So `send` takes `late` explicitly, required
- * with no default for the reason `LaunchOptions.fileIo` is: a new call site has
- * to decide, and deleting the argument is a type error rather than a silent one.
- *
- * Read off disk, because a component cannot be rendered here — no DOM and no
- * React — and none of this is a value a pure function returns. It is the same
- * argument the `SessionBrowser` extraction above makes and the `cpctl` one at the
- * foot of this file: compare behaviour where that is possible, and pin the one
- * line that decides it where it is not. Comments are stripped first, so what is
- * measured is code rather than the prose explaining it.
- * ------------------------------------------------------------------ */
+// At lg a session switch does not remount Composer, so shared state written after an await must check onScreen.
+// Comments are stripped so the patterns match code, not prose.
 
 process.stdout.write("\nwhich of the composer's writes may land late\n");
 {
@@ -1356,52 +1029,26 @@ process.stdout.write("\nwhich of the composer's writes may land late\n");
     return code(composer.slice(at, to < 0 ? composer.length : to));
   };
 
-  /*
-   * `send`'s two doors, named at the call sites rather than inferred inside it.
-   * A default would make the deferred door the silent one, which is the direction
-   * that loses a message into another session's box.
-   */
   check(
     "send is told whether it is arriving late",
     /const send = \(body: string, late: boolean\): void =>/.test(composer),
     true,
   );
-  check("the keystroke door says it is not", /send\(text\.trim\(\), false\)/.test(composer), true);
+  check("the keystroke door says it is not", /send\(sentText\(text\), false\)/.test(composer), true);
   check("and the config-round-trip door says it is", /send\(rest, true\)/.test(composer), true);
-  /*
-   * The short-circuit is the assertion, not merely the guard: with a bare
-   * `if (onScreen())` the synchronous door asks a question answered from an
-   * effect, and `onScreen`'s own docblock — "only ever asked after an await" —
-   * becomes a claim about call sites that nothing holds.
-   */
   check(
     "so the shared instance is written unconditionally on the synchronous one",
     /if \(!late \|\| onScreen\(\)\) \{/.test(composer),
     true,
   );
 
-  /*
-   * `applyValue`'s own late writes. `setApplying` is the spinner on a control
-   * strip and `closeMenu` sets `dismissed`, and both belong to the session the
-   * change was dispatched against.
-   */
   const apply = region("const applyValue = ", "const choose = ");
   check("a config change that lands late asks whose composer this is", /onScreen\(\)/.test(apply), true);
   check("before it clears the control's spinner", /if \(present\) setApplying\(null\)/.test(apply), true);
   check("and before it closes a menu", /if \(ok && present\) closeMenu\(\)/.test(apply), true);
-  /*
-   * `onDone` is called either way. Its own body decides what a late answer means
-   * — every one of them is keyed — and skipping it would drop the draft edit the
-   * one-tap path defers, i.e. lose the completion rather than misplace it.
-   */
   check("the deferred callback still runs whatever the answer is", /^\s*onDone\?\.\(ok\);/m.test(apply), true);
 
-  /*
-   * `choose`'s one-tap branch, which is the sibling the prompt-path fix missed.
-   * Asserted by *order* rather than by the presence of a string: `update` and
-   * `pendingCaret` both have to sit behind the test, and an edit that reinstated
-   * either above it would still contain both tokens.
-   */
+  // Asserted by order, not presence: moving either shared write above the guard keeps both tokens.
   const oneTap = region("applyValue(entry.option, entry.value, (ok) => {", "\n      return;");
   const guardAt = oneTap.indexOf("onScreen()");
   check("the one-tap completion asks before writing the box", guardAt >= 0, true);
@@ -1412,33 +1059,10 @@ process.stdout.write("\nwhich of the composer's writes may land late\n");
       guardAt < oneTap.indexOf("pendingCaret.current = next.caret"),
     `guard at ${guardAt}, update at ${oneTap.indexOf("update(next.text)")}, caret at ${oneTap.indexOf("pendingCaret.current = next.caret")}`,
   );
-  /*
-   * The keyed half is unconditional, and that is the whole point of splitting
-   * rather than simply dropping the write: the completion belongs to the session
-   * it was typed in, so it goes into that session's draft and is waiting there
-   * when somebody comes back. `pendingCaret` is a position *in the box*, so it
-   * has no keyed half and correctly has none here.
-   */
   check("while the draft is still written for the session it was typed in", /drafts\.set\(key, next\.text\)/.test(oneTap), true);
   check("and cleared rather than left stale when the completion is empty", /drafts\.delete\(key\)/.test(oneTap), true);
 
-  /*
-   * **A late-write gate is only half a rule, and the other half is the reset.**
-   *
-   * Everything above pins that a shared flag is not written by a request that
-   * arrived after a session switch. What none of it says is that the flag is
-   * *cleared* on that switch — and for `busy` both halves have always existed,
-   * with the effect's own comment explaining why the second is needed. `stopping`
-   * arrived with the gate and without the reset, and the ending is worse than
-   * `busy`'s because nothing can recover it: while it is set the send slot draws
-   * a "Stopping" spinner instead of the Stop button, so no tap can reach
-   * `cancelTurn`, whose own `if (stopping) return` refuses anyway — the one path
-   * to the `finally` that would release it. Every session opened in that tab
-   * afterwards showed a spinner where Send belongs.
-   *
-   * Asserted as the *pair*, on the effect's own region, so a future shared flag
-   * given one and not the other fails here rather than on somebody's phone.
-   */
+  // Each shared flag gated against late writes also needs its reset on session switch, or a stuck flag outlives the session.
   const onSwitch = region("liveKey.current = key;", "}, [key]);");
   for (const [what, token] of [
     ["a send", "setBusy(false)"],
@@ -1449,55 +1073,29 @@ process.stdout.write("\nwhich of the composer's writes may land late\n");
   }
 }
 
-/* ------------------------------------------------------------------ *
- * What a nameless file gets called
- *
- * The case this exists for is Ctrl+V of a screenshot, which is how an image is
- * attached on a desktop. Most browsers hand back `image.png`, but not all and
- * not from every source — and the daemon refuses an empty name with `400
- * invalid_name`, so without this the commonest desktop path would fail with an
- * opaque error.
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\nwhat a nameless file gets called\n");
 {
   const { pastedName } = await import("../src/attach.js");
   // 2026-08-04T09:15:30Z, fixed so the assertion is about the shape.
   const at = Date.UTC(2026, 7, 4, 9, 15, 30);
 
-  // A name the browser gave us always wins. Nothing is invented over it.
   check("a real name is kept", pastedName("shot.png", "image/png", at), "shot.png");
   check("even an odd one", pastedName("Screen Shot 2026.png", "image/png", at), "Screen Shot 2026.png");
   check("whitespace around it is not a name", pastedName("   ", "image/png", at), "pasted-20260804-091530.png");
 
   check("a nameless png", pastedName("", "image/png", at), "pasted-20260804-091530.png");
-  // Spelled rather than derived: the subtype would give `.jpeg`.
   check("a jpeg gets the extension people expect", pastedName("", "image/jpeg", at), "pasted-20260804-091530.jpg");
   check("a subtype with a suffix is not one", pastedName("", "image/svg+xml", at), "pasted-20260804-091530.svg");
-  // Derived, and right far more often than a table would be.
   check("an unlisted type takes its subtype", pastedName("", "application/pdf", at), "pasted-20260804-091530.pdf");
   check("a parameter on the type is ignored", pastedName("", "text/csv; charset=utf-8", at), "pasted-20260804-091530.csv");
-  // Nothing usable to derive from still has to produce a storable name, because
-  // the alternative is the 400 this function exists to avoid.
   check("no type at all still gets a name", pastedName("", "", at), "pasted-20260804-091530.bin");
   check("and neither does a malformed one", pastedName("", "not-a-mime", at), "pasted-20260804-091530.bin");
 
-  // The name it produces has to survive the daemon's own sanitizer, which
-  // refuses control characters and path separators. This is the assertion that
-  // ties the two ends together.
   const generated = pastedName("", "image/png", at);
   check("what it generates is a single safe segment", /^[A-Za-z0-9._-]+$/.test(generated), true);
 }
 
-/* ------------------------------------------------------------------ *
- * What may be drawn inline, and what may only be saved
- *
- * Two of these three rules are security decisions. `image/svg+xml` is absent
- * from the allowlist on purpose: SVG is a document format that can carry
- * `<script>`, and the only thing between that and this origin is `<img>`
- * disabling scripting for it — a promise about engine behaviour rather than
- * about our code. Four raster types cost nothing and do not depend on it.
- * ------------------------------------------------------------------ */
+// SVG stays off the allowlist: it can carry script, and only the img element's engine behaviour would stop it.
 
 process.stdout.write("\nwhat may be drawn inline\n");
 {
@@ -1507,31 +1105,20 @@ process.stdout.write("\nwhat may be drawn inline\n");
   check("a jpeg draws", previewable("image/jpeg", 1024), true);
   check("a gif draws", previewable("image/gif", 1024), true);
   check("a webp draws", previewable("image/webp", 1024), true);
-  // The assertion that earns the allowlist. It still downloads; it never renders.
   check("an svg never draws", previewable("image/svg+xml", 1024), false);
   check("nor does a pdf", previewable("application/pdf", 1024), false);
   check("nor does text", previewable("text/plain", 1024), false);
-  // Not `image/*`, which would admit svg and whatever the registry grows next.
   check("nor an unknown image type", previewable("image/avif", 1024), false);
 
   check("a parameter on the type is ignored", previewable("image/png; charset=binary", 1024), true);
   check("and case is", previewable("IMAGE/PNG", 1024), true);
 
-  // The budget: these bytes are pulled automatically, through the relay, onto a
-  // phone, for something somebody may only be scrolling past.
   check("exactly at the cap still draws", previewable("image/png", MAX_PREVIEW_BYTES), true);
   check("one byte over does not", previewable("image/png", MAX_PREVIEW_BYTES + 1), false);
-  // An unknown size is precisely the one that must not be fetched, so it is
-  // refused rather than treated as small.
   check("a zero size does not", previewable("image/png", 0), false);
   check("nor does a nonsense one", previewable("image/png", Number.NaN), false);
-  // A workspace file has no declared type at all — the daemon never echoes one.
   check("and neither does a file with no type", previewable(null, 1024), false);
 }
-
-/* ------------------------------------------------------------------ *
- * What is sent with a prompt
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwhat is sent with a prompt\n");
 {
@@ -1542,25 +1129,11 @@ process.stdout.write("\nwhat is sent with a prompt\n");
     "u_2",
     "u_1",
   ]);
-  // Blocked is a *visible* refusal: sending now would send the message without
-  // the file somebody attached to it.
   check("an upload in flight blocks", sendableAttachments([chip("uploading")]).blocked, true);
-  // And a failed one does not, or there would be no way out but removing it.
   check("a failed one does not", sendableAttachments([chip("failed")]).blocked, false);
   check("and is not sent", sendableAttachments([chip("ready", "u_1"), chip("failed")]).ids, ["u_1"]);
-  // The impossible state, refused rather than trusted: it would send an empty
-  // list under a message that says it has files.
   check("ready with no id never reaches the wire", sendableAttachments([chip("ready", null)]).ids, []);
 }
-
-/* ------------------------------------------------------------------ *
- * Whether a message can be sent at all
- *
- * Text **or** files. A message that is only a screenshot is an ordinary thing to
- * send, and the composer refused it for a while because the only guard was on the
- * text — the daemon refused it too, before it had even looked at `attachments`.
- * Both sides changed together, and this is the client's half.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwhether a message can be sent at all\n");
 {
@@ -1571,70 +1144,22 @@ process.stdout.write("\nwhether a message can be sent at all\n");
   check("a file alone sends", canSend("", [chip("ready", "u_1")]), true);
   check("both send", canSend("look", [chip("ready", "u_1")]), true);
   check("neither does not", canSend("", []), false);
-  // Whitespace is not a message, and never was.
   check("nor does whitespace alone", canSend("   \n ", []), false);
 
-  // `blocked` outranks everything: for a files-only message, sending mid-upload
-  // would deliver nothing at all.
   check("an upload in flight holds the send", canSend("hello", [chip("uploading")]), false);
   check("even with a ready file beside it", canSend("", [chip("ready", "u_1"), chip("uploading")]), false);
-  // A failed chip is not going to finish, so it must not hold Send hostage —
-  // there would be no way out but removing it.
-  /*
-   * ⚠ **"Nothing queues anywhere in this system" stood here for four releases and
-   * is now false. It is replaced rather than deleted, because the thing it
-   * guarded still needs guarding — it just moved.**
-   *
-   * What it recorded: `ManagedSession.prompt` answered `busy` while a turn was
-   * open, a parked question keeps one open, so every message typed then came back
-   * `409 turn_in_flight` as a red toast under a button whose own tooltip claimed
-   * it queued. Twice since, a client-side hold was built to fix that and taken
-   * back out — most recently the plan card's, Q3.454 — and each time this
-   * sentence was restored.
-   *
-   * What changed is *where*. The queue is the **daemon's** now, which is the one
-   * place the two failure modes named against it do not exist: a tab that closes
-   * is not holding anything, and a session that ends drops the queue and writes
-   * an `error` event saying so. Where the agent takes a mid-turn message
-   * directly — claude and codex, over `_session/steering` — there is no queue at
-   * all and the message reaches the turn already running.
-   *
-   * So this third argument no longer means "a turn is in flight". It means the
-   * caller has decided this send would be refused, which is a much narrower set:
-   * `Composer`'s `sendRefused` is a session that is `stopping`, or a daemon too
-   * old to take one. The **property** below is unchanged and is what is actually
-   * pinned: whatever the caller calls a refusal, this function does not offer a
-   * send into it.
-   */
+  // The third argument is a refusal the caller already decided; canSend never offers a send into it (Q3.454).
   check("a refusal the caller has decided is not overridden here", canSend("hello", [], true), false);
   check("whatever is attached to it", canSend("hello", [chip("ready", "u_1")], true), false);
   check("and with no refusal it is the rule it always was", canSend("hello", [], false), true);
   check("and the argument defaults to off, so nothing else had to change", canSend("hello", []), true);
 
-  /*
-   * **The Stop/Send swap reads this same predicate, and that is the fix rather
-   * than the shortcut.**
-   *
-   * It briefly read a separate `draftPresent` — "is there anything in the box" —
-   * and every state where the two disagreed drew a **disabled Send over a live
-   * turn**, taking away the only turn-cancel this client has: an upload in
-   * flight, a failed chip, and — the one that would have shipped to everybody —
-   * a daemon not yet updated, where `sendRefused` is the old refusal and that is
-   * the normal fleet between a release and the last owner updating. So the slot
-   * is decided by whether Send would *work*, and the cases below are that rule
-   * read as the swap: whitespace keeps Stop, one character takes it.
-   */
   check("an empty box keeps Stop", canSend("", []), false);
   check("a space is not a message", canSend(" ", []), false);
   check("nor is a tab", canSend("\t", []), false);
   check("nor any run of them", canSend("  \t \n  ", []), false);
   check("one character takes the slot for Send", canSend("x", []), true);
   check("and so does a file with nothing typed", canSend("", [chip("ready", "u_1")]), true);
-  /*
-   * The three states that must keep Stop rather than draw a Send that cannot be
-   * pressed. Asserted as the *pair* — draft present, send impossible — because
-   * either half alone reads as an ordinary refusal.
-   */
   check(
     "an upload in flight keeps Stop even with text typed",
     canSend("hello", [chip("uploading")]),
@@ -1647,19 +1172,9 @@ process.stdout.write("\nwhether a message can be sent at all\n");
   );
 
   check("a failed chip does not", canSend("hello", [chip("failed")]), true);
-  // But it is not a message either.
   check("and cannot be the whole message", canSend("", [chip("failed")]), false);
 
 }
-
-/* ------------------------------------------------------------------ *
- * A path inside the workspace, and one outside it
- *
- * `file_change` and `FileLocation` carry absolute, agent-chosen paths; the
- * download route takes one relative to the workspace root. A location that does
- * not convert draws no button at all — this repo's own paperclip rule, one
- * screen over.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\na path inside the workspace, and one outside it\n");
 {
@@ -1667,7 +1182,6 @@ process.stdout.write("\na path inside the workspace, and one outside it\n");
 
   check("an ordinary path", relativeTo("/w", "/w/a/b.ts"), "a/b.ts");
   check("a trailing slash on the root is the same answer", relativeTo("/w/", "/w/a.ts"), "a.ts");
-  // The assertion that earns the function: a bare `startsWith` says "a".
   check("a prefix is not a boundary", relativeTo("/w", "/workspace/a"), null);
   check("the root itself is not a file", relativeTo("/w", "/w"), null);
   check("nor is a directory under it", relativeTo("/w", "/w/sub/"), null);
@@ -1677,51 +1191,28 @@ process.stdout.write("\na path inside the workspace, and one outside it\n");
   check("unless it climbs", relativeTo("/w", "../a"), null);
   check("or contains a dot segment", relativeTo("/w", "a/./b"), null);
 
-  // Forced rather than chosen: the daemon sends no `access-control-expose-headers`,
-  // so `content-disposition` is unreadable cross-origin and the name has to come
-  // from the path we asked for.
+  // The daemon exposes no content-disposition header cross-origin, so the filename comes from the requested path.
   check("the name is the last segment", filenameFor("a/b/c.png"), "c.png");
   check("a bare name is itself", filenameFor("c.png"), "c.png");
   check("a directory has none", filenameFor("a/"), null);
   check("and neither does nothing", filenameFor(""), null);
 
-  /*
-   * Which inline code spans in agent prose become a download.
-   *
-   * The measured claim this rests on: across every session in one real database,
-   * agent prose held 55 path-shaped strings and 4 were inside their session's
-   * workspace — one session printed 39 and would show nothing. It is the
-   * containment test, not a guess at intent, that keeps the transcript quiet.
-   */
   const touched = new Set(["/w/out.png", "/w/sub/a.svg", "/elsewhere/x.png"]);
   check("a file the session made", downloadablePath("/w/out.png", "/w", touched), "out.png");
   check("nested", downloadablePath("/w/sub/a.svg", "/w", touched), "sub/a.svg");
-  // Relative spans are resolved against the root before being compared, because
-  // what the daemon reported is absolute.
   check("a relative span resolves first", downloadablePath("sub/a.svg", "/w", touched), "sub/a.svg");
 
-  // The filter that does the work: mentioned, but not ours.
   check("a path outside the workspace is not offered", downloadablePath("/elsewhere/x.png", "/w", touched), null);
-  // The second filter: inside the workspace, but this session never touched it.
   check("nor is one the session never touched", downloadablePath("/w/never.png", "/w", touched), null);
 
-  // Inline code holds commands far more often than filenames, and whitespace
-  // removes almost all of them in one rule.
   check("a command is not a path", downloadablePath("git commit -m x", "/w", touched), null);
   check("nor is prose with a slash", downloadablePath("and/or something", "/w", touched), null);
-  // A bare filename counts, because `touched` is what decides — requiring a slash
-  // was standing in for "looks like a path" and rejected the shorter reference an
-  // agent naturally makes to a file it just named in full.
   check("a bare filename in the set counts", downloadablePath("out.png", "/w", touched), "out.png");
   check("a bare word that is not is refused", downloadablePath("npm", "/w", touched), null);
   check("nor is an empty span", downloadablePath("", "/w", touched), null);
-  // The span is agent-chosen, so the traversal case is refused by `relativeTo`
-  // even when somebody puts it in the touched set.
   check("and a climb out is refused", downloadablePath("/w/../etc/passwd", "/w", new Set(["/w/../etc/passwd"])), null);
 
   check("bytes read as bytes", formatBytes(512), "512 B");
   check("and scale", formatBytes(2048), "2.0 KB");
-  // Binary divisors with decimal labels, which is the convention `paths.ts` picked
-  // and which is why the per-file cap reads as a round number rather than as 105.
   check("to something a chip can hold", formatBytes(100 * 1024 * 1024), "100 MB");
 }

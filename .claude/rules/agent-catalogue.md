@@ -218,13 +218,14 @@ settings card still draws all five states, because that screen is *about* the
 states. ⚠ **`unchecked` stays and it is the load-bearing arm** — kimi's permanent
 answer (`AGENT_LOGIN.kimi.status` is null) and claude's timed-out probe — so hiding
 on it would delete kimi from this screen fleet-wide and make a slow probe look like
-an uninstall. ⚠ **It hides a door and `NewSession` owes one back**: the sign-in
-wizard was reached by tapping the tile that said why, so it hangs off *no tile at
-all* now and names the first agent `signInOffered` is true of — the same predicate
-the wizard's own gate asks, because a fallback naming an agent the gate declines to
-draw for is an empty row with no door. Both halves are `shownHere`, called by the
-row, the auto-default and `offeredHere` alike. A preset is exempt: it starts on the
-**system's** key, which is what the daemon checks. Q3.526.
+an uninstall. ⚠ **It hides a door, and what `NewSession` owes back is a way to it
+rather than a copy of it**: the sign-in wizard was reached by tapping the tile that
+said why, so it hung off *no tile at all*, inline under the strip (Q3.526). That
+disclosure is gone (Q3.640) — the empty row says why and offers **Agent settings**,
+and the harness's row there offers **Set up**, which opens the card as a leaf.
+`shownHere` is still the one binding the row, the auto-default, `offeredHere` and
+the empty state are all decided by. A preset is exempt: it starts on the
+**system's** key, which is what the daemon checks.
 
 ⚠ **The harness row is above the model row, and the order is asserted.** The model
 row is the only control on the builder that waits — `GET /agents/capabilities`

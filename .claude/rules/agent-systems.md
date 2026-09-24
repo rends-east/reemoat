@@ -482,4 +482,4 @@ answered, and both conventions are read. The per-row evidence is in `SYSTEMS`.
 |---|---|
 | A system key | 8 KiB, the same constant a pasted agent credential gets — one act, one number |
 | An assembled agent | 80 characters of name, 256 of model id. The model's *content* is checked by nobody here |
-| `GET /agents/capabilities` | One agent process per harness, no prompt so no quota, cached `MODELS_TTL_MS` (10 min) under `MAX_CONCURRENT_ASKS` (2) |
+| `GET /agents/capabilities` | One agent process per harness, no prompt so no quota, cached `MODELS_TTL_MS` (10 min) or until the build that published it changes, compared on every read, under `MAX_CONCURRENT_ASKS` (2) |

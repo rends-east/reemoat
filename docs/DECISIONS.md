@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 89 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 386 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 65 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 114 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 71 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 147 | `###` |
-| | | **1014** | |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 144 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 93 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 418 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 115 | `####` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 73 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 149 | `###` |
+| | | **1059** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1014 rather than the 514
+dividers. So the count is over **both** depths, and it says 1059 rather than the 526
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -393,7 +393,9 @@ change what the daemon bound to or what an already-memoised client did.
 ### Q1.22 — Does `REEMOAT_PORT` still matter if nothing outside dials it?
 
 **Decision.** `REEMOAT_PORT` stays known and stays 7887. `REEMOAT_PORT=0` still
-works for a daemon only ever served by the relay.
+works for a daemon only ever served by the relay — and is what the desktop app
+gives every daemon it runs for a server other than the one `~/.reemoat/daemon.env`
+names, the `~/.reemoat` daemon keeping 7887 (Q7.148).
 
 **Why.** The things that address the port are on the same machine: `pnpm client`
 under the shared secret, and the deploy script's `/health` probe. With `0`, the
@@ -3381,6 +3383,9 @@ leaving the strip. Signing the address so the far side could trust it: it
 protects a form default — the order is built from the POST body either way — at
 the cost of a shared secret spanning two repositories with no rotation story.
 
+**Status.** Superseded — Q1.650: the offer is deleted, by the owner's decision of
+2026-09-23. Nothing above was wrong; it is kept whole as the way back.
+
 ### Q1.633 — May an admin hand somebody a grant on a machine they do not own?
 
 **Decision.** No, and the routes that did it are deleted rather than guarded.
@@ -3697,7 +3702,9 @@ is the owner's call rather than a derivation.
 **Why the rule points the other way.** Of `REEMOAT_CP_MACHINES_OFFER_URL` that
 rule says it *"points at one particular shop run by whoever runs the deployment"*
 and that neither it nor the catalogue URL has a compiled-in default, *"because
-this is AGPL software and forks run their own control planes."* Terms are that
+this is AGPL software and forks run their own control planes."* [⚠ the offer is
+deleted — Q1.650; `cp-accounts.md` now makes the same argument of
+`REEMOAT_CP_APP_DOWNLOAD_URL`, and it applies here unchanged.] Terms are that
 argument sharpened: they name a legal person with liability behind them, and they
 are drawn on the sign-up screen of **every** instance rather than on an admin
 screen. A fork that forgets to replace them is telling its users they have a
@@ -3730,7 +3737,8 @@ because *not yet known* may not be drawn either way.
 
 **The way back for the party itself is written down so nobody re-derives it.** Move the party to an
 environment variable named REEMOAT\_CP\_LEGAL\_OPERATOR, published on
-`GET /v1/instance` beside `machines.offer`, read in `instance.ts` with the guard
+`GET /v1/instance` beside `legal.documents` [it said `machines.offer`, deleted by
+Q1.650], read in `instance.ts` with the guard
 `isAbsoluteHttpUrl`'s sibling, and fall back to *"whoever runs this control
 plane"* — `gateNotice`'s own sentence, so two screens cannot disagree about who
 somebody is being asked to deal with. Its price is a field on that route, which
@@ -3791,11 +3799,16 @@ the lookup key** — `credential#<origin>`. So a credential cannot be *read* for
 server it was not issued by: structurally, rather than because some code path
 remembered to clear it on a change. `host_set_server` also erases the previous
 origin's entry in the same act, so nothing is retained for a server this app is no
-longer going to present to.
+longer going to present to. [⚠ reversed by Q7.148: it keeps it now, so a server
+switched away from stays signed in; the lookup key above is unchanged and is what
+the reversal rests on.]
 
 `#` as the delimiter because a URL origin cannot contain one, which makes the rule
 unambiguous with no escaping and makes a later `credential#<origin>#<account>` an
-extension of the shape rather than a migration away from it.
+extension of the shape rather than a migration away from it. [⚠ extended by
+Q1.651: it is that shape now — `credential#<origin>#<user id>` — and a
+`credential#<origin>` written before it is moved there once, after `GET /v1/me` has
+named its owner.]
 
 **Why not keep it only in the host process**, which is stronger on the face of it:
 `cpFetch` attributes a 401 by comparing `credential === sent` **by identity**, and
@@ -3938,7 +3951,10 @@ path.
 preferences file (`config.rs`). A device id has to survive a restart. Which one?
 
 **Decision. The configuration file**, as a map keyed on the server's origin
-beside `server`. `credential.rs` is untouched.
+beside `server`. `credential.rs` is untouched. [⚠ reversed by Q1.651 in its key: per
+account, `<origin>#<user id>`, because a device row belongs to one user and two
+accounts on one server took turns overwriting one entry. `credential.rs` gained the
+same scope and nothing else.]
 
 **Why, and it is a measurement rather than a preference.** `credential::probe`
 exists because a store that *accepts* a write and loses it is the failure that
@@ -4231,6 +4247,193 @@ answers `null` outside the shell, so a browser was already refused and already s
 so. What this removes is dead weight and a false promise, not a hole.
 
 **Status.** Current. Q7.37 is the phase this follows from.
+
+### Q1.650 — Deleting the machine offer
+
+**Question.** Q1.632 drew a "Rent a machine" link under the one-line installer, off
+unless `REEMOAT_CP_MACHINES_OFFER_URL` named a shop — and the dev stand's env file
+named one, so it sat on the home screen of every empty fleet there. Switch it off,
+or take it out?
+
+**Decision. Deleted — the owner's call of 2026-09-23.** Unsetting the variable is
+the state Q1.632 was built to fall back to, and it is not enough on its own: it is a
+line in the dev stand's env file, and possibly prod's, which this repository cannot
+see, and it leaves a renderer, a URL builder, a config field, a wire field and a
+tint in the tree — about thirty driver checks — for a feature nobody runs.
+
+**What went:** the `MachineOffer` renderer (`ui/MachineOffer.tsx`) and
+`machineOfferHref` (`offer.ts`), both files; its three call sites in
+`MachinesSection`, `SessionBrowser` and `NothingSelected`; `machineOffer` and
+`InstanceConfig`'s `offer` field; `machines.offer` on `GET /v1/instance` and the
+option that carried it into `createControlPlaneApp`; the variable's read in
+`main.ts` and its block in `.env.example`; and `--color-offer`. Its ink, which the
+`(stopped)` task chip had already borrowed (Q3.603), stays under a name of its own,
+`caution` — a palette naming a feature it no longer has is a docblock that has
+stopped being true. `webcheck` counts both old names as retired and bounds the new
+one to that one chip.
+
+**What stayed.** `installCommand` and `machineQuotaNotice`, untouched: the command
+is still the only way a machine is added from this app, and the door-or-the-sentence
+pair is still what an empty fleet draws. The landing page's pricing and the checkout
+it links to are another deploy. The Terms' *Paid plans* section is a contract rather
+than a screen and is not edited here.
+
+**Skew, in both directions.** An app built before this reads the missing field as
+an instance that offers nothing — Q1.632's own fail-closed arm — so redeploying the
+control plane takes the link off every installed build, the only lever that reaches
+them. An app built after it ignores a `machines.offer` a control plane not yet
+redeployed still sends; `webcheck` feeds it one. Neither side has to ship first.
+
+**The variable is warned about rather than swallowed.** `RETIRED_ENV` in `main.ts`
+says once at startup that it is set and no longer does anything —
+`scripts/daemon.ts`'s rule for its own retired settings (`deadContainerVars`),
+applied to the control plane for the first time. `REEMOAT_CP_WEB` went without one
+(Q1.649); this one is known to be set on the dev stand, and it shipped in 0.8.0 as
+a documented setting, so a deployment this repository cannot see may carry it on
+purpose. Its value is passed to nothing; `deploycheck` asserts the list names it and
+that nothing reads it by name.
+
+**The way back is Q1.632, kept whole.** Its placement argument — inside the
+`mayAddMachine` arm, below `installCommand` — and its `URLSearchParams` measurement
+do not depend on the feature existing, and this commit's parent holds every file.
+
+**Status.** Reversed an earlier decision — Q1.632.
+
+### Q1.651 — What an account is to this app, and why the host, not the page, decides which one a call is about
+
+**Question.** Q1.640 keyed the native credential on the server's origin, and
+Q7.148 made several servers ordinary. The owner then asked for Telegram's
+arrangement — several accounts in one app, switched from the drawer — and two of
+them may be on the same server. On one origin they collide on everything keyed by
+it: the keyring entry, the device id and key, the machine claim and the daemon
+root. What is an account, what is keyed on it, and who decides which one a given
+call is about?
+
+**Decision. An account is a pair — the normalized origin and the control plane's
+user id — and its key is `<origin>#<user id>`.** That key is the keyring scope,
+`credential#<origin>#<user id>` and `device_key#<origin>#<user id>`, both through
+`credential::account_for`: the extension Q1.640 reserved, taken rather than
+migrated to — no new `pub const`, and still no `list()`. It keys `server.json`'s
+`devices` and `device_keys` maps and `machine.json`'s claims. The list of accounts
+lives in `server.json` (`accounts`, `current`, `roots`, `legacy_root_holder`),
+because the keyring cannot be listed and that refusal stands.
+`accounts::is_user_id` admits 1–64 bytes of `[A-Za-z0-9_-]` — every id the control
+plane mints, `u_` and sixteen hex digits — so a user id can never carry the `#`
+that separates a scope, the `@` that names a guest root, or anything that walks a
+path; and a normalized origin carries no `#`, so a pre-accounts entry under the
+bare origin can never equal an account's scope. `MAX_ACCOUNTS` is ten (Q5's table).
+
+**The host decides, from the webview that asked.** A seat-scoped command takes the
+calling `tauri::Webview` and the `tauri::ipc::Request` it arrived on, and
+`Host::seat` resolves the account from the webview's label and the generation its
+document presents (Q5.120). No credential, device, daemon or `host_cp` command
+takes an account, an origin or a scope. The one command that names an account is
+`host_account_switch`, choosing among keys `host_accounts` listed, and nothing that
+names another account returns a credential. `host_cp`'s base is the seat's own
+origin; a probe override refuses a request carrying `authorization`, and so does a
+pending seat, both read through `proxy::carries_credential` — the same
+case-folding `proxy::send` forwards by, so the refusal and the allowlist cannot
+disagree.
+
+**The host proves whose a token is, itself.** `host_credential_set` takes `{value}`
+and nothing else. The host sends `GET /v1/me` with that token to the seat's own
+origin (`accounts::me`, through `proxy::get_json`) and keys on the answer, so a page
+that is wrong — or hostile — cannot file one person's token under another's account.
+`accounts::decide` settles the outcome before anything is written:
+
+- **`bound`** — a new account, or the seat's own signed in again. The page adopts
+  the token.
+- **`adopted`** — the account is already here and signed out. The token is written
+  into it, its webview reloads with it, and the page switches there.
+- **`existing`** — already here and signed in. **The host revokes the new
+  session** with the token it holds (`proxy::revoke`, `DELETE
+  /v1/me/sessions/current`), and the page switches.
+- **`refused`** — a signed-out account's seat, signed in to as somebody else. The
+  host revokes, and the page says so (`WrongAccount`): taking the token there would
+  register the first person's device key for the second and start the first
+  person's database under the second's sign-in.
+
+A failed `GET /v1/me` — unreachable, or anything but a 2xx carrying a usable id —
+is an `Err`, and `cp.login` adopts nothing: `setSession` runs only on `bound`. So no
+page path ever holds a bearer the host did not bind.
+
+**A sign-in offers no device any more.** `POST /v1/login` carried the stored device
+id and public key, one round trip rather than two. In the shell that id is an
+*account's*, and the account is exactly what the sign-in finds out — so the request
+would offer the last person's key to whoever signs in next, and the control plane's
+owner clause, which makes a foreign id harmless, copies the offered key onto the
+fresh row and links the two. So `login` sends `{name, password}`, and the bootstrap
+that follows in the same document registers through `POST /v1/me/devices`
+(`ensureDevice`, whenever the id is missing **or** `Boot.deviceBound` is false).
+`deviceBound` is false from the moment a credential is written until
+`host_device_set` stores the answer, which also makes a failed first registration
+retry at the next bootstrap. `registerDevice` is single-flight, because
+`ensureDevice` and a mint refused `device_key_required` can meet with a null id and
+would otherwise register two rows.
+
+**Nothing is inherited without proof.** A `server.json` from before accounts has no
+`accounts`; `config::read_accounts` derives a list for it in memory and writes
+nothing — the one keyring read it needs per origin is made by `lib.rs` once and
+passed in — and the first act that changes the list writes it
+(`config::materialize_accounts`). `server` becomes a legacy entry only on evidence
+of a sign-in: `devices` names it, `machine.json` claims a machine on it, or
+`credential#<server>` exists. Otherwise it is `Roster.pending` — a pending seat that
+keeps its `‹ Server`, rather than an account somebody would have to remove. The
+other bare `devices` keys and claim keys become legacy entries too. A legacy seat's
+page calls `host_account_confirm` at bootstrap (`Boot.legacy`); the host reads the
+bare credential itself, asks `GET /v1/me`, and moves it — written, read back, then
+erased (`accounts::bind` with a move). What sat beside it follows **only by proof**
+(`accounts::gather`, with the credential being bound, to the seat's own origin):
+
+- the device id and key, only if `GET /v1/me/devices` lists that id —
+  `device::copy_key` runs on a proven move and nowhere else;
+- the server's own daemon root and its bare machine claim, only if the root's
+  claimed or announced machine id is among the user's **owned** machines in
+  `GET /v1/machines` — a machine somebody shared is listed there too, and a grant is
+  not ownership of a database.
+
+Without a proof the account gets a fresh key, a fresh device and a root of its own,
+and the bare items wait for whoever can prove them. A proof that could not be
+reached sets `pending_proof`, which keeps `Boot.legacy` true, so the next bootstrap
+asks again. The same proofs apply when a new account meets a server root that is
+not empty and has no recorded owner. **`owner := roots[origin] == user` is
+recomputed on every bind**, never carried, so somebody who removed their account
+and signs in again gets their root — and the machine and database in it — back. A
+legacy entry removed while unconfirmed writes its root as owned by nobody (`""`), so
+the next new account on that server cannot take a root that may hold somebody
+else's database.
+
+**Why the user id and not the name.** A login name can be changed and then taken by
+somebody else; an id is never reused. The name is cached for the drawer
+(`accounts::clamp_name`) and refreshed by a confirm whenever `Me.name` no longer
+matches it (`confirmDue` in `slot.ts`).
+
+**Why the page still holds one account.** Each webview is a single-account app, so
+`cp.ts`'s one credential, the 401-by-identity rule (Q1.412) and the store singleton
+stand exactly as they were — Q7.149 has the argument against several credentials in
+one page.
+
+**Rejected.**
+
+- **An account argument on the commands.** It makes the page the thing that names
+  whose credential, device and daemon a call touches — exactly what a wrong page
+  gets wrong.
+- **The page supplying the user id** — `host_credential_set(value, user, name)`,
+  the first design. It let a page file one person's token under another person's
+  id, and the duplicate-account routing would then switch the real owner into it.
+  One request per sign-in is the price of the host asking itself.
+- **A locally minted account id.** That is Q7.136's device identity arriving by
+  accident, and it names nothing the control plane can confirm.
+- **The login name as the key** (above).
+- **Adopting the token when the bind fails**, the old setter's degraded-mode
+  posture. A keyring that keeps nothing is still `durable: false` and still binds;
+  what a rejection means now is a session nobody attributed.
+- **Handing a legacy seat's bare items to whoever signs in on it.** Upgrading while
+  signed out, or a second person on a shared computer, would have given one
+  person's device key and root to another.
+
+**Status.** Reversed an earlier decision — Q1.643's device id per server, which is
+per account now; Q1.640's keyring key is extended rather than reversed.
 
 
 ## Session lifecycle, questions and attachments
@@ -4567,7 +4770,7 @@ ended loses its composer** — and that one line revived the `disabled` on
 terminal session, both dead code until then. `StatusDot` takes the session
 and goes through `statusTone`, because a `Record<SessionStatus, string>`
 cannot express a distinction that lives on `exit`. And
-`POST /sessions/:id/prompt` joins `slowRoute`'s 90s budget unconditionally,
+`POST /sessions/:id/prompt` joins `slowRoute` unconditionally,
 because `request` sees only a method and a path — a deadline that depended on
 session state would be state leaking into the transport, and a deadline that
 is too short here is a *transport* failure, which renders a healthy machine
@@ -5396,7 +5599,7 @@ number of open calls of any kind was zero, because the work being waited on was
 behind a call that had already reported `completed`, and no ACP message describes
 it. It is the only honest client-side signal available; the drain is the fix.
 
-**Status.** Current
+**Status.** Current Amended by Q2.233: `showsWorking` now also reads work nobody prompted, which no longer refuses Send.
 
 ### Q2.45 — Choosing `ultracode` moved the mode to Manual. Why, and what fixes it?
 
@@ -7912,6 +8115,430 @@ change is one `TurnStopReason` member and the daemon ships first: `wire.ts` type
 `stopReason` as `string` and `stopReasonText` already falls through for a value it
 has never heard of.
 
+### Q2.232 — a question the agent asks between turns is cancelled the instant it arrives
+
+**Symptom.** Reported by the owner from session `s_078b731c` on their own machine:
+questions to them kept arriving already cancelled — *"cancelled — no turn to answer
+into"* — and the first plan approval was drawn *"Approve Plan — denied, no turn to
+answer into"*. His requirement, verbatim in substance: all such requests must wait
+until somebody answers them.
+
+**Measurement.** Read-only, the reporting machine's `~/.reemoat/reemoat.db`, session
+`s_078b731c`, claude under claude-agent-acp 0.73.0. `turn_end` at seq 411
+(13:50:00); the next `prompt` is seq 860 (14:28:12). Between them the agent worked
+with no prompt: 446 events from 13:59:27, beginning after a background workflow
+finished. At seq 511 (14:00:42) it raised an `AskUserQuestion` elicitation and seq
+512, stamped the same second, is `elicitation_resolved {action: "cancel", by:
+"no_turn"}`. At seq 685 (14:27:48) an ExitPlanMode `permission_request` titled
+*Approve Plan*, and seq 686 the same second, `permission_resolved {outcome:
+"cancelled", by: "no_turn"}`. Again at 1967/1968 (16:31:18), an elicitation, after
+the turn that ended at seq 1652 (15:12:36). Each time the person had to prompt
+again (seq 860, seq 2049) to be asked the same thing inside a turn, where it was
+answered (864, 2053, `by: "client"`). Across that store's 20 sessions: 3
+`no_turn` resolutions, all this session, none `turn_ended`.
+
+**Cause.** Two settle paths keyed on turn boundaries, both older than the idle
+drain. `ManagedSession.refusalReason` answered `"no_turn"` whenever `this.turn ===
+null`, so `resolvePermission` and `resolveElicitation` recorded a refusal and
+answered the agent `cancelled` on arrival. It dates from the initial commit, when
+events outside a turn were stranded in the queue (Q2.44) and nobody *could* see the
+request — refusing then was the honest answer. Q2.44 fixed the stranding and left
+the refusal behind it. The second path is the same judgement one step later:
+`pump`'s `finally` called `sweepPending("turn_ended" | "pump_failed")`, settling
+any request still parked when a turn ended.
+
+**Decision.** A request the agent raises is settled by exactly four things: a
+person's answer, a person's cancel (the card's ✕, or Stop), the agent withdrawing it
+(the abort signal, `agent_withdrew`), and the agent going away (`doStop`,
+`session_stopped` — a stop, an exit, a restart). Never by a turn boundary, never by
+a timer. `refusalReason` keeps only the terminal arm; `pump`'s sweep is deleted.
+`turn_ended`, `pump_failed` and `no_turn` stay in `AnswerResolvedBy` — stored logs
+hold them and `resolvedByText` still draws them — and nothing writes them.
+
+**Consequences walked.**
+- *Status.* A request parked with no turn reads `blocked`, which it already did
+  (`awaitingCount` precedes `turn` in `status`). `parkable` and `wedged` both read
+  `status`, so neither the idle sweep, the ceiling's eviction nor the silent-turn
+  sweep touches it.
+- *Stop.* `cancelTurn` with no turn but a request parked used to answer `no_turn`
+  and leave it, so the only way to dismiss it was the card's ✕. It now runs a turn's
+  own order — send `session/cancel`, sweep `turn_cancelled`, watch — and answers
+  `cancelled: true, turn: null` (`cancelWithoutTurn`). `CancelResult.turn` widens
+  to `number | null`; the route already typed `turn` as nullable. The sweep is
+  fenced on `turn === null`, as the turn's is on its own turn.
+- *Revising a plan.* The composer's `revising` send is cancel-then-prompt. With no
+  turn the cancel used to be `no_turn`, leaving the plan parked and the new prompt
+  queued behind it in claude's FIFO — a message that never arrives while the plan
+  waits. The cancel now dismisses it, then the prompt is an ordinary turn.
+- *`/clear`.* `clearContext` refuses (`409 turn_in_flight`) while a request is
+  parked with no turn, the same reason it refuses mid-turn: clearing decides what
+  happens to a cycle in progress, which is Stop's to decide. The composer's
+  `clearRefused` reads `canCancelTurn` rather than `turn`, so the refusal is drawn
+  rather than toasted.
+- *The client.* The ask card was never gated on a turn. `canCancelTurn` widens to a
+  parked request with no turn, so Stop is offered there.
+
+**What was not done.** No timeout on a parked request, in either direction — a
+question may wait overnight. No re-ask machinery: a request the daemon refused is
+gone from the agent's side, and the agent re-raises it if it still wants it.
+
+⚠ **A plan raised between turns is offered no clearing grant.** claude-agent-acp
+0.73.0 cannot carry out a plan approved *with the context cleared* outside a turn:
+that choice answers `deny, interrupt: true` and records
+`pendingExitPlanContextReset`, the restart it defers to sits below the
+`isAutonomousResult` early `break` in the adapter's `result` case, and
+`continuePlanInFreshContext` throws *"Cannot clear context without an active ACP
+turn"* — read off the adapter's source, not driven with a real CLI. Pressing the
+card's filled primary (Q3.594) there would stop claude with nothing continuing. So
+`PendingPermissionSnapshot.outOfTurn` records whether a turn was held when the
+request was raised, and `planControls` given `true` drops the shape's `clearing`
+grant and fills the one left; the 0.63.0 shape has none and is drawn unchanged. An
+older daemon sends no field and gets today's card. Declining with a reason is still
+the message box, and a plan re-raised inside a turn gets both grants back.
+
+**Status.** Current. Reverses the initial commit's out-of-turn refusal and the
+turn-end sweep. Amends Q3.594: between turns the plan card draws one grant.
+
+### Q2.233 — the agent working outside a turn reads as working
+
+**Symptom.** Reported by the owner: after a background workflow finished, the
+working line at the foot of the conversation did not appear although the agent was
+visibly doing things — and *the working line means literally that the agent is
+working*, which the owner called an invariant. Q2.231 had already named the mechanism from
+the other side: a cycle claude starts by itself leaves `turn === null`, so `status`
+reads `idle`.
+
+**Measurement.** The same store as Q2.232. Out-of-turn agent content — `text`,
+`tool_call`, `tool_call_update`, `plan`, a request — between a `turn_end` and the
+next `prompt`: 1 194 events in 3 sessions, **all claude**; the byo, grok, kimi and
+opencode sessions there have none. In `s_078b731c` two such stretches run 28.5 and
+54.9 minutes. Their longest gaps, 24.1 and 50.4 minutes, sit *between* cycles, not
+inside one: seq 573 is the agent writing *"I'll continue when the notification
+comes"*, and seq 574 is the next cycle starting. So a clock over output cannot tell
+a working agent from a waiting one, which rules out a timer as the primary signal.
+
+**The adapter, read (claude-agent-acp 0.73.0, `dist/acp-agent.js`).** A result
+whose `origin.kind` is in `AUTONOMOUS_RESULT_ORIGINS` (task-notification, peer,
+coordinator, observer, observer-activity) is an autonomous cycle's end. Every
+`result` — the user's own too — is followed by a `usage_update` whose `_meta` carries
+`"_claude/origin": message.origin`, sent whenever the consumer has seen a top-level
+assistant message (`lastAssistantTotalUsage !== null`), and sent *before* the
+`session.cancelled` check. The SDK's `session_state_changed` running/idle is not
+forwarded. `cancel()` calls `query.interrupt()` whether or not an ACP turn is active,
+so `session/cancel` with no prompt in flight interrupts an autonomous cycle.
+
+**Decision.** Work between turns is a state, not a clock. `Session` lights
+`unpromptedSince` when the agent's own text, thought, tool call, tool update, plan,
+permission or elicitation arrives with no `session/prompt` in flight — at arrival,
+in `onUpdate`'s order, so a drain running behind the end marker cannot light it
+again. A subagent's step (a non-null `parentToolCallId`) is a delegation and lights
+nothing. What ends it:
+1. a `usage_update` carrying `_claude/origin`, of **any** origin — one cycle runs at
+   a time, so whichever ended, the agent is between cycles (`marksCycleEnd`);
+2. the agent answering a prompt of ours — claude runs its input FIFO, so every
+   cycle begun before that prompt has ended;
+3. a `/clear`, whose old conversation's marker is unroutable;
+4. the process going (`doStop` drops the mirror);
+5. the silent-turn clock (below).
+
+`ManagedSession` mirrors it, `status` reads `running` over it, and the snapshot
+carries it as `unpromptedSince`.
+
+⚠ **Latched on the first marker.** Tracking starts only once the agent has sent one
+`usage_update` with `_claude/origin` — claude's first result does. An agent that
+never sends one is never tracked, so a straggler after another agent's turn cannot
+light a working line nothing would ever end. That is a capability read off the
+agent's own output, not its name.
+
+**Q2.44's refusal, re-read.** It refused three things. A new `SessionStatus`: still
+refused, `running` is reused. A clock in `status`: still refused — this is a state an
+event sets and an event clears. Widening `showsWorking`, *"because it is what refuses
+Send"*: no longer true. `sendRefused` is `session.status === "stopping" ||
+(!acceptsMidTurn(session) && (blocked || working))`, and a daemon that sends
+`unpromptedSince` sets it only from a live agent, whose snapshot always carries a
+`midTurnDelivery` — `daemoncheck` asserts the pair. A message sent now is an
+ordinary `prompt`, which claude queues behind the cycle.
+
+**What reads it.** `parkable` refuses it through `status` (the idle sweep would
+otherwise release an agent mid-cycle once its output went quiet for half an hour).
+`takesCredentialChange` refuses it (a credential change restarts the agent).
+`clearContext` refuses it. `wedged` now tests `turn` itself, since `running` no
+longer implies one. Stop is offered and works: send, no sweep of anything but
+parked requests, and watch `awaitUnpromptedEnd`; `cancelRequestedAt` is set for it
+and cleared when the work ends. ⚠ `armTurn` clears `cancelRequestedAt`: an
+out-of-turn cancel the agent has not finished answering would otherwise make
+`pump`'s cancel-before-prompt check end the *next* message unsent — exactly the
+revising flow's cancel-then-prompt when the plan was raised outside a turn.
+
+**The safety net, and why it is the silent turn's.** An agent that marks cycles and
+then stops marking — an adapter change, an interrupt that pre-empts the result —
+would read as working until the next turn ends it. `abandonWedgedTurns` also calls
+`unpromptedGoneQuiet`, the same predicate as `wedged` (`status === "running"`, not
+mid-clear or restart, no live background work, the agent's own clock) floored at
+`unpromptedSince`, with `TURN_SILENCE_MS` and `REEMOAT_TURN_SILENCE_MINUTES` — three
+hours by default. The evidence is the same with or without a turn: the agent has
+said nothing. A separate, shorter number was rejected: the measured gaps above show
+a waiting agent and a working one look alike to a clock, and a second number for
+one judgement drifts. It writes nothing — no turn ended — and never settles a
+request: a session waiting on a person reads `blocked`, which the predicate refuses.
+
+**Rejected.**
+- *Holding the turn open over the cycle* — Q2.44's objection stands: `canCancelTurn`
+  true for a turn that ended, `409 busy` for ever.
+- *A timer after the last output as the primary signal* — the measured 50-minute
+  between-cycle gaps make any timer either lie during them or drop the line during
+  a long tool call.
+- *Recording the marker as an event* — one row per cycle for something nobody did;
+  it rides the snapshot like `cancelRequestedAt`.
+- *Keying on the agent id* — the latch reads the agent's own output instead.
+
+**Compatibility.** `unpromptedSince` is optional in `wire.ts` and absent reads as
+not working, which is today's behaviour. Daemons ship first. An older client
+against this daemon sees `status: "running"` with `turn: null`: a running dot in the
+list and no working line — degraded, not broken.
+
+**Status.** Current. Narrows Q2.44 and closes the defect Q2.231 described from the
+other side.
+
+### Q2.234 — Finished background work belonged to the process, and an effort change took it away
+
+**Symptom.** Reported by the owner, translated: *"After changing effort from
+ultracode to high, all finished background tasks were reset, although it's the same
+dialog. They must be kept."*
+
+**Measurement.** Read-only against the development machine's store, 2026-09-24.
+Session `s_078b731c` (claude, now `ultracode = 0`) launched six workflows in the
+background between 13:39 and 15:38 — every one is a `Workflow` tool call whose
+result reads *"Workflow launched in background. Task ID: w…"* (seq 147 → 1711). At
+16:31:35 seq 2041 is `status interrupted`, `exit.reason: "config_changed"`, then
+`starting`, `agent_config`, `idle` and a `session_started` on the **same**
+conversation, all within one second. There is no `stoppedWithBackgroundWork` row
+beside it, so nothing was running: every row the panel held was finished, and every
+one was gone after that second.
+
+**Cause.** Choosing a level while ultracode is on is `setConfigOption`'s ultracode
+arm → `applyUltracode(false)` → `restartAgent` → `stop("config_changed")` and
+`resume()` on the same `agentSessionId`, because ultracode is read only when a
+conversation opens (Q2.43). `doStop` then set `backgroundTasksState = []`, and
+`onStarted` handed the list to `applyBackgroundTasks`, which **replaced** it with
+the new `Session`'s — a fresh `asyncTasks` map, empty. Nothing could refill it:
+claude-agent-acp 0.73.0 holds the lifecycle per process in `AsyncTaskRuntime`
+(`async-tasks.js`), built per session at `acp-agent.js:1377`, and
+`teardownSession` calls its `clear()` without publishing anything; the SDK's
+replace-semantics level (`backgroundTasksChanged`) *"does not create unknown
+tasks"*. So the daemon was the only thing that had ever known about that work, and
+it threw its copy away. The same `doStop` runs for a credential restart
+(`applyCredentialChange`, `onAuthFailure`), a park, an agent exiting and a clean
+daemon shutdown — all of them stops a message undoes, all of them the same
+conversation, and every one lost the rows. An effort change *without* ultracode,
+a model change and a mode change go through `session/set_config_option` and never
+restarted anything; they were not affected.
+
+**Decision.** A task list belongs to the conversation, not to the process.
+
+- **Kept on Q2.229's gate.** `doStop` keeps the rows as `earlierTasks` whenever
+  `revivableByPrompt(reason, …)` — the same call that keeps the controls and the
+  `/` menu — and `applyBackgroundTasks` merges the live agent's list over them
+  (`withEarlierAgents`). The live agent's row wins an id it shares, which would only
+  be a reused id; the cap stays `MAX_TRACKED_ASYNC_TASKS` over both together, and
+  what gives way is an earlier agent's oldest-finished row, which is the order the
+  cap already evicted in. A `/clear` is a new conversation and drops them in
+  `clearContext`; a stop nothing revives (`start_failed`, `start_timeout`,
+  `agent_kill_failed`) drops them as it drops the controls.
+- **A row that was running when its agent went reads `stopped`, with `endedAt` the
+  stop's time.** It cannot stay `running`: the process that owned it is gone and no
+  resume replays it (Q7.113), a live row makes `hasLiveBackgroundWork` refuse
+  parking and the silence sweep for ever, and the panel's clock would tick for ever.
+  `failed` draws `(error)` in the danger tone and claims the task itself went wrong,
+  which nobody measured. `stopped` is the chip for *ended from outside*, and it is the
+  adapter's own word for the same fact: `taskState` maps `killed` to `stopped`, and
+  `finishLifecycle` publishes `stopped` for a cancelled stream. The transcript's
+  existing `stoppedWithBackgroundWork` row still says it in prose, once.
+- **Durable across a clean restart, with no migration.** The finished rows ride
+  the `agent_state_json` blob Q2.229 added, as a `tasks` key, written on the same
+  gate. A JSON key is additive in both directions: an older build's `toAgentState`
+  destructures `config` and `commands` and never reads it, and a blob an older build
+  wrote has none and reads as no rows. They are bounded **apart** from the controls
+  (`keptOnDisk`, `MAX_KEPT_TASKS_CHARS` = 32 KiB, rows kept whole, oldest-finished
+  first), because the controls are refused whole past 64 KiB and a long task list
+  must never cost somebody their model picker. Read back **row by row**
+  (`readKeptTask`): a row this build did not write — live, unstamped, over a bound —
+  is dropped alone, and a `tasks` that is not an array costs the tasks and never the
+  controls beside it.
+- **A memory of tasks alone does not seed the commands revision.** Restore set it to
+  1 for any stored memory, which was right while a memory implied a list; 1 over an
+  empty list tells every client to fetch one. It is seeded only when there are
+  options or commands.
+
+**What the client needed: nothing, and why that was checked rather than assumed.**
+An agent swap walks `interrupted → starting → idle`, and `backgroundReporting` is
+`unasked` for the first two. `showFinished` is `reporting === "reports" ||
+finished.length > 0`, so the band is held open by the rows the daemon kept, not by
+the arm — `FinishedSection` stays mounted and its fold stays where the reader left
+it. The hidden set is keyed by session, the ids do not change, and
+`forgetHiddenFinished` has one caller, `forgetSession`, so a reader's clear
+survives the swap too. `webcheck` pins all three by name now, because each looked
+like it could be tidied into the bug.
+
+**What was not done.**
+
+- **A crash still loses them.** The blob is written at a stop, as the controls are,
+  and a live session's row carries none. A column of its own written on every touch
+  (`background_tasks_json` through `migrate()`) would have survived a crash, and was
+  declined: it is up to 32 KiB re-serialized on every touch of every live session to
+  cover a daemon killed hard, and a column an older build does not know is one its
+  upsert leaves stale — so a roll-forward after a rollback could list rows from
+  before a `/clear` the older build performed.
+- **The `unasked` sentence is unchanged**: *"It is not kept across a restart"*
+  remains true of running work and of a crash, and is shown only when there are no
+  rows, which is now rarer. Its wording is the owner's to revisit.
+- **The empty band still flickers for a second.** A session in the `reports` arm
+  with **no** finished rows draws `Completed (0)`, and for the second a swap takes
+  it draws the `unasked` sentence instead. Nothing is lost — a zero band is a
+  heading with no fold — and holding the arm through the window would need a wire
+  field saying *restarting*.
+- **A stop pressed on an earlier agent's id is still forwarded** to the live agent,
+  which answers `stopped: false`, already an ordinary 200. The panel offers no stop
+  on a finished row, and every earlier row is finished.
+
+**What still loses them**, exactly: a daemon crash; a `/clear`; a stop nothing
+revives; eviction at the 32-row cap; the disk budget on a clean restart; the
+startup prune taking the whole session (Q2.222); and a rollback to a build that
+rewrites the blob without the key. The budget was measured rather than guessed: a
+row shaped like one of `s_078b731c`'s workflows serializes to 542 characters, so all
+32 fit in ~17 KB and it never bites; a row at every text bound is 3 201, and 32 of
+those keep the newest 10.
+
+**Pinned.** `daemoncheck.restart-and-resume.ts`: a replacement through
+`applyCredentialChange` — the door ultracode takes — keeps two finished rows and
+turns the running one `stopped` with an end of its own; the finished row's end is
+not restamped; the new agent's rows merge live-first; earlier rows hold nobody back
+from release; a park keeps all four and writes them; a second registry over the same
+store lists them on a `parked` row before any agent is back, at commands revision 0;
+a wake keeps them; a `/clear` drops them; `start_failed` drops them; and the merge,
+the cap, the disk budget and the reader as functions.
+`daemoncheck.after-the-turn-and-config.ts`: the reported path itself on the modal
+rig — a workflow completed under ultracode, then `effort: "high"`, still listed.
+`daemoncheck.store-and-worktrees.ts`: the SQLite round trip, a live row dropped
+alone, and a malformed `tasks` costing nothing else. ⚠ **Two rows pinned the old
+behaviour** — a released session's list and a stopped session's list, both `[]` —
+and are rewritten in place with a comment saying what they were. Each new guard was
+knocked out once and its rows went red: the keep in `doStop`, the `stopped`
+relabel, the `/clear` drop, the write in `persistedRow`, the revision gate.
+
+**Status.** Current. Amends Q3.633: a zero is no longer what an agent swap leaves.
+
+### Q2.235 — grok's questions, plan approvals and MCP forms arrive as its own requests, and are routed onto the two doors every agent uses
+
+**Symptom.** Reported by the owner with grok 1.0.40: the agent called its
+`ask_user_question` tool and the transcript showed the tool failing with *"Tool
+`ask_user_question` failed: Failed to reach the client for user question: "Method
+not found": _x.ai/ask_user_question"*, over a card header reading *"Ask: Какой
+напиток ты бы выбрал прямо сейчас?"*.
+
+**Cause.** `AcpClient` registered no handler for any `_`-prefixed method, so the
+SDK answered every agent-to-client extension request `-32601`. grok sends three —
+its question, its plan approval and an MCP server's form — and Q6.113 measured what
+each did with the refusal: the question tool failed; the plan approval failed as
+*"the client disconnected"* and **ended the turn**; the MCP server was handed a
+`cancel` it never learned the reason for.
+
+**Decision.** Parse each in `src/acp/xai.ts`, the one module that knows their
+shapes, and route it onto a door every agent already uses, so parking, the log, the
+card, Stop, the idle sweep and the four ways a request ends (Q2.232) are the
+existing ones rather than a copy:
+
+- `_x.ai/ask_user_question` becomes an elicitation built in **claude-agent-acp's
+  AskUserQuestion bridge shape** — `question_<n>` with the options as a titled
+  `oneOf` (or an `anyOf` list for `multiSelect`), and its own-answer box
+  `question_<n>_custom` marked with `_askUserQuestionCustomAnswer`, the marker that
+  bridge documents as *intentionally agent-neutral, for other AskUserQuestion
+  bridges*. It then goes through `toElicitationForm`, so every elicitation bound is
+  the bound — twelve questions is twenty-four fields, the cap — with no second
+  number. The card draws it exactly as it draws claude's: a question a step, the
+  descriptions, the box and circle marks, the own-answer row. The answer goes back
+  as grok measured accepting: `{outcome: "accepted", answers: {<question text>:
+  label | [labels] | typed text}}`, a typed answer winning over a pick as on claude.
+- `_x.ai/exit_plan_mode` becomes a **permission** titled *Approve plan* with
+  `rawInput: {plan}` — which is where the card reads a plan — and two options named
+  by the outcome each sends, `approved` (*Approve plan*, `allow_once`) and
+  `abandoned` (*Abandon plan*, `reject_once`). grok's `exit_plan_mode` tool call
+  carries `{}` for arguments and the snapshot clamps a permission's blob at 8 KiB,
+  so the plan is also written onto grok's own call as a `tool_call_update` with
+  `rawInput.plan`: the card recovers a clamped payload from the log, which would
+  otherwise hold no copy.
+- `_x.ai/mcp/elicit` becomes an elicitation of the server's own schema, its message
+  prefixed with the server's name as grok's own card names it, answered `{outcome:
+  "accept", content}`, `{outcome: "decline"}` or `{outcome: "cancel"}`.
+
+**What this costs in meaning, stated.** On grok **decline and cancel are one word**:
+the question's only no-answer outcome is `cancelled`, which the model reads as
+*"User declined to answer"*, so Skip and the ✕ send the same thing where on claude
+they are two acts. `chat_about_this`, `skip_interview` and `annotations` exist on
+the wire and are never sent, because nothing on the card asks for them. A plan's ✕,
+Stop and every sweep send `cancelled`, which grok reads as *"the user wants to
+revise the plan"* and stays in plan mode — exactly what the composer's `revising`
+send (cancel, then the correction as a prompt) wants.
+
+**The question is the title of its field.** grok has no short header, and the
+title is what `renderAnswers` logs an answer under; without one a typed answer — which
+`answeredQuestions` cannot join back by label — was logged as `question_0`. The
+card draws no heading equal to its title (`askTitle`), so nothing is drawn twice.
+
+**A plan's options keep their names on the card.** `optionLabel` substitutes a
+kind's word whenever kinds are unique, and grok's two would have read *Allow once*
+and *Deny* over approve and abandon. It takes `plan` now: a kind's word describes a
+grant, and approving a plan is not one. `planControls` still curates claude's shapes
+alone — grok's request has no `switch_mode` and matches none of them.
+
+**grok withdraws by resolving, never by cancelling.** It sends
+`_x.ai/session_notification {update: {sessionUpdate: "interaction_resolved",
+tool_call_id}}` after every answer *and* after its own timeout, and no
+`$/cancel_request` ever. `Session.withdrawable` gives each request a signal that
+either the SDK's or that notification aborts, so the registry settles it
+`agent_withdrew` — Q2.232's third way. ⚠ **The notification handler's position is
+load-bearing.** grok resolves its own permission step for a call immediately before
+it asks the question on that call; the SDK walks a message through the handlers
+with one `await` each, so registered after the request handlers, that earlier
+resolution reached its handler *after* the later question reached its own and
+withdrew it on arrival — the Q2.232 defect again, by a new road. The driver
+reproduced it before the handler moved to second place; it sends the pair in
+grok's order.
+
+**grok's own question timeout is off at the spawn.** `GROK_SPAWN_ENV` carries
+`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED=false` on the grok arm of `resolveAgent`:
+the default gives up after 30 minutes and answers itself "declined" (Q6.113), which
+is Q2.232 from the other side. The environment outranks the user's `config.toml`
+and loses only to an organisation's `requirements.toml` — which is what the
+withdrawal above is for.
+
+**With questions off, the tool is withdrawn.** grok keeps `ask_user_question`
+whatever the client declares, so `REEMOAT_ELICITATION=0` now also sends
+`_meta.askUserQuestion: false` on `session/new` (`sessionMetaFor`, measured to
+remove the tool), and the question and MCP-form methods still answer `-32601`, as
+`elicitation/create` does when declined. A plan is a permission and is always asked.
+
+**Refusals.** Malformed params are `-32602` from the parser, before anything is
+parked or logged. A question longer than the card's 4096-character message cap is
+refused rather than drawn cut, because its text is the answer's key. `url` mode is
+refused as Q2.20 refuses it; grok hands its MCP server a `cancel` for any refusal.
+Every other `_` method — including x.ai's own `folder_trust/request` — is still the
+SDK's `-32601`: an unknown request must stay a failure the agent reports.
+
+**Rejected.**
+- *Recognising grok's tool calls in the transcript and asking from those* — the
+  request is the protocol; a tool call is a picture of it.
+- *A grok-specific card* — two bodies already exist and grok's requests fit them.
+- *Sending grok's `revise` with the composer's text as `feedback`* — measured to
+  work (*"The user wants to revise the plan. The user said: …"*), and it would skip
+  the cancel; but it needs a route the composer does not have, and the cancel-then-
+  prompt that works for claude works here.
+- *Handling `interaction_resolved` by diverting the line below the SDK*, as the
+  async-task updates are — it would order the notification strictly, but at the
+  price of a second parse of a stream that carries one notification per token.
+
+**Status.** Current.
+
 ## The web client
 
 ### What the client is
@@ -8487,7 +9114,7 @@ following carries on. One frame later, because the height to read is the one
 **Rejected.** A "stop following" flag. It would also make the jump-to-bottom
 button appear while the reader was still at the bottom.
 
-**Status.** Current
+**Status.** Current Amended by Q3.648: the re-measure is an observer flag in `useFollow`, not a `rAF`.
 
 #### Q3.27 — What does the transcript refuse to draw?
 
@@ -9408,8 +10035,9 @@ Low/High/Max, and on `K2.7 Coding` it offers the single value `On`.
 #### Q3.66 — Why did the model chip read "Default", and how is the real name recovered?
 
 **Decision.** The snapshot keeps the **selected** choice's description — 1 of N,
-clipped to 120 chars — and `chipValue` shows the head of it, minus qualifiers.
-Narrowed to `category === "model"`.
+clipped to 120 chars — and `chipValue` shows the head of it, minus qualifiers
+[on the `default` placeholder; on any other row only where the head names the row's
+own model, Q3.641]. Narrowed to `category === "model"`.
 
 **Why.** The model is resolvable and was being thrown away: its `default` choice
 is named `Default (recommended)` and only its **description** says which model
@@ -10112,6 +10740,12 @@ installed", which called a machine whose only harness is installed and signed ou
 predicate is now one function called in both places: the fallback naming an agent
 the wizard's own gate then declines to draw for is an empty row, no door, and
 nothing saying why. `webcheck` pins both call sites as source text.
+
+⚠ **Reversed by Q3.640: the door is gone, and what the screen owes back is a way to
+it rather than a copy of it.** New session draws no sign-in and no install; an empty
+strip says which kind of empty it is and offers Agent settings, and a row there
+offers Set up, which opens the card as a leaf of the machine's Agents list. The
+paragraph above is kept as what was decided at the time.
 
 **And an empty row says which kind of empty it is.** It had one sentence because it
 had one cause — the daemon listed nothing. A machine can now list three agents and
@@ -11675,7 +12309,7 @@ the composer at the exact moment that message appears above it.
 `behavior: "smooth"` is not reachable by the CSS block in `index.css` that collapses
 every other animation in this app.
 
-**Status.** Current
+**Status.** Current Amended by Q3.648: `measure` on every scroll event is gone; `atBottomRef` is the intent and the state mirrors it for the button.
 
 #### Q3.427 — Which element names a settings screen?
 
@@ -12586,7 +13220,8 @@ length guard does not tell a sentence from a name.
 **Measured.** codex's 37-character "Latest frontier agentic coding model." passed a
 length guard and put itself on the chip while `GPT-5.6-Sol` sat one field away.
 
-**Status.** Current
+**Status.** Current — narrowed by Q3.641: the separator is necessary and no longer
+sufficient, since claude 2.1.280 separates a notice from its blurb the same way.
 
 #### Q3.411 — Do `labelFor` and `choiceOverride` answer the same question?
 
@@ -13313,7 +13948,7 @@ class. A browser that will not style `::marker` then draws exactly what it drew
 before this existed, so the degradation is a no-op rather than a fallback anybody
 has to look at; there is no third state where the marker goes missing.
 
-**Status.** Current
+**Status.** Current Amended by Q3.646: a person's message is no longer parsed, so this serves agent output only.
 
 #### Q3.436 — Your own message appeared under the conversation, then jumped into it
 
@@ -13345,8 +13980,8 @@ moves it out of the `onScreen()` set `web-composer.md` describes and into the
 theirs.
 
 **The settle is in the store, and it takes two calls rather than one.** `onEvents`
-compares the newest seq against the echo's; `promptLanded` lowers the sentinel to
-the real seq **and compares again immediately**, because the ordering that makes
+compares the newest seq against the echo's; `promptLanded` lowers its own send's sentinel to
+the real seq (a late answer to an earlier send lands nothing) **and compares again immediately**, because the ordering that makes
 that necessary is the common one rather than the exotic one — the `prompt` event
 comes down a socket waiting for nothing, while the POST that created it is on a
 90-second budget. When the event wins, `onEvents` has already compared it against
@@ -15947,7 +16582,7 @@ deleted check is how the next wrong string gets in.
 
 **Rule.** `GET /agents/capabilities`, `POST /custom-agents` and
 `PATCH /custom-agents/:id` are `slowRoute` entries, so they get
-`SLOW_ROUTE_TIMEOUT_MS` (90s) rather than `REQUEST_TIMEOUT_MS` (15s). `/agents` is
+a slow-route budget (`slowRouteTimeout`, 290s for these three) rather than `REQUEST_TIMEOUT_MS` (15s). `/agents` is
 matched by **prefix**; `/custom-agents` by **verb plus prefix**.
 
 **Why the miss happened, which is more useful than the miss.** `/agent-auth` was
@@ -15983,15 +16618,14 @@ both sit on a first paint where 90 seconds of a screen that cannot say anything 
 worse than 15 and a refusal. `(POST|PATCH)` plus the prefix covers a write route
 that does not exist yet without covering the two reads that do.
 
-**Stated rather than fixed: 90s does not bound the new worst member.** 360s does,
-and `SLOW_ROUTE_TIMEOUT_MS` governs eight other routes whose docblock says a move
-should follow a measurement. Ninety seconds covers what the route actually costs —
-three spawns and a handshake each, then ten minutes of cache — and a harness hung to
-its full budget still lands on the failure this table exists to prevent, three
-minutes later instead of fifteen seconds later. The honest fix is a per-route budget,
-which stops `slowRoute` being a boolean and is a shape change with call sites outside
-the file; the gap is written into the constant's own docblock instead of implied
-away.
+**Fixed per route rather than by raising one constant.** `slowRouteTimeout` gives each
+slow route its own daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s), never below the old
+90s. Here that is 290s over a 260s chain: two login probes, `SLOT_WAIT_MS`, then the
+ask's handshake, authenticate, `session/new` and `providers/list`. `ASK_TIMEOUT_MS`
+bounds a prompt, which a capability read never sends. A single constant above the
+worst member was tried and rejected: it made every slow route, every prompt included,
+take up to five minutes to fail on a dead connection. `slowRoute` stays a boolean,
+derived from the budget.
 
 **The structural hazard is not fixed and is recorded as Q7.123**: `slowRoute` lives
 in `packages/web` and the routes it is about live in `src/`, so nothing fails when
@@ -17139,8 +17773,8 @@ daemon reads were one `Promise.all`, so `systems` was set only when **both** leg
 landed — and the OpenRouter effect is gated on `openRouterListed`, which is derived
 from `systems`. `GET /systems` is a table read; `GET /agents/capabilities` starts
 one agent per harness — serially at the time, all at once since Q3.524 — on a
-route whose own budget is
-`SLOW_ROUTE_TIMEOUT_MS`. So a 672 KiB read of somebody else's catalogue did not
+route whose own budget was
+the 90s slow-route one. So a 672 KiB read of somebody else's catalogue did not
 begin until the render in which the spinner left. It was queued behind four cold
 agent spawns and was then, necessarily, the last thing on screen.
 
@@ -17615,6 +18249,11 @@ and `…/agents/claude` lands there with the tail dropped — still "fall up to 
 nearest real screen", and the screen it falls to is one tap from what that address
 used to open.
 
+⚠ **The tail is not dropped any more (Q3.640).** `…/agents/claude` opens claude's
+card as the list's own leaf, pushed by a row's Set up, and walks back to the list by
+URL. The list's ◀ below still reads `origin`, which is what brings a walk that began
+on New session back there after two taps.
+
 **The Agents screen's own ◀ reads `origin` too, and only there.** It walked to the
 machine — the parent in the URL — which is right when you arrived from the machine's
 own row and wrong when you arrived from the gear: it strands somebody in settings
@@ -18079,7 +18718,12 @@ for, that screen lists no rows at all, so "lists them all" would have been two
 screens answering one question with one of them wrong. The second ending names the
 bar at its foot, which is drawn either way.
 
-**Status.** Done.
+⚠ **Superseded by Q3.640, and neither ending survives.** The sentences are
+`STRIP_EMPTY` now, and every arm with somewhere to send you ends in an Agent settings
+button rather than naming the gear in prose. The row's **Set up**, opening the card,
+is a fourth door beside the three this entry lists.
+
+**Status.** Done; the empty arm superseded by Q3.640
 
 #### Q3.539 — May a plugin add an *agent*?
 
@@ -19244,7 +19888,7 @@ and both presentations are in it: without that, a refusal line carries the same 
 twice and every `aria-describedby` pointing at it resolves to whichever copy the
 browser reaches first — on a phone, the one that is `display: none`.
 
-**Status.** Current
+**Status.** Current Amended by Q3.660: a picker's scrim closes on its own click, not at the press, so a tap no longer falls through.
 
 #### Q3.566 — What does a picker sheet owe beyond appearing?
 
@@ -19351,7 +19995,7 @@ arrival's curve **mirrored** — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` 
 rather than a curve picked again, so tuning one and not the other is visible as an
 asymmetry rather than as nothing.
 
-**Status.** Current. Supersedes the exit half of Q3.566.
+**Status.** Current. Supersedes the exit half of Q3.566. Superseded by Q3.650: exits use the arrival's curve on one `--sheet-ease`.
 
 #### Q3.568 — What does a picker sheet owe once its rows are taller than it is?
 
@@ -19499,7 +20143,7 @@ pressable sits under it.
 
 **Status.** Current. The `max-height`-only full detent and the discrete gesture
 are superseded above, both by measurement from the same phone that reported them;
-so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`.
+so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`. Amended by Q3.650: the drag runs on the touch stream with a fling-or-distance release; the two detents and the kept offset stay.
 
 #### Q3.569 — Whose order is the session rail in, and where does it live?
 
@@ -20411,7 +21055,7 @@ the `ResizeObserver` fires for none of this — so there is a second effect keye
 Somebody reading history keeps their `scrollTop`, for the reason the observer
 already gives: adjusting by the delta is what would move the ground under them.
 
-**Status.** Current
+**Status.** Current Amended by Q3.648: the second effect keyed on `askHeight` is gone; the padding is a commit `useFollow` pins.
 
 #### Q3.584 — Cancelling was a labelled button in the footer, and the footer is where a plan needed the room
 
@@ -20876,7 +21520,7 @@ beside the filled primary. A rule costing one comparison is cheaper than that.
 clear-context row at all, so its two are the two grants it can offer and there is
 nothing to pair them with. It drops three of five now rather than two.
 
-**Status.** Reversed an earlier decision
+**Status.** Reversed an earlier decision Amended by Q2.232: a plan raised between turns draws one grant, the elevation, filled.
 
 #### Q3.595 — The plan was on screen and the box under it said to go and answer something
 
@@ -21412,7 +22056,8 @@ which are not tokens in this palette — Tailwind v4 emits no rule for a utility
 variable does not exist (Q3.204's own measurement), so `(done)` and `(stopped)` were
 drawn in the row's ambient colour and were indistinguishable from `(running)`. The
 retired-colour sweep does not catch them: its pattern ends `warn\b`, and `\b` fails
-against the `i` of `warning`. They are `add-ink` and `offer-ink` now.
+against the `i` of `warning`. They are `add-ink` and `offer-ink` now. [⚠ `offer-ink`
+is `caution` since Q1.650, which deleted the control it was named for; same value.]
 
 **Status.** Current
 
@@ -21605,6 +22250,9 @@ immediately above Sign out because changing servers *is* signing out plus a
 redirection. `state.pickingServer` carries it, so it rides the store the screen
 already subscribes to and adds no hook above `App.tsx`'s branching — where a
 recorded `Minified React error #310` says one must not appear.
+[⚠ reversed by Q3.643: that row shows the account's server and changes nothing;
+another server is another account, added from the menu drawer, and
+`state.pickingServer` is left to `‹ Server` on a window nobody has signed in to.]
 
 **It stays a phase, not a `Route` arm and not a `SettingsLeaf`.** Both are routes;
 `parseGateScreen` and `parseSettingsRoute` are shared with the web build, which
@@ -21617,7 +22265,8 @@ Cancel put it back exactly where it was, the URL never having moved.
 condition is what keeps the first-run state uncancellable, and it is the reason
 `signInReady` did not have to learn about servers: there is no path to a sign-in
 form with no server, so the guard is structural rather than a second predicate
-answering a question one arm above already answers.
+answering a question one arm above already answers. [⚠ amended by Q3.643: or an
+account to go back to — adding one is cancellable; a first run still is not.]
 
 **Three things the editing entrance made necessary that first run never did.** The
 field opens on the current value, because an editing screen that opens empty is
@@ -21818,14 +22467,18 @@ the test was overruled rather than re-read. This entry is the correction.
 **What follows for the next row.** The test is unchanged, so the bar is what it
 was: a destination, reached from nowhere else, about you. The head being inert is
 not a licence to duplicate a destination that is one tap away — it is the reason
-the head is a *heading*.
+the head is a *heading*. [⚠ reversed by Q3.642: in the shell the head is a
+disclosure over the accounts on this computer. It is still not a link — the rows it
+opens switch or add an account and go nowhere — so the test above and the rejection
+below stand.]
 
 **Rejected: make the head itself the link.** It keeps the panel's only destination
 on the one element that does not look like one, which is the discoverability
 problem the session row's kebab was added to solve.
 
 **What is unchanged.** No Language row and no ellipsis of extras — there is no i18n
-and `index.css` refuses a theme switcher. `Sign out` is last, separated, **above
+and `index.css` refuses a theme switcher [⚠ reversed by Q3.670: the drawer's
+last row is a dark-theme switch]. `Sign out` is last, separated, **above
 the version**, and drawn even when `me === null`, because `bootstrap`'s catch keeps
 `phase: "ready"` with no `me` during a control-plane outage and that is the worst
 moment for the way out to disappear. One tap, no two-step confirm: the confirming
@@ -22254,7 +22907,7 @@ screen *replacing* another one, and a tab change has no history entry and no
 mounted at once, on a rail whose whole design is one machine at a time
 (`waitingFloor` exists because of it). What ships is a nudge and a swap.
 
-**Status.** Current.
+**Status.** Current. Reversed by Q3.655: a swipe is Telegram's two-page turn now, with the neighbour sliding in.
 
 
 #### Q3.622 — A panel that lines up, against a panel that has nothing to line up with
@@ -22559,7 +23212,7 @@ repair is loosening the pattern. A control asserts it does not match that line.
 the hand from every user-agent stylesheet, and reclaiming it would mean this app
 setting a cursor on the only elements whose shape is universally understood.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.665: the header's session name shows the text caret, the second named exception.
 
 
 #### Q3.628 — the menu drawer loses its weight and its ✕, and the build line becomes a stamp
@@ -22891,7 +23544,7 @@ expressible in it at all. The partition is driven now. The slice went with it: a
 of the file rather than nothing, so deleting the sentence would have turned the
 check green over a message about something else entirely.
 
-**Status.** Current.
+**Status.** Current. Amended by Q2.234: finished rows now survive an agent swap and a clean restart.
 
 
 #### Q3.634 — a target grown with a pseudo-element grows hover with it, and the ✕ lit up 10px early
@@ -23125,6 +23778,8 @@ are about which element is selectable, which is a different question from where
 the painting stops — but nothing here should be read as saying the fill had to be
 lived with.
 
+**Status.** Amended by Q3.646: the composer sends `sentText` rather than trimming both ends.
+
 #### Q3.637 — the bubble is sized to the text it ended up holding, and that is a layout value written from JavaScript
 
 **Question.** A message bubble sits 31px wider than its longest line. Asked as
@@ -23198,6 +23853,8 @@ engine painting any gap at all — so no width here decides anything a selection
 see. What is left is the 31px themselves: a grey box 31px wider than the sentence
 inside it, with nothing selected. That is a typographic judgement rather than a
 workaround, and it is the one this entry should be read as making from here on.
+
+**Status.** Amended by Q3.646: a bubble cannot hold `pre` or `table`; `huggable` tests attachments and images.
 
 #### Q3.638 — only the text is selected, and one property is the whole of it
 
@@ -23346,6 +24003,2741 @@ walk cannot enter them, and that is CommonMark's own behaviour. Asserted rather
 than trusted, because it is the property that decides whether this plugin may be
 pointed at markdown at all. It is also a **render** fix rather than a send fix —
 every message already in the log gains its breaks back on the next paint.
+
+**Status.** Reversed by Q3.646: a person's message is not markdown at all, and `pre-wrap` draws it.
+
+#### Q3.640 — New session never installs or signs in; it sends you to the machine's Agents list
+
+**Reported, by the owner.** New session unfolded an *Install <X>* or *Sign in to
+<X>* disclosure, with that harness's whole card inside it, whenever no agent on the
+machine could start. What was asked for: no install and no sign-in on that screen at
+all, and a button to the machine's agent settings instead.
+
+**Question.** Redirecting was the easy half and a dead end on its own. The Agents
+screen that button would open could not sign anybody in, and its Install ran with no
+output — a menu item, then one word under a row. Sent there as it stood, somebody
+with nothing to start would land one screen short of the remedy.
+
+**Decision. New session keeps no door, and the Agents list finishes the job.** An
+empty strip draws one sentence and at most one control, from `STRIP_EMPTY`, chosen by
+`stripEmpty` — both in `NewSession.tsx`, both driven as values:
+
+| Case | Sentence | Control |
+|---|---|---|
+| a row that could start is hidden | *Every agent that can start here is hidden.* | Agent settings |
+| nothing installed, nothing assembled | *No agent is set up on this machine yet.* | Agent settings |
+| signed out, refused, only a router like opencode, a preset on a missing harness or on one refused while routed | *No agent on this machine is ready to start.* | Agent settings |
+| the machine lists nothing | *This machine reports no agents.* | Check again |
+| a daemon too old for the strip routes | *This machine needs an update before agents can be set up here.* | none |
+| a read failed or is still out | nothing — the Try again row speaks | — |
+
+**Agent settings** is `onConfigure`, the gear's own handler — the same crossing, so
+the address made whole, the push and the pick in `agentPick.ts` all come with it
+rather than a second copy. `plain`, so `Start` stays the one filled control; named
+as the gear is labelled. No sentence says install or sign in, and `webcheck` sweeps
+the table for that and for the jargon floor and the fourteen-word line.
+
+**The empty state is decided once, and the footer is why.** The first draft computed
+it inside the strip and gave the footer its own test — *once both reads have
+settled, nothing chosen means nothing startable* — which is false exactly when a read
+fails: `GET /agents` failing lands `[]` and a reason, so the footer would have said
+*no agent to start* directly under *could not be read*. `stripEmpty` is called in
+`NewSession` over `stripRows`, the merge `defaultRow` is taken from, told about both
+failures; the strip reads it as a prop, and the footer says *no agent to start* only
+where it is non-null. Nor does the footer ask for a tap after `GET /agents` failed:
+there is no harness tile and every preset tile is disabled, so *choose an agent* was
+the impossible request again, and that line is empty while the Try again row speaks.
+
+**Hidden means a hidden row that could start.** "Every row is hidden" was the old
+test and it was wrong both ways, each a state the new table would otherwise have
+shipped: a signed-in harness hidden beside a visible preset on a missing harness
+read *not ready* about a machine that was ready, and a hidden preset on a missing
+harness read *hidden*, promising a remedy that fixes nothing. It is asked after
+*nothing listed* and before every fault, because it is the one cause true of a
+machine with nothing wrong with it.
+
+**The destination had to finish the job.** A row whose badge says *not installed*,
+*not signed in* or *would not start* — or a preset whose harness is not there or
+refused while routed, which its subline now says (*not installed*, *would not start*)
+instead of naming its system — offers **Set up <harness>** in its menu. That pushes
+`agentSetupPath`, `/settings/machines/:m/agents/:harness`, and
+`MachineAgentsSection` draws `AgentDetail` there, untitled, below its three guards:
+the same card New session used to unfold, with the installer's output and the
+sign-in wizard. The pane is titled **Setup**, a noun like its siblings. The list's
+own Install is **deleted**, so the card is the one surface that starts a run; the
+list only adopts one through `liveInstall`, which is what keeps `Installing… · 42s`
+under a row after a ◀ from a card mid-install. The poll it adopts stops when the list
+unmounts, which it now does on every Set up: a loop that outlived it was one more
+`readInstall` a second through the tunnel for each ◀ back during a run.
+
+⚠ **The routed arm was missing from the first draft, and it was the sharpest case.**
+`startableHere` refuses a preset whose harness refused while routed, so on a machine
+whose only row was an OpenRouter preset on opencode, New session said nothing could
+start and sent somebody to a row reading like a healthy one, with no Set up behind
+it — and beside that sentence the tile was drawn pressable over a tap `offeredHere`
+dropped. The row (`presetRefused`) and the tile (`refused`) both ask
+`routed === true` now, in the same words, so the tile, the pick, the sentence and
+the row say one thing; a refusal measured bare still leaves the preset startable.
+
+⚠ **A card that moved rather than one that multiplied.** Q3.540 records two leaves
+for one credential as the shape the Sign-ins list was built to remove, and
+`…/agents/claude` now draws claude's card beside the Anthropic leaf. It is the same
+`AgentDetail` over the same `GET /agent-auth`, so the two cannot disagree about
+*signed in?*, and the Sign-ins list stays the list of credentials; what this leaf
+adds is the state that list never shows — a harness not installed yet. It left New
+session in the same change, so the count of places it is drawn did not move.
+
+⚠ **The route's shape did not change, and the bound did.** The harness rides the
+existing `signin` field with `agents` true, so no route literal in the drivers had
+to move. It is bounded by `MAX_HARNESS_ID_CHARS`, 96 — the daemon's own
+`MAX_STRIP_REF_CHARS` — rather than the 64 a system id is held to: a harness a
+plugin adds is two 32-character halves and a colon, and at 64 a Set up on that row
+pushed an address the parser dropped, landing back on the list it was tapped from.
+The Sign-ins list's harness leaf, `…/signin/:agent`, moved to the same number in the
+same change: the harness it names is by definition one no provider speaks for, which
+is the contributed kind, so it had the same latent defect.
+
+**The walk back is derived, with no new mechanism.** The leaf's ◀ is the list, by
+URL: `settingsUp` answers `…/agents` for it and never reads `origin`. The list
+still holds the origin across that push — `originFor` keeps it within one pop-up —
+so its own ◀ answers New session, which remounts and restores the folder from the
+address and the pick from `agentPick.ts`: Q3.531's two survivals, which are also
+why Q7.118's reason for pulling the sign-in inline no longer holds. `depthOf` gives
+the leaf a fifth depth so Set up slides, and `screenOf` folds in `signin` so focus
+moves — which also closes a latent defect: the Sign-ins list's own harness leaf
+shared the machine screen's identity.
+
+**What this reverses.** Q4.126's *What it costs* sentence, which named the install
+under the strip; Q3.526's *this hides a door, and the screen owes one back*; Q3.538's
+empty arm naming the gear, with its two endings; Q3.531's `…/agents/claude` landing
+on the list with the tail dropped; and the inline mount of `AgentDetail` that
+Q3.431 counted as its second render site. `agentDoor` and `doorLabel` are deleted
+from `agentInstall.ts` and named in its tombstone; the repair they carried lives on
+in `primaryControl`, which tests `available` before the credential axis.
+
+**Rejected.**
+
+- **Relabelling the door.** Whatever it says, it is a form growing inside a screen,
+  which the owner's settings rule refuses.
+- **A button straight to one harness's card.** Which one is the `agents[0]` guess
+  this row has been caught making before; the list shows every row's reason.
+- **The Sign-ins leaves, `…/signin/:agent` and `…/systems/:system`.** Their ◀ goes
+  to the machine screen, which is the stranding Q3.531 recorded for a crossing.
+- **A `history.state` flag for the way back.** `settingsUp` is derived from the URL,
+  and that is what makes every chevron in the sheet stable.
+- **Making the row itself a tap target for Set up.** A row here is a handle and a
+  menu, and a row that gains a control moves every control beside it.
+- **Gating Set up on `installable`.** On a harness this machine cannot install, the
+  card still says what to do — install it on the machine itself — and carries Check
+  again for after; that is a sentence with a control rather than an empty card.
+
+**Known residue.** A daemon too old for the strip routes loses the only in-app way
+it had to set an agent up: a sentence and no button, because its Agents screen is a
+dead end. On a shared grant the card's Install answers `403` with the route's own
+sentence, since installing is `machine:admin`; signing in still works. A preset
+whose harness is gone draws the raw id for a contributed harness, as the New
+session tile already did — and says *not installed* when that harness belongs to a
+plugin that is installed and switched off, since `availability()` leaves a disabled
+plugin's harness out of the listing entirely and neither screen can tell the two
+apart; the remedy is the Plugins page, which neither row names, and Set up is
+rightly withheld because the card would have nothing to act on. The card keeps its
+own two in-place disclosures, now inside a leaf — not yet put to the owner against
+the no-in-place-expansion rule. And
+*choose an agent* still shows for the beat between the two reads landing.
+
+**Asserted, and not yet measured.** `webcheck` drives `stripEmpty` over every arm
+and both of the states the old hidden test got wrong, pins the footer and the one
+`Empty` with no `aria-expanded` under the strip, holds New session free of the card,
+both helpers, both glyphs and both verbs, and pins Set up inside the row's menu, the
+preset row's two sublines ahead of its system, the routed-refused preset as *not
+ready* with its tile disabled, the list's two empty sentences, its poll loop stopping
+on unmount, the leaf's parse and its bound, `Setup`, depth five, and the whole
+New session → Agents → Set up → ◀ → ◀ walk as a sequence of `originFor` and
+`settingsUp` answers. The walk in WKWebView — a fresh machine at 390×667 and 1280,
+Install and sign-in on the card, the two ◀ — is still to be made, and is what this
+paragraph owes next.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.641 — A model chip read "Newer version availa…": when is a description's head a model name?
+
+**Question.** Reported with a screenshot: after Claude Code had moved under the
+daemon, a conversation that woke on its old model drew its model chip as "Newer
+version availa…".
+
+**Measured, 2026-09-22, against claude 2.1.280, off stored `agent_config` events.**
+A fresh session's list:
+
+| value | name | description |
+|---|---|---|
+| `default` | Default (recommended) | Sonnet |
+| `sonnet` | Sonnet | Sonnet 5 · Efficient for routine tasks |
+| `claude-fable-5-1[1m]` | Fable | Fable 5.1 · Most capable for your hardest and longest-running tasks |
+| `opus` | Opus | Opus 5.5 · Best for everyday, complex tasks |
+| `haiku` | Haiku | Haiku 4.5 · Fastest for quick answers |
+| `opus[1m]` | Opus (1M context) | Opus 5.5 with 1M context · Best for everyday, complex tasks |
+
+A session resumed on `claude-opus-5[1m]` publishes the first five unchanged and, in
+place of `opus[1m]` — which is absent from its list — a row valued
+`claude-opus-5[1m]`, named "Opus 5 (1M context)" and described "Newer version
+available · select Opus for Opus 5.5". ⚠ **The row is not new in 2.1.280.** Its
+template is in the 2.1.277 and 2.1.278 binaries as well; what 2.1.280 changed is
+that the `opus` alias now means Opus 5.5, so a session on the explicit id an alias
+has moved past is the one that qualifies. `chipValue` took the head before the `·`
+as the model's name, because a separator was the whole of its test (Q3.410), and
+the head was 23 characters of notice.
+
+**Decision.** Off the `default` placeholder, a description's head is believed only
+where its first word is the row name's own — `familyWord`, which splits on
+whitespace, `(` and `[` and folds case, so `Sonnet` over `Sonnet 5 · …` and `Opus
+(1M context)` over `Opus 5.5 with 1M context · …` both pass, and so does a raw
+`opus[1m]` over prose when the value has no choice to name it. Otherwise the chip
+draws the row's own name without a trailing parenthetical: `Opus 5 (1M context)` →
+`Opus 5`. `default` is exempt because it is the one row whose name names no model,
+which is the reason the function mines descriptions at all; keyed on the literal
+value, as `choiceOverride` keys it.
+
+**Why this test.** Every fixture in `webcheck` passes it unchanged, and so does
+every row of both measured lists but the one it exists for. Run over the last 3000
+stored `agent_config` events, the only two mismatches are that row and `default`,
+which is exempt; grok, kimi and opencode publish no description with a separator at
+all.
+
+**Why the parenthetical goes.** `CHIP_MAX` holds about eighteen characters at
+`text-2xs` and "Opus 5 (1M context)" is nineteen, so the name whole would read
+"Opus 5 (1M cont…". Before the alias moved, the same model on `opus[1m]` read `Opus
+5`, because the `with 1M context` qualifier is already dropped from a head — the
+context length is a property of the choice, spelled out in the menu row. This is
+that rule applied to a name, in the fallback arm only.
+
+**Rejected.**
+- **Mining only the placeholder.** Every picked row would lose its version — `Opus`
+  where the answer is `Opus 5.5` — and the version is exactly what an update moves.
+- **Requiring a digit in the head.** "Newer version 2 available" would pass.
+- **A table of phrases that are not models.** That is this client matching the CLI's
+  English, which moves with every release.
+- **Matching on any shared word.** It admits strictly more heads than the first word
+  does and no measured row needs it.
+
+**Unchanged.** The menu row draws the CLI's sentence exactly as sent, under the
+row's whole name, and the chip's `title` draws the sentence alone — `Model: Newer
+version available · …`, never the name — so the context length the chip drops is
+in the menu row and not one hover away. In both the sentence is the remedy, and
+`webcheck` pins that the rule stops at the chip on the menu row; nothing pins the
+title. A session parked with the pre-update list keeps that list
+until it wakes, and `restoreConfig` is untouched: both are the owner's scope,
+decided 2026-09-23. A memory in `localStorage` that already holds the notice is read
+back through the same function and draws the name.
+
+**Status.** Current. Narrows Q3.410: the separator is necessary and no longer
+sufficient.
+
+#### Q3.642 — the drawer's head becomes the account switcher, and its rows are acts rather than destinations
+
+**Question.** The owner's brief, modelled on Telegram: the left drawer opens on a
+large face, then the name with a chevron; pressing it lists every account on this
+computer, the current one's face ringed, followed by *Add account*. Q3.612 made
+that head inert and wrote the test a drawer row must pass. What changes, and what
+does that test say about a row that is an account?
+
+**Decision.** In the shell the head is `AccountPanel`, defined below `MenuDrawer`
+and drawn **inside the scroller** — with ten accounts a fixed head of eleven rows
+would starve the scroller, and the `overflow-hidden` aside would clip Sign out off
+the bottom. Top to bottom:
+
+- **the face**, `Monogram` at `size="lg"` (`h-14 w-14 rounded-full text-xl`), and
+  **not a control** — it is who this window is, above a list of who else it could
+  be;
+- **the name, with the server under it**, as one disclosure button —
+  `aria-expanded` and `aria-controls` on a button that navigates nowhere. The server
+  is mono `text-2xs` through `serverLabel`, display only: the scheme dropped for
+  `https` alone, anything else drawn whole, and never compared or sent back. The
+  chevron is a `ChevronDown` that turns on its icon rather than on the button,
+  because `.tap`'s transition shorthand on the button would swallow a
+  `transition-transform`, and a trailing *right* chevron on a full-width row reads as
+  *goes to another screen*;
+- **the fold**, `Disclosure`'s `grid-rows-[0fr]`/`grid-rows-[1fr]` with `inert` on
+  the closed half, so a closed fold is neither a tab stop nor read out;
+- **this account's row**, a `<div aria-current>` and not a button — a control that
+  answers a tap with nothing is refused in this app — with its face ringed
+  `ring-2 ring-fg ring-offset-2 ring-offset-surface`. A box-shadow ring, never an
+  outline: `outline` is this app's focus ring, and a current mark drawn with it
+  would read as focus;
+- **a button for every other account**, *signed out* at its trailing edge in sans
+  where the host's persisted flag says so — a state word, not a change of family
+  halfway along the mono line;
+- **Add account**, while the host's `canAdd` says there is room.
+
+**Account rows are acts, not destinations.** Q3.612's test — a destination, reached
+from nowhere else, about you — is a test for *destinations*, and Sign out was
+already the one act beside them. An account row is that second kind: it calls
+`onClose()` and then a store verb (`switchAccount`, `addAccount`), never `go` and
+never `navigate`, because switching accounts is not a place in this window's URL.
+The three destinations and the single `navigate(` are unchanged, and the drivers
+still hold both. A refusal is a toast, because the panel it would be drawn on is
+already leaving.
+
+**The list is the host's, read live** — `nativeAccounts`, one IPC, no keyring — on
+every mount. Accounts are added and removed from other webviews while this one
+lives, and a list kept from launch would offer a switch to one that is gone. The
+panel unmounts on every close, so the fold is shut on every open (`TaskPanel`'s
+finished band is the precedent) and is **not persisted**: `localStorage` stays empty
+after a sign-in, which `docs/NATIVE.md` step 3 checks by hand. [⚠ reversed the next
+day, the owner's call on the first build (2026-09-24): the fold stays open until it
+is closed, as Telegram's does — `reemoat.accountsOpen`, read on every mount (every
+account's window is a page of its own on one data store, so no module copy), kept
+only while open, so step 3 still holds until somebody opens it. In the same pass:
+faces in the list at `row` (32px) under a 48px head, and a rule under the head
+whether or not the fold is open, with a second under the last row — what says the
+rows slid out of the head, and the room before the first of them.]
+
+**What it spends and does not:** no `tabIndex`, no weight on a row or a name, no
+second caps band.
+
+**The browser keeps the inert head exactly as it was.** It has no list of accounts:
+one origin is one sign-in (Q7.149).
+
+**Rejected.**
+
+- **A trailing chevron `IconButton` beside an inert head.** Two controls where every
+  multi-account client has one, and the name — the largest target on the panel —
+  would still do nothing.
+- **The face as the control.** It is the element that looks least like one, which
+  is Q3.612's own rejection of the head as a link.
+- **A persisted fold** (above) — [⚠ taken back, above: it is persisted now.]
+- **Rows through `go`.** A switch has no URL, and a destination whose arrival is a
+  different document is not a place.
+
+**Status.** Reversed an earlier decision — Q3.612's inert head, in the shell. Its
+row test, and its rejection of the head as a link, stand.
+
+#### Q3.643 — the server step opens locked on the build's server, and a server is changed by adding an account
+
+**Question.** The owner's brief: *Add account* opens the sign-in flow, whose first
+page's server field holds the default, disabled, with a small pencil to edit it; and
+Settings → Account → Server address becomes read-only. When is the field locked,
+and where does changing a server go once no screen repoints a signed-in window?
+
+**Decision. The field is locked only where it opens on the build's own
+suggestion**: `useState(!editing && suggested !== null)` — a first run or an add,
+with `defaultServer` non-null. Never on the `‹ Server` arrival, where the field
+holds this window's address and the reason for coming back is to change it; never
+where the build compiled no default, where there is nothing to confirm and the
+field is empty and editable, with no pencil.
+
+- **`disabled`, not `readOnly`.** A disabled field reads as not yours to edit until
+  you ask, takes no caret and raises no keyboard on a phone. A read-only one is
+  focusable, draws a caret, and reads as editable to everybody who then finds it is
+  not.
+- **The locked look is two `disabled:` variants and no opacity** —
+  `disabled:border-edge disabled:text-muted`. Without them a disabled `FIELD` draws
+  exactly like an editable one, because the preflight and `FIELD` set its ground,
+  boundary and ink themselves and the engines' own disabled styling never shows; an
+  opacity would take the address somebody is here to read down with it.
+- **The pencil is beside the field, not inside it** — `FIELD` already carries
+  `px-3` — an `IconButton` labelled *Edit server address* at `size="nav"`, whose
+  finger pad lands in the `gap-2` rather than over the field. It runs `flushSync`
+  unlock, then `focus()`, then `select()`, inside the tap: a disabled input cannot
+  take focus, and a focus that arrives in a later task is not one a phone raises its
+  keyboard for. Selected, because somebody who pressed it is about to type another
+  address. It unmounts once pressed.
+- **Continue carries `autoFocus={locked}`.** A disabled field takes no Enter, so
+  without it the first screen's whole job — confirm, press Enter — would need a
+  click.
+
+**Adding an account is this screen with another heading, not a screen of its own.**
+The host opens a pending webview (or rebinds this one); it arrives here exactly as a
+first run does, so the store has no "adding" phase. Which of the two it is comes
+from the host's **live** list (`useBackAccount`): a pending window on a computer that
+already holds an account is an add — heading *Add account*, a Cancel back to the
+account that was on screen (`switchAccount(null)`), and, where it is true, *Adding
+an account signs none of the others out* (gated on `durable`) and the daemon clause.
+Until the host answers, the screen draws an empty box rather than flashing a welcome
+at somebody with three accounts. [⚠ amended the next day, the owner's call on the
+first build (2026-09-24): **no Cancel anywhere in this flow** — a **‹** above the
+heading naming the account that was on screen, back to the interface from either
+arrival — and **neither sentence**, nor *That address is ours*; the footer keeps
+only a first run's explanation where no address was compiled in. And a **first
+sign-in has no way back at all**, `‹ Server` included, which knowingly reopens the
+one-way door Q3.607 closed for a wrong-but-reachable address; the probe still
+refuses anything that is not a Reemoat.]
+
+**The sign-in screen's ways off are one table**, `signInExits` in `slot.ts`, pure
+and driven: `‹ Server` only on a pending window; Cancel, last, where the live
+`back` names an account; *Remove account* on a window that is an account on the
+list. [⚠ since 2026-09-24: `‹ Server` only on a pending window *with* an account to
+return to, and `back` — a **‹** at the top naming that account — where Cancel was;
+never both.] Every control is `disabled={busy}`. The two screens that never reach the
+drawer — the loading screen of a server that cannot be reached, and
+`ForcedPasswordChange` — offer *Use another account* on the same live condition
+(`UseAnotherAccount`), because on a desktop the account shown at launch is the one
+shown last, and a server that is down would otherwise wall off every other account.
+[⚠ amended the same day, the owner's call on a build: an unreachable server is no
+longer a screen at all. `store.bootstrap`'s catch draws the shell — drawer included,
+so every other account is one tap away — and the outage is a line under the
+conversation's title in the list's own words (`CONTROL_PLANE_UNREACHABLE`), beside
+the notice above the list; the list does not call an unread registry empty, and
+setup waits for the registry rather than for the phase. `ForcedPasswordChange` is
+the one screen left that needs the button.]
+
+**Settings → Account → Server address states the server and changes nothing** —
+`action={null}`, with the subline *Another server is another account, from the
+menu.* An account is a server and a person: repointing a signed-in window would make
+it a different account wearing the old one's keyring entry, device and daemon root,
+and the host refuses it anyway (Q5.120). Sign out's subline in the shell adds that
+it takes this account off this computer.
+
+**Rejected.**
+
+- **Keeping *Change* under Settings.** It moves a signed-in account's server under
+  its credential, which the account key (Q1.651) makes a different account.
+- **`readOnly`** (above), and **the pencil inside the field's padding**.
+- **Deciding "add" from the boot payload.** A desktop webview's snapshot outlives
+  every add and remove after it, so it would offer no way back after an account was
+  added and a way back to one since removed.
+
+**Status.** Reversed an earlier decision — Q3.607's second entrance: the Server
+address row changes nothing now. Amends Q4.121's welcome, whose box opens locked on
+the default.
+
+#### Q3.644 — the working line counts the tokens streamed since the last tool call
+
+**Question.** From the owner, with Q2.233's working line: *add tracking of tokens
+since the last tool call, as in Claude Code, so one can see the agent is working,
+not hung.* Claude Code's spinner reads `✻ Working… (1m 12s · ↓ 1.2k tokens)`.
+
+**Decision.** The working line gains a third part, after the elapsed time:
+`working… · 3m · ↓ 1.2k tokens`. The count is the characters of agent text —
+**thoughts included**, which are logged and reach the client though `tail.ts` never
+draws them — since the newest `tool_call`, `prompt`, `turn_end` or
+`context_cleared`, divided by four (Claude Code's own estimate, as the owner's
+reference describes it; not re-read out of its binary), rounded, and drawn with
+`taskTokens`, the panel's compact formatter — so `1.2k`, never a locale's. Nothing
+under half a token draws nothing. A user's text never counts. Tool progress adds
+nothing, and a tool call starts it again, which is the whole point: a count that
+climbs says the model is producing, a count at zero with a tool row in progress says
+where the time is going.
+
+**It is the working line's, with every rule that line already has.** Drawn only
+while `working`; dropped with the elapsed time when nothing is streaming (a count
+beside *last seen working* would be a live number over a stale claim). The elapsed
+time now starts at `workStartedAt` — the turn's start, else `unpromptedSince` — so
+Q2.233's work between turns is timed as a turn is.
+
+⚠ **Drawn, never spoken.** The foot's words also feed the transcript's `aria-live`
+region; a count there would be announced on every token. `footSays`' `spoken` form
+never carries it, and `webcheck` sweeps the whole 32-cell space for it.
+
+**Cost.** `streamedSinceTool` memoises per `StoredEvent` in a `WeakMap` — the count
+up to and including that event — so a new token reads the event before it and
+itself, and nothing else; `webcheck` counts the array reads through a `Proxy` over
+5 001 events rather than timing it. It remembers only a count anchored on a restart:
+a window that opens mid-run (history still paging in) is counted but not stored, or
+the earlier events arriving underneath would leave it short for the rest of the run.
+`EventList` computes it (it already re-renders per event) and hands the formatted
+string to the foot alone; no `TailRow` receives it, so the memo on every row
+survives.
+
+**Rejected.** Reading `usage_update`'s `used` — occupancy of the context window,
+Q6.9's other quantity, and absent on kimi. Reading `turn_end.usage` — it arrives
+when the turn is over. A per-second clock render — this app schedules one only for
+the task panel (Q3.603), and the count moves with the events that re-render anyway.
+
+**Status.** Current.
+
+#### Q3.645 — the box you type your own answer in drew a dark rectangle out past its row, and `outline-none` was on it
+
+**Symptom.** Reported off a screenshot of the macOS app: an `AskUserQuestion` card,
+typing into the free-text box under the options (the "Other" row, marked with a
+filled circle once counted). The input drew a thick dark **rectangle** inside the
+rounded row, sticking out past the row's left edge — *"the input field slides out of
+the interface, and this highlight should not exist, it is superfluous."*
+
+**Cause.** One cause for both halves: `index.css`'s app-wide focus rule, `outline:
+2px solid var(--color-fg); outline-offset: 2px` under `:focus-visible`. A text
+control matches `:focus-visible` on **every** focus, mouse and touch included, and
+the rule is **unlayered**, so the `outline-none` written on that input — a utility,
+inside `@layer utilities` — lost to it regardless of specificity. That is Q3.56 and
+Q3.414, met a second time by a file that never read them. The geometry did the
+rest: the row carries the border and the radius, the input sits flush against the
+border with no radius of its own (preflight's `border-radius: 0`), so a ring 2px out
+and 2px wide is a square-cornered box ending 3px beyond the row's rounded outer edge.
+An outline is ink overflow and takes no layout space, which is why nothing moved and
+nothing scrolled — and why no width measurement could have caught it.
+
+**Measured in WebKit**, which is what the product ships — a Swift/AppKit
+`WKWebView` harness loading the card's markup with the built stylesheet, focusing
+each box and reading `getComputedStyle` before `takeSnapshot`, at 390px and 700px:
+
+| Classes on the input | Computed outline | Painted |
+|---|---|---|
+| `outline-none` (as shipped) | `solid 2px rgb(28,26,22)`, offset `2px` | the reported rectangle: input at x=30, row's outer edge at 29, outline from 26 |
+| `no-focus-ring` alone | `auto 5px rgb(0,103,244)` | WebKit's own blue ring, overhanging the same way |
+| `no-focus-ring outline-none` | `none` | nothing; the caret, `caret-color` = `--color-fg` |
+
+`document.documentElement.scrollWidth` equalled `clientWidth` in every row of that
+table, at both widths.
+
+**Decision.** Every box you type in on the card — the question's own-answer box, and
+an MCP form's text field, textarea and number field — carries `NO_RING`, which is
+`no-focus-ring outline-none`. ⚠ **It is the pair or it is nothing**: `outline-none`
+alone loses to this app's rule, `no-focus-ring` alone hands the box to WebKit's `auto`
+ring. The indicator is the caret, which is the composer's answer (Q3.55, Q3.414) and
+the owner's word here; the row gets **no** `focus-within` tone either — the row's own
+tone and the mark are what it says.
+
+**And the mark beside it moves its ring onto the glyph.** Its 44px target is
+invisible and flush with the row's right edge, so under keyboard focus the app's ring
+around it was the same square box, straddling the other end of the row. The target
+opts out (`NO_RING`) and `ChoiceMark` takes `MARK_RING` — the app's own `2px`, `fg`,
+offset `2px`, spelled `[button:focus-visible_&]:` the way `AgentBuilder` already
+spells a keyboard-only state — so a keyboard user sees a concentric ring round the
+circle or the box, inside the row. Keyboard-only, since `:focus-visible` does not
+match a button a pointer focused.
+
+**Alternatives refused.** An inset ring on the input or a `focus-within` border on
+the row — both are the highlight the owner asked to be rid of. Taking `input,
+textarea, select` out of the app-wide rule — that changes every field in the app to
+settle one card.
+
+**Pinned** in `webcheck.elicitation-and-links.ts`, off disk: the rule in `index.css`
+still declares the opt-out; `NO_RING` is exactly both halves; a sweep of every
+`<input`/`<textarea` in `ElicitationCard.tsx`, with a floor of four, finds none
+without both; the own-answer box keeps `min-w-0 flex-1` so it is the half that
+shrinks at 390px; neither `ElicitationCard` nor `AskCard` carries a `focus:`,
+`focus-within:` or `focus-visible:` utility; the mark's target opts out; and
+`MARK_RING`'s width, offset and colour are read **off `index.css`'s rule** and
+compared, so the two spellings of the ring cannot drift. Proved by drift: `outline-none`
+back alone, `NO_RING` without its second half, a `focus-within:` tone on the row, a
+1px mark ring and a lost `min-w-0` each fail it.
+
+⚠ **Not swept: `outline-none` is a no-op on every element that rule lists, app-wide**
+— `bits.tsx`'s two field constants, `NewSession`, `SessionBrowser`, `SessionMenu` and
+`AgentBuilder` each carry it on an input and each still draw the ring. Whether any of
+those *wants* it gone is a question per surface, not this entry's.
+
+**Status.** Current
+
+#### Q3.646 — a person's message is drawn exactly as they sent it, and never parsed
+
+**Question.** The owner, 2026-09-24 (translated): *"Lots of changes to messages on
+sending … Numbered items, once sent, are displayed in the chat as an entity
+separate from the text. The message must be exactly as the user sent it."*
+
+**Decision.** A person's own message is plain text. `UserBubble` draws the string
+as **one text node** in a `select-text text-sm whitespace-pre-wrap text-fg
+wrap-anywhere` block, and nothing parses it. Every row that draws a person's words
+is that component — the pending echo, a `prompt` row (queued or not), an adapter's
+`role: "user"` run, the `/clear` marker — and a settled question's typed answer
+(`ElicitationResolvedRow`) takes `whitespace-pre-wrap` too, so a multi-line answer
+keeps its breaks. A message that is only whitespace draws no text line, so an
+attachment-only message is the chips alone. Agent output keeps markdown, unchanged.
+
+**Measured** 2026-09-24 in a `WKWebView` on macOS 15.6 (24G84), against the built
+stylesheet, with the old and the new bubble DOM side by side:
+
+- **The old DOM is the report.** `Please do:\n1) first thing\n2) second
+  thing\n10) tenth`, drawn through the user tone, reads back as `innerText`
+  `"Please do:\nfirst thing\nsecond thing\ntenth"` — the numbers were `::marker`
+  boxes, not text: hanging outside the sentence, not selectable, not copied.
+- **The new DOM is the string.** textContent and `innerText` equal what was sent,
+  exactly, for seven messages — the owner's own (`…появляется надпись "start one
+  before bed"`), that numbered list, `**not bold**` with backticks, `#`, `-` and
+  `>` lines and `--all -- "x"`, a 324-character unbroken token, an indented first
+  line followed by three blank lines, a trailing newline, and one word — at 760 and
+  at 390 wide. No box overflows; the long token wraps inside the 85% cap.
+- **`hug.ts` still measures it.** One `pre-wrap` node answers one rect per line and
+  a zero-width rect per newline (`[68, 0, 78, 0, 101, 0, 56]` for the list), so the
+  widest line decides as before; a trailing `\n` adds no line box (22px, one line);
+  the owner's message at 390 hugs from 304px to 285px.
+- **The selection is unchanged.** Real `NSEvent` drags and a triple-click (the
+  Q3.636 harness) paint identically on the old and new DOM — 282×64, bands
+  `20px@159w 22px@282w 22px@30w`, the text and nothing of the padding or the gap —
+  and copy the same string. Q3.638's `sel-root` on the box needs nothing added.
+
+**Why plain text rather than a narrower markdown.** Every markdown construct in a
+person's message is a rewrite of what they typed: `1)` becomes a marker — Q3.435
+mended the *delimiter* and left the separation, which is what was reported next —
+`**x**` loses its asterisks, `# x` becomes a heading, `- x` a bullet, `> x` a
+quote, an indented first line a code block, a backslash escape vanishes. Somebody
+writing to a coding agent types those characters *as characters* as often as for
+formatting, and the agent is sent the raw string either way — so the bubble was the
+only place the two could disagree. Turning constructs off one at a time is the road
+Q3.639 took, and it leaves the next one to be reported.
+
+⚠ **Reverses Q3.639's mechanism.** Its plugin, the second plugin list that carried
+it and the `"user"` tone on `Markdown` are deleted; `MarkdownBody` has one plugin
+list again and `COMPONENTS` is untouched. Q3.639 refused `white-space: pre-wrap`
+because `mdast-util-to-hast` writes a `\n` after every `<br>`; with no parse there
+is no `<br>`, so that measurement no longer bears on this. Q3.639's finding that
+the write path is clean still holds and is still what makes a render-side fix
+sufficient: every message already in the log is drawn verbatim on its next paint.
+`huggable`'s `pre, table` clause went with it — a bubble now holds text and
+attachment chips and nothing else.
+
+**What leaves the box.** `sentText`, in `ui/composing.ts`: the blank lines before a
+message and the whitespace after it are dropped; the first line's own indentation,
+every blank line inside, and every character are kept. It replaces `text.trim()`,
+which took the indentation off the **first** line of a pasted stack trace or YAML
+fragment while keeping it on every other — a change to the content, where the ends
+are not. `typedConfigCommand`'s `rest` goes through it too, after the spaces that
+separate the command's name, so `/plan` followed by an indented block keeps the
+block. `canSend` still trims, to decide *whether* anything is worth sending. A
+first line that begins with spaces and then `/` is sent with its spaces, which is
+consistent with the composer's own model: `slashQuery` and `typedConfigCommand`
+already recognise a command only at offset 0. The daemon stores what arrives — the
+route validates and `recordPrompt` appends it untouched, re-read for this.
+
+**Rejected.**
+- **Linkifying URLs without changing a character.** The brief allowed it; declined.
+  It is a second URL grammar beside remark-gfm's, whose boundaries would disagree
+  with the agent's rendering one character at a time, for a link the person already
+  has — and in WebKit a drag that begins on an anchor is a link drag rather than a
+  selection, which costs the one thing people do with their own message: copy it.
+  `openableHref` and `ui/links.ts` are untouched.
+- **Monospace for a verbatim bubble.** `pre-wrap` is not `pre`: this is somebody's
+  prose, and `web-typography.md` draws prose in sans.
+- **Trimming the ask card's free-text answer like a message.** `elicitationAnswer`
+  keeps `raw.trim()`: that value is a form field measured against the schema's
+  `min`/`max`, not a message, and a single-line box's leading space is never
+  content. What changed there is input-side (Q3.647) and the `pre-wrap` above.
+
+**Status.** Current. Reversed an earlier decision (Q3.639's plugin). Amends Q3.435
+(the delimiter plugin now serves agent output only), Q3.636 (its "the composer
+trims" is `sentText` now) and Q3.637 (a bubble declines attachments and images;
+`pre` and `table` cannot occur in one). Amended by Q3.652: an own answer on the ask card may hold lines, and is sent with them.
+
+#### Q3.647 — the box never rewrites what was typed
+
+**Question.** The same report: *"A quote followed by a space turns into a
+«guillemet» quote — this must not happen."* The stored `prompt` event at seq 7615
+of session `s_078b731c` already reads `«start one before bed»`, so the rewrite
+happened before anything was sent — in the input.
+
+**Measured** 2026-09-24, macOS 15.6 (24G84), a `WKWebView` driven by real keyDown
+NSEvents from a Swift harness, with the system's settings untouched ("Use smart
+quotes and dashes" at its default, the text replacement list holding its default
+`omw`):
+
+- **A plain `<textarea>` or `<input type=text>` rewrites four ways.** `"hello" `
+  becomes `“hello” ` — each quote replaced the instant it is typed; `it's` becomes
+  `it’s`; `ls --all` becomes `ls —all`; `a -- b` becomes `a — b`; `omw ` becomes
+  `On my way! `. Each reaches the page as a beforeinput/input pair of type
+  insertReplacementText. The harness ran under the ABC layout and did not switch
+  the person's input source; the `«»` in the report is the same substitution under
+  the Russian layout this machine also has enabled, whose quote style is
+  guillemets — inferred, not produced here.
+- **`autocorrect="off"` changes none of it** on macOS.
+- **`spellcheck="false"` stops all four** — WebKit runs its automatic substitutions
+  behind the same per-node spell-checking gate as the red marks.
+- **Registering `WebAutomaticQuoteSubstitutionEnabled`,
+  `WebAutomaticDashSubstitutionEnabled`, `WebAutomaticTextReplacementEnabled` and
+  `WebAutomaticSpellingCorrectionEnabled` as NO stops all four** in every field,
+  with no attribute at all: WebKit reads these from the application's defaults
+  before it falls back to the system's switches. Registered after the view was
+  built but before its first load, it still held.
+- **A person's own choice wins over the registration**: an app-domain YES for
+  quotes — what the context menu's Substitutions → Smart Quotes writes — brought
+  quotes back while dashes stayed off.
+- **Spelling marks.** A bare WKWebView draws none: 0 red pixels over `teh wrold
+  recieve becuase`. With "Check Spelling While Typing" on, 179 — the same 179 with
+  the four keys registered off, so the registration costs no marks — and 0 on a
+  `spellcheck="false"` field.
+- Spelling *correction* (`teh` to `the`) never fired in the harness, with or without
+  continuous checking; double-space-period and automatic capitalisation did not
+  fire either.
+
+**Decision. Two layers, because there are two clients.**
+
+1. **The native shell registers the four off**: `leave_typing_alone` in `lib.rs`,
+   the first statement of `run()`, macOS only, over `VERBATIM_TYPING`. It is
+   app-wide on purpose — a server address, a model id and a plugin's settings are
+   fields where `--` and `"` matter as much as in a message. **Registered, never
+   set**: the registration domain is not written to disk and sits below the app's
+   own, so somebody who turns Smart Quotes back on from the context menu gets them,
+   and keeps them across launches. Raw `objc2` messages, `seats.rs`'s precedent, so
+   no new dependency; `a_keystroke_is_left_as_typed` asks Foundation under
+   `cargo test` that all four answer NO.
+2. **Every field an agent reads carries `VERBATIM_FIELD`** — `spellCheck` false and
+   `autoCorrect` off — which is the composer's textarea and the ask card's three
+   free-text fields. `spellcheck` is the one lever a *page* has over WebKit's
+   substitutions, so it is what covers the browser client in Safari, where no
+   default can be registered; `autocorrect` is the phone keyboards' word
+   correction.
+
+**Spelling correction and text replacement are off as well, and that is the
+argument rather than a side effect.** In this app a word is as likely to be a
+command, a path, an identifier or a model name as a word, and a dictionary can only
+be wrong about those. A corrected identifier is a valid-looking *different* word the
+agent will act on; a typo is something a model reads straight through. A text
+replacement is a person's own shortcut, which is why the native registration yields
+to their toggle — but in a field an agent reads it is the same rewrite as a smart
+quote.
+
+**What it costs.** `spellcheck=false` takes the red marks off the composer and the
+answer box in a browser, where Chrome, Safari and Firefox draw them by default. In
+the native macOS shell it costs nothing unless somebody has turned "Check Spelling
+While Typing" on, since a bare WKWebView draws none. Accepted: here the marks mostly
+flag identifiers, and the rewrite is the defect.
+
+**Rejected.**
+- **Undoing a substitution in the page.** An insertReplacementText beforeinput is
+  also what a deliberate right-click correction produces, and mapping `“”«»—` back
+  to ASCII would rewrite characters somebody typed on purpose — a Russian writer's
+  own `«»` first of all.
+- **`autocorrect="off"` alone** — the obvious first guess, measured to change
+  nothing on macOS.
+- **Writing the keys (set, not register) at every launch.** It writes the person's
+  preferences file and overrides their own choice every time the app starts.
+- **Automatic capitalisation off.** Left at the keyboard's default: it changes a
+  letter's case where the person watches it happen rather than a character an agent
+  parses, and a phone composer without it is worse to write prose in.
+
+**Not measured.** iOS, where this relies on WebKit dropping the keyboard's smart
+quotes and dashes traits for a `spellcheck=false` field; Android, where it relies on
+Chromium mapping `autocorrect=off` to the keyboard's no-auto-correct flag; spelling
+autocorrection on macOS, which did not fire in the harness; and an end-to-end run of
+the packaged app — the Rust half is its unit test plus the harness's measurement of
+the identical registration.
+
+**Status.** Current.
+
+#### Q3.648 — a message you send always lands at the foot, and only the reader takes the conversation off it
+
+**Symptom.** Reported by the owner: sending a message sometimes did not scroll,
+even from the very bottom. The message appeared somewhere below the fold and the
+*latest* button came up. Nothing after it followed until the reader scrolled by
+hand. Reported alongside it, and one bug underneath: the end of an answer sometimes
+stopped a line or two short of the foot. Scrolling up by a small amount while the
+agent was talking got pulled back down.
+
+**Measurement.** A WKWebView harness on this box (macOS 15.6, WebKit 605.1.15,
+420×800 and 390×844) mounted a verbatim copy of `SessionView`'s old scroll code
+and the new `useFollow`, and drove the same scenarios through both. The scenarios
+were: sends, streamed text behind `Markdown`'s 150ms settle, a parked card, taps,
+a wheel, and history paging in. Then the same page ran in headless Chromium 151.
+Engine facts first:
+
+- **A pin's own scroll event measures what landed after the pin.**
+  `scrollTop = scrollHeight`, then 90px of growth in a later task of the same
+  frame. The scroll event that the pin raised read a **90px** gap, in WebKit and
+  in Chromium alike.
+- **WebKit can deliver a `ResizeObserver` before the scroll event and `rAF` of the
+  same frame.** Growth in the same task as a programmatic scroll arrived
+  `ro → scroll → raf`, 6 of 6 trials. Growth in a later task arrived
+  `scroll → raf → ro`. Chromium matched both orders.
+- **WebKit has no scroll anchoring.** `CSS.supports("overflow-anchor", …)` is
+  false, and 200px inserted above a box scrolled to 1000 left it at 1000.
+  Chromium supports it and moved the box to **1200 on the forced layout of the
+  next `scrollTop` read**.
+
+Then the app's code, old against new:
+
+| scenario | old | new |
+|---|---|---|
+| send while the run above settles in the same frame (3 trials) | *latest* shown and the echo left below the fold in **2 of 3**; ends 294px off the foot, last row covered by 252px | at the foot, 3 of 3 |
+| send during a stream, then the answer (3 trials) | painted up to **80–100px** off the foot while "following"; ended 20px short in 2 of 3 | 0px, every frame |
+| draft sent, then answered | ended **60px** short | 0 |
+| sent from 4000px up in history | ended 60px short | 0 |
+| 40px wheel up during a stream | **pulled back 360px** to the foot | stays; 0 |
+| 40px move up with no wheel, an event landing before its scroll event | pulled back **420px** | stays; 0 |
+| tap opens a 300px card at the foot during a stream | card stays put | card stays put |
+| 30 history rows page in above a reader mid-transcript (Chromium) | reader's row moved **−1320px** | 0 |
+
+The deterministic send race did not reproduce in 3 Chromium trials. The frame
+timing differs and the flaw does not, as the pin-then-growth fact above shows.
+
+**Cause.** There were three causes, and the first one is the report.
+
+1. **"At the bottom" was re-derived from geometry on every scroll event**, in
+   `measure` in `SessionView.tsx`: `scrollHeight − scrollTop − clientHeight < 48`.
+   A scroll event cannot say who moved the box. The send's own pin raised one.
+   While the agent was still talking, `Markdown`'s trailing settle (`useSettledText`,
+   150ms) landed in a later task of the same frame, grew the run *above* the echo
+   by more than 48px, and the pin's event read that growth as the reader leaving.
+   `atBottom` went false, the button appeared, and every later pin was gated on it.
+   That is the mid-turn send, which is the ordinary send since 0.8.0 (Q3.600).
+2. **Content that grew without a commit of `Transcript` was never followed.** The
+   pins were an effect keyed on `[count, firstSeq, atBottom, working]` and an
+   observer that fired only on the box's `clientHeight`. Neither saw a settled
+   markdown run, a re-hugged bubble, a card's own padding or a width change. So a
+   streamed answer's last 150ms of text landed under the fold with nothing to pin
+   it, and the reader saw it jump in a line at a time as the next event arrived.
+3. **A reader scrolling up during a stream was pulled back**, because the pin
+   kept firing while they were inside the 48px slack, and because an event landing
+   between their move and its scroll event pinned over the move before anything
+   judged it.
+
+**Decision.** `ui/follow.ts`. The intent is a ref, `atBottomRef`, and nothing
+reads it off geometry except a move:
+
+- **`followsAfterScroll` judges a move against where the box was last left**
+  (`lastTop`). A gap with no move is growth after a pin and keeps the foot. A move
+  up of more than `FOOT_EXACT_PX` leaves it, inside the old slack too, because
+  otherwise the next pin takes the move back. Reaching the foot, or moving down
+  into `FOOT_SLACK_PX`, rejoins it. A clamp moves up and lands exactly on the foot,
+  so it keeps it. The function is pure and asserted in both directions.
+- **It is asked wherever layout settles, not only on scroll events.** That means
+  after every commit of `Transcript` (a layout effect with no dependency list), on
+  one `ResizeObserver` watching the box *and* the content element, and on every
+  scroll event. A reader's move can land before its own event, and settling
+  judges it before pinning over it. When the foot is held, each of those pins
+  before paint. That covers the echo, its row, the working line, the queued line,
+  the card's padding, a settled run, a re-hug and a width.
+- **A wheel going up leaves at once** (`wheelLeavesFoot`). It is skipped where an
+  element between the target and the box is scrolled off its own top, since that
+  element takes the wheel. A finger is left to the scroll event: touch listeners
+  belong to the gesture plumbing alone (`webcheck` sweeps them), and non-passive
+  ones would put the transcript's scrolling behind the main thread.
+- **A send is not judged.** A changed `sent` (the `tailRequest` counter) or a
+  changed session re-reads `lastTop` and holds the foot, so a move not yet
+  reported cannot keep a sent message below the fold.
+- **A tap that resizes a row is measured at the observer instead of followed**
+  (`remeasure` sets a flag, cleared two frames on). This is Q3.26's rule. It moves
+  from a `rAF` to the observer because WebKit can deliver the observer first, and
+  there the pin would have scrolled the opened card away before the `rAF` measured.
+- **`[overflow-anchor:none]` on the box.** WebKit anchors nothing. Chromium anchored
+  history paging in above a reader, and then the manual `grewAbove` shift ran on
+  top of it, so it moved the reader by twice the page. That was 1320px measured,
+  and it was live on Android. The manual shift is now the only one.
+- The *latest* button still sets nothing, for Q3.426's reason. Holding the foot at
+  the tap would pin on the next growth and cut the smooth scroll short, so arriving
+  at the foot is what holds it.
+
+**Amends.** Q3.26 (the mechanism: an observer flag rather than a `rAF`). Q3.426:
+its `measure` on every scroll event, and "`atBottomRef` is written beside the
+state", where the ref is now the intent and the state only mirrors it for the
+button. Q3.583: its "second effect keyed on `askHeight`" is gone, and the padding
+is a commit of `Transcript`, which the layout effect pins.
+
+**Rejected.**
+
+- **Input intent alone** (unpin only after a wheel, key or touch). Find-in-page,
+  focus and a scrollbar drag in an engine that sends no `pointerdown` would never
+  leave.
+- **Unpinning only when nothing was laid out since the last look.** A clamp plus
+  growth is still indistinguishable from a reader, and a scrollbar drag during a
+  stream would then never leave.
+- **Keeping the 48px slack for moves up.** It is exactly the window in which a
+  stream pulls the reader back.
+
+**Status.** Current. `webcheck.follow-and-wrap.ts` pins `followsAfterScroll`'s
+table and the wiring as source. The harness itself is outside the tree and is not
+a driver.
+
+#### Q3.649 — wrapping moves nothing: the composer measures without collapsing the page, and the card reserves its room before it paints
+
+**Symptom.** Reported by the owner: when lines wrap, the page can jerk, so check
+for overlaps and jumps. That covers three surfaces: the composer growing as you
+type, the streamed answer re-wrapping, and the parked card over the last rows.
+
+**Measurement.** Same WKWebView harness, same verbatim old code.
+
+- **The composer.** A long draft typed one keystroke at a time at the foot, with
+  the app's own box observer. On the keystroke *after* each wrap, the transcript
+  dropped **16, 36, 56, 76, 96, 116, 132px** off its foot (a 176px box), and the
+  scroll events reported the same gaps. The observer had pinned at the wrap and saw
+  no size change on the next keystroke. In the app scenario, **88 of 107
+  keystrokes** left the transcript off the foot, by up to 98px. *latest* was shown
+  for 214 frames, and following was lost from the fourth line on, because 56px
+  passes the 48px slack. With the parent held: **0px on every keystroke**, and no
+  scroll event with a gap. In Chromium 151 the drift was hidden by scroll
+  anchoring. With `overflow-anchor: none`, which Q3.648 needs, it was the same
+  16–132px, so the hold is what fixes it in both engines.
+- **The card.** Parked at the foot, the card painted **200px** over the last row
+  for a frame. Grown from inside by a commit, it painted **88px** over. With the
+  layout effects: 0 and 0.
+- **The stream.** See Q3.648: up to 100px painted off the foot per settle.
+
+**Cause.**
+
+- `fitToContent` sets `height = auto` and reads `scrollHeight`. That read is a
+  forced layout with the composer collapsed to one row, so the transcript beside it
+  grows. A box at its foot has `scrollTop` clamped to the new, smaller maximum. The
+  height comes back in the same task, and the clamp stays. The same transient
+  also ran on every `visualViewport` resize.
+- `AskCard` reported its height from a passive effect and from its observer. The
+  first update was scheduled at default priority, and the observer's always lands
+  after the frame it fires in. So the card painted over the rows for one frame
+  before the padding moved them.
+- The markdown settle grew content that no commit of `Transcript` saw (Q3.648,
+  cause 2).
+
+**Decision.**
+
+- **`fitToContent` moves to `ui/autosize.ts` and holds its parent's height**
+  (`minHeight = offsetHeight`) while the box collapses to measure. It releases the
+  hold once the new height is written, so layout sees one change of the composer's
+  height per line and never a transient. Its own module so the harness could drive
+  the shipped code. `COMPOSER_MAX_SHARE` went with it, unchanged (Q3.422).
+- **`AskCard` reports from layout effects**: the existing one with its observer
+  and its `(0)` on the way out, plus one on every commit. The padding lands in the
+  frame the card paints, and `useFollow` pins it there. Only growth no commit
+  makes, such as a font or an image, is still left to the observer, a frame late.
+- The streamed re-wrap needs nothing of its own: the content observer in Q3.648
+  pins every settle before paint.
+
+**Rejected.**
+
+- **`field-sizing: content`.** It is not in this WebKit, which is the shipped
+  engine.
+- **Restoring the transcript's `scrollTop` from inside `fitToContent`** (what
+  `autosize` libraries do for ancestors). The transcript is a sibling, not an
+  ancestor, and the composer would have to know the scroller.
+- **`flushSync` in the card's observer.** It would render inside
+  `ResizeObserver` delivery, and the transcript's own observer would then be
+  skipped as a loop past the delivered depth.
+
+**Not verified.** A caret edited mid-draft in a capped box. The harness window
+never takes key focus, so WebKit does not reveal the selection there, and nothing
+was changed for it.
+
+**Status.** Current. `webcheck.follow-and-wrap.ts` pins the hold's order in
+`autosize.ts`, the single copy, and both layout effects in `AskCard.tsx`.
+
+#### Q3.650 — one drag-to-dismiss for every sliding panel, on the touch stream, leaving from where the finger let go
+
+**Symptom.** Reported by the owner from Android: the slide-up panel with the effort or
+plan menu would not close with a swipe, and when it did, it jerked back toward where
+it started and then played its closing animation. The brief that came with it: the
+animations of the slide-out menus are to be standardised and the bugs fixed.
+
+**Cause — measured, not inferred.** Driven in Chromium (Playwright's build, mobile
+emulation at 412×860, real touch input through CDP `Input.dispatchTouchEvent`, so
+`touch-action`, the gesture detector and `pointercancel` are the engine's own) against
+`AgentConfigBar`'s picker as it stood at d7cda6a. Three separate defects, each of
+which reads as "will not close":
+
+- ⚠ **At the full detent the sheet could not be swiped at all.** The rows become
+  `overflow-y-auto` there, so `touch-action` allowed a pan, and a downward swipe on
+  them delivered `pointerdown`, one `pointermove`, then **`pointercancel`**: the
+  engine took the gesture for the list, found nothing to scroll at the top, and the
+  panel's pointer handlers never saw another event. The panel did not move by one
+  pixel, on the four-row effort picker as much as on mode with the model list folded
+  into it (Q3.565) — and pulling to full is what somebody does to see that list. Only
+  the 32px grab bar still dragged, and from there a close needed the full-to-rest
+  distance plus `SHEET_DISMISS_PX`: a 420px pull on effort settled back to rest.
+- **A flick was not a dismissal.** The release read distance only — past 72px below
+  rest — with no velocity. A 60px flick in 60ms, the ordinary way to throw a sheet
+  away on a phone, animated back to rest over 300ms. That is the most likely reading
+  of *jerks back to its initial position*: the panel returning, and a second, longer
+  swipe then closing it.
+- **Where it did close, the exit stalled under the finger.** `sheet-out` ran on the
+  arrival's curve mirrored, `cubic-bezier(1, 0, 0.68, 0.28)` (Q3.567), which starts
+  at zero velocity: measured after a 1.2px/ms flick, the panel moved 713 → 722px in
+  the first 150ms after release — 8% of its travel in 60% of its time — and then fell.
+  A panel thrown downward stopped dead, then left. And the scrim was the panel's
+  **parent**, so `scrim-out` faded the panel too: mid-exit screenshots show the
+  transcript through it.
+
+⚠ **What was not reproduced**: a literal snap to `translateY(0)` before the exit.
+Q3.568's reasoning holds in Chromium — with the offset kept, `sheet-out`'s implicit
+`from` is the drag's transform, both in `getBoundingClientRect` and in painted
+screenshots sampled through the exit. One device-only mechanism is plausible and
+unmeasured: `restH` was measured once at open, and on Android the chip tap blurs the
+composer, the soft keyboard closes after the sheet mounts, and `60dvh` grows under
+`interactive-widget=resizes-content` — so the first stretch of a drag shortened the
+panel instead of sliding it and `below` stayed under the threshold. The rest height
+is re-measured at the start of every drag from rest now.
+
+**Decision.** One gesture and one clock for the four surfaces that slide: the config
+picker, `TaskPanel` below `md`, the routed `Sheet` below `sm`, and the drawer.
+
+- **`sheetMotion.ts` holds the decisions, pure and importing nothing**, so `webcheck`
+  drives them: `sheetRelease` (a fling of `FLING` = 0.5 px/ms toward the exit, or
+  `dismissAt` = `DISMISS_PX` or a third of a short panel; never while flung back),
+  `releaseVelocity` over the last `VELOCITY_MS`, with a stop before lifting counting
+  as no speed, `resisted` for pulling past an end, `claimDrag`, and the picker's
+  `detentAfter`, where a fling picks the detent by direction.
+- **`sheetDrag.ts` is the shell.** ⚠ **A finger is on the touch stream**: the drag
+  reuses `rowDrag`'s `useTouchGesture` — non-passive listeners on the node — and
+  `claimDrag` decides once, past `PRESS_SLOP`: along its axis by `DOMINANCE` (now
+  shared with `machineSwipe`), never against `cancelable === false`, and inside a
+  `data-sheet-scroll` scroller only when it cannot move that way. Claimed, the move is
+  `preventDefault`ed, so the engine never pans and there is no `pointercancel` to
+  lose. A mouse keeps the pointer stream, captured at engage. The click a drag leaves
+  behind is swallowed for 400ms and reset by the next press. `touchcancel` is a
+  cancel, never a release.
+- **A dismissal keeps the offset**, and every exit keyframe has no `from`, so the
+  panel leaves from where it was let go — including the routed sheet, whose close is
+  a navigation: `sheet-close` captures the dragged panel and continues from it
+  (measured, 320 → 611px → gone).
+- **One clock, one curve**: `--sheet-ms` 260ms and `--sheet-ease`
+  `cubic-bezier(0.32, 0.72, 0, 1)` in `index.css`, `SHEET_MS`/`SHEET_EASE` in
+  `sheetMotion.ts`, asserted equal; every sheet, drawer and scrim, arriving and
+  leaving, and the routed `sheet-close` now plays `--animate-sheet-out` rather than
+  the arrival reversed. Exits take the **arrival's** decelerating curve: they start
+  fast, so a flung panel keeps going. The three per-surface backstops
+  (`DRAWER_EXIT_MS`, `SHEET_EXIT_MS`, `TASK_PANEL_EXIT_MS`) and the picker's
+  `SHEET_SETTLE_MS`, `SHEET_DISMISS_PX` and `SHEET_DRAG_STEP` are gone; `webcheck`
+  names each as retired.
+- **The picker is a `useLeaving` caller**, its scrim a sibling. Its geometry is its
+  own — above rest the height follows, past full `resisted`, below rest it slides —
+  but every way to a detent is `settleTo`: pin the height in px, read once to commit
+  it, transition, then hand back to the defaults with nothing animating. The class
+  animates nothing, so the old inline-transition switch and `paintNow`'s rAF are gone.
+- **Pulled the other way, a panel grows rather than lifting** off its edge.
+- **A drag begins where the panel is drawn**: `hold` reads the computed transform,
+  finishes the arrival and cancels a settle, so a grab mid-flight does not jump.
+- **The breakpoint stays in CSS**: `TaskPanel` and `Sheet` gain a grabber
+  (`md:hidden`, `sm:hidden`) that is also the gate, read through `offsetParent` per
+  gesture — the docked card and the dialog never drag. The drawer carries
+  `touch-pan-y`; grips carry `touch-none`.
+- **Reduced motion**: the settle and the exit are CSS, which the blanket block
+  zeroes (inline transitions included, since that block is `!important`); what is
+  written per move is only the finger's own position.
+
+Measured after, same harness: a 64px flick closes and the same 64px over 600ms does
+not; the exit leaves from the release point with no stall; at the full detent a
+downward swipe on the list follows the finger and closes (mode) or settles to rest
+(effort, whose rest is above the release); `TaskPanel` closes from its head and from
+its body at the top; the drawer closes on a 200px swipe left and settles on 50px; a
+routed sheet drags from its head and not its body; taps on rows still choose, for a
+finger and a mouse.
+
+**What was not done.**
+
+- **No drag from a routed sheet's body.** A screen holds its own scrollers, forms and
+  reorder gestures (`MachineAgentsSection`); the head is the grip.
+- **No scrim fade that follows the finger.** A routed sheet's panel is its scrim's
+  child, as the picker's was; fading one would fade the other.
+- **No spring or velocity-matched exit duration.** One curve and one duration keep
+  every close — swipe, scrim, Escape, a chosen row — the same movement; the curve's
+  fast start is what carries a fling.
+- **No `touch-action: pan-down`**, which would have let the list keep a pointer drag:
+  Safari does not implement it, and it cannot say "only while at the top".
+- **Not verified on a real Android device or in WebKit.** The Chromium measurements
+  above use the engine's own touch pipeline; the keyboard-resize mechanism is
+  unmeasured anywhere.
+
+**Status.** Current. Supersedes Q3.567's mirrored exit curve and the per-surface exit
+constants of Q3.566–Q3.568 and `docked-panels.md`; amends Q3.568's drag (the touch
+stream, the release rule and the settle) while keeping its two detents, its geometry
+on custom properties, and its kept offset. Amended by Q3.651: a drag is one composited, device-pixel transform per frame, and the routed sheet drags from anywhere.
+
+#### Q3.651 — a moving panel is one composited transform per frame, and New session drags from anywhere
+
+**Symptom.** The owner tested Q3.650 on an Android phone: the swipes worked. But
+(a) the grab bar at the top of the Mode picker *flickered unpleasantly while the
+panel moved, as if it were being repainted during the movement*; (b) New session
+likewise *jerked, as if repainted,* when moved up or down; and (c) New session moved
+only by its top edge, while the effort and model pickers could be dragged from
+anywhere — *make it the same*.
+
+**Cause — measured, not inferred.** The same Chromium harness as Q3.650
+(Playwright's build, mobile emulation at 412×860 and DPR 2.625, real touch through
+CDP `Input.dispatchTouchEvent`), now with a trace (devtools.timeline, cc), the
+LayerTree domain, and a React commit counter installed through the DevTools hook.
+One 30-move drag per case, at Q3.650's code:
+
+- **React was not it**: 0 commits during every drag. Q3.650 had already taken the
+  gesture out of React.
+- ⚠ **Every move repainted the whole viewport.** 55 main-thread Paint events per 30
+  moves, each clip 412×860, plus a Layerize per frame — 25–30ms on the picker and
+  76–83ms on a 300-row stand-in for New session, on a desktop CPU; a phone is several
+  times slower. The panel *was* its own layer, but for Overlap only: a 2D
+  transform written inline is not a composited transform, so under
+  CompositeAfterPaint each new offset was baked into paint and re-rasterised.
+- ⚠ **The bar flickered because it was re-rasterised at a new sub-pixel phase every
+  frame.** A finger's offsets are fractional, and at DPR 2.625 the 4px bar is 10.5
+  device pixels, so each frame drew its edge rows differently. Captured at device
+  scale with the clip aligned to the bar's own device row, its pixels changed by up
+  to **94/255** between frames while sliding, and **140/255** while the picker
+  expanded.
+- **Upward was a layout per move.** Past open, `useSlideSheet` grew the panel's
+  height — 25 Layouts, 35ms of PrePaint and 74ms of Paint for 30 moves on the
+  New session stand-in — and the picker's expand branch wrote `--sheet-h` per move,
+  an inherited custom property, so every row under it restyled (18ms of
+  UpdateLayoutTree against 7ms sliding).
+- **The rest was ruled out**: nothing display-toggles the grabber (the gate reads
+  `offsetParent`, never writes it); no `leaving` or animation class changes
+  mid-drag (0 commits); the scrim was not repainted apart from the whole-viewport
+  paints above; the view-transition path runs only at close.
+
+**Decision.**
+
+- **The panel is promoted for the gesture**: `hold` sets `will-change: transform` at
+  engage and `letGo` clears it once the settle is still. Its layer reason becomes
+  WillChangeTransform, and a move is a compositor property update.
+- **Offsets are whole device pixels** (`slide`), so the bar's raster never changes
+  phase.
+- **One write per frame**: moves go into `pending` and a single
+  `requestAnimationFrame` writes the last one; a release flushes first, so the
+  offset the exit leaves from is the last one the finger reached.
+- **Nothing is resized while a finger is down.** A plain panel **stops at open**
+  rather than growing past it (Android's own bottom sheets stop at their expanded
+  edge). The picker is **laid out at the full detent once, at engage** (`stretch`),
+  and both branches are then one formula: `fullHeight() - shows` as a translate.
+  `settleTo` moves only the transform, then in one write trades it for the detent's
+  defaults, so the edge stays put (measured continuous to 0.14px at engage and at the
+  hand-off). `resisted` and `RUBBER_PX` are gone.
+- **`transition` is held at `none`, never cleared.** Found while measuring reduced
+  motion: `index.css`'s blanket block gives every element a `0.01ms !important`
+  transition-duration, and with the default `transition-property: all` every inline
+  write became a transition whose first frame is the old value — at engage one frame
+  drew the picker at 516px tall and untranslated, 259px above where it was.
+- **`Sheet` drags from anywhere on the panel.** The grip option is gone. The scroller
+  handoff is now found rather than marked: at the first move past the slop,
+  `scrollerOf` walks from the finger to the panel for a computed `overflow-y` of
+  `auto` or `scroll`, and `claimDrag` hands the drag over only at that scroller's
+  edge. `data-sheet-scroll` is gone, since every screen in a routed sheet has
+  scrollers nobody would remember to mark.
+- **What stays the screen's own**:
+  - a tap is not a drag (the `PRESS_SLOP`, and the engine's own tap slop);
+  - a finger held past `PRESS_MS` before moving is left alone — a text selection, or
+    a row's own hold-to-drag inside settings;
+  - a move an inner gesture already `preventDefault`ed is not argued with;
+  - a mouse pressed on an input, textarea, select or contenteditable, or inside a
+    scroller, is editing or selecting.
+  The centred dialog above `sm` still never drags, because its grabber is
+  `sm:hidden`.
+
+**Measured after**, the same drags, with the panel's layer reason now
+WillChangeTransform.
+
+| Drag | Paint (whole drag) | Layout |
+|---|---|---|
+| Picker, down | 55 → 3 (at engage only) | 1 |
+| Picker, up | 51 → 3 (at engage only) | 26 → 1 |
+| New session stand-in, down | 55 → 3 | 0 |
+| New session stand-in, up | 51 → 3 | 25 → 0 |
+
+The bar's frame-to-frame pixel change went to **0/255** in both directions.
+Behaviour is unchanged elsewhere:
+- a flick closes; a slow short drag stays;
+- a full picker closes from its list at the top;
+- rows are still chosen by a finger and a mouse;
+- `TaskPanel` and the drawer close and settle as before;
+- a drag during the arrival continues from where the panel is drawn;
+- a routed sheet's `sheet-close` still leaves from the dragged offset.
+
+The routed sheet, driven from its body:
+- at the top, a downward swipe closes it;
+- scrolled 400px down, the same swipe scrolls the list and the sheet stays;
+- upward, the list scrolls;
+- a tap on a row delivers its click, and a tap on the field focuses it;
+- a 600ms hold then a swipe does nothing to the sheet;
+- a mouse drag from the field keeps focus and selection;
+- at 1100px the dialog does not move.
+
+**What was not done.**
+
+- **No rubber band.** Keeping one without a height per move needs the panel laid
+  out taller than the screen, or a gap under a lifted panel; neither was worth a
+  48px give that Android's own sheets do not have.
+- **Nothing ties its own settle to `transitionend`.** The timers stay: an event that
+  never arrives would keep a layer promoted indefinitely.
+- **The picker's bottom edge changes once at engage on a long list.** Laid out at
+  full, the rows run to the screen's edge where the panel's bottom padding was;
+  checked in screenshots, it is the last row's lower strip and nothing else.
+- **The blanket reduced-motion block is not changed.** Its `transition-property:
+  all` side effect reaches every element in the app; only the panels here now opt
+  out of it, with `none`.
+- **Not verified on a real Android device, in WebKit, or against the real New
+  session screen**, which needs a signed-in fleet; the stand-in has 300 rows,
+  buttons and a field.
+
+**Status.** Current. Amends Q3.650: the plain panels' upward growth, `resisted`, the
+routed sheet's head-only grip and the `data-sheet-scroll` mark are gone, and a
+drag's writes are composited, snapped and batched. Its release rule, clock, curve and
+kept offset are unchanged.
+
+#### Q3.652 — your own answer takes a line break, and Enter still moves the card on
+
+**Symptom.** The owner, 2026-09-24 (translated): *"When typing my own answer option,
+for some reason you can't insert a line break — make it possible."*
+
+**Cause.** The box under a question was an `<input type="text">`, which cannot hold a
+newline at all: WebKit strips one from a paste and Enter types none. Enter did not do
+anything else either, because the card is not a `<form>` and nothing on it read the
+key. So neither Enter nor the composer's Shift+Enter did anything. The same held for
+every string an MCP form asked for unless its `maxLength` was over 240. The old rule
+said an unbounded string is one line because *"the commonest is the adapter's Other
+box"*, and that box is exactly the one this report is about.
+
+**Decision.**
+
+- **A string with no `format` may hold lines.** `RenderKind.text.multiline` is now
+  `format === null`, and `rows` is the height it starts at: three past
+  `TALL_ABOVE` (240, the old threshold, which now decides height only), otherwise one.
+  A `format` (`email`, `uri`, `date`, `date-time`) names a single token, so it stays an
+  `<input>`. A number stays an `<input>`. `TypedAnswer` draws both kinds, in the row
+  under a question and as a form's own field.
+- **It grows through `fitToContent`**, the composer's one autosize, from a layout
+  effect keyed on the value and on a window or `visualViewport` resize. Q3.649's
+  parent hold comes with it, so the scroller holding the card never clamps while the
+  box collapses to measure. The same frame's commit is what `AskCard` reports its height
+  from. The composer's cap (`COMPOSER_MAX_SHARE`) comes with it too; past the cap the box
+  scrolls inside itself.
+- ⚠ **The box is borderless inside a bordered one.** `fitToContent` writes
+  `scrollHeight`, which does not include a border. A bordered textarea sized that way is 2px
+  short and clips its last line under `overflow: hidden`. The row already works this
+  way, with the border on the `<div>` and none on the control. A form's own field now
+  does the same: `border border-edge bg-raised` on the wrapper, `border-none` on the
+  box.
+- **The row keeps its geometry.** `NO_RING`, `min-w-0 flex-1`, the mark, `askRowTone`,
+  `min-h-11`. `py-3` makes one line 44px, the mark's own height, so an empty or one-line
+  row is 46px outside its border, as it was. `items-center` became
+  `items-start`: the mark stays level with the first line as the box grows, which is
+  where `OptionRow`'s mark sits.
+- **Enter is the composer's rule, through `answerKey` in `keys.ts`.** It is
+  `enterSends && shouldSend(event)`: `composerKey` with no menu, IME guard included.
+  - On a keyboard, Enter is Next or Submit and Shift+Enter is the newline.
+  - On a coarse pointer, Enter is the newline and the button advances, since a phone
+    has no Shift.
+  - The pointer is read with `matchMedia` at the keystroke, as the composer reads it.
+  - Enter and the button are **one action behind one gate** (`advance`,
+    `advanceBlocked`), so Enter can never do what the button would refuse. When the
+    button would refuse, Enter on a keyboard is swallowed rather than typing a
+    newline, as the composer's Enter is when Send is refused.
+  - The number field and a formatted `<input>` take the same handler. On a keyboard,
+    Enter moves the card on from any box you type in. On a phone it does what it
+    already did in an `<input>`, which is nothing.
+- **What is sent keeps its lines.** `elicitationAnswer` passes the draft through
+  `sentText`, which drops the blank lines before it and the whitespace after it.
+  - If what is left holds a newline, it is sent as lines: every inner line, blank
+    lines included, and the first line's own indentation.
+  - If it is one line, it is trimmed as before.
+  - `min` and `max` measure the value that is sent. Whitespace alone is still no answer.
+- **The settled row already draws it**, as `whitespace-pre-wrap` (Q3.646), and the
+  daemon passes the string through untouched: `validateField` measures it,
+  `renderAnswers` copies it, and `clip` only shortens it. None of that changed.
+
+⚠ **This amends Q3.646's rejected alternative** *"Trimming the ask card's free-text
+answer like a message"*. Its reason was that *"a single-line box's leading space is
+never content"*, and that still holds: a single line is still trimmed. What changed
+is that the box is no longer single-line. Q3.646's argument for `sentText` is that
+taking the indentation off the first line of a pasted block, while keeping it on
+every other line, changes the content. That argument applies exactly when there are
+other lines, so the rule keys on the newline and not on the field.
+
+**Measured**, in a `WKWebView` on macOS with the built stylesheet. The harness page
+draws the card's row and a form field with `TypedAnswer`'s classes, wires the
+shipped `answerKey`, `shouldSend` and `fitToContent` (type-stripped from `keys.ts`
+and `ui/autosize.ts`), and types with real keyDown NSEvents:
+
+| Keys (390px unless said) | Value | Advanced | Box | Overflow |
+|---|---|---|---|---|
+| `line one` ⇧↩ `line two` ⇧↩ `  indented three` ↩ | three lines, the indentation kept | once, no newline added | 84px (3 × 20 + 24), `scrollHeight` = `clientHeight` | none |
+| the same with ↩ only, pointer reported coarse | three lines | never | 84px | none |
+| ten lines in a form field | ten lines | never | capped at 136px (22% of a 620px window), `overflow-y: auto` | none |
+| a 75-character unbroken token, then words | wrapped inside the box | never | 84px | none |
+| empty | | | row 44px (46 with the border); field 40px centred in 44 | none |
+| `one line` ↩ at 700px | | once | 44px | none |
+
+In every run the document's `scrollWidth` equalled its `clientWidth` and the
+scroller's `scrollWidth` equalled its own `clientWidth`, and `outline-style` was
+`none` (Q3.645 still holds).
+
+**Rejected.**
+- **Enter always inserts a newline, and a chord (⌘↩) advances.** That is safe, but it is
+  a second rule beside the composer's, in the one other box in this app where
+  somebody writes to the agent, where Shift+Enter is already the newline.
+- **A second autosize, or teaching `fitToContent` to add the border.** The first
+  duplicates Q3.649's hold. The second changes the composer's measure for a box that
+  needs no border of its own.
+- **Deciding lines by `maxLength`** (the old rule). A length says how much, not
+  whether a newline is allowed, and the box this report is about has no length at all.
+
+**Not verified.** An IME commit in WebKit: the harness does not switch input source.
+`answerKey` refuses `isComposing`, which `webcheck` pins, and the card forwards
+`nativeEvent.isComposing` exactly as the composer does. The shipped React component
+was not mounted; the harness used its classes and the shipped functions. Focus after
+Enter advances a step lands on the document, because the box it was in unmounts.
+The digit shortcuts still answer from there; where Tab goes next was not measured.
+
+**Pinned** in `webcheck.elicitation-and-links.ts`:
+- `answerKey`'s table: keyboard ↩, ⇧↩, a soft keyboard's ↩, an IME commit, the
+  chords.
+- The card asks it with the pointer read at the keystroke, reads no `"Enter"` of its
+  own, and every `<input>`/`<textarea>` on it takes the handler.
+- The button and Enter share `advance` and `advanceBlocked`.
+- `fitToContent` runs from a layout effect and on both resizes, and the card has no
+  `scrollHeight` or `style.height` of its own.
+- Both `TypedAnswer` call sites are `border-none`, and the row is `items-start`.
+- An unformatted string holds lines (the Other box `[true, 1]`, a 4000-character
+  field `[true, 3]`, a 20-character one `[true, 1]`), a formatted one is `[false, 1]`,
+  and a number is a number.
+- A typed answer is sent with its lines and its first line's indentation, a single
+  line's ends still go, and whitespace alone is no answer.
+
+Each was checked by breaking the code: the box losing its Enter, `items-center`
+back, a bordered box, Enter advancing on a phone, plain `trim()`, and the button off
+the shared gate each fail the run. `webcheck.history-and-cursor.ts`'s floor for the
+card's own-answer placeholders moved from three to two: one component now draws
+every typed answer, as lines or as one line.
+
+**Status.** Current. Amends Q3.646 (the ask card's answer), and the one-line rule
+for unbounded strings that `webcheck` had pinned for the Other box.
+
+#### Q3.653 — a message sent while the agent talks is drawn once, and a pinned conversation only ever moves one way
+
+**Symptom.** Reported by the owner after 0.8.x shipped to macOS and Android:
+"Sometimes when I send a message while the agent is typing its answer, the whole
+screen jerks and sometimes blinks."
+
+**Measurement.** A harness bundled the *shipped* modules: `store.ts` (`onEvents`,
+`promptLanded`), `echo.ts`, `EventList` with `UserBubble`, `hug.ts`, `Markdown`'s
+settle and the working line, `useFollow` and `fitToContent`, all on the built
+stylesheet. It drove a send into a streaming answer. The socket and the POST were
+ordered as the daemon orders them: `sendMidTurn` calls `recordPrompt` before it
+awaits `session.steer`, so the `prompt` event is on the socket before the POST can
+answer. It ran in a WKWebView (macOS 15.6, WebKit 605.1.15) and in Chromium 151,
+at 420×800 and 390×844. Each painted frame recorded `scrollTop`/`scrollHeight`,
+how many bubbles carried the sent text, the screen position of a row above the send
+(read after `useFollow`'s observer had pinned), and the identity of the column,
+the streamed run and the foot.
+
+It was measured on the integrated tree as deployed, then with the changes below.
+
+| scenario | as deployed (WebKit / Chromium) | changed |
+|---|---|---|
+| steered, socket first, POST 60ms later | message drawn **twice for 4 / 4 frames**; a pinned reader dropped **112px** when the echo went | once; motion one way only |
+| steered, POST 150ms later | twice for **9 / 11 frames**; dropped **84px** | once; one way |
+| typed 4-line draft, steered, POST 80ms | twice for **5 / 7 frames**; dropped **96px** | once; one way |
+| queued, POST 20ms later | twice for 1 / 2 frames; dropped 74px (Chromium) | once; one way |
+| queued, the pump's two snapshots 20ms apart | working line **gone for 1 / 3 painted frames**: 20px down, 26px back up | never gone |
+| any turn ending while pinned | **20px down** as the working line left, then (Chromium) **22–44px up** as the last settled text landed | no down-move |
+| POST first | once; the turn-end drop only | once; one way |
+
+Nothing else moved: the column, the streamed run's node and the foot kept their
+identity. No frame was painted off the foot, *latest* never appeared, and the
+bubble's hugged width was the same for the echo and for the row that replaced it
+(305px WebKit, 296px Chromium). A cancel's row still lands 6px above where the
+working line stood, as it did before.
+
+**Cause.** There were three, all in the send-while-working path.
+
+1. **The echo was settled by seq alone** (`settleEcho`), and the seq arrives with
+   the POST. For a steered message the POST answers only after `session.steer`
+   returns, and the prompt event is already on the socket by then. So between the
+   event and the answer, `EventList` drew the landed row *and* the echo below it.
+   That is the "blink": a second copy of the message for 70–190ms. When the answer
+   came, the echo left, and a conversation pinned to its foot dropped by the
+   bubble's height: the "jerk". Q3.436 had accepted the doubled state as the
+   common case and bounded it by the POST, which a steer makes long.
+2. **The pump fans a turnless snapshot out before it delivers a queued message.**
+   `touchSafe()` is called before `deliverQueued()`, so one snapshot says no turn
+   with the queue still full, and the next says a turn with the queue empty. When
+   those two socket frames straddle a frame, `showsWorking` is false for that frame
+   and the working line is removed and re-added.
+3. **The working line added its own 20px to the transcript's foot.** Its arrival
+   and departure at a turn's edges moved a pinned reader by that much. At a turn's
+   end the last `Markdown` settle, 150ms behind the stream, then pushed them back
+   up.
+
+**Decision.**
+
+- **`claimEcho`** in `onEvents`, before `settleEcho`. The echo is settled in the
+  commit its own `prompt` event lands in. `isEchoOf` accepts only a `prompt` with
+  a seq past `after` and not past a seq the daemon named, with the same text and
+  the same upload ids in order. `after` comes from **`sendFloor`**, which is the
+  newest seq held at the send, raised past an earlier landed send whose event is
+  still on the socket. So sending the same words twice is not taken for the
+  earlier message. The seq path stays for the POST-first order.
+- **`deliversQueued`** (in `wire.ts`): a waiting message with nothing holding it is
+  work, *for the transcript's working line only*. `SessionView` ORs it into
+  `working`. `Composer` still reads `showsWorking`, so no gate moves.
+- **`keepsFootSlot`** (in `EventList`): while the working line is silent its
+  `h-5` room is kept, and with no card the column's own 48px foot pays for it
+  (`calc(48px - 1.25rem)`). So the line coming and going changes no height. There
+  are two exceptions. Under a card the foot is the card's (`askHeight +
+  ASK_CLEARANCE`), and a slot would sit in its clearance. Under a cancel, the
+  cancel's row takes that room as the working line did (Q3.437), so the cancel
+  still lands where the line was.
+
+**Rejected.**
+
+- **Settling on text alone.** Without the floor, an earlier identical message's
+  late event would take the new echo, and the conversation would lose a bubble for
+  a moment.
+- **A client nonce carried into the prompt event.** That would be exact, but it
+  is a daemon and wire change with a compatibility row, for a window the floor
+  already closes.
+- **Reordering `touchSafe` and `deliverQueued` in the pump.** Delivery being the
+  last statement is a daemon rule, `mid-turn-messages.md`'s, and the client can
+  read the gap honestly.
+- **Keeping the slot always, card or not.** It put the working line into the
+  card's 20px clearance.
+
+**Known and left.**
+
+- The *Waiting for the agent to finish* line leaves when a queued message is
+  delivered, and that moves a pinned reader down by its height, once. That is the
+  information itself.
+- An identical message sent from another tab inside the window can claim this
+  tab's echo early, which is the log's own row replacing it.
+- An idle transcript that ended in a cancel has 34px under the cancel line rather
+  than 54px.
+- The composer's chips still fade while the POST is out (`disabled={busy}`,
+  Q3.412). That is a candidate for the "blink" on a slow steer, and it is untouched
+  here because it is a stated decision.
+
+**Status.** Current. `webcheck.follow-and-wrap.ts` pins `isEchoOf`, `claimEcho`,
+`sendFloor`, `deliversQueued` and `keepsFootSlot` as tables. It pins as source that
+`onEvents` claims before it settles, that the composer's echo carries its floor,
+that the transcript reads `deliversQueued`, and the foot's `calc` and slot.
+
+#### Q3.654 — Send and Stop swap rather than jump, and only the arriving one can be pressed
+
+**Symptom.** The owner, 2026-09-24 (translated): *"The Send button turns into Stop
+and back instantly, whereas in Claude Code it disappears with a fairly quick
+animation and a new button appears. Do the same."* The swap is frequent: the slot
+follows the draft rather than the turn (Q3.601), so typing the first character
+mid-turn or deleting the last one flips it, and since Q2.233 an autonomous cycle
+flips it with nobody typing.
+
+**Decision.** `SendSlot` owns the slot and stacks its four occupants — Send, Stop,
+the sending spinner and the stopping spinner — in one 32px grid cell. A swap keeps
+the old occupant drawn *under* the new one while it fades to nothing and shrinks to
+0.6; the new one fades in over it, and its glyph grows from half size. Both run on
+`rise`'s clock, `SWAP_MS` (140ms), arriving `ease-out` and leaving `ease-in` — the
+popover's `rise`/`rise-out` pair, not a new motion token. The composer row keeps
+its width because every occupant is the same 32px circle (Q3.560) and the cell is
+fixed.
+
+`slotSwap.ts` is the state, as pure functions: `slotOccupant` is the decision the
+nested ternary in `Composer` used to make; `swapTo` and `exitEnded` are what is
+drawn; `refocusBox` is where focus goes.
+
+- **One live occupant, always exactly one.** Each leaving occupant carries the swap
+  that sent it out. A flip back mid-exit takes the returning one *out* of the
+  leaving list, so nothing is drawn twice (Send → Stop → Send leaves Send live and
+  Stop fading). An exit clears only its own entry, so a late `transitionend` from an
+  earlier swap cannot clear a later one. `webcheck` walks every four-swap sequence
+  (341 of them) with every mix of animated or jumped and ended or not: one live
+  occupant, never also leaving, never listed twice, at most three fading.
+- ⚠ **The arriving layer only fades; its box never scales.** Scaling the arriving
+  button would shrink its hit box for the first frames, so a tap on its rim would
+  land on nothing. The glyph scales instead (`.swap-in svg`), and the layer is on
+  top (`z-1`). The *leaving* layer shrinks freely: it is `inert`, `aria-hidden` and
+  `pointer-events-none`. What it draws can do nothing even if something reached
+  it — Stop has no handler, and Send is `type="button"`, so a fading Send is never
+  the form's default button.
+- **A leaving Send is drawn as it last was.** The change that takes Send away has
+  usually disabled it in the same render — an emptied box — so drawing it with the
+  current props would dim it to 40% at the start of its exit. The look is kept from
+  the render before the swap; measured, the leaving Send read not disabled.
+- **The swap is decided in a layout effect**, so no frame paints the old occupant
+  live and the focus is read while the old DOM still holds it. The layers render in
+  a fixed order (`SLOT_ORDER`): a keyed reorder would move a node, and a moved node
+  restarts its transition from `@starting-style`.
+- **Focus.** If the control taken away held focus, focus goes to the message box on
+  a fine pointer and stays where the browser leaves it on a coarse one. The coarse
+  case is `shouldFocusComposer`'s rule: a phone would raise the keyboard. Focus
+  never goes to the arriving control: Space held or pressed twice on Send would
+  then stop the turn it had just started.
+- **Jumps.** Reduced motion is read at the swap (`matchMedia`, as the pointer is at
+  the keystroke), and a session switch is another session's slot. Neither leaves
+  anything fading. The global reduced-motion rule in `index.css` covers the CSS
+  half as well.
+
+**Measured** 2026-09-24 in a WKWebView on macOS 15.6. The real `SendSlot` was
+bundled with React and the built stylesheet, and driven by state changes from the
+page. The harness window had to turn WebKit's window-occlusion detection off: an
+occluded page pauses transitions and throttles timers, and the first run read
+opacity 0 throughout.
+- Send→Stop: at 0ms Send 1.00 and Stop 0.00; at 35ms 0.90 and 0.40; at 75ms 0.61
+  and 0.75; by 300ms one layer, Stop at 1.00.
+- elementFromPoint at the centre and 13px out on both axes hit Stop from the first
+  frame.
+- A click dispatched on the hit element 20ms into Send→Stop stopped the turn and
+  submitted nothing (stops 1, submits 0); 20ms into Stop→Send it sent and stopped
+  nothing (submits 1, stops 0).
+- The leaving layer read `aria-hidden="true"`, `pointer-events: none`, and a Send of
+  `type="button"`, not disabled.
+- Stop→Send→Stop within 30ms: one live layer, and the reversal continued from 0.33
+  and 0.93 rather than restarting.
+- Send→sending→Stop within 40ms: three drawn, one live, and one left at the end.
+- A focused Send taken away left focus in the textarea.
+- A session switch, and `prefers-reduced-motion` (stubbed at the swap): one layer,
+  at 1.00.
+
+**Claude Code's own values were not read, and the ones here are chosen.** There is
+no Claude desktop app on this machine. The CLI (`~/.local/bin/claude`, 2.1.281) is a
+terminal UI with no such button. No browser cache here holds claude.ai's
+assets, and `claude.ai` answered 403 to a direct fetch. So 140ms and the
+fade-and-shrink are this app's own small-element motion, within the 120–200ms the
+brief described.
+
+**Rejected.**
+- **Keyframe animations**, considered first and not built: a reversal mid-exit
+  restarts from the `from` keyframe, so a rapid flip pops. Transitions continue
+  from where the value is. The cost is `@starting-style` for the arrival: an engine without it
+  (WebKit before 17.5) draws the arriving occupant at once, over a leaving one it
+  then hides — a jump, never a broken state.
+- **Scaling the arriving button**, for the rim reason above.
+- **Keeping at most one leaving occupant.** Send → sending → Stop inside one swap
+  is the ordinary send on a fast daemon, and 40ms into its exit Send still reads
+  0.87 (measured, `ease-in` barely moving it), so dropping it there would make it
+  vanish while nearly opaque.
+- **Ignoring a Stop click that is the second of a double-click** (`detail > 1`).
+  That would close the one hazard this does not: a double-click on Send whose
+  prompt returns before the second click, which then lands on Stop. It cannot be
+  told apart from somebody clicking Stop quickly and repeatedly after sending,
+  because the count keeps rising while the clicks keep coming. The hazard predates
+  this entry: the sending spinner covers the round trip, and nothing here widens it.
+
+**Status.** Current.
+
+#### Q3.655 — swiping between machines turns a page, as Telegram's folders do
+
+**Symptom.** Reported by the owner from a phone: the slide between machines is jerky.
+*"It slides where I want, but then it just returns to the initial state and
+teleports to the new folder. It should be like Telegram: smoothly go on into the
+neighbouring folder."*
+
+**Cause — read in the code, then measured.** Q3.621 shipped *"a nudge and a swap"*:
+the list's wrapper followed the finger up to `CAP`, 96px, and on release
+`onEnd` called `settle()` — a 160ms transition back to 0 — and *then*
+`selectMachine`. Driven in Chromium through the real `SessionBrowser` (Playwright's
+build, mobile emulation at 412×860 and DPR 2.625, touch through CDP, 3 machines × 40
+sessions), sampling each machine's first row every frame for a 200px swipe left:
+
+- alpha's row went 50 → −46px and stopped there, a quarter of the finger's travel;
+- beta was never drawn during the drag;
+- at release, in one frame, beta's rows replaced alpha's **at −46px**, and then slid
+  back **rightward** to 50px, against the swipe.
+
+That is the report exactly: the list returns the way it came, and the new folder
+teleports in.
+
+**Decision.** A page turn. The neighbouring machine's list slides in beside this one,
+both move with the finger, and the release carries the pair on to the neighbour or
+back home.
+
+- **The rule is the sheets', on its side.** `pageTurn` is `sheetRelease` with the
+  list's offset and velocity toward the neighbour it reveals: a fling (`FLING`), or
+  `DISMISS_PX` slowly, and never while flung back. `pageOffset` lets the list follow
+  up to a whole page, and not at all toward a side with no neighbour: Telegram's
+  pager does not rubber-band its ends, and a give that turns nothing is a promise
+  the release breaks.
+- **The sheets' clock and curve** (`SHEET_MS`, `--sheet-ease`). A page turn covers at
+  most one width, which is less than a sheet's height, so there is no case for a
+  separate token. The curve's fast start is what carries a fling on.
+- **The page that moves is the scroller itself**, inside a new window that clips it.
+  The bare wrapper Q3.621 moved sat *inside* the scroller, and a translated child
+  overflows a vertical scroller sideways and makes it scroll horizontally.
+- **Round 2's rules apply** (Q3.651): one composited transform per page per frame,
+  batched on `requestAnimationFrame`, snapped to device pixels (`snap`, now exported
+  from `sheetDrag.ts`), `will-change` only for the gesture, and `transition` held at
+  `none`, never cleared.
+- ⚠ **The turn commits in one task.** `flushSync` selects the machine and unmounts
+  the neighbour; the scroller goes to its top and back to 0; only then does anything
+  paint. Measured: beta's first row sits at 50px in the last frame of the slide and
+  at 50px in the first frame after the commit.
+- **The neighbour is mounted for the gesture only, cut to a screen, and it is a
+  picture.** That answers Q3.621's reason for taking the two-page turn back out —
+  both lists mounted at once on a rail designed around one:
+  - `BesidePane` draws `ListBody` for the neighbour's view, `inert`, `aria-hidden`
+    and without pointer events, so `visibleRows`, the keyboard and `waitingFloor`
+    never see it, and neither does a screen reader;
+  - `takeRows` cuts it to the rows one screen can show, measured once per gesture
+    at `ROW_FLOOR_PX`: 19 rows of a 300-row machine;
+  - it mounts once per direction, synchronously, so it exists before the first
+    frame that shows it, and it is gone at the commit or the give-back.
+- ⚠ **The neighbour is a store the pane alone reads, not state in
+  `SessionBrowser`.** As state, mounting it re-rendered the whole current list, and
+  the engage grew with the list: 28.8ms at 40 rows, 50.6ms at 300 (development
+  React). As a store the engage no longer depends on the current list's length.
+- **The tab's underline travels with the page**, measured once per neighbour and
+  moved as a composited transform, and hands over to the new tab's own underline at
+  the commit (measured: 70 → 158px, then beta's own at 158px). **Not toward All**,
+  which sits outside the scroller the machine tabs are in and would clip it; there
+  it switches at the commit.
+- **What stays as Q3.621 made it**:
+  - the layout gate, read through the strip's `offsetParent` per gesture;
+  - the 24px edge bands left to the platform's Back;
+  - `SWIPE_SLOP` as `PRESS_SLOP`, and `DOMINANCE`;
+  - standing down while a row drag is armed;
+  - `selectMachine` with no route, no history entry and no view transition.
+  - Under reduced motion nothing follows and nothing mounts, and the release still
+    turns the page, in place.
+- **Also new**: a touchcancel gives the page back, and a new touch lands a turn
+  still in flight rather than grabbing it.
+
+**Measured after**, same harness:
+- **Turns and gives back:**
+  - a 200px swipe turns the page with both lists moving together;
+  - 60px slow gives it back;
+  - an 80px flick turns it.
+- **Ends:** from All a drag right moves nothing, and from the last machine a drag
+  left moves nothing.
+- **Unchanged gestures:**
+  - a vertical swipe still scrolls the list;
+  - a tap on a row still opens it;
+  - a turn from a list scrolled 600px lands the new machine at its top.
+- **Per move:** 0.07–0.1ms median touchmove handling, one layout and a handful of
+  paints for the whole drag, and a constant 2 React commits at the engage and 2 at
+  the turn, whether the drag has 4 moves or 40.
+- **The engage**, production build, 300-row machines:
+  - the neighbour cut to a screen: 9.5–18.5ms of script and 1.0ms of layout;
+  - mounted whole: 12.7–22.4ms of script and 6.3ms of layout.
+
+**What was not done.**
+
+- **No neighbour on both sides at once.** Only the side the finger moves toward
+  mounts, and it is remounted if the finger turns back. Both would double the
+  engage for a direction the gesture may never take.
+- **No per-machine scroll position.** Telegram keeps each folder's; a turn here
+  lands at the top, which is what the neighbour showed while it slid in. A tab tap
+  still keeps the offset it had.
+- **The engage is not free.** On a phone, 10–19ms of desktop script is likely a
+  frame or two at the instant the finger crosses the slop, before anything has
+  moved. Pre-mounting the neighbours at rest would remove it, at the cost of a
+  second list for every screen nobody swipes.
+- **Not exercised in the harness:**
+  - a row's hold-to-drag, which does not arm under CDP touch in the harness at this
+    code or at the baseline;
+  - a real Android device;
+  - WebKit.
+- **docscheck's one other failure is not this change's.** keyDown, cited near line
+  25105 of `docs/DECISIONS.md`, resolves to no source file in the baseline tree either.
+
+**Status.** Current. Reverses Q3.621's *"deliberately not Telegram's two-page turn"*
+and its 96px cap. The rest of Q3.621 stands. Amended by Q3.656: the underline is a pill that travels on every change of tab, toward All too. Amended by Q3.667: `BesidePane` became `BesidePanes`, one per page of a strip, and a turn commits only at rest, so a flick during a settle carries the pages on.
+
+#### Q3.656 — the selected machine is a pill, and it never teleports
+
+**Symptom.** The owner, after Q3.655 shipped:
+
+> *"See, in Telegram, while paging, the element that marks the currently selected
+> folder moves together with the page. Make the element the same shape — not an
+> underline — and implement the same mechanism, so the selection never teleports."*
+
+Telegram's strip, in the owner's reference mid-swipe, marks the selected folder with
+a soft filled pill behind the label. The pill sits between the two tabs, its
+position and width set by the page's progress. Here it was:
+- a 2px underline under the selected tab;
+- carried with the page by Q3.655 but switched at the turn;
+- never carried toward All, which sits outside the machine tabs' scroller, so the
+  scroller clipped it;
+- on a tap, not animated at all.
+
+**Decision.** A pill, and a traveller for every change of tab.
+
+- **At rest the pill is the selected tab's own.** `TabLabel` is an `h-8`
+  `rounded-full` span behind the label, `bg-raised` when selected. So a strip
+  scroll, a reorder, a resize, a font load, a machine arriving or leaving, and a
+  first render all carry it with no code, and none can animate it from nowhere.
+  - Measured: during a reorder drag, the selected tab moved 96px and its pill moved
+    the same 96px.
+- **Why `raised`.** Q3.209 spends `raised` on *"a tab you are on"*. `tabPill` in
+  `bits.tsx` already draws its selected pills with it. And it is what a selected
+  menu row and a toggle that is on use. The blocked count stays `bg-fg` with
+  `text-ink` on top of it, readable on `raised` as on `ink`. Nothing else in the
+  palette was spent.
+- **Every change of tab is a trip.** `useTabPill` reads the strip, the scroller and
+  both tabs once. It then sets `data-pill-travel`: an unlayered rule in `index.css`
+  stands every tab's own pill down. A traveller runs from one tab to the other and
+  hands back to the new tab's own pill at the identical rect.
+  - A swipe drives the trip by the page's progress and settle (`machineSwipe`).
+  - A tap, a key or a fallback drives it from `MachineTabs`' layout effect, before
+    the new tab's own pill can paint. It never starts a second trip while a page
+    turn already carries one (`turning`).
+  - A trip that overtakes another starts from where the traveller is drawn that
+    moment. A second tap used to finish the first trip at its end: a jump the
+    length of what was left.
+- ⚠ **The traveller lives in the strip's coordinates, because All does not
+  scroll** — Q3.610 keeps it on screen as the scope of fleet-wide search — **and
+  the machine tabs do.**
+  - Each end is placed at the scroll of the moment and clipped to the scroller's
+    visible box (`clipSpan`), so the pill crosses into All freely and is never
+    drawn outside the strip.
+  - Putting it inside the scroller's content, as proposed, is exactly what clipped
+    it at All last time.
+- **Three pieces, transforms only.** Two `h-8` caps that only move, and a `w-16`
+  middle that moves and stretches between their centres (`pillPieces`), so the ends
+  stay round at any width with no layout per frame. A single `scaleX` would have
+  made them elliptical in flight, and animating `width` is a layout per frame.
+  Snapped to device pixels, `will-change` only for the trip, and `transition` held
+  at `none`, never cleared.
+- **The strip follows, as Telegram's does.** `scrollToShow` picks the scroll that
+  shows the whole target tab, button included, so the selection's own
+  `scrollIntoView` finds nothing to do and stands down while any trip runs.
+  - The drag writes the scroll by progress.
+  - The settle runs it in frames on `easeAt`, which is `SHEET_EASE` evaluated in
+    script, because CSS cannot transition a scroll offset.
+  - It is landed before the hand-off. Measured without that: the finish could run
+    before the last scroll frame, and the tab's own pill took over 8.1px from the
+    traveller.
+- ⚠ **Selection no longer changes a label's weight.** A bolder label is a wider
+  tab, so the pill measured before a tap would land short of the one after it.
+  Colour and the pill carry the selection.
+- **Reduced motion**: no trip. The swipe mounts nothing, and a tap simply moves the
+  tab's own pill.
+- **The desktop column is unchanged.** The owner's words are about paging on the
+  phone, and its 28px mark answers Q3.624's problem, not this one.
+
+**Measured**, in Chromium through the real `SessionBrowser` (mobile emulation at
+412×860 and DPR 2.625, touch through CDP). Every frame recorded where the visible
+pill was — the traveller while one runs, otherwise the selected tab's own.
+- **Every hand-off within 0.2px**, which is device-pixel snapping, not motion.
+  Covered:
+  - a swipe turn, a give-back, a swipe onto All and one away from it;
+  - a tap, a second tap 80ms into the first trip (the pill reverses in flight from
+    226.0px, with no jump), a tap to All then back;
+  - at 300px wide, a tap on a tab 20px from hidden: the strip scrolls it whole,
+    and the pill hands off within 0.1px;
+  - at 300px wide, a swipe onto a hidden tab.
+- **Per move, while the pill travels**: 0.08–0.1ms median touchmove handling,
+  3 layouts and 9 paints for a 30-move drag (7 with the underline), and still 2
+  React commits at engage and 2 at the turn.
+- **First render**: the traveller is not drawn in any frame.
+- **Reduced motion**: 40ms after a tap, the new tab's own pill is already drawn.
+
+**What was not done.**
+
+- **Labels do not cross-fade their colour** as Telegram's do mid-swipe. The colour
+  changes at the hand-off, and interpolating `color` per frame is a repaint of the
+  text.
+- **The strip is not a rounded bar.** The owner asked for the element that marks
+  the selection. The strip keeps its hairline.
+- **A resize or a font load during a trip** would land the traveller on the old
+  rect. The tab's own pill takes over at the hand-off and is right from then on.
+- **The traveller's clipped end is round.** A tab half out of the strip shows its
+  own pill cut straight at the scroller's edge; the traveller clipped there shows
+  a round end, for as long as the trip lasts.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655's hand-off: the underline, its switch at the turn
+and its exception for All are gone. Reverses the strip's 2px rule for a `raised`
+pill, which Q3.209 already allowed.
+
+#### Q3.657 — on the first page, a swipe toward nothing pulls the menu drawer out
+
+**Symptom.** The owner: *"make it so that after a swipe on the first folder the side
+menu opens — you don't have to press the menu button, you can swipe to it."*
+Q3.655's `pageOffset` refused a rightward drag on All, the first page: there is no
+page before it, so the list did not move at all. Telegram Android pulls its drawer
+out with exactly that gesture on its first folder.
+
+**Decision.** That drag pulls the drawer, following the finger one for one, and a
+release opens it or gives it back.
+
+- **One arbiter for the list's gestures.** `listGesture`, pure and asserted,
+  decides the first move past the slop once. Sideways on the first page, rightward,
+  is the drawer; any other sideways move is a page. Q3.658's pull is the third
+  answer.
+- ⚠ **Pulled, the drawer is drawn, not yet a layer.** `MenuDrawer` registers a
+  `sheet` layer for as long as it is shown, and that puts `inert` on `#root`, the
+  element the finger is still on. So `drawerPull` is a small store `MenuDrawer`
+  reads beside its own `open`:
+  - the drawer mounts for the pull, which is the gesture's one React commit;
+  - its layer stays keyed on `shown`, which `useLeaving` derives from `open` alone,
+    so nothing goes inert under a finger that may still give it back.
+- **The drawer mounts closed, under the finger.** `hold` stops the arrival the mount
+  started, so the finger decides where the drawer is from the first frame.
+  - Each frame writes the panel's transform, snapped, and the scrim's opacity by the
+    same progress.
+  - `will-change` only for the gesture, `transition` held at `none`.
+- **Released open, it opens through `onMenu`, the menu button's own path**, so the
+  layer, inert, Escape and Android's Back are exactly the button's. The panel carries
+  on to open from where the finger let go.
+- **Given back, it slides closed and unmounts where it stands.**
+- **The decision is `sheetRelease`, sideways**: a flick, or `DISMISS_PX`, and never
+  while flung back. Opening is the drawer leaving the list's side of the screen.
+- **The 24px edge bands stay the platform's.** A rightward swipe from the left edge
+  is Android's own Back gesture, which the system takes before the page sees it, so
+  the band does conflict. The pull starts anywhere else on the list.
+- **Reduced motion**: nothing follows the finger, and a release that opens opens the
+  drawer as the button does, with its movement zeroed.
+- **Wide layouts are unchanged**: the gesture runs only where the phone's tab strip
+  is laid out.
+
+**Measured**, in Chromium through the real `SessionBrowser` and `MenuDrawer`
+(mobile emulation at 412×860 and DPR 2.625, touch through CDP):
+- **A 200px pull**: the drawer's right edge tracked the finger exactly, 0 → 200px,
+  with the scrim at 0.57.
+  - `#root` was not inert during the drag and was inert from the release that
+    opened it.
+  - The panel then settled to its full 350px width.
+- **Commits and cost**: one React commit during the drag (the mount); per move a
+  0.09ms median touchmove, and 1 layout and 3 paints for a 30-move drag. The engage
+  costs 10ms, which is the mount.
+- **Gives back**: a slow 60px pull slid closed and unmounted, with the menu state
+  still closed.
+- **Flick**: an 80px flick opened it.
+- **Elsewhere**: from a machine's page, the same drag turned the page to All.
+- **Reduced motion**: no follow, and it opened at the release.
+
+**What was not done.**
+
+- **No pull from the drawer's side on other pages.** Anywhere but the first page a
+  rightward swipe is a page turn, as it is in Telegram.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655: on the first page, the side with no neighbour is
+the drawer's. Amended by Q3.660: a drag begun on the drawer's scrim moves it too.
+
+#### Q3.658 — a pull down from the top of the list refreshes every machine
+
+**Question.** The owner: *"a swipe down forces an update of the chats — space
+appears … with a loading animation there. After the update it disappears. If the
+update mechanism is currently not functional and not prepared, explain it and don't
+do this item."*
+
+**The mechanism exists, and it is the wake path.** `store.resume` is what the app
+runs when a phone wakes, comes back online or leaves the bfcache (`resume.ts`), and
+it is a real refresh:
+- `runResume` re-lists the registry.
+- For every machine, `resumeMachine` forgets the chosen route and re-dials it, with
+  loopback and relay probes of 1.5s each.
+- It then re-lists the machine's sessions with `GET /sessions`, bounded by the
+  15-second request timeout.
+- It reattaches that machine's streams.
+- Machines run independently under `Promise.allSettled`, so an unreachable one
+  never delays the rest, and the promise settles when every answer has landed or
+  failed.
+
+A refresh that only re-drew the same store on a timer would not have been built.
+This one re-dials an unreachable machine immediately, rather than waiting for the
+poll's 15-second re-check, and re-lists every machine the page shows.
+
+**Decision.** Pull to refresh on the list, holding the gap for exactly as long as
+`store.resume("pull")` takes.
+
+- **Only from the top, only downward, never over a gap already open.** That is the
+  third answer of `listGesture`, through `claimDrag` with `DOMINANCE`, so it
+  arbitrates by axis with the page turn and the drawer. A scrolled list, or an
+  upward drag, stays the list's own scroll.
+- **The list itself moves down**, by a composited transform on the scroller.
+  - `pullOffset` gives one for one at first and then less and less, never past
+    twice the hold.
+  - The mark sits centred in the gap and fades in toward `PULL_HOLD_PX`. It is shown
+    closed before the first write, so the engage frame draws nothing.
+- **Past the hold on release the gap stays open**, 56px (`h-14`, asserted equal),
+  until the refresh settles, and then closes on the sheet clock. Short of the hold,
+  it closes and nothing is asked.
+- **The mark is the app's own `WorkingMark`**, the three bars that already mean
+  "working" in the transcript, at 20px through a new `size` prop. It is not new art.
+- **While the gap is open, no page, drawer or second pull starts**; the list still
+  scrolls natively.
+- **A machine that does not answer** still lets the gap close when its probes give
+  up, and nothing new is drawn. Connection trouble is the new connection indicator's
+  to show, not a banner's.
+- **Android**: `html`'s `overscroll-behavior: none` keeps the engine's own pull to
+  refresh and overscroll glow out, and every claimed move is refused to the engine.
+- **Reduced motion**: nothing follows the finger. A release past the hold opens the
+  gap and closes it with no transition at all, since a 0.01ms transition draws its
+  first frame at the old value.
+- **Desktop is unchanged**: touch only, and only where the phone's tab strip is laid
+  out.
+
+**Measured**, same harness, with `store.resume` stubbed to take 1.2s so the hold can
+be seen. The product calls the real one, and that call is pinned.
+- **A 200px pull**: the list followed to 72px (`pullOffset`), then held at 56px for
+  the whole refresh and closed.
+  - `store.resume` was called once, with `"pull"`.
+- **A short pull**: 60px closed with no refresh.
+- **Scrolled 300px, the same drag scrolled the list**, and an upward drag scrolled
+  it too.
+- **Per move**: a 0.07ms median touchmove, and 1 layout and 6 paints for a 30-move
+  pull.
+  - No React commit comes from the pull itself: the two per gesture are the row
+    drag's own pressed state, the same at 14 moves or 40.
+- **Reduced motion**: 0 → 56px held → 0, with no frames in between.
+
+**What was not done.**
+
+- **The refresh does not say which machine failed.** That is the connection
+  indicator's job.
+- **A refresh coalesces with a wake already in flight** (`resume`'s own
+  coalescing). The gap then closes when that run lands, and the queued run follows
+  it.
+- **Not verified on a real Android device, in WebKit, or against a live fleet.**
+
+**Status.** Current.
+
+#### Q3.659 — connection trouble is one pill at the bottom-left, and no banner sits above the conversations
+
+**Asked.** The owner: "When there is no connection or problems with it, make a
+loading pill like in the picture — at the bottom, bottom-left. On hover it expands
+as in picture 2. Remove all kinds of notifications above the chats that break the
+interface; they are not needed." The picture is Telegram Desktop: a white circle
+with a spinning arc floating over the chat list's bottom-left, which opens on hover
+into a pill reading *Connecting…*, with a shield on the right.
+
+**Decision.** `ConnectionPill` draws it, and `connectionTrouble` in `ui/connection.ts`
+decides it as a pure function over the store's own state.
+
+- **What counts.** Four things, in this precedence:
+  1. The server unreachable (`cpError`) — *Connecting…*.
+  2. A machine this screen reads that is offline for a reason of the wire's —
+     `no_route`, `cp_unreachable` or unset — named: *studio-mac is unreachable*.
+  3. The open conversation's stream in `connecting` or `waiting` — *Connecting…*.
+  4. A first probe — *Connecting…*.
+
+  The server outranks a machine, since nothing else can be asked without it, and a
+  machine outranks its own stream, since its name says more than *Connecting…*.
+- **What this screen reads.** The list's machine tab, plus the open conversation's
+  machine and its stream. Under All a first probe counts, but a machine offline on
+  the wire does not: a machine that is simply switched off would otherwise hold the
+  pill for as long as it stays off, which says nothing the list does not. A
+  background stream held open for a session nobody is looking at is not this
+  screen's trouble.
+- **What does not count.** `over_limit`, `owner_disabled`, `not_enrolled`,
+  `no_token`, `no_machine_key` and `no_device_key` are refusals that somebody has
+  to act on. They stay where they are drawn, because a spinner over them would
+  claim a retry that fixes nothing.
+- **The grace.** `troubleSince` keeps one spell across a change of kind: a
+  reconnect that turns into an outage is one spell. `troubleShown` waits
+  `TROUBLE_GRACE_MS` (1s), so a reconnect under a second never draws the pill.
+- **The shield.** It is drawn only for a stream down the relay. That channel is
+  Noise end to end (`e2ee.md`). The server is TLS to a party that reads it, and
+  loopback is plaintext by design (`relay.md`), so neither earns it.
+- **The motion.** The pill arrives on `animate-rise` and leaves on
+  `animate-rise-out`, through `useLeaving`, with `PILL_EXIT_MS` equal to that
+  token's 140ms. It opens on the disclosure idiom this app already uses: a
+  `grid-template-columns` transition at 200ms `ease-out`. Reduced motion collapses
+  both, as the stylesheet's own block does for every animation; the spinner then
+  stands still as an arc.
+- **The inputs.** Hover opens it only where hovering exists (`pointer-fine`).
+  Focus-visible opens it for a keyboard, and a tap toggles it for a finger.
+  36px is drawn, as Telegram's is; the target is 44px under a coarse pointer.
+- **The announcement.** A `role="status"` region is mounted for good and holds the
+  words only while the pill is shown. It changes only when the words do, so a spell
+  is announced once and a retry never is.
+- **The look.** It uses this app's own `surface`, `edge`, `muted` and `shadow-lg`.
+  [⚠ reversed by Q3.669: there are two palettes, and the pill spends the same
+  tokens in both.]
+
+**Where it floats, and why there.**
+
+- **Beside a list.** The list's pager window, at `bottom-3 left-3`. That puts it
+  over the rows, as in the picture, and structurally above the foot's *New
+  session*, which it can never cover. A row's own target runs the width of the row,
+  so the 36px circle over its left edge blocks no row.
+- **In a conversation below `lg`.** No list is on screen there, so the conversation
+  draws its own, `lg:hidden`, in the region above the composer, at the same corner.
+  It is lifted over a parked card by `askHeight + PILL_OVER_CARD_PX`: the frame's
+  8px plus the 12px gap. It floats over the transcript's foot, where the working
+  line starts. That is accepted: the pill is up only while the stream is down, and
+  the foot then reads *last seen working*.
+- **Never on the composer.** It never sits on the composer's Send.
+- **One at a time.** Above `lg` the list's pill reads the open conversation as well,
+  and exactly one pill is ever displayed. So one live region speaks.
+
+**What was removed.** All three were connection trouble drawn as a banner:
+
+- the notice over the list (*Server unreachable — retrying…*), with its component
+  and its sentence;
+- the same sentence standing in for the conversation's workspace subtitle, which is
+  now drawn always;
+- the `reconnecting — …` line between the header and the transcript.
+
+`webcheck` asserts them absent by name and updates the two pins that held them.
+`MachineTab.reach` still has no caller, and Q3.202's gap is closed by the pill
+rather than by a row.
+
+**What stayed, and why.** Each of these is either not this client's connection or
+something somebody must act on.
+
+- The session's own notice: the daemon re-attaching its agent, a failed resume
+  with Reconnect or Sign in, an exit. These describe the agent, and a socket being
+  fine says nothing about them.
+- `transcriptNotice`'s `stalled`, although a failing history fetch causes it. Q3.112
+  makes the head of a conversation say why its beginning is missing, and asserts
+  that as a totality.
+- The lagged-frame gap, which records a real loss.
+- The machine-limit and owner-disabled bodies of a machine's tab.
+- The native setup failure.
+- The missing-row body of a conversation whose machine cannot be reached, since it
+  is the only content that screen has.
+- The toasts saying an action did not run.
+- The composer's placeholder.
+
+**Status.** Current. `webcheck.connection-pill.ts` pins `connectionTrouble` as a
+table (reasons, scope, precedence and the shield), the grace, the words, the
+placements, the hover, focus and tap openings, the live region, the exit token, and
+the removed banners by name. WebKit frames of the pill collapsed, opened, with the
+shield and naming a machine were rendered from the shipped component on the built
+stylesheet.
+
+#### Q3.660 — the scrim is a grip: a drag begun beside a panel moves it, and a tap still closes
+
+**Symptom.** The owner, from Android: *"If, while in the left menu, I start swiping
+from a part of the screen that is not in this menu, it doesn't close. Make it slide
+back together with the finger too."* The brief added that the other panels with a
+scrim should be made consistent with it in the same pass, as round 1 (Q3.650) asked.
+
+**Cause — measured, not inferred.** Driven in Chromium against the integrated tree
+07366ff, with mobile emulation at 412×860 and DPR 2.625 and real touch input through
+CDP:
+- **Three of the four scrims were not a grip at all.** `useSheetGesture` listened on
+  the panel alone. A 200px drag on the scrim of the drawer, of `TaskPanel` or of the
+  routed `Sheet` moved nothing: the drawer's edge stayed at 350px, and the two bottom
+  sheets' tops stayed at 69px.
+- **The picker's scrim closed on the press.** `AgentConfigBar`'s outside-press
+  listener counted the scrim as outside (Q3.565 kept it so on purpose), so a finger
+  landing there started the exit at once, from rest, without following the finger.
+- ⚠ **That press also let the tap fall through.** The close put
+  `pointer-events-none` on the leaving scrim before the tap's click was dispatched,
+  so the click hit whatever lay under the scrim. A tap on the picker's scrim over
+  another control closed the picker *and* pressed that control: in the harness it
+  opened the `TaskPanel` behind it.
+
+**Decision.** The scrim is a second grip on the same panel, through the same hook,
+on every surface that has one.
+
+- **One gesture, two grips.** `useSheetGesture` takes the scrim's ref and returns a
+  `scrim` half to spread on it: touch listeners and pointer handlers from the same
+  factories as the panel's, over the same record.
+  - So a drag begun on the scrim is claimed, followed and released exactly like one
+    begun on the panel: `claimDrag` past `PRESS_SLOP` along the axis by `DOMINANCE`,
+    one transform per frame, and `sheetRelease` sideways or downward.
+  - A second finger anywhere is still a pinch.
+  - The click a mouse drag leaves behind is swallowed on the scrim as on the panel.
+  - Closing goes through each surface's own `onClose`, which is the path Escape, a
+    scrim tap and Back already take, so inert, focus and history are unchanged.
+- ⚠ **Only the scrim's bare surface begins a drag.** The routed `Sheet`'s scrim is
+  its panel's parent, so every touch and pointer event on the panel bubbles through
+  it. So the scrim's half:
+  - starts only when the target is the scrim itself;
+  - answers only for a gesture that began there;
+  - never runs a second drag over the panel's.
+- **A tap still closes and a cross-axis move does nothing.** A tap is not a drag:
+  nothing is claimed within `PRESS_SLOP`, and the scrim's own click closes it as
+  before. A vertical move on the drawer's scrim, or a sideways one on a bottom
+  sheet's, is never claimed.
+- **The picker's scrim closes on its own click, not on the press**, since a press
+  may be the start of a drag. That also ends the fall-through: the click lands on the
+  scrim, which is still there to take it. This amends Q3.565's "a press on it still
+  closes".
+- **A scrim beside its panel fades with it** by how much of the panel is out, as the
+  drawer's scrim already did during Q3.657's pull:
+  - `useSlideSheet` does this for the drawer and `TaskPanel`, and the picker's own
+    geometry does it below rest;
+  - `holdFade` and `fade` are the one writer, and `drawerPull` now uses them too;
+  - the scrim is promoted to a layer of its own for the gesture, and its transition
+    is held at `none`;
+  - a settle brings it back on the sheet clock and leaves nothing inline;
+  - a dismissal keeps its opacity, and `scrim-out`, which has no `from`, leaves from
+    there.
+- ⚠ **The routed `Sheet`'s scrim does not fade.** It is the panel's parent, so
+  fading it would fade the panel. Q3.650 recorded exactly this, and it still holds.
+  Its drag moves the panel and nothing else.
+- **The three sibling scrims are `touch-none`** (they were `touch-manipulation`),
+  because a scrim has nothing to pan or zoom. A tap still clicks with no delay, and
+  the engine can never commit to a pan before the claim. The routed `Sheet`'s keeps
+  `touch-manipulation`, since as a parent its value would reach into the panel.
+- **A panel reopened mid-exit is put back.** A dismissal keeps the panel's offset
+  and now the scrim's opacity, so a `TaskPanel` reopened during its 260ms exit (its
+  scrim no longer takes taps by then) used to arrive back at the dragged offset.
+  `useSlideSheet` resets the panel and scrim it dismissed if the same nodes are
+  opened again; the picker's `show` already did this for its panel and now does it
+  for its scrim.
+- **A drag begun while a pulled drawer is still settling takes it from where it is
+  drawn.** `yieldPull` stops the pull's timer and its writes. Without it, the timer
+  landed mid-drag and drew the drawer fully open for one frame.
+- **Reduced motion** is unchanged from Q3.650: what is written per move is the
+  finger's own position, and the settle and the exit are CSS, which the blanket block
+  zeroes.
+- **Desktop is unchanged.** The routed `Sheet`'s gate is its `sm:hidden` grabber, so
+  a mouse drag on the centred card's scrim moves nothing and a click closes. The
+  picker's and `TaskPanel`'s scrims are not laid out at those widths.
+
+**Measured after**, same harness:
+- **A 200px drag on each scrim** follows the finger one for one. The drawer's edge
+  goes from 350 to 150, `TaskPanel`'s and the `Sheet`'s tops from 69 to 269, and the
+  picker's from 344 to 544.
+  - The scrims read 0.43, 0.75 and 0.61 at that point, which is the share of each
+    panel still out. The routed sheet's stays at 1.
+  - There are 0 React commits during the drag, and each panel leaves from where it was
+    let go.
+- **Release**: a 90px two-step flick closes all four, and the same 90px dragged
+  slowly settles back, since 90 is under `DISMISS_PX`. Settled back, the scrim reads
+  1 with nothing inline.
+- **Taps and cross-axis moves**: a tap closes all four. A 200px cross-axis move moves
+  and closes nothing.
+- **The fall-through is gone**: a tap on the picker's scrim over another control now
+  closes the picker and presses nothing.
+- **Mouse**, on the drawer's scrim: a slow 50px drag settles back and its click is
+  swallowed, so the drawer stays open. 250px closes it, and a click closes it.
+- **Reopened mid-exit**, `TaskPanel` and the picker come back at rest with nothing
+  inline. With the reset removed, `TaskPanel` came back 200px down with its scrim at
+  0.75. The panel half of that predates this change.
+- **Pull, then an immediate scrim drag**: three runs with no jump. With `yieldPull`
+  removed, the drawer went 229 → 350 → 210 across three frames.
+- **Per move** it costs the same as a drag begun on the panel:
+  - a 0.06–0.08ms median touchmove;
+  - no layout (the picker lays out once, at engage);
+  - 2–3 paints over 30 moves.
+- **Reduced motion**: a settle-back goes from 300 straight to 350, and an exit from
+  150 straight to 0.
+- **The round-5 pull is unchanged**: it opens at 200px with one commit and gives back
+  a slow 60px.
+
+**What was not done.**
+
+- **The routed `Sheet`'s scrim does not fade with the drag.** Making it would mean
+  moving the dim onto a sibling of the panel, and with it the view transition's
+  `scrim` group. That is a restructure of the one routed surface for a 69px strip.
+- **`touch-none` is a guard, not a measured fix.** With `touch-manipulation` the
+  drawer's scrim still dragged in Chromium, because the claim at `PRESS_SLOP` came
+  first. A device whose engine commits a pan sooner is what it guards against, and
+  that is unmeasured.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current.
+- Amends Q3.650: a sibling scrim now fades with the drag, and the routed sheet's
+  still does not, for the reason given there.
+- Amends Q3.565: the picker's scrim closes on its click, not on the press.
+- Amends Q3.657: a drag takes a pulled drawer mid-settle.
+
+#### Q3.661 — the phone's menu button is the top bar's size, not a chip's
+
+**Symptom.** The owner, on a phone: the menu button at the top left is small, not
+made for a phone.
+
+**Cause.** The list header drew it as `size="chip"`: a 32px box and a 14px glyph,
+reaching 44px under a finger only through `TAP_GROW_Y`'s invisible grow. The
+target met the rule; what a thumb aims at is what it sees, and that was a 14px
+mark beside a 32px search field.
+
+**Decision.** A fifth `ICON_BUTTON_SIZE`, `bar`: `h-11 w-11` with a 20px glyph —
+the top bar's own way out on a phone. The menu takes it, and so does the
+conversation's back chevron, which is the same act on the other screen and was
+`lg` (44px, 16px glyph). The header row grows from 32px to 44px; the bell and the
+search keep their sizes, since the owner named the menu. `-ml-1.5` keeps the glyph
+where a thumb expects the screen's first control.
+
+**Status.** Current. `webcheck.shell-and-enrollment.ts` pins both call sites at
+`bar`; `webcheck.decision-surfaces.ts` already holds every size to a 44px target, a
+chosen glyph and 4px of ink margin, and `bar` passes all three.
+
+#### Q3.662 — on a phone the whole type scale is two pixels up
+
+**Symptom.** The owner, on a phone: the app's text is too small. Asked for the
+numbers, then: *increase by two*.
+
+**Measured.** The six steps are 12, 13, 14, 15, 18 and 22px at the reader's 16px
+root; `text-2xs` and `text-xs` carry 349 of 495 uses, and a conversation, a session
+title and a machine tab are `text-sm`, 14px. Telegram on Android sets messages and
+chat titles at 16sp, iOS body text at 17pt.
+
+**Decision.** One `@layer theme` block under `@media (pointer: coarse)` restates the
+six `--text-*` steps two pixels up — 14, 15, 16, 17, 20 and 24px — each with a
+line-height raised with it. Tailwind's utilities read the variables
+(`font-size: var(--text-2xs)`), so no call site changes, and the block sits in the
+theme layer so a utility still wins over it. Keyed on the pointer and never on a
+breakpoint, which is the rule the 16px field floor already follows: a narrow desktop
+window keeps its density, a tablet gets the larger text. The two count badges, `h-4`
+circles that a 14px numeral crowds, become `h-5` under the same gate. The one
+arbitrary size, `text-[11px]` on the installer line, is left alone: it is sized to
+fit a command, not to be read at arm's length.
+
+**What was not done.** The root `font-size` stays unset, so `1rem` is still the
+reader's own setting and a system font scale still applies on top. No per-surface
+tuning: every step moves by the same two pixels, so the ratios between them hold.
+
+**Status.** Current. `webcheck.typography.ts` reads the scale from the `@theme` block
+alone and pins the coarse block: every step and line-height restated, each size
+exactly two pixels up, no line-height shrinking, in the theme layer.
+
+#### Q3.663 — a conversation dragged rightward goes back to the list, following the finger, with the list revealed under it
+
+**Question.** The owner, on a phone: *"A swipe from a session must lead to the page
+with the list of conversations, i.e. back. And it must go there smoothly, not
+teleport — like with the different folders."* That means a finger moving right in
+an open conversation, Telegram style: the conversation follows the finger off to the
+right, the list is revealed under it, and a release either finishes going back or
+puts the conversation back.
+
+**How it worked before — measured.** Driven in Chromium through the real `App`, with
+synthetic state, mobile emulation at 412×860 and DPR 2.625, and touch through CDP:
+- **Two routes, one screen each below `lg`.** The phone's list and the conversation
+  are rendered in `main` one at a time. While a conversation is open, the phone's
+  list is not mounted. (The rail's `SessionBrowser` is mounted, but
+  `display: none`.)
+- **The chevron.** It calls `navigate("/")`, which pushes a history entry and plays
+  the pop view transition: 220ms, `nav-enter` and `nav-under`.
+- **The list comes back fresh.** It remounts at its top: a list scrolled to 900px
+  came back at 0.
+- **There was no swipe.**
+
+**Decision.** A back swipe on the conversation, drawn by the finger. It lands on the
+list the chevron would have landed on, without remounting it.
+
+- **One pure decision, `backClaim`,** made once, past `PRESS_SLOP`:
+  - the move must be rightward and pass `DOMINANCE`;
+  - never against an engine already panning;
+  - never while a horizontal scroller under the finger can still scroll back.
+    `scrollsBack` finds that scroller by what it is (scrolled from its start,
+    `overflow-x` that scrolls, wider than it shows), so a code block keeps the drag
+    until it is at its start, as on iOS.
+- **Where it never starts:**
+  - from a field (`EDITABLE`);
+  - over a selection already made;
+  - after a hold past `PRESS_MS`, which is a text selection starting;
+  - from the edge bands, where Android's own Back lives. `EDGE_DEAD_ZONE` moved into
+    `sheetMotion.ts`, so this swipe and the list's share one number.
+  - while any layer but the ask card is open (`currentLayers`);
+  - ⚠ **on the press that closes a menu.** Pointer events precede touch events, and a
+    menu closes on its own window `pointerdown`, so by `touchstart` the menu was gone.
+    Measured without the check: one press closed the kebab menu *and* went back. The
+    layers are now read in a capture-phase `pointerdown` on the conversation, before
+    the menu's listener runs.
+- **Gate.** The swipe runs only while the back chevron is laid out, so the breakpoint
+  stays in CSS. `Header` takes `backRef`, and `IconButton` now takes a ref. At `lg` the
+  conversation sits beside the list and there is no swipe; a tablet in portrait below
+  `lg` swipes like a phone.
+- ⚠ **The list under it is the list's own element.** `App` renders `PhoneList` with
+  the same key on both routes.
+  - On the conversation's route it renders nothing until a swipe engages. A store
+    (`backRows`) then mounts it, absolutely positioned under the conversation: inert,
+    unread and untouchable, and cut to one screen of rows (`ROW_FLOOR_PX`, as the
+    neighbouring machine's page is, through `SessionBrowser`'s new `rows`).
+  - The conversation's roots are `bg-surface`, so nothing shows through them.
+  - Landing therefore keeps the element and its scroller. The remaining rows mount
+    below the fold.
+- **The moves:**
+  - the conversation is one `translate3d` per frame, snapped to device pixels;
+  - the list comes in from the left and brightens as the conversation leaves, with
+    `underAt` giving both values;
+  - it starts where the chevron's own pop starts it (`BACK_UNDER_SHIFT`,
+    `BACK_UNDER_OPACITY`), and webcheck reads those two numbers off `nav-under` in
+    the stylesheet;
+  - `will-change` is set only for the gesture, transitions are held at `none`, and
+    moves are batched with rAF;
+  - there is no React commit per move; the only one during a drag is the mount.
+- ⚠ **`main` is clipped while the list is drawn under it**
+  (`has-[>[data-back-under]]:overflow-hidden`). Measured without it: the conversation,
+  translated past `main`'s edge, grew `main`'s scroll width to 612px on a 412px
+  screen. `main`, the document and the transcript then repainted on every frame: 118
+  paints over 30 moves, against 6 with the clip.
+- **Release uses `sheetRelease`, sideways.** A fling or `DISMISS_PX` goes back, and
+  never while flung the other way.
+  - **Going back:** the conversation is carried off from where it was let go, and the
+    list comes the rest of the way home, both on the sheet clock (`SHEET_MS`,
+    `settleTransition`). Then, in one task: `navigateDrawn("/")`, and the list lets go
+    of its gesture styles. `navigateDrawn` pushes the same history entry as the
+    chevron's `navigate("/")` but plays no view transition over a move the finger
+    already drew. So history, focus and Android's Back are the chevron's.
+  - **Otherwise:** it settles back and the list unmounts.
+- **Other doors during a gesture:**
+  - A settle overtaken by another route (Android's Back, a notification) gives back
+    rather than carrying the new route home.
+  - A conversation unmounted mid-gesture takes its styles off the list that route
+    draws.
+- **Reduced motion:** nothing follows the finger. A release that goes back goes at
+  once, by the chevron's path.
+
+**Measured after**, same harness:
+- **A 250px drag:**
+  - the conversation followed the finger one for one (21 → 250px);
+  - the list moved from −86px at 0.57 opacity to 0 and 1;
+  - one React commit during the drag;
+  - it landed on `/` with no view transition and one new history entry, as the
+    chevron does;
+  - it was the same list element with the same scroller, and a row of the list sat
+    at y=741 in every frame, the route change included.
+- **What it lands on:** 40 rows (and 100 with a larger fixture) on the same machine
+  tab, which is exactly what a chevron back draws.
+- **Release:**
+  - a 60px flick goes back, and the same 60px slowly gives back;
+  - a give-back is smooth (90 → 0px, the list back to −90px at 0.55), then the list
+    unmounts;
+  - the conversation keeps nothing inline but its transition, held at `none`.
+- **Moves it leaves alone:**
+  - a vertical drag scrolls the transcript;
+  - leftward, and from either edge band, nothing happens.
+- **Code blocks:**
+  - scrolled 120px, a rightward drag scrolls the block back to 0 and never becomes a
+    swipe;
+  - at its start, a rightward drag goes back;
+  - leftward, the block scrolls (to 210px).
+- **Where it starts and where it doesn't:**
+  - no swipe from the composer's field, after a 500ms hold, or over a selection;
+  - the header and the chip row do go back;
+  - with the kebab menu open, the press closes the menu and nothing else, and the
+    next drag goes back;
+  - with the docked task panel open at 800px, no swipe.
+- **Widths:** at 800px it goes back; at 1280px there is no swipe.
+- **Reduced motion:** nothing follows; 250px lands on the list at once, and 60px
+  stays.
+- **A route change mid-completion:** the new conversation stays at rest, and the
+  list is removed.
+- **Cost, production build:**
+  - the engage (mounting one screen of the list) costs 4–10ms whatever the list's
+    length. Uncut, it was 7–9ms at 120 rows and 11–15ms at 300.
+  - a move costs a 0.06–0.11ms median touchmove;
+  - 6 paints over 30 moves;
+  - a vertical scroll that is not claimed costs 0.1ms and 2 paints.
+- **Mutations, seen in the harness as well as in the pins:**
+  - rendering the list under the conversation as a second element: landing remounts
+    it (a new element and a new scroller);
+  - landing through `navigate`: the pop view transition plays over the finished move.
+
+**What was not done.**
+
+- **The list still opens at its top after a back, by either door, as it did before.**
+  The chevron remounts it. The swipe keeps the element it mounted when the drag
+  engaged, and that element too starts at the top. Keeping the list's place across a
+  visit is a change to both doors and belongs in its own entry.
+- **The row just left is not marked,** on the phone as before: its list has no open
+  session.
+- **No shadow on the conversation's edge,** since the chevron's pop draws none.
+- **The swipe settles on `SHEET_MS` (260ms) while the chevron's pop runs 220ms.** The
+  finger's clock is the sheets'.
+- **Touch listeners on the conversation are non-passive**, as the list's own
+  gestures already are. So the first move of each touch waits for the main thread; on
+  a phone busy streaming a transcript that could delay the start of a scroll. This is
+  unmeasured on a device.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655 and Q3.657: the edge band is one shared number.
+
+#### Q3.664 — a window that grows keeps the conversation on its foot, and the offset is written through after a resize
+
+**Symptom.** Reported by the owner from the macOS app, maximised to full screen
+during a streaming turn. A gap about 300px tall opened between the last row and the
+composer. Hovering in that gap highlighted the *Ran N commands* rows, which were
+drawn half a screen higher. So what WebKit painted and what it hit-tested
+disagreed.
+
+**Measurement.** A WKWebView harness on this box (macOS 15.6) ran the shipped
+`AppShell`, `SessionView`, `EventList`, `useFollow` and composer over the shipped
+store, on the built stylesheet. A session streamed text and tool rows every 60ms
+while the window grew. There were six ways of growing it:
+
+- an instant setFrame;
+- an animated one;
+- `zoom`;
+- a *live resize*: the view's live-resize start, 24 steps at 60Hz, then its end;
+- one jump to the final size inside a live resize, which is what a full-screen
+  transition does to the content view;
+- a real toggleFullScreen.
+
+After each one, the page's own `scrollTop`/`scrollHeight`/`clientHeight` were read
+beside the UI-side scrolling tree, which is what positions the painted layer. The
+tree came from WKWebView's testing accessor for its scrolling tree as text.
+
+- **The live resize lost the foot, 3 runs of 3.** It ended at `scrollTop` 2097
+  with 404px of scroll range below it. The *latest* button was up, and the stream
+  was no longer followed. A trace showed why:
+  - each step made the box about 4px taller, and layout clamped the offset down
+    4px;
+  - one step clamped 4px *and* took 50px of streamed text before anything looked;
+  - the scroll event then read a 4px move up with a 50px gap, and
+    `followsAfterScroll` took that for the reader leaving.
+
+  This is the "clamp, then growth, before an observation" case Q3.648 had judged
+  rare. It is the ordinary case the moment a window is resized while an agent
+  talks. The instant, animated, `zoom` and full-screen-jump resizes held the foot.
+- **The scrolling tree agreed with the page in every mode here.** Offset, box
+  height and content height all matched, before and after the fix, including after
+  real wheel scrolling put the offset in the tree's hands first. So the paint and
+  hit-test split the owner saw was not reproduced on this box.
+- **Real full screen could not be entered here.** willEnterFullScreen fires and
+  didEnterFullScreen never does on this display, so that path is not measured.
+- **Nothing on this path was transformed.** No element under `main` carried a
+  transform or `will-change` after any resize, at either width. The back swipe
+  translates only during a touch gesture, and this app gets none on a Mac.
+
+**Cause.**
+
+- **The live-resize foot loss is ours.** `followsAfterScroll` counted every move
+  up of more than 2px as the reader's. A taller box clamps its offset down by up to
+  its own growth, and when a streaming commit landed between that clamp and the
+  next look, the clamp read as a reader leaving with content below.
+- **The owner's paint/hit split fits a WebKit scrolling layer left at the old
+  offset.** The old maximum is the new one plus the growth. Painted there, the
+  content ends at the old box bottom, where the screenshot's rows end, and nothing
+  is below it. That gap equals the growth. The page meanwhile clamped to the new
+  maximum, where hit-testing puts the rows, which is where the hover found them.
+  Nothing the page did afterwards could correct it: the pin writes the maximum the
+  page already holds, WebKit drops a write that changes nothing, and a no-op never
+  reaches the scrolling layer. This is inferred from the geometry and the report,
+  not reproduced (see above).
+
+**Decision.**
+
+- **`followsAfterScroll` takes the box's last height** as a fourth argument, with
+  a default of no growth. A move up that the box's own growth since the last look
+  explains is layout, however much streamed in after it; a move past that growth is
+  still the reader's. `useFollow` keeps `lastClient` beside `lastTop`.
+- **`resync` writes the offset through.** It writes the offset WebKit holds as a
+  change (one pixel off, then back) that cannot be dropped as a no-op. It runs in
+  every settle where the box's height moved. It runs once more `RESIZE_SETTLE_MS`
+  (250ms) after the window's last `resize` event, which is past the end of a
+  transition that catches its layers up only afterwards. Both writes land in one
+  task, so nothing paints between them, and the scroll they raise is a net zero
+  move.
+- **`[overflow-anchor:none]` stays.** WebKit has no scroll anchoring for it to
+  interact with (Q3.648).
+
+**Rejected.**
+
+- **Re-pinning after the resize settles, alone.** The pin is the very no-op that
+  cannot reach a stale layer.
+- **Suspending the follow during a live resize.** WebKit gives the page no
+  live-resize signal to key on.
+- **Forcing a relayout or recompositing the box** (toggling `overflow` or a
+  transform). That costs a full re-raster of the conversation to do what one
+  written offset does.
+
+**Status.** Current.
+
+- The live-resize foot loss is fixed and measured: 404px left below the foot
+  before, 0 after, 3 runs of 3, with the tree in agreement.
+- The re-sync is a workaround for a WebKit behaviour inferred rather than
+  reproduced. The real full-screen transition could not be driven on this box.
+- `webcheck.follow-and-wrap.ts` pins:
+  - the clamp exemption as a table, from the measured live-resize step;
+  - `resync`'s two writes against a stub box, including at the top and on a box
+    with nothing to scroll;
+  - `RESIZE_SETTLE_MS`;
+  - as source: the settle judging against `lastClient`, re-syncing when the height
+    moved, and the trailing resize settle.
+
+#### Q3.665 — renaming a session moves nothing, and its name shows the text caret
+
+**Symptom.** The owner, on the Mac app: pressing the session's name in the header
+opens a field that nudges the interface, which it must not — the reference is
+Claude Code's rename box, drawn around the name where it stands. And hovering the
+name should show the text caret.
+
+**Cause.** `RenameField` was a different box from the name it replaced: a 1px
+border and `py-0.5` made it 6px taller than the name's line, so the subtitle under
+it dropped; `px-1.5` plus the border against the name's `px-1` moved the text 3px
+right; `flex-1` stretched it to the row, which on a phone also pulled a centred
+title to the left; and its `outline-none` lost to the app's unlayered focus ring,
+the trap Q3.645 measured, so a 2px ring with a 2px offset was drawn round it.
+
+**Decision.** The field takes the name's exact place: one text line tall
+(`h-[var(--text-sm--line-height)]`), the name's own `px-1`, no border and no
+vertical padding, its frame a `ring-1` — a box shadow, which takes no room — and
+`no-focus-ring` beside `outline-none`. It hugs what is typed, as Claude Code's does,
+through a hidden copy of the value in the same `inline-grid` cell rather than by
+spanning the row. Each caller lines its text up with the name it replaces: the
+header passes the button's `lg:-ml-1`, the list row, whose name has no inset,
+passes `-mx-1`. The header's name takes the text caret — the second named exception
+to Q3.627's ban on changing the mouse, on the owner's word, since this is the one
+caption in the app that is edited where it stands; the list's names are not, as
+they are renamed from the row's menu.
+
+**Status.** Current. Amends Q3.627: two exceptions now, both named in
+`CURSOR_ALLOWED`. `webcheck.command-menu-and-browser.ts` pins the box's height,
+inset, frame and focus-ring opt-out, the hugging grid, both callers' offsets and
+the caret.
+
+#### Q3.666 — the machine column is Telegram's width, and its menu button reaches below the menu bar
+
+**Symptom.** The owner, on the Mac app in full screen: pressing the menu button at
+the top left makes macOS slide its menu bar down over the window, and the bar covers
+the button. Telegram's buttons are simply larger — make the column Telegram's width
+and the buttons proportionally larger.
+
+**Measured.** Off two full-screen screenshots of the same display, both 2000px wide:
+this app's column ends at 94px and Telegram's folder rail at 104px, so Telegram's is
+about ten per cent wider — 80 CSS pixels to this column's 72. Telegram's menu glyph
+is about 1.4 times this one's, and its top row is about 59 CSS pixels tall against
+this button's 44. The folder entries below are within a few pixels of each other.
+
+**Decision.** `MACHINE_COLUMN_PX` becomes 80, and the three rail bounds move with it,
+since each is the column plus the list's own width; `--rail-w`'s first-paint value
+in `index.css` becomes 392px to match `RAIL_DEFAULT`. The menu button becomes 56px
+tall (`h-14`): the macOS menu bar is 24 points, or about 37 on a notched display, so
+a 44px button starting at the window's top was covered entirely, while the lower
+part of a 56px one stays below it. A first cut at 64px with lucide's 24px glyph read
+too bulky to the owner beside Telegram's, so the glyph is `FlatMenuGlyph` — three
+bars 22 by 14, half again as wide as tall, as Telegram's are — and the button is
+lit edge to edge with the entries' `hover:bg-raised/60`, never a rounded inset. The entries grow by the width's
+proportion: a 32px tile (a new `rail` size of `Monogram`, and the All tile beside
+it), `text-xs` labels and `py-2.5`; Add takes a 56px row and an 18px glyph.
+
+**What was not done.** Nothing moves the button away from the top: the menu bar
+appears whatever the button's size, and Telegram lives with it the same way. The
+phone's list header is untouched — its button is Q3.661's.
+
+**Status.** Current. `webcheck.shell-and-enrollment.ts` pins the column at 80px in
+device pixels, the rail bounds by subtraction as before, the CSS first-paint width,
+and the menu button's height, its edge-to-edge hover and its glyph's proportion.
+
+#### Q3.667 — a flick that follows a flick: the pages are one strip, and a turn commits only when it rests
+
+**Symptom.** The owner, on a phone: *"when flicking through the folders quickly the
+app stalls, because a folder needs time to settle; because of that you can't quickly
+flick through two folders."*
+
+**Cause — measured, not inferred.** The harness is a production build of the list in
+Chromium: mobile emulation at 412×860 and DPR 2.625, six machines of 40 rows each.
+Each flick is 140px in 72ms, stamped as a 60Hz digitizer would, since CDP's own pace
+turned a flick into a slow drag.
+- **It was not a stall: a second flick inside a settle was lost every time.**
+  - Released 38–180ms before the second touch, at two finger positions (8 cases), and
+    with 60, 120 and 200ms gaps: not one second flick turned.
+  - Two flicks ended on tab 1 of 2.
+  - Three ended on tab 2 of 3. The third turned only because the second had been
+    lost and the settle had ended by then.
+- **The first way it was lost.** The listeners were on the list scroller, which is
+  the page that moves. By the time the next finger came down, the page had slid out
+  from under it. What covered the finger was the neighbour, which takes no pointer
+  events, so no listener heard the touch.
+- ⚠ **The second way it was lost.** A touch that did land on the page landed the
+  turn: a `flushSync` inside `touchstart` selected the machine, swapped the list and
+  unmounted the neighbour.
+  - The page jumped the rest of its way, 195px in one frame at 38ms after the release.
+  - The row under the finger was replaced. Every later event of that touch went to a
+    node React had just removed, so neither the list nor a window listener ever heard
+    it.
+- **After a settle had ended (300–400ms):** a flick turned. Its first frame drew
+  57–79ms after the touch, and it paid tasks of 10–19ms: the neighbour's mount at the
+  slop, and the commit at the end of the previous turn.
+
+**Decision.** The pages are one strip, a touch catches the strip where it is drawn,
+and the machine is selected only when the strip rests.
+
+- ⚠ **The finger is heard on the pager's window, which never moves** (`windowRef`,
+  through `useTouchGesture`). The list scroller is only the page that is drawn.
+  `rowDrag` stays on the scroller inside it, so its `PRESS_SLOP` and `armed`
+  arbitration are unchanged.
+- **The strip model is pure, in `sheetMotion.ts`:**
+  - `pageX` gives every page's place from the strip's offset and the page it is
+    measured from;
+  - `offsetFrom` reads that offset back from where a page is drawn;
+  - `stripAt` says where the strip is, in pages.
+- **A touch catches a settling turn** (`hold`):
+  - the list's own page's computed transform, mid-transition, is read back into the
+    strip;
+  - every page is written there with its transition at `none`;
+  - the pill stops where it is drawn (`TabPill`'s new `hold`), with the strip's scroll
+    left where it is;
+  - nothing commits and nothing jumps.
+- **What the caught touch becomes:**
+  - Sideways, it is a page drag measured from the page the turn was heading for:
+    `pageOffset` from the caught offset, then `pageTurn`, which is the sheets' rule
+    (`FLING`, or `DISMISS_PX`).
+  - It is never the drawer or a pull: `listGesture` gains `turning`.
+  - A tap or a vertical move lets the turn carry on to where it was going.
+- **Neighbours are the strip's pages**, rendered by `BesidePanes`: one pane each,
+  keyed by place (`data-beside`), cut to one screen of rows (`ROW_FLOOR_PX`).
+  - While a turn settles, its page and both neighbours are mounted (`pagesFor`), so
+    the page beyond is already there for the next flick.
+  - That mount runs after the frame that starts the settle, a frame and then a task,
+    so it never holds back a composited transition.
+- **The pill's legs follow the strip.** `nextPage` gives the next page the strip is
+  heading for; `legProgress` gives the pill's progress along its leg. A new leg is
+  measured before the pages move in its frame, from where the pill is drawn.
+- **The commit waits for rest.** When a settle ends with no finger down,
+  `selectMachine`, unmounting the panes, and returning the scroller to its top and to
+  0 happen in one task, as before. Nothing is selected where the strip came back.
+- **Reduced motion is unchanged:** nothing follows, and every flick turns one page at
+  once.
+
+**Measured after**, same harness (production build):
+
+| Flicks | Gap between them | Before (tab reached) | After (tab reached) |
+|---|---|---|---|
+| 2 | 60, 120 and 200ms | 1 | 2 |
+| 3 | 60, 120 and 200ms | 2 | 3 |
+| 6 | 100ms | — | 6, the last page, with no further |
+
+- **At each caught touch, no jump:**
+  - the largest one-frame move of the strip is 35px, one finger step;
+  - a chained flick's first move is drawn 18–44ms after its event: one or two frames,
+    since headless Chromium's frames here run 16–35ms apart;
+  - the pill moves at most 17px in a frame.
+- **Across whole runs:** the largest strip moves (60–88px) are the fast opening of a
+  settle after a 1.9px/ms flick.
+- **No stall under the finger:**
+  - no touch handler over 4ms, and no long tasks;
+  - three flicks cost four tasks over 8ms, all off the touch: 13.0ms, 11.6ms and
+    13.4ms just after each release (the page beyond), and 17.8ms 263ms after the last
+    (the commit at rest).
+- **No jump at the commit:** a row of the page the strip rests on is drawn at
+  (50,155) by its pane, then by the list itself in the frame of the commit.
+- **Other touches mid-turn:**
+  - a tap, or a vertical drag, lets the turn carry on to tab 1;
+  - left, left, then right goes back to tab 1, continuously;
+  - under reduced motion, three flicks make three turns, each instant.
+- **Unchanged against the baseline build:**
+  - the drawer opens at 200px and gives back at 60px; from alpha the same drag turns
+    to All, with the same commit count;
+  - the pull holds 56px through one refresh;
+  - an upward drag scrolls the list 185–266px, the same spread as the baseline;
+  - a held row turns no page.
+- **Mutation, seen in the harness as well:** with the catch removed, the second flick
+  is lost again (it ends on tab 1).
+
+**What was not done.**
+
+- **The first flick from rest still mounts its neighbour at the slop,** synchronously
+  (10–19ms, Q3.655). Mounting both neighbours at rest would cost that on every screen
+  that never swipes.
+- **The commit at rest is still one task of about 18ms.** A touch that lands inside
+  that task waits for it once.
+- **One drag moves at most a page from the page it is measured from** (`pageOffset`),
+  as before. Consecutive flicks chain; a single long drag does not skip two pages.
+- **"Touch to first moving frame" is paced by CDP in this harness,** so what is
+  reported is input to frame for each move.
+- **Not verified on a real Android device or in WebKit.**
+
+**Status.** Current. Amends Q3.655: the swipe is heard on the pager's window and
+commits at rest; the pages beside it are several panes instead of one. Amends Q3.656:
+a caught trip is held where it is drawn.
+
+#### Q3.668 — the phone's machine tabs are one step down the scale
+
+**Symptom.** The owner, on a phone, after Q3.662 raised the scale: the names in the
+machine strip at the top are one pixel too large.
+
+**Decision.** Both tab spellings — All and every machine — go from `text-sm` to
+`text-xs`: one step down the scale, which is exactly one pixel under a finger (16 to
+15) and one pixel in a narrow desktop window (14 to 13), so no arbitrary size is
+needed. The pill (Q3.656) measures its tabs at runtime and needs nothing; its `h-8`
+still holds the smaller line.
+
+**Status.** Current. `webcheck.shell-and-enrollment.ts` reads the tab inset off the
+`text-xs` spelling and still requires All and the machine tabs to share it.
+
+#### Q3.669 — a dark palette, and what keeps a second palette honest this time
+
+**Question.** The dark block was deleted on the argument that every state had been
+re-encoded in fill, ring, weight and shape, so a second palette meant designing all of
+it twice and reviewing it once. The owner asked for a dark theme built to the usual
+practice. What makes a second palette hold now, where the first one did not?
+
+**Decision.** One unlayered block, `:root[data-theme="dark"]`, restating the same
+fifteen colour tokens and nothing else, so no component knows which palette is on.
+Each dark token keeps its light twin's *job* and its *ratio to surface*: `raised` is
+the message you wrote at 1.21:1 (1.22 light), `ink` the rail's hint at 1.05:1 (1.06),
+`edge` one step beyond `raised`, `edge-strong` at least 3:1 on every paper, and every
+text tone at least 4.5:1 on every paper. Elevation reads lighter — `ink` < `surface` <
+`raised` < `edge` — because a shadow barely shows on a dark ground. Neither end is
+pure: `fg` is `#e9e6e1` (14.53:1 on surface, against light's 17.37) and `ink` is
+`#11100e`. Hue and chroma are the light palette's (a warm grey near 80°, chroma
+0.004–0.006); `danger`, `caution` and the diff's four are lightened and kept at low
+chroma rather than inverted.
+
+**The conversation's ground is `#171614`, one notch under where it was drawn first.**
+The owner put the first build beside Claude's own dark window and asked for the
+conversation a little darker; `surface` moved down with `ink`, `raised` and `edge` so
+every ratio above held, rather than giving the pane a colour of its own.
+
+**Three things outside the palette had to move, and each was a defect in the dark
+before it was a change.**
+
+- **The scrim was `fg` at a quarter**, which turns into a light wash when `fg` does.
+  It is its own token, `scrim`: the same `rgb(28 26 22 / 0.25)` in light, black at
+  55% in dark. `webcheck` bans the old spelling across `src/`.
+- **Tailwind v4 inlines a shadow's colour into the utility** — `.shadow-lg` carries
+  `var(--tw-shadow-color, #3c34261f)`, measured by compiling — so restating
+  `--shadow-*` under the dark selector reaches nothing. The colour moved into two
+  plain properties, `--shade` and `--shade-k`, which the dark block turns black and
+  three times heavier. The light shadows compute to the same values as before.
+- **The key hint on the affirmative fill** was `ink` at half over `fg`: 4.98:1 in
+  light and 3.30:1 in dark. It is at 60% now, 6.58 and 4.53.
+
+**What answers "the second copy is the one nobody looks at".** `webcheck.theme.ts`
+reads both palettes off `index.css` and fails a dark twin that is missing, extra or
+copied from light, then computes every ratio above in both from one table. It also
+fails a colour literal or a palette-free utility in any component — which is what
+makes a second palette one block rather than a sweep.
+
+**The first paint.** `public/theme.js` is a blocking classic script in the app's
+HTML shell: the CSP refuses an inline one, and a module may run after the first
+paint. It reads the switch's choice, sets `data-theme` and rewrites the
+`color-scheme` and `theme-color` tags; `theme.ts` owns every later change, and the
+driver holds the two to one key. Under the dark palette the page's own controls,
+autofill and scrollbars have to be dark, which is the reverse of what "light only"
+defended. The gate keeps none of this: it is another origin with no switch, so it is
+light, as it was.
+**A swap holds every transition for two frames**, or `.tap`'s colour fades smear it;
+the switch's knob is exempt, since its slide is the answer to the press.
+
+**Measured.** Rendered in Chromium against a scratch control plane: sign-in, the
+shell, the drawer, settings, and a sheet of the transcript's parts (a bubble, a code
+fence, a table, a diff, the buttons and choice marks) in both palettes. The sign-in
+screen rendered in a bare WKWebView too, which is the engine the shell ships.
+
+**Rejected.** `light-dark()` — one declaration per token, but it is Safari 17.5, the bundle's minimum is macOS 13, and an engine
+without it resolves every token to nothing: an app with no colours, not a light one.
+A `@media (prefers-color-scheme: dark)` copy of the block beside the attribute one —
+two copies of the palette to drift, for a default the owner then decided against
+(Q3.670).
+
+**Status.** Reversed an earlier decision: the stylesheet's "there is no second
+palette" position, and the connection pill's "one palette" line.
+
+#### Q3.670 — the drawer's switch, and light until it is pressed
+
+**Question.** Where does the dark theme's control go, and what does pressing it mean
+beside a system that already has an appearance?
+
+**Decision.** Where Telegram puts night mode: a `role="switch"` row, **Dark theme**,
+last in the drawer's list — under Settings, Plugins and any plugin screens, parted
+from the screens by a rule so it does not read as one of them — and above the
+parted-off Sign out, which stays last. A press leaves the drawer open, so the app
+repaints in view.
+
+**What it means.** **Light until it is pressed, whatever the system says** — the
+owner's call on 2026-09-25, after the first build opened dark on a phone whose system
+was dark. The system's appearance is read nowhere, and `webcheck` asserts the absence.
+The choice is a *device's*, kept in `reemoat.theme`: every account's webview shares
+one data store, signing out keeps it, and the `storage` event repaints the seats that
+did not press.
+
+**How it looks.** The track is outlined at `edge-strong`, and takes `raised` when on
+— the tone this app gives state. The knob is 14px, `fg` when on and `edge-strong`
+when off: a glyph-sized mark, which is the only size `bg-fg` may wear outside a
+decision (Q3.209).
+
+**Rejected.** *Following the system until the switch is pressed* — built first, and
+taken out on the owner's word for the reason above. *A three-way control* (system,
+light, dark) — the owner asked for a switch, and light by default.
+
+**What this changes in Q3.612.** Its test was that a drawer row is a destination.
+This one is not, by the owner's call, and it is the only one.
+
+**Status.** Current.
+
+#### Q3.671 — the shell's window follows the page's palette
+
+**Question.** The page can now be dark. What does the window around it — its title
+bar, the colour behind the page before it paints, the webview's own idea of the
+system's appearance — have to do so the app does not show a light frame around a dark
+page, or a light flash before one?
+
+**Decision.** Three things, all in the shell.
+
+- **The window's theme is the switch's, always, and Rust sets it.** On macOS a window
+  theme is app-wide: it becomes the application's appearance, which the title bar and
+  WKWebView's `prefers-color-scheme` follow. `tauri.conf.json` said `"Light"`, which
+  would have left a light title bar over a dark page; it declares none now, and
+  `seats::themed` builds the window light unless `server.json` says dark. The window
+  never follows the system, which is also what keeps the system out of the page.
+- **The switch reaches the window through `host_set_theme`** — a surfacing command
+  (the seat on screen only), `(async)` because a change is a durable `server.json`
+  write. The page repeats its theme at every boot and every show, so the command
+  writes and applies **only a change**; a write that fails is still applied.
+  It uses `Window::set_theme` rather than the application's: tao's app-wide call on
+  macOS leaves the window's cached answer stale, and on Linux leaves the window's own
+  preference in place.
+- **Launch builds the window in the stored theme, on that palette's ink.**
+  `server.json` keeps `"dark"` as `theme` and light as no key, so the one moment no
+  page can speak — before the first one paints — is already right; a junk value is
+  light. The two inks live once, in `seats.rs`, and `nativecheck` holds them to
+  `--color-ink` in both palettes of `index.css`.
+
+**Measured.** In a bare WKWebView from a Swift harness on this machine, the page read
+`prefers-color-scheme: dark` under a dark application appearance and light under a
+light one — so the appearance is what the window's theme sets. Read from source
+rather than run: without wry's `transparent` feature (Tauri's `macos-private-api`,
+which is off) a WKWebView's background cannot be set at runtime and the configured
+colour becomes only its under-page colour, so on macOS it is the appearance, not the
+colour, that decides what shows before the first paint. Tao's Linux window ignores a configured theme at
+creation for the XDG portal's answer, so the theme is applied again after building. On
+iOS and Android a window's theme and background are no-ops that answer `Ok`, and
+`theme()` always answers light.
+
+**Known limitations.** The shell was not launched here to watch it, because launching
+starts this computer's real daemons: the launch flash and the title bar following the
+switch are unmeasured by this repository. Two overlapping calls could apply out of
+order; the page's next boot or show repeats the theme.
+
+**Status.** Current.
 
 ## Deployment, packaging and code layout
 
@@ -24968,7 +28360,9 @@ the four come from is a choice made once per machine.
   PATH, which is the daemon's only for the daily run; and a refresh with no restart
   is seen by nothing in the daemon, so `AgentCapabilities.cli` names the previous
   build for up to ten minutes while the spawn already runs the new one — the file
-  a held path names was swapped by rename. Before, because `pnpm install` brings none of the CLIs any more: a
+  a held path names was swapped by rename. [⚠ no longer true — Q6.112: a held
+  choice is weighed against the file behind its path on every use, so the report
+  catches up at the daemon's next use of that CLI.] Before, because `pnpm install` brings none of the CLIs any more: a
   machine upgraded from 0.5.0, which vendored claude, codex and opencode under
   `node_modules`, would come back up with none of the three for the five minutes
   until the daemon's own first run, and `autoResume` would refuse every interrupted session
@@ -25374,7 +28768,8 @@ product. What does that page link to?
 
 **Decision. `REEMOAT_CP_APP_DOWNLOAD_URL`, env-only, unset by default**, published
 on `GET /v1/instance` as `app.download` — `REEMOAT_CP_MACHINES_OFFER_URL`'s shape
-and every one of its arguments. An address rather than a flag, because a client
+and every one of its arguments [⚠ that variable is deleted — Q1.650; this one now
+carries those arguments on its own]. An address rather than a flag, because a client
 that renders a link cannot be told "there is one" and left to invent where it goes.
 
 **⚠ Unset is the truthful state and the one this repository ships in.** Nothing
@@ -25447,7 +28842,10 @@ Environment at **compile** time rather than run time, because a bundle has no
 environment to read when Finder, Explorer or a desktop entry launches it.
 `build.rs` carries `cargo:rerun-if-env-changed` for the name, without which
 `option_env!` is baked into a cached object file and a fork that corrects its
-address gets a binary silently keeping the previous one.
+address gets a binary silently keeping the previous one. [⚠ amended by Q4.127: no
+file here gives it a value still, and `release.yml` forwards the repository variable
+of that name to both app jobs — the one form `nativecheck` lets through. The field
+opens on it locked, with a pencil beside it (Q3.643).]
 
 ⚠ **A suggestion for a form field, and written down by nothing — which is the
 third answer, both of the first two having been built and taken back out.**
@@ -25704,7 +29102,7 @@ stays full-bleed because a tab strip does not mask. The Windows Store tiles are
 one inside-test away in `coverage`. Not in this commit: the defect is *size*, and a
 corner-curvature change alongside it makes the before and after unreadable.
 
-**Status.** Current. `.claude/rules/native-packaging.md` is the area.
+**Status.** Current. `.claude/rules/native-packaging.md` is the area. Amended by Q4.128: the Android foreground is sized to the 72dp mask as the Dock tile is, and the generator draws it.
 
 
 ### Q4.125 — Which door installs grok, and why it is npm under both sources
@@ -25872,6 +29270,170 @@ contention is answered so the script's own `exit 0` is never what a person sees.
 presses Install, and `NewSession` owes that state its own sentence — *"No agent is
 installed on this machine yet."* — because *"not ready to start"* describes the
 ordinary first-run state as a fault.
+
+⚠ **The sentence and the press both moved with Q3.640.** New session installs
+nothing now: that state reads *"No agent is set up on this machine yet."* and offers
+Agent settings, and the press is on the harness's card, opened by its row's Set up on
+the machine's Agents list. The reason for a sentence of its own is unchanged.
+
+### Q4.127 — Where a release's default server comes from, and why the repository still names none
+
+**Question.** The owner's decision: the released apps open on `app.reemoat.com`.
+Q4.121 made the default a compile-time suggestion and had `nativecheck` assert that
+no file here sets it, so that a fork inherits no address. How does this
+repository's own release get a default without the repository naming a server?
+
+**Decision. From a repository variable, forwarded by one line.** The `app` step of
+both app jobs in `release.yml` — `app` and `app-android` — carries exactly
+`REEMOAT_DEFAULT_SERVER: ${{ vars.REEMOAT_DEFAULT_SERVER }}`, and a `default server`
+step ahead of each writes the value into the job summary, or *none (the repository
+variable is unset)*. The value is set in the forge (`gh variable set`), not in a
+file, and a fork inherits no repository variables — so a fork's release opens on an
+empty box exactly as before, and this repository still names nobody's server.
+
+**A variable, not a secret.** `option_env!` puts the value in the binary as plain
+text. A secret would be masked in the logs while shipping in every download, which
+is a secret in name only, and it would make the one line that is allowed look like
+something it is not.
+
+**Unset is the empty string, not absence.** `${{ vars.X }}` of a variable nobody set
+expands to `""`, so `option_env!` answers `Some("")`. `default_server` already turned
+that into no default — `normalize_origin` refuses it — and
+`a_compiled_default_is_an_address` now skips a blank value, since it would otherwise
+fail every build made from an unset variable.
+
+**`nativecheck` holds both halves.** The sweep that used to read five files now reads
+every tracked file that is not prose (`git ls-files`), line by line — `build.rs`,
+`packages/native/scripts`, `deploy/`, `.github/` and any cargo `[env]` table
+included. A line is a setter when it names the variable followed by `=` or `:` and a
+value, unless it is that exact forward in `release.yml`. The predicate is driven
+against a table, so a loosened predicate goes red while no file tests it: a literal,
+a `secrets.` read, `vars.X || 'literal'`, a `cargo:rustc-env`, a `process.env`
+assignment and the same forward in `check.yml` are all setters, and the
+`rerun-if-env-changed` line is not. And it asserts the forward **is present** in both
+app jobs and that no other job reads the variable — a deleted forward is a release
+that silently opens empty, green in every other check here. The fixtures are exempt
+by living in `nativecheck` itself, and `config.rs`'s test message was reworded so it
+no longer reads as a setter.
+
+**Rejected.**
+
+- **A literal in `release.yml` or `deploy/ci-release.sh`.** An address in the
+  repository, which every fork's release then carries.
+- **A secret** (above).
+- **`${{ vars.X || 'https://…' }}`** — a literal with a step in front of it.
+- **A literal on the page**, `import.meta.env` — Q4.121's rejection stands.
+- **A protected `release` environment with required reviewers.** The critique's
+  point is real: a variable is edited outside code review, and a locked,
+  pre-filled field (Q3.643) makes it a trusted default somebody sends a password to.
+  Not added in this change; the job summary printing the value is detection, not
+  prevention. Recorded as open in Q7.149.
+
+**Status.** Current. Amends Q4.121: no file here names a server, and one line
+forwards a variable that does.
+
+### Q4.128 — Why the Android launcher icon filled its circle, and why the generator now draws Android too
+
+**Question.** Reported by the owner with two screenshots: on an Android launcher the
+mark all but fills its dark circle, while in the macOS Dock the same mark sits in its
+tile with a clear margin. It should look like the Dock's. Why doesn't it?
+
+**Measurement.** An adaptive icon is two 108dp layers. The launcher's mask shows the
+**centre 72dp**, and only the centre **66dp circle** is guaranteed to survive every
+mask. The committed foreground had the mark alone on transparency, as Q4.124 said,
+with its box **58% of the 108dp frame**: 62.75 × 55.5dp at xxxhdpi. Against the 72dp
+a person sees, that is **87.2% of the height** (77.1% of the width). The Dock's tile,
+measured off `icon.png`, holds the mark at **70.6%** of the 824px squircle's height
+(582px) and 62.6% of its width. That ratio is the favicon's own `scale(.7059)`. So
+the mark read about a quarter larger in linear terms on Android than in the Dock,
+which is what the screenshot shows.
+
+⚠ **The 58% was chosen against the safe zone, and it met it exactly. That was the
+defect rather than the defence.** The farthest opaque pixel sat **32.25dp** from the
+centre at xxxhdpi, and 33.3dp at mdpi, against the safe circle's 33dp radius. The
+safe circle is 92% of the visible one, so a mark sized to reach it all but touches
+the mask. "Inside the safe zone" is a ceiling on where art may go, not the size it
+should be.
+
+**What builds is the committed tree, measured rather than assumed.**
+`buildapps.sh` runs `tauri android build` and nothing else. It runs neither
+`tauri android init` nor `tauri icon`, so it goes straight to `gen/android`. The
+0.11.0 APK it published (`d7cda6a`, 2026-09-24 06:09) carries `ic_launcher.png` at
+all five densities **byte-identical** to the committed files. Its 432px foreground
+is the committed drawing, re-crunched by aapt. Every `res/mipmap-*` file on that
+checkout was last written on 2026-09-22, two days before the build, so
+`tauri android build` copies nothing into `res/`. `tauri-build` 2.6.3's source
+names no mipmap. `release.yml` runs no `init` either.
+
+**Decision. `packages/native/scripts/icons.mjs` draws the Android rasters as well,
+from the same numbers.** Android's mask stands in for Apple's squircle.
+
+- **Foreground:** the mark alone, positioned by treating the 72dp viewport as the
+  badge. `ADAPTIVE_MARGIN = (108 - 72) / 2 / 108` joins `MARGIN` and `RADIUS` as
+  the third platform number, and the mark is the Dock's share of the visible shape
+  **by construction**. That gives 50.8 × 45dp, reaching about 26dp of the 33dp safe
+  radius, at all five densities.
+- **Background:** unchanged, `@color/ic_launcher_background`, `#1c1a16`.
+- **`<monochrome>`**, new, for Android 13's themed icons. It points at the
+  foreground itself, which is already the mark alone in one colour, and that is
+  all a themed icon tints. Tauri's own template names an `ic_launcher_monochrome`
+  mipmap that nothing here would draw. `nativecheck` used to assert *no*
+  monochrome, only because there was nothing to point one at.
+- **Legacy `ic_launcher.png` (API 24–25):** the Dock's tile itself, the same
+  function at 48dp × density. These launchers draw it unmasked, as the Dock does.
+  It was full-bleed, which is the Dock's original defect (Q4.124) in a second
+  place.
+- **Legacy `ic_launcher_round.png`:** the same tile as a circle (`radius: 0.5`).
+  **Nothing reads it.** The manifest has no `android:roundIcon`. It is drawn
+  rather than deleted so the file keeps matching its name, and so an `init` or
+  `tauri icon` diff stays small.
+
+**Both trees are written, byte for byte.** `gen/android/app/src/main/res` is the one
+a build reads. `src-tauri/icons/android` is the one a diff is read against. The
+two launcher XMLs stay **hand-authored**, and the generator writes no XML. Having
+`tauri icon` rewrite them was the defect Q4.124 retired it for.
+
+**Checked.** The macOS and Windows outputs come out **byte-identical** after the
+change, as `shasum -c` over every file under `icons/` shows. A second run of the
+generator changes no file. `nativecheck` loses the 58% band and the "writes nothing
+under either Android tree" assertion, and gains these:
+
+- The mark's share is read off the favicon's `scale`. It is asserted in the Dock
+  tile, in the foreground against 72dp and in both legacy rasters, to ±2px.
+- Each foreground is 108dp × density, carries alpha, is centred, has the mark's
+  aspect and **has every opaque pixel inside the 66dp circle**.
+- The legacy square is inset to Apple's grid and square-cornered, and the round
+  one is a circle.
+- The two trees are the same bytes, file for file.
+- All three layers of the adaptive XML are named, in both trees.
+- The generator's code names both trees and no `.xml`.
+
+Run against the tree before this change, **eight go red**. One of them reads
+`reaches 33.3dp of 33`.
+
+**Rejected.**
+
+- **Shrinking the hand-authored PNGs to a new percentage.** That is a second
+  hand-typed number to drift from the Dock's. The complaint was exactly that
+  nothing tied the two together.
+- **Sizing to the safe zone, or to Material's keylines.** The safe zone gave 58%.
+  The owner's reference is the Dock, and one share on every masked surface is
+  the only rule a driver can hold against the favicon.
+- **A separate `ic_launcher_monochrome` raster.** It would be the same pixels
+  under another name.
+- **A vector drawable foreground.** Four rounded rectangles would fit, but that
+  is a fourth copy of the mark in a fourth syntax. The rasters are derived from
+  the one copy that is read.
+- **Running `tauri icon` or `tauri android init` from the build.** Neither is
+  needed, and each would overwrite this.
+
+**Unverified.** No real launcher has drawn this build. The previews composite the
+layers and apply a circle, a superellipse and a rounded square in PIL. API 24–25
+and themed icons on Android 13+ have not been seen on a device.
+
+**Status.** Current. Amends Q4.124, whose "the mark at 58% of its frame" and
+"writes nothing under either Android tree" no longer hold.
+`.claude/rules/native-packaging.md` is the area.
 
 ## Invariants — rules that were defects first
 
@@ -27075,8 +30637,9 @@ focus, and dismissing a menu must not also dismiss the soft keyboard.
 never the mime the uploader declared, never derived from an extension — plus
 `attachment`, `nosniff` and `no-store`; and the client re-types the `Blob` to
 `application/octet-stream` before creating an object URL for it. Never
-`window.open(blobUrl)`, never `target="_blank"` without `download`, never an
-`<iframe src=blobUrl>`.
+`window.open(blobUrl)`, never a `blob:` URL behind `target="_blank"` — an object
+URL reaches an anchor only with `download`, and `webcheck.native-bridge.ts` pins
+every `_blank` anchor to an address — never an `<iframe src=blobUrl>`.
 
 **Why.** A `blob:` URL carries the *client's* type and inherits the *creating*
 origin, so both halves are needed. The reason is stronger than the usual
@@ -27438,14 +31001,15 @@ a clock.
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
 | Passwords | scrypt N=2^15 r=8 p=1 — ~51ms on the machine this was measured on (Node 26, 2026-08-07), against ~25ms at 2^14 and ~103ms at 2^16 — holding `128·N·r` = 32 MiB for the duration of each. `maxmem` is passed explicitly at **128 MiB**, because Node's default ceiling is 32 MiB and OpenSSL refuses *at* the boundary: measured, N=2^15 r=8 throws `memory limit exceeded` while N=2^14 succeeds, and a KDF that throws for some parameter sets looks like a wrong password on one deployment rather than a configuration error. 12–256 characters, NFKC and never trimmed; the maximum is not about KDF cost (scrypt passes the input through one PBKDF2 iteration, so bcrypt's folklore does not apply) but about not storing a string somebody else sized. **4 concurrent hashes, at most 2 of them public** (Q1.39); wait lists per lane, 32 authenticated and 16 public, then `503 overloaded` with `Retry-After: 1` |
 | Sessions | 30 days absolute, 14 idle, `last_seen_at` written at most once per 15 minutes — the guard that makes idle expiry affordable at all, since the alternative is an fsync per request on a `synchronous = FULL` database in the process carrying every tunnel. 10 per user, the **oldest revoked** rather than the newest refused, evicted inside the mint's own transaction. Each records what it said about itself, clamped at ingest: 256 characters of `User-Agent`, 64 of address. A revoked row is kept **7 days** and swept at startup with its origin — short because no reader surfaces it (`listSessions` and the admin count both filter `revoked_at IS NULL`), non-zero because deleting on revoke would make the day something does read it unanswerable |
-| Login throttle | **5 failures per 15 minutes per `<name, address>` pair** (Q1.37), then 30s doubling to a 15-minute ceiling, the *exponent* clamped at 30 so `Infinity` is unreachable. A second instance under `ADDRESS_THROTTLE` counts **30 per address** — looser because that key is shared by everybody who appears to be at one address, and 5 would make one person's bad afternoon an office lockout; a `429` reports the longer of the two blocks. A password change is `passwordChangeKey(userId)`, its own namespace. 10 000 keys per instance, and past it settled entries go first and then the map is cleared outright — which lets somebody buy one reset for ten thousand requests, stated rather than hidden, because an unbounded map keyed by a caller-chosen string is the worse failure. 200 characters per composed key, 120 for the name half (a 200-character name would otherwise cut the address off and share one counter), 64 for an address. In memory: a restart clears it |
+| Login throttle | **5 failures per 15 minutes per `<name, address>` pair** (Q1.37), then 30s doubling to a 15-minute ceiling, the *exponent* clamped at 30 so `Infinity` is unreachable. A second instance under `ADDRESS_THROTTLE` counts **30 per address** — looser because that key is shared by everybody who appears to be at one address, and 5 would make one person's bad afternoon an office lockout; a `429` reports the longer of the two blocks. A password change is `passwordChangeKey(userId)`, its own namespace. 10 000 keys per instance, and past it settled entries go first and then the map is cleared outright — which lets somebody buy one reset for ten thousand requests, stated rather than hidden, because an unbounded map keyed by a caller-chosen string is the worse failure. `MAX_KEY_CHARS` per composed key (325 today, derived from the builders' field caps so no built key is cut), 254 for a login identifier or a mail recipient, 120 for other name halves, 64 for an address. In memory: a restart clears it |
 | Machines per user | **50 is the ceiling, not the limit.** It is the anti-abuse bound — creating one is reachable by anybody with a password, and each is a row plus an enrollment code plus a tunnel credential, against a `synchronous = FULL` file in the process carrying every tunnel. The *limit* is `machines.per_user`, a setting (env-seeded, database-owned) overridable per person in `user_machine_limits`, refused above the ceiling on both write paths and clamped again on read. **Unset resolves to 50**, which is the behaviour before the setting existed and deliberately not 0 — nothing seeds `instance_settings`, so a 0 default would take the whole fleet offline on deploy. Over the limit is **derived** from rank among `machine_owners` ordered by `(created_at, machine_id)`, never stored, so lowering switches off the newest and raising switches them back on with no recompute (Q1.51). Still counted with no revoked filter, which is why a revoke has to `releaseOwner` (Q1.43); `PUT …/owner` counts rows for *other* machines, so re-labelling one you already own is never your fifty-first — and it preserves `created_at` when the owner is unchanged, or an admin re-label would move a machine to the back of its own queue |
 | Control-plane bodies | 64 KiB above THE LINE and 256 KiB below it. The two public routes are the only places in this service where somebody with **no credential** decides how many bytes it reads, and neither had ever bounded it; below the line there was no bound at all, on the reasoning that a caller past the gate has a credential — a statement about *who* is asking and not about *how much*, when every route calls `readJsonObject`, which buffers before it looks. Both answer `413 payload_too_large` in the envelope every client here parses, because `bodyLimit`'s default `onError` is `text/plain` and none of them can read it. `currentPassword`/`newPassword` are refused over 512 characters |
 | Agent commands | 256 per session; 64 characters of name, 200 of description, 100 of hint — clamped at **ingest** in `session.ts`, like `MAX_PARENT_ID_CHARS`: the agent chooses the strings, the list rides no event so `truncateEvent` never sees it, and "bounded by what the agent sent" is not a bound. Measured 2026-08-03, claude publishes **100 commands / 18.7 KiB**, longest name 24, longest hint exactly 64, descriptions median 68 and max 1135. So 256 is for an MCP server publishing hundreds of prompts rather than for trimming a real list; the hint cap sits *above* the longest real one; the description cap is the only one that bites. **The name cap is a refusal and the other two are truncations** — `clip` appends `…[truncated N bytes]`, right for prose and wrong for a name, since a command is invoked by *sending* `/<name>`; dedup running on the unclipped name while the clipped one was stored made two long names collide with `dropped` reporting none. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot entirely; only `commandsRevision`, a number, rides the poll |
-| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — which get 90s; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
+| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — each of which gets its own budget, its daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s) and never below `SLOW_ROUTE_FLOOR_MS` (90s): `POST /sessions` 215s, `/prompt` 150s, `GET /agents/capabilities` and the `/custom-agents` writes 290s, the rest 90s, each held above its chain by webcheck; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
 | Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
+| Accounts on one computer | **10 per installation** (`MAX_ACCOUNTS`) — past it *Add account* is not drawn and the host refuses `account_limit`. A bound on this computer rather than on a control plane: every account is a webview, a keyring scope and, once set up, a daemon of about 136 MB from launch to quit, and ten is what a laptop is asked to keep alive (Q7.149) |
 
 #### Q5.100 — Why do the containment predicates have a *resolved* form as well?
 
@@ -28049,7 +31613,8 @@ field's name is read off a form somebody is filling in from a phone.
 does not "fix" them: `SessionBrowser`'s waiting-elsewhere band (`text-fg` — louder
 than the rows under it, on purpose), `MachineSection`'s `RETIRE_HEADING`
 (`text-danger`), and `MachineOffer`'s `or` (no `font-semibold`, because it is the
-word between two doors rather than a heading). ⚠ `RETIRE_HEADING` is spelled out
+word between two doors rather than a heading) [⚠ deleted with the offer — Q1.650;
+`webcheck.typography.ts`'s census is the current list]. ⚠ `RETIRE_HEADING` is spelled out
 rather than composed for a real reason: `` `${SETTINGS_HEADING} text-danger` `` is a
 **silent no-op**, two colours of one family resolved by Tailwind's alphabetical
 emission rather than by the line — the same trap Q3 records for `items-center`
@@ -28077,7 +31642,14 @@ credential and no window; as a settings screen there is both.
 
 **The rule.** `cp.clearSession()` runs **before** `setNativeServer`, never after.
 It is local, instant, cannot fail, and erases `credential#<old origin>` through
-the same call `host_set_server` was about to make one line later.
+the same call `host_set_server` was about to make one line later. [⚠ amended by
+Q7.148: it is `detachSession` now, the in-memory half, and neither side erases the
+old origin's entry — a switch keeps that server signed in. The order is unchanged
+and is still the rule; a refused switch re-adopts the copy it let go of.] [⚠ extended by
+Q5.120: a signed-in account's server never moves now — `host_set_server` refuses
+anything but a pending seat — so no path the app draws opens this window. The order
+stays as the belt, and wherever a webview is rebound to another account the host
+refuses the old document's commands instead.]
 
 **Priced, because the safe-looking order is the wrong one.** Clearing first costs
 one sign-in in the case where `setNativeServer` then fails on a full disk:
@@ -28251,6 +31823,89 @@ probes in the sections that build a bare `LocalRuntime` — `claude auth status`
 `grok models`. Those are Mach-O binaries that register nothing and draw no tile, and
 one of those sections exists precisely to `report` what this machine answers. The
 spawn that mattered was the ACP handshake, and it is gone.
+
+#### Q5.120 — A command is bound to the document that sent it, and a signed-in account's server never moves
+
+**The defect, which one webview holding two accounts creates.** Wherever a webview
+is *rebound* — every switch in the single-webview arm, and forgetting the last
+account in both arms (Q7.149) — its label outlives the document that was on it. A
+host that resolved the account from the label alone would answer the previous
+document about the next account, and three shapes of that were real before this
+rule:
+
+- a poll or a `cpFetch` in flight between the rebind and the reload hands account
+  A's bearer, through `host_cp`, to account B's server — Q5.116's disclosure,
+  crossing accounts;
+- a sign-out's fire-and-forget `host_credential_clear` lands after the rebind and
+  erases B's credential — the race Q7.148 recorded, crossing accounts;
+- Android's Back (the activity answers it with `goBack()`) or a back/forward-cache
+  restore revives A's document, and its `host_boot` would be handed B's credential,
+  because the per-page-load hand-over had been reset.
+
+**Rule 1 — every seat-scoped command presents the generation of the document that
+sent it, or is refused `stale_document`.** `host_boot` issues one per page load,
+sixteen random bytes; `lib.rs`'s `on_page_load(Started)` retires it
+(`Host::page_loaded`), and so does every rebind (`Host::move_seat`). The page sends
+it in the `reemoat-generation` invoke header (`GENERATION_HEADER` on both sides):
+`native.ts`'s `invoke` adds it to every command but `host_boot` (`withGeneration`,
+pure and driven), and answers the first `stale_document` with
+`window.location.replace("/")` — once, so a burst of refused calls queues one
+navigation. Each of the three shapes above is a document that is not the one its
+seat belongs to now, and each is now the same refusal.
+
+**Why a header.** It is the one field Tauri carries beside a command's arguments
+without the command's signature seeing it, so no command gains an account parameter
+(Q1.651). The comparison is plain equality: the page holds the value, so it binds a
+document rather than authenticating one.
+
+**`rebinding`, for the page load that trails.** Between a rebind and the new page
+load `host_boot` answers `rebinding: true` with no generation and no credential. On
+Android the page-load event is posted to the UI thread while the new document's
+first call can arrive first on the bridge's, so the page asks again with a doubling
+pause for `REBIND_PATIENCE_MS` (two seconds) before taking the answer as it stands —
+a sign-in form over a document whose first command is refused and reloads it, which
+is a recovery rather than a hang.
+
+**Account moves use `location.replace`, never `assign`**, so Back cannot bring the
+left account's document back to be refused again; `webcheck.native-bridge.ts`'s
+navigation sweep admits `location.replace` with a root-relative literal.
+
+**Rule 2 — `host_set_server` is refused unless the seat is pending**
+(`pending_seat`). An account is its server (Q1.651); the only window whose server may
+move is one nobody has signed in to — a first run, an account being added, or
+`‹ Server` on a pending sign-in. So Q5.116's window — a live bearer in the page while
+the host's base moves — is on no path the app draws now. `ChooseServer`'s `submit`
+keeps its detach-then-set order byte for byte, as the belt for the day an entrance
+holding a credential comes back, and Q5.116's index pins still hold on it.
+
+**No `detachSession` on a switch, and that absence is asserted.** A document is one
+account for its whole life. Where the host shows another webview, this page stays
+alive and hidden with its session, sockets and poll; where it rebinds this one,
+Rule 1 refuses whatever it still sends. A detach would strand a live hidden page
+with no credential in the first case and guard nothing in the second.
+
+**Defence in depth, not structure.** `host_cp` also refuses an `authorization`
+header from a pending seat and on a probe override (Q1.651). The CSP lets the page
+`fetch` anywhere, so these guard against a page that is *wrong* — a late poll, a
+stale bearer — and not against a hostile one; `script-src 'self'` is still what
+keeps a hostile one out.
+
+**Asserted.** `nativecheck`: every seat-scoped command takes the `Webview` and the
+`Request` and no account, origin or scope parameter; `host_boot` and
+`host_account_confirm` are the only bodies that read a credential, and only the
+first hands one to the page; the header's name matches on both sides; `host_set_server`'s
+pending guard; `host_cp`'s two refusals. `webcheck`: the header on every invoke but
+the first, the reload on `stale_document` once, no `detachSession` in
+`switchAccount`, and the bootstrap's order.
+
+⚠ **Closed by construction, measured on no device.** Whether a bfcache restore fires
+`Started` does not matter to the rule — either the restore retires the generation
+or the new document's did, and the old one's value matches neither — but whether
+`tauri::ipc::Request` headers reach a command, and when `Started` fires on Android,
+are Q7.149's spike items 14 and 9, and neither has been run.
+
+**Status.** Current. Extends Q5.116 to a rebind, and closes the race Q7.148
+recorded.
 
 ## Measured behaviour of the agents and the tools
 
@@ -28983,7 +32638,9 @@ which the shipped `tsconfig.json` deliberately forbids.
 
 **Behaviour.** The single-row `daemon` table, checked before restore.
 
-**Consequence.** Without it each daemon would reap the other's agents.
+**Consequence.** Without it each daemon would reap the other's agents. So it is one
+daemon per database — and the desktop app runs one per server, each on a state root
+of its own, rather than two against one file (Q7.148).
 
 ### Q6.50 — What happens if the daemon's port is already taken?
 
@@ -29475,7 +33132,8 @@ being recorded.
 
 **What an agent can now do.** Same uid, no sandbox: a file at `~/.local/bin/claude`
 whose `--version` prints a higher number becomes the build every session and login
-runs, within ten minutes. Before this it could edit the vendored binary in
+runs, within ten minutes [at the next use now, where it replaces the file behind a
+path already held — Q6.112]. Before this it could edit the vendored binary in
 `node_modules` to the same effect, so this is a second door to a room that was
 open; `CLAUDE.md` names it under **What is not confined**, and the pin flag or a
 named `CLAUDE_CODE_EXECUTABLE` closed it — with the flag gone (Q4.114) the
@@ -29501,7 +33159,9 @@ of `override` or `path`; and `findOnPath` searching `MANAGED_CLI_DIRS` **after**
 PATH. `daemoncheck` drives what stands with stubs on PATH and an injected
 `--version`, the in-flight collapse, the fence, and `spawnPlan`; `webcheck` the
 refusals of the picker line; `relaycheck` nothing — none of this crosses the relay.
-What keeps the PATH copy moving is Q4.113.
+What keeps the PATH copy moving is Q4.113. Amended by Q6.112: the ten-minute cache
+is a ceiling now rather than the mechanism — a held choice is weighed against the
+file behind its path on every use.
 
 ### Q6.107 — `_session/steering`: what the four agents actually do with a message sent mid-turn
 
@@ -29801,6 +33461,186 @@ from, so the two halves of that screen cannot disagree. `notice` became a list
 rather than a string: OpenRouter's failure is a fetch *this browser* made and this
 one is a spawn *the daemon* could not make, and joining them would claim one cause
 for two.
+
+### Q6.112 — A CLI build this daemon did not install is noticed at its next use
+
+**Question.** A new claude session ran Opus 5.5 the moment it was started, while the
+New session screen went on naming the previous Claude Code build, and listing that
+build's models, for up to ten minutes. Why the two answers, and why the delay?
+
+**Measured, 2026-09-22.** `~/.local/bin/claude` pointed at
+`~/.local/share/claude/versions/2.1.280`, the link's own mtime 21:56. It was moved by
+something other than this machine's production daemon, whose `daemon.log` still
+recorded its last refresh as 2.1.278; **which process moved it is not recorded**.
+Three other daemons started from a checkout were listening on 7987, 7992 and 7993,
+each running its own agent updater against the same home directory. A spawn after
+the move ran 2.1.280 at once, because the held path is the symlink and the file
+behind it is what executes. But `AGENT_CLI_TTL_MS` went on holding `2.1.278` as the
+reported build and `MODELS_TTL_MS` the list that build had published, and the only
+thing that clears either early is `afterAgentsChanged` — which runs only when *this*
+daemon moved the file.
+
+**Decision.** Pull, not push: each cache records which file answered, and compares
+on every hit.
+
+- `probeBuild`, in `stall.ts`: a bounded `realpath` then a `stat` of the target,
+  keyed `real + dev:ino:size:ctimeMs`. The resolved path catches the native
+  installers, which swap by rename; the inode, size and change time catch an npm
+  install replacing the file where it stands, where the real path is the same across
+  builds. `ctime` rather than `mtime`, because an installer may keep the packed file
+  times and `ctime` cannot be set from userland. `null` is "could not tell".
+- `LocalRuntime.agentCli`: `cliChosen` holds the key beside the choice (`cliBuild`
+  is the default `identify`, spelling `missing` as a key of its own), and every hit
+  asks again. `null` keeps the held choice — a stalled mount has not replaced
+  anything. A different key drops **this harness's** entry and re-chooses; not
+  `forgetAvailability()`, which would bump `probeGeneration` from inside a read path
+  and discard every harness's login probe and the PATH memo over a fact about one
+  file. `chooseCli` reads the file **before** `--version`, so a swap between the two
+  costs one extra `--version` at the next use rather than an old version held against
+  a new file for the whole TTL.
+- `AgentAskRuns.capabilities`: a held list is believed while `sameCli` says the
+  report it was published under is the report `agentCli` gives now — path, version
+  and source compared field by field, since a runtime may answer a fresh object on
+  every call.
+- **Both hit paths are fenced**, because both used to be synchronous and neither is
+  now, so a hit that straddles `forgetAvailability()` or `forget()` cannot hand back
+  the answer from before it. `agentCli` captures `probeGeneration` before the await
+  and compares it after, which is exact there because `forgetAvailability()` clears
+  every harness. `capabilities` compares the entry itself — still the one it read —
+  rather than `capsGeneration`, which a `forget()` for *any* harness bumps: fenced on
+  the counter, an install finishing on codex made every straddling claude hit throw a
+  valid list away and spend a handshake under `MAX_CONCURRENT_ASKS` fetching it
+  again. A caller whose signal has already aborted gets the held list without the
+  check, which may be a `--version`.
+- The two TTLs stay, as the ceilings behind the check rather than the mechanism.
+
+**Composes with.** `afterAgentsChanged` is unchanged in code: still immediate for
+this daemon's own updates and installs, and still the only thing that clears
+`findOnPath`'s memo and re-runs `resumeInterrupted`, neither of which a file check
+reaches.
+
+**Rejected.**
+- **`fs.watch` on the CLI's directory.** A watch on a directory this daemon did not
+  create is the stall `files-paths-git.md` forbids, in another shape.
+- **A timer.** Polling, for a fact nobody is looking at until something asks.
+- **Reading `cli` before `claim` in `readCapabilities`.** It would make the race
+  inside a spawn correct itself on the next hit, but it puts a CLI read ahead of a slot
+  wait of up to `SLOT_WAIT_MS`, and in front of the two `daemoncheck` cases that
+  measure that wait, whose runtimes carry no `agentCli`. So the window stays and is
+  written at the read: a build swapped inside the second or so of `Session.start` can
+  label the old list with the new build until `MODELS_TTL_MS` runs out.
+- **Clearing `startRefused` on a moved build.** Left, exactly as `afterAgentsChanged`
+  leaves it: a refusal still ages on `START_REFUSAL_TTL_MS`, and the first successful
+  start clears it.
+
+**Limits.**
+- The probe sees the file the path names and never what that file loads, so a
+  launcher that resolves its payload at run time hides a payload update beneath it,
+  which falls back to the ten minutes. grok's node launcher is one — left as the bin
+  entry when a package manager other than npm installs it, it execs
+  `$GROK_HOME/bin/grok` — and under npm it is not: grok's postinstall points the bin
+  entry at an extracted native binary and an update renames a new file over it,
+  which the probe sees. Measured 2026-09-23: `/opt/homebrew/bin/grok` resolved to
+  that native binary, byte-identical to `~/.grok/bin/grok-1.0.40` on its own inode.
+- `sameCli` compares the *reported* build, so a CLI whose `--version` answers nothing
+  keeps its previous list for up to `MODELS_TTL_MS` across a change.
+- A copy newly placed *earlier* on PATH is still found only once `findOnPath`'s memo
+  is cleared — the check weighs the path a choice already holds.
+- The stall memory is filed under the link's mount rather than the target's; the
+  deadline covers both calls, so the probe is still bounded.
+- A live or parked session keeps the list its own process published, and an open
+  builder keeps the list it fetched on mount — the first by the owner's decision, with
+  `restoreConfig` (Q3.641).
+
+**Cost.** One bounded `realpath` and `stat` per use — a spawn, the login probe, a
+capability read, a relay dial inside `ANNOUNCE_TIMEOUT_MS` — and nothing synchronous.
+On a stalled home directory it is one deadline, then remembered by `stall.ts`, and the
+held choice stands.
+
+**Status.** Current. Amends Q6.106: the ten-minute cache is a ceiling now rather than
+the mechanism.
+
+### Q6.113 — grok's client-bound extension requests, and what it does with each answer
+
+**Measured 2026-09-24, grok 1.0.40 (`eb1a2256660d`) at
+`/opt/homebrew/lib/node_modules/@xai-official/grok/bin/grok-native`, `grok
+--no-auto-update agent stdio`, driven by a raw JSON-RPC client that sends this
+daemon's own `initialize` and logs every frame.** About a dozen prompts on
+`grok-4.7`.
+
+**Three agent-to-client requests exist, and all three are sent whatever the client
+declares.** Their names sit side by side in the binary's leader code
+(`x.ai/ask_user_question`, `x.ai/exit_plan_mode`, `x.ai/mcp/elicit`) and go out
+with ACP's `_` prefix. Verbatim params:
+
+```json
+{"sessionId":"…","toolCallId":"call-96b1221b-…-0","questions":[{"question":"Which drink?","options":[{"label":"Coffee","description":"Hot, black"},{"label":"Tea","description":"Green"},{"label":"Water","description":"Still"}],"multiSelect":false}],"mode":"default"}
+{"sessionId":"…","toolCallId":"call-db1e94e8-…-2","planContent":"# Plan\n\nAdd one comment line to README.md.\n"}
+{"sessionId":"…","toolCallId":"mcp-elicit-ffb00a18-…","serverName":"probe","message":"Pick a colour for the probe","mode":"form","requestedSchema":{…the server's own schema, unchanged…}}
+```
+
+`mode` is `"plan"` for a question asked in plan mode, and `multiSelect` may be
+`null` there. An option with no description arrives with the label copied into it.
+Each request is preceded by `_x.ai/session_notification {sessionUpdate:
+"pending_interaction", tool_call_id, kind}` (`question`, `plan_approval`,
+`mcp_elicitation`) and followed by `interaction_resolved` — and ahead of it, for the
+same call id, by grok's own `permission` step and its `interaction_resolved`.
+
+**What each accepts.** Found from grok's own errors and tool results, never
+guessed:
+
+| | answer | grok's tool result |
+|---|---|---|
+| question | `{outcome: "accepted", answers: {"Which drink?": "Coffee"}}` | *User has answered your questions: "Which drink?"="Coffee"* |
+| | a list for a value | joined with `, ` |
+| | `{outcome: "cancelled"}` | *User declined to answer the questions. Continue with the task using your best judgment, or ask different questions.* |
+| | `{outcome: "chat_about_this"}`, `{outcome: "skip_interview"}` | clarify first; stop the plan interview (optional `partial_answers`) |
+| | `{}` | fails: *missing field `outcome`* |
+| | `{outcome: "nonsense"}` | fails: *unknown variant, expected one of `accepted`, `chat_about_this`, `skip_interview`, `cancelled`* |
+| | `{outcome: "accepted"}` | fails: *missing field `answers`* |
+| | `answers: {"Q": 5}` | fails: *did not match any variant of untagged enum StringOrVec* |
+| | `annotations: 5` / `{"Q": 5}` | fails: *expected a map* / *expected struct QuestionAnnotation*; `{"Q": {}}` is accepted |
+| plan | `{outcome: "approved"}` | *Your plan has been approved. You can now start coding.*, plan mode off |
+| | `{outcome: "abandoned"}` | *The user chose to abandon the plan entirely… Plan mode has been disabled.* |
+| | `{outcome: <anything else>, feedback: "X"}` | *The user wants to revise the plan. The user said: X* |
+| | `{}`, `"nonsense"`, `{outcome: "cancelled"}` | *The user wants to revise the plan. Ask the user what changes they would like to make.* |
+| MCP form | `{outcome: "accept", content: {…}}` | the server receives `{action: "accept", content: {…}}` |
+| | `{outcome: "decline"}` / `{outcome: "cancel"}` | `{action: "decline"}` / `{action: "cancel"}` |
+| | ACP's own `{action: "accept", content}`, `{}`, anything else | the server receives `{action: "cancel"}` |
+
+Answers are keyed by the question's **text** — an unknown key is taken and quoted
+back, an empty map is taken — and grok itself refuses two questions with one text.
+
+**`-32601`, what this daemon answered until now.** The question tool fails with
+*"Failed to reach the client for user question: Method not found"*; the plan fails
+with *"Plan approval could not be completed because the client disconnected. Plan
+mode remains active; the approval will reappear on reconnect."* **and the turn
+ends**; the MCP server is handed `{action: "cancel"}`.
+
+**The question timeout is real, silent and on by default.** `[toolset.
+ask_user_question] timeout_enabled = true, timeout_secs = 1800`, overridable by
+`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED` / `…_SECS`, with the environment ahead of
+the user's config and behind `requirements.toml` (grok's own documentation). With
+`…_SECS=5`, the question was abandoned at 5.0s as *"User declined to answer…"* —
+the `cancelled` text — with **no message of any kind to the client** except
+`interaction_resolved`; the request stays open on the client's side for ever. With
+`…_ENABLED=false` beside it, an answer 20s later was taken. Re-measured through this
+worktree's own `Session` and spawn with `…_SECS=3` in the daemon's environment: an
+answer at 8s was taken, because the spawn's `false` wins.
+
+**`_meta.askUserQuestion: false` on `session/new` removes the tool** — asked to
+call it, the model answered that it had none. It is read nowhere else we found, and
+nothing in `initialize` changes whether grok sends any of the three.
+
+**Also seen, not acted on.** `enter_plan_mode` is taken without a permission
+request, and the plan file is written through the client's `fs/write_text_file`.
+The binary names a fourth client-bound method, `x.ai/folder_trust/request`, which no
+run reached. `initialize` now advertises `cached_token` beside `grok.com`
+(as the default auth method), which Q6.110 did not see.
+
+**Status.** Current, for 1.0.40. `pincheck` pins no grok build, so a shape change
+arrives with grok's own updater; the parser refuses rather than guesses and the
+driver holds these requests verbatim.
 
 ## Open questions and deliberate non-goals
 
@@ -32827,10 +36667,17 @@ call.
 shape as `SmtpDialer` and `AgentProcess`: `SSH` is what reaches the box, so
 `echo` turns the remote argv into an assertion, and `GH` is how the commit's
 verdict is read, so a stub exercises the green path and the red one.
-`deploycheck` drives twenty-four cases — every named secret separately, because a
-guard that fires on "any of them missing" passes just as well when it names the
-wrong one; the daemon refusal; both gate outcomes and the escape; the exact
-remote command; and that the key is neither printed nor left behind.
+`deploycheck` drives thirty-three cases — every named secret separately, by the
+refusal's first line, because a guard that fires on "any of them missing" passes
+just as well when it names the wrong one; the daemon refusal; both gate outcomes
+and the escape; the exact remote command; the host key pinned from
+`DEPLOY_KNOWN_HOSTS` into a known_hosts file of its own under
+`StrictHostKeyChecking=yes`, with no scan anywhere in the script; that
+`deploy.yml` forwards every secret the script requires; and that the key is
+neither printed nor left behind. The pin was a claim before it was code: the
+script said "pinned rather than trusted on first use" while `ssh-keyscan -H`
+appended whatever answered, on every run. It fails closed now, and uses its own
+file because a reused runner's `~/.ssh/known_hosts` may still hold scanned keys.
 
 **What is still unmeasured is only the transport.** No ssh has run and no host
 has answered; the decisions are exercised, the socket is not. That is a smaller
@@ -33179,6 +37026,10 @@ answer already held; `unknown` remains the value for never having asked, and a
 failed probe still lands on `offline`. That covers every screen at once rather
 than one predicate per caller. `daemonReadable` is the second half, for the
 genuine first-load `probing`, and it is pure so all four values are walked.
+Extended to `offline`: a re-probe keeps `offline` and its reason until it answers, so
+`probing` is published only from `unknown` and `daemonRead` maps it to `asking`.
+`skipReasonFor` alone still attempts a machine mid-probe, because its request joins the
+probe in flight.
 
 **What it confirms.** `.claude/rules/web-shell.md` already states this rule for
 the rail — reachability flickers, so a row may not change because of it — and the
@@ -33861,6 +37712,11 @@ own docblock records why the *sign-in* flow was pulled inline — from inside a
 pop-up, navigating is "a pop-up replacing a pop-up", and it discards the folder
 already chosen. The builder has the same exposure.
 
+⚠ **The sign-in flow followed the builder out (Q3.640).** Its reason for being inline
+stopped holding for the reason this entry gives — the folder rides the address and
+the pick rides `agentPick.ts` — and the card is a leaf of the machine's Agents list
+now, reached from New session through Agent settings.
+
 **What changes the answer is that the folder can be made not to live in component
 state.** `/new/:machineId/:cwd` already had a segment for it — it was seeded from
 there and never written back. `NewSession` now replace-navigates on every folder
@@ -34080,8 +37936,8 @@ the semantics decide what the keys should do.
 
 ### Q7.123 — `slowRoute` is a hand-maintained list in a different package from the routes it is about
 
-**Position.** Which calls get 90 seconds instead of 15 is a predicate in
-`packages/web/src/machine.ts`, matching on verb and path. The routes are registered in
+**Position.** Which calls get more than 15 seconds, and how much more, is a table
+(`daemonChainMs`) in `packages/web/src/machine.ts`, matching on verb and path. The routes are registered in
 `src/server.ts`. Nothing connects the two: adding a route that spawns an agent
 compiles, typechecks, passes `daemoncheck`, passes `webcheck`, and goes out on a
 budget it cannot meet.
@@ -34116,6 +37972,11 @@ version with no second copy, and it is a protocol change with a compatibility st
 which is `compatibility.md`'s subject rather than this one's. The realistic near-term
 step is the smallest: a comment at each expensive route in `src/server.ts` naming
 `slowRoute`, so the grep exists in the direction somebody actually edits.
+
+**Half closed.** webcheck's "how long a slow route is given" reads each member's daemon
+budgets from `src/` and fails when a chain outgrows the client's number or a table branch
+has no chain. A new route that spawns a process with no table entry still passes; that
+half stays open.
 
 **Status.** Not built — deferred at the 2026-08-26 design review
 
@@ -34788,7 +38649,9 @@ Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
 (WebKitGTK) are open, and `docs/NATIVE.md` carries them. A platform that refuses
 costs nothing visible: `proveLocal` fails and the relay answers.
 
-**Status.** Reversed an earlier decision. Q7.135 is superseded.
+**Status.** Reversed an earlier decision. Q7.135 is superseded. Where the
+announcement lives — one per state root rather than one under `homedir()` — and
+which daemon may remove it is Q7.148.
 
 ### Q7.138 — Why the payload shipped a coding-agent CLI it deliberately does not ship
 
@@ -34900,8 +38763,94 @@ write nobody asked for, can itself `409` on `nameVisibleTo` leaving half a
 migration, and is cosmetic for a grantee anyway — `machines.name` was minted as
 `qualifiedName(label, id)` at creation and is permanently unchangeable.
 
+**Amended 2026-09-23: the home screen says `local`, and puts it first — the badge
+alone had kept half of the owner's words.** *"The local machine is called local
+only where the app is running"* was implemented as a `this device` badge in
+Settings → Machines, the one screen where the label is *managed*. The home screen —
+the machine strip, the desktop rail, the New session picker — never read
+`localMachineId`, so on the computer the app runs on the rail drew `M · MacBoo…`,
+in name order, and the owner asked why the local daemon was "not local and not
+first in the list". A badge answers *which row is this computer* for somebody who
+goes looking; the words were about what that machine is **called**, and the list
+you work from is where it is called anything.
+
+- **One rule for the name.** `machineDisplayName` in `machineOrder.ts`: `local` for
+  `localMachineId`, the stored label for every other machine. `sessionGroups` fills
+  `MachineGroup.name` from it, so the strip, the rail (label, tooltip, monogram) and
+  the drag's announcement follow with no call of their own; New session reads
+  `machinesAsDrawn`, which is the rail's order, names and therefore its default; the
+  two `machine · path` lines, on a row under All and on a session's header, call it
+  directly. **Settings → Machines keeps the real label** and the badge, since that is
+  where a label is renamed and told apart from a collision; **a sentence keeps it
+  too**, because one is what gets pasted to somebody at another client.
+- **One clause for the place.** `orderMachines` takes `first`: this computer's
+  machine leads *unless the stored order names it*, ahead of the stored ids rather
+  than among the machines nobody placed. A position somebody chose always wins, and
+  a drag is what stores one — `setMachineOrder` writes the whole drawn list, so the
+  first drag of any machine pins this one where it was drawn. A reader who had
+  dragged before this clause existed has it stored wherever it was drawn then, and
+  it stays there until they move it.
+- **The memo keys on it**, for `machineOrderVersion`'s reason — it is patched on its
+  own and replaces neither array — and `bootstrap` reads it inside the listing's own
+  `Promise.all`, so a daemon already up is `local` and first on the first paint
+  rather than renamed and moved a moment later.
+- **Seeded, then sticky — the review of that amendment found the name and the place
+  still moving by themselves.** The read above answered only on a launch where the
+  daemon was *already* up, and on this app's own computer it never is: the app stops
+  its daemon at quit, `src/announce.ts` removes the announce file on that clean stop,
+  and `setUpThisComputer` starts it again only after `phase: "ready"`. So every cold
+  launch drew the host name in name order and then renamed and jumped. And
+  `host_local_daemon` answers only a daemon that passes `/health` inside its probe, so
+  any wake where the daemon was restarting put the host name back until the next one.
+  Both were this entry's own rule read the wrong way round — *identity and
+  reachability are two questions* — so:
+  - **The seed is the claim**, the machine this app created for this server, which
+    the host already keeps per origin for the quota's sake and which survives the
+    quit. It rides the boot payload (`claimed`, one small file read, no probe) rather
+    than a new command or `host_daemon_state`'s poll, and `seedLocalMachine` fills an
+    unknown with it and never replaces a known id. A daemon the app adopted rather
+    than created carries no claim; the live read is its only answer, as before. The
+    announce file read *without* the probe was the other candidate and buys nothing
+    here: on the cold launch this exists for, the clean stop has already removed it.
+  - **The live read merges rather than assigns** (`localMachineAfter`): a read that
+    finds nothing keeps what is known, and a different machine of ours replaces it —
+    the live daemon is the authority when it names one. **An id this account does not
+    hold never displaces one**, which the brief had not asked for and the host forced:
+    it answers the first live daemon across this server's root and then
+    `~/.reemoat`, and a computer carrying a daemon for another fleet in the second
+    would otherwise have `local` moved off its own row on every cold launch. *Ours*
+    is a question about the list, and both reads are made before it is current, so
+    each answer is weighed again once a listing lands (`weighLocalMachine`) —
+    without that, the daemon of a machine just created lost to a claim for one
+    since switched off until the next wake.
+  - **Nothing clears it, and nothing needs to.** A stale id — a revoked machine,
+    another fleet's — matches no row, so it draws exactly what `null` does; a server
+    change reloads the page. The drag consequence above narrows with it: a drag made
+    while the id was unknown stored this machine at its name position, and that
+    window is now only a computer this app did not set up, before its daemon answers:
+    a machine the app has just created is weighed as this computer the moment the
+    listing holds it, rather than when its child first announces itself.
+- **Two tiles may not both say `local`.** *Not migrated*, above, means a machine the
+  app set up while `local` was the stored label still carries it — the owner's Mac
+  lists one beside the machine it runs now — and `nameVisibleTo` lets any other be
+  renamed to it, since this computer's own label is its host name. The control
+  plane's uniqueness rule cannot see a name that exists only on a client, so
+  `machineDisplayName` draws another machine's `local` (case-folded) as label, `-`,
+  and its id without `m_` — `qualifiedName`'s shape, which for a machine created as
+  `local` and never renamed is exactly the `machines.name` `cpctl admin machines`
+  prints. Whether or not this computer is known yet, so that tile's name never waits
+  on the identification, and in a browser the word is never drawn at all.
+
+Still drawn, never stored: nothing that writes a label reads it — `webcheck` sweeps
+every file under Settings, where the rename field is — and another fleet's daemon
+matches no row, so it is never called `local` and never put first.
+
 **Status.** Reverses the decision of 2026-09-15 recorded in `store.ts` and pinned in
-`webcheck.machine-limit-and-probe.ts`, on the owner's word the same day.
+`webcheck.machine-limit-and-probe.ts`, on the owner's word the same day. Amended
+2026-09-23, on the owner's report, to reach the home screen; driven in
+`webcheck.command-menu-and-browser.ts` (the name, the place, the merge, the
+collision, New session's default) and `webcheck.local-route.ts` (the seed and the
+merge through the real store); the host half of the seed is `nativecheck`'s.
 
 ### Q7.140 — Where a failed setup's output goes
 
@@ -35088,7 +39037,9 @@ Settings → Machines → *that machine*, beside the "This device" switch.
 **No way back to the compiled default.** Once somebody saves an address the file
 wins for ever, which is the whole point of seeding (Q4.121) and also means there
 is no "reset to the shipped server" control. Deleting `server` from the shell's
-config is the remedy, and nothing surfaces it. Left open rather than built: the
+config is the remedy, and nothing surfaces it. [⚠ amended by Q3.643: an account's server never
+changes, so there is nothing to reset; another server is another account, and
+*Add account* opens on the compiled default.] Left open rather than built: the
 population that needs it is a fork's users on a build whose default moved, and
 nobody has one yet.
 
@@ -35100,8 +39051,10 @@ Tauri plugin and no second arrival path to secure. `paseo` registers a `paseo:`
 scheme for *agent* deep links, which is a different feature from account recovery.
 
 **Unmeasured.** Nobody has switched servers on a real machine and watched
-`credential#<old origin>` disappear from the OS keyring. The Rust key *shape* is
-unit-tested and the erase is asserted at the call site, but writing and reading a
+`credential#<old origin>` disappear from the OS keyring. [⚠ Q7.148 reversed the
+erase: a switch keeps that entry now, and `nativecheck` asserts its absence at the
+call site. The hand check is `docs/NATIVE.md`'s step 16, rewritten to match.] The
+Rust key *shape* is unit-tested and the erase was asserted at the call site, but writing and reading a
 real entry needs an unlocked login keychain, which a non-interactive shell does
 not have — the same limit every other keychain item in `credential.rs` has.
 `docs/NATIVE.md`'s hand checklist is where it happens.
@@ -35375,3 +39328,541 @@ harness.
 eventually carries must be read off `docs.x.ai/developers/models` on the day it is
 written — the `moonshot` row shipped three ids that had been retired four months
 earlier and nothing noticed.
+
+### Q7.148 — One app, several servers, one computer: a state root and a daemon per server
+
+**Question.** Signed in to production on the Mac this is developed on, the app said
+*"This computer could not be set up"*. `~/.reemoat/daemon.env` there belongs to the
+launchd daemon and names the dev stand, and the app treated `~/.reemoat` as the one
+daemon slot a computer has: the file named another server, so `config_state`
+answered `elsewhere` and the setup stopped. The owner's follow-up was the real
+question: *why not just restart the one daemon when the server changes — and what
+does it cost with three instances?*
+
+**Decision. Each server gets a state root of its own and a daemon of its own,
+started the first time the app opens that server and stopped when the app quits.** [⚠ amended by Q7.149: per account — a server's first account keeps the root chosen
+below, every further one gets `~/.reemoat/servers/<server>@<user id>/` — and every
+listed account's set-up daemon starts with the app rather than when a page opens it;
+the host's supervisors are keyed by root.]
+
+- **Which root** is `state_root` in `daemon.rs`, first match wins: `~/.reemoat` when
+  its `daemon.env` names this server (the launchd / `install.sh` daemon works exactly
+  as before and is adopted); else `~/.reemoat/servers/<server>/` when that folder
+  already has an env file (a server keeps its folder); else `~/.reemoat` when there
+  is nothing in it — no env file, no database, no announcement — **and** no service
+  unit left behind (the first server on a fresh computer, so `install.sh` can still
+  take over what the app set up); else `~/.reemoat/servers/<server>/`.
+- **The folder name** doubles every `_` and then writes the scheme's `://` and the
+  port's `:` as one `_` each — `https_app.reemoat.com`, `http_127.0.0.1_7890`. The
+  doubling makes it injective: `http://a.b:8080` and `http://a.b_8080` would
+  otherwise share a folder, and the second server's permanent `elsewhere` would tell
+  somebody to move the first one's database aside. The scheme is kept, because
+  `http://` and `https://` are different trust boundaries. Every level is created
+  `0700` with `DirBuilder` and narrowed again for one that already existed wider: a
+  writable `servers/` is a folder another account could name for a server first.
+- **The root, the server and the port are variables on the spawn, never
+  configuration.** `Supervisor::start` sets `REEMOAT_HOME` (`STATE_ROOT_KEY`), the
+  host's own origin as `REEMOAT_CONTROL_PLANE`, and `REEMOAT_PORT=0` for a root of
+  its own — after the env file, so they win over it. The legacy root keeps the
+  file's port, 7887, because `pnpm client` and `deploy/lib.sh`'s `/health` probe
+  address it there (Q1.22), and forcing `0` there would break the rule that the file
+  wins. Nothing is written into the file, so `OWNED_KEYS` stays exactly three. A
+  per-server file is `env_contents` as before; its `REEMOAT_CONTROL_PLANE` line is a
+  record for `config_state`, and its certificate and proxy lines come from this
+  app's own environment when it is written — never copied from another root, which
+  would add one fleet's private CA to another's trust.
+- **The daemon derives every default from that root.** `resolveStateRoot` in
+  `src/paths.ts` reads `REEMOAT_HOME` — `~/.reemoat` unset, an absolute path only,
+  and never the home directory itself, whose defaults would be undotted folders the
+  picker offers — and the database, worktrees, uploads, plugins, the ask directory
+  and `daemon.json` all sit inside it unless their own variable says otherwise. The
+  agent toolchain (`MANAGED_CLI_DIRS`) does not move: it is per user.
+- **The host keeps a supervisor per origin**, behind a lock of its own inside the
+  lock on the map, because `host_daemon_stop` holds one for up to `STOP_DEADLINE` and
+  a single lock would stall every server's state poll for that long. Every daemon
+  command answers about the current server's root. `host_set_server` touches no
+  daemon, and `nativecheck` pins that absence in its body. `RunEvent::Exit` signals
+  every child and then reaps them all against one deadline, so a quit costs one
+  `STOP_DEADLINE` rather than one per server; `cargo test` drives it with children
+  that ignore `SIGTERM`, the only shape that can tell the two apart.
+- **`host_local_daemon` reads the current server's announcement, then
+  `~/.reemoat`'s.** The second is what keeps a client build finding an `install.sh`
+  daemon (`native-packaging.md`), and a legacy machine id from another fleet is
+  declined by every caller, all of which compare it with a machine they hold.
+- **`managed_unit` is asked only about the legacy root**, the one file a unit can
+  source; a leftover unit beside an *empty* `~/.reemoat` is caught in `state_root`
+  and sends that server to a folder of its own rather than handing the unit a file
+  to race for.
+
+**Fixed with it, each a defect the one-slot assumption was hiding.**
+`removeAnnounce` unlinked whatever was at the path, so of two daemons sharing a
+root the one that lost the last-writer race deleted the winner's announcement on its
+own clean stop; it now takes the daemon's own `instanceId` and removes only a file
+carrying it (a read and an unlink, so a microsecond window remains between daemons
+sharing a root). A live daemon for *another* server read as this one's `foreign`,
+and `setUpThisComputer` returned at its status gate without a word; `foreign` now
+means this server's root, a machine already in this account's list is adopted
+silently, and one that is not is `FOREIGN_DAEMON_DETAIL` — once the machine list is
+in hand, since `bootstrap`'s catch leaves no connections and would otherwise make
+somebody's own daemon read as one they cannot see. `running` gets the same answer in
+that first read, for the child a previous account on this server enrolled, which a
+sign-out leaves up. ⚠ **This server's root is still not always this server's
+daemon.** `~/.reemoat` is the root of every daemon started without `REEMOAT_HOME`
+and its file is last-writer-wins, so a `pnpm daemon` from a checkout, enrolled with
+another control plane, can be the one announced there — and the first version of
+this told that person a daemon *for this server* was running as a machine they could
+not see, with a remedy about this server's accounts. So `LocalAnnounce` carries
+`controlPlane`, the stored identity's, which `Stored` reads with a serde default;
+`host_daemon_state` compares it with the server through `normalize_origin` and sets
+`DaemonState.stranger` on a mismatch — a flag beside the status, never `absent`,
+which would start a second daemon on a database the launchd unit holds. A stranger
+is silence in the first read, `STRANGER_DAEMON_DETAIL` rather than
+`ANOTHER_DAEMON_DETAIL` once a child this app started has died beside it, and its own
+sentence in Settings → Logs. An announcement with no control plane — a daemon older
+than the field — is taken at its root's word, as before. And a daemon for this server
+running on the legacy database with its env file elsewhere (`REEMOAT_ENV_FILE`,
+`pnpm daemon` from a checkout, a `daemon.env` moved aside while it ran — the step
+the old `FOREIGN_ENV_DETAIL` told people to take) answers `absent` for the server's
+own root; `setUpThisComputer` asks `localDaemon()` before it re-mints or buys, so
+that daemon is adopted rather than joined by a second machine, or re-enrolled into a
+fresh database with its tunnel key rotated out from under it.
+
+**Why not one daemon, restarted on a switch — the owner's question, answered.**
+
+- **A restart does not change which server a daemon belongs to.**
+  `REEMOAT_CONTROL_PLANE` is read on the enrollment path only (`buildVerifier`), and
+  enrollment runs only for a code whose fingerprint is new (`codeFp`); the relay URL
+  and the tunnel key come from the stored identity. A restart with a new address and
+  no new code stays on the old fleet, and every token from the new one is refused.
+- **Moving it means overwriting its identity.** `identity` is a single row
+  (`CHECK (id = 1)`, `SqliteIdentityStore` upserts id 1), and enrolling rewrites the
+  machine id, the issuer, the keys, the control plane and the tunnel credential — the
+  first fleet's machine and relay key are gone, and going back is a fresh
+  enrollment, a code minted by the owner, every time. `ensureMachineKey` also hands
+  both control planes the same X25519 key, which links this computer across fleets.
+- **Worse, the daemon checks a token's `aud` and never its subject.** Sessions carry
+  no fleet column, so after a switch everything that database holds — every session,
+  transcript and worktree, the pasted agent keys, the plugins, system keys and custom
+  agents — is served to whoever holds a grant on the machine it has just become, and
+  the boot pass brings the old fleet's interrupted sessions back on its own under the
+  new identity. So **every server needs its own state folder whatever else is
+  chosen.** ⚠ That folder is a boundary on what the app and the API *serve*, not a
+  wall: an agent runs as you, from either fleet, and can read every root's
+  `reemoat.db` itself (`CLAUDE.md`, *What is not confined*).
+- **Given separate folders, one process restarted on each switch still costs a
+  restart every time.** A `SIGTERM` and the full shutdown — a 20-second session
+  budget, `SHUTDOWN_HARD_LIMIT_MS`, up to `STOP_DEADLINE` of waiting in the host —
+  every live turn interrupted and not re-run, every pending approval dropped (Q2.12),
+  a boot pass on the way back, and the server just left dark for as long as the app
+  is on the other one, a phone's way to this computer included.
+- **One daemon per server costs about 140 MB of memory and one relay connection**
+  (measured below), and every one of them stops when the app quits. With three
+  servers that is at most three processes, and only for the servers actually opened
+  in that run of the app. A second server starts empty — no plugins, system keys,
+  custom agents or pasted keys of its own — while the agent CLIs' own sign-ins
+  (`~/.claude` and the rest) are shared, `HOME` being the real one.
+
+**Measured**, 2026-09-23 on this Mac, with `footprint` (physical memory, which is
+what a person's machine pays) rather than `ps` RSS. A fresh daemon started the way
+the app starts one — `node --import tsx scripts/daemon.ts`, its own
+`REEMOAT_HOME`, no sessions — answered `/health` 0.5 s after the spawn and held
+122 MB, plus 14 MB in the `esbuild` child `tsx` keeps: **136 MB**, unchanged after
+90 s idle, over which it spent 0.03 s of CPU. Its state root was 304 KB. The dev
+daemon, 23 hours up with sessions behind it, held 103 MB (peak 122 MB) plus the same
+`esbuild` child. ⚠ An earlier reading here said 12–71 MB: that was `ps` RSS on
+daemons idle for days, which macOS had compressed, and it understated by about half.
+For scale, one Claude Code agent on the same machine held 382 and 541 MB — a daemon
+is a fraction of the agents it runs, and those are per session, not per server.
+
+**Rejected.**
+
+- **Rewriting `daemon.env` on a switch.** One file holds one single-use code, so
+  every switch is a re-enrollment; on this Mac it is refused outright, the file
+  belonging to a launchd unit whose `KeepAlive` would race the rewrite for the code,
+  the lock and the port (`managed_unit`).
+- **One daemon at a time over per-server folders**, for the restart cost above.
+- **Scanning `servers/*` and starting every root at launch**, which would keep every
+  fleet reachable from a phone while the app runs but spend a process on servers
+  nobody opened. Only the servers opened in this run get one; the other shape is an
+  open question below rather than a default. [⚠ reversed by Q7.149 for accounts:
+  every listed account's root whose env file names its server starts at launch.
+  Still no scan of folders no listed account owns.]
+- **`REEMOAT_HOME` and `REEMOAT_PORT` written into the file.** Two more owned keys,
+  a longer list of what a refreshed code may rewrite in a file `install.sh` wrote,
+  and a second daemon's address turned into a setting somebody can copy into the one
+  file a service sources — where the owner asked for a variable.
+- **`REEMOAT_PORT=0` on the legacy root too.** It would override `install.sh`'s
+  `REEMOAT_PORT=7887` and take `pnpm client` and `lib.sh`'s probe away from the one
+  daemon they can reach.
+- **Copying the certificate between roots**, which adds one fleet's CA to another's
+  trust.
+
+**Known limitations.**
+
+- **Toolchain policy does not follow.** A per-server env file is bare `env_contents`,
+  so `REEMOAT_AGENT_UPDATES`, `REEMOAT_AGENT_SOURCE` and `REEMOAT_AGENT_CHANNEL` set in
+  `~/.reemoat/daemon.env` do not reach the daemons the app runs for other servers:
+  they refresh a toolchain the owner switched off there and, left on the default
+  channel, flip claude's back to `latest` daily whenever that one file names
+  `stable`. The seam, if it
+  matters, is copying exactly those three into a *new* per-server file, validated by
+  `is_writable_value`.
+- **Refreshes multiply.** Every daemon runs `deploy/agents.sh --refresh-only`
+  `FIRST_RUN_DELAY_MS` (five minutes) after it starts and daily after that, so with
+  lazily started daemons two refreshes by *other* daemons can be minutes apart rather
+  than a day. The toolchain lock serialises them and the native installers swap by
+  rename, but `prune_builds` spares only the build it replaced and the one it
+  installed — so an npm-installed harness (kimi, or anything under `--source npm`)
+  that a live session in one daemon is running can lose its tree to a second daemon's
+  refresh the same afternoon. The fix that does not depend on how many daemons there
+  are is a time-based spare in `prune_builds`; not built.
+- **`install.sh` cannot run a second daemon** — its unit label and log path are one
+  per account — so only the legacy root's server is reachable after the app quits,
+  and `pnpm client` and `lib.sh`'s probe cannot find a per-server daemon on its
+  ephemeral port.
+- **Every server somebody signs in to gets this computer as a machine**, spending a
+  quota slot and starting a daemon, which is today's first-server behaviour extended.
+  Whether a second server should be opt-in is open. [⚠ answered by Q7.149:
+  every account, and not opt-in.]
+- **The dev and the release build share `com.reemoat.app`**: open together, each
+  adopts the other's child as `foreign`, and quitting the one that started it stops
+  a daemon the other is using. Pre-existing, now per server. So is a force quit,
+  which orphans every child at once — the next launch adopts each silently as
+  `foreign` where its machine is in the list.
+- **`REEMOAT_DAEMON_PAYLOAD` pointing at a checkout older than this** ignores
+  `REEMOAT_HOME`, so with the legacy daemon stopped it would enroll
+  `~/.reemoat/reemoat.db` with another server's code. `docs/NATIVE.md` says so.
+- **A purge with the app running** deletes databases live daemons are using, and
+  Windows still has no graceful stop, now once per daemon. Both pre-date this; what
+  is new is how ordinary the first is, with an `install.sh` service and the app's
+  daemons side by side, and `--purge` cannot refuse it the way it refuses a live
+  service — `_stopped` sees only the unit. So when it names a `servers/` folder it
+  also says *Quit Reemoat first: it may be running these right now*, a sentence
+  rather than a refusal; probing each folder's announced port would be the script
+  reading the app's layout.
+- **Adoption after an account switch is still silent on a relaunch.** The first read
+  answers a `running` child whose machine this account cannot see with
+  `FOREIGN_DAEMON_DETAIL`, but after a relaunch there is no child: the root's env file
+  names this server, so adoption starts the previous account's daemon and the settle
+  loop's `running` arm clears the notice without asking the list. It is left that
+  way because that arm is the happy path, and a control plane that blinked between
+  the spawn and the poll would draw a failure over a daemon that came up fine. A
+  later bootstrap in the same run — a Retry — finds the child and says it; the next
+  relaunch is silent again. [⚠ closed by Q7.149 for accounts in this app: each
+  has a root of its own, and a server's own root changes hands only on proof.]
+
+**And a switch keeps the sign-in it leaves.** `host_set_server` erased
+`credential#<previous>` in the same act (Q1.640), on the argument that nothing
+should be retained for a server this app is not using. With a daemon per server,
+moving between two fleets is the ordinary case rather than a one-way move, and the
+erase priced every return at a full sign-in while buying little: a switch ends no
+session on the old server, deliberately, so it removed only this computer's copy of
+a session that stayed live there. It keeps it now. The page still lets go of its
+own copy before the host's base moves — `detachSession`, which is `clearSession`'s
+in-memory half, so the old fleet's bearer still cannot ride a request to the new
+host — and the keyring account is still the origin, so a kept credential is never
+read for another server. Signing out while on a server is what gives one up.
+`nativecheck` pins the absence of the erase in that body, and `webcheck` pins that
+the server screen never calls `clearSession`, that `detachSession` asks the store
+for nothing, and that a refused switch re-adopts the copy it let go of.
+
+⚠ **What keeping them widens, recorded rather than closed.** A script running in
+this window — `script-src 'self'` is what keeps one out — could call
+`host_set_server` and then `host_boot` again without a reload, and read *every*
+kept server's credential rather than only the current one's; before, the others did
+not exist. It already held the current server's credential and its DH oracle, so
+this is a widening from one fleet to N, not a new door. The close is a one-shot
+credential read per page load, armed by a page-load hook — which has to be measured
+in the real window first, because a hook that fires after the first `host_boot`
+would sign everybody out on every launch. And a sign-out whose `DELETE` settles
+between a switch and its reload erases the *new* server's entry, since the
+credential and device commands act on whichever origin is current when they run —
+a race older than this change, which a kept credential makes cost a sign-in rather
+than nothing. [⚠ closed by Q1.651 and Q5.120: `host_set_server` is refused for
+anything but a pending seat, a webview's commands answer about its own account and
+name no other, `host_boot` hands a credential over once per page load, and a
+document the host has moved past is refused rather than answered about the account
+that replaced it.]
+
+**Status.** Reversed an earlier decision: the one-slot announcement of Q7.137 —
+`daemon.json` under `homedir()`, removed by whoever stopped — is one per state root,
+removed only by the daemon that wrote it; and Q1.22's 7887 no longer holds for the
+daemons the desktop app runs for a server other than the one `~/.reemoat/daemon.env`
+names, which get `0`; and Q1.640's erase of the previous server's credential on a
+switch.
+
+### Q7.149 — Several accounts on one computer: a webview, a keyring scope and a daemon per account
+
+**Question.** The owner asked for Telegram's arrangement: several accounts in one
+app, a switch that is fast, and work in the account left behind that keeps running.
+Two decisions came with it (2026-09-23): **every account gets this computer as a
+machine of its own**, with its own root and database, the first account on a server
+keeping today's root so `install.sh` stays compatible; and **every account's daemon
+runs from launch to quit**, whichever account is on screen. Q7.148 gave a daemon to
+each *server*, and the page is one credential, one store and one 401 rule. What does
+a second account on one computer cost, and where does it live?
+
+**Decision. Each account is a webview, a keyring scope and — once set up — a daemon
+of its own.** The account itself, and who decides which one a call is about, is
+Q1.651; binding a call to a document is Q5.120.
+
+- **A webview per account, on macOS.** `seats.rs` is the only file that builds a
+  webview. With `MULTI_WEBVIEW` — macOS only — there is one window, `main`, holding a
+  child webview per account, labelled `seat-<n>`, since an account key's `#` and `.`
+  are outside Tauri's label alphabet. At launch (`seats::open_at_launch`, which
+  writes nothing) the window is built hidden, the account shown last is added at
+  full size and the window shown, then every other account is added at zero size and
+  hidden: a webview has no visible flag, and none may flash over the one being
+  looked at. A switch is hide-then-show — nothing reloads, a page keeps its heap, its
+  sockets and a half-typed draft, and a turn in the account left goes on streaming
+  into a page nobody is looking at. A pending caller, an *Add account* that was
+  cancelled, is closed. It needs Tauri's `unstable` feature — `Window::add_child`,
+  `tauri::window::WindowBuilder`, `tauri::webview::WebviewBuilder`,
+  `Manager::get_webview` — which a `[target.'cfg(target_os = "macos")'.dependencies]`
+  table enables for macOS alone, because with it on even a plain `WebviewWindow` is
+  built as a window child with bounds of its own, a change nobody has measured
+  elsewhere.
+- **One webview everywhere else, rebound.** Windows, Linux and Android — and macOS
+  with `MULTI_WEBVIEW` flipped off — keep one `WebviewWindow`, `main`. A switch
+  moves its seat to the other account (`Host::move_seat`), the host answers
+  `AccountMove.reload`, and the page leaves with `location.replace("/")`. Linux is
+  here on purpose: tao packs a window's children into a `GtkBox` and ignores their
+  bounds, so two children split the height. Windows is here until a pass of its own
+  measures WebView2 building N webviews on the main thread at launch. The page never
+  branches on the arm; `reload` is the whole of what it knows.
+- **Every webview is built from `main`'s configuration, and guarded.** `from_config`
+  carries `dragDropEnabled: false` and the background colour into every child, and
+  `on_navigation(is_our_own)` is on every one; there is no `initialization_script`
+  anywhere. `nativecheck` asserts both of `seats.rs` and that nothing builds a
+  webview any other way.
+- **Each page is a single-account app.** `Boot` answers about the calling webview's
+  account — `server`, `credential` once per page load, the device fields and
+  `claimed`, plus `account`, `name`, `legacy`, `deviceBound`, `generation` and
+  `rebinding` — so `cp.ts`'s one credential, the 401-by-identity rule (Q1.412) and
+  the store singleton stand unchanged.
+- **A daemon per account, owned by the host.** A server's first account — its owner
+  in `server.json`'s `roots` — keeps the root Q7.148's `state_root` gives that server
+  (`daemon::owner_root`), which is `~/.reemoat` where `install.sh`'s file names it.
+  Every further account on that server gets `~/.reemoat/servers/<server>@<user id>/`
+  (`daemon::guest_root`): never the legacy root, so always on the kernel's port, and
+  injective, since `@` is in no slug and `accounts::is_user_id` refuses it. The host's
+  supervisor map keeps its type, keyed by the root's directory, so a legacy seat and
+  the account it becomes share one. At launch `daemon::start_configured_at_launch`
+  starts, on a thread of its own, every listed account's daemon whose env file
+  already names its server — the adoption path, no enrollment code and no machine
+  created — **whether or not a page is alive**: in the single arm only the account on
+  screen has a page, and macOS 14 and later suspends a hidden `WKWebView` after about
+  five minutes. Pages still create machines and enroll.
+- **Root selection is serialized.** Q7.148's third rule hands an empty `~/.reemoat`
+  to whoever asks, which is a fact about the disk at one instant — two owners of two
+  servers setting up together at launch could both see it empty, and the second
+  `Supervisor::start` would answer `Ok` over the first's child. `ROOT_LOCK` is held
+  from `state_root` through `Supervisor::start`, and `server.json`'s
+  `legacy_root_holder` records the origin that was handed the folder, so any other
+  origin asking the third rule is sent to one of its own. `machine.json` gained
+  `CLAIM_LOCK` and an atomic write for the same launch: eight webviews setting up at
+  once would otherwise interleave read-modify-writes and lose a claim — a quota slot
+  each.
+- **A guest reads its own announcement and nobody else's.** `announce_roots` answers
+  `[own]` for a guest and `[own, legacy]` for an owner or a legacy seat: `~/.reemoat`
+  is the owner's or `install.sh`'s, and a guest's page handed that daemon's machine
+  id would adopt another person's machine as its own and never get one.
+- **Taking an account off this computer stops its daemon.** Sign out
+  (`store.signOut`, then `cp.logout`, then `forgetNativeAccount`) and *Remove
+  account* both run `host_account_forget`, which acts on the caller only: erase its
+  credential; drop the entry under `daemon::lock_roots` (`config::forget_account`,
+  which keeps the device id, the key and the `roots` record, so signing in again as
+  the same person reuses the device row and the root); stop its root's supervisor
+  unless another listed account shares the root; then show the most recently shown
+  other account — a hidden caller closes itself and leaves the screen alone — or,
+  with none left, rebind to a sign-in on the same server. ⚠ **Both spawns ask
+  `Host::lists_root` under the same lock** — the launch thread, working through a
+  roster read at launch, and a `host_daemon_start` already past its seat check. The
+  first version stopped before dropping the entry and neither spawn looked again, so
+  a start in flight brought the removed account's daemon back until quit (review,
+  2026-09-25). A switch, an add, a confirm and a sign-in stop nothing, and
+  `nativecheck` pins both halves.
+- **A hidden webview cannot reach the screen.** Every page runs, shown or not, and
+  may be rendering agent output, so `host_account_switch`, `host_account_add`,
+  `host_save_file`, `host_pick_folder`, `host_open_external` and `host_copy_text`
+  are refused `not_shown` from any label but the one on screen.
+- **The lock rule.** No `Host` mutex but `changing` is held across a `Window` or
+  `Webview` call, and nothing on the main thread takes `changing`: creating, showing
+  and closing a webview run on the main thread and are waited for, and the main
+  thread runs `on_page_load`, which takes `seats`. `host_boot` became `(async)` for
+  the same launch — every account's webview boots at once, and on the main thread
+  each keyring read would queue in front of the shown page's first paint.
+- **`MAX_ACCOUNTS` is ten** (Q5's table); past it the host refuses `account_limit`
+  and the drawer draws no *Add account*.
+
+**Why not several credentials in one page.** `cpFetch` attributes a 401 by comparing
+`credential === sent` by identity (Q1.412), the store is a singleton owning one
+session's sockets and poll, and every screen reads *the* account. Giving all of them
+an account dimension is a rewrite of the client for something the host provides by
+building a webview.
+
+**What it costs.** Q7.148's measurement stands per daemon — about 136 MB of physical
+memory, idle at almost no CPU — so N set-up accounts cost about N × 136 MB from
+launch to quit, plus a hidden `WebContent` process per account on macOS, which has
+not been measured.
+
+**The multi-webview arm was measured before it shipped**, against `tauri` 2.11.5,
+`tauri-runtime-wry` 2.11.4 and `wry` 0.55.1 with `unstable` on the macOS target —
+the pair `nativecheck` pins as `MEASURED_TAURI`. The gate was these sixteen checks;
+`docs/NATIVE.md` steps 29–43 walk them by hand:
+
+1. hide and show are instant, and a hidden page keeps its heap and its sockets;
+2. `visibilitychange` fires and `resume()` runs on show;
+3. a webview hidden at launch still completes its bootstrap;
+4. auto-resize follows the window, full screen included, once a switch has reset
+   the zero-size bounds;
+5. `set_focus` moves the keyboard to the webview shown;
+6. the navigation guard applies to each child;
+7. an OS file drop reaches the Composer in each child;
+8. the caller's label reaches the host;
+9. `on_page_load(Started)` fires before the new document's first call — on Android
+   too;
+10. `add_child`, and a webview closing itself from an `(async)` command, do not
+    deadlock;
+11. closing the window reaches `RunEvent::Exit` and `stop_all`;
+12. the memory each hidden webview holds;
+13. a page hidden for more than ten minutes, with a live socket and a setup retry;
+14. `tauri::ipc::Request` headers are readable in a command — the generation rides
+    one;
+15. the locked `<input disabled>` has the computed style its classes promise, in
+    WebKit;
+16. a back/forward-cache restore after a switch.
+
+A pass is items 1–8, 10 and 11. If the arm fails, the fallback is one line —
+`MULTI_WEBVIEW = false` — which gives macOS the rebind-and-reload arm and keeps
+every other rule here.
+
+**Measured**, 2026-09-23, macOS 15.6, a bundled release build driven by itself
+through `Webview::eval` against a local control plane — the session had no
+Accessibility grant, so nothing could be clicked from outside — with an isolated
+`HOME` and keychain. **Pass: `MULTI_WEBVIEW` stays `true`.**
+
+- **1** A switch is 0.2–1.0 ms of host work and 9–22 ms from the tap to the other
+  page's `visible` (one outlier, 128 ms). The heap survived every check, and a
+  loopback WebSocket stayed open through 16 minutes hidden with no gap in 509 replies.
+- **2** Paired `hidden`/`visible` events on every switch; after 20 s or more hidden,
+  `resume()` ran on show and minted fresh tokens 258–410 ms later. ⚠ Measured with
+  WebKit's window-occlusion detection switched off in the throwaway harness: the
+  console screen was locked, which reports every page hidden. With it on and the
+  screen unlocked is a hand check.
+- **3** A seat created hidden at launch completed its bootstrap and drew its machine
+  list; `start_configured_at_launch` started both accounts' daemons in 63 ms, before
+  either page asked.
+- **4** Resizing with one seat hidden resized both, the hidden one included. Full
+  screen could not be entered on a locked session — a hand check.
+- **5** The shown `WKWebView` is the window's first responder after every switch and
+  the hidden one is not; `document.hasFocus()` needs an active app — a hand check.
+- **6** `location.href` to a foreign address was refused in a hidden and a shown seat.
+- **7** Not drivable without Accessibility — a hand check.
+- **8, 14** Every command carried its caller's label and the `reemoat-generation`
+  header; one sent without it was refused.
+- **9** On macOS, `Started` preceded the document's `host_boot` 20 times out of 20,
+  by 11.5–26.2 ms. Android is unmeasured.
+- **10** `add_child` took 4–5 ms inside `host_account_add`; a webview closing itself
+  from its own `(async)` command returned every time, with no deadlock.
+- **11** Closing the window reached `RunEvent::Exit` and `stop_all`, which stopped
+  two daemons in 60 ms and left no WebContent process.
+- **12** A seat's WebContent process holds 55–57 MB at launch and about 105–122 MB
+  after twenty minutes of use; a pending sign-in about 48 MB; each daemon 112–146 MB.
+- **13** Hidden for 982 s: throttled to about 0.5 Hz for the first 484 s, then
+  suspended by WebKit — timers frozen, the socket not closed. On show, all 248 queued
+  messages arrived in order and `resume()` ran. The setup-retry half is unmeasured.
+- **15** Locked: ink `--color-muted`, border `--color-edge`, opacity 1 — WebKit adds
+  no disabled styling of its own; the pencil unlocks, focuses and selects.
+- **16** Not applicable to this arm: a switch never navigates.
+
+**Two defects found by it, both fixed before this shipped.** The first build
+reloaded **728 times in twelve seconds** and drew nothing: `store.bootstrap` fires
+`loadConfig` before it awaits `hostReady`, that `host_cp` went out with no
+generation, was refused `stale_document`, and the refusal reloaded the page —
+`native.ts`'s `invoke` now waits for the boot while it is in flight, and
+`shouldLeave` reloads only on the refusal of a call that carried a generation. The
+second: `Webview::close` left a closed account's page running — a signed-out
+account's socket still answered 17 s later, and every cancelled add kept a
+WebContent process of about 48 MB until quit — so `seats.rs` sends the view
+WebKit's `_close` first (`end_page`), asked for with `respondsToSelector:` rather
+than assumed; `nativecheck` pins the order. A hidden seat added at zero size reports
+`innerHeight` −28 until it is first shown — the title bar's inset — which nothing
+here reads while hidden.
+
+**Rejected.**
+
+- **Several credentials in one page** (above).
+- **One daemon per server, shared by the accounts on it.** The daemon checks a
+  token's `aud` and never its subject (Q7.148), so two people's sessions in one
+  database are served to whoever holds a grant on either — Q7.148's argument from
+  servers, extended to people.
+- **A window per account.** A second presence in the dock and in window management
+  per account, for something a switch shows in place.
+- **Several accounts in the browser.** One origin is one `localStorage`; the web arm
+  and its three storage names stay byte-identical, and a browser reaches no machine
+  anyway (Q1.649).
+- **Starting daemons from pages**, the first design. It breaks the owner's decision
+  in the single-webview arm, and under macOS's suspension of hidden webviews.
+- **Keeping a removed account's daemon to the next quit.** It would go on serving
+  that account's phones and grantees, running agents as this person, under a screen
+  saying the account is gone.
+- **Namespacing `localStorage` per account now** — see the first limitation.
+
+**A deliberate non-goal: notifications and badges for accounts not on screen.** The
+drawer draws no unread count and no dot for another account, and nothing notifies
+across accounts. A hidden account's work still runs; what is not built is telling
+somebody about it. The owner's call, for this iteration.
+
+**Known limitations.**
+
+- **`localStorage` is shared by every account's webview.** One origin, one
+  `WKWebsiteDataStore`: `configMemory`, `machineOrder`, the groups and the
+  local-route switches are one set for every account, and one account's sign-out
+  `forgetAllConfig` clears the others' remembered controls. The sweep only ever
+  deletes, so a convenience is lost and nothing is disclosed, and a confirm that
+  finds its account already here deliberately does not sweep. The fix is a
+  per-account key prefix, or `data_store_identifier` once macOS 14 is the floor — the
+  bundle's minimum is 13.
+- **Every account's daemon shares `HOME`**, so the agent CLIs' own sign-ins
+  (`~/.claude` and the rest) and the toolchain are one set across accounts, as they
+  were across servers (Q7.148); an agent run for one account runs as the same uid as
+  every other's.
+- **Losing `server.json` orphans keyring entries.** The keyring cannot be listed, so
+  `accounts` is the only record of which entries exist; a deleted or quarantined file
+  leaves them until they expire, and the next sign-in makes fresh ones.
+- **A downgrade signs migrated accounts out.** An earlier build reads
+  `credential#<origin>`, which a migrated account no longer has, and knows nothing of
+  `accounts`. Its read-modify-write keeps the fields it does not know (`Stored.rest`),
+  so going forward again finds them.
+- **The single-webview arm reloads on every switch**, on Windows, Linux and Android,
+  and keeps no page state across one. A spike of their own is what moves them.
+- **No protected `release` environment for the default-server variable** (Q4.127).
+  Anybody who can write repository variables can repoint every new installation's
+  locked default outside code review; the job summary is detection, not prevention.
+- **`install.sh` reaches only the legacy root** (Q7.148), so a guest root's daemon
+  lives exactly as long as the app.
+- **An upgrading owner can be bound a guest, and a second machine bought.** Traced
+  in review on 2026-09-25, not reproduced on a device. A legacy seat's confirm proves
+  `~/.reemoat` by a machine id — the bare claim in `machine.json`, or the root's
+  announcement — and a root `install.sh` set up has no bare claim, while at the
+  first launch after the update its daemon is still starting when the page asks.
+  With no id `accounts::gather` answers `Unreachable`: the account is bound a guest
+  with `pending_proof`, and the same bootstrap's `beginSetUp` finds the guest root
+  empty and creates a machine — a quota slot that is never returned. From the next
+  launch `launch_roots` starts only the guest root, so `~/.reemoat` never announces
+  and the proof never lands: this computer is a new, empty machine, and the old one,
+  sessions and all, is offline. Where the old daemon does come up — its own unit — a
+  later confirm proves the root and flips `owner`, and the guest daemon runs on
+  under a supervisor keyed by the old directory, which Stop and Sign out no longer
+  reach: two daemons and two machines for one account until quit. **Update with the
+  root's daemon running**, so it has announced before the page asks. The fix, when
+  it is wanted: start a `pending_proof` account's owner root at launch and wait a
+  bounded time for its announcement, refuse machine creation while a proof is
+  pending, and stop the guest supervisor when `owner` flips. Documented rather than
+  fixed, the owner's call of 2026-09-25.
+
+**Status.** Reversed an earlier decision — Q7.148's root and daemon per server, which
+are per account now; its rejected "start every root at launch", since every listed
+account's set-up daemon starts with the app; and its recorded widening and race,
+both closed by Q1.651 and Q5.120.

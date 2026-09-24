@@ -15,30 +15,8 @@ import {
 import { newId } from "../keys.js";
 import { TunnelRegistry } from "./registry.js";
 
-/**
- * The relay's entry point — the second deployment of this package.
- *
- * It exists because the two halves of the control plane have opposite restart
- * costs. The API's inputs move constantly (a web bundle, a route, a mail
- * template) and recreating it is ordinary; the relay's move rarely, and
- * recreating *it* costs every tunnel in the fleet: tens of seconds of
- * reconnecting per open session, every in-flight request, and any approval
- * tapped in the window. In one process the cheap deploy paid the expensive
- * price, every time.
- *
- * What this process is: a listener, an in-memory map of tunnels, four read
- * queries against the same SQLite file the API owns, and one table it writes so
- * the API can see what it is carrying. What it deliberately is **not**: it does
- * not mint a signing key (`ensureSigningKey` is the API's, and a second minter
- * would be a race over the one secret in this system), does not bootstrap an
- * admin, does not prune, does not send mail, and holds no private key at all —
- * `authorize` reads `public_jwk` and nothing else.
- *
- * It also does not depend on the API being up. That is not an accident of
- * packaging: authorization is four live row reads, so a control plane that is
- * down stops you *minting* a token and does not stop an existing one reaching
- * your machine.
- */
+// The relay's own entry point: restarting it costs every tunnel, so it deploys apart from the API.
+// It mints no signing key, prunes nothing, sends no mail and holds no private key.
 
 const DEFAULT_RELAY_HOST = "0.0.0.0";
 const DEFAULT_RELAY_PORT = 7889;
@@ -52,23 +30,9 @@ if (!Number.isInteger(relayPort) || relayPort < 1 || relayPort > 65535) {
   process.exit(2);
 }
 
-/*
- * The issuer, which must match the API's or nothing verifies.
- *
- * Same default and same env name, read from the same file both services are
- * given, so the ordinary case needs nobody to think about it. A mismatch is not
- * silent: every token fails `iss` and the relay answers 401, which is loud in
- * the way a wrong shared secret should be.
- */
+// Must match the API's issuer, or every token fails iss with a 401.
 const issuer = (process.env["REEMOAT_CP_ISSUER"] ?? DEFAULT_ISSUER).trim() || DEFAULT_ISSUER;
 
-/*
- * This relay's name in `relay_tunnels` — a slot, not a process.
- *
- * A relay that is killed hard cannot delete its own rows, so its replacement
- * clears them by this name at boot. That only works while the name survives a
- * restart, which is why it is a fixed default and not a pid or a container id.
- */
 const relayId = (process.env["REEMOAT_CP_RELAY_ID"] ?? DEFAULT_RELAY_ID).trim() || DEFAULT_RELAY_ID;
 
 const dbPath = resolveDbPath(process.env["REEMOAT_CP_DB"]);
@@ -85,20 +49,7 @@ try {
   process.exit(2);
 }
 
-/*
- * The slot, claimed before anything is written to it.
- *
- * ⚠ **Two relays under one `REEMOAT_CP_RELAY_ID` delete each other's rows every
- * five seconds** — `sweep` removes rows carrying this name that this relay's own
- * flush did not stamp, which is every machine on the other one. The fleet flaps
- * between reachable and offline and nothing anywhere says why. `deploy/RELAYS.md`
- * warned about it; a warning in a document is not an enforcement, and this is
- * the same lesson `claimDaemonLock` learned one package over.
- *
- * Before `presence.clear()`, deliberately: that call deletes every row under this
- * name, and doing it while another relay is live would blank the fleet's presence
- * on the way to being told the name was taken.
- */
+// Claimed before presence.clear: two relays under one id sweep each other's rows, and clearing first would blank a live relay's.
 const nonce = newId("ri");
 const claim = claimRelayId(store.db, relayId, nonce);
 if (!claim.ok) {
@@ -121,24 +72,10 @@ const presence = createPresenceWriter(store.db, {
   onEvent: (event, detail) => console.error(`relay: ${event} ${detail}`),
 });
 
-/*
- * Before the listener, not after.
- *
- * Whatever the previous relay under this name left behind is a lie the moment
- * this process starts — those tunnels died with it. Clearing first means the
- * window in which the API can read a stale `true` ends at boot rather than at
- * the first flush, and the first daemon to dial in writes its own row a moment
- * later.
- */
+// Cleared before listening: the previous relay's tunnels died with it.
 presence.clear();
 
-/*
- * `relayId` passed to the registry as well as to the writer, and the two must be
- * the same value: the writer stamps it into `relay_tunnels.relay_id`, and
- * `relayFor` is what the API reads back to decide where to send a browser. Two
- * sources for one name is how a fleet ends up routing to a relay that never
- * claimed the tunnel.
- */
+// One relayId for the registry and the writer: relayFor must name what the writer stamps.
 const tunnels = new TunnelRegistry(
   (event, detail) => console.error(`relay: ${event} ${detail}`),
   presence,
@@ -173,16 +110,7 @@ process.on("unhandledRejection", (reason) => {
   console.error("unhandled rejection:", reason);
 });
 
-/**
- * A backstop, not a licence — and the argument is stronger here than it was in
- * `main.ts`, because this process holds *only* tunnels.
- *
- * Exiting on one stray socket error takes every machine in the fleet offline and
- * makes every daemon reconnect into nothing until a supervisor intervenes. There
- * is nothing else in this process for a bad exception to be corrupting: no
- * credential is minted here, no mail is sent, and the one table it writes is
- * best-effort and re-derived from memory every few seconds.
- */
+// Continue: this process holds only tunnels, and exiting would take the whole fleet offline.
 process.on("uncaughtException", (error) => {
   console.error("uncaught exception (continuing):", error);
 });
@@ -196,20 +124,9 @@ function shutdown(signal: string): void {
   }
   shuttingDown = true;
   console.error(`\n${signal}: stopping`);
-  /*
-   * `relay.close()` reaches `registry.closeAll` through the tunnel endpoint, and
-   * that is what deletes the presence rows — so a *planned* stop also stops the
-   * API reporting these machines as online, rather than leaving them claimed for
-   * a staleness window. A hard kill has no such courtesy, which is exactly what
-   * the window and the boot-time clear are for.
-   */
+  // Reaches registry.closeAll, which deletes this relay's presence rows on a planned stop.
   relay.close();
-  /*
-   * The slot goes back on the way out, so an ordinary deploy reclaims the name
-   * instantly rather than waiting out `RELAY_CLAIM_STALE_MS`. A hard kill has no
-   * such courtesy — which is exactly what that window is for, the same trade the
-   * boot-time `presence.clear()` already makes about tunnel rows.
-   */
+  // Released on the way out, so a deploy reclaims the name at once.
   releaseRelayId(store.db, relayId, nonce);
   store.close();
   console.error("stopped");

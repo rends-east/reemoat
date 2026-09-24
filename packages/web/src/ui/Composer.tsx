@@ -1,4 +1,4 @@
-import { ArrowUp, Paperclip, RefreshCw, Square, X } from "lucide-react";
+import { Paperclip, RefreshCw, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -26,7 +26,7 @@ import {
   type PendingAttachment,
 } from "../attach";
 import type { DaemonClient } from "../daemon";
-import { clearEcho, setEcho } from "../echo";
+import { clearEcho, sendFloor, setEcho, type PendingEcho } from "../echo";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
@@ -48,12 +48,15 @@ import {
 } from "../wire";
 import { AgentConfigBar, applyConfigChange } from "./AgentConfigBar";
 import { choiceRefusal, configProse, drawnControls } from "./agentConfig";
+import { fitToContent } from "./autosize";
 import {
   composerPlaceholder,
   focusWorthKeeping,
+  sentText,
   shouldFocusComposer,
   shouldReleaseComposer,
   takeKeyNav,
+  VERBATIM_FIELD,
 } from "./composing";
 import { COLUMN, IconButton, Spinner } from "./bits";
 import {
@@ -65,156 +68,28 @@ import {
   typedConfigCommand,
 } from "./commands";
 import { CommandMenu } from "./CommandMenu";
+import { SendSlot } from "./SendSlot";
+import { slotOccupant } from "./slotSwap";
 import { toast } from "./Toast";
 
-/**
- * Where a prompt is written.
- *
- * Three things this did not do before, all of them things every other chat
- * client does and whose absence made the app feel broken rather than minimal.
- *
- * **Enter sends.** There was no key handling here at all — a grep for
- * `onKeyDown` across the whole package returned nothing — so the only way to
- * send was tapping the arrow. See `keys.ts` for why the IME guard is not
- * optional.
- *
- * **The box grows.** It was `rows={1}` with `resize-none`, so a paragraph
- * scrolled inside a 44px slot and you could not see what you had written.
- *
- * **The draft survives.** Switching sessions unmounted this and threw away
- * whatever was typed, which on a phone is one mis-tap.
- */
-
-/**
- * Drafts, per session, outside React.
- *
- * A module-level map rather than `AppState` on purpose: nothing else renders
- * from a draft, so putting it in the store would wake every subscriber on every
- * keystroke — the store's subscribers include the whole session list. This
- * outlives an unmount, which is the only property actually needed.
- */
+// Outside the store: a draft outlives an unmount without waking every subscriber per keystroke.
 const drafts = new Map<string, string>();
 
-/**
- * How much of the *visible* page the growing box may take.
- *
- * A share rather than a line count, because what has to stay readable is the
- * thing underneath — the conversation this is a reply to — and that is a share of
- * a screen rather than a number of lines.
- *
- * **0.22, which is 0.4 lowered by 45% on request after looking at it running.**
- * The first cap was set to the largest share that still left the conversation the
- * majority of the screen, which is a defensible number and was not the one that
- * felt right in the hand. Measured at `text-sm`, i.e. a 22px line: seven lines on
- * a 390×844 phone, four with the keyboard up, three in a 416px-tall desktop
- * window, nine at 1000px. Past that the box scrolls, which is the whole point of
- * there being a cap — the floor is `min-h-11` on the box itself and is not
- * restated here.
- */
-const COMPOSER_MAX_SHARE = 0.22;
-
-/**
- * Size the box to its text, bounded, and give it a scrollbar only when bounded.
- *
- * One function rather than a body inside the effect, because two things call it:
- * the text changing, and the viewport changing under text that did not. See the
- * effect for why the bound is read off `visualViewport`.
- *
- * `height = "auto"` first is what makes `scrollHeight` mean "what the content
- * wants" rather than "what the box already is" — without it the box only ever
- * grows.
- */
-function fitToContent(area: HTMLTextAreaElement): void {
-  area.style.height = "auto";
-  const visible = window.visualViewport?.height ?? window.innerHeight;
-  const max = Math.round(visible * COMPOSER_MAX_SHARE);
-  const wanted = area.scrollHeight;
-  area.style.height = `${Math.min(wanted, max)}px`;
-  area.style.overflowY = wanted > max ? "auto" : "hidden";
-}
-
-/**
- * A stable empty array for a session whose transcript has not loaded.
- *
- * `[]` written inline is a new identity on every render, which would defeat the
- * `useMemo` in `AgentConfigBar` that walks the whole event window — on every
- * keystroke, since this component re-renders on each one.
- */
+// Stable identity, so memos over the event window survive each keystroke.
 const EMPTY_EVENTS: readonly StoredEvent[] = [];
-/** Same reason, for the two lists the command menu is derived from. */
 const EMPTY_COMMANDS: AgentCommandList = { commands: [], dropped: 0 };
 
-/**
- * A chip that will not finish on its own.
- *
- * `uploading` clears itself and `ready` is already done; `failed` is the one state
- * whose way out is a decision somebody has to make, which is why it is the one
- * that holds Send.
- */
 function stalled(list: readonly PendingAttachment[]): boolean {
   return list.some((item) => item.state === "failed");
 }
 
-/**
- * `canSend`, and the one refusal it does not make.
- *
- * ⚠ **A failed attachment holds Send now, and it deliberately did not before.**
- * The old argument was sound while its premise held: a failed chip is never going
- * to finish by itself, so gating Send on it left removing the file as the only way
- * out — a message you cannot send until you throw away the screenshot it is about.
- * The premise was that there is no retry. There was not one: `attach`'s failure
- * arm claimed in a comment that the chip stayed "with a retry" while the chip drew
- * Remove and nothing else. There is a real one now, so there are two ways out and
- * Send may be held by the one that keeps the file.
- *
- * And it has to be held, because the alternative is the failure this gate already
- * exists to prevent, arriving one state later. Sending past a failed chip
- * delivered "here is the screenshot" with no screenshot:
- * `sendableAttachments` names only `ready` ids, `forgetAttachments` then cleared
- * the chip, and neither the message, the echo nor a toast said a file had gone. An
- * upload still *in flight* has always blocked for exactly that reason; the only
- * difference between the two is which one clears itself, and that difference is
- * about how long somebody waits rather than about what gets sent.
- *
- * Here rather than inside `canSend` because this is the screen that can see the
- * chip and draws the Retry on it — a refusal belongs with its remedy.
- * ⚠ `canSend`'s own docblock still argues the old rule for `failed`; that is a
- * statement about `canSend` alone now, not about what this composer will send.
- */
+// A failed attachment holds Send too: sending would drop the file, and the chip's Retry is the way out.
 function sendable(text: string, list: readonly PendingAttachment[], refused: boolean): boolean {
   return canSend(text, list, refused) && !stalled(list);
 }
 
-/**
- * Why Send is dead while `/clear` sits in the box mid-turn — **one string, drawn
- * and spoken**.
- *
- * ⚠ **A refusal that lives only in an `aria-label` is silence on a phone.**
- * `IconButton` puts `label` on both `aria-label` and `title`, and a `title` is a
- * *hover* tooltip: a coarse pointer has no hover, and `IconButton` additionally
- * carries `disabled:pointer-events-none`, so a disabled control never shows one on
- * any pointer. The placeholder cannot carry it either — the box has text in it by
- * construction, that text being the whole condition — and no chip in the row is
- * about what is in the box. So the phone-first case, which is this app's case, got
- * an inert Send and nothing at all, while the docblock at `clearRefused` claimed
- * the sentence was being carried.
- *
- * The line below the field is the sighted half and this constant is what makes the
- * two halves one claim rather than two strings that drift. The *heard* half stays
- * on Send's `aria-label`, which is read even though the control is dead — that is
- * the third arm the send slot's own comment argues for, and it is why the visible
- * line is deliberately **not** also a live region: it would announce the same
- * sentence a second time on the way to the button it is about.
- *
- * The remedy is in the sentence because a refusal without one is furniture: both
- * ways out — stop the agent, or send the command after the turn — are named.
- * Drawn in sans, like the command names in `CommandMenu` this sentence quotes: a
- * mono run inside a sans line takes the step below it (`web-typography.md`), and
- * one word of a hint is not worth a second type size at 390px.
- */
-const CLEAR_REFUSAL = "/clear waits for the turn to end — stop the agent, or send it after";
+const CLEAR_REFUSAL = "/clear waits for the agent to finish — stop it, or send it after";
 
-/** Distinguishes chips within one session. Never leaves the client. */
 let uploadSeq = 0;
 
 export function Composer({
@@ -225,128 +100,34 @@ export function Composer({
 }: {
   sessionRef: SessionRef;
   state: AppState;
-  /**
-   * A message is going out on this screen, said once per send.
-   *
-   * `SessionView` turns it into "put the conversation back at its foot". It fires
-   * on the **optimistic** half — where the message is written into `echo.ts` and
-   * the box is cleared — rather than when the daemon answers, because that is the moment the reader's
-   * own message appears and the moment they expect the ground to move; a refusal
-   * arriving 90 seconds later has already put the text back in the box, and having
-   * scrolled to the tail in the meantime costs nothing.
-   *
-   * It is deliberately not called for a typed config command (`/effort high`),
-   * which sends no message and leaves the transcript untouched.
-   */
+  /** Fires on the optimistic half of a send, never for a typed config command. */
   onSent: () => void;
-  /**
-   * A plan is on screen waiting to be decided.
-   *
-   * **The one state where a parked request does not gate this box, because this
-   * box is one of the ways to answer it.** Decided by `SessionView`, which is the
-   * only place the pending permission and the transcript are both in scope.
-   */
+  /** A plan is waiting: the one parked request that does not gate this box, which answers it. */
   revising: boolean;
 }): ReactNode {
   const key = keyOf(sessionRef);
   const row = state.rowsByKey.get(key);
   const [text, setText] = useState(() => drafts.get(key) ?? "");
   const [busy, setBusy] = useState(false);
-  /**
-   * The cancel request itself, not the state of being cancelled.
-   *
-   * A second flag beside `busy` rather than a reuse of it: `busy` gates Send and
-   * is what the spinner in that slot means, and a cancel is dispatched precisely
-   * when Send is *not* available — so one flag would have made the Stop button
-   * replace itself with the Send spinner. This one covers only the round trip;
-   * what outlives it is `cancelInFlight`, read off the daemon's own snapshot.
-   */
+  // The cancel round trip only; reusing `busy` would put Send's spinner over Stop.
   const [stopping, setStopping] = useState(false);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
-  /*
-   * The command menu's state.
-   *
-   * `caret` is tracked because the menu is derived from where the caret *is*, not
-   * only from what the text is — clicking back into the middle of a word must
-   * close a menu that would otherwise be completing something else. `stage` is
-   * the control being valued once one has been picked; `dismissed` is an Escape
-   * that must not be undone by the next keystroke recomputing the same query.
-   */
   const [caret, setCaret] = useState(0);
   const [active, setActive] = useState(0);
   const [stage, setStage] = useState<AgentConfigOption | null>(null);
   const [applying, setApplying] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  /** Where to put the caret after a completion rewrote the box. */
   const pendingCaret = useRef<number | null>(null);
-  /**
-   * Which session this instance is showing *now*, readable from a callback that
-   * started under a different one.
-   *
-   * This component is not remounted on a session change — `App` renders
-   * `SessionView` with no `key` and `SessionView` renders this with none — which
-   * is the whole reason the `[key]` effect below exists. `send`'s continuations
-   * can land up to ninety seconds later (`POST /sessions/:id/prompt` is on the
-   * slow-route budget and resumes a terminal session first), so the `key` in
-   * their closure is *the session the message went to* while this ref is *the
-   * session somebody is looking at*. Every `setText`/`setBusy` after an await
-   * needs the second one: a `409 turn_in_flight` from session A used to put A's
-   * message into B's box, where pressing Enter sent it to B's agent in B's
-   * worktree.
-   *
-   * The echo used to be in that list and is not any more, because it left React
-   * for `echo.ts`, where it is keyed by session. That is the direction this split
-   * wants everything to move: a write that names the session it belongs to needs
-   * no guard at all.
-   *
-   * Written from the effect rather than during render, so a render React
-   * discards cannot move it.
-   */
+  // This instance is not remounted on a session switch, so shared state written after an await must check this.
   const liveKey = useRef(key);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
 
-  /*
-   * Attached files, from module state rather than from React or the store.
-   *
-   * `useSyncExternalStore` over `attach.ts` for the same reason drafts live
-   * outside React: list → detail → back unmounts this component, and a chip lost
-   * that way is bytes already on the daemon that nothing can reference. Not the
-   * store either — a progress event at 60fps would wake every subscriber
-   * including the session list, which is strictly worse than the keystroke this
-   * component already refuses to put there.
-   */
   useSyncExternalStore(subscribeAttachments, attachmentsVersion);
-  // For drawing the chips and for `sendable`. The ids that actually go on the wire
-  // are resolved inside `send`, from the live list — see the note there.
   const attachments = attachmentsFor(key);
-  /**
-   * No room for an eleventh file.
-   *
-   * `admitFiles`'s rule, read the way that function states it: an `uploading` chip
-   * holds a slot and a `failed` one does not, because a failed chip is not going to
-   * be sent. Named once because two controls ask it now — the paperclip, and a
-   * failed chip's Retry, which turns a chip holding no slot into one that does.
-   * `admitFiles` says in as many words that this is the rule that would otherwise
-   * be decided differently in two places, and the second place is here.
-   */
   const slotsFull =
     attachments.filter((item) => item.state !== "failed").length >= MAX_PROMPT_ATTACHMENTS;
 
-  /**
-   * Stream one staged file to the daemon and settle its chip, whichever way it
-   * goes.
-   *
-   * Split out of {@link attach} because a failed chip can be retried now, and a
-   * retry is this same upload against the same `File` — which `PendingAttachment`
-   * holds for exactly that reason. Written twice it would be two places deciding
-   * what a failure leaves on screen, and the failure arm is the half somebody has
-   * to act on.
-   *
-   * The `AbortController` is the caller's rather than this function's: it is what
-   * the chip's own `cancel` closes over, so `removeAttachment` and
-   * `forgetAttachments` can abort an upload they can only reach through the chip.
-   */
   const upload = async (
     daemon: DaemonClient,
     item: { localId: string; file: File; name: string },
@@ -357,8 +138,6 @@ export function Composer({
         sessionRef.sessionId,
         item.file,
         item.name,
-        // Resolves `(key, localId)` and no-ops if the entry is gone, which is
-        // what lets a session switch mid-upload simply not matter.
         (fraction) => updateAttachment(key, item.localId, { progress: fraction }),
         controller.signal,
       );
@@ -366,19 +145,11 @@ export function Composer({
         state: "ready",
         progress: 1,
         uploadId: answer.upload.uploadId,
-        // The daemon may have shortened it. Show what it will actually be.
         name: answer.upload.name,
         cancel: null,
       });
     } catch (cause) {
-      // An abort is `removeAttachment` or `forgetAttachments` doing what was asked
-      // of them, and there is no chip left to write a failure onto.
       if (controller.signal.aborted) return;
-      // The chip stays, carrying the daemon's own message, beside a Retry that
-      // reaches this function again with the same `File`. A toast and a vanished
-      // chip is the "nothing to retype from" failure this file already names for
-      // the config path — and until `retry` existed, this comment was the only
-      // place that retry existed at all.
       updateAttachment(key, item.localId, {
         state: "failed",
         error: errorText(cause),
@@ -387,26 +158,7 @@ export function Composer({
     }
   };
 
-  /**
-   * Send a failed chip's file again.
-   *
-   * **The remedy two docblocks already claimed was here.** The failure arm above
-   * said the chip stayed "with a retry" and `PendingAttachment.file` is documented
-   * as held "so a failed chip can be retried" — while the chip drew Remove and
-   * nothing else, so the only way past a failed upload was to throw the file away
-   * and pick it again, which for a pasted screenshot means taking it again.
-   *
-   * A fresh `AbortController`, not the dead one: the failed chip's `cancel` is
-   * `null` by then, and reusing an already-aborted signal would make this fail
-   * instantly and silently.
-   *
-   * **It does not join the batch's queue, and that is deliberate.** {@link attach}
-   * uploads sequentially so ten files cannot each take a share of one tunnel
-   * window; a retry is one file and one gesture, and holding it behind a queue
-   * nobody can see would make the button look dead exactly where somebody is
-   * already looking at something that failed. One extra stream is not the ten that
-   * rule exists for.
-   */
+  // A fresh controller: the failed chip's signal is already aborted.
   const retry = (item: PendingAttachment): void => {
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined || item.state !== "failed") return;
@@ -420,25 +172,7 @@ export function Composer({
     void upload(daemon, item, controller);
   };
 
-  /**
-   * Take files from the picker and start uploading them.
-   *
-   * **On select, not on send.** The daemon has to answer `{uploadId}` before a
-   * prompt can name it, so uploading at send time would turn Send into a
-   * thirty-second operation under `busy` with no way to tell the network from the
-   * agent — and a limit refusal should arrive while somebody is still at the
-   * picker rather than after they commit.
-   *
-   * Sequentially rather than in parallel: ten concurrent uploads at
-   * `MAX_UPLOAD_BYTES` against a 1 MiB-per-stream tunnel window is self-inflicted
-   * head-of-line blocking on the same tunnel that carries the poll and every
-   * socket in the fleet. (Both numbers in that sentence were stale — 25 MiB and
-   * 256 KiB — and the argument is stronger at 100 MiB, not weaker.)
-   *
-   * The cost, accepted rather than papered over: bytes land on the daemon for
-   * messages that are never sent, because a tab can close mid-upload. That is
-   * what the daemon's own 24-hour sweep of unconsumed uploads is for.
-   */
+  // Upload on select, sequentially, so a batch does not contend for one tunnel window.
   const attach = (picked: readonly File[]): void => {
     if (picked.length === 0) return;
     const daemon = store.daemonFor(sessionRef.machineId);
@@ -463,9 +197,7 @@ export function Composer({
       return {
         localId: `a_${uploadSeq++}`,
         file,
-        // Not `file.name`: a pasted screenshot can arrive nameless, and the
-        // daemon refuses an empty one. Named here so the chip and the upload
-        // cannot disagree.
+        // A pasted screenshot can be nameless, and the daemon refuses an empty name.
         name: pastedName(file.name, file.type, stampedAt),
         size: file.size,
         mimeType: file.type,
@@ -483,98 +215,32 @@ export function Composer({
     );
 
     void (async () => {
-      // One at a time, for the reason this function's docblock gives. `upload`
-      // settles each chip itself and never rejects, so nothing here can strand the
-      // files behind it.
       for (const item of staged) await upload(daemon, item, item.controller);
     })();
   };
 
-  // Reload the draft when the session changes under a mounted composer, which
-  // is what happens in the desktop two-pane layout.
-  // Everything keyed to the old session goes, and that means every one of these:
-  // a `caret` left behind indexes into a draft it never came from, and an
-  // `applying` left behind lets a config change dispatched against the previous
-  // session close this one's menu when it lands.
   useEffect(() => {
     liveKey.current = key;
     setText(drafts.get(key) ?? "");
-    // Deliberately *not* clearing the echo, and that is the whole point of it
-    // having moved: it is keyed by session in `echo.ts` now, like the draft and
-    // like the attachments, so leaving a conversation mid-send and coming back
-    // finds the message still in it. As shared React state on this instance it
-    // had to be cleared here, and the message vanished for the round trip.
     setStage(null);
     setDismissed(false);
     setCaret(0);
     setApplying(null);
-    // And `busy`, which belongs to a prompt sent against the *previous* session:
-    // left set, it made this session's Send a spinner and `submit`'s `if (busy)
-    // return` swallow every message typed here until that other request answered.
     setBusy(false);
-    // And `stopping`, for the same reason and with a worse ending, because unlike
-    // `busy` there is no second path that could ever clear it. Its only reset is
-    // gated on `onScreen()`, and a cancel routinely holds the daemon for
-    // `CANCEL_SEND_TIMEOUT_MS + CANCEL_SETTLE_MS` — long enough to tap another
-    // session — after which that reset is skipped, the send slot draws the
-    // "Stopping" spinner for whatever session is on screen, the Stop button that
-    // would dispatch again is no longer drawn, and `cancelTurn`'s own `if
-    // (stopping) return` refuses to reach the `finally` that would release it.
+    // Its only other reset is gated on `onScreen`, so a switch mid-cancel would leave it stuck.
     setStopping(false);
-    // Deliberately *not* clearing attachments: they are keyed by session in
-    // `attach.ts` and coming back to this one should find them where they were.
   }, [key]);
 
-  /*
-   * The caret goes in the box when the session changes.
-   *
-   * A `useEffect` on `[key]` and not `autoFocus`, for the same reason the reset
-   * above is one: at `lg` the two-pane shell does **not** remount this component
-   * when you switch sessions — only `key` changes — so a mount-time prop fires
-   * once, on the first session you ever open, and never again.
-   *
-   * `composerShows` is in the dependency list because `row` can be absent on the
-   * first render after a switch: `openSession` has not answered yet, this renders
-   * `null`, and there is no textarea for the effect to reach. Keyed on `key`
-   * alone it would fire into nothing and never fire again.
-   *
-   * `matchMedia` is read **here** rather than held in state, and that is not a
-   * violation of the rule this file states further down — it is the rule. What
-   * `SessionBrowser` removed was a media query read during render and *kept*,
-   * which an iPad gaining a keyboard silently invalidated. This answer is
-   * discarded in the same tick it is taken, so there is nothing to go stale, and
-   * it cannot be a CSS variant because there is no CSS for "call `.focus()`".
-   *
-   * `preventScroll` because this box is inside a sticky footer and the transcript
-   * beside it is a separate scroll container: focusing must not also be a scroll.
-   */
-  // Always, now. Kept as a name rather than folded away because it is what the
-  // autofocus effect below is about, and a `true` inlined there would read as an
-  // oversight rather than as the rule one screen down.
+  // An effect on `key`, not autoFocus: at lg a session switch does not remount this.
   const composerShows = row !== undefined;
   useEffect(() => {
-    // Taken unconditionally, so a switch that decided not to focus cannot leave
-    // the flag set for the next one.
     const fromKeyboardNav = takeKeyNav();
     const active = document.activeElement;
     if (
       !shouldFocusComposer({
         hasBox: composerShows,
         pointerCoarse: window.matchMedia("(pointer: coarse)").matches,
-        /*
-         * Only focus that would actually be *stolen* — an editable field or an
-         * open menu — and emphatically not "anything at all is focused".
-         *
-         * The wider test made this feature dead on Chromium at `lg`, which is
-         * the layout it was written for: the rail stays mounted, a session row
-         * is a `<button>` (`SessionBrowser`), and Chromium focuses buttons on
-         * click — so `activeElement` was always the row you had just tapped and
-         * the effect declined every single time. Safari and Firefox on macOS do
-         * not focus buttons on click, so it worked there, and below `lg` the
-         * list unmounts so it worked there too. A feature that depends on which
-         * browser you opened is not a feature; confirmed dead in practice before
-         * this was narrowed.
-         */
+        // Only focus that would be stolen: Chromium focuses a tapped session row.
         focusHeldElsewhere: focusWorthKeeping(active),
         blocked: row !== undefined && needsHuman(row.snapshot),
         fromKeyboardNav,
@@ -583,65 +249,17 @@ export function Composer({
       return;
     }
     areaRef.current?.focus({ preventScroll: true });
-    // `row` is read inside and is deliberately *not* a dependency: the store
-    // replaces that object on every poll, so listing it would re-focus the box
-    // every four seconds and fight whatever else is on the screen. What is read
-    // from it is a guard, not an input — it only ever decides against focusing.
+    // `row` is not a dependency: the store replaces it every poll, which would refocus the box.
   }, [key, composerShows]);
 
-  /*
-   * Grow to fit, up to a share of what you can actually see.
-   *
-   * There used to be a `min(scrollHeight, 40vh)` clamp here and a `max-h-[40vh]`
-   * to match, and both were removed on the argument that the box *is* the
-   * message: past about a dozen lines it became a small window with a scrollbar
-   * down its right edge, so you were writing into a viewport rather than at a
-   * page. That removal wrote its own cost down rather than hiding it — "a
-   * genuinely huge paste makes the composer taller than the viewport, and the
-   * column has nowhere to put the overflow" — and that is exactly what came back
-   * from a phone: a long message and the box is the whole screen, with the
-   * conversation it is a reply to squeezed to nothing.
-   *
-   * So a cap is back, and two things make it a different cap from the one that
-   * was taken out.
-   *
-   * **It is measured against `visualViewport`, never `innerHeight` and never
-   * `vh`.** A software keyboard covers the layout viewport without shrinking it,
-   * so with the keyboard up on a 390×844 phone `40vh` is 337px of a page with
-   * only ~508px of it visible — a cap that still resolves to "most of the screen",
-   * which is the report. `visualViewport.height` is the number the keyboard
-   * actually moves, and it is why this is arithmetic here rather than a
-   * `max-h-[…]` utility: CSS has no unit for it.
-   *
-   * **The box scrolls only once it is capped.** `overflow-hidden` stays in the
-   * class list as the pre-measurement default and this overrides it inline, so no
-   * scrollbar exists until there is something to scroll — the other half of the
-   * old objection. The caret needs no help staying in view; that is what a
-   * scrollable textarea already does on input.
-   *
-   * `useLayoutEffect` so the height is set before paint; with `useEffect` the box
-   * visibly steps taller one frame late on every keystroke. Q3.422.
-   */
+  // Layout effect so the height is set before paint; `visualViewport` because a soft keyboard does not shrink `vh`. Q3.422.
   useLayoutEffect(() => {
     const area = areaRef.current;
     if (area === null) return;
     fitToContent(area);
   }, [text]);
 
-  /*
-   * The cap moves without the text moving, so it is re-applied on its own.
-   *
-   * A rotation, a desktop window resize and the keyboard opening or closing all
-   * change what `visualViewport.height` answers while `text` is untouched, and the
-   * effect above is keyed on `text` alone — so without this a box that was capped
-   * with the keyboard up stays that tall when it closes, and one measured against
-   * a tall window stays taller than a short one. `visualViewport` is the only one
-   * of the two that fires for the keyboard; `window` still gets rotations on
-   * browsers where the visual viewport does not.
-   *
-   * Mount-only, and it can be: `fitToContent` reads the DOM and closes over
-   * nothing that renders.
-   */
+  // The cap moves without the text; only the visual viewport fires for the soft keyboard.
   useEffect(() => {
     const refit = (): void => {
       const area = areaRef.current;
@@ -657,30 +275,12 @@ export function Composer({
 
   const transcript = state.transcripts.get(key);
 
-  /*
-   * The agent's command list, fetched once per revision for the open session only.
-   *
-   * Keyed on the revision as well as the session: claude republishes mid-session
-   * as it discovers skills in a subdirectory, and the revision is the only thing
-   * on the snapshot that says so.
-   */
+  // Keyed on the revision: claude republishes its commands mid-session.
   const revision = row?.snapshot.commandsRevision;
   useEffect(() => {
     store.ensureCommands(sessionRef, revision);
-    // On the ids and not on `sessionRef` itself, the same as `SessionView`'s own
-    // effect: the object is rebuilt by the router on every render, so depending on
-    // its identity would re-run this on each keystroke. `ensureCommands` would
-    // no-op every time, but a dependency that is always new is a dependency list
-    // that says nothing.
   }, [sessionRef.machineId, sessionRef.sessionId, revision]);
 
-  /*
-   * Put the caret where the completion left it.
-   *
-   * `useLayoutEffect` for the same reason the auto-grow above uses one: with a
-   * plain effect the caret is visibly in the wrong place for a frame, and on a
-   * phone that frame is where the soft keyboard decides what to capitalise.
-   */
   useLayoutEffect(() => {
     const at = pendingCaret.current;
     if (at === null) return;
@@ -694,11 +294,7 @@ export function Composer({
   const commands = commandList.commands;
   const agentConfig = row?.snapshot.agentConfig;
 
-  // Memoised because this walks both lists and the composer re-renders on every
-  // keystroke — the same reason `EMPTY_EVENTS` exists above. What these deps are
-  // *not* is stable across a poll: `agentConfig` rides a snapshot the store
-  // reparses every four seconds, and `events` is a fresh array per streamed
-  // event. That is why nothing downstream may key a *reset* on their identity.
+  // These deps change on every poll and streamed event, so nothing may key a reset on their identity.
   const prose = useMemo(() => configProse(events), [events]);
   const entries = useMemo(
     () => buildCommands(commands, agentConfig, prose, row?.snapshot.agent),
@@ -709,84 +305,26 @@ export function Composer({
     () => (query === null ? [] : filterCommands(entries, query.query)),
     [entries, query?.query],
   );
-  /*
-   * Read from `row` and not from `session`, which is bound below the early return
-   * and is not in scope here — the memo would otherwise close over a stale value
-   * and the `/` menu would draw a sentence about a turn that had ended.
-   */
+  // From `row`: `session` is bound below the early return.
   const turnRunning = row !== undefined && turnInFlight(row.snapshot);
   const choices = useMemo(
     () => (stage === null ? null : configChoices(stage, prose.get(stage.id), turnRunning)),
     [stage, prose, turnRunning],
   );
 
-  /** Whichever list is on screen. `active` indexes into this and nothing else. */
   const rows: readonly unknown[] = choices ?? matches;
-  // An empty panel is furniture, so the menu opens only onto something.
   const menuOpen = !dismissed && rows.length > 0 && (stage !== null || query !== null);
 
-  /*
-   * Send the highlight home when the *question* changes, never when the array
-   * does.
-   *
-   * This was keyed on `[matches, choices]`, and those identities move on a timer
-   * rather than on content: `entries` depends on the session snapshot, which the
-   * 4s poll replaces wholesale, and on `prose`, which is a new Map per streamed
-   * event. So arrowing through a hundred-entry menu had the highlight snap back
-   * to row 0 every four seconds at rest and continuously while the agent worked —
-   * which is exactly when the menu is used, since the composer stays live and
-   * queues. Enter then acted on row 0 instead of the row under the eye, and for a
-   * mode shortcut that applies in one tap with no second step: aiming at
-   * `/dontAsk` and landing on `/default` is a silent permission change.
-   *
-   * The query string and the stage are what actually invalidate the index, and
-   * both are values rather than references.
-   */
+  // Reset on the question, never on list identity (which moves every poll), or aiming at `/dontAsk` can land on `/default`.
   useEffect(() => {
     setActive(0);
   }, [query?.query, stage]);
 
-  // Belt to that brace: a list can also shrink under a held highlight without the
-  // query changing — a command withdrawn mid-session does it — and an `active`
-  // past the end selects nothing at all.
   useEffect(() => {
     setActive((at) => (at < rows.length ? at : 0));
   }, [rows.length]);
 
-  /*
-   * Hand the caret back when a request parks, so the card's own keys work.
-   *
-   * The mirror of `shouldFocusComposer` and the half it was missing: declining to
-   * *take* focus does nothing about a caret taken a moment earlier, and while the
-   * composer holds one every shortcut on the ask card is switched off by
-   * `isTypingInto`.
-   *
-   * **Above the early returns, with `blocked` derived from `row` rather than from
-   * `session`.** It sat below them, which is a Rules-of-Hooks violation and not a
-   * style point: `showsAsEnded(session)` flips true the moment anybody stops a
-   * session, that render produces one hook fewer than the last, React throws
-   * `Rendered fewer hooks than expected`, and there was no error boundary
-   * anywhere in this package, so the root unmounted to a blank page — on a
-   * phone, with no console. `RootErrorBoundary` is the floor under that now, and
-   * it names this docblock as one of the two ways in; it turns the blank page
-   * into a message and a Reload, which is a better failure and not a fix for
-   * this one. Nothing here would have caught it: there is no eslint, `tsc` does
-   * not model hook order, and `webcheck` has no DOM.
-   *
-   * `row !== undefined && needsHuman(row.snapshot)` is the same expression
-   * `shouldFocusComposer` is already given a few lines up, for the same reason.
-   */
-  /*
-   * ...**and a plan is not "parked" for this purpose**, which is the one
-   * exception the rule below needs.
-   *
-   * Releasing the caret exists so the digits beside a question's answers do
-   * something: with the composer focused, `isTypingInto` switches every bare
-   * shortcut off. In front of a plan that reasoning inverts — the box *is* one of
-   * the answers, its placeholder says so, and blurring it the instant the request
-   * lands would take the caret out from under somebody the screen has just
-   * invited to type.
-   */
+  // Release the caret when a request parks so the card's keys work (not for a plan); above the early returns for hook order.
   const parked = row !== undefined && needsHuman(row.snapshot) && !revising;
   useEffect(() => {
     const box = areaRef.current;
@@ -800,211 +338,26 @@ export function Composer({
     ) {
       box.blur();
     }
-    // `text` is deliberately not a dependency: this is about the moment a request
-    // arrives, not about every keystroke after it.
   }, [parked]);
 
   if (row === undefined) return null;
   const session = row.snapshot;
-  /*
-   * ⚠ **Nothing takes this box off the screen. There is no early return here any
-   * more, and that is the rule rather than the current behaviour.**
-   *
-   * It was `if (showsAsEnded(session)) return null`, and the argument was
-   * already half of the one that deleted it: "only a session somebody *ended*
-   * loses its composer — one the daemon interrupted keeps it, and sending a
-   * message is what brings the agent back". Losing the box for the length of a
-   * deploy was the failure that reasoning fixed. The remaining half was found
-   * the same way, from a phone: an expired OAuth token ended a conversation as
-   * `agent_signed_out`, `autoResumable` refused to revive it on any trigger, and
-   * the only reversal — `reloadCredentials` — is reachable only by writing a
-   * credential *in the app*. So somebody whose CLI had already refreshed its own
-   * token sat looking at "nobody is signed in", under a Sign in button leading
-   * to a screen where they were, **with nothing to type into**. The one control
-   * that would have fixed it, `POST /sessions/:id/resume`, is ungated and was
-   * simply not drawn.
-   *
-   * A conversation you cannot type into is a dead end whatever put it there, and
-   * this app cannot enumerate the ways in advance — that is what the whole
-   * episode demonstrated. So the box is unconditional, including for a session
-   * somebody stopped by hand: sending into one starts it again, which is the
-   * same promise every other row on this screen already makes.
-   *
-   * **What is gated is Send, never the box.** `sendable` and the placeholder say
-   * what will happen; the daemon answers with a real refusal when it must, and
-   * that refusal is drawn in the conversation. Nothing about the *sending* path
-   * changed here — only that there is always something to send from.
-   */
+  // Nothing takes this box off the screen: Send is gated, never the box.
 
   const blocked = needsHuman(session);
   const working = showsWorking(session);
-  /*
-   * The daemon will not take a message, so the composer does not offer to send one.
-   *
-   * ⚠ **This used to be `blocked || working`, and that is the change.** Those two
-   * were a guaranteed `409 turn_in_flight` because `ManagedSession.prompt` refused
-   * outright while a turn was open — and a parked question keeps one open. The
-   * daemon takes both now: `acceptsMidTurn` is the daemon saying so about itself,
-   * either by steering the message into the running turn or by holding it until
-   * the turn ends. So the gate survives only for a daemon that has not been
-   * updated, where the old refusal is still exactly what would happen and a live
-   * Send would be the button lying — the defect `attach.ts` records shipping once.
-   *
-   * ...**and while a plan is waiting it never applied anyway**, because writing
-   * one stops the turn and sends it — see `send` — so the gate would be refusing
-   * the very thing that state exists for.
-   *
-   * `stopping` is the one refusal that is not about the turn: the daemon answers
-   * `409 session_terminal` on `stopRequested`, and it is a live non-terminal
-   * status carrying its own dot for seconds — `canCancelTurn`'s own reason for
-   * excluding it, read here from the other side.
-   */
   const midTurnOk = acceptsMidTurn(session);
   const sessionRefused = revising
     ? false
     : session.status === "stopping" || (!midTurnOk && (blocked || working));
-  /*
-   * ⚠ **The one text the daemon still refuses mid-turn, and it has to be refused
-   * here or Send is live onto a route that can only fail.**
-   *
-   * `POST /sessions/:id/prompt` carries `/clear` out itself rather than forwarding
-   * it, and `clearContext` refuses while a turn is in flight — deliberately, because
-   * clearing under a running agent means deciding what happens to that turn's own
-   * output and there is no answer to that which is not a surprise. So it still
-   * answers `409 turn_in_flight`, and `/clear` is in the client's own restored
-   * command list for claude, which is a *steerable* agent: lifting the gate for
-   * mid-turn messages made "type `/clear` while it works, press Send, get a red
-   * toast" reachable for the first time. That is verbatim the defect `attach.ts`
-   * records this composer having shipped once already, narrowed to one command.
-   *
-   * A refusal of its own rather than folded into `sessionRefused`, because the
-   * remedy is different and the slot has to say so: this one is about what is in
-   * the box, so the box keeps a **disabled Send** where a session-level refusal
-   * hands the slot back to Stop.
-   *
-   * ⚠ **The disabled Send is not what says so, and this comment claimed it was
-   * from the commit that added the refusal until the line below the field
-   * existed** — never in a release, `clearRefused` having landed after v0.8.0 was
-   * cut. A dead button carries an `aria-label` and a `title`, and the
-   * `title` is a hover tooltip that a coarse pointer never sees and that
-   * `disabled:pointer-events-none` suppresses anyway — so the whole explanation was
-   * inaudible to everybody looking at it. {@link CLEAR_REFUSAL} is the sentence,
-   * drawn in the box under the field and spoken by Send, and its docblock carries
-   * the mechanics.
-   */
-  const clearRefused = !revising && session.turn !== null && text.trim() === "/clear";
+  // The daemon refuses `/clear` while the agent works or waits, turn or not, so it is refused here too (Q2.232).
+  const clearRefused = !revising && canCancelTurn(session) && text.trim() === "/clear";
   const sendRefused = sessionRefused || clearRefused;
-  /*
-   * The two halves of the send slot's other state.
-   *
-   * `stoppable` is `canCancelTurn` narrowed by `!revising && !slotSends`, read
-   * from the predicate that means what this control means rather than reusing the
-   * one above.
-   *
-   * ⚠ This said `canCancelTurn` "is `sendRefused` restated from the snapshot's own
-   * fields — the two coincide today", and mid-turn messages ended that. On an
-   * updated daemon they are close to complementary: `sendRefused` no longer covers
-   * `blocked || working`, which is exactly the span `canCancelTurn` is true
-   * through, so a working session is now cancellable *and* not refused. Neither
-   * predicate can be read off the other any more.
-   *
-   * `pendingCancel` is whether somebody has already asked, which is the daemon's
-   * answer and not this tab's.
-   */
-  /*
-   * ...and while a plan is waiting the slot is **Send**, not Stop.
-   *
-   * Not because stopping stopped being possible — it is exactly what a send does
-   * first — but because there is a better verb for it here. The one control in
-   * that slot should say what somebody came to this screen to do, and in front of
-   * a plan that is "say what to change", not "stop".
-   */
-  /*
-   * ...**and the slot now follows the draft rather than the turn.**
-   *
-   * With a message in the box the thing somebody is about to do is send it, not
-   * stop the agent — that is the whole of what "you no longer have to stop the
-   * model to correct it" means at this end. With the box empty there is nothing
-   * to send and Stop is the only act left, which is where it was before.
-   *
-   * ⚠ **It reads `sendable` and not `draftPresent`, and that reversal came out of
-   * a review.** `draftPresent` is the right answer to "is there anything in the
-   * box" and the wrong one here, because the arm it falls through to is gated on
-   * `sendable` — so every state where the two disagree drew a **disabled Send
-   * over a live turn**, taking away the only turn-cancel this client has. Three
-   * of them are ordinary: an attachment still uploading, one that failed, and —
-   * the one that would have shipped to everybody — a daemon not yet updated,
-   * where `sendRefused` is exactly the old refusal and `compatibility.md` says
-   * that state *is* the normal fleet between a release and the last owner running
-   * `deploy.sh`. The worst instance is a parked question on such a daemon, which
-   * is precisely the state `canCancelTurn` is deliberately wider than
-   * `showsWorking` to reach.
-   *
-   * So the rule is one predicate rather than two that have to partition:
-   * **Send is drawn when it would work, and Stop holds the slot the rest of the
-   * time.** Whitespace does not make it work, which is the behaviour asked for;
-   * an upload in flight does not either, and there Stop simply stays, which is
-   * what it did before this feature existed.
-   */
   const slotSends = sendable(text, attachments, sendRefused);
-  /*
-   * ⚠ **...and the one exception to "Stop holds the slot the rest of the time",
-   * which is a refusal about the *draft* rather than about the session.**
-   *
-   * Three states reach it: an attachment still going up, one that failed, and
-   * `/clear` typed mid-turn. In all three the daemon would take a message — this
-   * message just is not one it can take yet — and the remedy is in the box, so
-   * the answer is the **disabled Send**, which is what the idle case already
-   * draws and which is otherwise unreachable. Letting Stop take the slot there
-   * put a destructive control under a thumb aimed at Send, and then swapped it
-   * back on its own when the upload landed.
-   *
-   * ⚠ **What this predicate decides is which control holds the slot, and nothing
-   * about what says why.** It said "the disabled Send with its own sentence", and
-   * a disabled Send does not carry a sentence anybody can see: `IconButton` puts
-   * `label` on `aria-label` and on a `title`, and a `title` is a hover tooltip
-   * that a coarse pointer never gets and that `disabled:pointer-events-none`
-   * suppresses on every pointer. So the sighted half is somewhere else in each of
-   * the three, and they do not agree:
-   *
-   * - an upload still in flight has no sentence at all, here or on Send —
-   *   `sendRefusal` is `null`, the label reads "Send", and the spinner in the
-   *   chip is the whole of it, which is what the send slot's own comment argues;
-   * - one that failed answers with the danger-toned chip carrying the daemon's
-   *   message and the Retry at its head, and `sendRefusal` adds the audible half
-   *   on Send;
-   * - `/clear` is the one with no chip and no row of its own, so
-   *   {@link CLEAR_REFUSAL} is drawn under the field — gated on `sendDrawn`,
-   *   because it is about a button — and spoken by Send.
-   *
-   * The slot being Send rather than Stop is what the rest of this block argues;
-   * where the words are is `sendRefusal`'s docblock and {@link CLEAR_REFUSAL}'s.
-   *
-   * `!sessionRefused` and not `!sendRefused` is the whole of the distinction. A
-   * session-level refusal — a daemon too old to take a mid-turn message — keeps
-   * handing the slot to Stop, because there the person can do nothing about the
-   * draft and taking away the only turn-cancel this client has is the worse of
-   * the two, which is what the previous round of this reasoning established.
-   */
+  // A refusal about the draft keeps a disabled Send rather than putting Stop under a thumb aimed at Send.
   const draftAnswerable = !sessionRefused && !slotSends && (text.trim().length > 0 || attachments.length > 0);
   const stoppable = canCancelTurn(session) && !revising && !slotSends && !draftAnswerable;
-  /*
-   * The one sentence Send is refusing under, or `null` when it is not refusing.
-   *
-   * ⚠ **Computed once so that "drawn and spoken" is a property of the code rather
-   * than a claim in a docblock.** This was a ternary written inline in `label`, and
-   * the obvious way to give it a sighted half is a second expression under the
-   * field gated on `clearRefused`. The two would agree only by inspection, and
-   * they do not agree: `clearRefused` is one arm of three, and the `stopping` arm
-   * is tested *first*, so a session whose status is `stopping` with a turn still
-   * open and `/clear` in the box satisfies both — the line would read *"/clear
-   * waits for the turn to end"* under a button reading *"This session is
-   * stopping"*. That state is reachable and draws Send: `sessionRefused` holds, so
-   * `slotSends` is false and `draftAnswerable` true, which takes `stoppable` away,
-   * and `canCancelTurn` excludes `stopping` in any case. Two strings for one state,
-   * and the visible one would be the wrong advice. One expression cannot diverge
-   * from itself.
-   */
+  // Computed once, so the drawn line and Send's label cannot disagree.
   const sendRefusal = sendRefused
     ? session.status === "stopping"
       ? "This session is stopping — it cannot take a message"
@@ -1015,19 +368,9 @@ export function Composer({
       ? "An attachment did not upload — retry it or remove it"
       : null;
   const pendingCancel = cancelInFlight(session);
-  /*
-   * Whether Send is the control the slot is actually drawing.
-   *
-   * ⚠ **The refusal line under the field is about a button, so it may not outlive
-   * one.** The slot has four arms and Send is the last; `busy` and a pending cancel
-   * each take it with a spinner, and `stoppable` takes it with Stop. All three are
-   * reachable with `/clear` in the box — most plainly against a daemon too old to
-   * take a mid-turn message at all, which `compatibility.md` calls the ordinary
-   * fleet state between a release and the last `deploy.sh`: there `sessionRefused`
-   * holds, Stop owns the slot, and the line was advising somebody to press a Send
-   * that was not on screen.
-   */
-  const sendDrawn = !busy && !((stopping || pendingCancel) && !slotSends) && !stoppable;
+  const occupant = slotOccupant({ sending: busy, stopping: stopping || pendingCancel, sends: slotSends, stoppable });
+  // The refusal line is about Send, so it shows only while Send holds the slot.
+  const sendDrawn = occupant === "send";
 
   const reconnecting = waitingForDaemon(session) || resumeStalled(session);
 
@@ -1037,29 +380,7 @@ export function Composer({
     else drafts.set(key, next);
   };
 
-  /**
-   * Is this render's session still the one on screen?
-   *
-   * Only ever asked *after* an await, and that is a property of the call sites
-   * rather than a hope about them. Everything synchronous here is by definition
-   * still looking at the session it was written for, and asking then would make
-   * an ordinary keystroke depend on an effect having flushed — `liveKey` is
-   * written from the `[key]` effect, so between a session-switch render and its
-   * flush this answers `false` about the session the render is actually for.
-   *
-   * `send` is the one function reachable *both* ways, and it takes `late`
-   * explicitly for that reason: the synchronous caller cannot accidentally ask
-   * this question, and the deferred one cannot accidentally skip it. Stated as a
-   * comment alone it was false — `submit` calls `send` with nothing awaited, so
-   * the ordinary Send did depend on that effect, and in the window where it does
-   * not hold the message goes to the daemon while the box is left full and no
-   * spinner lights: the one rendering that reads as "it did not send" and invites
-   * a duplicate.
-   *
-   * See `liveKey`: the box and the spinner are shared state on one instance while
-   * `drafts`, `attach.ts` and `echo.ts` are keyed, so a late answer may write the
-   * keyed halves and must not write the shared ones.
-   */
+  // Ask only after an await: `liveKey` is written from an effect.
   const onScreen = (): boolean => liveKey.current === key;
 
   const closeMenu = (): void => {
@@ -1067,59 +388,20 @@ export function Composer({
     setDismissed(true);
   };
 
-  /**
-   * Apply one value of a control, and close only if the daemon agreed.
-   *
-   * `onDone` is how the one-tap path defers its own draft edit until the answer
-   * is in — see `choose`. Nothing here edits the box itself, because the second
-   * stage has already cleared it by the time it gets here.
-   *
-   * `applying`, `stage` and `dismissed` are the same shared instance the box is,
-   * and this callback runs after `POST /sessions/:id/config` on the 90s slow
-   * route — long enough for somebody to be looking at another session in this
-   * same composer, which at `lg` does not remount. So a config change dispatched
-   * against A used to close B's open `/` menu when it landed, with nothing said
-   * and no way to tell it from a stray tap. `onDone` is called either way,
-   * because what it does with a late answer is its own decision and every one of
-   * them is keyed.
-   */
   const applyValue = (option: AgentConfigOption, value: string, onDone?: (ok: boolean) => void): void => {
-    /*
-     * **The second door, refused by the same function as the first.** The strip's
-     * row swallows this tap and so does this one, which is what licenses
-     * `applyConfigChange` suppressing the toast for that single code: nothing
-     * dispatches into a refusal that says nothing.
-     *
-     * `onDone?.(false)` keeps this path's contract — the typed form sends its
-     * message only if the daemon agreed — so a refused value neither applies nor
-     * sends, and the menu stays open because only success closes it.
-     */
     if (choiceRefusal(option, value, turnRunning) !== null) {
       onDone?.(false);
       return;
     }
     setApplying(value);
     void applyConfigChange(sessionRef, option.id, value).then((ok) => {
-      // One question, asked once, because the two writes below are one decision:
-      // clearing the spinner and closing the menu belong to the same session or
-      // to neither, and `onDone` sits between them.
       const present = onScreen();
       if (present) setApplying(null);
       onDone?.(ok);
-      // Closed only on success. The daemon's answer is the truth — the agent can
-      // refuse a value — and a menu that shut on failure would look like it had
-      // worked. The toast is `applyConfigChange`'s.
       if (ok && present) closeMenu();
     });
   };
 
-  /**
-   * Take a command.
-   *
-   * Three outcomes, not two: `/plan` carries its own value and applies in one
-   * tap, `/model` opens its choices as a second stage, and everything else fills
-   * the box for sending.
-   */
   const choose = (index: number): void => {
     if (query === null) return;
     const entry = matches[index];
@@ -1127,31 +409,9 @@ export function Composer({
     const next = completion(text, query, entry);
 
     if (entry.option !== null && entry.value !== null) {
-      /*
-       * The one-tap path dispatches *first* and rewrites the draft only if the
-       * daemon agreed, which is the same rule `applyValue` states and this branch
-       * was breaking. Clearing up front meant that on a refusal the token was
-       * already gone — and with it `query`, so `menuOpen` went false and the menu
-       * closed anyway, leaving a toast as the only trace of a mode that did not
-       * change. There is nothing to retype from.
-       */
+      // Rewrite the draft only if the daemon agreed, so a refusal leaves the token to retry from.
       applyValue(entry.option, entry.value, (ok) => {
         if (!ok) return;
-        /*
-         * The same split `send` makes, for the same reason: this runs after a
-         * `POST /sessions/:id/config` round trip on a 90s budget, and `update`
-         * writes `setText` — the one shared instance — as well as the keyed
-         * draft. Tapping `/plan` in the menu and then moving to another session
-         * put A's completion text into B's visible box, and `pendingCaret` then
-         * moved B's caret to A's offset, so an Enter aimed at retrying A's
-         * gesture sent A's text to B's agent (`submit` reads the live render's
-         * `sessionRef`).
-         *
-         * The draft is written for the session it was typed in either way —
-         * that is what makes "come back to it and it is waiting for you" true —
-         * and only the box on screen is rewritten. `pendingCaret` is a position
-         * *in that box*, so it goes with the box and never with the draft.
-         */
         if (onScreen()) {
           update(next.text);
           pendingCaret.current = next.caret;
@@ -1163,8 +423,6 @@ export function Composer({
 
     update(next.text);
     pendingCaret.current = next.caret;
-    // A control is not a message: no text is sent, the token is cleared, and the
-    // menu becomes that control's own choice list.
     setStage(entry.kind === "config" ? entry.option : null);
   };
 
@@ -1178,203 +436,59 @@ export function Composer({
     event?.preventDefault();
     const daemon = store.daemonFor(sessionRef.machineId);
     if (busy || daemon === undefined) return;
-    // Text **or** files. A message that is only a screenshot is legitimate, and
-    // `sendable` is where that rule lives so the button and this guard cannot
-    // disagree — it also refuses while an upload is in flight or has failed,
-    // because sending then would deliver a files-only message with no files in it.
     if (!sendable(text, attachments, sendRefused)) return;
 
-    /*
-     * A typed control is a control, not a message.
-     *
-     * The menu applies these on selection and sends nothing; typing the same name
-     * and pressing Enter used to send it to the agent as text. Measured against
-     * claude: `/plan I want…` — a slash command with an argument after it —
-     * arrived as a prompt and came back "/plan isn't available in this
-     * environment", a mode change spent as a turn.
-     * The names are ours precisely so they are typeable, so typing one has to do
-     * what choosing it does.
-     */
+    // A typed control applies like a chosen one instead of reaching the agent as a prompt.
     const typed = typedConfigCommand(text, entries);
     if (typed !== null) {
       const { entry, option, rest } = typed;
       if (entry.value === null) {
-        // `/model`, `/effort`, `/mode`: a question rather than a change. Open the
-        // choices, the same second stage the menu would. Anything typed after the
-        // name is not a message — it is an argument to a picker that has none —
-        // so the box keeps just the token and the list answers it.
-        //
-        // `dismissed` is cleared with the stage, and that is the whole of this
-        // gesture rather than a detail of it: `menuOpen` is `!dismissed && …`, and
-        // tapping the Send arrow *is* a dismissal — `pointerdown` lands outside the
-        // panel and the textarea, so `CommandMenu`'s own outside-click listener has
-        // run `closeMenu()` before the `click` that submits. Without this, pressing
-        // Send on `/model` opened a stage nothing would draw: no picker, no message,
-        // no toast, repeatable for ever, with only editing the text as a way out.
-        // Escape-then-Enter reached the same dead end. `dismissed` may only ever
-        // suppress the menu the *query* derives; it must never suppress a stage
-        // somebody just asked for.
+        // Clear `dismissed` too: pressing Send already dismissed the menu, leaving a stage nothing draws.
         update(`/${entry.name}`);
         setStage(option);
         setDismissed(false);
         return;
       }
-      // Dispatch first and send only if the daemon agreed, which is `applyValue`'s
-      // own rule: a prompt written for plan mode must not run in the previous one
-      // because the change was refused. On a refusal the draft is untouched and
-      // `applyConfigChange`'s toast says why, so there is something to retry from.
+      // Send only if the daemon agreed: a prompt written for plan mode must not run in the previous mode.
       setBusy(true);
       applyValue(option, entry.value, (ok) => {
-        // The same split `send` makes below, for the same reason and one round
-        // trip earlier: this callback runs after `POST /sessions/:id/config` on a
-        // 90s budget, by which time somebody may be looking at another session in
-        // this same composer. The draft still goes to the session it was typed in
-        // — `update` writes `drafts` under this render's key — and `send` below
-        // still sends to `sessionRef`; what must not happen is `/plan`'s leftover
-        // message appearing in a box belonging to a different agent.
         if (onScreen()) setBusy(false);
         if (!ok) return;
         if (onScreen()) update(rest);
         else if (rest.length === 0) drafts.delete(key);
         else drafts.set(key, rest);
-        // Nothing after the name is the ordinary case — `/plan` on its own is a
-        // whole gesture. `sendable` decides for the rest, so a files-only message
-        // still goes, an empty one does not, and one whose upload failed waits in
-        // the box for the Retry on its own chip rather than going without it.
-        //
-        // Against the **live** set and not this render's copy: a round trip has
-        // happened since, and nothing stops a file being attached — or failing —
-        // during it.
         if (sendable(rest, attachmentsFor(key), sendRefused)) send(rest, true);
       });
       return;
     }
 
-    // Nothing has been awaited between the keystroke and here, so this render's
-    // session *is* the one on screen — see `late`.
-    send(text.trim(), false);
+    send(sentText(text), false);
   };
 
-  /**
-   * Put a message on the wire. Split out so a typed control can reach it too.
-   *
-   * `late` says whether the caller has awaited since the gesture began, and it is
-   * required with no default for the reason `LaunchOptions.fileIo` is: a new call
-   * site has to decide, and deleting the argument is a type error rather than a
-   * silent one. The two answers are the two doors — `submit` arrives straight off
-   * the keystroke, `applyValue`'s callback arrives a `POST /sessions/:id/config`
-   * round trip later, by which time this one composer instance may be showing a
-   * different session.
-   *
-   * It is the whole of what `onScreen` is asked here, and asking it on the
-   * synchronous path was wrong in the one direction that matters: `liveKey` is
-   * written from an effect, so in the window between a session-switch render and
-   * its flush the ordinary Send would have put the message on the wire while
-   * skipping the box, the message and the spinner — which reads as "it did not
-   * send".
-   */
+  // `late`: whether the caller awaited since the gesture, so it knows whether to ask `onScreen`.
   const send = (body: string, late: boolean): void => {
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined) return;
 
-    /*
-     * Read **live**, not from this render's closure.
-     *
-     * `forgetAttachments(key)` two lines down deletes the whole live list, so
-     * whatever is captured here has to be the same list that is about to be
-     * destroyed — or a chip is thrown away without being sent and without being
-     * restorable. That is not hypothetical: the typed-control path calls `send`
-     * from `applyValue`'s callback, i.e. after a `POST /sessions/:id/config` round
-     * trip on a 90s budget, while the paperclip, paste and drop all stay live
-     * throughout. Type `/plan fix the build`, press Enter, paste a screenshot
-     * while the config call is in flight, and the closure's copy sent the prompt
-     * without the screenshot, cleared the chip anyway, and left no error and
-     * nothing in the echo to say a file had gone.
-     *
-     * On the ordinary path nothing has awaited, so this reads exactly what the
-     * render did and the change is invisible.
-     */
+    // Read live: a late caller may have gained a chip since this render, and the live list is cleared below.
     const sent = [...attachmentsFor(key)];
     const { ids: sending } = sendableAttachments(sent);
-    /*
-     * These three are the shared instance, and on the `late` door — the
-     * typed-control path, calling from `applyValue`'s callback a `POST
-     * /sessions/:id/config` round trip later — they belong to a session that may
-     * no longer be the one on screen. Emptying the box, drawing the pending
-     * bubble and lighting the spinner all belong to the session the message came
-     * from, so on that door they happen only while it is still showing. The
-     * draft is cleared either way: the message has genuinely left it.
-     *
-     * `!late` short-circuits rather than merely being redundant, which is what
-     * keeps `onScreen`'s "only ever asked after an await" true and what stops the
-     * ordinary Send depending on an effect having flushed.
-     */
-    /*
-     * **Above the arm, because this one names the session it belongs to.**
-     *
-     * The echo is keyed state in `echo.ts` now, not React state on this shared
-     * instance, so it obeys the same rule `drafts` and `attach.ts` already do:
-     * write it whatever is on screen, because the write says which conversation
-     * it is about. On the `late` door that is the correction rather than a
-     * relaxation — the message really did go to that session, and its transcript
-     * should show it whether or not somebody is looking at it.
-     *
-     * `MAX_SAFE_INTEGER` until the daemon names a seq; see `PendingEcho`.
-     */
-    setEcho(key, {
+    const echo: PendingEcho = {
       text: body,
       seq: Number.MAX_SAFE_INTEGER,
+      after: sendFloor(key, store.getSnapshot().transcripts.get(key)?.events.at(-1)?.seq ?? 0),
       attachments: echoAttachments(sent),
-    });
+    };
+    setEcho(key, echo);
     if (!late || onScreen()) {
       setBusy(true);
       update("");
-      // Inside this arm rather than beside it, and for its whole reason: on the
-      // `late` door the session that sent this may not be the one on screen, and
-      // scrolling *that* conversation to its foot would move a transcript nobody
-      // was writing into.
       onSent();
     } else {
       drafts.delete(key);
     }
     forgetAttachments(key);
-    /*
-     * Everything below the await is split in two, and the split is the same one
-     * `updateAttachment` already makes for a chip: what is **keyed** by session
-     * happens whatever is on screen, and what is **React state on this one shared
-     * instance** happens only if this is still the session that sent it.
-     *
-     * `drafts`, `attach.ts` and the store are all keyed, so they are correct from
-     * anywhere — and so, now, is the echo. `setText` and `setBusy` are not: they
-     * write into whichever session this composer is showing when the promise
-     * settles, and at `lg` switching sessions does not remount it. What that
-     * produced was A's refused message appearing in B's box, and then being sent
-     * to B's agent by an Enter aimed at retrying it. A's pending bubble drawn
-     * above B's composer was the other half of that same failure, clearable only
-     * once B's own log passed A's seq; it is gone by construction now rather than
-     * by a guard.
-     */
-    /*
-     * **A message written in front of a plan stops the turn first, and that
-     * ordering is measured rather than chosen.**
-     *
-     * The daemon refuses a prompt while a turn is in flight, and a parked
-     * permission is *inside* one — so something has to end the turn before this
-     * can land. Rejecting the plan does not: measured on this daemon, the agent
-     * takes the refusal, carries on talking, and the turn stayed open for the
-     * thirty seconds it took the operator to press Stop by hand. `POST
-     * /sessions/:id/cancel` is what they pressed, and it answers only once the
-     * turn has settled — which is what makes the prompt behind it land rather
-     * than come back `409 turn_in_flight`.
-     *
-     * The cancel also settles the permission, as `cancelled` and `by:
-     * turn_cancelled`. That is the same record the operator's own Stop already
-     * wrote, and it is the honest one: the plan was not approved, and the reason
-     * is the message that follows it.
-     *
-     * One chain, so the failure path below is the only one: a cancel that fails
-     * puts the text back in the box exactly as a refused prompt does.
-     */
+    // Before a plan, cancel first, turn or not: the daemon dismisses the parked plan either way (Q2.232).
     const settled = revising
       ? daemon.cancelTurn(sessionRef.sessionId).then((result) => {
           store.applySnapshot(sessionRef, result.session);
@@ -1384,64 +498,22 @@ export function Composer({
     void settled
       .then(() => daemon.prompt(sessionRef.sessionId, body, sending))
       .then((result) => {
-        // Both keyed, both unconditional. `promptLanded` is not just the seq
-        // arriving: the `prompt` event routinely beats this answer down the
-        // socket, which is not waiting on a 90-second slow-route budget, so the
-        // store settles the echo against the log in the same call rather than
-        // leaving one pinned to a conversation that has already drawn it.
-        store.promptLanded(sessionRef, result.seq);
+        // `promptLanded` also settles the echo, since the prompt event often beats this answer.
+        store.promptLanded(sessionRef, echo, result.seq);
         store.applySnapshot(sessionRef, result.session);
       })
       .catch((cause: unknown) => {
-        // Put it back rather than losing it. `turn_in_flight` is the commonest
-        // refusal and the message is the daemon's own, which says which of the
-        // two reasons it was.
-        //
-        // **Both**, and that is not tidiness: the uploads are still on the daemon
-        // and still valid, so restoring the text while dropping the chips would
-        // silently turn a retry into a different message.
-        //
-        // The draft is written through the map either way — that is what makes
-        // "come back to the session and it is waiting for you" true — and only the
-        // box on screen is rewritten.
-        clearEcho(key);
+        // Restore the chips with the text: the uploads are still valid.
+        clearEcho(key, echo);
         if (onScreen()) {
           update(body);
         } else if (body.length === 0) {
-          // A files-only message has no text to restore, and an empty entry left
-          // in the map is a draft that is not one. Same rule `update` applies.
           drafts.delete(key);
         } else {
           drafts.set(key, body);
         }
         restoreAttachments(key, sent);
-        /*
-         * **Every refusal says so, and the exception that used to be here is
-         * gone.**
-         *
-         * ⚠ Two things were wrong with it, and the second is why it cannot come
-         * back. It tested `agent_signed_out`, **a code the daemon had stopped
-         * sending** when the probe on the prompt path was deleted — the route
-         * answers `session_terminal` — so the branch was unreachable and the
-         * toast it suppressed fired anyway. `webcheck` asserted the *literal
-         * string* was in this file rather than that the behaviour held, which is
-         * how that stayed green.
-         *
-         * And the argument itself expired. It was Q7.102's: a refusal a person
-         * can fix does not belong in a toast, because the *screen changed* — the
-         * send ended the session, and a notice with a Sign in button appeared
-         * where the composer had been. Nothing changes on screen now. The
-         * composer is unconditional and `onAuthFailure` no longer ends anything,
-         * so a refused send restores the text and does nothing else: measured on
-         * a `start_failed` session, pressing Send put "hello?" back in the box
-         * and said nothing anywhere. Silence is the one answer a control may
-         * never give.
-         *
-         * What is left to refuse at all is narrow — `autoResumable` covers every
-         * reason with a conversation to return to — so this fires for a session
-         * that genuinely cannot be reopened, which is exactly when somebody needs
-         * telling.
-         */
+        // Every refusal toasts: the box is unconditional and `onAuthFailure` no longer ends the session.
         toast("error", errorText(cause));
       })
       .finally(() => {
@@ -1449,25 +521,7 @@ export function Composer({
       });
   };
 
-  /**
-   * Ask the agent to stop what it is doing.
-   *
-   * **Nothing is written optimistically.** Every other action here draws its
-   * effect before the daemon confirms it — the box empties, the message appears
-   * in the conversation —
-   * because a message a person typed is theirs and putting it back is the
-   * remedy. A cancel has no such copy: drawing "stopping" and then having the
-   * request fail would claim an agent had been called off when it is still
-   * working, which is the one lie this control must not tell. So the button's
-   * pending state comes from the snapshot the daemon returns
-   * (`cancelRequestedAt`) and from nothing else.
-   *
-   * `stopping` is local and short-lived, covering only the round trip itself, and
-   * it is gated on `onScreen()` for the reason `busy` is: this composer instance
-   * outlives a session switch, so a late answer must not spin a button belonging
-   * to somebody else's session. The keyed half — the snapshot — is applied
-   * unconditionally, because it names the session it is about.
-   */
+  // Nothing optimistic: the pending state comes only from the daemon's snapshot.
   const cancelTurn = (): void => {
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined || stopping) return;
@@ -1487,23 +541,12 @@ export function Composer({
 
   return (
     <div
-      /*
-       * Dropped files, on the whole composer rather than on the textarea: a
-       * person aims at the box they type in, and the box is 44px tall when empty.
-       *
-       * `onDragOver` has to `preventDefault` or `drop` never fires at all — the
-       * browser's default is to refuse the drop — and it is gated on the drag
-       * actually carrying files so that selecting text and dragging it within the
-       * box still behaves normally.
-       */
       onDragOver={(event) => {
         if (!event.dataTransfer.types.includes("Files")) return;
         event.preventDefault();
         if (!dragging) setDragging(true);
       }}
       onDragLeave={(event) => {
-        // Fires for every child the pointer crosses. Only the one that leaves the
-        // composer itself counts, or the highlight flickers on every internal edge.
         if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
         setDragging(false);
       }}
@@ -1514,132 +557,20 @@ export function Composer({
         event.preventDefault();
         attach(files);
       }}
-      /*
-       * **The rule above the composer is gone, and so is the blur it sat on.**
-       *
-       * The box below carries `border-edge-strong` now, which is 4.40:1 where this
-       * `border-edge` was 1.31:1 — so what separates the composer from the
-       * conversation is a stronger line 8px lower, rather than two hairlines eight
-       * pixels apart, which is what a bordered box under a full-width rule reads
-       * as on a phone.
-       *
-       * `bg-surface/95 backdrop-blur` went with it, and that is a measurement
-       * rather than taste: `SessionView` makes this a **sibling** of the
-       * conversation region rather than a layer over it — the ask card's frame
-       * ends where the composer begins for exactly that reason — and `AppShell`'s
-       * pane does not scroll, every route owning its own scroller. So nothing ever
-       * passes under this element, and a `backdrop-filter` was re-rasterising a
-       * static white backdrop on every frame to blur nothing.
-       *
-       * `sticky bottom-0` stays. It costs nothing and it is the correct guard for
-       * the day `<main>`'s `overflow-y-auto` backstop actually fires.
-       *
-       * ⚠ The dragging fill moved to the box. It was written here as a second
-       * `background-color` utility beside `bg-surface/95` in the same class string,
-       * i.e. the equal-specificity race `FIELD` documents — two `bg-*` on one
-       * element, decided by emission order rather than by the ternary.
-       */
       className="pb-safe sticky bottom-0 bg-surface pt-1.5"
     >
-      {/*
-       * The bar is full width and its contents are not.
-       *
-       * The background and the drop target span the window — they are chrome, and
-       * a centred drop target with dead margins either side would be a lie about
-       * where a file may be let go. The box you type in shares `COLUMN` with the
-       * transcript above it and the ask card that floats between them, so all
-       * three line up at every width; the inset used to be written three times, on
-       * the chip list, on the form and on the control strip.
-       *
-       * ⚠ **They did not line up, and this comment said they did.** It was `px-3`
-       * here against `px-4` on the transcript's column, so the box you type in was
-       * 8px wider than every row above it and than the ask card floating between —
-       * visible as a step where the card's edge met the box's, and reported that
-       * way. `px-4` is the one gutter for the conversation column now, and
-       * `webcheck` reads the three files off disk and compares them, because
-       * nothing else can: three literals in three files agreeing is exactly the
-       * claim a comment cannot keep.
-       *
-       * ⚠ **`pb-2` is here and not on the band above, and that is a cascade fact
-       * rather than a layout one.** The box sat 12px off the bottom edge and read
-       * as pressed into it. The obvious fix — another `pb-*` beside `pb-safe` on
-       * the band — is a **silent no-op**: `.pb-safe` is declared unlayered in
-       * `index.css` while Tailwind emits every utility inside `@layer utilities`,
-       * and an unlayered rule beats a layered one regardless of specificity. That
-       * is the same trap the focus ring and `touch-none` docblocks are both about,
-       * and `Toast.tsx`'s `pb-3` and `SHEET`'s `sm:pb-0` are still losing it.
-       *
-       * On this element there is no unlayered competitor, so the 8px lands. It
-       * sits inside the band's `bg-surface`, so what grows is the painted gutter
-       * under the box rather than a transparent strip with the transcript
-       * scrolling through it — which is what `mb-*` or a non-zero `bottom-*` would
-       * have given. Total clearance is `pb-2` + `pb-safe`'s floor: 20px, or the
-       * home indicator where that is larger.
-       */}
+      {/* `pb-2` here: beside the unlayered `.pb-safe` it would lose. */}
       <div className={`${COLUMN} px-4 pb-2`}>
-      {/*
-       * **The box: one bordered container holding everything the composer owns.**
-       *
-       * It was a bordered textarea, a bordered send button beside it and a
-       * separate strip of bordered pills underneath — seven outlines in two rows
-       * at the bottom of a 390px screen. This is one, and the only other thing in
-       * it wearing an edge is Send's fill and Stop's border while a turn runs.
-       * What each control inside owes for its own identification once the border
-       * goes is argued at `CHIP` in `AgentConfigBar.tsx`.
-       *
-       * ⚠ **The box is the `<form>`, and every hand-rolled `<button>` under it
-       * has to name its type.** A button inside a form defaults to
-       * `type="submit"`, and `Select`, `Absent`, `Toggle` and the choice rows are
-       * all hand-rolled — so a typeless one here does not open a menu, it sends
-       * the draft. They carry explicit `type="button"` and `webcheck` scans every
-       * `<button` in `AgentConfigBar.tsx` for one, comment-stripped, because that
-       * assertion is now the **only** thing standing between a chip and a sent
-       * message. This was a `<div>` wrapping a smaller `<form>` for one release,
-       * which made the structure a second guard; Send moving into the control row
-       * spent it, since a submit button has to be inside the form it submits.
-       *
-       * ⚠ **Never `overflow-hidden` here.** `CommandMenu`, all three chip menus,
-       * `Absent`'s panel and the `…` popover are `bottom-full` children of this
-       * box, and clipping is the regression a rounded container invites.
-       *
-       * `relative` is here rather than on the textarea so `CommandMenu` spans the
-       * box's own edges. The background lives in the ternary and never in the
-       * base, which is `FIELD`'s equal-specificity rule: two `bg-*` utilities on
-       * one element are decided by emission order, not by the condition that looks
-       * like it decides them.
-       */}
+      {/* The box is the form, so every hand-rolled button under it needs an explicit type; never overflow-hidden (menus open above it). */}
       <form
         onSubmit={submit}
         className={`relative rounded-xl border border-edge-strong px-1.5 pt-1 pb-1.5 ${
           dragging ? "bg-raised ring-1 ring-edge-strong ring-inset" : "bg-surface"
         }`}
       >
-      {/* Its own full-width row rather than a place in the control strip: chips
-          wrap to two lines and need the width a phone has, and the strip is a
-          single line of controls that must not reflow under them.
-
-          The row gap is twice the column gap, and the 12px is arithmetic rather
-          than taste. A chip's controls are `IconButton size="sm"`, 24px of ink
-          centred in a 34px chip inside a symmetric `after:-inset-2.5`, so each
-          target reaches 5px past the chip's own top and bottom edge. At `gap-1.5`
-          two wrapped rows sit 6px apart, so those targets overlapped across 4px of
-          that 6px gap and the lower row painted last and won — aim below one
-          file's Remove and remove the file under it instead. 12px leaves 2px of
-          clearance. It costs 6px, and only once there are enough files to wrap. */}
+      {/* Row gap 12px so the grown tap targets of wrapped chips do not overlap. */}
       {attachments.length > 0 && (
         <ul className="flex flex-wrap gap-x-1.5 gap-y-3 pb-2">
-          {/* A fill rather than an outline, now that these sit inside a bordered
-              box: an attachment chip is **content**, not a control — its controls
-              are the two `IconButton`s inside it — so `raised` is the "a mark on a
-              thing" tone the transcript already gives the message you wrote, and it
-              groups the chip without drawing a second line inside the first. That
-              leaves the failed chip as the only outlined attachment in the row,
-              which is the right way round: failure is the one state here that has
-              to be found rather than read past.
-
-              `border` stays in the base with `border-transparent` in the ordinary
-              arm, so a chip that fails does not *grow* by 2px — the same "nothing
-              moves" rule `chipParts` is built around. */}
           {attachments.map((item) => (
             <li
               key={item.localId}
@@ -1647,29 +578,7 @@ export function Composer({
                 item.state === "failed" ? "border-danger/50 bg-danger/5" : "border-transparent bg-raised"
               }`}
             >
-              {/*
-               * The leading slot says what is happening to this file, so on the one
-               * state that needs a decision it is the control that makes it:
-               * spinner while it is going up, paperclip once it is staged, and the
-               * way out when it failed.
-               *
-               * **It is here rather than beside Remove because of the arithmetic,
-               * not the semantics.** `size="sm"` is 24px of ink inside a symmetric
-               * `after:-inset-2.5`, so two of them need 20px between their boxes
-               * before their targets stop overlapping — at the row's `gap-1.5` they
-               * share 14px, and a positioned pseudo-element of a later sibling
-               * paints on top, so the *destructive* control would have won that
-               * band and a tap aimed just right of Retry would delete the file.
-               * That is the adjacency `TAP_GROW_Y`'s note warns about, and 20px of
-               * blank between two glyphs inside one chip is not a fix, it is a
-               * different defect on a 390px phone. Here Retry's only neighbours are
-               * the chip's own padding and an inert name, so both controls keep a
-               * whole 44px: from the previous chip's Remove there are 24px
-               * (`px-2`, two borders and `gap-x-1.5`), which clears 20px.
-               *
-               * Remove also stays last in every state, so the control does not move
-               * along the chip when an upload settles.
-               */}
+              {/* Retry leads the chip, away from Remove, so their grown targets cannot overlap. */}
               {item.state === "uploading" ? (
                 <Spinner />
               ) : item.state === "failed" ? (
@@ -1677,13 +586,6 @@ export function Composer({
                   icon={RefreshCw}
                   label={`Upload ${item.name} again`}
                   size="sm"
-                  // A retry turns a chip that holds no slot into one that does, so
-                  // it is refused exactly where the paperclip is and by the same
-                  // expression — the daemon answers `400 too_many_attachments`
-                  // above ten, and a retry into an eleventh slot would buy a chip
-                  // that can never be sent. Remove stays live, which is what keeps
-                  // a full strip out of a deadlock now that a failed chip holds
-                  // Send.
                   disabled={slotsFull}
                   onClick={() => retry(item)}
                 />
@@ -1700,12 +602,6 @@ export function Composer({
                     ? (item.error ?? "failed")
                     : formatBytes(item.size)}
               </span>
-              {/* Was a hand-rolled `<button>` around an 11px glyph: `.tap` is three
-                  transitions and adds no hit area, so this was a ~15px target on
-                  the row where a mis-tap throws away bytes that are already on the
-                  daemon. It also had colour-only hover on the faintest value in
-                  the palette, which is the pair of defects `IconButton` exists to
-                  retire. */}
               <IconButton
                 icon={X}
                 label={`Remove ${item.name}`}
@@ -1717,10 +613,6 @@ export function Composer({
         </ul>
       )}
 
-      {/* The text and the one control that acts on it, and nothing else. The
-          `relative` this used to carry for `CommandMenu`'s sake is on the box now,
-          so the panel spans the box's own edges rather than stopping short of its
-          padding; the inset is the wrapper's `px-3`. */}
         <input
           ref={fileInput}
           type="file"
@@ -1750,36 +642,16 @@ export function Composer({
         )}
         <textarea
           ref={areaRef}
+          {...VERBATIM_FIELD}
           value={text}
           onChange={(event) => {
             update(event.target.value);
             setCaret(event.target.selectionStart ?? event.target.value.length);
-            // Typing re-arms a menu an Escape closed. Any other rule means Escape
-            // switches the feature off for the rest of the draft.
             setDismissed(false);
-            // And it abandons a value picker. Choosing `/model` clears the box, so
-            // typing into it is somebody writing a message again rather than
-            // picking a model — leaving the choices up would put a list they are
-            // no longer looking at over the text they are.
             setStage(null);
           }}
-          /*
-           * The caret can move without the text changing — an arrow key, a click,
-           * a drag — and the menu is derived from where it is. Without these a
-           * click back into the middle of a word leaves a menu open that is
-           * completing something the caret is no longer in.
-           */
           onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
-          /*
-           * Ctrl+V of an image, which on a desktop is how a screenshot is
-           * actually attached — the picker is the phone's answer, not everyone's.
-           *
-           * `preventDefault` only when there really are files: a clipboard
-           * carrying an image often carries a text alternative too, and letting
-           * the default run would paste a filename or a data URL beside the chip.
-           * An ordinary text paste must fall straight through untouched, which is
-           * why this returns before touching the event.
-           */
+          // Only when there are files: a text paste must fall through untouched.
           onPaste={(event) => {
             const files = [...(event.clipboardData?.files ?? [])];
             if (files.length === 0) return;
@@ -1787,26 +659,7 @@ export function Composer({
             attach(files);
           }}
           onKeyDown={(event) => {
-            /*
-             * What the keystroke means is decided in `keys.ts`, including the one
-             * collision — Enter, which the menu takes while it is open and
-             * `shouldSend` takes otherwise. That ordering used to live here, in
-             * two blocks in a JSX prop, which is a rule nothing could assert;
-             * `composerKey` is the same rule somewhere `webcheck` can reach it.
-             *
-             * `nativeEvent.isComposing`, not the synthetic event: React does not
-             * forward it, and without it Enter commits an IME candidate *and*
-             * sends the half-typed word.
-             *
-             * **The pointer is read here, at the keystroke, and thrown away in the
-             * same tick** — the rule this file already states for
-             * `shouldFocusComposer` above. A soft keyboard has no Shift+Enter, so
-             * on a coarse pointer Enter is the newline and Send is the button;
-             * `keys.ts` carries why. Held in state instead it would be the exact
-             * staleness the deleted `↵` button's own comment warned about — an
-             * iPad gaining or losing a keyboard flips this and nothing re-renders
-             * — whereas the next keystroke always reads the truth.
-             */
+            // React does not forward `isComposing`; the pointer is read per keystroke so an attached keyboard is seen.
             const action = composerKey(
               { ...event, isComposing: event.nativeEvent.isComposing },
               menuOpen,
@@ -1821,27 +674,13 @@ export function Composer({
               if (stage === null) choose(active);
               else chooseValue(active);
             } else {
-              // Escape only, and the propagation stop is the load-bearing half:
-              // `useKeyboard` binds Escape on `window` to blur whatever has
-              // focus, so without this, dismissing the menu would also throw you
-              // out of the composer and dismiss the soft keyboard.
+              // `useKeyboard` blurs on a window Escape, which would also close the soft keyboard.
               event.stopPropagation();
               closeMenu();
             }
           }}
           rows={1}
-          /*
-           * `enter` rather than `send`, unconditionally, and the unconditionality
-           * is the point: this attribute is only ever consulted by a *virtual*
-           * keyboard, so there is no pointer question to ask and nothing that can
-           * go stale. It is the half of the mobile rule the person can see — the
-           * key is drawn as a return key and it inserts a return, which is what
-           * `composerKey`'s `enterSends` makes true underneath.
-           */
           enterKeyHint="enter"
-          // `entries` and not `matches`: the promise is that the key opens
-          // something on this session, which is true or false before anything has
-          // been typed into the box.
           placeholder={composerPlaceholder({
             blocked,
             reconnecting: busy && reconnecting,
@@ -1851,413 +690,47 @@ export function Composer({
           })}
           aria-label="Message"
           role="combobox"
-          // `combobox` on a `textarea` costs the multiline semantics a screen
-          // reader would otherwise infer, so they are restored explicitly rather
-          // than lost silently; `aria-autocomplete` is what says the list narrows
-          // as you type, which nothing else here conveys.
+          // `combobox` on a textarea drops the multiline semantics, so they are restored explicitly.
           aria-multiline={true}
           aria-autocomplete="list"
           aria-expanded={menuOpen}
           aria-controls={menuOpen ? "composer-command-menu" : undefined}
-          // The highlight is an index rather than focus, which is what lets the
-          // caret stay in the box — and therefore what lets an input method go on
-          // composing while the list is up.
-          //
-          // Both stages, not just the first. This was gated on `stage === null`
-          // because only the entries branch rendered the ids — which made the
-          // choice list, the one that changes the agent's model or mode, the one
-          // with no announcement at all: the arrows moved a highlight a screen
-          // reader could not see and Enter applied whatever it had reached.
           aria-activedescendant={menuOpen ? `composer-command-${active}` : undefined}
-          /*
-           * One appearance, focused or not, and `outline-none` is what keeps it
-           * that way rather than an oversight.
-           *
-           * The border used to turn `accent` on focus, which made the box somebody
-           * is about to type in the loudest thing on the screen for the whole time
-           * they are typing in it. It is where the caret already is; a second
-           * signal saying so is decoration.
-           *
-           * Deleting `outline-none` instead would be *worse*, not neutral. The
-           * app-wide rule in `index.css` is `:focus-visible`, and a text control
-           * matches that whenever it is focused — mouse and touch included, unlike
-           * a button — so removing it draws a 2px ring on every single tap. The
-           * caret is the focus indicator a textarea has anyway.
-           *
-           * **`outline-none` alone was not enough, and it looked like it was.**
-           * No Tailwind utility can win here: they are emitted inside
-           * `@layer utilities` and the app-wide rule is unlayered, and unlayered
-           * styles beat layered ones *regardless of specificity* — measured,
-           * `focus-visible:outline-none` at (0,2,0) still loses to the rule's
-           * (0,1,0). So the box went on drawing an accent ring on focus while
-           * this comment claimed it did not.
-           *
-           * `no-focus-ring` is the opt-out that rule declares for itself in
-           * `index.css`, which is the only place able to grant one. Nothing else
-           * in this app should use it — see the note there.
-           */
-          /*
-           * **No border and no fill of its own: the box is this field's boundary.**
-           *
-           * `rounded-md border border-edge-strong bg-surface` all moved outward one
-           * element. What that costs is nothing — the box is the same 4.40:1 edge
-           * one padding-width further out — and what it buys is that the text, the
-           * attachments and the controls sit inside one outline instead of three.
-           *
-           * `bg-transparent` rather than `bg-surface`, and it is load-bearing: the
-           * box goes `bg-raised` while a file is dragged over the composer, and a
-           * white field would punch a hole through that highlight.
-           *
-           * `min-h-11` **stays**. It is not the field's own identification any
-           * more, but it is still 44px of target directly above a row of chips
-           * whose `TAP_GROW_Y` reaches 4px up toward it, and the mis-tap it
-           * prevents is aiming at the end of a draft and opening a model menu.
-           */
+          // `no-focus-ring`: the unlayered focus-visible rule beats any layered outline utility, and a textarea matches it on every tap.
           className="no-focus-ring block min-h-11 w-full resize-none overflow-hidden bg-transparent px-2 py-2.5 text-sm outline-none"
         />
 
-      {/*
-       * **The one refusal this box explains in words, and the only one that can
-       * be.** {@link CLEAR_REFUSAL} carries why it exists and why it is not a live
-       * region; what belongs here is where it sits and what it costs.
-       *
-       * In flow rather than a `bottom-full` overlay: the menu, the chip panels and
-       * the `…` popover all open upward into the conversation, and a refusal about
-       * the text under a menu that may be open over the same space is a sentence
-       * behind a panel. Under the field is also where somebody typing already is.
-       *
-       * ⚠ **In flow costs the other half of that, and it is displacement rather
-       * than occlusion.** `CommandMenu` is `absolute inset-x-0 bottom-full` against
-       * this `<form>`'s own `relative`, and the box is pinned to the bottom of the
-       * screen — so the panel rides the form's *top* edge, and a line added inside
-       * the form moves the whole open menu by its own height. That height is
-       * arithmetic off the tokens rather than a measurement: `pt-1` is 4px on
-       * Tailwind's default `--spacing` (nothing here overrides it) and
-       * `--text-2xs--line-height` is `1.125rem` in `index.css`, so 22px.
-       * And the menu is open in exactly the state that draws this: `slashQuery`
-       * answers a query for `/clear` with the caret at the end, and
-       * `filterCommands` still holds the `clear` row, so `menuOpen` is true and the
-       * row somebody is about to tap jumps 22px at the keystroke that completes the
-       * word.
-       *
-       * Accepted, and the reason is the schedule again rather than the amount.
-       * This line is derived synchronously from `text`, so it cannot arrive
-       * *between* keystrokes: the move lands on the keystroke that caused it and
-       * never under a thumb already travelling to a row. The panel is moving on
-       * those keystrokes anyway — `filterCommands` narrows `matches` as the query
-       * grows and the panel is anchored at its bottom edge, so every row that drops
-       * out moves the rest — and somebody typing a command name is not aiming at a
-       * row that is holding still. The one move that is *not* a keystroke is the
-       * line going away: `clearRefused` falls when the turn ends and `sendDrawn`
-       * falls when a cancel lands, both on the daemon's clock, and the panel drops
-       * back 22px. That is this sentence's own subject ending, in a window that
-       * needs a command menu held open across it.
-       *
-       * The two ways to buy the stillness were weighed and cost more. Reserving the
-       * 22px whenever the menu is open puts a blank strip under the field for every
-       * `/` in a running session — the trade the control row below already refused
-       * once, as "16px of permanent blank under every composer to avoid a shift
-       * most people never reach". Drawing it in the menu's own footer
-       * beside the `dropped` line puts a refusal about the composer inside a
-       * component that is about completion, and inside a panel that vanishes on
-       * Escape while the refusal it carried is still true.
-       *
-       * ⚠ **It is not one of the three hint lines the control row's comment says
-       * are never coming back, and the distinction is the schedule.** Those three
-       * mounted on every focus, on every turn, or on a reconnect — heights that
-       * moved between the box and the transcript on a clock nobody set. This one is
-       * conditioned on a string somebody typed, against a turn they can see
-       * running: it appears only in the state it describes — which now means the
-       * state *and* the arm, since it is gated on Send being the control the slot
-       * drew — it is the only thing on screen answering "why is Send dead", and it
-       * goes with the next keystroke. The other three arms still have no sighted
-       * half, and they do not need one: each has a chip, a spinner or a Stop that
-       * says what is happening.
-       *
-       * `text-muted` (7.75:1) and not `text-danger`: nothing failed and nothing was
-       * lost — the draft is untouched and both ways out are in the sentence — so
-       * danger colours would be the loudest thing in the composer for a state that
-       * resolves itself when the turn ends. It is the tone the chips rest at, which
-       * is what the quiet half of this box is for.
-       */}
       {sendDrawn && sendRefusal === CLEAR_REFUSAL && (
         <p className="px-2 pt-1 text-2xs text-muted">{CLEAR_REFUSAL}</p>
       )}
 
-      {/*
-       * **The control row, inside the box and below the text.**
-       *
-       * It is `Composer`'s rather than `AgentConfigBar`'s now, and the paperclip
-       * came back with it — to the component that owns `fileInput`, `slotsFull`
-       * and `attach`, where it stops being a `ReactNode` prop that had to explain
-       * itself. What that also retires is `configBarShows`: its third clause
-       * existed to stop one failure — no bar, so no paperclip, so no way to attach
-       * a file on a session with no live agent — and moving the paperclip out
-       * makes that failure structurally impossible rather than asserted. What was
-       * left of the predicate was `optionCount > 0`, which is an ordinary empty
-       * render and not a rule.
-       *
-       * Still below the text rather than above it, for the reason that has not
-       * changed: a strip above the box reads as a toolbar belonging to the
-       * transcript rather than to the thing you are about to send. The popovers
-       * open upward (`bottom-full`), so nothing is behind a soft keyboard.
-       *
-       * **`gap-1.5` is arithmetic.** Six pixels is what `TAP_GROW_Y` is measured
-       * against — a chip's target grows 4px up, and its docblock's "the textarea's
-       * own bottom edge is 6px above" is this gap. Anything under it puts a chip's
-       * target on the textarea's last pixel row, which is a tap aimed at the end of
-       * a draft opening a model menu.
-       *
-       * ⚠ **Read that as "6px above whatever is directly over this row", which is
-       * the textarea in every state but one.** {@link CLEAR_REFUSAL}'s line sits
-       * between them when it is drawn, so there the 4px grow reaches into 22px of
-       * inert text and the textarea's own edge is 28px up. The margin this
-       * arithmetic protects only ever *widens*, and what the grow lands on is a
-       * `<p>` with nothing to activate — so the conclusion holds and only the
-       * distance changes. It would not hold if anything tappable were ever put in
-       * that slot.
-       *
-       * Three hint lines used to live in this space and none is coming back.
-       * "Enter to send · Shift+Enter for a new line" appeared under the box on
-       * every focus, i.e. on every single message, and a keyboard hint still being
-       * shown after the hundredth is furniture rather than teaching; the behaviour
-       * it described is `keys.ts`. `agent is working — your message will queue`
-       * mounted and unmounted on **every turn**, adding and removing 16px between
-       * the box you type in and the transcript you read it against, on a schedule
-       * set by the agent rather than by you — `showsWorking` draws that row inside
-       * the transcript now, where the agent's next sentence appears anyway. And
-       * `reconnecting the agent — this can take a moment` moved into the
-       * **placeholder**, which is visible for exactly the window it describes and
-       * costs no height; a reserved-height slot was refused, being 16px of
-       * permanent blank under every composer to avoid a shift most people never
-       * reach.
-       */}
-      {/* The wider gap sits where the **kind** of control changes and the narrower
-          one inside a group: the paperclip acts on the message, the chips describe
-          the turn, and Send is the action. Both are clear of the 6px `TAP_GROW_Y`
-          was measured against, so neither tightens a tap target, and both stay far
-          under the 20px a symmetric grow would need — which is why that growth is
-          still vertical-only.
-
-          ⚠ **8px and not 12: this was `gap-3 sm:gap-4` for one round and it was
-          too much.** The separation it buys is real and the amount was not: at 12px
-          the paperclip stopped reading as one of the row's own controls and started
-          reading as something parked to the left of them, and Send — which already
-          adds `pl-1` on top — sat 16px off the last chip in a 352px row that has
-          none to spend. 8 is still more than the 6 inside a group, so the two kinds
-          of boundary are still two, and it is the same step `sm:gap-3` keeps above
-          the breakpoint.
-
-          That breakpoint is the one left in this row, and it is a space question,
-          which is the one thing a breakpoint is honestly for. It is affordable: the
-          model chip folds into the mode picker below `sm`, so a 390px row carries
-          the paperclip, two chips and a 32px Send against 352px of box interior
-          rather than the four-control row that was overflowing. */}
       <div className="mt-1.5 flex items-center gap-2 sm:gap-3">
         <IconButton
           icon={Paperclip}
           label="Attach a file"
-          // `ghost` rather than `plain`: with the box carrying the boundary, an
-          // outlined paperclip would be the only bordered thing beside a row of
-          // borderless chips — and it already sat eight pixels from the
-          // attachment chips' own Remove, which has been a bare ghost glyph all
-          // along. What identifies it is the glyph, `text-muted` at 7.75:1.
           tone="ghost"
-          // 32px, so it is one of the pills rather than the only 36px thing in
-          // the row, and the twin of the `…` at the other end.
           size="chip"
-          // Not gated on any capability: ACP requires every agent to support
-          // `resource_link`, so there is no agent for which this does nothing.
-          // Only the count limit closes it, and a terminal session does not —
-          // `resume` exists, and staging a file for one is the ordinary flow.
+          // ACP requires every agent to support `resource_link`.
           disabled={slotsFull}
           onClick={() => fileInput.current?.click()}
         />
         <AgentConfigBar
           sessionRef={sessionRef}
-          // The pair rather than the snapshot's own config: a restart empties that,
-          // and the strip used to go blank for the length of one. `drawnControls`
-          // decides between the live answer and the row's memory of the last one,
-          // and reports which — so nothing here has to know.
           controls={drawnControls(session, row?.heldConfig)}
           events={transcript?.events ?? EMPTY_EVENTS}
-          // The session's turn, which is what the daemon refuses a restart on — not
-          // `disabled` below, which is this tab's own prompt in flight and clears
-          // the moment the daemon accepts it.
           turnRunning={turnRunning}
-          // Terminal is no longer named here: a session with no live agent arrives
-          // as `stale` from `drawnControls`, which is the same refusal reached
-          // through the predicate that also decides what may be drawn.
           disabled={busy}
         />
-        {/* `ml-auto` is load-bearing in exactly one state and is easy to read as
-            decoration in every other: a live agent that publishes no controls
-            renders no `AgentConfigBar` at all, and without this Send would sit
-            beside the paperclip in the middle of the row. `pl-1` on top of the
-            row's own gap because this is the one mis-tap here that *sends*. */}
+        {/* `ml-auto` keeps Send at the end when no config bar renders. */}
         <div className="ml-auto flex shrink-0 items-center pl-1">
-          {/*
-           * **There was a `↵` button here, and it is gone rather than moved.**
-           *
-           * It existed because a soft keyboard has no Shift+Enter while Enter sent,
-           * so on touch there was no way to type a newline at all. That is answered
-           * one level down now — `composerKey`'s `enterSends` is false on a coarse
-           * pointer, so the keyboard's own Return key inserts the line break and
-           * Send is the button, which is what every phone chat client does.
-           *
-           * Two things went with it that were never right. The button appended to
-           * the **end** of the draft (`update(`${text}\n`)`) while `caret` sat one
-           * field away unread, so a newline typed in the middle of a message landed
-           * at the bottom of it; and it took 44px plus a gap out of the box you are
-           * typing in, on the narrowest screen this app runs on, to do it.
-           */}
-          {busy ? (
-            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fg text-ink">
-              <Spinner />
-            </span>
-          ) : (stopping || pendingCancel) && !slotSends ? (
-            /*
-             * A cancel has been asked for and the agent has not finished.
-             *
-             * A spinner rather than a disabled Stop, and the reason is mechanical:
-             * `IconButton` carries `disabled:pointer-events-none`, so a greyed
-             * square's `title` never appears — the explanation would exist only for
-             * a screen reader while everybody else got an unexplained dead control.
-             * The same shape the `busy` branch above uses, in `plain` rather than
-             * `accent`, because this is the way out of an action and not the
-             * affirmative one.
-             *
-             * It is drawn from `cancelInFlight` and not from the local `stopping`
-             * alone: the turn routinely outlives the request that asked for it — an
-             * agent notices a cancel when it next looks up — so a slot that re-armed
-             * the moment the answer came back would invite a second tap at every
-             * stop. If the agent never answers, the escalation is Stop in the
-             * session menu, which is a different act with a different cost.
-             *
-             * ⚠ **And it yields to a sendable draft, which it did not at first.**
-             * The cancel outliving its request is the point of this arm, but that
-             * window is measured in seconds and "stop it, then tell it what I
-             * meant" is one gesture — so somebody who taps Stop and then types had
-             * the spinner drawn over the whole correction. `submit` never agreed:
-             * `sendable` is true there, so Enter sent while the visible control
-             * was a `role="status"` spinner, and on a coarse pointer — where Enter
-             * is the newline and the button *is* the send — there was no way to
-             * send at all. The guard and the drawn control have to say the same
-             * thing, and the one that was wrong is this one.
-             */
-            <span
-              role="status"
-              aria-label="Stopping — the agent has not finished yet"
-              title="Stopping — the agent has not finished yet"
-              // `border-edge-strong bg-surface`, which is byte-for-byte the `plain`
-              // box the Stop button it replaces already draws — so the slot does not
-              // change shape the moment a cancel is asked for. It was
-              // `border-edge bg-raised`: 1.31:1 over 1.22:1, a 44px square that was
-              // nearly invisible on the bar and is invisible inside a white box.
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-edge-strong bg-surface text-fg"
-            >
-              <Spinner />
-            </span>
-          ) : stoppable ? (
-            /*
-             * The same slot, holding the only thing that can be done in it.
-             *
-             * Send is refused for exactly one reason — there is a turn in flight —
-             * and until now that produced a disabled arrow with a sentence in its
-             * tooltip explaining why nothing would happen. A control whose whole
-             * content is "not now" is worse than the control somebody actually
-             * wants, and every remote agent has the same answer to what that is.
-             *
-             * `tone="plain"` and not `accent`: this is not the affirmative action in
-             * the row, it is the way out of one. The colour rule is `AskCard`'s —
-             * de-emphasis lives in fill and border, never in the text — so the label
-             * stays fully legible while the button does not compete with the
-             * transcript.
-             */
-            <IconButton
-              icon={Square}
-              label="Stop the agent"
-              tone="plain"
-              size="chip"
-              // The circle Send wears, because this is the same slot: a control that
-              // changed shape when a turn started would read as a different control
-              // arriving rather than as the one control doing the other thing.
-              shape="round"
-              type="button"
-              onClick={cancelTurn}
-            />
-          ) : (
-            <IconButton
-              /*
-               * **An arrow in a circle, not a paper plane in a square.**
-               *
-               * The plane is a *mail* metaphor and this is not mail: nothing is
-               * addressed, nothing is filed, and the reply arrives in the same
-               * column a moment later. The arrow says "up, into the conversation
-               * above", which is what actually happens and what every phone chat
-               * client draws. The square was the worse half — filled, 44px and
-               * hard-cornered, it is the shape a Stop control has, sitting where
-               * Stop genuinely appears a second later.
-               *
-               * The circle is an exception to this app's radius rule and is
-               * declared as one on `IconButton`'s `shape`; the three other things
-               * that occupy this slot take it too.
-               */
-              icon={ArrowUp}
-              /*
-               * ⚠ **This once read "Send — queues behind the current turn", which
-               * described nothing; then it read "wait for the agent", which
-               * described a refusal. Both are gone, and the second one is the
-               * interesting correction.**
-               *
-               * The tooltip lied first: `ManagedSession.prompt` refused while a
-               * turn was open, so Send was live onto a guaranteed `409
-               * turn_in_flight` and every message typed mid-turn came back as a
-               * red toast. Gating the button fixed the lie by removing the
-               * feature. The daemon holds a queue now — and steers where the
-               * agent takes one — so the original sentence is true at last and is
-               * still not written here: what happens to a mid-turn message is
-               * said in the **transcript**, under the message itself, where
-               * somebody is already looking. A tooltip on a control explaining
-               * the fate of something already sent is furniture.
-               *
-               * What is left in this label is the one state that really is a
-               * refusal, and it names it rather than saying "not now".
-               */
-              /*
-               * The third arm is heard rather than seen, and it is worth having
-               * anyway. `IconButton` carries `disabled:pointer-events-none`, so a
-               * disabled button never shows its `title` — the mechanical fact the
-               * `stopping` branch above is also built around — but the `aria-label`
-               * is still read, which is the difference between a dead control and one
-               * that says what it is waiting for. The *sighted* answer is on the row
-               * above: a chip in danger colours carrying the daemon's own message,
-               * with the Retry that clears this at its head. The uploading case gets no
-               * arm because it clears itself, and a spinner in a chip is already the
-               * sentence.
-               *
-               * ⚠ **The `clearRefused` arm has a sighted half too now, and it did
-               * not.** It is the one arm with no chip and no row of its own to fall
-               * back on — the refusal is about the text in the box — so from the
-               * commit that added it until the line under the field existed it was
-               * this `aria-label` alone, which on a phone is nothing at all. (Never
-               * in a release: `clearRefused` landed after v0.8.0 was cut.)
-               * {@link CLEAR_REFUSAL} is that same string drawn under the field;
-               * this arm is its audible half rather than the whole of it.
-               */
-              label={sendRefusal ?? "Send"}
-              tone="primary"
-              size="chip"
-              shape="round"
-              type="submit"
-              // A visible refusal while an attachment is not something the prompt can
-              // name — one still going up, and now one that failed as well. Either
-              // way sending would deliver the message without the file it is about;
-              // `sendable` carries the argument, including why the failed half of it
-              // reverses what this comment used to say.
-              disabled={!slotSends}
-            />
-          )}
+          <SendSlot
+            occupant={occupant}
+            scope={key}
+            sendLabel={sendRefusal ?? "Send"}
+            sendEnabled={slotSends}
+            onStop={cancelTurn}
+            box={areaRef}
+          />
         </div>
       </div>
       </form>

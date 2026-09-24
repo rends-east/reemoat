@@ -1,12 +1,21 @@
 //! The device's own cryptographic identity.
 //!
-//! An app installation holds one X25519 static per server. The Authority records
-//! the public half against the `devices` row it already keeps, names it in every
-//! capability it mints for this installation, and the daemon compares that name
-//! against the key the Noise handshake actually authenticated. The effect is the
-//! one this whole phase is for: **a capability copied off this device — out of a
-//! log, a proxy, a query string — cannot be used from anywhere else**, because
-//! the copier cannot produce the key.
+//! An app installation holds one X25519 static per **account** — per
+//! `<origin>#<user id>`, the scope `credential.rs` keys everything on. The
+//! Authority records the public half against the `devices` row it already keeps,
+//! names it in every capability it mints for this installation, and the daemon
+//! compares that name against the key the Noise handshake actually authenticated.
+//! The effect is the one this whole phase is for: **a capability copied off this
+//! device — out of a log, a proxy, a query string — cannot be used from anywhere
+//! else**, because the copier cannot produce the key.
+//!
+//! ⚠ **Per account rather than per server, and two accounts on one server no
+//! longer share a public key.** One key on two users' device rows is the linkage
+//! `credential.rs`'s `DEVICE_KEY` block forbids — anybody who can see both rows
+//! learns they are one computer — and the control plane has no uniqueness on the
+//! column to refuse it. The one key that moves between scopes is a pre-accounts
+//! key under the bare origin, and only to the account proved to own it
+//! (`copy_key`).
 //!
 //! ⚠ **The private half never crosses the bridge, and that is the whole of what
 //! this module is arranged around.** The page gets a public key and, on request,
@@ -58,7 +67,7 @@ fn encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Read the stored secret for one server, from wherever it actually is.
+/// Read the stored secret for one account, from wherever it actually is.
 ///
 /// The keyring first on every read, not only on the write that created it, so a
 /// value in the file is ignored the moment the keyring answers — which is also
@@ -76,11 +85,11 @@ fn encode(bytes: &[u8]) -> String {
 /// `diffie_hellman` calls this on every handshake, so a keyring write and its
 /// read-back would ride every message rather than a launch. `ensure_key` is
 /// where it would go, and it is not built.
-fn read_secret(dir: &Path, origin: &str) -> Option<([u8; KEY_BYTES], &'static str)> {
-    if let Some(found) = credential::read_device_key(origin).and_then(|v| decode_key(&v)) {
+fn read_secret(dir: &Path, scope: &str) -> Option<([u8; KEY_BYTES], &'static str)> {
+    if let Some(found) = credential::read_device_key(scope).and_then(|v| decode_key(&v)) {
         return Some((found, AT_REST_KEYRING));
     }
-    config::read_device_key_fallback(dir, origin)
+    config::read_device_key_fallback(dir, scope)
         .and_then(|v| decode_key(&v))
         .map(|found| (found, AT_REST_FILE))
 }
@@ -93,30 +102,26 @@ fn read_secret(dir: &Path, origin: &str) -> Option<([u8; KEY_BYTES], &'static st
 /// the `Ok` here would put this installation in the worst of the two states — a
 /// fresh key and a fresh device row on every single launch, with nothing in the
 /// file to fall back to and no signal that anything was wrong.
-fn store_secret(
-    dir: &Path,
-    origin: &str,
-    secret: &[u8; KEY_BYTES],
-) -> Result<&'static str, String> {
+fn store_secret(dir: &Path, scope: &str, secret: &[u8; KEY_BYTES]) -> Result<&'static str, String> {
     let encoded = encode(secret);
-    if credential::write_device_key(origin, &encoded).is_ok()
-        && credential::read_device_key(origin).as_deref() == Some(encoded.as_str())
+    if credential::write_device_key(scope, &encoded).is_ok()
+        && credential::read_device_key(scope).as_deref() == Some(encoded.as_str())
     {
         // Give up any earlier fallback: two copies of one secret is two places to
         // get wrong, and the keyring is the one that will now be read. ⚠ This is a
         // **promotion** and not a key given up, which is why it is the statement
         // that rewrites `server.json` alone — `reset_key` takes the second route,
         // `config::give_up_device_key`, and only that one reaches the quarantine.
-        let _ = config::erase_device_key_fallback(dir, origin);
+        let _ = config::erase_device_key_fallback(dir, scope);
         return Ok(AT_REST_KEYRING);
     }
-    config::write_device_key_fallback(dir, origin, &encoded)?;
+    config::write_device_key_fallback(dir, scope, &encoded)?;
     Ok(AT_REST_FILE)
 }
 
-/// This installation's key for one server, generating it on first use.
-pub fn ensure_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
-    if let Some((secret, at_rest)) = read_secret(dir, origin) {
+/// This installation's key for one account, generating it on first use.
+pub fn ensure_key(dir: &Path, scope: &str) -> Result<DeviceKey, String> {
+    if let Some((secret, at_rest)) = read_secret(dir, scope) {
         let public = PublicKey::from(&StaticSecret::from(secret));
         return Ok(DeviceKey {
             public_key: encode(public.as_bytes()),
@@ -126,7 +131,7 @@ pub fn ensure_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
 
     let mut secret = [0u8; KEY_BYTES];
     getrandom::fill(&mut secret).map_err(|e| format!("no randomness available: {e}"))?;
-    let at_rest = store_secret(dir, origin, &secret)?;
+    let at_rest = store_secret(dir, scope, &secret)?;
     let public = PublicKey::from(&StaticSecret::from(secret));
     Ok(DeviceKey {
         public_key: encode(public.as_bytes()),
@@ -134,13 +139,15 @@ pub fn ensure_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
     })
 }
 
-/// Start this installation over with a fresh key for one server.
+/// Start this installation over with a fresh key for one account.
 ///
 /// For the two cases that are the same act from the outside: a keychain that was
 /// reset, and somebody deliberately re-keying from the Devices screen. **Per
-/// origin, never a sweep** — `credential.rs`'s refusal to grow a `list` is what
-/// stops this becoming an enumeration, and one server at a time is also the only
-/// shape that matches what a person is looking at when they ask for it.
+/// account, never a sweep** — `credential.rs`'s refusal to grow a `list` is what
+/// stops this becoming an enumeration, and one account at a time is also the only
+/// shape that matches what a person is looking at when they ask for it. A Re-key
+/// under one account leaves every other account's key alone, including another
+/// account on the same server.
 ///
 /// ⚠ **That rule reaches a third place now, and for one release it did not hold
 /// there.** This gives up three copies, not two: the keyring's, `server.json`'s,
@@ -152,10 +159,10 @@ pub fn ensure_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
 /// quarantined bytes and refuses to remove a file naming any server but this one;
 /// `config.rs`'s `discard_quarantine` carries the measurement and the argument for
 /// both halves.
-pub fn reset_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
-    let _ = credential::erase_device_key(origin);
-    let _ = config::give_up_device_key(dir, origin);
-    ensure_key(dir, origin)
+pub fn reset_key(dir: &Path, scope: &str) -> Result<DeviceKey, String> {
+    let _ = credential::erase_device_key(scope);
+    let _ = config::give_up_device_key(dir, scope);
+    ensure_key(dir, scope)
 }
 
 /// One Diffie-Hellman with this installation's static, for the Noise handshake.
@@ -172,17 +179,65 @@ pub fn reset_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
 /// without either having proved anything. `x25519-dalek` answers that question
 /// directly and the Noise specification says to ask it; the cost of not asking is
 /// a handshake that completes with an attacker who knows no key at all.
-pub fn diffie_hellman(dir: &Path, origin: &str, peer_public: &str) -> Result<String, String> {
+pub fn diffie_hellman(dir: &Path, scope: &str, peer_public: &str) -> Result<String, String> {
     let peer = decode_key(peer_public)
         .ok_or_else(|| "the peer key is not 32 base64url bytes".to_string())?;
-    let (secret, _) = read_secret(dir, origin)
-        .ok_or_else(|| "this installation has no device key".to_string())?;
+    let (secret, _) =
+        read_secret(dir, scope).ok_or_else(|| "this installation has no device key".to_string())?;
 
     let shared = StaticSecret::from(secret).diffie_hellman(&PublicKey::from(peer));
     if !shared.was_contributory() {
         return Err("the peer offered a key that contributes nothing".to_string());
     }
     Ok(encode(shared.as_bytes()))
+}
+
+/// This account's key if it has one, **generating nothing**.
+///
+/// For a legacy seat's boot: its key is the bare, pre-accounts one, and minting a
+/// fresh bare key for a seat that has none would be a key nobody can ever prove is
+/// theirs, left behind for the account the seat becomes.
+pub fn existing_key(dir: &Path, scope: &str) -> Option<DeviceKey> {
+    let (secret, at_rest) = read_secret(dir, scope)?;
+    let public = PublicKey::from(&StaticSecret::from(secret));
+    Some(DeviceKey {
+        public_key: encode(public.as_bytes()),
+        at_rest: at_rest.to_string(),
+    })
+}
+
+/// Copy the keyring's device key from one scope to another, verified — and only
+/// where the destination has none.
+///
+/// **A proven move only**: the caller is `accounts::follow_claim`, after
+/// `server.json` recorded that the bare device was proved to be this account's
+/// (`GET /v1/me/devices` listed its id). Copying it anywhere else would put one
+/// key on two users' rows. It lives here because this module owns every decision
+/// about what the value means — and `webcheck.devices.ts` forbids reading a device
+/// key in any command body.
+///
+/// Answers `Ok(true)` where a key was copied, `Ok(false)` where there was nothing
+/// to copy or the destination already had one, and `Err` where the copy did not
+/// read back — the caller erases the source only on `Ok(true)`, so a failure here
+/// leaves the bare key exactly where it was. A file-held key is moved by
+/// `config`'s bind instead, inside the same write that moved the id.
+pub fn copy_key(from: &str, to: &str) -> Result<bool, String> {
+    if credential::read_device_key(to)
+        .and_then(|value| decode_key(&value))
+        .is_some()
+    {
+        return Ok(false);
+    }
+    let Some(secret) = credential::read_device_key(from).and_then(|value| decode_key(&value))
+    else {
+        return Ok(false);
+    };
+    let encoded = encode(&secret);
+    credential::write_device_key(to, &encoded)?;
+    if credential::read_device_key(to).as_deref() != Some(encoded.as_str()) {
+        return Err("the device key did not read back where it was copied".into());
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

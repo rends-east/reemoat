@@ -3,6 +3,7 @@ import { uptime } from "node:os";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { isBuiltinAgentId } from "../acp/agents.js";
+import { MAX_TRACKED_ASYNC_TASKS, readKeptTask } from "../acp/asynctasks.js";
 import {
   isBuiltinSystemId,
   type AgentStripEntry,
@@ -45,170 +46,37 @@ import {
   type PluginRecordStore,
 } from "../plugins/store.js";
 
-/**
- * Durable state, in one SQLite file.
- *
- * The interfaces this implements are synchronous, and that is not an accident of
- * Node's bindings being synchronous — it is what lets a client attach inside one
- * uninterruptible block, which is what makes gap-free resume true by construction.
- * Nothing in this file may become async. If it ever has to, put a write-behind
- * buffer in front of it rather than changing the shape of `append`.
- */
+// Stores are synchronous on purpose: a client attaches inside one uninterruptible block, which makes gap-free resume true. Nothing here may become async.
 
-/**
- * v2 added `sessions.owner_subject` and the `identity` table.
- * v3 added `identity.tunnel_key` and `identity.relay_url`.
- * v4 added `sessions.container_id`, `agent_pgid` and `container_started_at`.
- *
- * Bumping this makes an older daemon refuse a file this one has written, which
- * is the intended direction: old code reading a new column mis-parses rather
- * than fails. It does not gate the migration itself — see `migrate`.
- *
- * v4 is worth the bump even though an old daemon would degrade quietly rather
- * than loudly: it would read `agent_pid` as NULL for every containerised session
- * and conclude no agent was ever recorded, so it would silently stop reaping the
- * orphans it exists to reap.
- *
- * v5 added `sessions.title` and `sessions.pinned`. The degradation here is milder
- * than v4's and the bump is still right: an old daemon's upsert simply omits both
- * columns, and a DO UPDATE clause that does not name a column leaves it alone, so
- * titles and pins would *survive* a downgrade rather than be erased. Refuse-newer
- * is the documented direction regardless — losing the file is a cheaper failure
- * than a fleet half-writing it.
- *
- * v6 dropped `forge_accounts` and rekeyed `agent_credentials` from
- * `(owner_subject, agent, env_name)` to `(agent, env_name)`, when the daemon
- * stopped being multi-tenant. Here the refuse-newer direction is **load-bearing
- * rather than advisory**, which is a first for this list: a v5 daemon opening a
- * v6 file would not mis-parse a column, it would throw inside
- * `SqliteAgentCredentialStore`'s constructor at `db.prepare`, as a SQLite parse
- * error naming a column that no longer exists — at startup, with nothing to say
- * what had happened. `refuseNewerSchema` gets there first and says it, and it runs
- * *before* `migrate()` rather than after, which is what makes that sentence true:
- * the check used to sit downstream of the rewrite it was supposed to prevent.
- *
- * `sessions.owner_subject` is **not** dropped, and that asymmetry is deliberate.
- * Nothing reads or writes it any more; it is left in place because `sessions` is
- * the largest table in the file and SQLite cannot drop a column without a
- * copy-drop-rename of the whole thing — risking every transcript on disk to
- * reclaim one nullable column per row. The two credential tables are small and
- * hold secrets, which is what makes rewriting them worth doing.
- */
+/** Bumping it makes an older daemon refuse the file; a nullable column an older daemon never selects needs no bump. */
 export const SCHEMA_VERSION = 6;
 
-/** Handed to SQLite as `busy_timeout`. See the note on transactions in `insert`. */
 const BUSY_TIMEOUT_MS = 250;
 
-/**
- * How many times `claimDaemonLock` re-reads the row and re-tries its conditional
- * claim.
- *
- * An attempt loses only when another process rewrote the `daemon` row between
- * this one's read and its write — which is the state the lock exists to refuse —
- * so an unbounded loop would be a spin against a live competitor. Three is a
- * bound rather than a tuning: it turns "somebody is racing me right now" into an
- * error with a sentence in it instead of a hang.
- */
+// Bounded: a lost attempt means a live competitor is rewriting the row, so refuse rather than spin.
 const DAEMON_LOCK_ATTEMPTS = 3;
 
-/**
- * The partial unique index that holds *at most one live machine key*.
- *
- * One literal rather than two, because the two places that name it sit ~2,000
- * lines apart and disagreeing fails in the worst direction:
- * `migrateMachineKeysToOneLive` creates it, and `SqliteMachineKeyStore.save`
- * recognises its violation **by name** in order to absorb exactly that one
- * failure and rethrow every other. A drifted spelling would turn the one
- * absorbable failure into an uncaught `ERR_SQLITE_ERROR` out of a daemon's start.
- */
+// One literal: the migration creates the index and SqliteMachineKeyStore recognises its violation by name.
 const MACHINE_KEY_LIVE_INDEX = "machine_keys_one_live";
 
-/**
- * `SQLITE_CONSTRAINT_UNIQUE`.
- *
- * Measured on node 26's `node:sqlite`: a second live row throws an `Error` with
- * `code === "ERR_SQLITE_ERROR"`, `errcode === 2067` and the message
- * `UNIQUE constraint failed: index 'machine_keys_one_live'`. A primary-key
- * collision on the same table is a **different** number — 1555,
- * `SQLITE_CONSTRAINT_PRIMARYKEY` — which is half of why
- * `isLiveMachineKeyConflict` can be as narrow as it is.
- */
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
 
-/**
- * Eviction runs down to a mark *below* the bound rather than exactly to it.
- *
- * That is the whole of "amortized": one DELETE every ~256 appends instead of one
- * per append at steady state. Deleting to a low-water mark rather than letting
- * the log run past a high-water mark also keeps `count <= maxEvents` true at
- * every observable instant, which is what CLAUDE.md's Bounds table claims.
- */
+// Evict to a low-water mark below the bound, so a DELETE runs every few hundred appends rather than per append.
 const EVICT_SLACK_EVENTS = 256;
 const EVICT_SLACK_BYTES = 512 * 1024;
 const EVICT_CHUNK = 512;
-/**
- * Hard cap on delete rounds per append.
- *
- * A single `append` must never turn into an unbounded synchronous delete on the
- * agent's event path. Anything still over the bound is caught on the next append.
- */
+// Bounds the synchronous delete on the emit path; any remainder is evicted on the next append.
 const EVICT_MAX_ROUNDS = 8;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETAIN_MS = 7 * DAY_MS;
-/**
- * The most *inactive* rows a startup prune leaves in the table, past the floor
- * below — and, with that floor, what bounds the file.
- *
- * The file holds at most this many inactive rows (or the floor's, where
- * `REEMOAT_MIN_SESSIONS` is set above it: the floor is kept, and the cap cuts
- * only past it) plus the active ones, and the active ones have bounds of their
- * own rather than this one: a live row counts
- * against `MAX_LIVE_SESSIONS` in `registry.ts`, and a daemon-ended row was a
- * live one under that ceiling, which the next boot puts an agent back on or
- * gives up — on its own account, and then it is inactive here (`resume_gave_up`,
- * D27) unless somebody presses Resume first, or for that boot only, and then it
- * waits for the next. At the 2026-09-04
- * incident's ~8 MB a session (Q2.222) two hundred inactive rows is ~1.6 GB of
- * transcripts nobody is coming back to, and the floor's ~0.4 GB is the part of
- * that which may sit there however stale. `REEMOAT_MAX_SESSIONS` moves it.
- */
+// Caps inactive rows only; live rows are bounded by MAX_LIVE_SESSIONS in registry.ts (Q2.222).
 const DEFAULT_MAX_SESSIONS = 200;
-/**
- * The fewest rows a startup prune may leave in the table.
- *
- * A floor under both sweeps: rows are ranked active first, then pins, then
- * most recently touched first, and a row within the floor is taken by neither
- * rule, whatever its age. So the two bounds never meet, whatever either is set
- * to — `REEMOAT_MIN_SESSIONS` above `REEMOAT_MAX_SESSIONS` leaves the cap
- * nothing to cut rather than letting it cut under the floor, which the gate
- * this replaced allowed: the verification round measured a table of sixty cut
- * to thirty under a floor of fifty, and a table of exactly fifty cut to one.
- *
- * Four numbers put it at fifty. It is a quarter of `DEFAULT_MAX_SESSIONS`. The
- * 2026-09-04 incident database (Q2.222) held ~50 MB for six sessions, ~8 MB
- * each, so fifty of them is ~0.4 GB — what the floor lets sit on a disk, and
- * nothing beside the working trees they were about. One person's dense week is
- * 20–40 sessions, so a machine in ordinary use stays under it and the sweeps
- * never run across the conversations somebody is still scrolling through. And
- * below fifty a list *is* scrolled, and pruned by hand from the row's own
- * menu; the sweeps are for the tail nobody will ever scroll to, not for the
- * list they are looking at.
- *
- * `REEMOAT_MIN_SESSIONS` moves it. Read through `positiveInt`, so `0` is not a
- * way to switch it off — `1` is the nearest thing to off. The floor then
- * protects one row, and since it ranks active rows first that row is an active
- * one whenever there is any, which rule 1 keeps regardless: with a session live
- * the floor adds nothing, and only an all-inactive table keeps its most recently
- * touched row by it. ⚠ `.env.example` and this docblock said `1` keeps "the
- * newest row", which the ranking above does not promise while anything is
- * active.
- */
+/** Floor under both prune sweeps, ranked active first, then pins, then most recently touched (Q2.222). */
 export const DEFAULT_MIN_SESSIONS = 50;
 
 
 export interface OpenStoresOptions {
-  /** `:memory:` opts out of durability entirely — the old behaviour, on demand. */
   path: string;
   instanceId: string;
   maxEventsPerSession?: number | undefined;
@@ -216,26 +84,9 @@ export interface OpenStoresOptions {
   maxEventBytes?: number | undefined;
   retainSessionsMs?: number | undefined;
   maxSessions?: number | undefined;
-  /** The fewest rows the startup prune leaves in the table. See `DEFAULT_MIN_SESSIONS`. */
   minSessions?: number | undefined;
-  /**
-   * Fired once, on the transition into degraded.
-   *
-   * Nothing in `src/` writes to stdout or stderr, so this callback is the only
-   * way an operator hears that the disk stopped accepting writes.
-   */
   onDegraded?: ((detail: string) => void) | undefined;
-  /**
-   * What the startup prune removed, as one sentence, and only when it removed
-   * something.
-   *
-   * Its own sink rather than `onDegraded`, because a prune is the store doing
-   * what it was configured to do and not the store failing: `daemon.ts` prints
-   * the one as `store degraded:` and this as `store:`, and a driver collecting
-   * degradations must not find a routine deletion among them. It exists because
-   * the 2026-09-04 incident deleted five conversations with nothing in the
-   * journal but a resume count that did not add up (Q2.222).
-   */
+  /** What the startup prune removed, only when it removed something; not onDegraded, since a prune is not a failure. */
   onPruned?: ((detail: string) => void) | undefined;
 }
 
@@ -244,45 +95,21 @@ export interface StoreBundle {
   events: SqliteEventStore;
   sessions: SqliteSessionStore;
   identity: SqliteIdentityStore;
-  /** The X25519 statics an app authenticates this machine by. */
   machineKeys: SqliteMachineKeyStore;
   credentials: SqliteAgentCredentialStore;
-  /** Keys for the systems a harness can be routed at. */
   systemCredentials: SqliteSystemCredentialStore;
-  /** The harness+system+model presets somebody named on this machine. */
   customAgents: SqliteCustomAgentStore;
-  /** Which agents the New session strip offers here, and in what order. */
   agentStrip: SqliteAgentStripStore;
   machineSettings: SqliteMachineSettingsStore;
   uploads: SqliteUploadStore;
-  /** What is installed. See `src/plugins/store.ts` for why these are two subjects. */
   plugins: SqlitePluginRecordStore;
-  /** What plugins have put here, keyed on the plugin's id and never on its version. */
   pluginData: SqlitePluginDataStore;
-  /**
-   * Sessions the startup prune deleted.
-   *
-   * Surfaced because their staged upload *directories* still exist and only the
-   * caller can remove them — `prune()` runs before the upload root is known. See
-   * `SqliteSessionStore.prune`.
-   */
+  /** Ids the prune deleted: the caller removes their upload directories, which the prune runs too early to reach. */
   prunedSessions: string[];
   close(): void;
 }
 
-/**
- * Opens the database and both stores.
- *
- * One factory rather than two constructors, because the startup steps have an
- * order that is only correct in one arrangement and it should not be possible to
- * get it wrong from `daemon.ts`. In particular the daemon lock has to be claimed
- * *before* pruning or restore, since restore's orphan reaping would otherwise
- * SIGKILL a live daemon's agents.
- *
- * Throws on anything that goes wrong. Startup is strict and runtime degrades:
- * silently falling back to memory after the operator asked for durability is the
- * kind of thing you find out about at the worst possible moment.
- */
+/** Fixes the startup order: the lock is claimed before migration, prune or restore. Throws on any failure; startup is strict. */
 export function openStores(options: OpenStoresOptions): StoreBundle {
   const inMemory = options.path === ":memory:";
   if (!inMemory) {
@@ -292,62 +119,26 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const db = new DatabaseSync(options.path, { timeout: BUSY_TIMEOUT_MS });
 
   if (!inMemory) {
-    // The file holds full agent transcripts and every file the agent changed.
-    // That is at least as sensitive as REEMOAT_TOKEN, which already lives in a
-    // gitignored file with no world access.
-    //
-    // The directory is chmodded too, and not as belt-and-braces: SQLite writes
-    // `-wal` and `-shm` beside this file on its own schedule, they hold the same
-    // transcript bytes until a checkpoint folds them back, and they are created
-    // with whatever the umask says. Chasing those files is a losing race — they
-    // are recreated — so the containing directory is the only durable answer.
-    // `mkdirSync(mode)` above does not cover it either: that mode applies only to
-    // directories it actually created, so an upgrade into an existing 0755
-    // ~/.reemoat would otherwise leave the WAL world-readable.
+    // As sensitive as REEMOAT_TOKEN. The directory is chmodded too: WAL and SHM files are created with the umask.
     try {
       chmodSync(dirname(options.path), 0o700);
     } catch {
-      // Same reasoning as below: not a reason to refuse to start.
+      // Not a reason to refuse to start.
     }
     try {
       chmodSync(options.path, 0o600);
     } catch {
-      // A filesystem without POSIX modes (a mounted share) is not a reason to
-      // refuse to start; the directory above was created 0700 either way.
+      // A filesystem without POSIX modes is not a reason to refuse to start.
     }
   }
 
   applyPragmas(db, inMemory);
   db.exec(loadSchema());
-  // **The lock is claimed before the file is changed, and the order is the
-  // point.** `migrate()` adds columns and `stampSchemaVersion` writes
-  // `user_version`, both of which are permanent; running them first meant a
-  // second daemon that was about to be *refused* had already upgraded the
-  // database out from under the one still running. That daemon keeps working
-  // until it restarts, at which point `refuseNewerSchema` refuses its own file
-  // and there is no down migration. `CLAUDE.md`'s own `pkill` gotcha makes
-  // exactly this sequence the likely upgrade path.
-  //
-  // Safe to run here because `claimDaemonLock` touches only the `daemon` table,
-  // which `schema.sql` creates with `IF NOT EXISTS` above and which no schema
-  // version has ever changed.
+  // The lock comes before any permanent change, so a daemon about to be refused never upgrades the file.
   claimDaemonLock(db, options.instanceId, options.path);
-  // **Refused before it is migrated, and it was the other way round.** These two
-  // lines used to be `migrate(db); checkSchemaVersion(db);`, and the docblock on
-  // SCHEMA_VERSION said of exactly this case that "`checkSchemaVersion` gets
-  // there first and says it". It did not: a file written by a newer daemon was
-  // handed to `migrate()` — which rekeys `agent_credentials` by create-copy-drop-
-  // rename and drops `forge_accounts` outright — before the guard whose entire
-  // job is to stop old code touching a new file ever ran. The guards inside
-  // `migrate` are on column presence, so today the damage is nil; the reason to
-  // fix it anyway is that refuse-newer is protecting against a future this build
-  // cannot see, and a v7 that reintroduced either shape would have it silently
-  // collapsed by v6 code. Reading a pragma is free and cannot be the thing that
-  // goes wrong.
+  // Refuse a newer file before migrate can rewrite it.
   refuseNewerSchema(db);
   migrate(db);
-  // Stamped only now, so the version on disk still means "every migration in
-  // this build has run against this file".
   stampSchemaVersion(db);
 
   const sessions = new SqliteSessionStore(db, options.onDegraded, options.onPruned);
@@ -393,9 +184,6 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     prunedSessions,
     close() {
       try {
-        // Fold the WAL back into the main file so the next open has nothing to
-        // recover. Best effort: on the hard-exit path this never runs at all,
-        // and an un-checkpointed WAL is recovered on the next open anyway.
         db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
       } catch {
         // Nothing actionable — we are on the way out.
@@ -429,175 +217,39 @@ function applyPragmas(db: DatabaseSync, inMemory: boolean): void {
     );
   }
 
-  /*
-   * `synchronous = NORMAL` means COMMIT does not fsync; the WAL is flushed on
-   * checkpoint instead. That is the right point on the curve here, not a
-   * compromise:
-   *
-   *   - A *process* death — SIGKILL, OOM, segfault, a restart — loses nothing.
-   *     The dirty pages are in the OS page cache and the next open reads them
-   *     back. That is the entire threat model: the daemon dying is exactly what
-   *     this whole change exists to recover from.
-   *   - A *machine* death can lose commits since the last checkpoint, but cannot
-   *     corrupt the file — unlike `synchronous = OFF`. And the agents died with
-   *     the machine, so durably recording the last forty events of a session
-   *     whose subprocess no longer exists describes a world that is gone anyway.
-   *   - `synchronous = FULL` would put an fsync — 1 to 10 ms — on the agent's
-   *     synchronous emit path, which the first invariant in CLAUDE.md forbids
-   *     outright: anything that blocks there blocks the agent.
-   */
+  // NORMAL: a process death loses nothing and a machine death cannot corrupt; FULL would fsync on the agent's emit path.
   db.exec("PRAGMA synchronous = NORMAL");
-  // There are none. Saying so explicitly stops a future reader wondering whether
-  // the missing FK on `events` is an oversight.
   db.exec("PRAGMA foreign_keys = OFF");
 }
 
-/**
- * What `schema.sql` cannot express — which is no longer only columns.
- *
- * That file is re-applied on every open and every statement in it is `CREATE
- * ... IF NOT EXISTS`, which is idempotent for whole tables and useless for
- * anything narrower. Three kinds of thing end up here, and the third is not a
- * shape change at all:
- *
- *   - **A column on a table that already exists.** A new *table* needs nothing
- *     here; `sessions.owner_subject` does. Most of this function is that.
- *   - **A table shape `ALTER TABLE` cannot reach.** `migrateCredentialsToV6`
- *     rekeys `agent_credentials` by the documented create-copy-drop-rename,
- *     because SQLite cannot `DROP COLUMN` a member of the primary key — and it
- *     drops `forge_accounts` outright, for what is in it.
- *   - **A repair that changes data.** `migrateMachineKeysToOneLive` *retires*
- *     every live `machine_keys` row but the oldest, and only then creates
- *     `MACHINE_KEY_LIVE_INDEX`. That order is forced: the index cannot be
- *     created at all on a file that already holds two live rows — which is
- *     exactly the file the repair exists for — so the index can sit neither in
- *     `schema.sql` nor ahead of the retirement.
- *
- * ⚠ **So this is not a shape-only function, and a reader who assumes it is will
- * not expect a migration to rewrite rows or to speak.** All three of this file's
- * prints hang off it — the collapsed credential, the dropped forge accounts, the
- * retired machine keys — and they are the sanctioned exception to *"nothing in
- * `src/` writes to stdout or stderr"* (Q4.29) for one reason: they run inside
- * `openStores`, before the daemon has wired `onDegraded` or any other callback,
- * so this is the only moment anybody can be told. None of the three is undone by
- * anything in this build — the retirement at least leaves the private half on
- * disk, the other two drop rows — which is why each print names both what it did
- * and what the operator can still do about it: re-paste, revoke, or
- * `cpctl admin clearkey`.
- *
- * Decided from `PRAGMA table_info` rather than from `user_version`, for two
- * reasons. It is idempotent by construction — it asks the database what it
- * actually has instead of trusting a number written beside it — and it survives
- * the case where the stamp is wrong, which is reachable today: `stampSchemaVersion`
- * writes the stamp on a fresh file before anything else touches it, so a crash
- * between the two would leave a v2 stamp over a v1 table. Asking the table
- * cannot be wrong about the table. Both destructive steps re-derive the same way
- * — from the column they would rewrite, from `sqlite_master`, and from the rows
- * that are actually live — so running twice is a no-op rather than a second
- * rewrite.
- *
- * Fenced on both sides, and every fence is about the destructive half. After
- * `claimDaemonLock`, so no process rewrites rows in a file it is about to be
- * refused; after `refuseNewerSchema`, so a file written by a newer build is never
- * collapsed by this one; before `stampSchemaVersion`, so the version on disk
- * still means every migration in this build has run against this file.
- */
+/** Decided from table_info rather than user_version, so it is idempotent. It may rewrite rows, and it is where this file prints, before any callback exists (Q4.29). */
 function migrate(db: DatabaseSync): void {
   const columns = db.prepare("PRAGMA table_info(sessions)").all();
   const hasSession = (name: string): boolean => columns.some((column) => column["name"] === name);
-  // No DEFAULT: NULL is the honest value for every session that predates the
-  // column, and it is the same value the shared-secret path writes today.
   if (!hasSession("owner_subject")) db.exec("ALTER TABLE sessions ADD COLUMN owner_subject TEXT");
 
-  // Where the agent ran, when it was not a child of this daemon.
-  //
-  // Three columns rather than a wider meaning for `agent_pid`, because a process
-  // group inside a container is a different number space from a host pid and the
-  // two must not be indistinguishable once written down. `container_started_at`
-  // is the fence: measured 2026-07-30, a `docker restart` reset the container's
-  // PID namespace (a fresh pid was 309 before and 15 after) while the host's
-  // uptime — the fence the local runtime uses — was unchanged.
-  //
-  // NULL on every row the local runtime writes, which is also every row that
-  // predates these columns, so nothing has to tell those two apart.
   if (!hasSession("container_id")) db.exec("ALTER TABLE sessions ADD COLUMN container_id TEXT");
   if (!hasSession("agent_pgid")) db.exec("ALTER TABLE sessions ADD COLUMN agent_pgid INTEGER");
   if (!hasSession("container_started_at")) {
     db.exec("ALTER TABLE sessions ADD COLUMN container_started_at INTEGER");
   }
 
-  /*
-   * Why the daemon permanently stopped trying to reattach an agent.
-   *
-   * No DEFAULT and nullable, like `owner_subject` above and for the same reason:
-   * NULL is the honest value for every row that predates the column, and it is
-   * also the value that means "still worth trying", which is what every one of
-   * those rows deserves.
-   *
-   * `SCHEMA_VERSION` deliberately does not move for this. A nullable column an
-   * older daemon never selects is invisible to it — `fromRow` reads by name and
-   * would find nothing — so a rollback keeps working, and bumping the version
-   * would make `refuseNewerSchema` refuse one to buy that nothing.
-   */
   if (!hasSession("resume_gave_up")) db.exec("ALTER TABLE sessions ADD COLUMN resume_gave_up TEXT");
 
-  // What the session is called, and whether it is kept at the top of the list.
-  //
-  // `pinned` carries a DEFAULT where `owner_subject` above deliberately does not,
-  // and the difference is not a style choice twice over. SQLite refuses
-  // `ADD COLUMN ... NOT NULL` outright without one — so a NOT NULL column added to
-  // an existing table *must* have a default — and 0 happens to be the honest value
-  // as well, because nothing written before this column existed was ever pinned.
-  // For an owner, NULL is the honest value and there is no honest default, which
-  // is why that one is nullable instead.
   if (!hasSession("title")) db.exec("ALTER TABLE sessions ADD COLUMN title TEXT");
   if (!hasSession("pinned")) {
     db.exec("ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
   }
 
-  // Whether somebody chose ultracode for this session. Nullable, and NULL is the
-  // honest value for every row written before the column existed: nobody chose,
-  // so those sessions follow the machine's setting exactly as a fresh one does.
-  // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above — a
-  // nullable column an older daemon never selects is invisible to it.
   if (!hasSession("ultracode")) db.exec("ALTER TABLE sessions ADD COLUMN ultracode INTEGER");
 
-  // Where a session sits in the list somebody reads. Nullable on `ultracode`'s
-  // grounds rather than `pinned`'s: 0 is not "no position", it is the oldest
-  // position there is, so a default would sort every row that predates this
-  // column to the bottom of its folder on the day it shipped. NULL means
-  // "wherever its age puts it", which is what every one of them was.
-  // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above.
   if (!hasSession("rank")) db.exec("ALTER TABLE sessions ADD COLUMN rank REAL");
 
-  // Which assembled agent this session was started as, or NULL for one started
-  // on a bare harness — which is every session written before this column.
-  //
-  // ⚠ **`sessions.agent` still holds the harness, and that is what keeps this
-  // change small.** A custom agent names a harness plus a system plus a model;
-  // only the first of those decides which binary `resolveAgent` resolves, which
-  // credentials `signOutSessions` clears, and what a restart relaunches. Storing
-  // the harness where the harness has always been means none of those paths
-  // learn about this column at all.
-  //
-  // It is a *reference*, not a copy of the row: the system and the model are
-  // read back through `custom_agents` at resume, so editing a preset changes
-  // what its sessions come back as. Nullable and never selected by an older
-  // daemon, so `SCHEMA_VERSION` does not move — `resume_gave_up`'s reason.
   if (!hasSession("custom_agent")) db.exec("ALTER TABLE sessions ADD COLUMN custom_agent TEXT");
 
-  // What the agent was offering when it went — see the column in `schema.sql` and
-  // `AgentStateMemory` in `events.ts`. Nullable on `resume_gave_up`'s grounds: NULL
-  // is the honest value for every row that predates the column, and it is also the
-  // value that means "nothing to remember", which is what every one of them has.
-  // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above.
   if (!hasSession("agent_state_json")) db.exec("ALTER TABLE sessions ADD COLUMN agent_state_json TEXT");
 
 
-  // The relay fields on `identity`. NULL means "this daemon enrolled with a
-  // control plane that offered no relay", which is both the honest value for
-  // every identity that predates these columns and the value a control plane
-  // without a relay writes today — so nothing has to distinguish them.
   const identityColumns = db.prepare("PRAGMA table_info(identity)").all();
   const has = (name: string): boolean => identityColumns.some((column) => column["name"] === name);
   if (!has("tunnel_key")) db.exec("ALTER TABLE identity ADD COLUMN tunnel_key TEXT");
@@ -607,31 +259,7 @@ function migrate(db: DatabaseSync): void {
   migrateMachineKeysToOneLive(db);
 }
 
-/**
- * v6: one person, so a credential is keyed by what it is for and nothing else.
- *
- * Two tables and two different answers, decided by what is in them.
- *
- * **`agent_credentials` is rewritten, not dropped.** A pasted `CLAUDE_CODE_OAUTH_TOKEN`
- * is still exactly as useful as it was, so losing it would be gratuitous. SQLite
- * cannot `DROP COLUMN` a member of the primary key, so this is the documented
- * create-copy-drop-rename, guarded on the column's presence so it is idempotent
- * and an already-v6 file costs one `PRAGMA`.
- *
- * The copy collapses duplicates, which is destructive and one-way — but only for
- * a file written by a multi-tenant daemon that really did hold two people's
- * tokens for one agent. On the machine this now runs on there is at most one
- * owner, so in practice every row copies unchanged. Newest wins, with
- * `owner_subject` as a deterministic tiebreak so the result does not depend on
- * row order.
- *
- * **`forge_accounts` is dropped, and that is because of what is in it.** The
- * feature is gone, and the table holds plaintext push tokens that do not expire
- * and that nothing in this system could ever revoke — `DELETE /forges/:host` was
- * the only thing that could, and it went with the routes. Leaving the table would
- * leave those secrets on disk with no code path able to end one. So this is the
- * last moment anybody can be told, and it says so out loud.
- */
+/** v6: agent credentials are rekeyed to (agent, env_name), newest wins; forge_accounts is dropped since its tokens are unrevocable. */
 function migrateCredentialsToV6(db: DatabaseSync): void {
   const credColumns = db.prepare("PRAGMA table_info(agent_credentials)").all();
   if (credColumns.some((column) => column["name"] === "owner_subject")) {
@@ -650,15 +278,6 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
           "  ) AS n FROM agent_credentials" +
           ") WHERE n = 1",
       );
-      // **Counted before the DROP, because afterwards there is nothing to count.**
-      // On a single-user file every row copies across and this is zero. On one
-      // written by the multi-tenant daemon two people could each hold a
-      // `CLAUDE_CODE_OAUTH_TOKEN` for `claude`, and the collapse keeps exactly one
-      // — which `envFor` then injects into *every* agent this daemon spawns,
-      // because it is no longer keyed by owner. That is somebody else's identity
-      // and somebody else's billing, arriving silently on an upgrade. The
-      // neighbouring `forge_accounts` drop announces itself for a smaller reason;
-      // this one was doing more and saying nothing.
       const before = Number(db.prepare("SELECT COUNT(*) AS n FROM agent_credentials").get()?.["n"] ?? 0);
       const kept = Number(db.prepare("SELECT COUNT(*) AS n FROM agent_credentials_v6").get()?.["n"] ?? 0);
       db.exec("DROP TABLE agent_credentials");
@@ -682,21 +301,9 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
     }
   }
 
-  // Counted before it is dropped, because after the DROP there is nothing left to
-  // count and nobody to tell. This is one of the three prints in this file — the
-  // collapsed-credential one above and `migrateMachineKeysToOneLive`'s retirement
-  // notice below are the others — and together they are one of
-  // the two sanctioned exceptions in `src/`, `src/plugins/runner.ts`'s stderr
-  // write being the other (Q4.29); it earns the exception: the alternative is
-  // destroying a credential somebody
-  // minted, silently, on an upgrade they did not know did that.
   const forgeRows = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='forge_accounts'").all();
   if (forgeRows.length > 0) {
     const count = Number(db.prepare("SELECT COUNT(*) AS n FROM forge_accounts").get()?.["n"] ?? 0);
-    // The hosts, not just how many. Counting told somebody that secrets were
-    // destroyed and left them no way to act on it; the whole value of this line
-    // is that they can go and revoke the tokens, and for that they need to know
-    // where. Read before the DROP, because afterwards there is nothing to read.
     const hosts =
       count > 0
         ? db
@@ -716,83 +323,10 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
 }
 
 /**
- * At most one live machine key, and the index that makes that true of the store
- * rather than only of its callers.
- *
- * ⚠ **This exists because two daemons could once both mint one.**
- * `claimDaemonLock` is a compare-and-set now and refuses the second process
- * before any store is handed out — but it was a read followed by an
- * unconditional write for every release up to this one, and a file that lost
- * that race is on somebody's disk right now. `machine_keys.kth` is the
- * thumbprint of the key the caller has just *generated*, so two racers produce
- * two different primary keys, `ON CONFLICT(kth) DO NOTHING` never fires, and both
- * rows land with `retired_at` NULL. `active()` orders `created_at DESC`, so every
- * later start announces the **newer** key — which is not the one the Authority
- * pinned on first enrollment, so every dial is refused 409 for ever and nothing
- * on the machine says why. That is the state `cpctl admin clearkey` had to be
- * written to repair.
- *
- * **The oldest live row is kept, and the argument is about who reached the
- * Authority first.** Both racers walk the same path in the same order between
- * generating a key and dialling, so the process holding the earlier `created_at`
- * is the one that got to `enroll()` and to the dial first — and trust-on-first-use
- * means the Authority pinned whichever key reached it first. That premise is
- * checkable rather than assumed: `pinMachineKey` is one conditional `UPDATE ...
- * WHERE machine_key IS NULL`, so the first *writer* wins and every later
- * announcement is compared against it. An enrollment code is
- * single-use, so at most one of the two can have enrolled at all. And after the
- * lock fix, the process that created the *later* key is exactly the one
- * `claimDaemonLock` now refuses: retiring its row is undoing the write the fixed
- * lock would have prevented.
- *
- * ⚠ **But it is a guess from a timestamp about a fact that lives on the
- * Authority, and there is a second population it gets backwards.** A machine
- * whose operator already ran `cpctl admin clearkey` restarted, announced
- * `active()` — the **newest** — and had the Authority pin *that*. It works today,
- * on two live rows, and keeping the oldest here would retire the pinned key and
- * make a working machine a permanent 409, repairable only by another `clearkey`.
- * Flipping the `ORDER BY` only trades that population for the other one.
- *
- * **So the guess is deliberately not load-bearing.** This still has to pick one
- * row — the index below admits exactly one — but the pick is a *starting point*
- * rather than a verdict: `RelayTunnel`'s 409 handler asks `machinekey.ts`'s
- * rotator for another key this store holds, `SqliteMachineKeyStore.promote`
- * swaps which row is live, and the dial happens again. Each `kth` is tried at
- * most once per process, so a two-row file resolves in one extra dial in either
- * direction, and a machine holding **one** key has nothing to promote and behaves
- * exactly as it did before, sentence included. The print below says that rather
- * than claiming the machine is fixed.
- *
- * **Retired rather than deleted**, so the private half stays on disk: a machine
- * that really had been working on the newer key loses nothing that cannot be put
- * back by hand. The `AND retired_at IS NULL` on the UPDATE is what makes a second
- * run a no-op rather than a rewrite of when a key stopped being announced.
- *
- * It **prints**, for `migrateCredentialsToV6`'s reason and under the same
- * exception: this runs inside `openStores`, before the daemon has wired any
- * callback, so it is the only moment anybody can be told that a key stopped being
- * announced. `onDegraded` would be the wrong channel even where one existed —
- * `scripts/daemon.ts` prefixes it `store degraded:`, and a one-time repair is not
- * a degradation.
- *
- * `SCHEMA_VERSION` deliberately does not move for the index, for
- * `resume_gave_up`'s reason in `migrate` above: an older daemon inserts into this
- * table only when `active()` is already null, so it can never reach the
- * constraint, and a bump would turn every rollback into a daemon that will not
- * start in exchange for exactly that nothing.
- *
- * And it cannot live in `schema.sql`. That file is one `exec` that runs **before**
- * `claimDaemonLock` and before this repair, so on the very files this exists for —
- * the ones already holding two live rows — `CREATE UNIQUE INDEX` throws at
- * *creation* (measured: errcode 2067 there, not at some later insert) and the
- * daemon would never start. Idempotent by re-derivation from the table, like the
- * rest of `migrate()`.
+ * Keeps the oldest live machine key and retires the rest, then creates the index, which cannot exist over two live rows.
+ * The pick is only a starting point: a 409 at the dial promotes another retired key.
  */
 function migrateMachineKeysToOneLive(db: DatabaseSync): void {
-  // No `sqlite_master` guard, unlike the `forge_accounts` half above: `schema.sql`
-  // creates `machine_keys` with `IF NOT EXISTS` and is applied before `migrate`
-  // runs, so the table is always here. `forge_accounts` needed the guard precisely
-  // because nothing creates it any more.
   const [kept, ...losers] = db
     .prepare("SELECT kth FROM machine_keys WHERE retired_at IS NULL ORDER BY created_at ASC, kth ASC")
     .all()
@@ -809,23 +343,12 @@ function migrateMachineKeysToOneLive(db: DatabaseSync): void {
         "`cpctl admin clearkey <machineId>` is still the way back if every one of them is refused.",
     );
   }
-  // Unconditional and `IF NOT EXISTS`, so a fresh file gets it too and there is
-  // exactly one shape of this table in the fleet from here on.
   db.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS ${MACHINE_KEY_LIVE_INDEX} ` +
       "ON machine_keys (retired_at IS NULL) WHERE retired_at IS NULL",
   );
 }
 
-/**
- * The half that must run before anything is written. See `openStores`.
- *
- * The remedy is named, because there is no down migration and the operator
- * hitting this is usually mid-rollback: `deploy/deploy.sh --ref <sha>` is
- * advertised as the way back, and it cannot cross a schema bump. Saying "move
- * the file aside" is not a nice answer, but it is the true one and it beats a
- * daemon that refuses to start with no next step.
- */
 function refuseNewerSchema(db: DatabaseSync): void {
   const row = db.prepare("PRAGMA user_version").get();
   const found = Number(row?.["user_version"] ?? 0);
@@ -846,65 +369,13 @@ function stampSchemaVersion(db: DatabaseSync): void {
   }
 }
 
-/** What one process saw in the single `daemon` row, or `null` for an empty table. */
 export interface DaemonRow {
   instanceId: string;
   pid: number;
   startedAt: number;
 }
 
-/**
- * Compare-and-set the single `daemon` row: take it only if it still holds
- * exactly what this caller `observed`. Answers whether this caller got it.
- *
- * ⚠ **`IS` rather than `=` on all three columns — and the reason written here
- * before was measured and is false.** It claimed that with `=` the
- * nothing-observed case binds three NULLs and "an upsert whose `WHERE` is NULL
- * updates nothing *and* tells you nothing". The second half does not hold:
- * SQLite skips a `DO UPDATE ... WHERE` evaluating to NULL by the same rule it
- * skips a false one, and reports the skip as `changes: 0` either way. Measured on
- * node 26.3.0's `node:sqlite`, this exact upsert with `=` substituted for `IS`
- * over a copy of this exact table, in all four states a caller can reach — empty
- * table / observed nothing, racer row present / observed nothing (the interleave
- * this exists for), row present / observed that row, row present / observed a
- * stale row — both spellings answer `changes` 1, 0, 1, 0 and leave the same row
- * behind. `=` is not blind here, so that is not the argument.
- *
- * **What `IS` buys is a comparison that is total.** `SELECT 'x' = NULL` is NULL
- * where `SELECT 'x' IS NULL` is 0 (measured, same probe). So with `=` the
- * nothing-observed case refuses for the right reason only while a bound NULL can
- * never be a genuine match — which is not a property of this statement at all but
- * of three `NOT NULL`s written one file over in `schema.sql`. `IS` says what this
- * function means on its own: the row still holds exactly these three values, NULL
- * included. The two spellings come apart the moment that schema fact does —
- * measured on the same upsert over a nullable `instance_id` genuinely holding
- * NULL, `IS` takes the row (`changes: 1`) and `=` refuses it (`changes: 0`),
- * which in a compare-and-set loop is a daemon that can never claim a row it
- * correctly observed.
- *
- * Under either spelling "I saw an empty table" loses cleanly against a row a
- * racer has since inserted, which is the whole interleave this function exists
- * for.
- *
- * Exported as a **seam**. The interleave it makes safe — two processes that both
- * read an empty table, then both write — cannot be produced through `openStores`,
- * which always makes its own read immediately before its own write; standing in
- * for the losing racer means passing a *stale* observation, and only a caller
- * that owns the observation can do that.
- *
- * ⚠ **The driver this seam was exported for did not exist for four releases, and
- * now does.** This block said `scripts/daemoncheck.*` was the only other caller
- * and that being so was "the entire reason this is not a closure inside
- * `claimDaemonLock`" — while no file but this one called it, so the
- * compare-and-set was asserted nowhere and a regression to the unconditional `DO
- * UPDATE` it replaced, the one whose measurement is in `claimDaemonLock`'s
- * docblock, would have been caught by nothing. `daemoncheck.store-and-worktrees`
- * drives it now, and it takes **both halves of one case** because neither
- * discriminates alone: a *stale* observation must answer `false` with the racer's
- * row still standing (an unconditional write turns that one `true`), and the
- * *matching* observation must answer `true` (which is what fails against a
- * statement that never updates anything at all).
- */
+/** Compare-and-set on the daemon row: take it only if it still holds exactly what was observed. IS rather than = keeps the comparison total over NULL. */
 export function takeDaemonRow(db: DatabaseSync, claimant: DaemonRow, observed: DaemonRow | null): boolean {
   const result = db
     .prepare(
@@ -924,48 +395,6 @@ export function takeDaemonRow(db: DatabaseSync, claimant: DaemonRow, observed: D
   return Number(result.changes) > 0;
 }
 
-/**
- * Refuses to start when another daemon already owns this file, and claims it in
- * one conditional statement rather than two unconditional ones.
- *
- * Two daemons on one path would hold stale in-memory `lastSeq` counters, collide
- * on the primary key, and drive every append in *both* processes into the
- * degradation path — and each would try to reap the other's agents as orphans.
- *
- * ⚠ **It was a SELECT and then an unconditional INSERT, and the gap between the
- * two *was* the race.** Measured with two `DatabaseSync` handles on one WAL file,
- * interleaved exactly as two daemons starting together against a file with no
- * `daemon` row: both reads answer `undefined`, both upserts report `changes: 1`,
- * the second silently overwrites the first, and **neither throws**. Both processes
- * then walk on into `ensureMachineKey` and mint a machine key each — which is a
- * permanent 409 on every dial, and is what `migrateMachineKeysToOneLive` above
- * exists to repair. The claim is now conditional on the row still holding what
- * this process *observed*, so a racer that read the same empty table gets
- * `changes: 0`, loops, sees the winner on its next read, and is refused by the
- * liveness check.
- *
- * The liveness probe cannot move into the SQL and that is why this is still a read
- * *and* a write: `isAlive` is `process.kill(pid, 0)`, which SQLite has no
- * expression for. What changed is that the write is now conditional on the read,
- * which is the part that was missing.
- *
- * Rejected the harder `PRAGMA locking_mode = EXCLUSIVE`: it would make the file
- * unreadable by the `sqlite3` CLI while the daemon runs, and for a tool whose
- * whole value is "you can find out what your agents are doing", losing external
- * inspectability of the transcript store is a bad trade for a misconfiguration
- * that a clear error message already covers.
- *
- * Rejected `BEGIN IMMEDIATE` around the pair for a nearer reason: the loser does
- * not lose, it *waits* out `BUSY_TIMEOUT_MS` and then throws a generic `database
- * is locked` — measured, two handles on one WAL file: 322 ms against a 250 ms
- * `busy_timeout`, then `ERR_SQLITE_ERROR` errcode 5 with no mention of what it
- * lost to. That makes the only observable a **timeout**, which is on this
- * repository's list of assertion shapes that stay green because they cannot
- * fail; `changes` is a value, and a value can be asserted. It would
- * also let an `sqlite3` write transaction somebody left open refuse the daemon a
- * start, which is the same external-inspectability trade the paragraph above
- * already declines.
- */
 function claimDaemonLock(db: DatabaseSync, instanceId: string, path: string): void {
   for (let attempt = 0; attempt < DAEMON_LOCK_ATTEMPTS; attempt += 1) {
     const row = db.prepare("SELECT instance_id, pid, started_at FROM daemon WHERE id = 1").get();
@@ -983,10 +412,6 @@ function claimDaemonLock(db: DatabaseSync, instanceId: string, path: string): vo
     }
     if (takeDaemonRow(db, { instanceId, pid: process.pid, startedAt: Date.now() }, observed)) return;
   }
-  // Only reachable while another process is rewriting this row *right now*, which
-  // is the state this function exists to refuse — so refusing is the answer rather
-  // than looping. `openStores`' caller turns any throw here into `could not open
-  // <path>` and exit 2, which is the same ending the message above already has.
   throw new Error(
     `could not claim ${path}: another process rewrote the daemon row under every one of ` +
       `${DAEMON_LOCK_ATTEMPTS} attempts.\n` +
@@ -994,10 +419,6 @@ function claimDaemonLock(db: DatabaseSync, instanceId: string, path: string): vo
       "somewhere else with REEMOAT_DB.",
   );
 }
-
-/* ------------------------------------------------------------------------- *
- * Events
- * ------------------------------------------------------------------------- */
 
 interface Counters {
   /** Lowest seq still on disk; 0 when nothing is. */
@@ -1016,14 +437,6 @@ export interface SqliteEventStoreOptions {
   onDegraded?: ((detail: string) => void) | undefined;
 }
 
-/**
- * The event log, on disk.
- *
- * Counters are cached in memory and derived once at construction, never
- * persisted per append. `stats()` is therefore a map lookup — which matters
- * because `ManagedSession.snapshot()` calls it on every state change, so three
- * index scans here would sit behind every permission settle.
- */
 export class SqliteEventStore implements EventStore {
   private readonly counters = new Map<string, Counters>();
   private readonly maxEvents: number;
@@ -1052,9 +465,7 @@ export class SqliteEventStore implements EventStore {
     this.readStmt = db.prepare(
       "SELECT seq, ts, bytes, payload FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
     );
-    // The `seq < ?` guard is "never delete the newest row", in SQL. It is what
-    // keeps `lastSeq = MAX(seq)` derivable at load, and it mirrors
-    // MemoryEventStore.evict stopping at `count <= 1`.
+    // seq below the newest never deletes the newest row, which keeps lastSeq derivable at load.
     this.deleteStmt = db.prepare(
       "DELETE FROM events WHERE rowid IN (" +
         "SELECT rowid FROM events WHERE session_id = ? AND seq < ? ORDER BY seq LIMIT ?" +
@@ -1070,20 +481,7 @@ export class SqliteEventStore implements EventStore {
     return this.degraded;
   }
 
-  /**
-   * Rebuilds every counter in one grouped index scan.
-   *
-   * All five are derivable, and deriving beats persisting because a persisted
-   * counter can drift from the rows if a crash lands between the INSERT and the
-   * counter write. The preconditions:
-   *
-   *   - `dropped = firstSeq - 1` holds only because seqs are dense from 1 and
-   *     eviction removes a strict prefix. A failed insert can leave a hole, which
-   *     is most of why `append` writes a placeholder rather than skipping a seq.
-   *   - `lastSeq = MAX(seq)` holds only because eviction never takes the newest
-   *     row. `seedFloors` raises it afterwards for sessions whose events are gone
-   *     entirely, which is the one case the table cannot answer.
-   */
+  /** Counters are derived at load, not persisted: that needs dense seqs, prefix eviction and the newest row kept. */
   private loadCounters(db: DatabaseSync): void {
     const rows = db
       .prepare(
@@ -1103,18 +501,7 @@ export class SqliteEventStore implements EventStore {
     }
   }
 
-  /**
-   * Raises `lastSeq`/`dropped` to the floor recorded on each session row.
-   *
-   * A floor, never a ceiling: a crash between an append and the `touchSafe()`
-   * that would have recorded it leaves the row one behind the table, and taking
-   * the max picks the table — self-healing in the only direction that is safe.
-   *
-   * Without this, a session whose events were pruned restarts at seq 1, and a
-   * client resuming with `since=500` is clamped to 0 by `attach` and replayed
-   * from the beginning — receiving *different events under numbers it has already
-   * seen*, with nothing on the wire to say so.
-   */
+  /** A floor, never a ceiling: without it a pruned session restarts at seq 1 and a resuming client sees reused numbers. */
   seedFloors(rows: readonly PersistedSession[]): void {
     for (const row of rows) {
       const counters = this.countersFor(row.id);
@@ -1125,17 +512,12 @@ export class SqliteEventStore implements EventStore {
 
   append(sessionId: string, event: SessionEvent): StoredEvent {
     const counters = this.countersFor(sessionId);
-    // Burned here and never reused, whatever happens below. Two clients must
-    // never see two different events under the same number.
+    // Burned and never reused: two clients must never see different events under one seq.
     const seq = counters.lastSeq + 1;
     counters.lastSeq = seq;
     const ts = Date.now();
 
-    // Truncate, measure and serialize together, because serialization is the one
-    // failure mode SQLite adds that the memory store does not have: a cyclic
-    // `rawInput` survives truncateEvent — jsonSize() swallows the cycle and
-    // reports 4 KiB, under the 128 KiB ceiling, so nothing is shrunk — and then
-    // throws in JSON.stringify.
+    // Serialization can throw where truncation did not (a cyclic rawInput), so all three share one try.
     let payload: SessionEvent;
     let bytes: number;
     let json: string;
@@ -1163,26 +545,7 @@ export class SqliteEventStore implements EventStore {
       return stored;
     }
 
-    /*
-     * The row did not land. Two things follow, and both are counter-intuitive.
-     *
-     * A placeholder goes in at the *same* seq rather than the seq being skipped.
-     * A hole cannot cause the attach loop to spin — `read` is `seq > ?` — but it
-     * is invisible on the wire: `lagged` is derived from firstSeq/lastSeq, so a
-     * mid-log hole is never reported to anyone. A silent gap is the single
-     * failure this whole subsystem exists to prevent.
-     *
-     * And the placeholder is what we *return*, not the real event. If a live
-     * client is handed the real text at seq 412 while a reconnecting client is
-     * handed a placeholder at seq 412, the two disagree about what seq 412 is and
-     * neither can detect it. Both losing it is strictly better than diverging,
-     * because the loss is visible and the divergence is not.
-     *
-     * There is deliberately no separate "the store is degraded" event: this store
-     * cannot append to itself. SessionLog.append fans out only what its own call
-     * to store.append returned, so a recursive append here would be written to
-     * disk and delivered to nobody. The placeholder is the notice.
-     */
+    // A placeholder at the same seq, returned instead of the real event: a visible loss beats a silent hole or clients that disagree.
     const note: SessionEvent = {
       type: "error",
       message: `seq ${seq} (${payload.type}) could not be persisted: ${this.lastError}`,
@@ -1192,9 +555,6 @@ export class SqliteEventStore implements EventStore {
     if (this.insert(sessionId, seq, ts, noteBytes, JSON.stringify(note))) {
       this.credit(counters, seq, noteBytes);
     }
-    // If even that failed, the disk is refusing writes outright. The seq stays
-    // burned and the log has a hole; the counters keep describing what is on
-    // disk rather than what we wished were there.
     return { seq, ts, event: note };
   }
 
@@ -1203,21 +563,10 @@ export class SqliteEventStore implements EventStore {
     if (limit <= 0) return out;
     let bytes = 0;
     try {
-      /*
-       * `WHERE seq > ?` is what makes StreamConnection.attach terminate: it
-       * cannot return a row at or below the cursor whatever the state of the
-       * table, so read → emit → read always advances. The memory store gets the
-       * same property from index arithmetic, which is the much harder argument.
-       *
-       * iterate() rather than all(): a page is 200 rows and one event may be
-       * 128 KiB, so all() would materialize up to 25 MiB to return the handful
-       * that fit a 512 KiB budget — inside a WebSocket upgrade handler. Breaking
-       * out resets the statement; the next call is unaffected.
-       */
+      // seq above the cursor guarantees attach advances; iterate so a page never materializes more than it returns.
       for (const row of this.readStmt.iterate(sessionId, since, limit)) {
         const rowBytes = Number(row["bytes"] ?? 0);
-        // Always yield at least one, or a single oversized record wedges a reader
-        // that can never make progress past it.
+        // Always yield at least one, or an oversized record wedges the reader.
         if (out.length > 0 && bytes + rowBytes > maxBytes) break;
         out.push(decodeRow(row));
         bytes += rowBytes;
@@ -1246,8 +595,7 @@ export class SqliteEventStore implements EventStore {
     } catch (error) {
       this.markDegraded(describeError(error));
     }
-    // Dropped regardless: leftover rows are swept as orphans at the next startup,
-    // and keeping a counter for a session we have forgotten is worse.
+    // Dropped regardless: leftover rows are swept as orphans at the next startup.
     this.counters.delete(sessionId);
   }
 
@@ -1268,16 +616,10 @@ export class SqliteEventStore implements EventStore {
 
   private insert(sessionId: string, seq: number, ts: number, bytes: number, json: string): boolean {
     try {
-      // No explicit transaction. A bare statement is already its own implicit
-      // transaction in SQLite, so BEGIN/COMMIT here would add two statement
-      // executions and exactly zero atomicity — on the agent's emit path.
       this.insertStmt.run(sessionId, seq, ts, bytes, json);
       return true;
     } catch (error) {
-      // No retry. `busy_timeout` already handles the only retryable case
-      // internally, and SQLITE_FULL / IOERR / CORRUPT fail identically on a
-      // second attempt — so a retry buys nothing and costs a second synchronous
-      // statement per event, forever, once the disk fills.
+      // No retry: busy_timeout covers the retryable case, and a full disk fails the same way twice.
       this.lastError = describeError(error);
       this.markDegraded(this.lastError);
       return false;
@@ -1287,9 +629,7 @@ export class SqliteEventStore implements EventStore {
   private evict(sessionId: string, counters: Counters): void {
     if (counters.count <= this.maxEvents && counters.bytes <= this.maxBytes) return;
 
-    // Clamped to a quarter of the window, because REEMOAT_LOG_EVENTS exists
-    // precisely so this path can be exercised with a tiny log — and a fixed slack
-    // of 256 against maxEvents=10 would delete the entire thing.
+    // Slack is clamped to a fraction of the window, so a tiny REEMOAT_LOG_EVENTS is not wiped.
     const slack = Math.min(EVICT_SLACK_EVENTS, Math.max(Math.floor(this.maxEvents / 4), 1));
     const keepEvents = Math.max(this.maxEvents - slack, 1);
     const byteSlack = Math.min(EVICT_SLACK_BYTES, Math.max(this.maxBytes >> 4, 1));
@@ -1313,8 +653,7 @@ export class SqliteEventStore implements EventStore {
       counters.dropped += rows.length;
     }
 
-    // Exact, and only on the eviction path — never per append. Arithmetic on the
-    // deleted seqs would be wrong the moment a failed insert left a hole.
+    // Queried rather than computed: a failed insert can leave a hole.
     counters.firstSeq = this.minSeq(sessionId);
   }
 
@@ -1334,8 +673,7 @@ export class SqliteEventStore implements EventStore {
     try {
       this.onDegraded?.(detail);
     } catch {
-      // A caller-supplied callback. Its failure is not ours to propagate, and we
-      // are already on the path where something is badly wrong.
+      // A caller-supplied callback; its failure is not ours to propagate.
     }
   }
 }
@@ -1347,30 +685,16 @@ function decodeRow(row: Record<string, unknown>): StoredEvent {
   try {
     event = JSON.parse(String(row["payload"])) as SessionEvent;
   } catch (error) {
-    // A corrupt row stays *in* the sequence rather than punching a hole in it,
-    // which keeps `read` total and keeps the client's seq arithmetic honest.
+    // A corrupt row stays in the sequence rather than punching a hole in it.
     event = { type: "error", message: `seq ${seq} could not be decoded: ${describeError(error)}`, data: null };
   }
   return { seq, ts, event };
 }
 
-/* ------------------------------------------------------------------------- *
- * Sessions
- * ------------------------------------------------------------------------- */
-
 export interface PruneOptions {
   /** How long an *inactive* session may go untouched before the age sweep may take it. */
   retainMs: number;
-  /**
-   * The most rows nobody is coming back to that the table may hold after a
-   * prune. Live rows, and the ones the daemon is still coming back to, sit
-   * outside it, so the table may exceed it by exactly those.
-   */
   maxSessions: number;
-  /**
-   * The fewest rows a prune may leave. Ranked active first, then pins, then
-   * most recently touched first; a row within it is taken by neither sweep.
-   */
   minSessions: number;
 }
 
@@ -1379,45 +703,13 @@ export class SqliteSessionStore implements SessionStore {
   private readonly listStmt: StatementSync;
   private readonly removeSessionStmt: StatementSync;
   private readonly removeEventsStmt: StatementSync;
-  /** Last row written per session, so an unchanged `touchSafe` costs no WAL write. */
   private readonly lastWritten = new Map<string, string>();
 
   constructor(
     private readonly db: DatabaseSync,
-    /**
-     * Where a row this build cannot read gets reported.
-     *
-     * ⚠ **`fromRow` drops rows and said nothing, which is not this file's own
-     * convention.** `SqlitePluginRecordStore` reports the identical class of fact
-     * through this same sink, under a docblock saying "nobody is at the keyboard,
-     * and the alternative is silence". A dropped *session* costs more than a
-     * listing: `registry.restore()` walks `list()`, so the row is never announced,
-     * never marked interrupted, and — the half that is not recoverable — its
-     * recorded agent handle never reaches `runtime.reap`, which is the only reap
-     * in `src/`. An agent that outlived the daemon's death then keeps running.
-     */
     private readonly onDegraded: ((detail: string) => void) | undefined = undefined,
-    /**
-     * Where `prune()` says what it removed. See `OpenStoresOptions.onPruned` for
-     * why it is not `onDegraded`; it fires after the COMMIT, so the sentence is
-     * never about a deletion that rolled back, and not at all when nothing went.
-     */
     private readonly onPruned: ((detail: string) => void) | undefined = undefined,
   ) {
-    // `agent`, `created_at` and the workspace's identity are absent from the DO
-    // UPDATE clause on purpose: they are immutable identity, and an upsert that
-    // can rewrite them is one that can corrupt a row it was only meant to touch.
-    // `last_seq`/`dropped` use scalar MAX so a stale writer can never walk a
-    // cursor backwards.
-    //
-    // `title`, `pinned`, `ultracode` and `rank` *are* in the clause: they are the
-    // record's mutable preferences, the things a later touch is *supposed* to
-    // rewrite. What may never be here is identity — `agent`, `created_at` and
-    // `custom_agent` — which is the property this paragraph is actually about.
-    //
-    // `owner_subject` is no longer written at all. The column is still in the
-    // table — see the note on SCHEMA_VERSION for why it is not worth rewriting
-    // `sessions` to remove — and new rows leave it NULL.
     this.putStmt = db.prepare(
       `INSERT INTO sessions (
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
@@ -1467,18 +759,12 @@ export class SqliteSessionStore implements SessionStore {
   put(row: PersistedSession): void {
     try {
       const params = toParams(row);
-      // `doStop` calls touchSafe twice with identical content, and so does the
-      // permission sweep. One string compare against one WAL write is a good
-      // trade. Keyed without updated_at, which is stamped below.
       const key = JSON.stringify(params);
       if (this.lastWritten.get(row.id) === key) return;
       this.putStmt.run({ ...params, updated_at: Date.now() });
       this.lastWritten.set(row.id, key);
     } catch {
-      // Swallowed: this runs from touchSafe(), on the agent's state-change path,
-      // where a bookkeeping fault must not unwind a turn. The running session is
-      // unaffected; restart fidelity loses one state change and the next
-      // touchSafe recovers it.
+      // Swallowed: a bookkeeping fault on the state-change path must not unwind a turn; the next touch recovers it.
     }
   }
 
@@ -1486,18 +772,11 @@ export class SqliteSessionStore implements SessionStore {
     const out: PersistedSession[] = [];
     for (const row of this.listStmt.all()) {
       const parsed = fromRow(row);
-      // A row we cannot parse is a row we cannot honour. Skipping it loses one
-      // session; letting it throw would lose every session after it.
+      // Skip rather than throw: one unparsable row must not lose every row after it.
       if (parsed) {
         out.push(parsed);
         continue;
       }
-      /*
-       * Said out loud, because the two consequences are not recoverable from a
-       * listing that simply has one fewer row in it: this session is not restored,
-       * and the agent process its row records is never reaped. Named rather than
-       * counted — an operator reading this needs the id to go and look.
-       */
       this.onDegraded?.(
         `session ${String(row["id"])} is in the database naming agent ` +
           `${JSON.stringify(String(row["agent"]))}, which this build does not have: ` +
@@ -1518,189 +797,16 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   /**
-   * Drops sessions nobody is coming back to, past a bound, then sweeps events
-   * belonging to no session — and says what it did.
-   *
-   * Without this `registry.list()` grows without limit and `GET /sessions` ends
-   * up serializing every session the machine has ever run.
-   *
-   * ⚠ **Three rules, and each is the 2026-09-04 incident read back.** On host
-   * `cloud-09fce7b571`, the restart at 14:46:18 UTC for the v0.6.0 deploy logged
-   * `SIGTERM: stopping 6 session(s)` at 14:46:17 and `restored 1 session(s)` at
-   * 14:46:20. The five in between were not lost on the resume path: **this
-   * method deleted them**, with their transcripts, inside `openStores`, in the
-   * three seconds between those two lines. The age sweep read `created_at < ?
-   * AND pinned = 0` with a seven-day cutoff, so a conversation was condemned by
-   * the date it was *opened*, however much it had been used since — five of the
-   * six had been opened before 2026-08-28 14:46, and every one of the five had
-   * been written seconds earlier by the daemon's own SIGTERM handler, carrying
-   * `daemon_shutdown` and every intention of restoring it. Nothing was logged:
-   * the ids went up to `daemon.ts` only to sweep upload directories. What was
-   * left was one row (`s_bd274666`, opened 2026-08-31) and a file of 51,060,736
-   * bytes on disk against 0.6 MB of pages — the shape of ~50 MB of transcripts
-   * deleted in one operation and vacuumed by `reclaim()`. Q2.222.
-   *
-   *   1. **Only an inactive session is ever deleted, by either rule.** A row is
-   *      *active* — and nothing here touches it, at any age, under any cap —
-   *      when it is live (no `exit_json`), when its exit `keepsItsConversation`
-   *      — the daemon's own promise to bring it back (a machine put down for a
-   *      week must come back holding its conversations), or an agent it released
-   *      for being idle, which is a conversation somebody is expected to return
-   *      to — ⚠ **and a `parked` row is therefore active for ever, which is a
-   *      class nothing bounds.** It never becomes inactive on its own: no boot
-   *      pass reaches it (`autoResumable` answers `parked` on a prompt alone),
-   *      `markInterrupted` returns early on an existing exit record, and only a
-   *      person stopping it or a sign-out relabels it. Before parking, an
-   *      abandoned conversation held ~400 MB and a `MAX_LIVE_SESSIONS` slot, so
-   *      the class was self-limiting by memory; a parked one costs neither. The
-   *      floor feels it first: `active` counts these, so a machine holding
-   *      `minSessions` parked rows has spent the whole floor on rows that were
-   *      never at risk. Left unbounded on purpose — see D27's correction in
-   *      `docs/DECISIONS.md` — because an age bound here deletes exactly the
-   *      conversation this rule exists to keep — or when its exit cannot be
-   *      read — not JSON, not an object, or a `reason` this build cannot name
-   *      (`isExitReason`) — because a deletion may not be decided from a value
-   *      it cannot read. **Unless the daemon has given it up**: a row whose
-   *      `resume_gave_up` holds a value this build honours (`isPersistedGiveUp`
-   *      — one it cannot name keeps the row, as an exit it cannot read does) is
-   *      one the daemon will not put an agent back on by itself — the column is
-   *      written only when the agent says it no longer holds the conversation,
-   *      and `resumeSettled` keeps such a row out of the boot pass and the
-   *      prompt route alike; only a manual `POST /sessions/:id/resume` still
-   *      can, and it clears the column when it succeeds — so once it has an
-   *      exit it is inactive whatever that exit says, and a live row carrying
-   *      the column is still live: the next boot comes back to it first. The
-   *      promise above was the daemon's, and this is the daemon recording that
-   *      it cannot be kept on its own; without it a
-   *      `daemon_shutdown` row the next boot gave up on was active for ever,
-   *      never swept and never counted under the cap, an unbounded class (D27,
-   *      2026-09-05). Everything else is inactive, and that is a decision per
-   *      reason rather than a remainder: `stopped` and `agent_signed_out` were
-   *      ended by a person (the sign-out has one writer, the explicit logout
-   *      route), `agent_exited` by the agent, `start_failed` and
-   *      `start_timeout` never had a conversation, and `agent_kill_failed` is
-   *      a legacy value `autoResumable` answers `no` to on both triggers, so
-   *      no promise is broken by taking it. `isActiveRow` is that predicate, in
-   *      one place for both sweeps, read *here* in TypeScript off both columns
-   *      so that `DAEMON_EXIT_REASONS` has no second copy in SQL. The age sweep
-   *      takes an inactive, unpinned row whose `updated_at` — which `put`
-   *      stamps on every write that changes the row — is older than
-   *      `retainMs`: activity, never creation.
-   *   2. **A prune leaves at least `minSessions` rows, whatever their age.**
-   *      Rows are ranked active first (never cut), then pins, then most
-   *      recently touched first, and a row ranked within the floor is taken by
-   *      neither sweep — so a table under fifty rows loses nothing at all, and
-   *      one over it keeps at least fifty: its active rows first, then its
-   *      pins, then the most recently touched of the rest, however stale. Fifty
-   *      sessions is a list somebody scrolls and prunes by hand; the sweeps are
-   *      for the tail nobody will. The orphan sweeps below run regardless,
-   *      since they delete nothing anybody can see. ⚠ **This was a gate on the
-   *      count before any delete, and the verification round read it back as a
-   *      floor bypass**: fifty rows let the sweep run, and it could take
-   *      forty-nine of them in one boot, while the rule file said "never under
-   *      50 rows". A floor that is *kept* implies the gate, and not the other
-   *      way round, so it is the floor.
-   *   3. **The cap bounds the rows nobody is coming back to, and never the
-   *      others.** Among inactive rows: pins first, then most recently touched
-   *      first, and the rank past `maxSessions` goes — so what it cuts is the
-   *      least recently touched inactive row, a pin only once every unpinned
-   *      inactive row is gone, and a live row, or one the daemon is still
-   *      coming back to, never. The table may therefore exceed the cap by
-   *      exactly its active rows, since no cap could bound those without
-   *      breaking rule 1. ⚠ **It ranked `pinned
-   *      DESC, active DESC` across the whole table and cut past the cap
-   *      regardless, and the docblock called that "cut last".** Measured in
-   *      the verification round: two hundred pins put every live row and every
-   *      row the daemon had just stopped over the cap at the next boot, and the
-   *      SQL `CASE` behind `active` ranked a reason this build cannot name as
-   *      inactive — the rollback case `isExitReason` exists for — so the cap
-   *      cut what rule 1 kept.
-   *
-   * **And it says so.** One sentence through `onPruned` — the count, the split
-   * between idle and over-the-cap, every id, and that the transcripts went with
-   * them — and nothing at all when nothing was removed.
-   *
-   * **Returns the ids it removed**, which is not bookkeeping for its own sake:
-   * a pruned session's staged uploads are *files*, and the SQL below can only
-   * reach their rows. `prune()` runs inside `openStores`, before the upload store
-   * exists, so the directories have to be swept by somebody who is handed this
-   * list rather than by moving the call — moving it would break the ordering that
-   * docblock spends four paragraphs establishing. Empty on a rollback, which is
-   * the honest answer: nothing was deleted, so nothing should be swept — and
-   * never empty because the *sink* threw, which is why the sentence is said
-   * outside the transaction's `try` below.
+   * Deletes only inactive rows, idle past retainMs or ranked past the cap, never below minSessions, and reports it through onPruned (Q2.222).
+   * Returns the removed ids so the caller can sweep their upload directories.
    */
   prune(options: PruneOptions): string[] {
     const cutoff = Date.now() - options.retainMs;
     const stale: string[] = [];
     const excess: string[] = [];
-    // One transaction, not for atomicity — each statement is already atomic — but
-    // so the WAL takes one commit instead of several.
     this.db.exec("BEGIN");
     try {
-      /*
-       * The whole table, read once and classified in TypeScript. Off the table
-       * rather than through `list()`, because a row `fromRow` drops is still a
-       * row on disk and still a conversation somebody could roll back to — the
-       * floor is about what the file holds, and so is the cap. Two hundred rows
-       * once per boot; ranking in SQL bought nothing but a second copy of the
-       * classification, which is the copy that disagreed (rule 3 above).
-       *
-       * Rule 1. **A pin survives the inactivity sweep**, and once it did not
-       * survive the age sweep this replaced.
-       *
-       * `server.ts`'s `listRank` already treats a pin as durable, with the
-       * reason written out: "a `?limit=` cut that dropped it would make the
-       * pin a lie". The old statement made it a lie by a slower route — the API
-       * cut kept a pinned session and the startup prune deleted it, with its
-       * whole transcript, at seven days. Two halves of one system disagreeing
-       * about what a pin means, and the disagreeing half was the destructive
-       * one.
-       *
-       * A pin survives the inactivity sweep, not the cap. Under the cap it
-       * ranks first among the *inactive* rows, so it goes only after every
-       * unpinned inactive row has gone — and the cap bounds inactive rows
-       * only, while the table exceeds it by its active ones (rule 3). So what
-       * "keep this" buys is a place at the head of the queue, never a place
-       * outside it: unbounded retention would be the other way to read it, and
-       * it is the one that lets one person's bookmarks become everyone's disk.
-       *
-       * Rule 3. A plain cap across the table again. It was partitioned by owner
-       * while one daemon served several people, because a global bound is a
-       * *shared* one and somebody creating sessions in a loop would silently
-       * delete everybody else's transcripts.
-       *
-       * ⚠ **That sentence used to end "with one person there is nobody to take
-       * it from", and it was the bug report.** A grant is `(user_id,
-       * machine_id)` and `POST /v1/tokens` mints for any holder, so the moment
-       * a machine is shared there is somebody to take it from — and the loop it
-       * describes was reachable, because `registry.create()` had no bound of
-       * any kind. Restoring the partition is not the repair and cannot be:
-       * `owner_subject` is no longer written (see the note by `putStmt`), so
-       * partitioning by it yields one group, i.e. exactly this statement. What
-       * was missing was a bound on *creation*, and it now lives at the only
-       * place that can hold one — `MAX_LIVE_SESSIONS` and
-       * `SESSION_CREATE_BURST` in `registry.ts`, refusing with 429 before a
-       * worktree exists. This cap stays what it always was: the bound on the
-       * table's inactive rows, not a defence against whoever filled it.
-       *
-       * **The ranking is pins, then activity, then recency — and it used to be
-       * pins then `created_at`.** Ranked by creation, the cap kept the
-       * newest-*opened* two hundred, so a conversation opened a month ago and
-       * used this morning was cut before an empty one opened yesterday. Now
-       * `updated_at DESC` — activity, which `put` stamps on every write that
-       * changes the row — with `created_at DESC` only as the tie-break that
-       * makes the cut deterministic, and `id` under that so it is total. ⚠ For
-       * one round the `id` term was this sentence and not a term in the
-       * comparator. The order held anyway — the rows arrive `ORDER BY id` and
-       * the sort is stable — but a total order that rests on how the rows
-       * happened to arrive is a claim the comparator should make itself. For
-       * the same two reasons the term is unobservable while the SELECT keeps
-       * `ORDER BY id`: the rows arrive in the order it would impose, so no
-       * input can make it change one, and no driver is spent on it. It is here
-       * so that the order is total on the comparator's own terms, whatever the
-       * query becomes.
-       */
+      // Classified in TypeScript off the raw table, so rows fromRow drops still count toward the floor and cap.
       const rows = this.db
         .prepare("SELECT id, pinned, exit_json, resume_gave_up, updated_at, created_at FROM sessions ORDER BY id")
         .all();
@@ -1715,15 +821,11 @@ export class SqliteSessionStore implements SessionStore {
         );
       const active = rows.length - inactive.length;
       inactive.forEach((row, index) => {
-        // Rule 2. The row's rank across the whole table, active rows first: a
-        // rank within the floor is kept by both sweeps, whatever else is true
-        // of it, so what is left after a prune is never under `minSessions`.
+        // Rule 2: a row ranked within the floor, active rows first, is kept by both sweeps.
         const rank = index + 1;
         if (active + rank <= options.minSessions) return;
         const id = String(row["id"]);
-        // Rule 1 before rule 3: a row both idle and over the cap is counted as
-        // idle, because that is the rule that would have taken it at any table
-        // size. The report below reads the split off these two lists.
+        // Rule 1 before rule 3: a row both idle and over the cap counts as idle.
         if (!Number(row["pinned"]) && Number(row["updated_at"]) < cutoff) stale.push(id);
         else if (rank > options.maxSessions) excess.push(id);
       });
@@ -1733,76 +835,11 @@ export class SqliteSessionStore implements SessionStore {
         this.removeSessionStmt.run(id);
         this.lastWritten.delete(id);
       }
-      // Events whose session row is gone: only reachable if a put() failed while
-      // appends succeeded, or a remove() half-completed. A known, accepted loss.
       this.db.exec("DELETE FROM events WHERE session_id NOT IN (SELECT id FROM sessions)");
-      // The same sweep for staged uploads, and it covers more than the rows just
-      // deleted above: a database restored from a backup, or one whose session
-      // rows were cut by an older build, leaves rows here with nothing to belong
-      // to. The *files* are handled by the caller, from the returned list plus
-      // the upload store's own reconciliation at open.
       this.db.exec("DELETE FROM uploads WHERE session_id NOT IN (SELECT id FROM sessions)");
-      /*
-       * ⚠ **And the same for what a plugin put here, which is the one child
-       * table in this file that had no sweep.** Same shape as the two above — no
-       * FOREIGN KEY, `PRAGMA foreign_keys = OFF` — and the same reachable cause,
-       * except that here the two deletes are written in another file: `host.ts`
-       * runs `records.remove(id)` and then `data.dropPlugin(id)` as two implicit
-       * transactions with no BEGIN around them, in `doRemove` and again in the
-       * install rollback. A throw from either, or a SIGKILL between them, or a
-       * backup taken between them, strands up to `MAX_PLUGIN_KEYS` rows and
-       * `MAX_PLUGIN_DATA_BYTES` per id.
-       *
-       * **Stranded here means stranded for ever**, which is what makes this
-       * worse than the upload case: afterwards `installed()` is false on both
-       * halves — no row, and the tree below the plugin root is gone — so `DELETE
-       * /plugins/:id` answers 404 and nothing can reach `dropPlugin` again. And
-       * they do not stay invisible: `plugin_data` is keyed on the id and never
-       * on the version, deliberately so that an update keeps it, so the next
-       * install of that id silently inherits somebody else's rows against its
-       * own quota.
-       *
-       * **The subquery reads the table rather than `records.list()`**, and that
-       * is `PluginRecordStore.has`'s distinction rather than a shortcut: a row
-       * whose `manifest_json` this build cannot validate is reported through
-       * `onDegraded` and omitted from `list`, and destroying its data would make
-       * a daemon downgrade a data loss. A row is a row here. Nothing races it
-       * either — `prune()` runs inside `openStores`, before `PluginHost` exists,
-       * so no plugin is running and no half-written install is in flight.
-       */
+      // Plugin data with no plugin row: host.ts removes the two separately, and strays would pass to the next install of that id.
       this.db.exec("DELETE FROM plugin_data WHERE plugin_id NOT IN (SELECT id FROM plugins)");
-      /*
-       * ⚠ **A pasted credential is deliberately swept by nothing here, and this
-       * is a reversal.** Both credential tables had an age-plus-emptiness sweep;
-       * it is gone, and what is left is the route that put the value there —
-       * `DELETE /agent-auth/:agent` and `DELETE /systems/:system`, plus a paste
-       * that replaces one.
-       *
-       * The sweep's three stated reasons did not survive being read back:
-       *
-       *   - *"this daemon can never be told about a revocation"* is true and is
-       *     not addressed by deleting the local copy. A leaked key is with
-       *     whoever took it; revocation happens at the vendor.
-       *   - *"the second recoverable secret in this file"* argues against itself.
-       *     `identity.tunnel_key` is in the same file and there is no `DELETE FROM
-       *     identity` anywhere, so the file holds a live secret regardless — and
-       *     that one lets somebody be this machine on the relay.
-       *   - *"a plaintext token outlived the last session"* couples two unrelated
-       *     lifetimes. How long transcripts are kept is a storage question; how
-       *     long a pasted key lives is "until it is replaced or removed", which is
-       *     what `~/.claude/.credentials.json`, `~/.codex/auth.json` and
-       *     `~/.ssh/id_ed25519` all answer, none of them self-expiring.
-       *
-       * What it cost was concrete. The age clause read `updated_at`, which moves
-       * only on a paste, so it was permanently true of any key in real use and the
-       * rule collapsed to `NOT EXISTS (SELECT 1 FROM sessions)` — eight idle days,
-       * since unpinned sessions aged out at seven then, by creation. A machine
-       * put down over a holiday came back with its tokens gone and nothing on
-       * screen saying why.
-       *
-       * The protection here is what it has always been and what the rest of this
-       * file relies on: the 0700 directory and the 0600 file. See Q7.124.
-       */
+      // Pasted credentials are deliberately never swept; only their routes remove them (Q7.124).
       this.db.exec("COMMIT");
     } catch {
       try {
@@ -1813,24 +850,7 @@ export class SqliteSessionStore implements SessionStore {
       return [];
     }
     const removed = [...stale, ...excess];
-    /*
-     * Said after the COMMIT, so it is never said about a deletion that rolled
-     * back, and said once. The split is by which rule took the row. This
-     * replaces a `console.error` that fired only for the cap and said nothing
-     * about the age sweep — which is how the 2026-09-04 deletion left no line
-     * at all. It still names what that line named: the cap is across the file,
-     * not per person, and a database written when the daemon served several
-     * people meets a narrower bound than it was filled under.
-     *
-     * ⚠ **Outside the `try` above, and guarded on its own.** It sat inside,
-     * between the COMMIT and the `return`, so a sink that threw landed in the
-     * catch: a ROLLBACK attempted against a committed transaction, `reclaim()`
-     * skipped, and `[]` returned over rows that were in fact gone — so the
-     * upload directories of the deleted sessions were never swept, and nothing
-     * was printed either. Latent while the only sink was `console.log`, and
-     * read rather than hit; the guard is what makes the returned list mean what
-     * the docblock says it means whatever the sink does.
-     */
+    // Reported after the COMMIT and outside the try, so a throwing sink cannot roll back or empty the returned list.
     if (removed.length > 0) {
       const parts: string[] = [];
       if (stale.length > 0) {
@@ -1847,9 +867,6 @@ export class SqliteSessionStore implements SessionStore {
             "the cap is across the whole file, not per person.",
         );
       } catch {
-        // The rows went at the COMMIT and this is only the telling of it: a sink
-        // that throws may not cost the caller the list of what is gone, nor the
-        // reclaim below.
       }
     }
     this.reclaim();
@@ -1857,44 +874,8 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   /**
-   * Give the deleted pages back to the filesystem, sometimes.
-   *
-   * ⚠ **Pruning bounded the rows and nothing bounded the bytes.**
-   * `.claude/rules/daemon-sessions.md` said "what bounds the database is whole
-   * sessions: 7 days / 200, pruned at startup" — true of rows, and the file on
-   * disk only ever grew. SQLite's `auto_vacuum` defaults to NONE and **cannot be
-   * turned on for a database that already exists** without a full rebuild, so
-   * every transcript this daemon has ever deleted is still occupying pages that
-   * are merely marked free. On a machine running agents daily, against a table
-   * whose rows are whole conversations and file diffs, that is the largest thing
-   * on disk here.
-   *
-   * Three things make this safe to do at exactly this point and nowhere else:
-   * `prune()` runs inside `openStores`, so `claimDaemonLock` has already refused
-   * a second daemon; no listener is open, so no request is waiting; and `VACUUM`
-   * cannot run inside a transaction, which is why it is after the `COMMIT` rather
-   * than in it.
-   *
-   * **Only when it is worth the rewrite.** `VACUUM` copies the whole database, so
-   * running it on every boot would put a full-size copy on the startup path of a
-   * daemon that deleted nothing. A quarter of the file free is the trigger: high
-   * enough that ordinary churn never reaches it, low enough that a fleet of
-   * expired sessions does.
-   *
-   * **The trigger is independent of what `prune()` just removed, which is why it
-   * still runs under the floor.** It reads `freelist_count` against
-   * `page_count`, and those count pages freed by *any* delete since the last
-   * `VACUUM` — `remove()` from `DELETE /sessions/:id` on any day, the event
-   * eviction an operator switched on, a prune from a boot months ago — not the
-   * rows the transaction above took. So a boot that pruned nothing can still
-   * rewrite a file a quarter of which is free, and one that pruned five rows of a
-   * hundred may correctly leave it alone. `prune()` calls this on every path
-   * that commits, including the one where the floor stopped both sweeps.
-   *
-   * Best-effort by construction. A failure here — no room for the copy, a
-   * filesystem that will not — costs a database that is larger than it needs to
-   * be, which is the state it was already in, and must never cost a daemon that
-   * will not start.
+   * VACUUM once a quarter of the file is free, since auto_vacuum cannot be enabled on an existing file.
+   * Only here: after the lock, before any listener, outside the transaction.
    */
   private reclaim(): void {
     try {
@@ -1903,22 +884,11 @@ export class SqliteSessionStore implements SessionStore {
       if (total === 0 || free / total < 0.25) return;
       this.db.exec("VACUUM");
     } catch {
-      // See the docblock: a database that stays large is the status quo, and a
-      // daemon that will not start is not.
+      // Best effort: a large database is the status quo, a daemon that will not start is not.
     }
   }
 }
 
-/**
- * The index for staged uploads.
- *
- * Synchronous like every other store here, and for the same reason: node's SQLite
- * bindings are synchronous, so async would buy nothing and cost the argument. It
- * is safe to be synchronous *and* to be called from `ManagedSession.prompt`
- * because none of it is on the agent's emit path — `prompt` is a request handler
- * that answers 202, and the one place bytes are read is `pump`, which is already
- * async.
- */
 export class SqliteUploadStore implements UploadIndex {
   private readonly insertStmt: StatementSync;
   private readonly getStmt: StatementSync;
@@ -1933,18 +903,10 @@ export class SqliteUploadStore implements UploadIndex {
 
   constructor(db: DatabaseSync) {
     this.insertStmt = db.prepare(
-      // `consumed_at` is bound rather than hardcoded NULL, and that mattered: an
-      // image the agent returned is inserted **already consumed**, because it is
-      // referenced by an event the instant it exists. Writing NULL regardless
-      // silently discarded that, so the 24-hour unconsumed sweep would have
-      // deleted every agent image while the transcript went on pointing at it.
+      // consumed_at is bound, not NULL: an image the agent returned is inserted already consumed.
       "INSERT INTO uploads (session_id, upload_id, name, orig_name, mime, bytes, created_at, consumed_at) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
-    // Keyed on the pair, always. An upload id belonging to another session must
-    // read as "no such upload" rather than as somebody else's file — the same
-    // rule `sessionOf` follows one level up, and the reason the route can answer
-    // 400 rather than having to decide between 403 and a leak.
     this.getStmt = db.prepare("SELECT * FROM uploads WHERE session_id = ? AND upload_id = ?");
     this.sumStmt = db.prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM uploads WHERE session_id = ?");
     this.countStmt = db.prepare("SELECT COUNT(*) AS n FROM uploads WHERE session_id = ?");
@@ -1953,8 +915,6 @@ export class SqliteUploadStore implements UploadIndex {
     );
     this.listForStmt = db.prepare("SELECT * FROM uploads WHERE session_id = ? ORDER BY created_at");
     this.sessionsStmt = db.prepare("SELECT DISTINCT session_id FROM uploads");
-    // Only the unconsumed expire on their own. A consumed upload is referenced by
-    // a `prompt` event and dies with its session row instead.
     this.expiredStmt = db.prepare("SELECT * FROM uploads WHERE consumed_at IS NULL AND created_at < ?");
     this.removeStmt = db.prepare("DELETE FROM uploads WHERE session_id = ? AND upload_id = ?");
     this.removeSessionStmt = db.prepare("DELETE FROM uploads WHERE session_id = ?");
@@ -2033,9 +993,6 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     created_at: row.createdAt,
     updated_at: 0, // replaced at write time; excluded from the dirty-check key
     agent_session_id: row.agentSessionId,
-    // Flattened into columns rather than stored as JSON: `agent_pid` already
-    // existed and rows written by the local runtime keep exactly the shape they
-    // had, so an older daemon reading this database still reaps its own orphans.
     agent_pid: row.agentHandle?.kind === "local" ? row.agentHandle.pid : null,
     container_id: row.agentHandle?.kind === "container" ? row.agentHandle.containerId : null,
     agent_pgid: row.agentHandle?.kind === "container" ? row.agentHandle.pgid : null,
@@ -2051,25 +1008,12 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     last_seq: row.lastSeq,
     dropped: row.dropped,
     title: row.title,
-    // SQLite has no boolean, and the dirty-check key is JSON of this object — so
-    // the 1/0 form has to happen here rather than at the statement, or a `put`
-    // that only flipped a pin would compare `true` against `1` and look dirty for
-    // ever after.
+    // 1/0 here rather than at the statement: the dirty-check key is JSON of this object.
     pinned: row.pinned ? 1 : 0,
-    // A number or NULL, with no conversion: it is already what SQLite stores, and
-    // NULL is the state ("follows its age") rather than a missing value.
     rank: row.rank,
-    // Three-valued, so the same 1/0 conversion with NULL kept as NULL — that is
-    // the state, not a missing value: nobody has chosen. See the column.
     ultracode: row.ultracode === null ? null : row.ultracode ? 1 : 0,
-    // Absent from the DO UPDATE above, exactly as `agent` is and for the same
-    // reason: what a session was started as is not something a later touch may
-    // rewrite. Editing the preset changes what it resumes as; it cannot change
-    // which preset it was.
+    // Never in the DO UPDATE, like agent: what a session was started as is immutable.
     custom_agent: row.customAgent,
-    // One blob rather than two columns, because the two halves are written and
-    // read together and neither is queried on. NULL is the state — nothing to
-    // remember — rather than a missing value, so no `?? ""`.
     agent_state_json: row.agentState === null ? null : JSON.stringify(row.agentState),
     workspace_json: JSON.stringify(row.workspace),
     workspace_mode: row.workspace.mode,
@@ -2079,30 +1023,11 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
   };
 }
 
-/**
- * Rebuilds the agent handle from the four columns that can carry it.
- *
- * `container_id` is tested first and is the discriminator, not `agent_pgid`: a
- * pgid with no container to run it in cannot be signalled and must not be
- * mistaken for a host pid, which is exactly the confusion the union exists to
- * prevent. A row missing either of the other container fields is treated as
- * having no handle at all — half a handle is not a weaker handle, it is one that
- * would signal the wrong thing.
- */
+/** container_id is the discriminator; a partial container handle is no handle at all. */
 function toHandle(row: Record<string, unknown>): AgentHandle | null {
   const containerId = row["container_id"];
   if (containerId != null) {
-    // **Read-only legacy, and validated anyway.** Nothing writes this arm any
-    // more — it is what a row from the multi-tenant daemon still carries, and
-    // `LocalRuntime.reap` reports such a handle as one it will not signal rather
-    // than guessing at a number in a namespace that no longer exists. There is
-    // therefore no write path left to trust, which is the stronger reason to
-    // check the values here rather than a weaker one: the database is
-    // deliberately readable and writable by the `sqlite3` CLI, so it was never a
-    // trusted input, and now nothing upstream is validating it either.
-    //
-    // A pgid of 0 or 1 is refused along with the rest: 0 is "this process group"
-    // and 1 is init's, and neither can be a recorded agent.
+    // Legacy and read-only, validated anyway: the file is hand-editable. A pgid of 0 or 1 is refused.
     const pgid = toPositiveInt(row["agent_pgid"], 2);
     const startedAt = toPositiveInt(row["container_started_at"], 1);
     if (pgid === null || startedAt === null) return null;
@@ -2124,18 +1049,6 @@ function toPositiveInt(value: unknown, min: number): number | null {
   return Number.isInteger(n) && n >= min ? n : null;
 }
 
-/**
- * The exit reason on a row, read for the prune and for nothing else.
- *
- * `null` for a NULL column, for a value that is not JSON, for JSON that is not
- * an object, and for a `reason` this build cannot name — and `isActiveRow`
- * keeps a row on every one of those — a NULL column outright, and the other
- * three unless `resume_gave_up` says the daemon has given it up, which is read
- * between the two — so on this column "I cannot read it" and "it is fine" are
- * deliberately the same answer. Not `fromRow`, which drops the row for an
- * agent it does not know and repairs the handle on the way, neither of which a
- * deletion may depend on.
- */
 function readExitReason(exitJson: unknown): ExitReason | null {
   if (typeof exitJson !== "string") return null;
   try {
@@ -2149,67 +1062,7 @@ function readExitReason(exitJson: unknown): ExitReason | null {
   }
 }
 
-/**
- * Whether `prune()` may not touch this row, under either of its rules.
- *
- * Two columns, read in this order. A live row — `exit_json` NULL — is active
- * whatever else is on it. ⚠ The give-up clause below was read first for one
- * round, and the daemon writes exactly that shape for the length of every
- * recreate: `doResume` clears the exit and persists before the launch, and
- * `onResumed` clears the column only after it, so a crash inside that window
- * left a row the next boot's prune could delete, under a report sentence saying
- * a live session never is. Read live first, the row is what the sentence says:
- * the next boot marks it `daemon_restarted` and either puts an agent back on it
- * or, with the column set and the conversation not empty, leaves it a
- * daemon-ended row the column makes inactive at the boot after — so keeping it
- * bounds nothing less. Then `resume_gave_up`: a value `isPersistedGiveUp`
- * honours is a row the daemon has stopped trying to put an agent back on by
- * itself. The column is written only when the agent says it no longer holds
- * the conversation (`schema.sql`, `resumeGiveUpPersists`), and `resumeSettled`
- * takes a row carrying it out of both automatic paths — the boot pass and the
- * prompt route. What is left is a manual `POST /sessions/:id/resume`, which has
- * no such gate and clears the column when it succeeds, and that door closes
- * when the prune takes the row. Such a row is inactive whatever its exit says,
- * and it has to be: a give-up the boot pass writes sits over the exit the
- * shutdown before it wrote, a daemon one, so read off `exit_json` alone that
- * row was active for ever — never swept, never counted under the cap, a class
- * nothing bounded (D27, 2026-09-05). Only the value this build honours, not any
- * non-NULL: ⚠ it was any non-NULL for one round, on the argument that this
- * file may not read the registry's vocabulary — while the registry reads a
- * value it cannot name as "not given up" and puts an agent back on the row at
- * boot, so the prune was deleting, on the rollback `isExitReason` exists for,
- * exactly what the boot pass was coming back to. The predicate lives in
- * `events.ts` now, beside `isExitReason`, and an unreadable value keeps the row
- * on both columns. The one such row the boot pass does still touch is a
- * conversation `conversationKnownEmpty` — never a turn, or cleared and unused —
- * which it recreates rather than restores, since the conversation the agent is
- * asked for is empty by construction. What a deletion loses there is the empty
- * conversation the pass would have reopened under the same title and worktree,
- * and, for the cleared arm, the events before the marker: `/clear` appends the
- * marker and truncates nothing, so the log still holds them and
- * `GET /sessions/:id/events` still serves them, and they go with the row as
- * every inactive row's log does.
- *
- * Otherwise true for one whose exit `keepsItsConversation` — the daemon's own
- * promise to bring it back, **or an agent it let go of on purpose** — and for one
- * whose exit cannot be read (`readExitReason`).
- *
- * ⚠ **That predicate is one member wider than `endedWithDaemon`, and reading the
- * narrow one here would have deleted exactly the sessions somebody is most likely
- * to return to.** A `parked` row is a live conversation whose agent was released
- * for being quiet, which is the *strongest* case for keeping it and reads, to a
- * predicate that only knows the daemon's three exits, as the weakest: no promise
- * to come back, so inactive, so ranked for the cap. That is the shape of the
- * incident this whole function was written after — Q2.222, five conversations
- * deleted at a restart — aimed this time at the quiet ones. `events.ts` owns both
- * predicates for the reason the paragraph above gives about `isPersistedGiveUp`.
- *
- * One predicate serves both the age sweep and the cap,
- * because when the cap carried its own copy as a SQL `CASE` it ranked a reason
- * this build cannot name as inactive and cut what the sweep kept (Q2.222, the
- * verification round). Rule 1 in `prune()`'s docblock says why each of the
- * other six reasons is inactive.
- */
+/** A live row is active; then an honoured resume_gave_up makes it inactive; then keepsItsConversation or an unreadable exit keeps it (Q2.222). */
 function isActiveRow(row: Record<string, unknown>): boolean {
   const exitJson = row["exit_json"];
   if (exitJson === null || exitJson === undefined) return true;
@@ -2218,26 +1071,12 @@ function isActiveRow(row: Record<string, unknown>): boolean {
   return reason === null || keepsItsConversation({ reason });
 }
 
-/** `retainMs` as the prune's one line says it. */
 function describeRetain(ms: number): string {
   const days = ms / DAY_MS;
   return `${Number.isInteger(days) ? days : days.toFixed(1)} day(s)`;
 }
 
-/**
- * Repairs an exit record written before the agent handle was a union.
- *
- * `SessionExit.agentPid` became `agentHandle` in v4, but exit records live as an
- * unvalidated JSON blob in `sessions.exit_json` and the column migration cannot
- * reach inside one. Left alone, every pre-v4 row deserializes with
- * `agentHandle: undefined` — not `null`, which is what the type promises and
- * what `packages/web` declares as a required field — while the dead `agentPid`
- * rides along and is re-serialized verbatim on the next touch, so the blob never
- * heals.
- *
- * Converting rather than dropping keeps the fact the field was recorded for: a
- * pid from a daemon that predates containers really was a local one.
- */
+/** Converts a pre-v4 agentPid into agentHandle, since the column migration cannot reach inside the JSON blob. */
 function normalizeExit(value: unknown): SessionExit | null {
   if (value === null || typeof value !== "object") return null;
   const exit = value as SessionExit & { agentPid?: unknown };
@@ -2249,46 +1088,13 @@ function normalizeExit(value: unknown): SessionExit | null {
   return exit;
 }
 
-/**
- * The remembered agent state, or `null` for anything this build cannot read.
- *
- * ⚠ **Its own `try`, inside a function that already has one, and that is the
- * whole point.** `fromRow`'s catch drops the *session*, which is the right answer
- * for a workspace it cannot parse and the wrong one for this: a blob that is
- * unreadable costs a faint strip, not somebody's conversation. Every failure here
- * answers `null`, which is the value every row written before the column has and
- * which every reader already handles.
- *
- * ⚠ **Validated to the depth the declared type claims, and the containers alone
- * were not enough.** It read *"shape-checked rather than deep-validated ... what
- * the checks buy is that a half-written blob cannot put an `options` that is not
- * an array in front of `restoreConfig`"* — and a half-written blob fails
- * `JSON.parse` anyway, so the residual case was precisely the element-level one
- * that went unchecked. What it cost is out of all proportion to the faint strip
- * this function's first paragraph promises: `typeof modes === "object"` accepts
- * `{current: "plan"}` with no `available`, `ManagedSession.restore` adopts it, and
- * `snapshotConfig`'s `config.modes.available.map` then throws inside `snapshot()`
- * — which `GET /sessions` maps over **every** session with no per-row guard, so
- * one bad row 500s the listing for the whole machine, and which `touchSafe`
- * swallows in its own `catch`, so that session silently stops persisting and stops
- * fanning out to every watcher, permanently, with nothing logged.
- *
- * Only this daemon writes this column, so the reachable writers are a hand-edited
- * file and a rollback — and the rollback is a **documented** path here, since
- * `SCHEMA_VERSION` deliberately does not move for this column and an older daemon
- * preserves the blob through every row it rewrites. That is what makes "only we
- * write it" too weak an argument to rest a route on.
- *
- * Every failure is still `null`, which is the value every row written before the
- * column has and which every reader already handles — so a blob this build cannot
- * vouch for costs the faint strip it was always meant to cost.
- */
+/** Its own try: an unreadable blob costs the remembered strip, never the session. */
 function toAgentState(value: unknown): AgentStateMemory | null {
   if (value == null) return null;
   try {
     const parsed: unknown = JSON.parse(String(value));
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { config, commands } = parsed as { config?: unknown; commands?: unknown };
+    const { config, commands, tasks } = parsed as { config?: unknown; commands?: unknown; tasks?: unknown };
     if (typeof config !== "object" || config === null) return null;
     if (typeof commands !== "object" || commands === null) return null;
     const { options, modes } = config as { options?: unknown; modes?: unknown };
@@ -2297,13 +1103,11 @@ function toAgentState(value: unknown): AgentStateMemory | null {
     if (!isAgentModes(modes)) return null;
     if (!options.every(isAgentConfigOption)) return null;
     if (!list.every(isAgentCommand)) return null;
-    /*
-     * `dropped` is a count and a count that is not a number is not one. `Number`
-     * answers `NaN` for a string nobody meant, and `NaN` rides the snapshot out to
-     * `JSON.stringify`, which writes it as `null` — a third state on a field the
-     * client's reader declares as `number`.
-     */
     const cut = Number(dropped ?? 0);
+    // Row by row, unlike the controls: a finished task this build cannot read costs that row alone.
+    const kept = (Array.isArray(tasks) ? tasks.map(readKeptTask) : [])
+      .filter((task) => task !== null)
+      .slice(0, MAX_TRACKED_ASYNC_TASKS);
     return {
       config: {
         modes: modes ?? null,
@@ -2313,6 +1117,7 @@ function toAgentState(value: unknown): AgentStateMemory | null {
         commands: list as AgentStateMemory["commands"]["commands"],
         dropped: Number.isFinite(cut) ? cut : 0,
       },
+      ...(kept.length > 0 ? { tasks: kept } : {}),
     };
   } catch {
     // Unreadable JSON. See the docblock: a faint strip, never a lost session.
@@ -2320,17 +1125,7 @@ function toAgentState(value: unknown): AgentStateMemory | null {
   }
 }
 
-/**
- * `null`, or the mode block with both halves the declared type promises.
- *
- * ⚠ **Absent reads as `null` rather than as a refusal**, which is
- * `compatibility.md` rule 2 on the axis that actually bites here: `JSON.stringify`
- * omits an `undefined` key entirely, so a future build that makes `modes` optional
- * would have every stored blob come back without it — and discarding the whole
- * memory over that would take the option list and the command list with it. `null`
- * is the documented value for *"this agent publishes no modes"* and every reader
- * already draws it.
- */
+/** Absent reads as null, so an optional modes field cannot discard the whole memory. */
 function isAgentModes(value: unknown): value is AgentStateMemory["config"]["modes"] {
   if (value == null) return true;
   if (typeof value !== "object" || Array.isArray(value)) return false;
@@ -2344,15 +1139,6 @@ function isAgentModes(value: unknown): value is AgentStateMemory["config"]["mode
   });
 }
 
-/**
- * One control, to the depth something downstream dereferences it.
- *
- * `choices` is the load-bearing one — `clipChoices` reads `.length` and
- * `reduceAgentState` `.map`s it on the way back out, so a control carrying
- * anything else is the row that throws. `value` is checked because it is what a
- * tap sends and what `chipValue` compares against; the prose fields are not,
- * because nothing derefs them past drawing.
- */
 function isAgentConfigOption(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const { id, kind, value: current, choices } = value as Record<string, unknown>;
@@ -2377,34 +1163,7 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
   try {
     const workspace = JSON.parse(String(row["workspace_json"])) as SessionWorkspace;
     if (typeof workspace?.root !== "string") return null;
-    /*
-     * ⚠ **Validated, where it used to be cast — this is Q7.31's named
-     * precondition and it is reached now.**
-     *
-     * The line was `String(row["agent"]) as AgentId`, while `isAgentId` guarded
-     * the HTTP boundary — so the *only* unchecked door into the union was the
-     * one a restart walks through. A row naming an agent no longer in the union
-     * came back as a well-typed value and failed in `resolveAgent`, at which
-     * point a worktree had already been made. Adding an agent never reached
-     * that; removing or renaming one does, and so does a database written by a
-     * build that knew a fourth.
-     *
-     * Dropped rather than repaired, which is what returning `null` already means
-     * here for a row with no workspace: there is no honest substitute for an
-     * agent, and guessing one would resume somebody's conversation under a
-     * different model.
-     *
-     * ⚠ **Shape, not membership, and the two are not interchangeable here.** A
-     * harness a plugin added passes {@link isContributedId} whether or not that
-     * plugin is currently installed, switched on, or even readable — because this
-     * runs at boot, before anything is on screen, and a membership test would
-     * delete every session on a harness whose plugin somebody switched off an hour
-     * ago. What refuses such a session is `resolveAgent`, at launch, with a
-     * sentence naming the plugin; the conversation is still there when it comes
-     * back. The original rule is untouched for the four this repository ships: a
-     * built-in that is renamed or removed still drops, which is the case Q7.31
-     * named and the only one where there is nothing to come back to.
-     */
+    // Validated, not cast: an unknown built-in id drops the row; a contributed id passes by shape (Q7.31).
     const agent = String(row["agent"]);
     if (!isBuiltinAgentId(agent) && !isContributedId(agent)) return null;
     const exitJson = row["exit_json"];
@@ -2412,8 +1171,6 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       id: String(row["id"]),
       agent,
       createdAt: Number(row["created_at"] ?? 0),
-      // `?? null` and not `String(...)`: the column is NULL for every session
-      // written before v2, and coercing that would invent an owner named "null".
       workspace,
       agentSessionId: row["agent_session_id"] === null ? null : String(row["agent_session_id"]),
       agentHandle: toHandle(row),
@@ -2427,20 +1184,11 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       resumeGaveUp: row["resume_gave_up"] === null || row["resume_gave_up"] === undefined ? null : String(row["resume_gave_up"]),
       lastSeq: Number(row["last_seq"] ?? 0),
       dropped: Number(row["dropped"] ?? 0),
-      // `== null` for the same reason `owner` above uses it: the column is NULL
-      // for every session written before v5, and `String(null)` would invent a
-      // session named "null" and render it as the row's label.
       title: row["title"] == null ? null : String(row["title"]),
       pinned: Number(row["pinned"] ?? 0) !== 0,
-      // Read by shape rather than coerced: `Number(null)` is 0, which is a real
-      // position and the oldest one, so a coercion here would silently move every
-      // row that has none to the bottom of its folder.
+      // Read by shape: coercing NULL gives 0, which is a real position, the oldest.
       rank: typeof row["rank"] === "number" && Number.isFinite(row["rank"]) ? row["rank"] : null,
-      // `== null` covers both NULL on disk and a column an older database does
-      // not have at all, and both mean the same thing here: nobody chose, so
-      // this session follows the machine's setting.
       ultracode: row["ultracode"] == null ? null : Number(row["ultracode"]) !== 0,
-      // `== null` covers both NULL and a column an older file does not have.
       customAgent: row["custom_agent"] == null ? null : String(row["custom_agent"]),
       agentState: toAgentState(row["agent_state_json"]),
     };
@@ -2449,31 +1197,12 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
   }
 }
 
-/* ------------------------------------------------------------------------- *
- * Identity
- * ------------------------------------------------------------------------- */
-
-/** What enrollment produced, as it is stored. */
-/** One credential a tenant supplied, as it will be handed to their agent. */
 export interface AgentCredential {
   agent: string;
-  /** The environment variable the agent's CLI reads it from. */
   envName: string;
   updatedAt: number;
 }
 
-/**
- * Agent credentials, per tenant.
- *
- * Deliberately never hands the secret back out through a method a route could
- * reach by accident: `list` returns metadata and `envFor` returns a ready-made
- * environment map for a `docker exec`. There is no `get(agent) -> string`,
- * because the only correct destination for one of these is an agent process, and
- * a getter is how it ends up in a response body instead.
- *
- * Synchronous like every other store here — node:sqlite is synchronous, so async
- * would buy nothing and cost the argument that the emit path never awaits.
- */
 export class SqliteAgentCredentialStore {
   private readonly listStmt: StatementSync;
   private readonly envStmt: StatementSync;
@@ -2501,7 +1230,6 @@ export class SqliteAgentCredentialStore {
     }));
   }
 
-  /** What to inject into the agent's process. Empty when none was pasted. */
   envFor(agent: string): Record<string, string> {
     const env: Record<string, string> = {};
     for (const row of this.envStmt.all(agent)) {
@@ -2525,20 +1253,7 @@ export interface SystemCredential {
   updatedAt: number;
 }
 
-/**
- * Keys for the systems a harness can be pointed at.
- *
- * ⚠ **`get` exists here where {@link SqliteAgentCredentialStore} deliberately
- * has no getter, and the asymmetry is the design.** That class refuses one
- * because the only correct destination for an agent credential is a process
- * environment, and a `get(agent) -> string` is how it ends up in a response body
- * instead. A system credential's only correct destination is `providers/set`'s
- * headers, which is a *value* rather than an environment — so it has to be
- * readable, and what protects it is that the one caller is `LocalRuntime.
- * systemSecret` and there is no route that reaches this.
- *
- * `list` is what a route may have: metadata, never the secret.
- */
+/** Has a getter, unlike agent credentials: a system key becomes a providers/set header value. Routes get only list. */
 export class SqliteSystemCredentialStore {
   private readonly listStmt: StatementSync;
   private readonly getStmt: StatementSync;
@@ -2558,27 +1273,12 @@ export class SqliteSystemCredentialStore {
   }
 
   list(): SystemCredential[] {
-    // Validated on the way out for `fromRow`'s reason: the column is plain text
-    // and a row written by a build that knew more systems than this one must not
-    // become a well-typed value naming one this build cannot resolve.
     return this.listStmt.all().flatMap((row) => {
       const system = String(row["system"]);
-      // Shape rather than membership, for the reason `readCustomAgent` gives:
-      // a key saved for a provider whose plugin is switched off is still that
-      // person's key, and dropping it from the listing would make the one control
-      // that can delete it disappear at the moment it matters most.
       if (isBuiltinSystemId(system) || isContributedId(system)) {
         return [{ system, updatedAt: Number(row["updated_at"] ?? 0) }];
       }
-      /*
-       * Reported rather than merely dropped, for `SqliteSessionStore.list`'s
-       * reason: "the key disappears from a list" is visible only to somebody who
-       * remembers saving it, and this row is a plaintext secret. `DELETE
-       * /systems/:system` can still remove it — it removes before it validates,
-       * exactly so this state is not a strand — and since Q7.124 that route is the
-       * *only* thing that will: `prune()` names neither credential table, so
-       * nothing ages this row out. The line is what tells an operator it is there.
-       */
+      // Reported, since nothing else ages this plaintext key out (Q7.124).
       this.onDegraded?.(
         `a key is stored for system ${JSON.stringify(system)}, which this build ` +
           "does not know: it cannot be used, and DELETE /systems/:system will clear it",
@@ -2601,15 +1301,6 @@ export class SqliteSystemCredentialStore {
   }
 }
 
-/**
- * The agents somebody assembled on this machine.
- *
- * ⚠ **Every read validates `harness` and `system`, and a row failing either is
- * dropped rather than repaired.** Same rule and same reason as `fromRow`: there
- * is no honest substitute for a harness, and guessing one would start somebody's
- * session on a different model than its name promises. Dropping is visible — the
- * preset disappears from a list — where a guess is not.
- */
 export class SqliteCustomAgentStore {
   private readonly listStmt: StatementSync;
   private readonly getStmt: StatementSync;
@@ -2622,22 +1313,7 @@ export class SqliteCustomAgentStore {
     const columns = "id, name, harness, system, model, created_at";
     this.listStmt = db.prepare(`SELECT ${columns} FROM custom_agents ORDER BY created_at, id`);
     this.getStmt = db.prepare(`SELECT ${columns} FROM custom_agents WHERE id = ?`);
-    /*
-     * An upsert, and it was a bare `INSERT` for as long as a preset was
-     * write-once — which is why nothing had ever saved the same id twice.
-     * `PATCH /custom-agents/:id` reconstructs the whole row and hands it back
-     * under the id it already had, so against the bare insert every edit came
-     * back `500 internal_error` out of `SQLITE_CONSTRAINT_PRIMARYKEY`. The route
-     * section of `daemoncheck` stands a `Map` in for this port and `Map.set` is
-     * an upsert by construction, so that half saw nothing; only the real store
-     * can say it.
-     *
-     * `created_at` is deliberately absent from the update list. The age of a
-     * preset is the one thing about it that is not somebody's to change, and a
-     * caller of this port that gets it wrong — the route is such a caller by
-     * design, since it rebuilds the row rather than patching columns — must not
-     * be able to move it.
-     */
+    // An upsert for PATCH; created_at is deliberately never updated.
     this.saveStmt = db.prepare(
       `INSERT INTO custom_agents (${columns}) VALUES (?, ?, ?, ?, ?, ?) ` +
         "ON CONFLICT(id) DO UPDATE SET name = excluded.name, harness = excluded.harness, " +
@@ -2650,10 +1326,6 @@ export class SqliteCustomAgentStore {
     return this.listStmt.all().flatMap((row) => {
       const one = readCustomAgent(row);
       if (one !== null) return [one];
-      // Recoverable — somebody can assemble it again — so this is a line rather
-      // than the stronger sentence the session store writes. It is still said,
-      // because "you never made one" and "the row is here and unreadable" look
-      // identical on the screen that lists them.
       this.onDegraded?.(
         `assembled agent ${String(row["id"])} names harness ` +
           `${JSON.stringify(String(row["harness"]))} and system ` +
@@ -2677,20 +1349,7 @@ export class SqliteCustomAgentStore {
   }
 }
 
-/**
- * A preset, or `null` for a row this build cannot honestly resolve.
- *
- * ⚠ **Shape rather than membership, for `fromRow`'s reason and one of its own.**
- * This runs inside `restore()`, through `ManagedSession.assembled`, on every boot
- * — so a membership test would mean that installing a plugin and restarting the
- * daemon in the wrong order silently un-assembles every preset built on it, and
- * every session on those presets would come back demoted to the bare harness its
- * `agent` column names. What refuses an unrunnable pairing is the launch, which
- * has the live catalogue and answers a sentence.
- *
- * The refusal that stays is the one Q7.31 asked for: a row naming something with
- * no possible id at all is dropped rather than cast.
- */
+/** Shape, not membership: this runs at every restore, so a plugin missing at boot must not un-assemble presets (Q7.31). */
 function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
   const harness = String(row["harness"]);
   const system = String(row["system"]);
@@ -2706,24 +1365,7 @@ function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
   };
 }
 
-/**
- * Which agents the New session strip offers here, and in what order.
- *
- * ⚠ **A partial record over a list it does not own.** Nothing here knows what a
- * harness or an assembled agent is; a row is a `(kind, ref)` somebody moved or
- * switched off, and what the strip draws is this list merged against what the
- * machine currently offers. So an agent this table has never heard of is
- * *visible and last*, which is the only default that cannot surprise anybody —
- * a new agent arriving pre-hidden reads as the daemon losing it.
- *
- * ⚠ **No validation of `ref`, deliberately, and it is the opposite call from
- * `readCustomAgent` directly above.** That one drops a row naming a harness this
- * build cannot resolve, because restoring it would produce a well-typed lie that
- * fails later with a worktree already made. Here the row *is* the memory and
- * resolving is the reader's job: dropping the position of an agent that happens
- * to be signed out today would rearrange somebody's screen the moment they signed
- * out, and put it somewhere else again when they signed back in.
- */
+/** A partial order over agents it does not own: ref is deliberately not validated. */
 export class SqliteAgentStripStore {
   private readonly db: DatabaseSync;
   private readonly listStmt: StatementSync;
@@ -2743,38 +1385,14 @@ export class SqliteAgentStripStore {
     this.forgetStmt = db.prepare("DELETE FROM agent_strip WHERE kind = ? AND ref = ?");
   }
 
-  /**
-   * The remembered order.
-   *
-   * `ORDER BY rank` first, then `kind, ref` — the tie-break is not decoration.
-   * `rank` is the caller's array index and is therefore unique on every list this
-   * daemon writes, but the column carries no constraint saying so, and a file
-   * hand-edited or written by some future build must still come back in *one*
-   * order rather than in whatever order SQLite felt like. An unstable list here
-   * is a strip that shuffles itself between reads.
-   */
   list(): AgentStripEntry[] {
     return this.listStmt.all().flatMap((row) => {
       const kind = String(row["kind"]);
-      // The one thing that *is* checked, because it is this daemon's own
-      // vocabulary rather than somebody's agent id, and a third value would reach
-      // a `switch` in the client that has no arm for it.
       if (kind !== "harness" && kind !== "custom") return [];
       return [{ kind, ref: String(row["ref"]), hidden: Number(row["hidden"] ?? 0) !== 0 }];
     });
   }
 
-  /**
-   * Replace the whole strip.
-   *
-   * ⚠ **The transaction is for atomicity here, unlike the one in `prune`.** That
-   * one wraps statements that are each already correct on their own and takes the
-   * transaction only to spend one WAL commit; this one empties the table before it
-   * refills it, so a failure part-way through without a `ROLLBACK` is somebody's
-   * order deleted by an act that reported an error. The throw is re-raised rather
-   * than swallowed — the route above turns it into a 500, and the screen restores
-   * what it drew.
-   */
   replace(entries: readonly AgentStripEntry[]): void {
     this.db.exec("BEGIN");
     try {
@@ -2787,48 +1405,19 @@ export class SqliteAgentStripStore {
       try {
         this.db.exec("ROLLBACK");
       } catch {
-        // Nothing to roll back — the BEGIN itself failed.
-        //
-        // ⚠ The other way `BEGIN` can fail is *already inside a transaction*, and
-        // there the `ROLLBACK` would succeed and discard the outer one's work
-        // instead. Not reachable: this method has one caller, `PUT /agent-strip`,
-        // and no route on this daemon opens a transaction around a handler. Said
-        // out loud because the remedy if one ever does is a savepoint rather than
-        // a wider catch.
+        // Nothing to roll back: the BEGIN itself failed.
       }
       throw error;
     }
   }
 
-  /**
-   * Drop one position, for the write that is not the screen.
-   *
-   * Deleting an assembled agent takes its row with it. The merge would ignore the
-   * orphan anyway — it resolves to nothing — so this is not correctness; it is the
-   * only thing standing between this table and unbounded growth on a machine where
-   * presets are made and thrown away and the strip screen is never opened.
-   */
   forget(kind: AgentStripEntry["kind"], ref: string): void {
     this.forgetStmt.run(kind, ref);
   }
 }
 
 
-/**
- * The settings a person set on this machine from the settings screen.
- *
- * **Narrow on purpose, and the narrowness is the design.** The daemon's *config*
- * is env only and stays so; what lives here is the class of setting whose owner is
- * the person using the machine rather than the person deploying it. Q2.225 is the
- * argument, and the only key today is how long a conversation may sit before its
- * agent is shut down.
- *
- * Keys are enumerated in {@link MACHINE_SETTING_KEYS}: a row whose key this build
- * cannot name is left where it is and never read, so a downgrade cannot act on a
- * setting it does not understand — `isExitReason`'s rule on a different column.
- * `read` therefore answers `null` for anything unknown rather than a string
- * somebody might parse.
- */
+/** Person-owned machine settings, not config; a key this build cannot name is never read (Q2.225). */
 export class SqliteMachineSettingsStore {
   private readonly getStmt: StatementSync;
   private readonly setStmt: StatementSync;
@@ -2859,29 +1448,11 @@ export interface StoredIdentity {
   /** Fingerprint of the redeemed enrollment code, never the code itself. */
   codeFp: string;
   enrolledAt: number;
-  /**
-   * The relay tunnel credential, or `null` if the control plane offered none.
-   *
-   * The one live secret this daemon keeps on disk — everything else in this row
-   * is public. It sits in the same 0600 file inside the same 0700 directory as
-   * the transcripts, which is already the strictest thing available here; a
-   * separate file would add a second thing to get the permissions right on
-   * without adding a second protection.
-   */
   tunnelKey: string | null;
   /** Where to dial for a tunnel, or `null` for a control plane running no relay. */
   relayUrl: string | null;
 }
 
-/**
- * The single row this daemon keeps about who it is.
- *
- * Unlike the session and event stores, nothing here is on a hot path — it is
- * read once at startup and written once per enrollment — so these methods
- * throw rather than swallow. A daemon that cannot read its own identity must
- * not come up pretending it has none: that would silently re-enroll, or worse,
- * start refusing every token that was fine a moment ago.
- */
 export class SqliteIdentityStore {
   private readonly loadStmt: StatementSync;
   private readonly saveStmt: StatementSync;
@@ -2932,58 +1503,15 @@ export class SqliteIdentityStore {
   }
 }
 
-/** One X25519 static this machine answers on, as it is stored. */
 export interface StoredMachineKey {
-  /** The RFC 7638 thumbprint, which is the name this key is known by everywhere. */
   kth: string;
-  /** 32 raw bytes, base64url. */
   publicKey: string;
-  /** 32 raw bytes, base64url. The secret half; never leaves this process. */
   privateKey: string;
   createdAt: number;
   retiredAt: number | null;
 }
 
-/**
- * The X25519 statics this machine answers on.
- *
- * **Plural because retired rows accumulate, and at most one of them may be
- * live** — enforced by `MACHINE_KEY_LIVE_INDEX`, the partial unique index over
- * `retired_at IS NULL` that `migrateMachineKeysToOneLive` creates. `active()` is
- * still `ORDER BY created_at DESC, kth ASC` and is left exactly as it is: with one
- * live row the ordering is unobservable, and it is the ordering a rotation would
- * be built on rather than one it would have to replace.
- *
- * ⚠ **The index narrows a documented future, and the trade is measured.** This
- * docblock used to say the plural was here because "the only safe rotation is an
- * overlap, and an overlap needs two rows". Nothing in this build can *answer* on
- * two statics: `scripts/daemon.ts` calls `ensureMachineKey` once and hands
- * `RelayTunnel.start` a single `machineKey`/`staticKey`, so a second live row buys
- * no overlap and only poisons `active()` — it is how a machine ends up announcing
- * a key the Authority never pinned, which is a permanent 409. A rotation that
- * wants a real overlap drops this index in the same migration that teaches the
- * responder to hold two keys at once; that is one line, and it is much cheaper
- * than the failure class the index closes today.
- *
- * **`all()` and `promote()` are the *sequential* rotation that does exist**, and
- * they are the reason `migrateMachineKeysToOneLive`'s guess is no longer
- * load-bearing. Only one row is ever live, so nothing overlaps and the index
- * stands untouched; what `promote` buys is that *which* row is live can be
- * decided by evidence — a 409 at the dial — instead of by a timestamp. It retires
- * the incumbent and un-retires the candidate inside one transaction, in that
- * order, because the reverse leaves two live rows for the length of a statement
- * and the index refuses it. `machinekey.ts`'s rotator is the only caller and it
- * tries each `kth` at most once per process, which is what keeps this a walk over
- * a finite set rather than a redial loop.
- *
- * Like `SqliteIdentityStore`, every method here **throws rather than swallowing**,
- * with exactly one exception: `save` absorbs the live-row index's constraint
- * failure and nothing else, because losing that particular race means the winner's
- * key is already in the table for the caller to read back. A daemon that cannot
- * read its own key cannot be reached by any app, and starting anyway would mean a
- * machine that looks online and refuses every handshake — which is worse than not
- * starting.
- */
+/** At most one live row, enforced by MACHINE_KEY_LIVE_INDEX. Methods throw, except save absorbing the live-index conflict. */
 export class SqliteMachineKeyStore {
   private readonly activeStmt: StatementSync;
   private readonly allStmt: StatementSync;
@@ -3019,46 +1547,13 @@ export class SqliteMachineKeyStore {
     return rowToMachineKey(row);
   }
 
-  /**
-   * Every key this machine has ever held, oldest first, retired ones included.
-   *
-   * **The retired ones are the point.** A key is retired rather than deleted
-   * precisely so its private half survives — `migrateMachineKeysToOneLive` says so
-   * — and this is what makes that survival reachable by code instead of only by
-   * hand. The caller is `machinekey.ts`'s rotator, deciding what else to announce
-   * after the Authority refused what `active()` answered.
-   *
-   * Oldest first rather than `active()`'s newest first, and the difference is not
-   * cosmetic: this is a *candidate walk*, so the order is the order the candidates
-   * are tried in, and the population this exists for — a file that lost the
-   * two-daemon startup race — has exactly two rows whose only distinguishing fact
-   * is which came first.
-   */
   all(): StoredMachineKey[] {
     return this.allStmt.all().map(rowToMachineKey);
   }
 
   /**
-   * Make one key the only live one, and answer whether it is now.
-   *
-   * ⚠ **The two statements are ordered, and the reverse order cannot run at all.**
-   * `MACHINE_KEY_LIVE_INDEX` is unique over `retired_at IS NULL` and SQLite checks
-   * a unique index at the end of each *statement*, not at COMMIT — so un-retiring
-   * the candidate while the incumbent is still live is `SQLITE_CONSTRAINT_UNIQUE`,
-   * every time. Retiring first leaves zero live rows for the width of one
-   * statement, which the partial index is happy with, and the transaction is what
-   * keeps that window invisible to anything else on the file.
-   *
-   * **`ROLLBACK` when the candidate does not exist, and that arm is the whole
-   * reason this is a transaction rather than two `run` calls.** A `kth` naming no
-   * row leaves the second UPDATE with `changes: 0` while the first has already
-   * retired the incumbent — a machine with a table full of keys and none of them
-   * live, which `active()` answers `null` for and `ensureMachineKey` repairs by
-   * minting a *fresh* static the Authority has never seen. That is the permanent
-   * 409 this whole area exists to avoid, reached by trying to fix one.
-   *
-   * Idempotent: promoting the row that is already live matches it again and
-   * answers `true` rather than moving anything.
+   * Retire the others, then revive: the reverse violates the live-row index mid-statement.
+   * Rolls back when kth names no row, or nothing would be live.
    */
   promote(kth: string, now = Date.now()): boolean {
     this.db.exec("BEGIN");
@@ -3071,69 +1566,27 @@ export class SqliteMachineKeyStore {
       try {
         this.db.exec("ROLLBACK");
       } catch {
-        // Nothing to roll back — the BEGIN itself failed. Same argument as
-        // `SqliteAgentStripStore.replace`: this method's only caller is the
-        // tunnel's 409 handler, which opens no transaction of its own.
+        // Nothing to roll back: the BEGIN itself failed.
       }
       throw error;
     }
   }
 
-  /**
-   * Record a key.
-   *
-   * `DO NOTHING` rather than an upsert: the primary key is a hash *of the public
-   * half*, so a conflict means this exact key is already here, and overwriting
-   * would replace a private key with a byte-identical one.
-   *
-   * ⚠ **It is not a race guard, and this docblock claimed it was** — "at worst
-   * hide that two callers raced to generate". A race cannot reach the conflict at
-   * all: `kth` is `jwkThumbprint(x25519Jwk(publicKey))` over a key the caller has
-   * just generated, so two processes arriving together produce two *different*
-   * keys and two different primary keys. Both INSERTs would succeed, and the table
-   * would be left holding two rows with `retired_at` NULL — one of which
-   * `active()` will never choose again, while it is the row whose private half a
-   * live session may already have been built on.
-   *
-   * **What forbids that is the schema now, not a caller.**
-   * `MACHINE_KEY_LIVE_INDEX` is unique over `retired_at IS NULL`, so the loser's
-   * INSERT is refused with `SQLITE_CONSTRAINT_UNIQUE` — and this method absorbs
-   * that one failure rather than throwing, because by then the winner's key *is*
-   * in the table and `ensureMachineKey`'s read-back is about to return it. Two
-   * defences on purpose, and they are not redundancy: `claimDaemonLock` refuses
-   * the second daemon before any store is handed out, which is a caller's
-   * discipline and the fast path; the index refuses the second live *row* if a
-   * future caller ever gets past the lock, which is what makes the invariant true
-   * of this store rather than merely cited by it.
-   */
+  /** DO NOTHING: kth hashes the public half. A racing second live row is refused by the index and absorbed. */
   save(key: Omit<StoredMachineKey, "retiredAt">): void {
     try {
       this.saveStmt.run(key.kth, key.publicKey, key.privateKey, key.createdAt);
     } catch (error) {
-      // Nothing is reported and nothing is retried on purpose: the only failure
-      // swallowed here is "somebody else already holds the live row", and the
-      // caller's next statement is the read-back that returns their key. A
-      // warning would fire on a path that is already correct, and a retry would
-      // be a retry of an INSERT that must never win.
+      // Swallowed only for the live-row conflict: the winner's key is already there for the read-back.
       if (!isLiveMachineKeyConflict(error)) throw error;
     }
   }
 
-  /**
-   * Retire one key by name.
-   *
-   * Still no caller in `src/`: the rotation that exists is `promote`, which
-   * retires the incumbent with its own `kth <> ?` statement inside the same
-   * transaction rather than by calling this. What this is for is the *other*
-   * direction — taking a key out of service with nothing to put in its place —
-   * and `daemoncheck` is the only thing that executes it.
-   */
   retire(kth: string, now = Date.now()): void {
     this.retireStmt.run(now, kth);
   }
 }
 
-/** One `machine_keys` row, as every read here shapes it. */
 function rowToMachineKey(row: Record<string, unknown>): StoredMachineKey {
   return {
     kth: String(row["kth"]),
@@ -3144,31 +1597,12 @@ function rowToMachineKey(row: Record<string, unknown>): StoredMachineKey {
   };
 }
 
-/**
- * Is this the live-row index refusing a second machine key, and nothing else?
- *
- * **Two independent things are matched, and both are load-bearing.** The errcode
- * alone would be close to enough — `save`'s statement carries its own
- * `ON CONFLICT(kth) DO NOTHING`, which resolves a primary-key collision before any
- * index is consulted (measured: a re-save of the same `kth` answers
- * `changes: 0`), and a raw primary-key violation would in any case be errcode
- * **1555** rather than 2067. The name is what keeps this narrow *in the future*:
- * the day somebody adds a second unique constraint to `machine_keys`, its
- * violation stays a throw instead of becoming a silent no-op that loses a key.
- *
- * A store that swallows the wrong error is a machine with no key that says
- * nothing, which is the failure this whole area exists to avoid — so the
- * predicate is deliberately harder to satisfy than it strictly has to be.
- */
+/** Matches errcode and index name both, so a future unique constraint still throws. */
 function isLiveMachineKeyConflict(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const errcode = (error as { errcode?: unknown }).errcode;
   return Number(errcode) === SQLITE_CONSTRAINT_UNIQUE && error.message.includes(MACHINE_KEY_LIVE_INDEX);
 }
-
-/* ------------------------------------------------------------------------- *
- * Helpers
- * ------------------------------------------------------------------------- */
 
 
 /** Wall-clock time of the last boot. Pids from before it may have been recycled. */
@@ -3176,47 +1610,19 @@ function bootTime(): number {
   return Date.now() - uptime() * 1000;
 }
 
-/**
- * Is a process with this pid running, for the purpose of the lock above?
- *
- * A deliberate **two**-answer probe, unlike `runtime/local.ts`'s, and the
- * difference is worth stating because the two look identical and answer different
- * questions. There, `EPERM` means "that pid is somebody else's now", so treating
- * it as dead would let a reaper SIGKILL a stranger. Here it means the same thing,
- * and the consequence is the opposite: the daemon that wrote this row was ours,
- * by construction — the file lives under our own `HOME` — so a pid we cannot
- * signal is a pid that has been recycled away from it, i.e. our daemon is gone
- * and the lock is free.
- *
- * The `startedAt >= bootTime()` fence in front of this is what makes that
- * reasoning safe: a row from before the last boot is not consulted at all.
- */
+/** EPERM counts as dead here: the row was written by our own daemon, so a pid we cannot signal was recycled. */
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    // `EPERM` is "recycled to another user", which for this question is free.
     return (error as NodeJS.ErrnoException).code !== "ESRCH" && (error as NodeJS.ErrnoException).code !== "EPERM"
       ? true
       : false;
   }
 }
 
-/**
- * What is installed, durably.
- *
- * The manifest is stored whole and **re-validated on every read**, which is the
- * one thing worth arguing here. A row could have been written by a build that
- * knew a manifest field this one does not, or by a build whose validation was
- * looser; parsing it back through `parseManifest` means such a row is refused as
- * a plugin — reported once and skipped — rather than half-understood as a set of
- * fields, which is exactly what a column-per-field schema would silently produce.
- *
- * The degradation is reported through `onDegraded` because it is the same kind of
- * fact that sink already carries: something durable is not what this build
- * expects, nobody is at the keyboard, and the alternative is silence.
- */
+/** The manifest is re-validated on every read; an unreadable row is reported and skipped. */
 export class SqlitePluginRecordStore implements PluginRecordStore {
   private readonly listStmt: StatementSync;
   private readonly getStmt: StatementSync;
@@ -3231,27 +1637,13 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
   ) {
     this.listStmt = db.prepare("SELECT * FROM plugins ORDER BY id");
     this.getStmt = db.prepare("SELECT * FROM plugins WHERE id = ?");
-    /*
-     * `SELECT 1` and never `SELECT *`, because this is the one question about a
-     * row that must not go through `toRecord`: a manifest this build cannot
-     * validate is exactly the case `has` exists to answer for, and re-parsing it
-     * to find out whether it is there would answer "no" for a row that is. It
-     * also means asking costs an index probe rather than a JSON parse.
-     */
     this.hasStmt = db.prepare("SELECT 1 FROM plugins WHERE id = ?");
-    // One row per plugin, so an update is a replace. `installed_at` rides the
-    // parameter list rather than being preserved by the statement, because the
-    // caller is the only thing that knows whether this is a first install.
     this.putStmt = db.prepare(
       "INSERT INTO plugins (id, version, manifest_json, enabled, installed_at, updated_at, source) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(id) DO UPDATE SET version = excluded.version, manifest_json = excluded.manifest_json, " +
         "enabled = excluded.enabled, updated_at = excluded.updated_at, source = excluded.source",
     );
-    // `installed_at` is deliberately absent from the DO UPDATE, for the reason
-    // `agent`/`created_at` are absent from the sessions upsert: it is immutable
-    // identity, and an upsert able to rewrite it can corrupt a row it was only
-    // meant to touch.
     this.enableStmt = db.prepare("UPDATE plugins SET enabled = ?, updated_at = ? WHERE id = ?");
     this.removeStmt = db.prepare("DELETE FROM plugins WHERE id = ?");
   }
@@ -3271,10 +1663,6 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
   }
 
   has(id: string): boolean {
-    // No `onDegraded` here even though this is the method that can see a row
-    // `get` reported on: the same row is reported every time it is read, and a
-    // caller asking whether something exists must not be a second source of the
-    // same sentence.
     return this.hasStmt.get(id) !== undefined;
   }
 
@@ -3300,16 +1688,7 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
 
   private toRecord(row: Record<string, unknown>): InstalledPlugin | null {
     const id = String(row["id"] ?? "");
-    /*
-     * ⚠ **`presenting: false`, because this runs on every read of a row that is
-     * already installed.** A refusal added to `manifest.ts` is otherwise applied
-     * retroactively here: `list` omits the row and `get` answers `null`, so a
-     * plugin whose manifest was legal the day it was installed silently vanishes
-     * on the next daemon start, with its contributed agents and providers. The
-     * flag drops the refusals that exist to protect the install-approval card —
-     * no card is being drawn here — and keeps every one that bounds what the
-     * plugin may do. See `parseManifest`'s own note for the split.
-     */
+    // presenting false: a refusal added later must not retroactively drop an installed plugin.
     const parsed = parseManifest(String(row["manifest_json"] ?? ""), { presenting: false });
     if (!parsed.ok) {
       this.onDegraded?.(`plugin ${id} is on disk with a manifest this build cannot read: ${parsed.message}`);
@@ -3327,21 +1706,6 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
   }
 }
 
-/**
- * What plugins have put here.
- *
- * The quota is read and applied in one synchronous stretch — the running pair,
- * the replaced row's length, `checkPluginWrite`, insert — which is safe for the
- * reason everything else in this file is: `node:sqlite` is synchronous, so there
- * is no `await` between the read and the write for a second caller to interleave
- * into. That is also what makes the running pair legitimate rather than a cache
- * that can be wrong: nothing can write between the adjustment and the statement
- * it describes.
- *
- * `checkPluginWrite` lives in `src/plugins/store.ts` rather than here, so that
- * `daemoncheck`'s in-memory implementation refuses exactly what this one refuses.
- * A quota that holds only where there is a file is a quota nothing drives.
- */
 export class SqlitePluginDataStore implements PluginDataStore {
   private readonly getStmt: StatementSync;
   private readonly sizeStmt: StatementSync;
@@ -3351,41 +1715,11 @@ export class SqlitePluginDataStore implements PluginDataStore {
   private readonly entriesStmt: StatementSync;
   private readonly dropStmt: StatementSync;
   private readonly usageStmt: StatementSync;
-  /**
-   * `(keys, bytes)` per plugin, carried forward instead of recomputed.
-   *
-   * ⚠ **`set` used to run the `COUNT(*), SUM(...)` below on every single write,
-   * and that made filling a store quadratic.** The primary key is
-   * `(plugin_id, key)` and does not cover `value`, so the sum is a full walk of
-   * the plugin's rows *plus* a table fetch of every value — up to the 1 MiB
-   * `MAX_PLUGIN_DATA_BYTES` allows, per write, synchronously, on the event loop
-   * that also owns every session and the tunnel. Measured on Node 26 against
-   * `schema.sql` itself, filling one store with ~1 KiB values one write at a
-   * time: **250 keys 3.3 ms → 0.6 ms, 500 keys 11.7 ms → 1.2 ms, 1000 keys
-   * 42.9 ms → 2.3 ms.** The ratio is the small part of that — the shape is the
-   * point: doubling the row count roughly quadrupled the old time and roughly
-   * doubled the new one, which is what "quadratic" reads like from outside.
-   * 1000 is `MAX_PLUGIN_KEYS`, so it is the ceiling rather than an unfair case.
-   *
-   * Seeded once per plugin from the same query and then moved by
-   * `size - (existing ?? 0)`, which is the delta `checkPluginWrite` is already
-   * handed. Every mutation in this class adjusts it — `set`, `delete` and
-   * `dropPlugin` — so the invariant is "it agrees with the table", not "it agrees
-   * with the last seed". `dropPlugin` **forgets** the entry rather than zeroing
-   * it, so the next touch reseeds from the table: the one shape that is still
-   * right if a row survived the drop, which `prune`'s orphan sweep exists because
-   * it can.
-   */
+  // Running (keys, bytes) per plugin: recomputing per write made filling a store quadratic.
   private readonly usage = new Map<string, { keys: number; bytes: number }>();
 
   constructor(db: DatabaseSync) {
     this.getStmt = db.prepare("SELECT value FROM plugin_data WHERE plugin_id = ? AND key = ?");
-    // What the replaced row costs, without paying to carry it back. `set` used
-    // to read the whole value through `getStmt` and measure it with
-    // `Buffer.byteLength` — up to `MAX_PLUGIN_VALUE_BYTES` of TEXT off the table
-    // to learn one integer. The `LENGTH(CAST(... AS BLOB))` is the same
-    // expression `usageStmt` sums, so the credit-back cannot disagree with the
-    // seed the way a JS-side count and a SQL-side sum could.
     this.sizeStmt = db.prepare(
       "SELECT LENGTH(CAST(value AS BLOB)) AS bytes FROM plugin_data WHERE plugin_id = ? AND key = ?",
     );
@@ -3393,56 +1727,21 @@ export class SqlitePluginDataStore implements PluginDataStore {
       "INSERT INTO plugin_data (plugin_id, key, value, updated_at) VALUES (?, ?, ?, ?) " +
         "ON CONFLICT(plugin_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
     );
-    /*
-     * `RETURNING` so the credit back to `usage` costs no second statement, and
-     * safe here for a reason that is about this `WHERE` rather than about
-     * `RETURNING`: it names the whole primary key, so at most one row can match
-     * and `get()`'s single step is the whole statement. Measured on Node 26 —
-     * the row is gone afterwards, a missing key answers `undefined` and deletes
-     * nothing, and the statement resets clean for the next call. ⚠ **Widening
-     * that `WHERE` would break this**, because `get()` stops at the first row;
-     * `dropStmt` below is many rows and deliberately does not do this.
-     */
+    // RETURNING is safe because the WHERE names the whole primary key; widening it would break the single step.
     this.deleteStmt = db.prepare(
       "DELETE FROM plugin_data WHERE plugin_id = ? AND key = ? " +
         "RETURNING LENGTH(CAST(value AS BLOB)) AS bytes",
     );
-    /*
-     * ⚠ **A binary range rather than `LIKE`, because `LIKE` is not case
-     * sensitive and this column is.** SQLite folds ASCII in `LIKE` by default
-     * while `PRIMARY KEY (plugin_id, key)` collates BINARY, so the two disagreed
-     * about what a prefix is: measured against this exact DDL, `LIKE 'card:%'`
-     * answered `['CARD:3', 'Card:2', 'card:1']` where the plugin had asked for
-     * one namespace and `card:1` was the only row in it. Those are genuinely
-     * distinct rows a plugin can hold at once, so this was handing back other
-     * people's keys — and `daemoncheck`'s in-memory store filters with
-     * `startsWith`, which is case sensitive, so the parity assertion between the
-     * two passed only because every fixture key is lower case.
-     *
-     * `key >= :from AND key < :upto` is the same comparison the index is built
-     * on, so it is also the form SQLite can seek rather than scan, and it needs
-     * no escape discipline: `%` and `_` are ordinary characters to `<`.
-     */
+    // A binary range, not LIKE: LIKE folds ASCII case while the key collates BINARY.
     this.keysStmt = db.prepare(
       "SELECT key FROM plugin_data WHERE plugin_id = ? AND key >= ? AND (? IS NULL OR key < ?) ORDER BY key",
     );
-    /*
-     * The same range and the same bounds, widened to the value and given a
-     * cursor. Kept as its own statement rather than widening `keysStmt` to
-     * `SELECT key, value`: `keys` is still the right call for a plugin that wants
-     * names, and reading every value to answer it would make the cheap call pay
-     * for the batched one. `key > ?` is what makes a page a page — a keyset
-     * cursor rather than `LIMIT/OFFSET`, so a plugin writing to its own store
-     * between two pages cannot make the second one skip a row or repeat one.
-     */
     this.entriesStmt = db.prepare(
       "SELECT key, value FROM plugin_data WHERE plugin_id = ? AND key >= ? AND (? IS NULL OR key < ?) AND key > ? ORDER BY key",
     );
     this.dropStmt = db.prepare("DELETE FROM plugin_data WHERE plugin_id = ?");
     this.usageStmt = db.prepare(
-      // `CAST(... AS BLOB)` because bare `LENGTH` on TEXT counts characters, and the
-      // quota this feeds is in bytes. `checkPluginWrite` charges `Buffer.byteLength`
-      // against it, so both sides now count the same thing.
+      // CAST AS BLOB: LENGTH on TEXT counts characters, and the quota is in bytes.
       "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0) AS bytes FROM plugin_data WHERE plugin_id = ?",
     );
   }
@@ -3455,33 +1754,16 @@ export class SqlitePluginDataStore implements PluginDataStore {
   set(pluginId: string, key: string, value: string): void {
     const usage = this.usageOf(pluginId);
     const existing = this.sizeOf(pluginId, key);
-    // Throws before anything is written, and before `usage` is moved — so a
-    // refusal leaves the pair describing the table exactly as it did.
     checkPluginWrite(key, value, { keys: usage.keys, bytes: usage.bytes, existing });
     this.setStmt.run(pluginId, key, value, Date.now());
-    // The same arithmetic `checkPluginWrite` just did, applied rather than
-    // predicted: it charges `Buffer.byteLength(value)` against the credited-back
-    // `existing`, and the row now holds those exact bytes.
     usage.bytes += Buffer.byteLength(value, "utf8") - (existing ?? 0);
     if (existing === null) usage.keys += 1;
   }
 
   delete(pluginId: string, key: string): void {
-    /*
-     * ⚠ **Seeded before the statement runs, and the order is the whole of it.**
-     * A first touch that is a `delete` — a restarted plugin clearing a key it
-     * wrote in a previous daemon life — would otherwise seed `usage` from a
-     * table the delete had *already* changed, and then subtract the same row a
-     * second time. Measured against `schema.sql` with sixteen 64 KiB values,
-     * i.e. `MAX_PLUGIN_DATA_BYTES` exactly: a fresh store deleting one of them
-     * and then writing back accepted **two** 64 KiB values rather than one, and
-     * left 1,114,112 bytes under a 1,048,576-byte ceiling. A quota that a
-     * restart widens is not a quota.
-     */
+    // Seed before deleting, or a first-touch delete subtracts the row twice and widens the quota.
     const usage = this.usageOf(pluginId);
     const row = this.deleteStmt.get(pluginId, key);
-    // `undefined` means there was no such row, and then nothing moved — deleting
-    // a key a plugin never wrote must not credit it a key it never spent.
     if (row === undefined) return;
     usage.keys -= 1;
     usage.bytes -= Number(row["bytes"] ?? 0);
@@ -3496,42 +1778,13 @@ export class SqlitePluginDataStore implements PluginDataStore {
     const entries: PluginEntry[] = [];
     let bytes = 0;
     let more = false;
-    /*
-     * `iterate()` rather than `all()`, for `EventStore.read`'s reason one subject
-     * over: `all()` materializes the whole prefix — up to the 1 MiB
-     * `MAX_PLUGIN_DATA_BYTES` lets a plugin keep — to hand back the 128 KiB of it
-     * that fit in one answer. Breaking out resets the statement; the next call is
-     * unaffected.
-     */
     const [from, upto] = range(prefix);
     for (const row of this.entriesStmt.iterate(pluginId, from, upto, upto, after)) {
       const key = String(row["key"]);
       const text = String(row["value"]);
-      /*
-       * ⚠ **Charged as the bytes the answer will carry, not as a row count.** The
-       * page is bounded because it is sent over a channel that holds 256 KiB a
-       * message while a plugin may keep 1 MiB, and a row count cannot see that:
-       * 1000 keys is exactly `MAX_PLUGIN_KEYS` and says nothing about whether
-       * they are four bytes each or four times the channel between them.
-       *
-       * `text` is the byte count of the value as it will be re-serialized, and
-       * that is exact rather than an estimate: what is in the column was produced
-       * by `JSON.stringify` in `PluginApi`, and `JSON.stringify(JSON.parse(t))`
-       * is `t` byte for byte for such a string — same key order, no whitespace,
-       * numbers round-tripping through the same double. A row edited by hand
-       * could hold whitespace and would then be charged more than it costs, which
-       * is the safe direction. The key is charged through `JSON.stringify` for the
-       * opposite reason: a key may hold `"` or `\`, which are two bytes on the
-       * wire and one here, and it is the only part of a pair that can grow.
-       */
+      // Charged in answer bytes, not rows: the channel caps a message below what a plugin may store.
       const cost = SCAFFOLD_BYTES + Buffer.byteLength(JSON.stringify(key), "utf8") + Buffer.byteLength(text, "utf8");
-      /*
-       * Always at least one, or a single oversized row wedges a reader that can
-       * never advance past it. Unreachable today — `MAX_PLUGIN_VALUE_BYTES` is
-       * 64 KiB and every budget passed in is larger — but the two numbers are set
-       * in two files, and this is the arm that decides which way that stops being
-       * true.
-       */
+      // Always at least one, or an oversized row wedges the reader.
       if (entries.length > 0 && bytes + cost > maxBytes) {
         more = true;
         break;
@@ -3544,21 +1797,9 @@ export class SqlitePluginDataStore implements PluginDataStore {
 
   dropPlugin(pluginId: string): void {
     this.dropStmt.run(pluginId);
-    // Forgotten rather than zeroed, so the next write reseeds from the table.
-    // Zeroing asserts the drop emptied it; forgetting asks. The difference is
-    // only ever visible when a row outlives the drop — which `prune`'s orphan
-    // sweep is there because it can, `host.ts` writing the row and the data as
-    // two transactions with no BEGIN around them.
     this.usage.delete(pluginId);
   }
 
-  /**
-   * The running `(keys, bytes)` for one plugin, seeded from the table on first
-   * touch and moved by every mutation after that.
-   *
-   * Returned by reference on purpose: the callers adjust the object they were
-   * handed, so there is no second write-back to forget.
-   */
   private usageOf(pluginId: string): { keys: number; bytes: number } {
     let held = this.usage.get(pluginId);
     if (held === undefined) {
@@ -3569,91 +1810,28 @@ export class SqlitePluginDataStore implements PluginDataStore {
     return held;
   }
 
-  /** What one key's value costs on disk today, or `null` when there is no row. */
   private sizeOf(pluginId: string, key: string): number | null {
     const row = this.sizeStmt.get(pluginId, key);
     return row === undefined ? null : Number(row["bytes"] ?? 0);
   }
 }
 
-/**
- * The half-open range of keys a prefix names, as the index orders them.
- *
- * ⚠ **A range and not a `LIKE`, because `LIKE` folds case and this column does
- * not.** SQLite compares ASCII case-insensitively in `LIKE` unless told
- * otherwise, while `PRIMARY KEY (plugin_id, key)` collates BINARY — so the
- * pattern and the storage disagreed about what a prefix is. Measured against
- * this file's own DDL: `LIKE 'card:%'` answered `['CARD:3', 'Card:2', 'card:1']`
- * where the plugin had named one namespace and `card:1` was the only key in it.
- * Those are three rows a plugin can hold at once, so `keys` and `entries` were
- * handing back keys their caller had not asked for, and `PRAGMA
- * case_sensitive_like` was not the answer: it is a property of the connection,
- * and a later `LIKE` somewhere else would inherit it silently.
- *
- * `>=` and `<` are the comparison the index is already built on, so this seeks
- * rather than scans, and the escape discipline goes with the pattern — `%` and
- * `_` are ordinary characters to `<`.
- *
- * `null` above means unbounded: an empty prefix names every key this plugin has,
- * and there is no string to increment.
- */
 function range(prefix: string): [string, string | null] {
   const points = [...prefix];
-  // The successor of the prefix: the last code point raised by one. Anything
-  // sorting below it and at or above the prefix is a key the prefix names.
   for (let i = points.length - 1; i >= 0; i -= 1) {
     const at = points[i]?.codePointAt(0) ?? 0;
-    // 0x10FFFF is the top of the range and cannot be raised; drop it and carry,
-    // which is the same reason `zzz` carries to `{`.
     if (at >= 0x10ffff) continue;
     return [prefix, points.slice(0, i).join("") + String.fromCodePoint(successor(at))];
   }
   return [prefix, null];
 }
 
-/**
- * One code point on, in the values that survive the trip to the column.
- *
- * ⚠ **`at + 1` was the whole of this and it over-returned at exactly one code
- * point.** A JS string holds UTF-16 code units and this column holds UTF-8, and
- * the two do not agree about the surrogate block: `node:sqlite` binds a *lone*
- * surrogate as U+FFFD rather than as its own three bytes. So the successor of a
- * prefix ending U+D7FF — computed as U+D800, a lone high surrogate — reached
- * SQLite as U+FFFD, and the upper bound jumped over the whole of E000–FFFC
- * instead of stopping one code point along.
- *
- * Measured against this file's own DDL, `SELECT hex(?)`: U+D7FF binds `ED9FBF`,
- * U+E000 binds `EE8080`, and U+D800 binds `EFBFBD` — U+FFFD's bytes exactly.
- * With the five keys `\uD7FFa`, `\uD7FFb`, `\uE000private`, `\uF8FFapple`
- * and `\uFFFCobj` under one plugin id, `keys(id, "\uD7FF")` answered all five
- * where `startsWith` answers two. That is the same defect the LIKE-to-binary-range
- * rewrite above exists to close — a prefix handing back keys its caller did not
- * ask for — surviving at the one code point that borders the surrogates.
- *
- * The second arm is the prefix's own last code point being a lone surrogate,
- * which `[...prefix]` yields as a single element and which a plugin can send:
- * `"\ud800"` survives `JSON.parse` intact and nothing on the way here rejects
- * it. It is **mapped rather than skipped** — skipping it and carrying would
- * widen the bound to the next code point up, and the honest answer is narrower
- * than that: the bind already turned it into U+FFFD, so U+FFFD is what the
- * comparison is against and U+FFFE is what comes after it. Measured the same
- * way: writing the key `"\uD800zz"` and reading it back yields `"\uFFFDzz"`,
- * and with `at + 1` the two bounds both bound as `EFBFBD`, so an empty range
- * answered nothing at all for a key that is sitting right there.
- */
+/** node:sqlite binds a lone surrogate as U+FFFD, so D7FF steps to E000 and a surrogate maps to FFFE. */
 function successor(at: number): number {
   if (at >= 0xd800 && at <= 0xdfff) return 0xfffe;
   return at === 0xd7ff ? 0xe000 : at + 1;
 }
 
-/**
- * What a plugin kept, back the way it went in.
- *
- * Shared by `get` and `entries` so a value cannot be readable one way and not the
- * other. Written by this daemon as JSON, so the catch cannot be reached through
- * the API — and if the file has been edited by hand, `null` is a better answer
- * than a throw inside somebody's plugin.
- */
 function parseStored(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -3662,20 +1840,5 @@ function parseStored(text: string): unknown {
   }
 }
 
-/**
- * What one `{"key":…,"value":…}` pair costs in the answer besides its own two strings.
- *
- * Counted rather than guessed: `{"key":` is 7, `,"value":` is 9, the closing
- * brace is 1 and the comma joining it to the next pair is 1 — 18, rounded up to
- * 20 for the two bytes of slack per pair.
- *
- * ⚠ **The rounding covers the pair and nothing else.** The array's own brackets
- * and the `{"t":"answer",…}` envelope are a fixed cost outside this number, and
- * on a one-pair page two bytes of slack does not pay for them — an earlier
- * version of this comment claimed it did, which contradicted `api.ts` one file
- * over. They are absorbed instead by the gap between the page budget and
- * `MAX_PLUGIN_MESSAGE_BYTES`, which is where a fixed cost belongs: it does not
- * scale with the page, so charging it per pair would be wrong in the other
- * direction on a large one.
- */
+/** Per-pair JSON overhead beside the two strings, rounded up; the envelope fits the page budget's headroom. */
 const SCAFFOLD_BYTES = 20;

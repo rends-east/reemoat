@@ -1,36 +1,8 @@
 import { createHash, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 
-/**
- * The token wire format, and the only place that encodes or decodes one.
- *
- * A compact JWS — `base64url(header).base64url(payload).base64url(signature)` —
- * signed with Ed25519. Hand-rolled rather than taken from a library because
- * there is no usable one here: `jose` appears in the lockfile, but only as a
- * transitive dependency of `@agentclientprotocol/*`, and pnpm's strict layout
- * makes it unimportable from `src/`. `node:crypto` signs and verifies Ed25519
- * synchronously, which is what this file needs anyway.
- *
- * Both directions live here, in one file, for the same reason `git.ts` owns
- * every git spawn: the rules that make a token safe to trust are auditable in
- * one place rather than split across the signer and the verifier, where they
- * could drift apart and only the drift would be exploitable.
- *
- * This module decides nothing about *policy* — no expiry checks, no audience
- * checks, no scope interpretation. It answers exactly one question: "did the
- * holder of this private key produce these bytes". `auth.ts` decides what that
- * entitles anyone to. Keeping the split means a claim can never be read on a
- * path where the signature has not already been checked.
- */
+// Token wire format only: answers whether a key signed these bytes and decides no policy (auth.ts does).
 
-/**
- * The only algorithm this daemon will ever accept.
- *
- * Checked as an exact string, and then used only to look a key up in a set we
- * already trust and hand it to Ed25519 verification. That is what makes
- * algorithm confusion — `alg: "none"`, or an HMAC whose "verification" key is
- * the attacker-known public key — structurally impossible here rather than
- * something this file defends against case by case.
- */
+/** The only accepted alg, compared as an exact string so `none` or an HMAC can never be admitted. */
 export const TOKEN_ALG = "EdDSA";
 
 /** Distinguishes our tokens from any other JWT that might be pointed at us. */
@@ -42,11 +14,7 @@ export interface TokenHeader {
   kid: string;
 }
 
-/**
- * The claims, in seconds since the epoch — the JWT convention, kept so the
- * tokens read normally in any debugger. Callers work in milliseconds and
- * convert at this boundary; nothing downstream sees seconds.
- */
+/** Times are seconds since the epoch; callers convert from milliseconds at this boundary. */
 export interface TokenClaims {
   iss: string;
   sub: string;
@@ -57,32 +25,9 @@ export interface TokenClaims {
   nbf: number;
   exp: number;
   scp: string[];
-  /**
-   * Which key the holder of this capability must be able to prove it has.
-   *
-   * RFC 7800's confirmation claim, with `jkt` as its RFC 7638 thumbprint member —
-   * the registered slot for exactly this, chosen over an invented name so the
-   * token goes on reading normally in a debugger, which is this file's stated
-   * posture.
-   *
-   * ⚠ **This is what stops a capability being a bearer token.** The daemon
-   * compares it against the static key the encrypted handshake authenticated, so a
-   * copy taken out of a log, a proxy or a query string cannot be used from
-   * anywhere else. Optional on the type because a control plane older than this
-   * mints without it and the *daemon* decides what to do about that — a missing
-   * claim has to be a refusal somebody can read, not a parse failure.
-   */
+  /** RFC 7800 thumbprint of the key the holder must prove on the handshake; optional because older control planes omit it. */
   cnf?: { jkt: string };
-  /**
-   * Which installation this was minted for.
-   *
-   * **Advisory, never a decision** — the same voice as `reemoat-sub` on the relay
-   * handshake, and for the same reason. Nothing may branch on it: the binding is
-   * `cnf`, which is cryptographic, and a second identifier that looks like one
-   * would eventually be read as if it were. What it is for is a refusal that can
-   * say *which* device, which is the difference between a mystery and a fixable
-   * problem.
-   */
+  /** Advisory device id for refusal messages; never branch on it, `cnf` is the binding. */
   dev?: string;
 }
 
@@ -96,24 +41,11 @@ export type DecodedToken =
   | { ok: true; header: TokenHeader; signingInput: Buffer; signature: Buffer; payloadJson: string }
   | { ok: false; code: DecodeFailure; message: string };
 
-/* ------------------------------------------------------------------ *
- * base64url
- * ------------------------------------------------------------------ */
-
 function b64uEncode(input: Buffer | string): string {
   return Buffer.from(input).toString("base64url");
 }
 
-/**
- * Strict decode.
- *
- * `Buffer.from(s, "base64url")` is famously lenient: it skips characters it
- * does not recognise instead of failing, so `"ab!cd"` and `"abcd"` decode to
- * the same bytes. Two distinct token strings that decode identically would
- * both verify against one signature, which turns a token into a family of
- * tokens and makes `jti` useless as an identifier. Re-encoding and comparing is
- * the cheapest way to insist the input was already canonical.
- */
+// Node's base64url decoder skips invalid characters, so re-encode and compare to reject non-canonical input.
 function b64uDecode(input: string): Buffer | null {
   if (input.length === 0) return null;
   const decoded = Buffer.from(input, "base64url");
@@ -121,17 +53,7 @@ function b64uDecode(input: string): Buffer | null {
   return decoded;
 }
 
-/* ------------------------------------------------------------------ *
- * Decoding
- * ------------------------------------------------------------------ */
-
-/**
- * Splits and structurally validates a token without checking the signature.
- *
- * Deliberately returns the payload as an unparsed string. A caller that has not
- * yet verified the signature has no business holding parsed claims, and handing
- * back a `TokenClaims` here would make it easy to write exactly that bug.
- */
+/** Structural checks only, no signature check: the payload stays an unparsed string until verified. */
 export function decodeToken(token: string): DecodedToken {
   const parts = token.split(".");
   if (parts.length !== 3) {
@@ -158,9 +80,6 @@ export function decodeToken(token: string): DecodedToken {
   const typ = fields["typ"];
   const kid = fields["kid"];
 
-  // Before anything else touches this token. `alg: "none"` and every symmetric
-  // algorithm die here, on an exact string comparison, with no table lookup
-  // that could ever be extended by accident.
   if (alg !== TOKEN_ALG) {
     return { ok: false, code: "bad_alg", message: `unsupported alg; only ${TOKEN_ALG} is accepted` };
   }
@@ -183,37 +102,23 @@ export function decodeToken(token: string): DecodedToken {
   return {
     ok: true,
     header: { alg, typ, kid },
-    // The signature covers the *encoded* header and payload, byte for byte, so
-    // it is taken from the original string rather than re-encoded from the
-    // parsed values. Re-encoding would verify a token we reconstructed rather
-    // than the one we were handed.
+    // The signature covers the original encoded segments, never a re-encoding of the parsed values.
     signingInput: Buffer.from(`${rawHeader}.${rawPayload}`, "ascii"),
     signature,
     payloadJson: payloadBytes.toString("utf8"),
   };
 }
 
-/**
- * Ed25519 verification. `null` as the algorithm is how `node:crypto` says
- * "the key knows"; Ed25519 prescribes its own hash and rejects any other.
- */
 export function verifySignature(decoded: Extract<DecodedToken, { ok: true }>, key: KeyObject): boolean {
   try {
     return verify(null, decoded.signingInput, key, decoded.signature);
   } catch {
-    // A key of the wrong type reaches here rather than returning false. Both
-    // mean the same thing to a caller — this token is not trustworthy.
+    // A key of the wrong type throws rather than returning false.
     return false;
   }
 }
 
-/**
- * Parses claims. Only ever called after `verifySignature` has returned true.
- *
- * Every field is checked for presence and type: a token missing `exp` must be
- * rejected, not treated as one that never expires, and that is exactly the
- * shape of bug a permissive parse would introduce.
- */
+/** Call only after verifySignature; every claim must be present and well-typed, so a missing exp is a refusal. */
 export function parseClaims(payloadJson: string): TokenClaims | null {
   let parsed: unknown;
   try {
@@ -240,16 +145,7 @@ export function parseClaims(payloadJson: string): TokenClaims | null {
   if (!isFiniteNumber(iat) || !isFiniteNumber(nbf) || !isFiniteNumber(exp)) return null;
   if (!Array.isArray(scp) || !scp.every((entry) => typeof entry === "string")) return null;
 
-  /*
-   * ⚠ **A `cnf` that is present and malformed is a refusal, never an absence.**
-   *
-   * That single line is what stops the downgrade. Absent means *this Authority is
-   * older than this daemon*, and a daemon that requires the binding refuses it
-   * with a code naming the remedy. If a malformed one read as absent, anybody able
-   * to alter a claim could turn a device-bound capability into an unbound one and
-   * the binding would be advisory — which is the shape of every protocol
-   * downgrade there has ever been.
-   */
+  // A present but malformed cnf is a refusal, never an absence, or a claim edit would downgrade the binding.
   const cnf = fields["cnf"];
   let confirmation: { jkt: string } | undefined;
   if (cnf !== undefined) {
@@ -280,10 +176,6 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-/* ------------------------------------------------------------------ *
- * Signing — used by the control plane, never by the daemon
- * ------------------------------------------------------------------ */
-
 export function signToken(claims: TokenClaims, kid: string, privateKey: KeyObject): string {
   const header: TokenHeader = { alg: TOKEN_ALG, typ: TOKEN_TYP, kid };
   const signingInput = `${b64uEncode(JSON.stringify(header))}.${b64uEncode(JSON.stringify(claims))}`;
@@ -291,11 +183,6 @@ export function signToken(claims: TokenClaims, kid: string, privateKey: KeyObjec
   return `${signingInput}.${b64uEncode(signature)}`;
 }
 
-/* ------------------------------------------------------------------ *
- * Keys
- * ------------------------------------------------------------------ */
-
-/** An Ed25519 public key as it travels: JWK, so it survives JSON unharmed. */
 export interface PublicKeyJwk {
   kty: string;
   crv: string;
@@ -307,12 +194,6 @@ export function publicKeyToJwk(key: KeyObject): PublicKeyJwk {
   return { kty: String(jwk["kty"]), crv: String(jwk["crv"]), x: String(jwk["x"]) };
 }
 
-/**
- * Rebuilds a public key from a JWK, refusing anything that is not Ed25519.
- *
- * Returns `null` rather than throwing: this parses material that arrived over
- * the network at enrollment, and a caller has to handle bad input anyway.
- */
 export function jwkToPublicKey(jwk: unknown): KeyObject | null {
   if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk)) return null;
   const fields = jwk as Record<string, unknown>;
@@ -326,39 +207,19 @@ export function jwkToPublicKey(jwk: unknown): KeyObject | null {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * X25519, and the one name a key is known by
- *
- * These live here, beside the Ed25519 helpers, for a reason that is structural
- * rather than tidy: `packages/control-plane` may reach the repository root for
- * exactly five files, and this is one of them. The Authority names a device key
- * when it mints a capability, the daemon names the same key when it checks one
- * against the handshake, and a *second* implementation of the naming is a second
- * thing that can disagree about one fact — which is `keyIdFor`'s whole argument
- * one package over. Putting it anywhere else would mean widening a ratchet that
- * exists to stay narrow.
- * ------------------------------------------------------------------ */
+// Here because the control plane may import only a few root files; one thumbprint implementation serves both sides.
 
-/** An X25519 public key as it travels. The same shape, a different curve. */
 export interface X25519PublicJwk {
   kty: "OKP";
   crv: "X25519";
   x: string;
 }
 
-/** 32 raw bytes, base64url, as the JWK an X25519 key is named by. */
 export function x25519Jwk(raw: Uint8Array): X25519PublicJwk {
   return { kty: "OKP", crv: "X25519", x: Buffer.from(raw).toString("base64url") };
 }
 
-/**
- * The raw bytes behind an X25519 JWK, or `null` for anything else.
- *
- * Strict in the same three ways `jwkToPublicKey` is, and strict about the
- * **length** as well, which that one can leave to `createPublicKey`: nothing here
- * hands the value to a library that would refuse a short key, so this is the only
- * place a 31-byte "public key" can be turned away.
- */
+/** Null unless an X25519 JWK of exactly 32 bytes; nothing downstream would refuse a short key. */
 export function x25519FromJwk(jwk: unknown): Buffer | null {
   if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk)) return null;
   const fields = jwk as Record<string, unknown>;
@@ -370,30 +231,14 @@ export function x25519FromJwk(jwk: unknown): Buffer | null {
   return raw;
 }
 
-/** X25519 public keys are 32 bytes, always. */
 export const X25519_PUBLIC_BYTES = 32;
 
-/**
- * The name a public key is known by: its RFC 7638 thumbprint, base64url.
- *
- * **Not truncated**, unlike `keyIdFor` one package over. That one is naming a
- * row and twelve characters is plenty; this one is a *commitment* — it is what a
- * capability says the caller's key is, and what the daemon compares the
- * handshake's peer key against. Shortening a commitment is how two different keys
- * come to have one name.
- *
- * RFC 7638 is a fixed recipe rather than a choice: the required members of the
- * key type, in lexicographic order, as JSON with no whitespace, hashed with
- * SHA-256. For an OKP key that is exactly `crv`, `kty`, `x` — which is why this
- * is written as a literal rather than assembled from the object. An object
- * spread would take whatever order the fields happen to be in.
- */
+/** Full RFC 7638 thumbprint, never truncated since it is a commitment; members in the fixed order crv, kty, x. */
 export function jwkThumbprint(jwk: X25519PublicJwk): string {
   const canonical = `{"crv":"${jwk.crv}","kty":"${jwk.kty}","x":"${jwk.x}"}`;
   return createHash("sha256").update(canonical, "utf8").digest("base64url");
 }
 
-/** A token is recognisable by shape before anything is decoded. */
 export function looksLikeSignedToken(token: string): boolean {
   return token.split(".").length === 3;
 }

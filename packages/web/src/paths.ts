@@ -1,47 +1,20 @@
-/**
- * Paths, as the browser sees them.
- *
- * The daemon speaks absolute paths — a `file_change` carries whatever the agent
- * wrote, and a `FileLocation` carries wherever the tool looked — while
- * `GET /sessions/:id/files` takes a path relative to the workspace root. These
- * two functions are the join between them.
- *
- * No `node:path`: this runs in a browser, and the separator is always `/` because
- * the only paths reaching here came out of a daemon that already normalized them.
- *
- * **Neither of these is a boundary.** The daemon contains the path itself with
- * `safeRelPath`, and that is where containment actually lives. What refusing here
- * buys is that this client never hands a `..` to a route on the strength of the
- * route rejecting it — and that a button is not drawn for something that cannot
- * work.
- */
+// Not a boundary: containment lives in the daemon's `safeRelPath`; this only avoids sending a `..` or drawing a dead button.
 
-/**
- * Express `path` relative to `root`, or `null` if it is not underneath it.
- *
- * The separator check is the part that earns the function: `("/w",
- * "/workspace/a")` has to be `null`, and a bare `startsWith` says it is `a`. That
- * is the same hole `paths.ts` on the daemon side spends a docblock on, one
- * language over.
- */
+/** `null` unless `path` is strictly under `root` at a separator: `/w` is not a root of `/workspace/a`. */
 export function relativeTo(root: string, path: string): string | null {
   if (root.length === 0 || path.length === 0) return null;
   const base = root.endsWith("/") ? root.slice(0, -1) : root;
 
   let rel: string;
   if (path.startsWith("/")) {
-    // The root itself is a directory, not a file, so it is never downloadable.
     if (path === base) return null;
     if (!path.startsWith(`${base}/`)) return null;
     rel = path.slice(base.length + 1);
   } else {
-    // Already relative. Passed through rather than rejected, because an agent
-    // that reports a repo-relative path is reporting the thing we want.
     rel = path;
   }
 
   if (rel.length === 0) return null;
-  // A trailing slash names a directory.
   if (rel.endsWith("/")) return null;
   for (const segment of rel.split("/")) {
     if (segment.length === 0 || segment === "." || segment === "..") return null;
@@ -49,37 +22,7 @@ export function relativeTo(root: string, path: string): string | null {
   return rel;
 }
 
-/**
- * A working directory as somebody would say it out loud.
- *
- * ⚠ **Reported from a phone**, against a pinned row reading
- * `…/rends/2026-07-tare-r…` on the title *and* `claude · …/rends/2026-07-ta…`
- * underneath it: the same absolute path, truncated twice, two thirds of it spent
- * on `/Users/rends` — which is where every session on that machine lives and
- * therefore tells nobody anything.
- *
- * The old answer was `shortPath`, which keeps the last **two** segments
- * unconditionally. `folderNames` in `groups.ts` had already written down why that
- * is wrong — "always two segments is a wall of `Users/rends`" — and went to some
- * length to avoid it for folder headers, while the rows themselves went on doing
- * exactly that.
- *
- * **The prefix to cut is the daemon's own `REEMOAT_ROOTS`**, which defaults to
- * the home directory and is what `/fs/roots` already serves to the directory
- * picker. That is a fact the daemon states rather than one this client works out:
- * a home directory guessed from `/Users/<x>` or `/home/<x>` would be a rule about
- * one operating system's conventions applied to somebody else's machine, and this
- * codebase refuses that kind of guess everywhere else on this wire.
- *
- * **The longest matching root wins**, because roots may nest (`~` and
- * `~/work`) and the more specific one is the one that says more.
- *
- * Two degradations, both deliberate and both silent. A path under **no** root —
- * `cwd` is not confined, so this is ordinary rather than exotic — falls back to
- * `shortPath`, i.e. exactly what every row drew before this existed. And an empty
- * `roots` does the same, which is what an older daemon, an unreachable one, or a
- * listing that has not landed yet all look like.
- */
+/** Cuts the longest matching daemon root to `~`; under no root, or with no roots yet, falls back to `shortPath`. */
 export function displayCwd(cwd: string, roots: readonly string[]): string {
   const path = cwd.trim();
   if (path.length === 0) return path;
@@ -88,56 +31,12 @@ export function displayCwd(cwd: string, roots: readonly string[]): string {
   return match.rel.length === 0 ? "~" : `~/${match.rel}`;
 }
 
-/**
- * The same answer as {@link displayCwd}, without the `~/` that says which root.
- *
- * For a **list row**, where the folder is the whole of what the line has room to
- * say. Every session on a machine is under the same root in the ordinary case, so
- * `~/` is two characters of pure agreement repeated down the rail — and it is the
- * two characters nearest the reader's eye, ahead of the name they are scanning
- * for. `~/2026-07-taskmanager` becomes `2026-07-taskmanager`.
- *
- * ⚠ **Only the prefix goes; the cut itself is still `displayCwd`'s.** This is not
- * `basename` — a session three levels inside a root keeps all three
- * (`work/api/packages/web`), because those levels are what tell two rows apart,
- * which is the whole reason `displayCwd` cuts against the daemon's own roots
- * rather than keeping a fixed number of segments.
- *
- * Two answers pass through unchanged, and both are correct rather than missed.
- * `~` — the root itself — has nothing below it to name, so it stays the marker;
- * stripping it would leave an empty row. And a path under **no** root already came
- * back from `shortPath` with no marker on it.
- *
- * The header above a folder is a different question with a different answer:
- * `folderNames` in `groups.ts` picks the shortest suffix that separates it from
- * its siblings, which it can only do knowing all of them.
- */
+/** Drops only the `~/` marker, never the levels below the root: those tell rows apart. */
 export function folderLabel(cwd: string, roots: readonly string[]): string {
   const shown = displayCwd(cwd, roots);
   return shown.startsWith("~/") ? shown.slice(2) : shown;
 }
 
-/**
- * Which root a path is under, and what is left of the path once it is cut.
- *
- * Extracted from {@link displayCwd} so the directory picker's breadcrumb bar and
- * the sentence under it cannot disagree about where the home directory ends. The
- * bar had its own copy of this rule, inline, and the copy was wrong twice: it
- * tested `path.startsWith(root)` — the separator hole `relativeTo`'s own docblock
- * spends a paragraph on, which makes `/Users/re` a "root" of `/Users/rends/x` and
- * then builds crumbs addressing `/Users/re/nds`, a directory that does not exist —
- * and it weighed `roots[0]` alone, so under a second, nested root the bar drew no
- * crumbs at all and the picker could not be walked.
- *
- * `rel` is `""` for the root itself, which is a real answer rather than a miss:
- * `relativeTo` says `null` there, correctly, since there is no *relative* part,
- * and here that is the whole of it.
- *
- * The longest matching root still wins, for {@link displayCwd}'s reason — roots
- * may nest (`~` and `~/work`) and the more specific one says more — and it is
- * measured on `rel` rather than on the root, which is the same comparison the
- * shorter remainder already expressed.
- */
 function matchRoot(cwd: string, roots: readonly string[]): { base: string; rel: string } | null {
   const path = cwd.trim();
   if (path.length === 0) return null;
@@ -153,38 +52,17 @@ function matchRoot(cwd: string, roots: readonly string[]): { base: string; rel: 
   return best;
 }
 
-/** One step of a path, and the absolute path that walking to it lands on. */
 export interface Crumb {
   readonly label: string;
   readonly path: string;
 }
 
-/**
- * A working directory as a row of steps somebody can walk back up.
- *
- * The same cut {@link displayCwd} makes, kept as parts instead of joined — so the
- * first step reads `~` rather than the literal home directory, which is the whole
- * of Q3.441 applied to the one surface that was still printing it in full. On a
- * 390px phone that prefix was most of the line and it is the one fact every
- * session on the machine shares.
- *
- * `label` is what to draw and `path` is where a tap goes, and they are
- * deliberately different for the first crumb only: `~` is a name for a directory
- * whose address is still absolute. Every `path` is a prefix of the input at a
- * separator, so no crumb can address a directory the input did not pass through.
- *
- * Empty for a path under no root — `cwd` is not confined, so that is ordinary
- * rather than exotic, and it is the same state an older daemon, an unreachable
- * one and a listing that has not landed yet all produce. The caller draws what it
- * drew before rather than inventing a prefix.
- */
+/** The first crumb reads `~` but addresses the absolute root (Q3.441); empty under no root. */
 export function pathCrumbs(cwd: string, roots: readonly string[]): readonly Crumb[] {
   const match = matchRoot(cwd, roots);
   if (match === null) return [];
   const crumbs: Crumb[] = [{ label: "~", path: match.base }];
   let walked = match.base;
-  // `relativeTo` has already refused an empty segment, a `.` and a `..`, so this
-  // walk cannot build a path the input did not contain.
   if (match.rel.length > 0) {
     for (const part of match.rel.split("/")) {
       walked = `${walked}/${part}`;
@@ -194,82 +72,25 @@ export function pathCrumbs(cwd: string, roots: readonly string[]): readonly Crum
   return crumbs;
 }
 
-/**
- * The last two segments of a path, with a leading ellipsis.
- *
- * The fallback {@link displayCwd} reaches for when a directory is under none of
- * the daemon's roots — at which point there is no prefix anybody agreed on to
- * cut, and two segments is the most that fits a row.
- */
 export function shortPath(path: string): string {
   const parts = path.split("/").filter((part) => part.length > 0);
   if (parts.length <= 2) return path;
   return `…/${parts.slice(-2).join("/")}`;
 }
 
-/**
- * What to call the file a person just downloaded.
- *
- * Derived from the path we asked for rather than read off `Content-Disposition`,
- * and that is forced rather than lazy: the daemon sends no
- * `Access-Control-Expose-Headers`, so on a cross-origin response a browser only
- * exposes the CORS-safelisted headers and `content-disposition` is not one of
- * them. `content-length` is, which is why the size check works and this does not.
- *
- * The upside is that no RFC 5987 parser has to exist in a browser.
- */
+/** Named from the path because the daemon does not expose `Content-Disposition` cross-origin. */
 export function filenameFor(rel: string): string | null {
   if (rel.length === 0 || rel.endsWith("/")) return null;
   const name = rel.slice(rel.lastIndexOf("/") + 1);
   return name.length === 0 ? null : name;
 }
 
-/**
- * Is this inline code span a file this session produced, and can we fetch it?
- *
- * **Two filters, and the first one does nearly all the work.** Measured across
- * every session in one real database: agent prose contained 55 path-shaped
- * strings, of which 4 were inside their session's workspace. One session printed
- * 39 paths and would show no button at all, because none of them were its own.
- * That is the answer to "won't this clutter the transcript" — it is the
- * containment test, not a guess about intent, that keeps it quiet.
- *
- * The second filter — the path is one this session actually touched, from a
- * `file_change` or a tool call's `locations` — added nothing on that sample and
- * is kept anyway, cheaply: it guards the case the sample does not contain, a
- * workspace that is a large shared directory where an agent name-drops paths it
- * never opened. Saying it is unproven is more useful than pretending it earned
- * its place.
- *
- * **Deliberately boring about what looks like a path**, because the span is a
- * string an agent chose and inline code holds commands far more often than
- * filenames. Anything with whitespace is refused outright, which removes almost
- * every command in one rule.
- *
- * This decides whether to offer a *download*. It says nothing about whether the
- * agent wanted the file **displayed** — that is a different question with a
- * different answer, and guessing it from a path is how a transcript becomes a
- * wall of images.
- */
+/** A download offer only for a whitespace-free span inside the workspace that this session touched. */
 export function downloadablePath(span: string, root: string, touched: ReadonlySet<string>): string | null {
   const text = span.trim();
   if (text.length === 0 || text.length > 4096) return null;
-  // A command, a sentence, or a flag. Not a path we are willing to act on.
   if (/\s/.test(text)) return null;
 
-  /*
-   * A bare filename counts, and requiring a slash was wrong.
-   *
-   * Measured against a real transcript: the agent wrote the two full paths *and*
-   * referred to the same files again as `ffmpeg-claude.png`, and only the former
-   * became buttons. The slash was standing in for "this looks like a path", which
-   * is a job `touched` already does properly — `npm` is not in the set and
-   * `ffmpeg-claude.png` is. Leaning on the membership test instead makes the
-   * shorter, more natural reference work and rejects no more commands than before.
-   */
-
-  // `touched` holds what the daemon reported, which is absolute. A relative span
-  // is resolved against the root before it can be compared with them.
   const absolute = text.startsWith("/")
     ? text
     : `${root.endsWith("/") ? root.slice(0, -1) : root}/${text}`;
@@ -278,7 +99,6 @@ export function downloadablePath(span: string, root: string, touched: ReadonlySe
   return relativeTo(root, absolute);
 }
 
-/** Bytes, for a chip. Short enough to sit next to a filename on a phone. */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
   if (bytes < 1024) return `${bytes} B`;

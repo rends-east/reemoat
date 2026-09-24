@@ -32,6 +32,28 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.180"
 
+# **One window, a webview per account — on macOS only, and only by this line.**
+# `seats.rs`'s multi-webview arm needs `Window::add_child`, `WindowBuilder`,
+# `WebviewBuilder` and `Manager::get_window`/`get_webview`, which Tauri 2 puts
+# behind its `unstable` feature. A **target** table rather than the plain
+# dependency line below, so every other platform's runtime is untouched: with the
+# feature on, even a plain `WebviewWindow` is built as a window child with its own
+# bounds (`tauri-runtime-wry`), which is a behaviour change nobody has measured on
+# Windows, Linux or Android. The resolver (edition 2021's v2) applies a
+# target-specific feature only when building for that target —
+# `cargo tree -e features -i tauri --target <triple>` shows it absent elsewhere.
+#
+# ⚠ **An unstable API can change in a minor release, and `2.11.5` is a caret
+# requirement**, so `nativecheck` pins `Cargo.lock`'s `tauri` and
+# `tauri-runtime-wry` to the pair this arm was built against. Moving either is a
+# re-run of the multi-webview checks `seats.rs` lists, not a routine bump.
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2.11.5", features = ["unstable"] }
+# Already in the tree through wry; named here for two things nothing in Tauri's API
+# reaches: the one message `seats.rs` sends a closing account's WKWebView (`_close`),
+# and `lib.rs` registering WebKit's typing substitutions off (Q3.647).
+objc2 = "0.6.4"
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 

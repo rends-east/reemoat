@@ -135,8 +135,10 @@ four under `--agent-source npm` — so those go with it; the vendor-installed CL
 stay, and so does every sign-in, which lives in the vendors' own directories
 (`~/.claude`, `~/.codex`, `~/.kimi-code`, opencode's data directory) that nothing
 here touches. `--purge`
-deletes the data too, and always asks first, naming the database, the checkout and
-every worktree; `--yes` answers. Neither retires the machine row — that is one tap
+deletes the data too, and always asks first, naming the database, the checkout,
+every worktree and the desktop app's daemons for other servers under
+`~/.reemoat/servers` — each of those a database and working copies of its own;
+`--yes` answers. Neither retires the machine row — that is one tap
 in Settings → Machines, and doing it here would mean the uninstall path held a
 credential.
 

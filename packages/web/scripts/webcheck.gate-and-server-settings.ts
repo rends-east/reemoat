@@ -1,20 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
 
-/**
- * Every module one entry point can reach, as paths under `packages/web/src`.
- *
- * ⚠ **Both `from "…"` and `import("…")`, and the dynamic half is the one that
- * matters here.** Five screens in this app are `lazy()`, so a walk that followed
- * static imports alone would answer *the first-paint path* rather than *the
- * bundle* — and the question this exists for is what ends up in `dist` at all,
- * where a lazily-fetched chunk is every bit as present as the entry.
- *
- * Extensionless and bundler-resolved, matching `vite.config.ts`: `./x` is tried
- * as `x.tsx`, `x.ts`, then `x/index.{tsx,ts}`. A specifier that resolves to none
- * of those is a package rather than a file and is not followed — the question is
- * about this tree.
- */
+// Every module under `packages/web/src` an entry reaches, dynamic imports included: a lazy chunk is as much in the bundle as the entry.
 function closure(entry: string, valuesOnly = false): Set<string> {
   const root = new URL("../src/", import.meta.url);
   const resolve = (from: string, spec: string): string | null => {
@@ -43,15 +30,7 @@ function closure(entry: string, valuesOnly = false): Set<string> {
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/[^\n]*/g, "");
     for (const match of code.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
-      /*
-       * ⚠ **`valuesOnly` skips what TypeScript erases.** `verbatimModuleSyntax`
-       * is on, so an `import type` emits nothing and cannot put a byte in a
-       * bundle — but it is still a `from "…"` and this regex still matches it.
-       * Measured: `ui/bits.tsx` type-imports `OfflineReason`/`Reach` from
-       * `machine.ts`, which value-imports `e2ee.ts`, so the gate's *graph* reaches
-       * the whole transport chain while its *bundle* contains none of it. Asking
-       * the broad question about bytes answered two files that are not there.
-       */
+      // `valuesOnly` skips type-only imports: TypeScript erases them, so they put no byte in a bundle.
       if (valuesOnly) {
         const upto = code.slice(0, match.index);
         const line = code.slice(upto.lastIndexOf("\n") + 1);
@@ -63,14 +42,6 @@ function closure(entry: string, valuesOnly = false): Set<string> {
   }
   return seen;
 }
-
-/* ------------------------------------------------------------------ *
- * The screens somebody reaches before there is a credential
- *
- * `gate.ts` rather than `router.ts`, for the reason the settings block above
- * gives: that module reads `window.location` and installs a `popstate` listener
- * in its body, and this driver has neither.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
 {
@@ -94,14 +65,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const { SECTION_SPECS, settingsPath } = await import("../src/settings.js");
   const { adminMayInvite, mailUsable, parseInstanceConfig, signupMode } = await import("../src/instance.js");
 
-  /* ---- which screen a path names ---- */
   check("no segments is no gate screen", parseGateScreen([]), null);
   check("an unrelated path is none", parseGateScreen(["settings"]), null);
   check("a session path is none", parseGateScreen(["m", "m_1", "s", "s_1"]), null);
-  /*
-   * The disjointness case. A prefix-matching parser would eat `/new`, which is
-   * an overlay route this app has had for far longer than it has had a gate.
-   */
+  // A prefix-matching parser would eat `/new`, an existing overlay route.
   check("and /new is none", parseGateScreen(["new"]), null);
   for (const screen of GATE_SCREENS) {
     check(`${screen} names itself`, parseGateScreen([screen]), screen);
@@ -109,21 +76,9 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   }
   check("and the case a URL arrives in does not decide", parseGateScreen(["Reset"]), null);
 
-  /*
-   * ---- what a truncated link offers next ----
-   *
-   * One card served all three token screens and its button went to `/forgot`,
-   * which is the wrong door for two of them. A cut-short **confirmation** link
-   * belongs to somebody with no account at all, and `/forgot` answers them with
-   * the deliberately blank "if that address has an account" sentence and mails
-   * nothing — so the one screen whose entire job is to be a way forward was a
-   * dead end. Asserted per screen rather than as "there is a button", because a
-   * button pointing somewhere useless passes that.
-   */
   check("a truncated sign-up link offers the sign-up form", incompleteLinkRemedy("confirm")?.path, "/register");
   check("a truncated reset link offers a new one", incompleteLinkRemedy("reset")?.path, "/forgot");
-  // Nothing honest to offer: that account exists and is signed in somewhere, so
-  // a reset is not what was lost. The footer's sign-in link is the answer.
+  // That account exists and is signed in somewhere, so a reset is not what was lost.
   check("a truncated verify link offers nothing rather than the wrong thing", incompleteLinkRemedy("verify"), null);
   check(
     "and the screens that never carry a token have no remedy at all",
@@ -133,25 +88,17 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   check("whole segments only", isGatePath("/registerish"), false);
   check("a real one is a gate path", isGatePath("/register"), true);
 
-  /*
-   * Cross-file, and the second is the one that matters: a future settings
-   * section literally called `register` would silently steal a gate route, and
-   * nothing else in this system would notice.
-   */
+  // A settings section named like a gate screen would silently steal its route.
   check(
     "no gate screen collides with a settings path",
     SECTION_SPECS.every((spec) => !isGatePath(settingsPath(spec.id))),
     true,
   );
 
-  /* ---- the token, which rides the fragment ---- */
   const real = "pr_AbCdEf0123456789_-xyz";
   check("a well-formed registration token", isGateToken(real), true);
   check("and an email token", isGateToken("et_AbCdEf0123456789xyz"), true);
   check("an API key is not one", isGateToken("rk_AbCdEf0123456789xyz"), false);
-  // `credentialKind` answers "session" for anything not starting `rk_`, so a
-  // token that reached `setSession` would be stored as *the* credential and
-  // every later request would 401 with nothing to explain it.
   check("nor is a session token", isGateToken("rs_AbCdEf0123456789xyz"), false);
   check("no dot, so the SPA fallback cannot 404 the link as an asset", isGateToken("pr_abcdefghijklmnop.png"), false);
   check("no slash, which a path split would cut", isGateToken("pr_abcdefghijklmn/op"), false);
@@ -163,27 +110,9 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   check("with or without the hash", readGateToken(`t=${real}`), real);
   check("an empty fragment is nothing", readGateToken(""), null);
   check("a fragment naming something else is nothing", readGateToken("#other=1"), null);
-  /*
-   * The truncated paste, which is the case that decides this exists at all: a
-   * link cut short by a chat app must produce a screen that says so, rather than
-   * a request the server refuses about a token nobody typed.
-   */
   check("a truncated token is nothing rather than a request", readGateToken("#t=pr_abc"), null);
   check("and rubbish in the fragment never throws", readGateToken("#%%%"), null);
-  /*
-   * **The order of the two steps, which every case above is blind to.**
-   *
-   * `readGateToken` decodes (`URLSearchParams`) and then shape-checks
-   * (`isGateToken`), and the cases above pass under either order: they use raw
-   * `%`, which `isGateToken` refuses and a decode rewrites, so both orders
-   * answer `null` and both look right. `%2D` is the fixture that separates them
-   * — it decodes to `-`, which **is** inside the token alphabet — so this is
-   * `null` if the shape check ever runs first, and the token if it does not.
-   *
-   * It is not a hypothetical rearrangement: a mail client that percent-escapes a
-   * fragment is the ordinary way one arrives, and checking first would answer
-   * "this link is incomplete" about a link that is intact.
-   */
+  // `%2D` decodes to a character inside the token alphabet, so this fails if the shape check ever runs before the decode.
   check(
     "a percent-encoded token is decoded before it is shape-checked",
     readGateToken("#t=pr_AbCdEf0123456789%2Dxyz"),
@@ -199,53 +128,22 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       !gateNeedsToken(screen),
     );
   }
-  /*
-   * Asked for different reasons and currently answered the same way, so the
-   * equality is pinned with the note that the day they diverge this assertion is
-   * deleted deliberately rather than discovered. `sectionAllowed` vs
-   * `visibleSections` has the same shape.
-   */
+  // Asked for different reasons and equal today: delete this deliberately the day they diverge.
   check(
     "needing a token and outranking a session agree, for now",
     GATE_SCREENS.every((screen) => gateNeedsToken(screen) === gateOutranksSession(screen)),
     true,
   );
 
-  /* ---- the one screen that needs a session as well as a token ---- */
-
-  /*
-   * `/verify` spends its token below THE LINE, so a token alone cannot repoint
-   * an account's reset channel — which is the point of putting it there and the
-   * reason this screen has a second requirement at all.
-   */
+  // `/verify` spends its token below THE LINE, so a token alone cannot repoint an account's reset channel.
   check("exactly one screen needs a session", GATE_SCREENS.filter(gateNeedsSession), ["verify"]);
-  /*
-   * And it is a *token* screen. A screen needing a session and no token would be
-   * one `App` draws above the sign-in form with nothing to do when it gets there,
-   * which is the shape of the defect below rather than a second one.
-   */
   check(
     "and it is one of the token screens",
     GATE_SCREENS.every((screen) => !gateNeedsSession(screen) || gateNeedsToken(screen)),
     true,
   );
 
-  /*
-   * **What that screen used to render, driven rather than described.**
-   *
-   * `VerifyEmail`'s effect fired on mount unconditionally, and `App` draws the
-   * gate *above* `signed_out` — deliberately, so a mailed link beats the sign-in
-   * form — so the ordinary visitor is somebody with no credential at all.
-   * `cpFetch` refuses before it builds a request, and the string it refuses with
-   * is the one below: an internal sentence, written so that a bug in *this
-   * client* has something to say, rendered by `linkError`'s `default:` arm under
-   * "That link did not work" at somebody whose link is intact and unspent.
-   *
-   * Asserted through the real `cp` and the real mapper, because the value of
-   * this case is that it names what the branch in `Gate.tsx` exists to prevent —
-   * and it stays true whatever that branch does, which is what stops it being
-   * deleted along with the fix.
-   */
+  // Driven through the real `cp` and mapper: this is what the signed-out branch in `Gate.tsx` exists to prevent.
   const cpModule = await import("../src/cp.js");
   const { linkError: gateLinkError } = await import("../src/account.js");
   const { ApiError: GateApiError } = await import("../src/http.js");
@@ -261,60 +159,16 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   );
   check("and what it would have shown is an internal sentence", gateLinkError(refusedVerify), "not signed in");
 
-  /* ---- what the signed-out screen offers ---- */
-  // `source: null` throughout: none of the predicates below reads it, and that is
-  // the assertion — the AGPL §13 offer is drawn beside these screens and decides
-  // none of them. A fixture carrying a URL here would hide a future predicate
-  // that started keying on it.
-  /*
-   * ⚠ **`catalogue` is on all four rather than on the one case that reads it**,
-   * and that is `parseSettingsRoute`'s `plugin` lesson arriving one file over: a
-   * fixture missing a field reads as `undefined`, `?? null` is true for that, and
-   * the assertion that was supposed to fail passes. The compiler is what catches
-   * it here, so the field is written out rather than spread in.
-   */
-  /*
-   * ⚠ **`legal: false` on all four for `catalogue`'s reason, and it is the value
-   * that matters here.** None of the predicates below reads it either, and every
-   * one of them must keep not reading it: whether an instance publishes its
-   * operator's documents decides what the sign-up form *asks for*, never whether
-   * somebody may sign in or recover an account.
-   */
-  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
-  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
-  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
-  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
+  // No predicate below may read `source` or `legal`, so a URL or a true here would hide one that started to.
+  // `catalogue` is written out on all four: a missing field reads as `undefined`, which `?? null` would let pass.
+  const off = { registration: "off", email: false, source: null, catalogue: null, appDownload: null, legal: false } as const;
+  const offMail = { registration: "off", email: true, source: null, catalogue: null, appDownload: null, legal: false } as const;
+  const openLocal = { registration: "open", email: false, source: null, catalogue: null, appDownload: null, legal: false } as const;
+  const openMail = { registration: "open", email: true, source: null, catalogue: null, appDownload: null, legal: false } as const;
 
-  /* ---- the wire body actually becomes one of those ---- */
-
-  /*
-   * **The span nothing crossed**, and a live defect lived in it for a release.
-   *
-   * The four fixtures above are hand-written in the *client's* flat shape, and
-   * every predicate below was asserted against them and passed. `relaycheck`
-   * drove the live `GET /v1/instance` and asserted the *server's* nested shape,
-   * and passed. The two shapes have never matched, `cp.ts` bridged them with
-   * `readJson<InstanceConfig>` — an unchecked assertion the compiler cannot
-   * question — and the result was a sign-in screen on an instance with
-   * registration open and SMTP working that drew neither door.
-   *
-   * So the fixtures are no longer trusted to resemble anything. The server's own
-   * object literal is lifted out of `app.ts` and run through the client's
-   * parser, which is `enrollmentLines`' technique pointed at the other package:
-   * two copies compared by *behaviour* rather than by a transcription of one.
-   * Rename `mail.configured` on either side and this goes red.
-   */
+  // The fixtures are not trusted to match the wire: the server's own handler from `app.ts` is run through the client's parser.
   const appSource = readFileSync(new URL("../../control-plane/src/app.ts", import.meta.url), "utf8");
 
-  /*
-   * The §13 constants are lifted the same way and for the same reason.
-   *
-   * They are free variables in the handler body, so they have to be supplied to
-   * `new Function` — and taking them from `app.ts` rather than writing them out
-   * here is what keeps this a *span* rather than a second transcription. Rename
-   * `SOURCE_URL`, or drop the field from the payload, and this file goes red
-   * instead of quietly asserting a shape nobody serves.
-   */
   const literalIn = (name: string): string => {
     const found = new RegExp(`^const ${name} = "([^"]*)";$`, "m").exec(appSource);
     if (found === null) throw new Error(`app.ts no longer declares a top-level string const ${name}`);
@@ -324,22 +178,11 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const VERSION = literalIn("VERSION");
   const wireSource = { url: SOURCE_URL, version: VERSION };
 
-  /*
-   * ⚠ **`catalogue` and `machineOfferUrl` are free variables, and they have to be
-   * supplied here for the same reason the §13 constants are.** The handler closes
-   * over both — each is read once at construction in `main.ts` and never from the
-   * database — so a `new Function` that did not pass them throws a
-   * `ReferenceError` at call time rather than asserting anything, which is what
-   * this span is *for*: a field added to that payload is a field this driver
-   * either spans or breaks on, never one it silently ignores. Values rather than
-   * thunks, unlike `registrationMode` and `mailConfigured`, because the handler
-   * reads them rather than calling them.
-   */
+  // Every free variable of the handler is supplied here, so a new payload field is spanned or throws, never ignored.
   const instanceWireBody = (
     mode: { enabled: boolean; requiresEmail: boolean },
     configured: boolean,
     catalogue: string | null = null,
-    offer: string | null = null,
     legal = false,
   ): unknown => {
     const source = appSource.split("\n");
@@ -347,22 +190,12 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     if (open < 0) throw new Error("app.ts no longer registers GET /v1/instance at the top level of its routes");
     const close = source.findIndex((line, index) => index > open && line === "  });");
     if (close < 0) throw new Error("app.ts's /v1/instance handler has no closing `});` at its own indent");
-    /*
-     * A `SyntaxError` out of `new Function` is the loud failure this wants: the
-     * day that handler grows a type annotation or a helper call, this stops
-     * rather than quietly asserting something else.
-     */
     const handler = new Function(
       "registrationMode",
       "mailConfigured",
       "SOURCE_URL",
       "VERSION",
       "pluginCatalogueUrl",
-      "machineOfferUrl",
-      // Injected for `machineOfferUrl`'s reason: it is a free variable of that
-      // handler, so a driver that did not name it would fail with a
-      // `ReferenceError` rather than an assertion — which is the loud failure
-      // this construction is built to produce.
       "appDownloadUrl",
       "legalDocuments",
       "db",
@@ -375,10 +208,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       SOURCE_URL,
       VERSION,
       catalogue,
-      offer,
-      // Always `null` here. What the fixtures are about is the registration and
-      // mail matrix; the download address has one parser and it is driven
-      // directly in `webcheck.devices.ts`.
+      // Always null here: the download address's parser is driven in `webcheck.devices.ts`.
       null,
       legal,
       {},
@@ -396,14 +226,6 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     parseInstanceConfig(instanceWireBody({ enabled: false, requiresEmail: false }, false)),
     { ...off, source: wireSource },
   );
-  /*
-   * ⚠ **The catalogue address, across the same span, in both states.** The market
-   * is unreachable without it and the CSP is built from the same variable — so
-   * the field going missing from the payload, or arriving under a different key,
-   * is a Plugins pop-up that silently has no Market tab on every instance in the
-   * fleet. Asserted through the server's own handler rather than against a
-   * fixture, which is what makes it a span rather than a second transcription.
-   */
   check(
     "the catalogue address survives the wire",
     parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, "https://plugins.example"))
@@ -415,51 +237,25 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true))?.catalogue,
     null,
   );
-  /*
-   * A scheme-less value is no catalogue. It would otherwise resolve **relative to
-   * this origin**, and the control plane's SPA fallback answers such a path with
-   * `index.html` — so the market would fetch the app's own HTML and report the
-   * catalogue as malformed, which is a confusing way to say "that URL is wrong".
-   * `isAbsoluteHttpUrl` is the same guard the §13 offer already gets, and for the
-   * same reason.
-   */
   check(
     "and a scheme-less one is refused rather than resolved against this origin",
     parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, "plugins.example"))?.catalogue,
     null,
   );
 
-  /*
-   * ⚠ **The offer, across the same span, in both states and in the two shapes a
-   * wrong one takes.** It is rendered into an `href` a person taps, so the two
-   * failures are not symmetrical with the catalogue's: a scheme-less value is a
-   * **relative** path, and the SPA fallback answers it with `index.html` — the
-   * offer would open a second copy of this app in a new tab, which is the §13
-   * link's own measured failure arriving on a link somebody was told would sell
-   * them a machine. And `new URL` parses `javascript:` without throwing, on the
-   * one origin that holds the browser's credential.
-   */
+  // The instance document carries no machine offer; an older control plane's is dropped on read, not refused (Q1.650).
   check(
-    "the machine offer survives the wire",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "https://get.example"))
-      ?.offer,
-    "https://get.example",
+    "the instance document names no machine offer",
+    Object.keys(instanceWireBody({ enabled: true, requiresEmail: true }, true) as object).includes("machines"),
+    false,
   );
   check(
-    "and an instance that offers nothing says so rather than leaving it undefined",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true))?.offer,
-    null,
-  );
-  check(
-    "a scheme-less offer is refused rather than resolved against this origin",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "get.example"))?.offer,
-    null,
-  );
-  check(
-    "and a javascript: one is refused rather than parsed",
-    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "javascript:alert(1)"))
-      ?.offer,
-    null,
+    "and a control plane from before the deletion is read with its offer dropped",
+    parseInstanceConfig({
+      ...(instanceWireBody({ enabled: true, requiresEmail: true }, true) as object),
+      machines: { offer: "https://get.example" },
+    }),
+    { ...openMail, source: wireSource },
   );
 
   check(
@@ -468,16 +264,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     { ...offMail, source: wireSource },
   );
 
-  /*
-   * A shape this client cannot read is `null` — **unknown**, which fails open —
-   * and never a config with everything switched off, which is the failure this
-   * parser exists to end arrived at from the other direction.
-   */
+  // An unreadable shape is `null` (unknown, which fails open), never a config with everything off.
   check("a body from before this release is unknown", parseInstanceConfig({}), null);
   check("so is one that is not an object at all", parseInstanceConfig("registration: open"), null);
   check("and null itself", parseInstanceConfig(null), null);
-  // The exact defect: the flat shape the client's *type* claims is not what the
-  // server sends, and reading it as if it were must not half-succeed.
   check("the client's own type is not a wire body", parseInstanceConfig({ registration: "open", email: true }), null);
   check(
     "a nested body missing the mail half is unknown, not mail-less",
@@ -485,47 +275,29 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     null,
   );
 
-  // Fails OPEN, the opposite of `visibleSections`: fail closed where the cost is
-  // a missing screen, fail open where the cost is a locked-out person.
+  // Fails open, unlike `visibleSections`: closed where the cost is a missing screen, open where it is a locked-out person.
   check("an unknown config is reported as unknown", gateOffer("register", null), "unknown");
   check("for both doors", gateOffer("forgot", null), "unknown");
   check("registration closed", gateOffer("register", off), "closed");
   check("registration open", gateOffer("register", openLocal), "link");
-  /*
-   * THE cell. Registration off with mail configured is an admin-only instance
-   * where people still reset their own passwords, and an implementation keyed on
-   * one "self-service" boolean gets every other cell right and this one wrong.
-   */
+  // Registration off with mail on is an admin-only instance where people still reset their own passwords.
   check("recovery survives registration being closed", gateOffer("forgot", offMail), "link");
   check("no mail, no recovery", gateOffer("forgot", openLocal), "closed");
 
-  /*
-   * **Where failing open actually happens**, and the assertion that was missing.
-   *
-   * `gateOffer` answered `"unknown"` and every call site tested `=== "link"`, so
-   * an unknown config drew *nothing* — the exact opposite of the documented
-   * intent, in the one frame somebody arriving at a sign-in screen looks at. The
-   * three-way answer was asserted; the two-way rule the screen actually uses was
-   * not, so the gap between them was invisible.
-   */
   check("an unknown config still offers to register", showsGateLink("register", null), true);
   check("and still offers recovery", showsGateLink("forgot", null), true);
   check("only a definite no hides a door", showsGateLink("register", off), false);
   check("recovery survives registration being closed, in the drawn form too", showsGateLink("forgot", offMail), true);
   check("and no mail really does hide recovery", showsGateLink("forgot", openLocal), false);
 
-  // The property, not the prose: a door is never missing without a sentence, and
-  // never explained while it is there. Through the predicate the screen uses, so
-  // the two cannot disagree.
+  // A door is never missing without a sentence, and never explained while it is there.
   for (const config of [null, off, offMail, openLocal, openMail]) {
     const silent = gateNotice(config) === null;
     const both = showsGateLink("register", config) && showsGateLink("forgot", config);
     check(`a missing door always has a sentence (${JSON.stringify(config)})`, silent, both);
   }
-  // The frame the bug lived in: nothing known, so nothing is explained away.
   check("an unknown config says nothing at all", gateNotice(null), null);
 
-  /* ---- what the sign-up form asks for ---- */
   check("an unknown config waits rather than guessing", signupMode(null), null);
   check("closed", signupMode(off), "closed");
   // The cell an implementation keyed on `email` alone gets wrong.
@@ -533,35 +305,14 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   check("open without mail takes a password only", signupMode(openLocal), "open_local");
   check("open with mail requires an address", signupMode(openMail), "open_verified");
 
-  // Fails CLOSED, the opposite of `gateOffer`, because the cost here is that an
-  // admin hands a password over by hand — the status quo, not a lockout.
+  // Fails closed, unlike `gateOffer`: the cost is an admin handing a password over by hand, not a lockout.
   check("inviting is refused while the config is unknown", adminMayInvite(null), false);
   check("and allowed only with mail", [adminMayInvite(openMail), adminMayInvite(openLocal)], [true, false]);
 
-  /* ---- and what the sign-up screen does while it knows nothing ---- */
-
-  /*
-   * **The state that did not exist, and the spinner that never ended.**
-   *
-   * `signupMode` answers `null` for an unknown config and must — this is the one
-   * screen that may not guess. What was missing is *has anybody finished
-   * asking*: without it `null` meant both "coming" and "there is no answer", the
-   * screen drew a spinner for the union, and one failed `GET /v1/instance` left
-   * it there for ever. A signed-out tab never re-reads the config —
-   * `runResume`'s re-read is behind `cp.currentCredential() !== null` — and
-   * `showsGateLink` fails **open**, so the sign-in screen offers "Create an
-   * account" *precisely* when the config is unknown. The two rules compose into
-   * a door that leads to a spinner with no footer.
-   */
+  // `null` may mean waiting only until a read finishes: a signed-out tab never re-reads, so a failed read would spin for ever.
   check("an unread config still waits", signupScreen(null, false), "waiting");
   check("and a read that finished with nothing to show says so", signupScreen(null, true), "unavailable");
 
-  /*
-   * **`waiting` if and only if nothing is known and nothing has finished** —
-   * the property rather than the two cells, because what has to hold is that no
-   * *other* combination can hang. A tenth state on `InstanceConfig` cannot
-   * arrive without answering this.
-   */
   for (const config of [null, off, offMail, openLocal, openMail]) {
     for (const settled of [true, false]) {
       check(
@@ -571,12 +322,6 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       );
     }
   }
-  /*
-   * And giving up is **derived, never latched**: a config landing after the
-   * screen said it could not tell supersedes it on the next render. Asserted as
-   * agreement with `signupMode` under *both* flags, so a future implementation
-   * that remembers having failed fails here.
-   */
   for (const config of [off, offMail, openLocal, openMail]) {
     check(
       `a config that lands wins whatever the screen had settled for (${JSON.stringify(config)})`,
@@ -585,66 +330,24 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     );
   }
 
-  /* ---- and whether an address on an account can do anything ---- */
-
-  /*
-   * Settings → Account drew the whole Email block by default, over the sentence
-   * "and you can reset your own password" — the exact capability an instance
-   * with no SMTP does not have, offered to the people who then have no way back
-   * in at all. `PUT /v1/me/email` answers `409 mail_unconfigured` before it
-   * reads the body, so every control in that block could only ever be refused.
-   */
   check("no mail, so an address can do nothing", mailUsable(openLocal), false);
   check("mail, so it can", mailUsable(openMail), true);
-  // Keyed on `email` alone, like `gateOffer("forgot", …)` and for the same
-  // reason: an admin-only instance still recovers its own accounts.
+  // Keyed on `email` alone: an admin-only instance still recovers its own accounts.
   check("registration decides nothing about it", [mailUsable(off), mailUsable(offMail)], [false, true]);
 
-  /*
-   * **The three `null` answers side by side**, because they are one sentence
-   * read in two directions — *fail closed where the cost is a missing screen,
-   * fail open where the cost is a locked-out person* — and the only way to see
-   * that a new predicate picked the right direction is against the two that
-   * already did. Recovery and the address form both lead somebody back into an
-   * account; inviting only saves an admin a copy and paste.
-   */
   check(
     "an unknown config keeps both ways back and withholds the convenience",
     [showsGateLink("forgot", null), mailUsable(null), adminMayInvite(null)],
     [true, true, false],
   );
-  /*
-   * The machine limit's predicate joins that comparison rather than choosing its
-   * direction alone. It is the same kind as the first two: `AddMachine` is the
-   * **only** way to create a machine anywhere in this app, so failing closed on
-   * an unreadable `me` — which `bootstrap`'s catch reaches, and a rolled-back
-   * control plane reaches permanently — leaves somebody with quota and no route
-   * to a machine, which is no sessions, which is no product.
-   */
+  // Fails open: `AddMachine` is the only way to create a machine, and `me` is unreadable whenever `bootstrap` fails.
   check(
     "and it keeps the only door to a machine open too",
     (await import("../src/quota.js")).mayAddMachine(null),
     true,
   );
 
-  /* ---- the order App.tsx tests all of this in ---- */
-
-  /*
-   * **Source text, because the rule is the order of four `if`s in one function
-   * body** and there is nothing pure to ask. No driver read `App.tsx` at all
-   * until this one, so the two orderings below were held by a docblock and by
-   * nothing else — and both of them fail *silently*, as a screen that does not
-   * appear rather than as an error.
-   *
-   * Comments are stripped first, for the reason the `Gate.tsx` and `cp.ts` pins
-   * strip theirs: each branch's docblock **quotes the ordering being asserted**
-   * ("Above `signed_out` because that is the state on the *first frame*"), so
-   * the raw file satisfies these searches whichever way round the code is, and
-   * the cheapest route back to green would be deleting the explanation.
-   *
-   * Every `indexOf` is checked against `>= 0` first, so a rename fails here
-   * naming the string that moved rather than passing quietly on `-1 < n`.
-   */
+  // Comment-stripped: the branch docblocks quote the ordering, so the raw file would pass whichever way round the code is.
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
@@ -659,49 +362,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   check("and still renders the shell behind it", shell >= 0, true);
   check("and still draws a document before either", legalBranch >= 0, true);
 
-  /*
-   * ⚠ **The app bundle draws no gate screen at all, and this assertion replaced
-   * three that were about where it drew one.**
-   *
-   * The three that went — a mailed link above the sign-in screen, above the wall,
-   * and the predicate deciding it — were all about an arm that turned out never
-   * to render for a mailed link in the first place. `/register`, `/confirm`,
-   * `/forgot`, `/reset` and `/verify` are served by the **control plane**, from
-   * `dist-gate`, over a closed list checked before the app's own fallback; and
-   * under the shell three of the five have no way in at all, a mail client
-   * opening a link in a browser and a Tauri window having no address bar. What
-   * that arm actually drew was the two screens `SignIn` created client-side.
-   *
-   * So the property is now structural rather than positional: there is nothing
-   * here to order. What replaces the ordering is the closure walk further down,
-   * which says the bundle cannot reach a gate screen even by accident.
-   */
+  // The app draws no gate screen: the control plane serves them from `dist-gate`.
   check("the app bundle draws no gate route at all", gateBranch, -1);
 
-  /*
-   * **And it cannot reach one even by accident, which is the assertion the arm
-   * above is only the visible half of.**
-   *
-   * A grep on `App.tsx` says what one file does; this says what the *bundle*
-   * contains, which is the property. `packages/web` builds twice off two entry
-   * points — `main.tsx` into `dist` and `gate-main.tsx` into `dist-gate` — with
-   * no shared chunks by construction (`vite.gate.config.ts` argues why they are
-   * two builds rather than two inputs), so the import graph from each entry *is*
-   * the bundle, and a new importer anywhere would show up here rather than in a
-   * review.
-   *
-   * ⚠ **`GateCard` is the named exception rather than an oversight.**
-   * `ForcedPasswordChange` renders one, and that screen stays in the app by
-   * decision — it is the wall an admin-created account lands on. So the rule is
-   * *no gate **screen***, not *nothing from that directory*, and the pair below
-   * records it as an exception on purpose: a later reader who "fixes" the first
-   * check by moving `GateCard.tsx` out of `ui/gate/` would break the directory
-   * sweep further down and make `legal-pages.md`'s own glob stale.
-   *
-   * The second half is the non-vacuity control. A closure walk that silently
-   * resolved nothing would answer the empty set and pass the first check while
-   * asserting about no bytes at all.
-   */
+  // Two builds with no shared chunks, so each entry's import graph is its bundle; `GateCard` is shared on purpose (`ForcedPasswordChange` renders one).
   const appClosure = closure("main.tsx");
   const gateClosure = closure("gate-main.tsx");
   report("the walk found a bundle at all", appClosure.size > 40, `${appClosure.size} modules from main.tsx`);
@@ -720,52 +384,28 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     [...gateClosure].filter((f) => f.startsWith("ui/gate/")).sort(),
     ["ui/gate/Gate.tsx", "ui/gate/GateApp.tsx", "ui/gate/GateCard.tsx", "ui/gate/Handoff.tsx"],
   );
-  /*
-   * The cheap loud half, which names a file rather than a graph: whichever of the
-   * two fails first, one of them says *where*.
-   */
   check("App.tsx imports no gate screen", /ui\/gate\/Gate/.test(app), false);
 
-  /*
-   * ⚠ **And the gate reaches no transport module, which is a size property with
-   * a security-shaped reason and nothing measured it until it had regressed.**
-   *
-   * Measured 2026-09-17: the gate's entry chunk had reached 335,745 bytes
-   * (106.31 kB gzipped by Vite's report) from 266 kB two days earlier, and
-   * `Noise_IK_25519_ChaChaPoly_BLAKE2s` was greppable inside the shipped file.
-   * One import edge did it — `gate-main.tsx → store.ts → machine.ts → e2ee.ts →
-   * @reemoat/protocol` — worth about 70.5 kB, 21% of the chunk, on nine addresses
-   * that are a registration form, four mailed-link screens opened by a mail
-   * client (typically on mobile data), three legal documents and a handoff page.
-   * **A browser holds no device key and `dist-gate` has no session view, so not
-   * one of those pages can open a channel.** Cutting the edge took it to 232,490
-   * bytes / 72.91 kB gzipped.
-   *
-   * This is asserted over the import graph rather than over the built artifact on
-   * purpose: the graph is readable offline with no build step, which is what every
-   * other driver here is, and `webcheck` runs in one process with no `dist`.
-   *
-   * ⚠ **The second half is what `signInAuth.ts` rests on.** Its docblock argues
-   * that `provideSignInAuth`'s last-writer-wins needs no arbitration because the
-   * two stores are never in one bundle — so exactly one provider call is ever
-   * evaluated in a program. That is a claim about these two closures and nothing
-   * else, and for a while it was a claim with no check under it.
-   */
-  /*
-   * ⚠ **And the Install control is the app's, never the gate's** — asked directly
-   * because it was asked directly. The transport sweep below already makes it
-   * structurally impossible (the agents panel needs `store.ts` and `daemon.ts`,
-   * both of which the gate is held away from), but that is an argument and this
-   * is a name: `dist-gate` is a registration form, four mailed-link screens,
-   * three legal documents and a handoff page, and a control that downloads a
-   * coding-agent CLI onto a machine has no business in any of them. Finding this
-   * module in the control plane's image would be a defect rather than a
-   * reassurance, which is the one thing a grep for it cannot tell you on its own.
-   */
+  // A browser holds no device key, so `dist-gate` can open no channel and must carry no transport; `signInAuth.ts`'s one-provider claim rests on this too.
   check(
     "the Install control ships in the app and not in the gate",
     [appClosure.has("ui/agentInstall.ts"), gateClosure.has("ui/agentInstall.ts")],
     [true, false],
+  );
+  check(
+    "the account panel and the doors that switch accounts ship in the app and not in the gate",
+    [
+      appClosure.has("ui/MenuDrawer.tsx"),
+      gateClosure.has("ui/MenuDrawer.tsx"),
+      appClosure.has("ui/UseAnotherAccount.tsx"),
+      gateClosure.has("ui/UseAnotherAccount.tsx"),
+    ],
+    [true, false, true, false],
+  );
+  check(
+    "while the sign-in screen's pure table and its store-free read ship in both",
+    [appClosure.has("slot.ts"), gateClosure.has("slot.ts"), appClosure.has("ui/backAccount.ts"), gateClosure.has("ui/backAccount.ts")],
+    [true, true, true, true],
   );
 
   const TRANSPORT = ["e2ee.ts", "machine.ts", "stream.ts", "daemon.ts", "store.ts"];
@@ -776,18 +416,12 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     TRANSPORT.filter((f) => gateValues.has(f)).sort(),
     [],
   );
-  // The non-vacuity control: the APP must reach all of them, or the list above is
-  // five names that no longer resolve to anything and the check is free.
+  // Non-vacuity: the app must reach every transport module, or the list above names nothing.
   check(
     "while the app bundle reaches every one of them",
     TRANSPORT.filter((f) => appValues.has(f)).sort(),
     [...TRANSPORT].sort(),
   );
-  /*
-   * And the second control, which is what says the `valuesOnly` walk is a walk
-   * rather than an empty set: the gate's value graph is most of its graph, and
-   * the difference between the two is exactly the erased edges named above.
-   */
   report(
     "the value-only walk still found a bundle",
     gateValues.size > 20 && gateValues.size < gateClosure.size,
@@ -803,66 +437,53 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     ],
     [true, false, true, false],
   );
-  /*
-   * ⚠ **And the gate never reaches the app's version constant, where the `define`
-   * that fills it does not exist.**
-   *
-   * `vite.config.ts` defines `__APP_VERSION__` and `vite.gate.config.ts`
-   * deliberately does not — that file's own rule is that it sets no build config
-   * asserting something the code does not say, and nothing across those nine
-   * addresses draws a version. `version.ts` guards the identifier with `typeof`, so
-   * an accidental edge would not *throw*; it would answer `"dev"`, and a shipped
-   * bundle quietly claiming to be a development build is worse than one that fails
-   * to build. This is the check that makes the guard a safety net rather than the
-   * mechanism.
-   *
-   * The control beside it is the app, which must reach it — otherwise this is one
-   * name that resolves to nothing and the check is free.
-   */
+  // `vite.gate.config.ts` defines no `__APP_VERSION__`, so a gate edge to `version.ts` would ship claiming to be a development build.
   check(
     "the gate never reaches the version constant its build does not define",
     [gateValues.has("version.ts"), appValues.has("version.ts")],
     [false, true],
   );
 
-  /* ---- the server screen, as an editing screen ---- */
-
-  /**
-   * ⚠ **Two orderings, asserted as indices, because both fail silently.**
-   *
-   * The first: the page gives up its credential **before** `setNativeServer`
-   * moves the host's base. Below it, the four-second poll or a `cpFetch` in
-   * flight hands the old fleet's session token to a host somebody just typed in —
-   * the request succeeds, nothing on screen changes, and the only trace is a
-   * token in a stranger's log.
-   *
-   * The second: the no-op exit sits **above** that clear. Putting it after —
-   * where `host_set_server`'s own early return makes it look natural — means
-   * saving the address you are already on signs you out, because the clear has
-   * already run. That is how it was written first.
-   */
+  // The page lets go of its credential before the host's base moves, with `detachSession` so the server left stays signed in (Q7.148).
+  // The no-op exit sits above both, or saving the current address would sign you out.
   const chooseServer = readFileSync(new URL("../src/ui/ChooseServer.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
   const noop = chooseServer.indexOf("typed === current");
-  const clears = chooseServer.indexOf("cp.clearSession()");
+  const clears = chooseServer.indexOf("cp.detachSession()");
   const adopts = chooseServer.indexOf("setNativeServer(typed)");
   check("the server screen still does all three", [noop >= 0, clears >= 0, adopts >= 0], [true, true, true]);
   check("saving an unchanged address gives nothing up", noop < clears, true);
   check("and the credential goes before the host's origin moves", clears < adopts, true);
-  /*
-   * The field opens on the current value, and Cancel exists only where there is
-   * one — which is what keeps the first-run state uncancellable, and is why
-   * `signInReady` never had to learn about servers.
-   */
-  /*
-   * ⚠ **Two values, and folding them into one is the defect this pins.** The
-   * field opens on the *suggestion* when there is no server and on the *truth*
-   * when there is. The first draft had one value because it wrote the compiled-in
-   * default into the shell's config at first launch — which skipped this screen
-   * entirely, so the app chose a fleet and mentioned it afterwards on the sign-in
-   * form. Nothing is written down until somebody presses Continue.
-   */
+  check("and only the page's copy goes: the server being left stays signed in", /clearSession\(/.test(chooseServer), false);
+  // The credential is restored inside the catch: a restore anywhere else would re-arm it after the base had moved.
+  const refused = chooseServer.slice(adopts, chooseServer.indexOf("window.location.assign", adopts));
+  check(
+    "a refused switch gives the page its credential back, inside the catch",
+    /catch \(cause: unknown\) \{\s*if \(held !== null\) cp\.adoptHydratedCredential\(held\.value\);/.test(refused),
+    true,
+  );
+  check(
+    "the add screen says nothing about what adding costs, nor whose the address is",
+    [/signs none of the others out/.test(chooseServer), /keeps running until you quit Reemoat/.test(chooseServer), /That address is ours/.test(chooseServer)],
+    [false, false, false],
+  );
+  const accountSection = readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8");
+  check("and Settings no longer says a switch signs this computer out", /signs this computer out/.test(accountSection), false);
+  // Settings states the server and offers no way to change it (Q3.643): repointing a signed-in account would make it a different account.
+  const accountCode = accountSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check(
+    "Settings shows the server and offers no way to change it",
+    [/Server address/.test(accountCode), /store\.pickServer\(\)/.test(accountCode), /action=\{null\}/.test(accountCode)],
+    [true, false, true],
+  );
+  check("and says where the other door is", /Another server is another account, from the menu\./.test(accountCode), true);
+  check(
+    "and Sign out says, in the shell, that it takes the account off this computer",
+    /nativeBoot\(\) !== null\s*\?\s*"Ends this sign-in on the server too, and takes this account off this computer\."/.test(accountCode),
+    true,
+  );
+  // The field opens on the build's suggestion when there is no server and on the server when there is; nothing is written until Continue.
   check(
     "the field opens on the current server, or on what the build suggests",
     /useState\(current \?\? suggested \?\? ""\)/.test(chooseServer),
@@ -870,53 +491,65 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   );
   check("the suggestion is read as itself and never as the server", /defaultServer/.test(chooseServer), true);
   check("and the first screen greets rather than interrogating", /Welcome to Reemoat/.test(chooseServer), true);
-  /*
-   * ⚠ **Two sentences on this screen were true in one of its states and false in
-   * another, which is the class of bug a screen with two entrances grows.**
-   *
-   * *"That address is ours"* is nonsense on a build that compiled no default in —
-   * which is every build from this repository, where the field opens empty. And
-   * *"forgets this computer's sign-in"* describes something that does not exist
-   * when the screen is reached by the back control on the sign-in form, where
-   * there is no session at all. Each is now gated on the fact it claims.
-   */
-  check("the explainer knows whether there is an address above it", /suggested === null \?/.test(chooseServer), true);
-  check("and the sign-in it says will be lost is one that exists", /editing && signedIn &&/.test(chooseServer), true);
-  /*
-   * One field, first screen — and deliberately not when editing, where the sheet
-   * has already placed focus and taking it is the defect `Sheet`'s own effect
-   * exists to avoid.
-   */
-  check("the first screen focuses the one thing it asks for", /autoFocus=\{!editing\}/.test(chooseServer), true);
-  check("cancel is offered only where there is a server to go back to", /editing && \(/.test(chooseServer), true);
-  check("it says what changing servers costs", /forgets this computer/.test(chooseServer), true);
+  check("while an account being added is named as that", /adding \? "Add account" : "Welcome to Reemoat"/.test(chooseServer), true);
+  check(
+    "an add is decided by the live list, and the screen waits for it",
+    [/const back = useBackAccount\(\);/.test(chooseServer), /const adding = back !== null && back !== undefined;/.test(chooseServer), /if \(back === undefined\) return/.test(chooseServer)],
+    [true, true, true],
+  );
+  check(
+    "the explainer is drawn only where there is no address above it, on a first run",
+    /\{!editing && !adding && suggested === null && \(/.test(chooseServer),
+    true,
+  );
+  check("no sentence here is about a sign-in the screen holds: no entrance reaches it with one", /signedIn/.test(chooseServer), false);
+  // A disabled input takes no focus, so Continue takes it while the field is locked.
+  check(
+    "the field takes focus where it can be typed in, and Continue does while it is locked",
+    [/autoFocus=\{!editing && !locked\}/.test(chooseServer), /autoFocus=\{locked\}/.test(chooseServer)],
+    [true, true],
+  );
+  check(
+    "the way back is drawn only on an add, and names the account it returns to",
+    [
+      /\{adding && \(\s*<button[^>]*onClick=\{leave\}/.test(chooseServer),
+      /<span className="truncate">\{back\.label\}<\/span>/.test(chooseServer),
+      /store\.switchAccount\(null\)/.test(chooseServer),
+    ],
+    [true, true, true],
+  );
+  check("and there is no Cancel beside Continue", />\s*Cancel\s*</.test(chooseServer), false);
+  check("it no longer claims a switch keeps a sign-in it may not have", /stays signed in to/.test(chooseServer), false);
+  check("and no longer that it forgets a sign-in", /forgets this computer/.test(chooseServer), false);
   check("and the probe carries no credential", /probeServer\([^)]*authorization/i.test(chooseServer), false);
 
-  /*
-   * **The picker outranks everything, and its reason grew.** It was "a document
-   * route waits on `state.config`, and `config` needs a server, so `/terms` in a
-   * freshly installed app would spin for ever". With the picker reachable while
-   * signed in — from the sign-in screen's control and from Settings → Account —
-   * "there is no usable config" is every frame it is open rather than only the
-   * first ones after an install.
-   */
+  // Locked with `disabled`, never `readOnly` (focusable, draws a caret); the pencil calls `flushSync` first because a disabled field ignores focus (Q3.643).
+  check("the field is locked only on the build's own suggestion", /useState\(!editing && suggested !== null\)/.test(chooseServer), true);
+  check("by disabling it, never by making it read-only", [/disabled=\{locked\}/.test(chooseServer), /readOnly/.test(chooseServer)], [true, false]);
+  check(
+    "with a labelled pencil beside it while it is",
+    /\{locked && \(\s*<IconButton icon=\{Pencil\} label="Edit server address" size="nav"/.test(chooseServer),
+    true,
+  );
+  check(
+    "which unlocks, then focuses, then selects, inside the tap",
+    /flushSync\(\(\) => setLocked\(false\)\);\s*field\.current\?\.focus\(\);\s*field\.current\?\.select\(\);/.test(chooseServer),
+    true,
+  );
+  // Without the two `disabled:` variants a disabled `FIELD` draws like an editable one, and opacity would dim the address too.
+  const fieldClass = /className=\{`min-w-0 flex-1 \$\{FIELD\}([^`]*)`\}/.exec(chooseServer)?.[1] ?? "";
+  report("the field's own class string was found", fieldClass.length > 0, fieldClass.trim());
+  check(
+    "the locked field dims its ink and steps its boundary back, with no opacity anywhere here",
+    [/disabled:border-edge\b/.test(fieldClass), /disabled:text-muted/.test(fieldClass), /opacity/.test(chooseServer)],
+    [true, true, false],
+  );
+
+  // The picker outranks every screen that needs a config, since a config needs a server.
   check("the server picker is drawn above every screen that needs a config", picker >= 0 && picker < legalBranch, true);
   check("and above the sign-in screen it is reached from", picker < signedOut, true);
 
-  /*
-   * ⚠ **Every hook above every early return, asserted for the first time.**
-   *
-   * `App.tsx` records this as a defect it actually shipped — a render that took
-   * the gate, the sign-out or the forced-password arm ran one hook fewer than the
-   * render before it, `Minified React error #310`, an error boundary, and the
-   * whole screen gone — and notes it was *"caught in a browser rather than by
-   * `typecheck`, which cannot see it"*. Nothing has checked it since. This change
-   * widens the first early return, which is exactly the edit that would tempt
-   * somebody to compute something new just above it.
-   *
-   * Sliced to `App`'s own body: `OverlaySheet` below it calls `useState` after
-   * these returns, in file order, and is a different component.
-   */
+  // Sliced to `App`'s own body: a hook below an early return crashes the render (React error #310), which `typecheck` cannot see.
   const appBody = app.slice(app.indexOf("export function App("), app.indexOf("function OverlaySheet("));
   const lastHook = Math.max(
     ...["useState(", "useEffect(", "useSyncExternalStore(", "useRoute(", "useUnder(", "useOrigin("].map((hook) =>
@@ -925,37 +558,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   );
   check("the hook sweep can see App's body at all", appBody.length > 0 && lastHook > 0, true);
   check("every hook in App runs above its first early return", lastHook < appBody.indexOf("<ChooseServer"), true);
-  /*
-   * The wall itself precedes the shell, and that is the other half: below
-   * `<AppShell` an account holding a temporary password is handed the whole app,
-   * where every route under THE LINE answers `403 password_change_required` and
-   * nothing on screen says why — the four routes left reachable above that gate
-   * are `GET /v1/me`, the password change and the two session deletes.
-   */
+  // Past the wall a temporary password would get the whole app, where every route below THE LINE answers 403.
   check("and the wall itself is in front of the app", wall < shell, true);
 
-  /* ---- what the pre-credential screens may do ---- */
-
-  /*
-   * **No gate screen stores what it was mailed.**
-   *
-   * `credentialKind` answers "session" for anything not starting `rk_`, so a
-   * `pr_`/`et_` token handed to `setSession` is written to `localStorage` as
-   * *the* credential — and every later request 401s with nothing on screen to
-   * explain it, on a device that may never have been signed in. `isGateToken`
-   * refuses that shape above; this refuses the call.
-   *
-   * **And every navigation out of these screens replaces rather than pushes.**
-   * These links are single-use: Back onto a URL whose fragment still holds a
-   * spent token re-submits it, the server answers `token_unusable`, and the
-   * screen says the link is dead about a reset that in fact worked. Counted
-   * rather than matched call by call, because what has to hold is that *every*
-   * one carries the argument, which a search for the good shape alone cannot
-   * say.
-   *
-   * The **directory** is read rather than the two files named, so a third gate
-   * screen is covered by arriving rather than by somebody remembering this.
-   */
+  // A mailed token must never reach `setSession`, and every navigation replaces: Back onto a spent token would re-submit it.
   const gateDir = new URL("../src/ui/gate/", import.meta.url);
   const gateScreenFiles = readdirSync(gateDir).filter((name) => /\.tsx?$/.test(name));
   check("there are gate screens to have checked", gateScreenFiles.length > 0, true);
@@ -964,54 +570,23 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/[^\n]*/g, "");
     check(`${name} never stores a mailed token as the credential`, /setSession\(/.test(code), false);
-    // One level of nesting is allowed for, so `navigate(gatePath(screen), true)`
-    // counts as replacing rather than as a call that lost its argument.
+    // One level of nesting is allowed for, so a nested call as the first argument still counts as replacing.
     const calls = code.match(/navigate\(/g)?.length ?? 0;
     const replacing = code.match(/navigate\((?:[^()]|\([^()]*\))*,\s*true\)/g)?.length ?? 0;
     check(`${name} replaces on all ${calls} of its navigations`, replacing, calls);
   }
 
-  /* ---- and no card is a wait with no way off it ---- */
-
-  /*
-   * **Every `GateCard` holding a spinner carries a footer.**
-   *
-   * The rule generalises the defect rather than restating it: `/register` drew a
-   * bare centred `Spinner` in a card with no footer while it waited for
-   * `GET /v1/instance`, and one failed read made that the whole screen, for ever,
-   * on a tab that never asks again. A card somebody can only *wait* on is the one
-   * card that must always say how to leave, whether the wait is a second or
-   * permanent — and stated that way it also covers `/verify`'s own spinner, which
-   * is bounded by `CP_TIMEOUT_MS` and was nonetheless the same shape.
-   *
-   * The scan is deliberately crude: split on the opening tag, look at each card's
-   * own text. It is blind to a spinner rendered by a helper, which is the price
-   * of not parsing JSX — and the failure it guards is somebody deleting a
-   * `footer=`, which it sees.
-   */
+  // A card that can only be waited on must say how to leave; the scan is crude and misses a spinner drawn by a helper.
   const gateTsx = readFileSync(new URL("../src/ui/gate/Gate.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
   const cards = gateTsx.split("<GateCard").slice(1).map((rest) => rest.slice(0, rest.indexOf("</GateCard>")));
   const waits = cards.filter((card) => card.includes("<Spinner"));
-  // Non-vacuity: a rule about spinner cards is worth nothing on a file with none,
-  // and this is exactly the shape that would be "fixed" by deleting the wait.
+  // Non-vacuity: a rule about spinner cards is worth nothing on a file with none.
   check("there are cards that can only be waited on", waits.length > 0, true);
   check("and every one of them carries a way off it", waits.filter((card) => card.includes("footer=")).length, waits.length);
 
-  /* ---- /verify: the session, and where the way in is ---- */
-
-  /*
-   * **Source text, because the rule is the order of two `if`s** — the same
-   * argument the `App.tsx` block above makes, one level down. The pure half is
-   * asserted at `gateNeedsSession`; this is the half that says the component
-   * asks it, asks it *first*, and answers with something that keeps the token.
-   *
-   * Comments stripped: the branch's own docblock quotes both `not signed in` and
-   * `VerifyEmail`, so the raw file satisfies every search here whichever way
-   * round the code is, and the cheapest route back to green would be deleting
-   * the explanation.
-   */
+  // Comment-stripped: the branch's docblock quotes both strings searched for here.
   const asksForSession = gateTsx.indexOf("gateNeedsSession(");
   const testsSignedOut = gateTsx.indexOf('phase === "signed_out"');
   const mountsVerify = gateTsx.indexOf("<VerifyEmail");
@@ -1023,41 +598,14 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     Math.max(asksForSession, testsSignedOut) < mountsVerify,
     true,
   );
-  /*
-   * **And the way on is the form, not a navigation.** The token is in this URL's
-   * fragment and nowhere else, so anything that moves you off `/verify` moves
-   * you off the link — back to a mail somebody has to find again. Rendering
-   * `SignIn` here leaves the URL alone, so signing in re-renders this same
-   * component with a credential and `VerifyEmail` spends the token with no
-   * second tap. A card with a button to `/` passes every other check on this
-   * page and loses the token.
-   */
+  // Rendering `SignIn` in place keeps the token in this URL's fragment; a navigation would lose it.
   check("and the way on is the sign-in form itself", /<SignIn\b/.test(gateTsx), true);
 
-  /* ---- /register: the screen asks again, and asks one function ---- */
-
-  /*
-   * The terminal state is only reachable if something can finish a read, and
-   * `store.refreshConfig()` is the only thing on a signed-out tab that can:
-   * `loadConfig`'s catch is bare by design, so a failure is invisible to the
-   * store and this screen is where it stops being a spinner.
-   */
+  // `store.refreshConfig` is the only thing on a signed-out tab that can finish a config read.
   check("the sign-up screen can ask the control plane again", /store\.refreshConfig\(/.test(gateTsx), true);
-  /*
-   * And it reads the five-way answer rather than the three-way one — the mistake
-   * `showsGateLink` exists to record, in which a call site tested the narrower
-   * function and threw the new state away.
-   */
   check("and reads the screen state rather than re-deriving the mode", /signupMode\(/.test(gateTsx), false);
   check("through the function that has both inputs", /signupScreen\(/.test(gateTsx), true);
 
-  /* ---- Settings → Account: the instance, not just the person ---- */
-
-  /*
-   * `Me` says nothing about what the instance can do, so the block promising a
-   * self-service password reset had no way to know it was lying. The config is
-   * handed down the same way `UsersSection` already takes it.
-   */
   const settingsTsx = readFileSync(new URL("../src/ui/settings/Settings.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
@@ -1069,23 +617,11 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const asksMailUsable = accountTsx.indexOf("mailUsable(");
   const promisesReset = accountTsx.indexOf("reset your own password");
   check("the account screen asks the shared predicate", asksMailUsable >= 0, true);
-  // The `gateOffer` mistake in miniature: a call site reading the raw field is a
-  // second copy of the fail-open decision, and the copy is the one that gets it
-  // backwards.
   check("and never re-derives it from the config's own field", /config\?\.email|config\.email/.test(accountTsx), false);
   check("the promise about resetting your own password is still made", promisesReset >= 0, true);
   check("and it is made downstream of the check that it is true", asksMailUsable < promisesReset, true);
-  /*
-   * **Shown with the reason, never silently dropped.** Hiding the block would
-   * pass every check above and teach nobody why they have no way back into their
-   * account — so the sentence naming what is missing is itself the assertion.
-   */
   check("and where it cannot be kept, the block says why", /cannot send mail/.test(accountTsx), true);
 }
-
-/* ------------------------------------------------------------------ *
- * Where a setting's value came from, and the one badge a person's row carries
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nserver settings, and how stuck somebody is\n");
 {
@@ -1130,17 +666,7 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     4,
   );
 
-  /* ---- what a write-only secret says about itself ---- */
-
-  /*
-   * **The state that made the old two-part sentence contradict itself.** `set`
-   * is the server answering "is there a database row", never "does a password
-   * exist" — `app.ts` writes `set: resolved.source === "database"` — so a
-   * password supplied by `REEMOAT_CP_SMTP_PASSWORD`, which is a documented knob
-   * that `mailConfigured` reads and delivers on, arrives as
-   * `set: false, envSet: true`. The screen said "No password set." and then
-   * appended "from the environment", beside a Send test button it had enabled.
-   */
+  // `set` means a database row, not that a password exists: an environment password arrives with set false and envSet true.
   const secret = (over: Record<string, unknown>) =>
     ({ key: "smtp.password", secret: true, value: null, set: false, source: "unset", envName: "X", envSet: false, ...over }) as never;
 
@@ -1156,15 +682,8 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     "A password is set here, overriding the environment.",
   );
   check("nothing anywhere is the only 'no'", secretFieldText(secret({})), "No password is set.");
-  // A field the server did not send is unknown, and claiming "no password"
-  // about it would be the same lie one step further out.
   check("an absent field says nothing at all", secretFieldText(undefined), null);
 
-  /*
-   * The property rather than the four strings: **the screen never denies a
-   * password that exists on either side.** A fifth state cannot arrive without
-   * answering this.
-   */
   for (const set of [true, false]) {
     for (const envSet of [true, false]) {
       const source = set ? "database" : envSet ? "environment" : "unset";
@@ -1174,8 +693,7 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   }
 
   const draft = { host: "", port: "", security: "", username: "", from: "", publicUrl: "" };
-  // An empty form is "mail is off", a legal state — a form that refused to save
-  // it could never turn mail off.
+  // An empty form means mail is off, which is legal: refusing it would make mail impossible to turn off.
   check("an empty draft is not a problem", smtpProblem(draft), null);
   check("a port out of range is", smtpProblem({ ...draft, host: "h", port: "70000" }) !== null, true);
   check("port zero is", smtpProblem({ ...draft, host: "h", port: "0" }) !== null, true);
@@ -1191,22 +709,13 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("and matching is not", senderMismatch({ ...draft, username: "a@b", from: "A@B" }), false);
   check("a username that is not an address says nothing", senderMismatch({ ...draft, username: "apikey", from: "c@d" }), false);
 
-  /*
-   * ⭐ **A per-field Reset survives the next Save** (review D14). `save` sends
-   * all six fields from the draft, and the Reset used to re-sync the draft only
-   * while the form had no edits — so edit Host, Reset From, Save wrote the old
-   * From straight back under a "Saved." toast. The rule is one field: the
-   * cleared key takes the server's answer, every other field keeps its edit.
-   */
-  // Every field differs between the two, so "moves exactly one" below is a real
-  // claim on all six rather than on the three a blank fixture would leave equal.
+  // Every field differs between the two, so moving exactly one is a real claim on all six.
   const edited = { host: "typed.example", port: "2525", security: "plaintext", username: "typed", from: "typed@example", publicUrl: "https://typed.example" };
   const answered = { host: "env.example", port: "587", security: "starttls", username: "env", from: "env@example", publicUrl: "https://env.example" };
   check("a cleared key takes the server's value in a dirty draft", draftAfterClear(edited, "mail.from", answered).from, "env@example");
   check("and every other field keeps its edit", draftAfterClear(edited, "mail.from", answered), { ...edited, from: "env@example" });
   // The password is write-only and has no draft field, so clearing it moves nothing.
   check("a key with no draft field changes nothing", draftAfterClear(edited, "smtp.password", answered), edited);
-  // Every key the form saves has a field, and each clear touches exactly one.
   check(
     "the table names the six keys Save sends",
     Object.keys(SMTP_DRAFT_FIELD).sort(),
@@ -1218,14 +727,7 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     check(`clearing ${key} moves ${name} and nothing else`, moved, [name]);
   }
 
-  /*
-   * **The public URL is a value on a fresh server, not a placeholder** (review
-   * D15). `mailConfigured` requires `mail.public_url`, and the screen offered
-   * the origin only greyed in the box — so a filled-in form saved into a server
-   * that still refused to send. Unset anywhere: the origin goes into the draft
-   * and the form is dirty, so Save is live and sends it. Set anywhere — here
-   * or in the environment — it is somebody's decision and nothing moves.
-   */
+  // `mailConfigured` requires `mail.public_url`, so an unset one is seeded as a real draft value rather than a placeholder.
   const origin = "https://cp.example";
   const urlField = (over: Record<string, unknown>) => field({ key: "mail.public_url", ...over });
   check("unset anywhere: the origin is seeded and the form is dirty", seedPublicUrl(draft, urlField({}), origin), {
@@ -1246,38 +748,16 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     seedPublicUrl(stored, urlField({ source: "environment", envSet: true, value: stored.publicUrl }), origin),
     { draft: stored, dirty: false },
   );
-  // An origin `smtpProblem` would refuse is not offered: a seeded value under a
-  // problem sentence is worse than an empty box.
+  // An origin `smtpProblem` would refuse is not seeded.
   check("a non-http origin is not seeded", seedPublicUrl(draft, urlField({}), "null"), { draft, dirty: false });
 
-  /* ---- whether mail is arriving, which is not whether it is configured ---- */
-
-  /*
-   * The only surface in the product that can say mail is broken. Everything else
-   * reports the *queue*: the server's `send()` answers whether a row was
-   * inserted, and Users draws "Invitation queued for …" from it — so a provider
-   * that started rejecting the sender produced a green toast and a first user who
-   * never heard from us, with the failure reaching one `console.error` in a
-   * container whose logs rotate.
-   */
   const healthy = { pending: 0, failed: 0, oldestPendingMs: null, lastError: null, lastFailedAt: null, paused: false };
   check("a quiet queue says nothing", mailTrouble(healthy), null);
   check("and neither does something in flight", mailTrouble({ ...healthy, pending: 2, oldestPendingMs: 30_000 }), null);
 
-  /*
-   * **`undefined` is not `null`-with-a-clear-conscience.** A control plane rolled
-   * back past the `delivery` object sends nothing, and inventing an all-clear
-   * from absence is how a banner becomes one nobody trusts. Same answer, and the
-   * reason it is the same answer is that both mean "draw nothing" — what differs
-   * is what it would take to be wrong.
-   */
   check("an older control plane draws no banner rather than an all-clear", mailTrouble(undefined), null);
 
-  /*
-   * Ordered by remedy rather than by severity, which is the rule the machine
-   * badge already follows for a banned owner over a machine limit. Only the
-   * breaker is *currently* stopping delivery.
-   */
+  // Ordered by remedy, not severity: only the breaker is currently stopping delivery.
   check(
     "an open breaker outranks a count of past failures",
     mailTrouble({ ...healthy, failed: 3, paused: true })?.kind,
@@ -1292,14 +772,12 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     ],
     [null, "backlog"],
   );
-  // One failure reads as one message, not as "1 messages".
   report(
     "and it counts in English",
     mailTrouble({ ...healthy, failed: 1 })?.text.includes("1 message has") === true,
     `${String(mailTrouble({ ...healthy, failed: 1 })?.text)}`,
   );
 
-  /* ---- the one state badge ---- */
   const person = { disabled: false, hasPassword: true, mustChangePassword: false, emailVerified: true, email: "a@b" };
   check("an ordinary account wears nothing", userState(person, true), null);
   // The precedence case an `if (temp)` written first gets wrong.
@@ -1311,11 +789,8 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("no password outranks a temporary one", userState({ ...person, hasPassword: false, mustChangePassword: true }, true), "no_password");
   check("a temporary password", userState({ ...person, mustChangePassword: true }, true), "temporary_password");
   check("an unconfirmed address", userState({ ...person, emailVerified: false }, true), "unverified_email");
-  // No address is not an *unverified* address — the case a bare `!verified` test
-  // brands every account that simply never added one.
   check("no address at all is not unconfirmed", userState({ ...person, email: null, emailVerified: false }, true), null);
-  // On an instance with no SMTP nobody has a verified address, so a badge on
-  // every row would be noise.
+  // Without SMTP nobody has a verified address, so a badge on every row would be noise.
   check("and nothing is flagged where nobody could confirm", userState({ ...person, emailVerified: false }, false), null);
   check(
     "each state reads differently",
@@ -1323,39 +798,20 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     4,
   );
 
-  /*
-   * `emailChangeNeedsProof` is gone (Q1.630): `PUT /v1/me/email` takes the
-   * session alone by the owner's decision, and the predicate that decided when to
-   * draw the password field went with it. An API-key caller proves the password
-   * (Q1.630, amended 2026-09-05), and this app still draws no field for it:
-   * `SignIn` takes no key, so the only browser presenting one is the legacy
-   * adoption, which sees the server's 400 sentence. `relaycheck` pins the route's
-   * shape for both credentials.
-   */
+  // The email change takes the session alone (Q1.630); `relaycheck` pins the route for both credentials.
   check("the email form asks no proof of its own", /emailChangeNeedsProof|account-email-proof/.test(
     readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8"),
   ), false);
 
-  /*
-   * Every way a link can be dead reads the same. Written as an equality rather
-   * than trusted to the prose: the three are indistinguishable to anybody who
-   * does not hold the token, and a future second server code must not quietly
-   * split them on screen.
-   */
+  // The three dead-link causes must read the same: they are indistinguishable without the token.
   const dead = linkError(new ApiError(409, "token_unusable", "unknown, used or expired"));
   check("an unusable link says one thing", dead.length > 0, true);
   check("and says nothing about which of the three it was", /used|expired/.test(dead) && !/unknown token/.test(dead), true);
 
-  /* ---- the nav, and the heading that must not float over nothing ---- */
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
   check("a non-admin sees five rows", navRows(plain).map((row) => row.spec.id), ["account", "devices", "keys", "machines", "logs"]);
-  /*
-   * THE case, and it is invisible to the only people who could report it: a
-   * heading computed from the static table renders "Server" above nothing for a
-   * non-admin, and only an admin ever sees this nav in a correct state.
-   */
   check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
   check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "devices", "keys", "machines", "logs"]);
   check(
@@ -1370,16 +826,9 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   );
   const adminIndex = (id: string): number => navRows(admin).findIndex((row) => row.spec.id === id);
   check("and Server sits above Users", adminIndex("server") < adminIndex("users"), true);
-  // Email slots between them: it was split out of Server and reads as its
-  // continuation, and Users is the screen with the most rows, so it goes last.
+  // Email reads as Server's continuation, and Users has the most rows, so it goes last.
   check("with Email between the two", adminIndex("server") < adminIndex("email") && adminIndex("email") < adminIndex("users"), true);
   check("every group has a title", Object.keys(GROUP_TITLES).length >= 1, true);
-  /*
-   * ⚠ **The heading may not be a word a row under it uses.** It was "Server"
-   * over "Server settings", and a heading that restates its first row reads as
-   * the row. Pinned as the string *and* as the property, so a renamed row cannot
-   * quietly collide with it again. Decision 2A.
-   */
   check("the admin band is headed \"Admin\"", GROUP_TITLES.server, "Admin");
   check(
     "and no row under it shares a word with its heading",
@@ -1389,74 +838,31 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     true,
   );
 
-  /*
-   * **No field in Server or Email settings writes itself.**
-   *
-   * The SMTP form shipped with two saving mechanisms: some fields committed on
-   * `onBlur` while the Save button wrote the same keys from a separate draft, and
-   * an empty value in that draft means *clear* — so pressing Save deleted exactly
-   * the fields that had just saved themselves, and the screen then correctly
-   * reported them as not set. It reads as the form having ignored everything
-   * typed into it, which is the worst possible symptom for a settings form.
-   *
-   * Source text, in the `<RailHandle />` idiom this file already uses, because
-   * the rule is structural and no pure function can carry it: **one key, one
-   * writer.** A blur-commit is how the second writer becomes invisible.
-   */
+  // One key, one writer: a blur-commit beside Save would make Save clear fields that had just saved themselves.
   const serverSection = readFileSync(
     new URL("../src/ui/settings/ServerSection.tsx", import.meta.url),
     "utf8",
   );
-  // The SMTP form is `EmailSection` since the split; the field primitive both
-  // draw is `SettingField`, so all three are swept.
+  // The SMTP form is `EmailSection`, and both screens draw `SettingField`, so all three are swept.
   const emailSection = readFileSync(new URL("../src/ui/settings/EmailSection.tsx", import.meta.url), "utf8");
   const settingField = readFileSync(new URL("../src/ui/settings/SettingField.tsx", import.meta.url), "utf8");
   check("no settings field commits on blur", /onBlur=/.test(serverSection + emailSection + settingField), false);
-  /*
-   * **Reset waits with the rest of the form** (review D8). `busy` is the flag
-   * Save and the password's Remove already read, and Reset was the one control
-   * on these two screens that stayed live during a write — a clear racing a
-   * Save, both answering with the whole table in an order nobody chose. Pinned
-   * on the primitive and on every call site: a field drawn without `busy`
-   * gets a Reset that is never disabled, with the prop defaulting to `false`.
-   */
-  // Stripped for the positive, as this file's other positives are: the raw read
-  // above is right for the fail-closed negative and wrong here, where a docblock
-  // quoting the JSX would satisfy the regex (E9's review).
+  // Reset is disabled while a write is out, on the primitive and at every call site, since the prop defaults to false.
+  // Stripped for the positive, where a docblock quoting the JSX would satisfy it; the raw read above suits the negative.
   const settingFieldCode = settingField.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   check("SettingField's Reset is disabled while the form is busy", /<Button size="sm" tone="ghost" disabled=\{busy\} onClick=\{onReset\}>/.test(settingFieldCode), true);
   const fieldSites = (serverSection + emailSection).split("<SettingField").slice(1).map((site) => site.slice(0, site.indexOf("/>")));
   check("the two screens draw fields through it", fieldSites.length > 0, true);
   check("and every one of them passes busy", fieldSites.filter((site) => !/busy=\{busy\}/.test(site)).length, 0);
-  /*
-   * And the password's state sentence is not rebuilt in the JSX. It was two
-   * expressions — an existence test on `set` and an `originText` beside it — and
-   * two expressions on one line are two things that can disagree, which they
-   * did: "No password set. from the environment". The rule is that this file
-   * asks one function.
-   */
   const emailCode = emailSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   check("the secret's state is not re-derived on the screen", /No password|A password is set/.test(emailCode), false);
   check("and the screen asks the one function", /secretFieldText\(/.test(emailCode), true);
-  /*
-   * ⭐ **The password's Remove exists only while a row is stored here**, and the
-   * placeholder promising to keep the stored one with it. On a fresh server
-   * both were drawn — a Remove for nothing, over a placeholder describing a
-   * value that did not exist. Removability is `set` alone (`secretFieldText`'s
-   * own distinction: presence is `set || envSet`, removability is `set`), so
-   * the gate is that field and nothing looser.
-   */
+  // Removability is `set` alone; presence is `set || envSet`.
   const removeGate = emailCode.indexOf("passwordStored =");
   check("removing the stored password is gated on a row being stored", removeGate >= 0, true);
   check("and the gate reads `set` alone", /passwordStored = passwordField\?\.set === true/.test(emailCode), true);
   check("and the Remove is two-step, naming what goes", /Remove the stored password\?/.test(emailCode), true);
-  /*
-   * The pair is `TwoStep`'s (E7's review, Q3.552): a `plain` Remove — nothing
-   * here is irreversible, the password can be typed again — and Cancel last is
-   * the primitive's guarantee. What this file holds is the question and the act
-   * reaching it, the ghost Remove as its resting control, and the request handed
-   * over whole rather than run here with a flag of this form's own.
-   */
+  // The act and its cancel are `TwoStep`'s (Q3.552); this file owns the question and hands the request over whole.
   check(
     "with a plain act, the ghost Remove at rest, and the request handed to the primitive",
     [
@@ -1466,17 +872,7 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     ],
     [true, true, false],
   );
-  /*
-   * **The removal holds the form's one lock** (review D8; E7's review). `clear`
-   * is what both the confirmed Remove and a one-tap Reset go through, so `busy`
-   * is set there rather than in `clearKey`: held only by the one-tap wrapper it
-   * was off for the whole of a confirmed removal, and Save, Send and every Reset
-   * read enabled beside a request still out — a second `adminSaveSettings` and
-   * two answers re-syncing the draft in whichever order they landed, the D14
-   * class E4 had just closed. The primitive takes the flag back as `disabled`,
-   * so Remove is refused while a Save is out, which the hand-rolled act's
-   * `disabled={busy}` did.
-   */
+  // `busy` is set in `clear`, which the confirmed Remove and a one-tap Reset both go through, so no second write can start.
   check(
     "and the removal holds the form's busy, from the promise it hands over",
     [
@@ -1487,92 +883,33 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     ],
     [true, true, true, true],
   );
-  /*
-   * **Registration is a badge and a verb, not a switch** (decision 7A). A
-   * `role="switch"` promises a tap flips it, and opening waits behind a confirm.
-   * Only the widening act is confirmed (Q3.220): the question text appears in
-   * one arm and the closing tap goes straight to `close()`.
-   */
+  // Registration is a badge and a verb, not a switch; only opening, the widening act, is confirmed (Q3.220).
   const serverCode = serverSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  /*
-   * **The badge is the server's answer and nothing else** (review D12). `open`
-   * is read off `answer.registration.enabled` on every render, no state holds a
-   * copy, and the only thing a 200 does is hand the answer up through
-   * `onChanged` — so the badge flips inside `.then`, after the server, never
-   * on the tap.
-   */
+  // The badge is read off the server's answer on every render, so it flips only after the server.
   const registration = serverCode.slice(serverCode.indexOf("function Registration("), serverCode.indexOf("function Domains("));
   check("the registration badge reads the answer", /const open = answer\.registration\.enabled;/.test(registration), true);
   check("and is drawn from it", /<Badge tone="strong">\{open \? "Open" : "Closed"\}<\/Badge>/.test(registration), true);
   check("with no state holding a copy", /useState\([^)]*registration|useState<boolean>\(open/.test(registration), false);
   check("flipping only inside .then, through onChanged", /\.then\(\(updated\) => onChanged\(updated\)\)/.test(registration), true);
-  // And the question closes through the primitive alone, on that same promise
-  // (E7's review, Q3.552): nothing in this component puts the flag back itself.
+  // The question closes through the primitive alone, on that promise (Q3.552).
   check("and the question closes on that promise, through the primitive", [/onAct=\{\(\) => save\(true\)\}/.test(registration), /setConfirming\(false\)/.test(registration)], [true, false]);
   check("registration is not drawn as a switch", /role="switch"/.test(serverCode), false);
   check("opening registration asks first", (serverCode.match(/Open registration to anyone\?/g) ?? []).length, 1);
   check("and closing does not", /open \? close\(\) : setConfirming\(true\)/.test(serverCode), true);
-  /*
-   * **Remint is two-step** (decision 12A, Q3.219's mirror): the cost of a remint
-   * lands on somebody else's provisioning script, not on the person tapping.
-   * The first mint retires nothing and stays one tap.
-   */
+  // Remint is two-step and the first mint one tap: a remint's cost lands on somebody else's provisioning script (Q3.219).
   check("reminting the provisioning key asks first", /Replace the provisioning key\?/.test(serverCode), true);
-  // `mintNow` is the one-tap path with the panel's own wait; the remint hands
-  // `mint` itself to the primitive.
   check("and the first mint does not", /minted \? \(\) => setConfirming\(true\) : mintNow\}/.test(serverCode), true);
-  // Save buttons are drawn always and disabled until dirty: a button that
-  // materialises on the first keystroke is a layout shift under the finger.
+  // Save is always drawn and disabled until dirty: appearing on the first keystroke is a layout shift under the finger.
   check("Save is never gated on dirtiness in the JSX", /dirty && \(?\s*<Button/.test(serverCode + emailCode), false);
   check("and is disabled until dirty instead", ((serverCode + emailCode).match(/disabled=\{busy \|\| !dirty/g) ?? []).length, 2);
-  /*
-   * And the sign-in screen reads the *drawn* predicate rather than the three-way
-   * one — testing `=== "link"` there is what threw the fail-open away.
-   */
   const signIn = readFileSync(new URL("../src/ui/SignIn.tsx", import.meta.url), "utf8");
   check("the sign-in screen does not re-derive which doors to draw", /gateOffer\(/.test(signIn), false);
 
-  /*
-   * **Both doors are drawn as links, and they are not on one line.**
-   *
-   * They were: two `text-muted` runs joined by a `·`, which is prose with a
-   * separator in it. With the accent colour gone, the underline is the only
-   * thing left that says a word moves you somewhere, so it is not optional
-   * chrome — a navigation nobody can see is a navigation nobody takes. And the
-   * `·` is what made recovery and sign-up read as a pair of equal options,
-   * which they are not: one is about the password that just failed, the other
-   * about being on the wrong screen.
-   *
-   * Coarse on purpose — it counts uses of the shared constant rather than
-   * inspecting a layout, because the failure being pinned is somebody
-   * restyling these back into plain text, not a pixel.
-   */
+  // Both doors are underlined links on separate lines: with no accent colour the underline is the only cue.
   check("both doors wear the shared link look", signIn.split("${LINK}").length - 1, 2);
 
-  /*
-   * ⚠ **Three, not two, and the third is named here so the number is a list
-   * rather than a literal somebody bumps to go green.** Recovery, sign-up, and
-   * the control beside the server's own name — *"which fleet is this password
-   * about to be sent to"*, which is `cp.ts`'s oldest rule stated on the one
-   * screen where a browser's address bar cannot state it, because under a custom
-   * scheme there is one webview origin for every server.
-   *
-   * And the two doors are **anchors** now: this bundle carries no gate screen, so
-   * they leave for the control plane's own. Three properties, each a real
-   * failure — absolute rather than root-relative, or `openableHref` answers
-   * `null`, the shell's interceptor never fires and the webview quietly redraws
-   * this screen; `target="_blank"`, or the click is a real navigation and a browser
-   * leaves this document for the gate, losing whatever was already typed into the
-   * form behind it; and `controlPlaneOrigin()` rather than `location.origin`, which
-   * under the shell is `tauri://localhost`.
-   */
-  /*
-   * Comments stripped for these, and the `${LINK}` count above deliberately not:
-   * that one counts uses of a constant, while these are about what the code does
-   * — and the docblock beside each of them quotes the very shape being searched
-   * for, so the raw file satisfies the search whichever way round the code is.
-   * The cheapest route back to green would then be deleting the explanation.
-   */
+  // The doors are absolute anchors to the control plane opened in a new target, built from `controlPlaneOrigin` because the shell's own origin is not the server.
+  // Comment-stripped: the docblocks beside these quote the shapes searched for; the `LINK` count above counts a constant and stays raw.
   const signInBody = signIn.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   check(
     "the two doors are absolute addresses at the control plane",
@@ -1583,75 +920,60 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("the sign-in screen navigates nowhere itself", /navigate\(/.test(signInBody), false);
   check("and never builds an address out of this page's origin", /location\.origin/.test(signInBody), false);
   check("it asks the host where the control plane is", /controlPlaneOrigin\(\)/.test(signInBody), true);
-  /*
-   * ⚠ **The sign-in screen names no server, and for one draft it did.** The line
-   * sat under the lead sentence with a *Change* link beside it, on the argument
-   * that a custom scheme has no address bar. Sound, and the wrong screen: a login
-   * form is not where somebody learns which fleet they are on. That question has
-   * a screen of its own — the welcome — and a row under Settings → Account.
-   * Asserted as an absence, which is the only way a screen can be held to not
-   * growing something back.
-   */
   check("the sign-in screen names no server", /nativeBoot\(\)\?\.server/.test(signInBody), false);
-  /*
-   * ⚠ **But it does offer a way back to the screen that sets one, and its absence
-   * was a one-way door built while removing another.**
-   *
-   * The welcome asks for a server and Continue adopts it. With no control here,
-   * somebody who typed a reachable but *wrong* address arrived at a sign-in form
-   * with no route to the screen that sets it — Settings → Account needs a
-   * session, and getting one needs the right server. That is the defect this
-   * whole change set out to fix, one screen along.
-   *
-   * Asserted as a pair: the control exists, and it still names no address. The
-   * first without the second is how the rejected line comes back wearing a
-   * chevron.
-   */
+  // Without a way back, a reachable but wrong address would strand somebody: Settings needs a session.
   check("but it offers a way back to the screen that sets one", /pickServer\(\)/.test(signInBody), true);
   check("and that control names a destination rather than an address", /https?:\/\//.test(signInBody), false);
-  /*
-   * Shell only. In a browser the server is the origin that served the page, so
-   * there is no screen to go back to — and a control that navigates nowhere is
-   * worse than none.
-   */
-  check("and it is drawn only where there is somewhere to go", /inNativeShell\(\) && \(/.test(signInBody), true);
+  // Shell only, and only on a window nobody has signed in to: `signInExits` in `slot.ts` is the table.
+  check("and it is drawn only where there is somewhere to go", /\{exits\.server && \(/.test(signInBody), true);
+  check("and it asks the table rather than the shell", /inNativeShell\(\)/.test(signInBody), false);
 
-  /*
-   * ⚠ **The identifier field says both, because the route takes both.** `/v1/login`
-   * resolves a name and then a *verified* address, and a field labelled `Username`
-   * in front of that is a feature nobody discovers — the only place this app can
-   * say so is the label, since there is no placeholder and no help text on this
-   * screen. Read off disk for the reason every other placement rule here is:
-   * nothing typed can hold what a label says.
-   *
-   * `autoComplete="username"` is asserted *unchanged* beside it, and that is the
-   * half a well-meaning edit takes: `email` there tells a password manager to stop
-   * offering a saved username, on a form where the username is still the primary
-   * way in.
-   */
+  // Remove account is an act, not a link, so the `LINK` look stays on the two doors.
+  check(
+    "the way back and Remove account act through the seam, never the store",
+    [
+      /signInAuth\(\)\s*\.switchBack\(\)/.test(signInBody),
+      /signInAuth\(\)\s*\.forgetAccount\(\)/.test(signInBody),
+      /from "\.\.\/store"|\bstore\.\w+\(/.test(signInBody),
+    ],
+    [true, true, false],
+  );
+  check(
+    "and are drawn from the table, with the live answer",
+    [
+      /const back = useBackAccount\(\);/.test(signInBody),
+      /signInExits\(nativeBoot\(\), back === undefined \? undefined : \(back\?\.key \?\? null\)\)/.test(signInBody),
+      /\{exits\.back && back != null && \(/.test(signInBody),
+      /\{exits\.remove && \(/.test(signInBody),
+    ],
+    [true, true, true, true],
+  );
+  check("the way back names the account it returns to", /<span className="truncate">\{back\.label\}<\/span>/.test(signInBody), true);
+  check("and there is no Cancel beside Sign in", />\s*Cancel\s*</.test(signInBody), false);
+  // A bare negated class would stop at the arrow inside an onClick handler, so the tag reader steps over arrows; the report is its positive control.
+  const OPENING = /<(?:button|Button)\b(?:=>|[^>])*?>/g;
+  report(
+    "the tag reader reads past an arrow",
+    [...'<button onClick={() => go()} disabled={busy}>'.matchAll(OPENING)].map((m) => m[0]).join("").includes("disabled={busy}"),
+    "positive control",
+  );
+  const controls = [...signInBody.matchAll(OPENING)].map((m) => m[0]);
+  report("the sign-in screen's controls were found", controls.length >= 4, `${controls.length} controls`);
+  check(
+    "every control on it waits for a sign-in in flight",
+    controls.filter((c) => !/disabled=\{busy/.test(c)),
+    [],
+  );
+
+  // The label says both because the login route takes both; `autoComplete` stays username, still the primary way in.
   check("the identifier field offers both ways in", /Username or email/.test(signIn), true);
   check("and still autocompletes as the username it also is", /autoComplete="username"/.test(signIn), true);
 
-  /*
-   * **The gate screens do not narrate the implementation at the reader.**
-   *
-   * `/confirm` is reached from a mail somebody asked for, and it read "Your
-   * account does not exist yet. This is the step that creates it." That is true
-   * — a pending sign-up is not a `users` row — and it is an internal fact told
-   * to somebody who signed up two minutes ago, where it reads as a failure
-   * report about the step they already completed. The word on the page, the
-   * word on the button and the word in the mail are all "confirm" now, and this
-   * pins the phrase rather than the layout because the phrase is what came
-   * back. Comments stripped: the docblock explaining the fix quotes it.
-   */
   const gateCode = readFileSync(new URL("../src/ui/gate/Gate.tsx", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
   check("no gate screen tells somebody their account does not exist", /does not exist/.test(gateCode), false);
   check("and confirming is called confirming", /Confirm account/.test(gateCode), true);
-  // Comments stripped for the same reason `cp.ts`'s pin strips them: the JSX
-  // comment names the separator it replaced, and a rule that punishes its own
-  // explanation is a rule whose cheapest fix is deleting the explanation.
   const signInCode = signIn.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   check("and they are not one line with a separator", /·/.test(signInCode), false);
   // `bg-fg` is the affirmative action inside a decision. A navigation is not one.
@@ -1660,46 +982,18 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("a link carries an underline", /\bunderline\b/.test(linkDecl), true);
   check("and never a fill", /\bbg-/.test(linkDecl), false);
 
-  /*
-   * The instance body is **parsed**, and the cast that used to stand in for a
-   * parse cannot come back. `readJson<T>` is this client's idiom everywhere and
-   * is fine where a body is read field by field; it was fatal here, because the
-   * server's shape and `InstanceConfig` are genuinely different and a generic
-   * cannot notice. The behavioural half is asserted above against `app.ts`'s own
-   * literal; this is the half that stops a future edit reintroducing the shortcut
-   * and silently deleting that coverage.
-   */
+  // The instance body is parsed, never cast: the server's shape and `InstanceConfig` differ and a generic cannot notice.
   const cpSource = readFileSync(new URL("../src/cp.ts", import.meta.url), "utf8");
-  /*
-   * Comments stripped first, and not as tidiness: the docblock on
-   * `instanceConfig` **quotes the cast it replaced**, because a comment that
-   * cannot name the shape of the bug is a comment nobody can act on. Testing the
-   * raw file makes the explanation itself the offender, and the cheap way green
-   * would then be to delete the sentence that explains why the rule exists.
-   */
   const cpCode = cpSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   check("the instance config is never cast into its own type", /readJson<InstanceConfig>/.test(cpCode), false);
   check("it goes through the parser", /parseInstanceConfig\(/.test(cpSource), true);
-  /*
-   * And the Email form has exactly one call that writes the SMTP keys. `save`
-   * and the per-field reset both go through `adminSaveSettings`, so the count is
-   * of *writers of a draft*, not of calls: what is asserted is that no component
-   * in this file owns a draft of a key another component also writes.
-   */
   check(
     "and the SMTP fields are held in one draft",
     emailSection.split("useState<SmtpDraft>").length - 1,
     1,
   );
-  // And the screen asks that function on a clear, whether or not the form is
-  // dirty: the rule is pure, the placement is not, and this is the placement.
   check("a clear patches the draft through draftAfterClear", /draftAfterClear\(current, key, synced\)/.test(emailCode), true);
-  /*
-   * And the seed is **load-only, by construction**: called exactly once, in a
-   * state initialiser ahead of the draft's own — never in the re-sync after a
-   * save or a clear, where a person who emptied the field on purpose would
-   * watch it come back.
-   */
+  // The seed is load-only: in a re-sync it would bring back a field somebody emptied on purpose.
   check("the public URL is seeded exactly once", emailCode.split("seedPublicUrl(").length - 1, 1);
   check("in a state initialiser", /useState\(\(\) => seedPublicUrl\(/.test(emailCode), true);
   // Both operands guarded, the `>= 0` idiom: -1 is less than every real position.
@@ -1707,22 +1001,11 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const draftAt = emailCode.indexOf("useState<SmtpDraft>");
   check("ahead of the draft it seeds", seedAt >= 0 && draftAt >= 0 && seedAt < draftAt, true);
   check("and nowhere after it — not a re-sync, a save or a clear", /seedPublicUrl\(/.test(emailCode.slice(emailCode.indexOf("useState<SmtpDraft>"))), false);
-  /*
-   * **The seed alone does not hide the server's diagnosis** (E14's review):
-   * `mail.problems` is drawn under a clean form, and the seed dirties it with a
-   * value nobody typed — so on exactly the server it is for, the sentence saying
-   * what was missing vanished. `seeded` starts as the seed's own dirtiness, and
-   * the first edit or a Save — dirt of the person's own — clears it.
-   */
+  // The seed dirties the form, so `seeded` keeps the server's diagnosis drawn until an edit of the person's own.
   check("the diagnosis is drawn while the seed is the only edit", /\{\(!dirty \|\| seeded\) &&\s*!answer\.mail\.configured &&\s*answer\.mail\.problems\.map\(/.test(emailCode), true);
   check("seeded starts as the seed's own dirtiness", /const \[seeded, setSeeded\] = useState\(seed\.dirty\);/.test(emailCode), true);
   check("the first edit clears it", /setDraft\(\(current\) => \(\{ \.\.\.current, \.\.\.patch \}\)\);\s*setDirty\(true\);\s*setSeeded\(false\);/.test(emailCode), true);
   check("and so does a save", /setDirty\(false\);\s*setSeeded\(false\);/.test(emailCode), true);
-  /*
-   * **Why Send is off is said beside it** (review D12): a test sends with what
-   * is *stored*, so an unsaved form and an unconfigured server are the two
-   * reasons, each a sentence, and the button is disabled on either.
-   */
   check("the two reasons a test cannot send", /const sendBlocked = dirty \? "Save first\." : !answer\.mail\.configured \? "Configure the server first\." : null;/.test(emailCode), true);
   check("disable Send", /<Button disabled=\{busy \|\| sendBlocked !== null\} onClick=\{sendTest\}>/.test(emailCode), true);
   check("and are drawn under it", /\{sendBlocked !== null && <p className="mt-2 text-xs text-muted">\{sendBlocked\}<\/p>\}/.test(emailCode), true);

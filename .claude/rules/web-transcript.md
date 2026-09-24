@@ -2,6 +2,8 @@
 paths:
   - packages/web/src/ui/tail.ts
   - packages/web/src/ui/EventList.tsx
+  - packages/web/src/ui/follow.ts
+  - packages/web/src/ui/autosize.ts
   - packages/web/src/ui/TaskPanel.tsx
   - packages/web/src/tasks.ts
   - packages/web/src/ui/Markdown.tsx
@@ -21,7 +23,8 @@ paths:
 ---
 
 **The transcript.** Agent output is markdown and is rendered as such; raw HTML
-stays off, because it is untrusted text quoting an untrusted repository.
+stays off, because it is untrusted text quoting an untrusted repository. A
+person's own message is not markdown at all — see below.
 `Markdown.tsx` is memoised on the joined text of a coalesced run.
 
 - **Markdown renders what somebody wrote, including the marker they wrote it
@@ -43,9 +46,9 @@ stays off, because it is untrusted text quoting an untrusted repository.
   running while its own event is still on the socket. Nothing says "sending": a
   refusal puts the text back in the box with a toast, which is a remedy rather
   than a warning. Keyed by session, so leaving mid-send and coming back still
-  shows it. Settled in `store.ts` — `onEvents` compares the seq, and
-  `promptLanded` does it again when the POST answers, because that answer
-  routinely loses the race to the socket.
+  shows it. Settled in `store.ts` in the commit its own `prompt` event lands
+  in — `claimEcho` knows it before the POST names a seq, or it is drawn twice —
+  or by seq when the POST answers first. Q3.653.
 - **A message the agent has not been given yet says so, and only where that is
   true.** A `prompt` row whose seq is in the snapshot's `queuedPrompts` draws one
   line under the bubble, `Waiting for the agent to finish`. Nothing is drawn where
@@ -70,6 +73,13 @@ stays off, because it is untrusted text quoting an untrusted repository.
   else on this wire: legible, and never a guess. What is drawn changed and nothing
   else did — `taskFloor` still keys on `stopReason !== "end_turn"` alone, and
   `showsInTranscript` on that plus the `agent_error` exception one bullet down.
+
+- **The working line means the agent is working, turn or not** (`unpromptedSince`,
+  Q2.233, timed from `workStartedAt`), **and counts what it said since its last tool
+  call**: text and thoughts since the newest `tool_call`, `prompt`, `turn_end` or
+  `context_cleared`, characters over four. `streamedSinceTool` is one step a token,
+  handed to the foot alone. ⚠ **Drawn, never spoken** (`aria-live`). Q3.644. Its
+  room is kept while it is silent, `keepsFootSlot` (Q3.653).
 
 - **A run of agent text is keyed on `messageId`, not only on `role` and
   `thought`.** A run joins its parts with **no separator** — right for the
@@ -132,14 +142,15 @@ stays off, because it is untrusted text quoting an untrusted repository.
     background-task route and it is *stop*; it keeps terminal rows on purpose so
     this panel can answer *did that build finish*. So `finishedTasks.ts` is a module
     `Map` in memory, never `localStorage` — it is a claim about rows on a remote
-    machine, and a restart, the agent's `/clear` and eviction at the cap each
+    machine, and a crash, the agent's `/clear` and eviction at the cap each
     destroy those with nothing to tell the browser. It **replaces** rather than
     unions, which is the prune that keeps it a subset of the wire. And the hidden
     set never reaches `tasks.ts`: pushed in there the band would vanish when
     emptied, which is the owner's rule reversed by a change that reads as a
     simplification. ⚠ **The count is not Claude Code's.** Theirs is a lifetime list;
     ours is how many finished rows the daemon still holds — capped with live rows at
-    `MAX_TRACKED_ASYNC_TASKS`, lossy oldest-finished-first, and gone on a restart.
+    `MAX_TRACKED_ASYNC_TASKS`, lossy oldest-finished-first, kept across an agent
+    swap and a clean restart, and gone on a crash. Q2.234.
   - **⚠ A workflow's agents are not on this wire and the panel says nothing about
     them.** The adapter marks every `local_agent` task `ignored` before publishing,
     and no payload carries a phase, a fraction, a model or a count. So `Phases` is
@@ -159,8 +170,10 @@ stays off, because it is untrusted text quoting an untrusted repository.
     no agent at all. The sentences are a `Record` over the union, so a fourth state
     is a compile error and the partition is swept rather than the shape of an
     expression. The finished band is barred there with `silent`, for one reason:
-    the daemon's rows are gone after a restart, so a zero would say *nothing
-    finished* about a session that may have finished ten things. Q3.633.
+    the daemon's rows are gone after a crash or on an older daemon, so a zero would
+    say *nothing finished* about a session that may have finished ten things.
+    Q3.633. ⚠ A swap passes through `unasked`; `showFinished` reading the rows is
+    what keeps the band and its fold. Q2.234.
   - **⚠ Elapsed time comes from `startedAt`/`endedAt`, never `usage.durationMs`.**
     The agent's duration rides a *progress* frame and the adapter drops both the
     final `usage` and `end_time`, so a finished task's own number is stale and a
@@ -280,13 +293,13 @@ stays off, because it is untrusted text quoting an untrusted repository.
   an item `spread` so the paragraph comes back, costing no pixels. The zero-width
   `::after` this replaced is **gone**, not kept beside it. Blink is byte-identical
   either way, paint and copy. Q3.638.
-- **A person's own line breaks survive**, `remarkHardBreaks` on the **user tone
-  only** — an agent writes CommonMark and keeps it. The break is never lost on the
-  way out: the composer trims ends, the daemon stores verbatim; a soft newline is
-  collapsed at *render*. ⚠ Not `white-space: pre-wrap`, measured: `mdast-util-to-hast`
-  writes a `\n` after every `<br>`, so a hard break draws as two. The plugin list
-  varies, never `COMPONENTS` — a second map is declined by Q3.636 and Q7.86.
-  Q3.639.
+- **A person's message is drawn exactly as sent, and never parsed.** `UserBubble`
+  draws one text node, `whitespace-pre-wrap wrap-anywhere`: `1)` stays text, not a
+  `::marker`; `**x**` stays asterisks. Every row of a person's words is that
+  component. ⚠ **Reverses Q3.639**: with no parse there is no `<br>` to double. No
+  anchor — it turns a drag into a link drag. The composer sends `sentText` (blank
+  lines around and trailing whitespace go, indentation stays). **The box never
+  rewrites a keystroke**: `VERBATIM_FIELD`, and the shell's defaults. Q3.646, Q3.647.
 - **A bubble is sized to the text it ended up holding**, `ui/hug.ts`. CSS cannot:
   `fit-content` is `min(max-content, available)` and wrapped text has a max-content
   wider than available, so the box sits at its `max-w` however short its longest
@@ -298,9 +311,10 @@ stays off, because it is untrusted text quoting an untrusted repository.
   `ResizeObserver` watching each *row*, because a conversation is drawn whole here
   and per-message would be hundreds; and lines walked as **text nodes**, since
   `getClientRects()` answers a rect per element too and one range over the wrapper
-  hands the box its own width back. It declines attachments, images, `pre` and
-  `table`. It writes a layout value from JS, which `AppShell` forbids — the
-  exception and its three bounds are Q3.637.
+  hands the box its own width back — one `pre-wrap` node answers a rect per line
+  and a zero-width one per newline, measured. It declines attachments and images.
+  It writes a layout value from JS, which `AppShell` forbids — the exception and
+  its three bounds are Q3.637.
 - **What is selectable in a user's message is a wrapper *inside* the padding**, with
   `select-none` on both the row and the padded box. WebKit fills the selection gap
   to the bottom of the block a selection ends in, so a padded selectable block
@@ -311,7 +325,7 @@ stays off, because it is untrusted text quoting an untrusted repository.
   inside. `display: inline` on the paragraph painted 31 too; the property is where
   the selectable block's edges are. One trailing `\n` stays, and it is WebKit's
   block boundary rather than the two breaks a browser writes. Nothing on the write
-  side is implicated — the composer trims and the stored event is clean. ⚠ The
+  side is implicated — the stored event is what was sent. ⚠ The
   *fill* this bullet reasons from is gone — the rule above stops it — so read this
   as which element is selectable and not as where the painting ends. Q3.636.
 - **A run of consecutive tool rows is one row.** `foldRuns` folds it into a
@@ -383,10 +397,14 @@ stays off, because it is untrusted text quoting an untrusted repository.
   carries on, this one says why it is not there yet. `webcheck` asserts the
   **totality** over a 720-state grid — with history outstanding and no cut,
   something is always said. Q3.112.
-- **Opening a tool card re-measures whether the reader is still at the bottom.** No
-  scroll event fires when content grows *under* you, so `atBottom` stays true and
-  the next event scrolls the just-opened card out of view. One `remeasure` on the
-  next frame, honest in both directions, rather than a "stop following" flag.
+- **Only the reader takes the conversation off its foot**, `ui/follow.ts`: every
+  commit, an observer on box and content, and every scroll event pin it before
+  paint. A move is judged from where the box was left: growth after a pin, or a
+  clamp the box's growth explains, is none. **A send lands at the foot.** A resize
+  writes the offset through (`resync`, Q3.664); `[overflow-anchor:none]`: Chrome
+  doubled history shifts. Q3.648.
+- **Wrapping moves nothing.** `fitToContent` holds the form's height when
+  measuring; the ask card reports in layout effects. Q3.649.
 
 ## Layout
 
@@ -395,11 +413,12 @@ stays off, because it is untrusted text quoting an untrusted repository.
 | `packages/web/src/ui/tail.ts` | The transcript's shape as pure functions: coalescing, the five-events merge, which card a step belongs to, what it refuses to draw, where a `/clear` cuts, what a permission was answered with, `sameNode` — and which rows stand together: `foldRuns`, the clause grammar behind `runSummary`, and the one direction in which a duplicated `file_change` is dropped |
 | `packages/web/src/diff.ts` | What a file change was, as lines: the trim, the bounded LCS, hunks with two sets of line numbers, the word-level marks, the `+N −M`, and the refusal to draw a diff over an event the log clipped. The `WeakMap` behind `changeCounts` is why `buildTail` may ask on every token |
 | `packages/web/src/ui/DiffView.tsx` | A file change, drawn — for the transcript **and** the approval card. Its body paints `bg-surface` inside a `raised` frame because that is the ground the two tints were measured against; on `raised` they are 1.03:1, i.e. invisible |
+| `packages/web/src/ui/follow.ts` | Whether the conversation holds its foot: `followsAfterScroll` (pure) and `useFollow` |
 | `packages/web/src/ui/links.ts` | `openableHref`: which schemes a tap in agent output may open, and why a relative path is text rather than a link. Named for the case collision with `Markdown.tsx` on a case-insensitive filesystem |
 | `packages/web/src/ui/Markdown.tsx` | Agent output as markdown; code blocks with a lazily-loaded highlighter |
 | `packages/web/src/ui/mdlist.ts` | Which ordered lists were written with `)`, recovered from the source because mdast throws the character away. Pure, so `webcheck` imports it |
 | `packages/web/src/echo.ts` | The message that has been sent and has not come back: a module `Map` with subscribers, keyed by session, the third of `attach.ts`'s shape. At `src/` because `store.ts` settles it |
-| `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned. One component, three call sites, and **no `pending`** — a sent message looks sent |
+| `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned and drawn as sent. One component for every call site, and **no `pending`** — a sent message looks sent |
 
 ## Bounds
 

@@ -43,7 +43,14 @@ pub struct CpRequest {
     #[serde(default)]
     pub body: Option<String>,
     /// Set only by the server picker, to try a candidate before adopting it.
-    /// Every other call leaves it out and gets the stored server.
+    /// Every other call leaves it out and gets **the calling webview's own
+    /// server** — the host resolves it from the seat, never from the page.
+    ///
+    /// ⚠ **A request carrying it is refused if it would carry a credential**
+    /// (`carries_credential`). `GET /v1/instance` and `GET /v1/jwks`, the two
+    /// questions a probe asks, are both above the control plane's auth gate, so a
+    /// probe has no use for a bearer — and a bearer sent to an address somebody
+    /// is still deciding about is the fleet's session handed to a stranger.
     #[serde(default)]
     pub origin: Option<String>,
 }
@@ -133,6 +140,71 @@ pub async fn send(
     })
 }
 
+/// Whether a request would carry a credential: any header this proxy forwards as
+/// `authorization`.
+///
+/// ⚠ **The same normalization `send` forwards by — ASCII case folded, nothing
+/// trimmed — so the refusal and the allowlist cannot disagree.** A name `send`
+/// would drop (` authorization`, with a space) carries nothing and is not
+/// counted; one it would forward (`Authorization`) is. A predicate that trimmed
+/// would refuse a header that never leaves; one that did not fold case would pass
+/// one that does.
+pub fn carries_credential(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+}
+
+/// A `GET` this **host** makes with a token it holds — never the page's request.
+///
+/// For the identity questions `accounts.rs` asks before binding anything: whose
+/// token this is, which devices and which machines are that user's. The same
+/// `target` join, the same client with no redirects, and an `Err` for anything
+/// but a 2xx with a JSON body, because every caller's next act is to *believe* the
+/// answer.
+pub async fn get_json(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    let answer = send(client, base, &bearer(path, "GET", token)).await?;
+    if !(200..300).contains(&answer.status) {
+        return Err(format!("the server answered {}", answer.status));
+    }
+    serde_json::from_str(&answer.body).map_err(|_| "the server's answer was not JSON".to_string())
+}
+
+/// End the session a token names, on the server that issued it.
+///
+/// For a sign-in the host refused to keep — a duplicate of an account already
+/// here, or a different person on a signed-out account's seat. Revoking it here
+/// rather than handing it back to the page is what means no page path ever holds
+/// a bearer the host did not bind. Best effort: the caller has already decided,
+/// and an unrevoked session expires on its own.
+pub async fn revoke(client: &reqwest::Client, base: &str, token: &str) -> Result<(), String> {
+    let answer = send(
+        client,
+        base,
+        &bearer("/v1/me/sessions/current", "DELETE", token),
+    )
+    .await?;
+    if !(200..300).contains(&answer.status) {
+        return Err(format!("the server answered {}", answer.status));
+    }
+    Ok(())
+}
+
+fn bearer(path: &str, method: &str, token: &str) -> CpRequest {
+    CpRequest {
+        path: path.to_string(),
+        method: method.to_string(),
+        headers: vec![("authorization".to_string(), format!("Bearer {token}"))],
+        body: None,
+        origin: None,
+    }
+}
+
 /// One sentence, and never the URL.
 ///
 /// The path is in it and the address is not, for the reason the relay logs a path
@@ -150,7 +222,29 @@ fn describe(error: &reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::target;
+    use super::{carries_credential, target};
+
+    fn headers(names: &[&str]) -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|name| (name.to_string(), "x".to_string()))
+            .collect()
+    }
+
+    /// The probe refusal and the forwarding allowlist read one name the same way.
+    #[test]
+    fn a_probe_carries_no_credential() {
+        assert!(carries_credential(&headers(&["Authorization"])));
+        assert!(carries_credential(&headers(&[
+            "content-type",
+            "authorization"
+        ])));
+        assert!(!carries_credential(&headers(&["content-type"])));
+        assert!(!carries_credential(&[]));
+        // Not forwarded by `send`, so it carries nothing — and a refusal that
+        // counted it would disagree with the allowlist it exists to match.
+        assert!(!carries_credential(&headers(&[" authorization"])));
+    }
 
     #[test]
     fn a_path_stays_on_the_origin() {

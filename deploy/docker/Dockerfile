@@ -106,7 +106,7 @@ COPY packages/web/src ./packages/web/src
 # this; nothing else can.
 COPY packages/protocol/src ./packages/protocol/src
 # `public/` is copied to the root of the build output by Vite, and `gate.html`
-# names both files in it. Its own line rather than the one above, because that
+# names every file in it. Its own line rather than the one above, because that
 # COPY takes a file list and this is a directory — and it is the second half of
 # the pair `.dockerignore` states: missing from *that* list this fails here with
 # "not found", missing from *this* one the build succeeds and the page ships with

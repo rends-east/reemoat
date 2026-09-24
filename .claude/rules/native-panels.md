@@ -91,12 +91,12 @@ the machine they are sitting at. The route answers *reachability* and this
 question is *identity*; a local daemon that is momentarily unreachable is still
 this computer. And a screen cannot reach it at all: `MachineConnection` is pinned
 to an exact four-module set with no `ui/` file among them. `AppState.localMachineId`
-already carries this argument for the `this device` badge, and the picker is its
-second reader.
+already carries this argument for the `this device` badge, and the picker is one
+of its readers.
 
-⚠ **`osDialog` is not part of `key={selected}`.** `localMachineId` lands one
-`runResume` after the first render, so it can go false → true under a mounted
-picker; a remount there would throw away a folder somebody had already walked to.
+⚠ **`osDialog` is not part of `key={selected}`.** `localMachineId` can land at a
+`runResume` after the first render — a daemon that came up after the app — so it
+can go false → true under a mounted picker; a remount there would throw away a folder somebody had already walked to.
 
 **One component, two arms**, and not two components. `DirectoryPicker` holds one
 `path`, one `roots` read and one report effect, and that effect's dependencies are

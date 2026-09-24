@@ -53,8 +53,8 @@ session and says nothing — explicitly, since the fallthrough says `ended` — 
 pressing it got `200` and no change. Its **controls and its `/` menu stay live**, so
 a tap is *recorded* and applied by `doResume`, never a wake. ⚠ **And not only a
 parked one**: `revivableByPrompt` gates the keeping, the tap and
-`agent_state_json`, so every such stop keeps both across a restart. Q2.224,
-Q2.229.
+`agent_state_json`, so every such stop keeps both across a restart — and the
+finished background rows with them. Q2.224, Q2.229, Q2.234.
 
 **The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
 arm**, so adding a reason is a compile error rather than a silent `false`:
@@ -196,8 +196,8 @@ permission, which is the shape that fails under either other order. Q2.42.
 
 **The sweep is `sweepPending("turn_cancelled")`, and the reason is its own member.**
 `session_stopped` says the session is over while this one is idle and still holding
-its conversation; `turn_ended` is what the *pump* writes once the agent has
-answered, which is after this and may never come. It runs in a `finally`, so a send
+its conversation; `turn_ended` was what the *pump* wrote once the agent had
+answered, and the pump sweeps nothing now (Q2.232). It runs in a `finally`, so a send
 that throws on a pipe nobody is reading cannot leave the agent holding a promise
 this daemon will never settle, and it is fenced on the turn the call was about:
 `cancelTurn` can be in flight while that turn ends and a *new* prompt starts, whose
@@ -214,7 +214,9 @@ have cancelled.
 
 **`no_turn` is a 200 carrying `cancelled: false`, not a 409.** Nothing was stopped
 and nothing is wrong, and the state is reachable by losing an ordinary race, where a
-red error makes the control look broken at the moment it got what it wanted.
+red error makes the control look broken at the moment it got what it wanted. It is
+`no_turn` only with nothing left to stop: work nobody prompted, or a request parked
+with no turn, gets the same send, sweep, watch and `turn: null` (Q2.232, Q2.233).
 `terminal` and `not_ready` stay 409s, because those say something the caller does
 not know: there is no agent at all. A cancel beside an in-flight `/clear` is `409
 session_busy`.
@@ -301,19 +303,20 @@ already on `Session.recentLogs()`. ⚠ Dropped from the log, **not from the
 clock**: both move `lastEventAt`, the only defence agents that cannot report
 background work have. Q2.44, Q2.228.
 
-**What is deliberately not done.** `status` is untouched and this adds no
-`SessionStatus` member: a clock in `status` would break *"Status is derived, never
-stored"*. ⚠ Its second argument — *"a new member falls silently through
-`statusTone`'s `default`"* — is **spent**: `parked` was added anyway (Q2.224) and
-forced the mirror, partition and tone assertions that make it false. The reason not
-to add one here is that there is no state to name. The turn is **not** held open — that would make `canCancelTurn`
-true for a turn that has ended and answer `409 busy` for ever. And `showsWorking` is
-**not** widened, because it is what refuses Send: widening it would take the control
-away in exactly the state whose only exit is using it.
+**What is deliberately not done.** No `SessionStatus` member is added: a clock in
+`status` would break *"Status is derived, never stored"*. ⚠ Its second argument —
+*"a new member falls silently through `statusTone`'s `default`"* — is **spent**:
+`parked` was added anyway (Q2.224) and forced the mirror, partition and tone
+assertions that make it false. The turn is **not** held open — that would make
+`canCancelTurn` true for a turn that has ended and answer `409 busy` for ever.
+⚠ **The rest of what this refused is done now, on a state rather than a clock**
+(Q2.233): claude marks where each cycle ends, so its work between turns is
+`unpromptedSince`, `status` reads `running` over it and `showsWorking` is widened to
+it — which no longer takes Send away, a daemon sending the field being one that takes
+a message mid-work. `mid-turn-messages.md` has the rest.
 
 **What says so on screen is `outstandingTasks`**, drawn at the transcript's foot from
-the tail rather than the snapshot, since `showsWorking` reads `turn` and the
-delegations outlive it. `pending` counts, because a Task spawn sits there for 13–14s
+the tail rather than the snapshot, since the delegations outlive the turn. `pending` counts, because a Task spawn sits there for 13–14s
 and reaches `completed` without ever being `in_progress`; `mayStillReport` excludes
 terminal and `stopping`, the two states where a spawn can never complete.
 ⚠ **Shell, workflow and monitor work is on the wire now** — three `async_task_*`
@@ -325,6 +328,16 @@ subagent is still invisible**, which was the measured case: the adapter marks it
 `ignored`, the spawn reaches `completed` **at launch** and no later event ever
 names it. So `outstandingTasks` still reads 0 for that, and every margin bought
 for it stays. Q7.113, Q2.228.
+
+**A task list belongs to the conversation, not to the process.** Ultracode on or
+off, a credential restart, a park and a clean daemon restart each replace the
+agent, and the new one knows nothing of the old one's work. So
+`doStop` keeps the rows as `earlierTasks` on the `revivableByPrompt` gate, with
+anything still live marked `stopped` — its agent is gone, and a row left
+`running` would refuse parking for ever — and `applyBackgroundTasks` merges the
+live agent's list over them. A `/clear` or a stop nothing revives drops them.
+Only finished rows are written, and only at such a stop — a live session's row
+carries none — so a crash loses them. Q2.234.
 
 ## Invariants
 
@@ -378,6 +391,11 @@ for it stays. Q7.113, Q2.228.
 
 **Permissions and the registry**
 
+- **A request is settled by an answer, a cancel, the agent withdrawing it or the
+  agent going — never by a turn boundary, never by a timer.** claude asks between
+  turns, and refusing that (`no_turn`) or sweeping at a turn's end (`turn_ended`)
+  cancelled questions nobody had seen. Both stay in `AnswerResolvedBy` for the logs
+  that hold them and are written by nothing. Q2.232.
 - **`settle()` resolves the agent before it logs.** Order: `pending.delete` (the
   compare-and-swap) → record in `resolved` → **resolve the agent's promise** →
   append → fan out. Appending first means a throw leaves the permission recorded as
@@ -478,5 +496,7 @@ same globs as this file. It is a file of its own because this one reached
 - **`node:sqlite` needs `--experimental-sqlite` on Node 22**, which is why `engines` is
   `>=24`.
 - **Two daemons on one database file** is refused by the single-row `daemon` table,
-  checked before restore — otherwise each would reap the other's agents.
+  checked before restore — otherwise each would reap the other's agents. Two on one
+  *account* are ordinary: one per state root (`REEMOAT_HOME`), which is how the
+  desktop app runs one per account it holds — Q7.148, Q7.149.
 - **The daemon crashes with a raw `EADDRINUSE` stack** if the port is taken. Not fixed.

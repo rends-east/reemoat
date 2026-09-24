@@ -352,6 +352,18 @@ jobs:
       # around — a runner is reused, `binaries/node-*` outlives the build that
       # staged it, and `tauri-build` copies whatever it finds. Staging in this
       # file would take that refusal away from every leg.
+
+      # Which server this build's first screen opens on, said where whoever cut
+      # the release reads first. Empty is a build with no default — a fork that set
+      # no repository variable, or one whose variable was deleted — and that is
+      # written out rather than left as a blank line nobody notices. Q4.127.
+      - name: default server
+        shell: bash
+        env:
+          SUGGESTED: ${{ vars.REEMOAT_DEFAULT_SERVER }}
+        run: |
+          echo "Default server compiled in: ${SUGGESTED:-none (the repository variable is unset)}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: app
         # The one step in this workflow that can land on Windows, where the
         # default shell is pwsh and a POSIX script would not be run at all.
@@ -365,6 +377,14 @@ jobs:
           # there is no `tauri` on any runner's PATH — the CLI is a dependency of
           # `packages/native` and of nothing else in this tree.
           TAURI: ${{ github.workspace }}/packages/native/node_modules/.bin/tauri
+          # The one build-time input this app has — the variable of that name,
+          # read at compile time by `config.rs` — forwarded from a **repository
+          # variable**, never a literal and never a secret: this repository still
+          # names nobody's server, and a fork inherits none. Unset, it expands to
+          # the empty string, which the app reads as no default. `nativecheck`
+          # allows exactly this line, in this job and the Android one, and
+          # asserts both are here. Q4.127.
+          REEMOAT_DEFAULT_SERVER: ${{ vars.REEMOAT_DEFAULT_SERVER }}
         run: deploy/ci-release.sh app
 
       - uses: actions/upload-artifact@v7
@@ -446,6 +466,14 @@ jobs:
       - run: pnpm --dir packages/native install --frozen-lockfile
       - run: pnpm web:build
 
+      # The desktop job's summary line, for the APK. Q4.127.
+      - name: default server
+        shell: bash
+        env:
+          SUGGESTED: ${{ vars.REEMOAT_DEFAULT_SERVER }}
+        run: |
+          echo "Default server compiled in: ${SUGGESTED:-none (the repository variable is unset)}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: app
         env:
           GH_TOKEN: ${{ github.token }}
@@ -453,6 +481,9 @@ jobs:
           RELEASE_REF: ${{ github.sha }}
           RELEASE_APP_TARGET: android
           TAURI: ${{ github.workspace }}/packages/native/node_modules/.bin/tauri
+          # The desktop job's forward, for the APK — the same one line, and the
+          # only other place `nativecheck` allows it. Q4.127.
+          REEMOAT_DEFAULT_SERVER: ${{ vars.REEMOAT_DEFAULT_SERVER }}
           # ⚠ **The only four repository secrets this workflow reads, named in
           # this job and nowhere else.** `deploycheck` asserts both halves — that
           # these are the four, and that no other job mentions one. The script

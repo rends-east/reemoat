@@ -102,18 +102,19 @@ And the one that decides the rest: **a failure is a rejection, never a status.**
 The bridge re-throws the host's error as a `TypeError`, because `isTransportFailure`
 is a negation and `errorText` narrows on `instanceof Error`.
 
-## The credential is keyed on the server's origin
+## The credential is keyed on the server and the account
 
 A browser hands out one storage area per origin, so it scopes a credential to a
 server for free. **A custom scheme does not: there is one webview origin for every
-server somebody might point this app at.** So the keyring account *is* the origin —
-`credential#<origin>` — which means a credential cannot be read for a server it was
-not issued by, structurally rather than because a code path remembered to clear it.
-`host_set_server` erases the previous origin's entry in the same act.
+server, and every account on each.** So the keyring account *is* the account —
+`credential#<origin>#<user id>` — and a credential cannot be read for a server it
+was not issued by, nor for a second person on it, structurally rather than because
+a code path remembered to clear it. Which account a call is about is the host's to
+decide: `native-accounts.md`, Q1.651.
 
 `#` as the delimiter, chosen rather than defaulted: a URL origin cannot contain
-one, so no escaping is needed, and a later `credential#<origin>#<account>` is an
-extension of this shape rather than a migration away from it.
+one, so no escaping is needed, and the account half extended `credential#<origin>`
+rather than migrating away from it.
 
 ⚠ **The web arm keeps the unscoped name `reemoat.credential`, deliberately**, and
 so do the two pre-rename names `cp.ts` reads once and sweeps. A browser origin
@@ -169,9 +170,9 @@ is **`null` in a browser and for ever**. `ForcedPasswordChange` is the precedent
 *"reached by state, not by a URL, which is why it is filed beside `SignIn.tsx`"*.
 
 **The first screen is a welcome, not a picker.** On a machine where nothing has
-happened yet it greets, says what is about to happen, and asks one thing, with the
-field already holding what the build suggests; **Continue** adopts it and the
-sign-in form is next. ⚠ That ordering was briefly the other way round — the
+happened yet it greets, says what is about to happen, and asks one thing, the
+field holding what the build suggests, locked, with a pencil; **Continue** adopts it
+and the sign-in form is next. ⚠ That ordering was briefly the other way round — the
 default was written down at first launch and the address appeared instead as a
 line with a *Change* link under the sign-in form's lead sentence. The argument for
 it was real (a custom scheme has no address bar, so `cp.ts`'s "one origin" rule
@@ -185,50 +186,44 @@ without one was a one-way door in a new place.** `Continue` adopts an address; a
 reachable but *wrong* one then left somebody on a sign-in form with no route to
 the screen that sets it — Settings → Account needs a session, and getting one
 needs the right server. It names its destination and never the address, which is
-the line that was rejected; it is shell-only, there being nowhere to go in a
-browser; and it is `web-shell.md`'s kind of back control, a fixed destination
-drawn as a chevron rather than `history.back()`.
+the line that was rejected; it is drawn only on a pending sign-in with an
+account to return to (Q5.120) — ⚠ **not on a first run any more**, the owner's call
+of 2026-09-24, which reopens that door knowingly (Q3.643); and it is
+`web-shell.md`'s kind of back control, a fixed destination drawn as a chevron.
 
-**Two entrances, and the second closed a hole rather than adding a convenience.**
-`state.host.server === null` is the welcome above; `state.pickingServer` is the
-**Server address** row under Settings → Account. Before it, `setNativeServer` had
-exactly one call site and `clearSession` leaves the server alone — so a server
-once chosen **could not be changed from inside the app at all**, and the only
-remedy was deleting the shell's config by hand.
+**Two entrances, and both are a window nobody has signed in to.**
+`state.host.server === null` is the welcome — a first run, or an account being
+added; `state.pickingServer` is `‹ Server` on a pending sign-in. Before it,
+`setNativeServer` had one call site, so a wrong address once chosen **could not be
+changed from inside the app at all**. Another server is another account (Q3.643).
 
-⚠ **`cp.clearSession()` runs before `setNativeServer`, and the safe-looking order
+⚠ **`cp.detachSession()` runs before `setNativeServer`, and the safe-looking order
 is the wrong one.** `host_set_server` moves the base **in the host process**, so
 from the instant it returns every `host_cp` call goes to the *new* origin while
 the page still holds the old fleet's bearer — and the four-second poll,
 `refreshConfig` or any `cpFetch` in flight would hand server A's session token to
-a host somebody has just typed in. While the screen was only ever drawn at
-`server === null` there was no credential and no window; as a settings screen
-there is both. `clearSession()` is local, instant, cannot fail, and erases
-`credential#<old origin>` through the same call `host_set_server` was about to
-make. What it costs is one sign-in if the write then fails on a full disk; what
-the other order costs is a credential disclosure. `webcheck` asserts the two
+a host somebody has just typed in. No entrance reaches it holding one now —
+`host_set_server` refuses all but a pending seat (Q5.120) — so the order is the
+belt. `detachSession()` is local, instant, cannot fail, and drops the
+page's copy only — never `clearSession()`, which would sign out of the server
+being left. What the other order costs is a credential disclosure. `webcheck` asserts the two
 indices, because every other assertion stays green either way.
 
 **Adopting an origin equal to the one already held reloads nothing.**
 `host_set_server` returns early on a match — no file written, no credential
-erased — so re-typing the address you are on would otherwise be a sign-out charged
+erased — so re-typing the address you are on would otherwise be a reload charged
 for a spelling. Only reachable from the editing entrance, which is why it did not
 have to exist before.
 
-**Cancel exists if and only if there is a server to go back to**, and that is the
+**A way back exists if and only if there is an account to go back to**, and that is the
 whole of what keeps the first-run state uncancellable. It is also why
 `signInReady` did not have to learn about servers: there is no path to a sign-in
 form with no server, so the guard is structural rather than a second predicate
 answering a question `App.tsx` already answers.
 
-**What changing servers costs is said on the screen, in two sentences, and both
-halves are load-bearing.** The first is true because the credential for the old
-origin is erased in the same act. The second — *"Your account there is
-untouched"* — is true because **nothing here ends the session on the old
-server**: no `DELETE /v1/me/sessions/current` is sent, deliberately, it being a
-network call to a server somebody is leaving, which is often *why* they are
-leaving. The row stays in that server's Settings → Devices, and saying so is
-honest where claiming a revocation would not be.
+**What adding an account costs the others is said on the screen: nothing** — no
+credential erased, no session ended, no daemon stopped. `native-accounts.md` has
+why each is true.
 
 A `Route` arm would have been wrong twice. `parseGateScreen` is shared with the
 router, so the web build would parse and draw `/server` — a screen that can do
@@ -240,7 +235,7 @@ edits and a case table, against none.
 Above the `legal` arm, because `App` waits on `state.config` for a document route
 and `config` comes from `GET /v1/instance`, which needs a server. Below it,
 `/terms` spins for ever. ⚠ **That was a sentence about a freshly installed app and
-is now a standing one**: with the picker reachable while signed in, "there is no
+is now a standing one**: with every add reaching the picker, "there is no
 usable config" is every frame it is open rather than only the first ones after an
 install. There is no gate arm left to be above — see below.
 
@@ -258,10 +253,12 @@ is why there is a second question rather than a refusal. Adopting ends in
 `location.assign("/")`, because every connection, token, route memo and socket in
 the process was derived from a credential for a different fleet.
 
-## The default server, and why this repository has none
+## The default server, and why this repository names none
 
 `option_env!("REEMOAT_DEFAULT_SERVER")` in `config.rs` is the only build-time
-input this app has, and **it is empty here**. `nativecheck` asserts that the way
+input this app has, and **no file here gives it a value** — releases forward a
+repository *variable*, which a fork does not inherit, and `nativecheck` lets that
+one `release.yml` line through and refuses every other setter (Q4.127). `nativecheck` asserts that the way
 it asserts `signingIdentity: null`: this is AGPL software and forks run their own
 control planes, so a value compiled in would be one deployment's address in
 everybody's binary. `cp-accounts.md` makes the same argument for the two
@@ -325,6 +322,14 @@ and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
   takes `Composer.tsx`'s attachment drop and `ImportCode.tsx`'s archive drop with
   it, while the paperclip beside them keeps working. So the failure reads as "drag
   and drop was never supported". `nativecheck` asserts it because nothing else can.
+  It reaches a child webview only through `from_config`, which `seats.rs` uses for all.
+- **WebKit rewrites a keystroke unless told not to**: `"` to `“` (`«` under a
+  Russian layout), `--` to `—`, `omw` to its expansion, measured in a WKWebView.
+  `leave_typing_alone` registers `VERBATIM_TYPING` off before the first webview —
+  *registered*, never set, so a person's own Substitutions toggle still wins,
+  measured too. `autocorrect="off"` changes none of it on macOS. Q3.647.
+- **The window's theme is the switch's, set in Rust, never declared.** On macOS it
+  is app-wide and WKWebView's `prefers-color-scheme` follows it. Q3.671.
 - **`tauri://localhost` is a secure context** on macOS, so `crypto.*` and
   `navigator.clipboard` are available. The clipboard still gets a native arm first:
   a webview that has the object and refuses it without focus would fall through to
@@ -392,10 +397,9 @@ and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
 ## The capability surface is `commands.rs`
 
 An app-defined `#[tauri::command]` is **not** ACL-gated — it is callable from every
-window without an entry — so `commands.rs` is the whole surface and
-`capabilities/default.json` grants nothing. **Thirteen** of them — `nativecheck`
-holds the two lists to each other rather than this file holding a number, which is
-why the count here is prose and not a claim anything rests on. `host_local_daemon`
+webview without an entry — so `commands.rs` is the whole surface and
+`capabilities/default.json` grants nothing. How many is `nativecheck`'s to count,
+holding the two lists to each other. `host_local_daemon`
 reads a file the *daemon* wrote and answers a finished
 origin rather than the host and port it was built from — `local.rs` refuses
 anything but `127.0.0.1` and `::1`, in the host process, for `host_cp`'s reason. It
@@ -408,6 +412,13 @@ ring for Settings → Logs. That is a **second** reader of that ring on purpose:
 permission for any of them would be a door the webview could walk through on a page
 that renders agent output. `nativecheck` pins the permission list empty as an exact
 set and names those prefixes out of it.
+
+**The daemon commands answer about the calling webview's account.** A server's
+first account keeps `state_root`'s root — `~/.reemoat` for the server its
+`daemon.env` names, `servers/<server>/` for every other — each further one
+`servers/<server>@<user id>/`; the root, the origin and, off the legacy root,
+`REEMOAT_PORT=0` go on the spawn, so `OWNED_KEYS` stays three. A `Supervisor` per
+root, set-up ones started at launch, all stopped at `RunEvent::Exit`. Q7.149.
 
 Three censuses hold the command list, in three directions, and each catches a
 different failure: declared against registered (`nativecheck` — a dead function),
@@ -430,8 +441,8 @@ both lists off disk and asserts they are the same set. A backstop that could be
 
 Separately, `on_navigation` allows **only this app's own document** — not an
 allowlist, a single rule — so a script assigning `location.href` cannot replace the
-running app with somebody else's page inside a window holding the fleet's
-credential.
+running app with somebody else's page inside a webview holding an account's
+credential — on every account's webview.
 
 ⚠ **`localhost` and `127.0.0.1` were in that rule unconditionally, and it was a
 hole rather than a loosening.** They are there for the Vite dev server — but a
@@ -443,8 +454,7 @@ now; `tauri.localhost` stays in every build, being the *bundle's* origin on Wind
 and Android rather than a server's. The CSP could not have helped: there is no
 `navigate-to` directive, and neither `form-action` nor `base-uri` constrains a
 navigation. `webcheck.native-bridge.ts` holds the caller-side half — every
-`location.assign` in this client is a root-relative literal, today `"/"` at all
-four sites.
+`location.assign` and `location.replace` here is a root-relative literal.
 
 ## Where this package sits, and what depends on that
 
@@ -518,7 +528,7 @@ names, which is the `pnpm-lock.yaml` hazard that driver already refuses. Q4.117.
 
 ## Known gotchas
 
-- **`create: false` on the window is deliberate.** `lib.rs` builds it from that same
+- **`create: false` on the window is deliberate.** `seats.rs` builds it from that same
   config in order to attach `on_navigation`; with `create` left true there would be
   two windows, one of them unguarded.
 - **`reqwest` 0.13 renamed its TLS features.** There is no `rustls-tls-native-roots`

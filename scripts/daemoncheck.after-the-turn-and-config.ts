@@ -19,52 +19,16 @@ import { tmp } from "./tmp.js";
 import { check, report } from "./daemoncheck.env.js";
 import { now, tokenFor, verifier, credentials, stubAgentConfig } from "./daemoncheck.fixtures.js";
 
-/**
- * One event in the bytes a WebSocket message would carry.
- *
- * `Buffer.byteLength` of the JSON rather than `estimateBytes`, because the
- * estimate is what `flush` *budgets* with and this is what the socket *writes* —
- * and the gap between the two is the defect every census below exists to catch.
- * `session_started` is charged a flat 192 and weighs whatever its session id is.
- */
+// The bytes the socket writes, not what `estimateBytes` budgets: the gap between them is what the census catches.
 const weighEvent = (event: SessionEvent): number => Buffer.byteLength(JSON.stringify(event), "utf8");
 
-/**
- * What a hostile agent's configuration looks like *after* `toConfigOptions`.
- *
- * Set by the section that drives one and read by the census below. Carried across
- * rather than rebuilt from the caps, and that is the point: `MAX_CONFIG_CHOICES`
- * and friends are not exported, so a census fixture restating them would be a
- * second copy that drifts the moment somebody tunes one. The fixture for this one
- * label is therefore the real ingest path's own output.
- */
+// The real ingest path's output, carried across: the config caps are not exported, so a restated fixture would drift.
 let ingestedWideConfig: AgentConfig | null = null;
-
-/* ------------------------------------------------------------------ *
- * The one control that is not the agent's
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nwhat the agent says after its turn has ended\n");
 {
-  /*
-   * ⭐ **A conversation stopped dead while the agent went on working, and then a
-   * message produced five minutes of dialog that had nothing to do with it.**
-   *
-   * `session/prompt` resolves while claude drives work it has spawned. The
-   * generator in `Session.prompt` returns on `turn_end`, and everything the agent
-   * emitted after that went into an `EventQueue` whose only consumer had gone —
-   * held until the *next* prompt started a new generator, which drained the whole
-   * backlog in one microtask cascade. Measured on a live log: `turn_end` at seq
-   * 835, then 294,907 ms of silence, then a `prompt` at seq 836 followed by 57
-   * events all stamped inside a **2 ms** span, whose content was the agent saying
-   * "waiting on the reviewers" over and over. Past `MAX_BUFFERED_EVENTS` it was not
-   * held at all — the head was shifted and replaced by an error placeholder.
-   *
-   * The agent below is that behaviour reduced: it answers `session/prompt` at once
-   * and keeps talking afterwards, on demand.
-   */
+  // An agent that answers the prompt at once and keeps talking after its turn has ended.
   const acp = await import("@agentclientprotocol/sdk");
-  /** Pushed by the test between turns; each entry becomes one `session/update`. */
   const hook: {
     emit: (update: Record<string, unknown>) => void;
     stderr: (line: string) => void;
@@ -109,8 +73,6 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
             send({ jsonrpc: "2.0", id, result: { sessionId, modes: null, configOptions: [] } });
             break;
           case acp.methods.agent.session.prompt:
-            // Answered at once, which is the whole premise: the turn is over and
-            // the agent is not.
             send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
             break;
           default:
@@ -160,10 +122,6 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
   await settle();
   check("the turn ends by itself", managed.status, "idle");
 
-  /*
-   * The bug, exactly: the agent talks with no turn in flight. Before the drain
-   * these three landed nowhere until somebody sent another message.
-   */
   hook.emit(say("still working on it"));
   hook.emit(say("nearly there"));
   await settle();
@@ -174,37 +132,20 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
   );
   check("and the session is still idle, because the turn really did end", managed.status, "idle");
 
-  /*
-   * Order is arrival order, and it is checked over a burst large enough that the
-   * old code would not merely have delayed it — `MAX_BUFFERED_EVENTS` is 2000, and
-   * past that the head was shifted out and replaced by an error placeholder, so
-   * this is the half of the bug that lost content rather than postponing it.
-   */
+  // Larger than the session queue's own bound, so a loss rather than a delay would show.
   for (let index = 0; index < 2_500; index += 1) hook.emit(say(`burst ${index}`));
   await settle();
   const burst = texts().slice(2);
   check("a burst past the queue's own bound loses nothing", burst.length, 2_500);
   check("and arrives in the order it was sent", [burst[0], burst[2_499]], ["burst 0", "burst 2499"]);
 
-  /*
-   * ⚠ **`agent_log` and `other` are dropped out of turn, and that is today's
-   * behaviour preserved rather than a new loss.** They were exactly what the queue
-   * evicted first, which is why a count over five of this fleet's database
-   * snapshots — 95,618 events — holds zero `agent_log` rows. Recording them now
-   * would put an unbounded stderr stream into a log that is deliberately
-   * unbounded, and spend the tab's 16 MiB ceiling and `ATTACH_REPLAY_MAX`, both of
-   * which evict from the oldest, on machinery nothing draws.
-   */
+  // `agent_log` and `other` are dropped out of turn on purpose: recording them would put an unbounded stderr stream in the log.
   const before = managed.log.read(0, 10_000, 4 * 1024 * 1024).length;
-  // An `other` (an update shape nothing here models) and an `agent_log` (a line on
-  // the agent's stderr) — the exact two the queue evicted first.
   hook.emit({ sessionUpdate: "session_info_update", info: { title: "ignored" } });
   hook.stderr("[debug] a line nothing draws");
   await settle();
   check("machinery nobody draws is not recorded out of turn", managed.log.read(0, 10_000, 4 * 1024 * 1024).length, before);
 
-  // And the next turn still works, which is what proves the hand-back: the drain
-  // holds the queue right up to the moment `prompt` claims it.
   managed.prompt("again");
   await settle();
   hook.emit(say("after the second turn"));
@@ -216,16 +157,7 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
 
 process.stdout.write("\nwho owns a session's events\n");
 {
-  /*
-   * The handover itself, driven through `Session.prompt` rather than asserted on
-   * the queue — `EventQueue` is module-private, and the property that matters is
-   * the one a caller can observe: two turns cannot both be consuming.
-   *
-   * ⚠ The release is identity-checked, and that is the load-bearing half. A stale
-   * release clearing the turn's hold would route a live turn's events to a drain,
-   * park its generator for ever and pin `ManagedSession.turn` — `409
-   * turn_in_flight` for the rest of the session's life, with nothing running.
-   */
+  // The release is identity-checked: a stale release clearing the turn's hold would pin the turn for the session's life.
   const acp = await import("@agentclientprotocol/sdk");
   const hook: { emit: (update: Record<string, unknown>) => void; answer: () => void } = {
     emit: () => {},
@@ -266,8 +198,7 @@ process.stdout.write("\nwho owns a session's events\n");
             send({ jsonrpc: "2.0", id, result: { sessionId: "conv_1", modes: null, configOptions: [] } });
             break;
           case acp.methods.agent.session.prompt:
-            // Held open until the test says so, so the turn is genuinely in flight
-            // while events are emitted at it.
+            // Held open until the test says so, so the turn is genuinely in flight.
             hook.answer = () => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
             break;
           default:
@@ -312,17 +243,7 @@ process.stdout.write("\nwho owns a session's events\n");
       .filter((stored) => stored.event.type === "text")
       .map((stored) => (stored.event as unknown as { text: string }).text);
 
-  /*
-   * ⚠ **`session_started` has moved, and this is where that is written down.**
-   *
-   * It is pushed by `Session.adopt`, i.e. before `onStarted` runs — and until there
-   * was a drain, nothing read the queue until the first prompt, so it landed in the
-   * log *after* that prompt's own event. Every version of this daemon's notes says
-   * so, and it is why the registry appends its own `status` row at seq 1. It now
-   * lands where it happens. Nothing draws it (`TRANSCRIPT_SILENT`), so this is a
-   * fact about the log rather than about a screen — pinned because the old order is
-   * asserted in prose in several places and somebody will check.
-   */
+  // `session_started` is pushed by `Session.adopt`, before `onStarted`, so it is logged when the session starts.
   const kinds = (): string[] =>
     managed.log.read(0, 100, 1024 * 1024).map((stored) => stored.event.type);
   check(
@@ -353,6 +274,315 @@ process.stdout.write("\nwho owns a session's events\n");
   await heldRegistry.shutdown();
 }
 
+process.stdout.write("\nwhat the agent asks, and does, with no turn held\n");
+{
+  // claude's shape after background work comes back: output, questions and a plan with no session/prompt, each cycle ended by a usage_update carrying its origin.
+  const acp = await import("@agentclientprotocol/sdk");
+  type Rig = {
+    marks: boolean;
+    // Off for one prompt, so a turn's end is seen ending the work with no marker's help.
+    markTurn: boolean;
+    emit: (update: Record<string, unknown>) => void;
+    ask: (method: string, params: Record<string, unknown>) => Promise<any>;
+    methods: string[];
+    heldPrompt: ((stopReason: string) => void) | null;
+    holdNextPrompt: boolean;
+    onCancel: () => void;
+  };
+  const rigs: Rig[] = [];
+  const cycleEnd = (kind: string) => ({
+    sessionUpdate: "usage_update",
+    used: 10,
+    size: 100,
+    _meta: { "_claude/origin": { kind } },
+  });
+
+  const spawnUnprompted = (): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    const waiting = new Map<number, (result: unknown) => void>();
+    let askId = 7000;
+    const rig: Rig = {
+      marks: rigs.length > 0,
+      markTurn: true,
+      emit: (update) =>
+        send({ jsonrpc: "2.0", method: acp.methods.client.session.update, params: { sessionId: "conv_u", update } }),
+      ask: (method, params) =>
+        new Promise((resolve) => {
+          askId += 1;
+          waiting.set(askId, resolve);
+          send({ jsonrpc: "2.0", id: askId, method, params: { sessionId: "conv_u", ...params } });
+        }),
+      methods: [],
+      heldPrompt: null,
+      holdNextPrompt: false,
+      onCancel: () => {},
+    };
+    rigs.push(rig);
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        if (message["method"] === undefined && id !== undefined) {
+          waiting.get(id)?.(message["result"] ?? message["error"]);
+          waiting.delete(id);
+          continue;
+        }
+        rig.methods.push(String(message["method"]));
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { resume: {} } },
+                authMethods: [],
+              },
+            });
+            break;
+          case acp.methods.agent.session.new:
+            send({ jsonrpc: "2.0", id, result: { sessionId: "conv_u", modes: null, configOptions: [] } });
+            break;
+          case acp.methods.agent.session.prompt: {
+            const finish = (stopReason: string): void => {
+              // The adapter's order: the result's usage_update, then the answer to session/prompt.
+              if (rig.marks && rig.markTurn) rig.emit(cycleEnd("human"));
+              send({ jsonrpc: "2.0", id, result: { stopReason } });
+            };
+            if (rig.holdNextPrompt) {
+              rig.holdNextPrompt = false;
+              rig.heldPrompt = finish;
+            } else {
+              finish("end_turn");
+            }
+            break;
+          }
+          case acp.methods.agent.session.cancel:
+            rig.onCancel();
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      handle: null,
+      onceStartError: () => () => {},
+      onceExit: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    } as unknown as AgentProcess;
+  };
+
+  class UnpromptedRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<AgentProcess> {
+      return spawnUnprompted();
+    }
+  }
+
+  const registry = new SessionRegistry(new MemoryEventStore(), null, undefined, new UnpromptedRuntime());
+  const silenceMs = 60_000;
+  registry.setSessionLimits({ turnSilenceMs: silenceMs });
+  const dir = tmp("unpromptedcheck-");
+  const { app } = createApp({ registry, verifier, instanceId: "i_unprompted", startedAt: now, credentials, roots: [dir] });
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 30));
+  const say = (text: string) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  const post = async (path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    const response = await app.fetch(
+      new Request(`http://d${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+    const text = await response.text();
+    return { status: response.status, body: text.length === 0 ? null : JSON.parse(text) };
+  };
+  const permission = (rig: Rig, title: string) =>
+    rig.ask(acp.methods.client.session.requestPermission, {
+      toolCall: { toolCallId: `tc_${title}`, title, rawInput: { plan: "1. do it" } },
+      options: [
+        { optionId: "o_yes", name: "Yes", kind: "allow_once" },
+        { optionId: "o_no", name: "No", kind: "reject_once" },
+      ],
+    });
+  const question = (rig: Rig) =>
+    rig.ask(acp.methods.client.elicitation.create, {
+      mode: "form",
+      toolCallId: "tc_ask",
+      message: "Which one?",
+      requestedSchema: {
+        type: "object",
+        properties: { question_0: { type: "string", title: "Pick", oneOf: [{ const: "a", title: "A" }] } },
+      },
+    });
+
+  // An agent that has never marked where a cycle ends is not tracked at all: nothing could ever end it.
+  const plain = await registry.create({ agent: "kimi", cwd: dir });
+  const plainRig = rigs[0]!;
+  plain.prompt("go");
+  await settle();
+  plainRig.emit(say("after the turn"));
+  await settle();
+  check("an agent that never marks a cycle's end reads idle after its turn, as before", [plain.status, plain.snapshot().unpromptedSince], ["idle", null]);
+
+  const managed = await registry.create({ agent: "kimi", cwd: dir });
+  const rig = rigs[1]!;
+  const log = () => managed.log.read(0, 10_000, 4 * 1024 * 1024).map((stored) => stored.event);
+  const resolutions = () =>
+    log()
+      .filter((event) => event.type === "permission_resolved" || event.type === "elicitation_resolved")
+      .map((event) => (event as { by: string }).by);
+
+  managed.prompt("go");
+  await settle();
+  check("a turn that marked its end leaves nothing running", [managed.status, managed.snapshot().unpromptedSince], ["idle", null]);
+
+  rig.emit(say("the workflow finished, reading its report"));
+  await settle();
+  const lit = managed.snapshot();
+  check("output with no turn held is the agent working", [lit.status, lit.turn, typeof lit.unpromptedSince], ["running", null, "number"]);
+  // Q2.44's objection to widening showsWorking was Send; a daemon that says this also says it takes a message now.
+  check("and a daemon that says so is one that takes a message mid-work", lit.midTurnDelivery !== null, true);
+  check("so it is not released, however long ago anybody typed", managed.parkable(Date.now() + 10 * silenceMs, 0), false);
+  check("nor is its agent restarted under it for a credential", managed.takesCredentialChange, false);
+  check("and a /clear is refused rather than deciding the cycle's fate", (await managed.clearContext("/clear")).kind, "busy");
+  // Ultracode is the third restart, and kimi offers no row for it, so its gate is read off the source.
+  const registryCode = (await readFile(new URL("../src/registry.ts", import.meta.url), "utf8")).replace(/^\s*\/\/[^\n]*$/gm, "");
+  check(
+    "nor its agent restarted for ultracode, on the same three facts",
+    /if \(this\.turn !== null \|\| this\.unpromptedSinceState !== null \|\| this\.awaitingCount > 0\) \{\s*return \{ kind: "turn_in_flight"[^}]*\};\s*\}\s*await this\.applyUltracode\(wanted\);/.test(registryCode),
+    true,
+  );
+  rig.emit({ sessionUpdate: "usage_update", used: 11, size: 100 });
+  await settle();
+  check("a usage_update with no origin is a token, not an end", managed.snapshot().unpromptedSince === lit.unpromptedSince, true);
+  rig.emit(cycleEnd("task-notification"));
+  await settle();
+  check("the cycle's own end marker ends it", [managed.status, managed.snapshot().unpromptedSince], ["idle", null]);
+
+  rig.emit({
+    sessionUpdate: "tool_call",
+    toolCallId: "sub_1",
+    title: "grep",
+    kind: "search",
+    status: "pending",
+    _meta: { claudeCode: { parentToolUseId: "task_1" } },
+  });
+  await settle();
+  check("a subagent's step is a delegation, not the agent's own cycle", managed.snapshot().unpromptedSince, null);
+
+  // Q2.232: the defect as filed — a question raised with no turn held was cancelled on arrival.
+  const asked = question(rig);
+  await settle();
+  check("a question raised with no turn held is parked, not refused", [managed.status, managed.snapshot().pendingElicitations.length], ["blocked", 1]);
+  check("and nothing settled it on arrival", resolutions(), []);
+  const elicitationId = managed.snapshot().pendingElicitations[0]?.elicitationId ?? "none";
+  const replied = await post(`/sessions/${managed.id}/elicitations/${elicitationId}`, { content: { question_0: "a" } });
+  check("a person answers it", [replied.status, ((await asked) as any)?.action], [200, "accept"]);
+  check("and the answer is attributed to them", resolutions(), ["client"]);
+  rig.emit(cycleEnd("task-notification"));
+  await settle();
+
+  const plan = permission(rig, "Approve Plan");
+  await settle();
+  check("so is a plan", [managed.status, managed.snapshot().pendingPermissions.length], ["blocked", 1]);
+  check("and it says it was raised between turns", managed.snapshot().pendingPermissions[0]?.outOfTurn, true);
+  const permissionId = managed.snapshot().pendingPermissions[0]?.permissionId ?? "none";
+  const approved = await post(`/sessions/${managed.id}/permissions/${permissionId}`, { optionId: "o_yes" });
+  check("and approving it reaches the agent", [approved.status, ((await plan) as any)?.outcome?.optionId], [200, "o_yes"]);
+  rig.emit(cycleEnd("task-notification"));
+  await settle();
+
+  // A turn ending is not an answer.
+  rig.holdNextPrompt = true;
+  managed.prompt("hold on");
+  await settle();
+  const inTurn = permission(rig, "Terminal");
+  await settle();
+  check("a request raised inside a turn says so", managed.snapshot().pendingPermissions[0]?.outOfTurn, false);
+  rig.heldPrompt?.("end_turn");
+  await settle();
+  check("a request still parked when its turn ends stays parked", [managed.snapshot().turn, managed.snapshot().pendingPermissions.length], [null, 1]);
+  check("with nothing settled by the turn's end", resolutions(), ["client", "client"]);
+  const late = managed.snapshot().pendingPermissions[0]?.permissionId ?? "none";
+  const lateAnswer = await post(`/sessions/${managed.id}/permissions/${late}`, { optionId: "o_no" });
+  check("and it can still be answered", [lateAnswer.status, ((await inTurn) as any)?.outcome?.optionId], [200, "o_no"]);
+
+  // Stop with no turn: send, sweep, watch, as a turn's Stop does.
+  rig.emit(say("working on the next part"));
+  const parkedPlan = permission(rig, "Approve Plan");
+  await settle();
+  rig.onCancel = () => rig.emit(cycleEnd("task-notification"));
+  const cancelsBefore = rig.methods.filter((method) => method === acp.methods.agent.session.cancel).length;
+  const stopped = await post(`/sessions/${managed.id}/cancel`);
+  check("Stop with no turn held is a cancel, not a no_turn", [stopped.status, stopped.body?.cancelled, stopped.body?.turn], [200, true, null]);
+  check("the agent was told", rig.methods.filter((method) => method === acp.methods.agent.session.cancel).length - cancelsBefore, 1);
+  check("and what it had parked was answered cancelled, by the person", [((await parkedPlan) as any)?.outcome?.outcome, resolutions().at(-1)], ["cancelled", "turn_cancelled"]);
+  check("and it settled once the cycle said it had ended", [stopped.body?.settled, managed.status, managed.snapshot().cancelRequestedAt], [true, "idle", null]);
+
+  // Revising a plan parked with no turn: cancel, then the message goes through as a turn of its own.
+  rig.emit(say("still going"));
+  await settle();
+  rig.onCancel = () => {};
+  const unsettled = await post(`/sessions/${managed.id}/cancel`);
+  check("an agent that has not ended the cycle yet is reported honestly", [unsettled.body?.settled, typeof managed.snapshot().cancelRequestedAt], [false, "number"]);
+  const promptsBefore = rig.methods.filter((method) => method === acp.methods.agent.session.prompt).length;
+  rig.markTurn = false;
+  const revised = await post(`/sessions/${managed.id}/prompt`, { text: "change step 2" });
+  await settle();
+  rig.markTurn = true;
+  check("and the message sent after it is taken, never a 409", revised.status, 202);
+  check(
+    "and really reaches the agent rather than ending as cancelled before it is sent",
+    rig.methods.filter((method) => method === acp.methods.agent.session.prompt).length - promptsBefore,
+    1,
+  );
+  check("and a turn's end ends the unprompted work before it too", [managed.status, managed.snapshot().unpromptedSince], ["idle", null]);
+
+  const idleCancel = await post(`/sessions/${managed.id}/cancel`);
+  check("with nothing working and nothing parked, Stop is still the lost race it was", [idleCancel.body?.cancelled, idleCancel.body?.turn], [false, null]);
+
+  // The safety net: the silent-turn clock, for an adapter that stops sending the marker.
+  rig.emit(say("a cycle whose end never comes"));
+  await settle();
+  // Measured from the agent's own last word, the clock the sweep reads, rather than from a margin.
+  const lastWord = managed.lastAgentActivityAt ?? Number.NaN;
+  registry.abandonWedgedTurns(lastWord + silenceMs - 1);
+  check("the silent-turn clock leaves unprompted work alone a moment before the bound", typeof managed.snapshot().unpromptedSince, "number");
+  check("and does not take it for a turn to abandon", registry.abandonWedgedTurns(lastWord + silenceMs), []);
+  check("but ends it at the bound", managed.snapshot().unpromptedSince, null);
+  check("writing nothing, since no turn ended", log().at(-1)?.type, "text");
+  const blocking = permission(rig, "Terminal");
+  await settle();
+  registry.abandonWedgedTurns(Date.now() + 10 * silenceMs);
+  check("and never while it waits on a person", [managed.status, typeof managed.snapshot().unpromptedSince], ["blocked", "number"]);
+
+  await managed.stop();
+  check("stopping the session answers what is parked and ends the work", [((await blocking) as any)?.outcome?.outcome, managed.snapshot().unpromptedSince], ["cancelled", null]);
+  check("and the old resolvers are unreachable", resolutions().filter((by) => by === "no_turn" || by === "turn_ended" || by === "pump_failed"), []);
+
+  await registry.shutdown();
+}
+
 process.stdout.write("\nultracode, which claude offers and ACP has no field for\n");
 
 {
@@ -381,13 +611,12 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   });
   const claude = effort(["default", "low", "medium", "high", "xhigh", "max"]);
 
-  // What goes on the wire, which is the only thing the agent ever sees of this.
-  check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ultracode: true }), {
+  check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ultracode: true, elicitation: true }), {
     claudeCode: { options: { settings: { ultracode: true } } },
   });
-  check("and asked nothing at all when it is off", sessionMetaFor("claude", { ultracode: false }), undefined);
-  check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ultracode: true }), undefined);
-  check("nor codex", sessionMetaFor("codex", { ultracode: true }), undefined);
+  check("and asked nothing at all when it is off", sessionMetaFor("claude", { ultracode: false, elicitation: true }), undefined);
+  check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ultracode: true, elicitation: true }), undefined);
+  check("nor codex", sessionMetaFor("codex", { ultracode: true, elicitation: true }), undefined);
 
   // Which control the extra row belongs on — by category, never by id.
   check("the row goes on claude's effort control", ultracodeOptionId(claude, "claude"), "effort");
@@ -430,32 +659,14 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
     true,
   );
 
-  /*
-   * The property the whole split rests on: the overlay is for drawing, and the
-   * state `setConfigOption` validates against never grows this choice. Mutating
-   * the input here is the one mistake that would let `"ultracode"` through
-   * validation and out to the agent as an ordinary value — which is precisely
-   * what it must never be, since the agent has never heard of it.
-   */
+  // The overlay is for drawing: the config `setConfigOption` validates against must never grow this choice.
   check(
     "the live config the daemon validates against is not touched",
     claude.options[1]?.choices.map((choice) => choice.value),
     ["default", "low", "medium", "high", "xhigh", "max"],
   );
 
-  /*
-   * And the exit reason the restart writes. `config_changed` is a *daemon* exit:
-   * nobody asked for the session to end, so if the resume that follows never
-   * lands, the boot pass owes it another try.
-   */
-  /*
-   * And what actually goes on the wire, which no listener can see.
-   *
-   * `_meta` is a *request* parameter, so the only way to observe it is to be the
-   * agent. The checks above prove the shape; this proves `Session` spreads it onto
-   * `session/new` at all — the wiring between them, which is where a boolean that
-   * never reaches `sessionMetaFor` would hide with every unit test still green.
-   */
+  // `_meta` is a request parameter, so the only way to observe it is to be the agent.
   const acp = await import("@agentclientprotocol/sdk");
   const { Session } = await import("../src/session.js");
   const { PassThrough } = await import("node:stream");
@@ -522,37 +733,9 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
 
 process.stdout.write("\nthe mode a person chose, across the restart a setting causes\n");
 {
-  /*
-   * ⭐ **Choosing `ultracode` on the effort control put the *mode* back to Manual.**
-   *
-   * Two controls that have nothing to do with each other, and the coupling is the
-   * restart: `applyUltracode` is `stop("config_changed")` then `resume()`, `doStop`
-   * clears `agentConfigState`, and `onStarted` assigns whatever the fresh
-   * conversation published — which for claude is the mode it calls `Manual`.
-   * `/clear` has had `Session.restoreConfig` for exactly this since it was written;
-   * this path did the structurally identical thing with the capture missing.
-   *
-   * The agent below is the measured shape of all three: it answers `session/set_mode`
-   * and remembers the answer for as long as this *process* lives, so a fresh one
-   * starts back at `default` — which is what makes the assertion about a restart
-   * rather than about a variable.
-   */
+  // `applyUltracode` restarts the agent, which comes back on its own mode, so the restore must put the chosen mode back.
   const acp = await import("@agentclientprotocol/sdk");
-  /*
-   * ⚠ **The vocabulary narrows across the restart, and it has to.**
-   *
-   * `restoreConfig`'s two withdrawal guards ask whether the conversation that came
-   * up still *offers* what is being put back — and with one fixture handing every
-   * conversation the identical lists, neither guard can ever refuse and the option
-   * loop never even reaches `setConfigOption`, because `now.value === option.value`
-   * skips it a line earlier. Measured by mutation: reverting the option guard to
-   * `option.choices` (the predicate the docblock calls true by construction) and
-   * deleting the mode guard outright left this driver **all green**.
-   *
-   * So the first conversation is wide and every one after it is narrow, which is
-   * the real shape the guards name: claude drops `bypassPermissions` from its modes
-   * under root, and an agent restart can land on a new binary with fewer choices.
-   */
+  // The first conversation is wide and every later one narrow, or the restore's withdrawal guards can never refuse.
   let conversations = 0;
   const wide = (): boolean => conversations <= 1;
   const modes = () =>
@@ -566,14 +749,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
           { id: "default", name: "Manual", description: null },
           { id: "acceptEdits", name: "Accept Edits", description: null },
         ];
-  /*
-   * ⚠ `effort` keeps **all three** choices on every conversation, and `xhigh` is
-   * the reason: `ultracodeOptionId` reads it as a capability test off the agent's
-   * own answer, so narrowing it away takes the ultracode row off the control and
-   * every toggle below answers `invalid_value`. The narrowing that tests the option
-   * guard is therefore carried by a second control, and effort carries the restart
-   * and the positive path.
-   */
+  // `effort` keeps all three choices: `ultracodeOptionId` reads `xhigh` as the capability test, so the narrowing rides on a second control.
   const effort = (value: string) => ({
     id: "effort",
     name: "Effort",
@@ -587,7 +763,6 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
       { value: "xhigh", name: "xhigh", description: null },
     ],
   });
-  /** The control that loses a choice across the restart. */
   const verbosity = (value: string) => ({
     id: "verbosity",
     name: "Verbosity",
@@ -607,24 +782,10 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
         ],
   });
 
-  /**
-   * What the daemon actually sent, which is the only thing that can tell a guard
-   * that refused from a value that happened to match.
-   *
-   * Outside `spawnModal` so it survives the restart the whole block is about.
-   */
+  // What the daemon sent: the only thing that tells a refusing guard from a value that happened to match.
   const sent: string[] = [];
 
-  /**
-   * Fired once, from inside the fixture, on the first RPC `restoreConfig` makes.
-   *
-   * The only deterministic way into the window `restarting` closes. Racing it from
-   * the test lands in the *stop* phase, where `stopRequested` refuses with
-   * `terminal` all by itself — the honest answer there, and not the one this is
-   * about. The window that needs a marker is strictly later: after `onStarted` has
-   * assigned the new agent and while the restore is still putting values back, at
-   * which point the fixture receiving a restore call *is* that moment.
-   */
+  // Fired once on the restore's first RPC: the only deterministic way into the window `restarting` closes.
   let restoreHook: (() => void) | null = null;
   const fireRestoreHook = (): void => {
     const armed = restoreHook;
@@ -633,27 +794,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     armed();
   };
 
-  /**
-   * Fired once, on the conversation-opening RPC of a restart — i.e. inside the
-   * window with **no agent at all**, before `onStarted` has published anything.
-   *
-   * Deliberately not keyed on `session/resume`: nothing in this block ever sends a
-   * prompt, so `turnCounter === 0` makes `conversationKnownEmpty` true and the
-   * restart **opens** a conversation rather than resuming one. Keyed on the method
-   * it never fired at all, and the assertion passed vacuously on `<the hook never
-   * fired>` being compared to nothing. What scopes it is the arming, not the method.
-   *
-   * The other half of {@link restoreHook}, and it guards the opposite mistake. The
-   * hold that stops the mode flashing must not extend backwards over this window:
-   * an empty config is how a client is told there is nobody to ask, and
-   * `packages/web`'s `drawnControls` reads it as `stale` and draws its own memory
-   * dimmed and untappable. Serve the held config here and those chips become
-   * enabled, onto a certain 409.
-   *
-   * Armed only when a test wants it, so the very first `session/new` — which
-   * happens inside `registry.create`, before `managed` is even assigned — fires
-   * nothing.
-   */
+  // Fired once on a restart's conversation-opening RPC, while there is no agent; scoped by arming, not by method.
   let resumeHook: (() => void) | null = null;
   const fireResumeHook = (): void => {
     const armed = resumeHook;
@@ -662,20 +803,11 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     armed();
   };
 
-  /**
-   * An unsolicited `session/update` from the modal agent, pushed by the test.
-   *
-   * The same shape the talkative agent's `hook.emit` uses, and it is here for one
-   * reason: `current_mode_update` is the only ingest path onto `modes.current`
-   * that `toModes` does not stand in front of, so it cannot be reached through
-   * `session/new`, `session/resume` or a `set_mode` reply. Agent-first, outside a
-   * turn, which is exactly when a real one arrives.
-   */
+  // `current_mode_update` is the only ingest path onto `modes.current` that `toModes` does not guard.
   const modalHook: { emit: (update: Record<string, unknown>) => void } = { emit: () => {} };
 
   const spawnModal = (): AgentProcess => {
-    // Per *process*, which is the whole point: this is the state that does not
-    // survive, exactly as a real agent's does not.
+    // Per process: this state does not survive a restart, as a real agent's does not.
     let mode = "default";
     let level = "default";
     let verb = "terse";
@@ -713,8 +845,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
             break;
           case acp.methods.agent.session.new:
           case acp.methods.agent.session.resume:
-            // Before the answer, so the snapshot it samples is the one taken while
-            // this daemon genuinely has no agent — `onStarted` runs off this reply.
+            // Before the answer, so the sample is taken while the daemon has no agent.
             fireResumeHook();
             // Counted before `state()` reads it, so the conversation this answer
             // describes is the one the count names.
@@ -779,25 +910,8 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
   check("a fresh conversation starts on the agent's own mode", modeOf(), "default");
   check("and its own effort", effortOf(), "default");
 
-  /*
-   * ⭐ **The third door onto `modes.current`, driven agent-first.**
-   *
-   * `toModes` refuses a `currentModeId` over `MAX_CONFIG_ID_CHARS`, and it is on
-   * the `session/new` and `session/resume` paths only. A `current_mode_update`
-   * notification reaches `updateConfig` directly, and used to be written through
-   * with no bound at all — measured through a real registry and a stub over real
-   * streams, a 2 MB id produced a logged `agent_config` of 2,000,126 bytes after
-   * `truncateEvent`, against a `MAX_SOCKET_MESSAGE_BYTES` of 1,048,576. Past that
-   * the assembler refuses, the channel fails, and the client reconnects onto the
-   * same `seq` for ever.
-   *
-   * Both halves, because neither discriminates alone: an over-long id must be
-   * IGNORED (a bound that refuses everything would also pass the first check),
-   * and an ordinary one must still MOVE the mode (which is what fails against a
-   * guard written the wrong way round).
-   */
+  // Both halves: an over-long mode id must be ignored, and an ordinary one must still move the mode.
   const modeSettle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
-  /** The largest single event this session has logged, as the wire would weigh it. */
   const widestLoggedEvent = (): number =>
     managed.log
       .read(0, 10_000, 64 * 1024 * 1024)
@@ -818,16 +932,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
   await modeSettle();
   check("and moves it back", modeOf(), "default");
 
-  /*
-   * ⭐ **What the restore may *not* put back, which is the half no driver reached.**
-   *
-   * Both choices below exist only on the wide first conversation. The restart lands
-   * on a narrow one, so replaying either would send the agent a value it does not
-   * offer — refused over the wire, and then swallowed at `restoreConfig`'s own
-   * `.catch(() => {})`, so the failure is silent in both directions. Asserted on
-   * `sent` rather than on the snapshot, because a guard that refused and a value
-   * that happened to match read identically from outside.
-   */
+  // Asserted on `sent`: a withdrawn choice replayed would be refused and then swallowed by the restore, silently.
   await managed.setMode("bypassPermissions");
   await managed.setConfigOption("verbosity", "verbose");
   check("the wide conversation takes both", [modeOf(), optionOf("verbosity")], ["bypassPermissions", "verbose"]);
@@ -837,8 +942,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
   check("so the mode is the new conversation's own, not one nothing accepted", modeOf(), "default");
   check("and so is the option", optionOf("verbosity"), "terse");
 
-  // And back off, to land on a narrow conversation for the positive round below —
-  // where every value *is* still offered and the restore has to fire.
+  // Back to a narrow conversation where every value is still offered, so the restore has to fire.
   await managed.setConfigOption("effort", "default");
   await managed.setMode("acceptEdits");
   check("which takes what somebody chooses", modeOf(), "acceptEdits");
@@ -846,45 +950,15 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
   await managed.setConfigOption("verbosity", "normal");
   sent.length = 0;
 
-  // The reported bug, exactly. `ultracode` is intercepted before it reaches the
-  // agent and restarts it; the mode is a different control and must not move.
-  /*
-   * ⭐ **The window `restarting` closes, driven rather than described.**
-   *
-   * Fired from inside the restore, which is the only moment it means anything:
-   * every other guard has gone quiet by then — `stopRequested` is cleared,
-   * `terminal` is false, `session` is non-null and `clearing` was never set — so
-   * without the marker this `setMode` **succeeds and answers 200**, and the restore
-   * still in flight puts the pre-restart mode back over it with nothing recorded
-   * anywhere. That is `clearing`'s own documented `/clear` defect, reproduced on
-   * the one path `clearing` does not cover.
-   *
-   * Collected into an array rather than a variable so "the hook never fired" is a
-   * distinguishable answer: an assertion that passes because nothing ran is the
-   * shape this whole block was added to remove.
-   */
+  // Fired from inside the restore, where every other guard is quiet; an array so a hook that never fired is distinguishable.
   const raced: { kind: string }[] = [];
-  /*
-   * ⭐ **The mode chip flashed `Manual` for the whole restart, and this is where it
-   * was visible.**
-   *
-   * `onStarted` assigns the *fresh* conversation's own config, and `restoreConfig`
-   * does not run until several fan-outs later — so between them the snapshot said
-   * the mode was the agent's own default. Not one bad frame: every touch in that
-   * window composes from the same field, so a client had no frame to hold against
-   * and drew `Manual` until the mode's own round trip landed.
-   *
-   * Sampled from `restoreHook`, which fires on the restore's **first** RPC —
-   * strictly after `onStarted` and strictly before the mode is put back, i.e.
-   * inside the flash. Reads `default` without the fix, which is the report verbatim.
-   */
+  // Sampled on the restore's first RPC, after `onStarted` and before the mode is put back.
   const duringRestore: string[] = [];
   restoreHook = () => {
     duringRestore.push(modeOf(), optionOf("verbosity"));
     void managed.setMode("default").then((result) => void raced.push(result));
   };
-  // The opposite mistake, sampled in the same restart: while there is no agent the
-  // snapshot must still report none, or a client draws enabled chips onto a 409.
+  // The opposite mistake: while there is no agent the snapshot must not offer controls a client could tap onto a 409.
   const duringStop: string[] = [];
   resumeHook = () => {
     const snap = managed.snapshot();
@@ -894,7 +968,6 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
       snap.status,
     );
   };
-  // Every frame fanned out across the whole restart, for the totality check below.
   const frames: string[] = [];
   const unwatch = managed.watch((snap) => void frames.push(snap.agentConfig?.modes?.current ?? "<none>"));
   const toggled = await managed.setConfigOption("effort", "ultracode");
@@ -909,59 +982,29 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     duringRestore[1] ?? "<the hook never fired>",
     "normal",
   );
-  /*
-   * ⚠ **The empty window is gone, and that is the point of the change rather than
-   * a side effect of it.** This read `["<none>", "0"]` — the frames between
-   * `doStop` clearing the controls and `onStarted` refilling them, over which a
-   * client drew its own faint memory. `config_changed` is a reason a message
-   * revives, so `doStop` keeps the controls now ({@link revivableByPrompt}) and
-   * `snapshotConfigSource` serves the held set through the whole restart: the strip
-   * reads as though nothing happened to it, which is exactly what that getter was
-   * written to achieve and what it could only do for part of the window before.
-   *
-   * What replaced the `409` the old emptiness was protecting against is the `busy`
-   * guard, moved **above** the deferred arm in `setConfigOption` and `setMode` —
-   * asserted three checks down, where a mode chosen mid-restart is refused.
-   */
+  // `doStop` keeps the controls for a revivable reason, so the snapshot serves them through the restart; a choice made mid-restart is refused as busy.
   check(
     "the window with no agent no longer reports none: the strip does not blink",
     duringStop.slice(0, 2),
     ["acceptEdits", "2"],
   );
   check("which is the state it is drawn over", duringStop[2] ?? "<the hook never fired>", "starting");
-  /*
-   * The totality form, and the one that catches the next fan-out somebody adds
-   * between `onStarted` and the release without routing it through `snapshot()`.
-   * `<none>` is expected and correct — that is the empty window above.
-   */
+  // The totality form: catches a fan-out added between `onStarted` and the release that bypasses the snapshot.
   check("and no frame anywhere in the restart carries the fresh agent's own mode", frames.includes("default"), false);
   check(
     "a mode chosen while the agent is restarting is refused",
     raced[0]?.kind ?? "<the hook never fired>",
     "busy",
   );
-  // Deliberately weaker than it looks, and paired rather than standalone: this
-  // reads `acceptEdits` whether the refusal above happened or the change landed and
-  // was overwritten. That is the point — the silent revert is *indistinguishable*
-  // from the outside, which is why the assertion that carries the rule is the one
-  // on the caller's own answer.
+  // Deliberately weak: a refusal and a silent revert read the same here, so the rule rests on the caller's own answer above.
   check("and the mode is the one chosen before the restart either way", modeOf(), "acceptEdits");
-  /*
-   * The positive path, which the withdrawal assertions above cannot stand for: the
-   * loop has to *reach* `setConfigOption`, and with one vocabulary it never did —
-   * `now.value === option.value` skipped it a line earlier on every conversation.
-   */
+  // The positive path: the restore loop must actually reach `setConfigOption`.
   check("a value the new conversation still offers is put back", sent.includes("effort=high"), true);
   check("and so is one on a control that lost a *different* choice", sent.includes("verbosity=normal"), true);
   check("and so is the mode", sent.includes("mode=acceptEdits"), true);
   check("turning ultracode on is accepted", toggled.kind, "ok");
   check("and the mode somebody chose survives the restart it causes", modeOf(), "acceptEdits");
-  /*
-   * Read off the snapshot the call itself returned, not off a later poll: the
-   * restore is awaited *inside* `applyUltracode`, so a client folding this response
-   * never sees the agent's default. Without that, the fix would still be right and
-   * the screen would still flash "Manual".
-   */
+  // Read off the call's own returned snapshot: the restore is awaited inside `applyUltracode`.
   check(
     "and it is in the answer the caller already has",
     toggled.kind === "ok" ? (toggled.config?.modes?.current ?? "<none>") : "<not ok>",
@@ -969,24 +1012,11 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
   );
   check("with ultracode reported as the effort, which the agent cannot report itself", effortOf(), "ultracode");
 
-  // And back off again, which is the same restart in the other direction.
   await managed.setConfigOption("effort", "default");
   check("turning it off keeps the mode too", modeOf(), "acceptEdits");
 
   {
-    /*
-     * ⭐ **Sending a message during a restart waits it out; it is not refused.**
-     *
-     * Somebody flips ultracode and then types. They did not ask for a restart, and
-     * with the spinner gone and the strip drawing the change as already done, they
-     * cannot see one either — so `409 turn_in_flight` was the daemon refusing a
-     * message on account of work it had started itself.
-     *
-     * Driven through the **real route** rather than `ManagedSession`, because that
-     * is where the wait lives and the placement is the rule: `ManagedSession.prompt`
-     * is synchronous by contract — it sets `turn` before any await — so the route is
-     * the only place a transparent step can go. Asserted both ways below.
-     */
+    // A message during a restart waits at the route: `ManagedSession.prompt` is synchronous by contract, so the wait cannot live there.
     const { app } = createApp({
       registry: modalRegistry,
       verifier,
@@ -995,7 +1025,6 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
       credentials,
       roots: [modalDir],
     });
-    // `Promise.resolve` because `app.fetch` is typed `Response | Promise<Response>`.
     const send = async (text: string): Promise<Response> =>
       await app.fetch(
         new Request(`http://d/sessions/${managed.id}/prompt`, {
@@ -1005,13 +1034,10 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
         }),
       );
 
-    // Fired from inside the restore, the one window that is unambiguously mid-restart.
     const sessionSaid: string[] = [];
     const inFlight: Promise<Response>[] = [];
     restoreHook = () => {
-      // The session's own answer, which must stay a refusal: it is what makes the
-      // route's 409 exact for a real turn, and waiting there would put an await in
-      // front of the assignment that guard depends on.
+      // Must stay a refusal: waiting here would put an await before the assignment the route's 409 depends on.
       sessionSaid.push(managed.prompt("during").kind);
       inFlight.push(send("during the restart"));
     };
@@ -1022,33 +1048,27 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     check("and by the time it lands the restart is over", modeOf(), "acceptEdits");
   }
 
+  {
+    // The reported path (Q2.234): ultracode back to a level restarts the agent, and the panel's finished rows came back empty.
+    const listed = (): string[][] => managed.snapshot().backgroundTasks.map((task) => [task.id, task.state]);
+    check("ultracode is on going in", effortOf(), "ultracode");
+    modalHook.emit({ sessionUpdate: "async_task_spawned", asyncTaskId: "wf_1", name: "map", taskType: "workflow", description: "", showInTranscript: false, canStop: true });
+    modalHook.emit({ sessionUpdate: "async_task_state_update", asyncTaskId: "wf_1", state: "completed" });
+    await modeSettle();
+    check("a workflow finished under ultracode is listed", listed(), [["wf_1", "completed"]]);
+    await managed.setConfigOption("effort", "high");
+    check("effort is a level again, on a fresh agent", [effortOf(), managed.status], ["high", "idle"]);
+    check("and the finished workflow is still listed, since the conversation is the same", listed(), [["wf_1", "completed"]]);
+  }
+
   await modalRegistry.shutdown();
 }
 
 process.stdout.write("\ntwo config changes at once\n");
 {
-  /*
-   * ⭐ **Two changes in flight corrupted the config, and nothing on the daemon
-   * stopped them.**
-   *
-   * `Session.updateConfig` replaces the option list *wholesale* with whatever the
-   * response carried — correctly, since ACP defines `configOptions` as the complete
-   * list. So with A and B overlapping, whichever response landed last won, and it
-   * had been computed by the agent before the other change existed: the session
-   * then reported a configuration that never was, and kept reporting it.
-   *
-   * The only thing holding it off was `locked` in `AgentConfigBar`, which is half a
-   * guard — the composer's `/model` and `/effort` menus call `applyConfigChange`
-   * directly and never see it, and `pnpm client config` knows of no such thing. So
-   * this was reachable in a browser by choosing on the strip and then in the menu.
-   *
-   * The agent below is that race reduced: it applies each change on arrival and
-   * answers with both options, and the first answer can be held so the second
-   * overtakes it. Held rather than delayed by a timer, so the ordering is decided
-   * by the test rather than by a race the test would also have.
-   */
+  // `Session.updateConfig` replaces the option list wholesale, so overlapping changes must be serialized or a stale complete list wins.
+  // The first answer is held, not timed, so the test decides the ordering.
   const acp = await import("@agentclientprotocol/sdk");
-  /** Requests the agent has actually received, which is what serialization is about. */
   const seen: string[] = [];
   const held: (() => void)[] = [];
   let holdNext = false;
@@ -1092,8 +1112,7 @@ process.stdout.write("\ntwo config changes at once\n");
           case acp.methods.agent.session.setConfigOption: {
             const configId = String(params["configId"]);
             seen.push(`${configId}=${String(params["value"])}`);
-            // Applied on arrival, and the answer built now — so a held answer is a
-            // *stale complete list*, which is exactly the shape that corrupts.
+            // Applied on arrival and answered now, so a held answer is a stale complete list.
             state[configId] = String(params["value"]);
             const reply = { jsonrpc: "2.0", id, result: { configOptions: options() } };
             if (holdNext) {
@@ -1148,29 +1167,14 @@ process.stdout.write("\ntwo config changes at once\n");
   const first = managed.setConfigOption("a", "X");
   const second = managed.setConfigOption("b", "Y");
   await settle();
-  /*
-   * The property itself, and the one that reads as the fix rather than as its
-   * consequence: the second change has not reached the agent, because the first
-   * has not been answered. Unserialized this is 2 — both are in flight, and the
-   * corruption below is already inevitable.
-   */
   check("a second change waits for the first to be answered", seen.length, 1);
 
   held[0]?.();
   await Promise.all([first, second]);
   check("both are then applied, in the order they were made", seen, ["a=X", "b=Y"]);
-  /*
-   * The damage, stated as the outcome somebody would report. Unserialized the
-   * stale complete list lands last and `b` reads `b0` — a value nobody chose,
-   * on a snapshot that keeps saying so.
-   */
   check("and neither is lost to the other's answer", [valueOf("a"), valueOf("b")], ["X", "Y"]);
 
-  /*
-   * A refused change must not take the queue with it. `configChain` swallows every
-   * outcome for this reason: a rejected tail would make one bad value the end of
-   * that control for the life of the session.
-   */
+  // `configChain` swallows every outcome: a rejected tail would end that control for the session's life.
   const refused = await managed.setConfigOption("a", "nonexistent");
   check("an invalid value is refused without stopping the queue", refused.kind, "invalid_value");
   const after = await managed.setConfigOption("b", "X");
@@ -1180,23 +1184,7 @@ process.stdout.write("\ntwo config changes at once\n");
   await pairRegistry.shutdown();
 }
 
-/* -------------------------------------------------------------------------- *
- * ⭐ A long model list is cut on the poll and whole on the one read that is not
- *
- * `GET /sessions` returns sixty of these records every four seconds, over a
- * relay, to a phone — and a keyed opencode publishes **362** models in a single
- * control. `snapshotConfig` bounded each choice's *description* for exactly that
- * reason and never bounded the count, so the menu was the largest thing in the
- * response by an order of magnitude.
- *
- * ⚠ **The cut is only safe because there is somewhere to read the rest**, and
- * that is what these cases are really about. The browser draws its model picker
- * out of the snapshot — `store.ts`: *state comes from the snapshot, only prose
- * comes from the log* — so a cut with no complete read behind it is a picker
- * silently missing rows, which is worse than the payload it saves.
- * `GET /sessions/:id` is one session, asked for on purpose, never polled, and
- * answers in full.
- * -------------------------------------------------------------------------- */
+// The poll cuts a long choice list; that is safe only because the picker is drawn from the snapshot and the single-session read answers in full.
 
 process.stdout.write("\na long model list, cut and whole\n");
 {
@@ -1207,12 +1195,7 @@ process.stdout.write("\na long model list, cut and whole\n");
     const toAgent = new PassThrough();
     const toClient = new PassThrough();
     const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
-    /*
-     * The selected value sits **past** the cut on purpose. It is the one choice a
-     * client cannot do without — the chip, the strip tile and `configProse` all
-     * name the session from it — so a head that simply took the first N would make
-     * a running session report a model it is not on.
-     */
+    // The selected value sits past the cut on purpose: every screen names the session from it.
     const options = () => [
       {
         id: "model",
@@ -1292,10 +1275,6 @@ process.stdout.write("\na long model list, cut and whole\n");
   check("the agent really published a list worth bounding", MANY, 400);
   check("the polled snapshot cuts it", polled?.choices.length ?? -1, 40);
   check("and says so, which is what sends a picker to the other route", polled?.truncated, true);
-  /*
-   * The assertion the cut exists to survive. Taking the first forty would drop the
-   * selected model, and every screen that names the session reads it from here.
-   */
   check(
     "the selected choice survives the cut even sitting past it",
     polled?.choices.some((one) => one.value === `m${MANY - 1}`),
@@ -1304,52 +1283,23 @@ process.stdout.write("\na long model list, cut and whole\n");
   check("and is still what the control is set to", String(polled?.value), `m${MANY - 1}`);
 
   check("the single-session read is whole", whole?.choices.length ?? -1, MANY);
-  /*
-   * ⚠ **And is not flagged**, or a picker drawing the complete list would still
-   * print the line that says rows are missing — the failure `clamped` had in
-   * `fitView`, which reported a shortening that had not happened.
-   */
+  // Not flagged, or a picker drawing the whole list would still say rows are missing.
   check("and is not flagged as cut", whole?.truncated ?? false, false);
   check("both reads agree about the value", String(whole?.value), String(polled?.value));
 
   await longRegistry.shutdown();
 }
 
-/* ------------------------------------------------------------------ *
- * A config list nothing bounded, and the census that would have found it
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\na config list nothing bounded\n");
 {
-  /*
-   * ⭐ **`agent_config` was a door past `MAX_SOCKET_MESSAGE_BYTES`, and a nearer
-   * one than the door the comments called "the one".** `truncateEvent`'s arm for
-   * it nulls descriptions and leaves ids, names and values alone on purpose — a
-   * picker missing a choice offers the agent less than it supports — so the arm
-   * could not shrink the large part at all, and nothing bounded it at ingest
-   * either. Measured 2026-09-19 by replaying `truncateEvent` at
-   * `DEFAULT_MAX_EVENT_BYTES`: 20 000 choices came out at **1 318 159 bytes**, one
-   * choice with a 2 MB `value` at **4 000 214**, and at a realistic 40-character
-   * value and name the cliff was **7 766 choices** — below `plan.entries`' ~9 500.
-   * Past the ceiling `MessageAssembler` refuses, the channel fails, and
-   * `stream.ts` reconnects onto the same event for ever.
-   *
-   * The bound is at ingest, in `toConfigOptions`. This drives it through a real
-   * `SessionRegistry` rather than calling the function, because the function is
-   * not exported and because what matters is what reaches a snapshot.
-   *
-   * The agent below is every measured shape at once.
-   */
   const acp = await import("@agentclientprotocol/sdk");
   const HUGE = 2_000_000;
   const CHOICES = 20_000;
 
-  /** The config the stub answers `session/new` with; swapped between the two runs. */
   const published: { options: () => unknown[]; modes: unknown } = { options: () => [], modes: null };
 
   const hostileOptions = (): unknown[] => [
-    // Dropped whole: the id round-trips in `session/set_config_option`, so a
-    // clipped one names no control.
+    // Dropped whole: the id round-trips, so a clipped one names no control.
     {
       id: "i".repeat(HUGE),
       name: "Unreachable",
@@ -1359,8 +1309,7 @@ process.stdout.write("\na config list nothing bounded\n");
       currentValue: "a",
       options: [{ value: "a", name: "A", description: null }],
     },
-    // Kept, with the 2 MB choice dropped out of it for the same reason and the
-    // rest cut to fit. The selected value sits **past** the cut on purpose.
+    // Kept, with the 2 MB choice dropped and the rest cut; the selected value sits past the cut on purpose.
     {
       id: "model",
       name: "N".repeat(HUGE),
@@ -1379,17 +1328,7 @@ process.stdout.write("\na config list nothing bounded\n");
     },
   ];
 
-  /*
-   * ⚠ **The other end of `MAX_CONFIG_BYTES`, and it is the end that was wrong.**
-   * opencode publishes **362 models on one control** — the largest real list this
-   * repository knows of — and the first draft of the backstop weighed a model row
-   * at ~60 bytes, which is what a row costs with no prose on it. With a
-   * description on each it is ~450, so 362 rows is ~163 KiB and the 128 KiB draft
-   * cut the largest honest list in the world down to 256 rows while reporting
-   * `truncated`. A bound that bites on real data is a picker that lies, which is
-   * the exact failure `truncateEvent`'s own arm refuses to make. So this shape is
-   * driven too, and it must come through **whole and unflagged**.
-   */
+  // The largest real list, 362 models with prose: the `MAX_CONFIG_BYTES` backstop must pass it whole and unflagged.
   const realOptions = (): unknown[] => [
     {
       id: "model",
@@ -1471,11 +1410,7 @@ process.stdout.write("\na config list nothing bounded\n");
   }
 
   published.options = hostileOptions;
-  /*
-   * The legacy mode field, with a `currentModeId` nothing could match. Refused
-   * whole rather than clipped — a mode state with nothing selected is a control
-   * that draws blank.
-   */
+  // Refused whole: a mode state with nothing selected draws blank.
   published.modes = {
     currentModeId: "c".repeat(HUGE),
     availableModes: [{ id: "default", name: "Default", description: null }],
@@ -1490,21 +1425,10 @@ process.stdout.write("\na config list nothing bounded\n");
   check("the option beside it survives", model?.id, "model");
   check("its name is clipped rather than dropped — it is a label, not an id", (model?.name.length ?? 0) <= 256, true);
   check("so is its category", (model?.category?.length ?? 0) <= 256, true);
-  /*
-   * ⚠ **The 2 MB choice is *dropped* and the rest are *cut*, and both say so
-   * through the same flag.** `truncated` was already on the wire for the
-   * snapshot's own 40-row cut; setting it here is what keeps the arm's own
-   * argument — a picker must never silently offer less than the agent supports —
-   * true of a bound that does cut.
-   */
+  // A dropped choice and a cut list both set `truncated`, so a picker never silently offers less than the agent supports.
   check("the 2 MB choice value is gone", model?.choices.some((one) => one.value.length > 256) ?? true, false);
   check("and the list is cut", (model?.choices.length ?? 0) < CHOICES, true);
   check("and says so", model?.truncated, true);
-  /*
-   * The assertion the cut exists to survive, and the one the halving rung is
-   * shaped around: taking a head would drop the selected model, and every screen
-   * that names the session reads it from here.
-   */
   check(
     "the selected choice survives even sitting past the cut",
     model?.choices.some((one) => one.value === `m${CHOICES - 1}`),
@@ -1530,13 +1454,7 @@ process.stdout.write("\na config list nothing bounded\n");
   const realModel = real.snapshot({ fullConfig: true }).agentConfig?.options[0];
   check("the largest real model list comes through whole", realModel?.choices.length ?? -1, 362);
   check("and is not flagged as cut", realModel?.truncated ?? false, false);
-  /*
-   * And the fixture really is past the number that was wrong, or the two
-   * assertions above would pass over a list the draft would also have carried.
-   * The snapshot strips a non-selected choice's prose on the way out
-   * (`snapshotConfig`), so this is weighed as the agent published it, which is
-   * what the ingest backstop sees.
-   */
+  // Weighed as published: the fixture must be past 128 KiB, or the checks above would pass over a list the old bound also carried.
   const realBytes = Buffer.byteLength(JSON.stringify(realOptions()), "utf8");
   report(
     "and the list it came through is past the 128 KiB the first draft used",
@@ -1548,42 +1466,13 @@ process.stdout.write("\na config list nothing bounded\n");
 
 process.stdout.write("\nwhich events can still be too big for one WebSocket message\n");
 {
-  /*
-   * ⭐ **A census, because counting the doors by hand is how the wrong number got
-   * written down.** Two comments enumerated the events that can exceed one
-   * WebSocket message — `MAX_SOCKET_MESSAGE_BYTES` in `packages/protocol` and
-   * `BATCH_MAX_BYTES` in `src/server.ts` — each by reading `truncateEvent` by eye,
-   * and both missed `agent_config`; both called what they found "the one door". A
-   * third comment, `fitSnapshotFrame`'s residue note **in the same file as the
-   * second**, named `agentConfig`'s choice ids as bounded nowhere and was right the
-   * whole time. So the tree carried the contradiction inside one file and nobody
-   * read the two halves together. The arm was in the same switch throughout.
-   *
-   * So the enumeration is derived rather than typed. The labels come out of
-   * `SessionEvent`'s own union in `src/events.ts`, read off a **comment-stripped**
-   * copy — this repository deliberately restates code facts in prose, and a raw
-   * read matches the docblock rather than the union — and are differenced against
-   * the fixtures below in **both** directions. A label with no fixture fails here
-   * rather than being skipped silently, which a count could not tell apart.
-   *
-   * ⚠ **What a fixture is and is not.** Each is the largest event *this driver
-   * knows how to build*: where a field is bounded at ingest it is built at that
-   * bound, where it is bounded by nothing it is built enormous, and where the
-   * driver does not know — a `permissionId`, an `elicitationId` — it is built
-   * short. So this is a census with a stated construction, **not** a proof that
-   * no larger event of a given label exists. Somebody widening it should grep the
-   * minting site of the field they doubt and raise the fixture, not trust this
-   * paragraph. What the census does establish is the *partition*: which labels
-   * this repository already knows can exceed the ceiling, checked rather than
-   * remembered.
-   */
+  // Labels come from a comment-stripped copy of the `SessionEvent` union and are differenced against the fixtures both ways.
+  // Each fixture is the largest event this driver knows how to build, not a proof that no larger one exists.
   const source = await readFile(new URL("../src/events.ts", import.meta.url), "utf8");
   const bare = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const unionAt = bare.indexOf("export type SessionEvent =");
   const unionEnd = unionAt < 0 ? -1 : bare.indexOf(";", unionAt);
-  // Both ends guarded: a negative `indexOf` makes `slice` count from the end and
-  // *widen* the window instead of emptying it, which is how a census like this
-  // quietly starts sweeping the whole file.
+  // Both ends guarded: a negative `indexOf` makes `slice` widen the window instead of emptying it.
   if (unionAt < 0 || unionEnd < 0) throw new Error("could not find the SessionEvent union in src/events.ts");
   const members = bare
     .slice(unionAt, unionEnd)
@@ -1627,14 +1516,7 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
       parentToolCallId: null,
       subagent: false,
     },
-    /*
-     * Built at what `toolOutput` can actually emit rather than at what the type
-     * allows, and the difference is the whole point of the fixture. 40 000 blocks
-     * of 100 characters weighs 2 320 197 after truncation — the per-block budget
-     * floors at 64 the way `plan.entries`' does — but `toolOutput` spends one
-     * `MAX_TOOL_OUTPUT_BYTES` budget across the *array*, so the thinnest array it
-     * can produce is that many one-character blocks and no more.
-     */
+    // Built at what `toolOutput` can emit: one budget spans the array, so this is the thinnest array it can produce.
     tool_call_update: {
       type: "tool_call_update",
       toolCallId: "t",
@@ -1677,8 +1559,7 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
       optionId: "o",
       by,
     },
-    // Daemon-minted from a fixed set of push sites in `worktree.ts`, so the count
-    // is bounded by this repository's own code rather than by an agent.
+    // Daemon-minted from fixed push sites in `worktree.ts`, so the count is bounded by this repository's own code.
     workspace: {
       type: "workspace",
       mode: "worktree",
@@ -1689,25 +1570,13 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
       plainReason: null,
       warnings: Array.from({ length: 5_000 }, () => ({ code: "c", message: "m".repeat(100) })),
     },
-    /*
-     * Bounded at ingest as of this change — see `toConfigOptions`. The fixture is
-     * the **output of the real ingest path** on the hostile agent driven one
-     * section above (20 000 choices, a 2 MB choice value, a 2 MB option id, a 2 MB
-     * option name), rather than a hand-built object at the caps: the caps are not
-     * exported, and a fixture restating them would pass by agreeing with itself.
-     */
     agent_config: { type: "agent_config", ...wideConfig },
-    // Fixed shapes: a status word and a token count.
     status: { type: "status", status: "idle", exit: null },
     turn_end: { type: "turn_end", stopReason: "end_turn", usage: null },
-    // The two agent-minted session ids, bounded nowhere — `src/server.ts`'s
-    // residue note says so and refuses to bound them, because an agent session id
-    // is `AcpClient`'s routing key and a clipped one names a conversation that
-    // does not exist.
+    // Agent session ids are bounded nowhere: they are the routing key in `AcpClient`, and a clipped one names no conversation.
     context_cleared: { type: "context_cleared", agentSessionId: "a".repeat(600_000), previousAgentSessionId: "b".repeat(600_000) },
     session_started: { type: "session_started", agent: "claude", sessionId: BIG, agentInfo: null, modes: null },
-    // The per-item budget floors at 64 bytes, so the arm bounds an entry and
-    // never the count, and `session.ts` pushes the agent's array through uncapped.
+    // The per-item budget floors at 64 bytes, so the arm bounds an entry and never the count.
     plan: {
       type: "plan",
       entries: Array.from({ length: 10_000 }, () => ({ content: "z".repeat(200), priority: "medium" as const, status: "pending" as const })),
@@ -1717,24 +1586,10 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
   const fixtured = new Set(Object.keys(fixtures));
   const missing = [...declared].filter((label) => !fixtured.has(label));
   const extra = [...fixtured].filter((label) => !declared.has(label));
-  /*
-   * Differenced both ways rather than counted. A count cannot tell a skipped
-   * label from a renamed one, and this census exists precisely because somebody
-   * enumerated a set by hand and got it wrong.
-   */
   check("every label on the SessionEvent union has a fixture", missing, []);
   check("and every fixture names a label that exists", extra, []);
 
-  /*
-   * ⚠ **The expected set is three, and it is a *claim about this repository's own
-   * unbounded fields*, not a claim that three is the natural number of doors.**
-   * `plan.entries` is uncapped at ingest and its arm budgets per item against a
-   * 64-byte floor; `context_cleared` and `session_started` carry agent session ids
-   * that `src/server.ts` names and deliberately declines to bound, because they
-   * round-trip as `AcpClient`'s routing key. Bounding any of them flips a row here
-   * and this list has to move with it — which is the whole reason it is a list
-   * somebody has to edit rather than a sentence somebody has to re-derive.
-   */
+  // A claim about this repository's own unbounded fields: bounding one of them moves this list.
   const expectedOver = ["context_cleared", "plan", "session_started"];
   const over: string[] = [];
   for (const label of [...declared].sort()) {

@@ -7,10 +7,6 @@ import { MAX_TITLE_CHARS } from "../src/registry.js";
 import { check, report } from "./daemoncheck.env.js";
 import { uAb, uAbcd, escape, aFile, tokenFor, app, get } from "./daemoncheck.fixtures.js";
 
-/* ------------------------------------------------------------------ *
- * Containment — the primitive everything else rests on
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\ncontainment\n");
 
 check("a tenant's own subdirectory is inside it", containedIn(join(uAb, "proj"), uAb), true);
@@ -23,33 +19,9 @@ check("a sibling is outside", containedIn(join(uAbcd, "proj"), uAb), false);
 check("a symlink out of the root is not inside it", containedIn(escape, uAb), false);
 check("nor is anything under it", containedIn(join(escape, "proj"), uAb), false);
 
-/* ------------------------------------------------------------------ *
- * resolveCwd — what it still refuses, now that it confines nothing
- * ------------------------------------------------------------------ */
-
-/*
- * This section used to assert the opposite of every line in it, and the
- * inversion is the point rather than an embarrassment: `resolveCwd` was confined
- * to a tenant root, and the reason — a worktree created outside a container's
- * mount — went with the container. What is left is not a weaker boundary, it is
- * not a boundary: the checks below are all about whether the request can be
- * carried out at all.
- */
 process.stdout.write("\nresolveCwd\n");
 
-/*
- * ⭐ **The request-body bound, which this daemon had none of.**
- *
- * Every JSON route reads the whole body before it looks at it, on the process
- * that owns the agent subprocesses, the event log and the relay tunnel. The
- * control plane added a bound for this reason and this side had never had one:
- * `REEMOAT_AUTH` answers *who* may ask, which is not an answer to *how much*, and
- * a grant is full access reached from a phone.
- *
- * Both directions are asserted, because the bound has one route it must not
- * reach: uploads stream to disk against `MAX_UPLOAD_BYTES` with their own
- * counter, and wrapping them here would refuse every real upload at a megabyte.
- */
+// The body bound must not wrap uploads: they stream to disk against MAX_UPLOAD_BYTES with their own counter.
 {
   process.stdout.write("\nhow much one request may carry\n");
 
@@ -68,8 +40,7 @@ process.stdout.write("\nresolveCwd\n");
     "payload_too_large",
   );
 
-  // The guard against a vacuous pass: an ordinary body must still get through,
-  // or the assertion above would also hold for a daemon that refuses everything.
+  // The control: an ordinary body must still pass, or a daemon refusing everything would satisfy the check above.
   const ordinary = await app.fetch(
     new Request("http://d/sessions", {
       method: "POST",
@@ -90,8 +61,6 @@ async function cwdCode(input: string): Promise<string> {
 }
 
 check("a directory is accepted", await cwdCode(join(uAb, "proj")), "(accepted)");
-// The three that used to be refusals. Somebody keeping a repository in /opt or on
-// an external volume is the case this exists to allow.
 check("so is one somewhere else entirely", await cwdCode(join(uAbcd, "proj")), "(accepted)");
 check("so is a path that walks up and back down", await cwdCode(join(uAb, "..", "u_abcd")), "(accepted)");
 check("and so is a symlink pointing out of the tree", await cwdCode(escape), "(accepted)");
@@ -102,29 +71,7 @@ check("an empty path is refused", await cwdCode("   "), "invalid_path");
 check("a path that is not there is refused", await cwdCode(join(uAb, "nope")), "not_found");
 check("and a file is not a directory", await cwdCode(aFile), "not_a_directory");
 
-/* ------------------------------------------------------------------ *
- * A directory that never answers must not take the daemon with it
- * ------------------------------------------------------------------ */
-
-/*
- * The bug this exists for, measured 2026-08-02 on a real machine.
- *
- * `~/OrbStack` is a hard NFS mount. When its server pauses — the VM sleeping,
- * restarting, or busy — `open()` on it never returns and cannot be interrupted.
- * `browse.ts` did that read **synchronously**, so one directory listing stopped
- * the event loop and the whole daemon died: `/health` accepted the connection and
- * answered nothing, at 0% CPU, until it was killed. The relay tunnel died
- * underneath it without even logging, because the logging needed the same thread.
- *
- * It was reachable only because the browse root became the daemon user's home;
- * while browsing was confined to a small tree there was no stalled mount in it.
- *
- * A stalled mount cannot be built in a driver, so what is asserted is the
- * property that makes one survivable: **these functions are async**, so the
- * filesystem work happens off the event loop. A regression to `readdirSync` would
- * be a type error at every call site, which is the point of asserting the shape
- * rather than the timing.
- */
+// A stalled mount cannot be built here, so assert the shape: these return promises, keeping filesystem work off the event loop.
 process.stdout.write("\na stalled directory cannot block the daemon\n");
 {
   const listing = listDirs(null, { roots: [uAb], showHidden: false });
@@ -139,33 +86,10 @@ process.stdout.write("\na stalled directory cannot block the daemon\n");
   check("and so is makeDir", typeof (making as { then?: unknown }).then, "function");
   check("which still creates the folder", (await making).endsWith("async-check"), true);
 
-  /*
-   * There was a fourth case here — "a timer can run while a listing is in
-   * flight" — and it is **deleted rather than repaired**, because it could not
-   * fail. It set a flag from a `setTimeout(…, 0)`, put that timer's promise into
-   * a `Promise.all` beside the listing, awaited the pair, and then asserted the
-   * flag: the flag is true after that await for a synchronous listing too, since
-   * the timer resolves either way. A green line saying nothing is worse than no
-   * line, and rewriting it as a real ordering assertion means racing a 1 ms timer
-   * against one threadpool round trip — flaky in exactly the direction that
-   * teaches a maintainer to ignore this driver. The shape assertions above are
-   * what carries the property: `readdirSync` cannot be returned from any of these
-   * three without failing the compiler at every call site.
-   */
 }
 
 process.stdout.write("\nan unknown id is 404 on every per-session route\n");
-// Each route is checked in *both* directions, and the positive control is the
-// half that carries the weight. A "404 for an unknown id" assertion on its own
-// passes for a route that 404s for everybody, which is exactly what happened to
-// `stream`: `upgradeWebSocket` falls through on a plain `app.fetch` request, so
-// a real id got 404 too and deleting its lookup left the check green. `stream`
-// is therefore not tested here at all — it gets a real upgrade below — and the
-// rest have to prove they answer an id that exists.
-//
-// This section used to be about the tenant boundary, and the boundary is gone.
-// What it still catches is a route that stops resolving its id at all, which is
-// a live way to break every one of them at once.
+// Both directions per route: a 404 alone passes for a route that 404s for everybody. stream gets a real upgrade below instead.
 for (const [name, real, absent] of [
   ["events", "/sessions/s_one/events", "/sessions/s_nope/events"],
   ["changes", "/sessions/s_one/changes", "/sessions/s_nope/changes"],
@@ -175,39 +99,22 @@ for (const [name, real, absent] of [
     "/sessions/s_nope/changes/diff?path=notes.txt",
   ],
   ["workspace", "/sessions/s_one/workspace", "/sessions/s_nope/workspace"],
-  // `files` is not here: its positive control answers raw bytes, and `get` parses
-  // JSON. Both directions are asserted in "serving one file out of a session",
-  // where the helper reads a `Response` instead.
+  // files is not here: its positive control answers raw bytes and get parses JSON, so it is covered where a Response is read.
   ["upload download", "/sessions/s_one/uploads/u_x", "/sessions/s_nope/uploads/u_x"],
-  // The positive control is the half that carries the weight here, exactly as the
-  // note above says: a restored row has no live agent, and this route must still
-  // answer it with an empty list rather than 404 — otherwise the assertion passes
-  // for a route that 404s for everybody.
   ["commands", "/sessions/s_one/commands", "/sessions/s_nope/commands"],
 ] as const) {
   check(`${name} is 404 for an id that does not exist`, (await get(absent, "u_alice")).status, 404);
   check(`and ${name} answers one that does`, (await get(real, "u_alice")).status !== 404, true);
 }
 
-/*
- * And what the commands route *says* about a session with no live agent, which
- * the status alone cannot show.
- *
- * An empty list at revision 0, not a 409. Nothing is asked of the agent here —
- * this reads a field — and "no commands" is the honest answer for a restored row,
- * where a refusal would make the composer draw an error instead of no menu.
- * Revision 0 is also what tells a client there is nothing worth fetching at all.
- */
+// A restored row has no live agent: commands answers an empty list at revision 0 rather than a refusal, so the composer draws no menu.
 check("a session with no live agent has no commands", (await get("/sessions/s_one/commands", "u_alice")).body, {
   revision: 0,
   commands: [],
   dropped: 0,
 });
 
-// The mode/model/effort route is a POST, so it cannot ride the loop above. Both
-// directions, same as the rest: the positive control answers 409
-// (`session_not_ready`, since these rows have no live agent), and 409 is
-// emphatically not 404.
+// A POST, so outside the loop; its positive control answers 409 (no live agent), which is not 404.
 const configTheirs = await app.fetch(
   new Request("http://d/sessions/s_nope/config", {
     method: "POST",
@@ -225,38 +132,8 @@ const configMine = await app.fetch(
 );
 check("and config answers one that does", configMine.status !== 404, true);
 
-/* ------------------------------------------------------------------ *
- * Listing sessions, and the reorder a cut depends on
- * ------------------------------------------------------------------ */
-
-/**
- * `?limit=` is safe **only** because the order changes with it.
- *
- * Unbounded, the list is creation order and always has been — `scripts/client.ts`
- * prints it that way. With a limit it is `listRank` order: blocked first, then
- * pinned, then everything still live, then the most recent terminal rows. So
- * dropping the tail can only ever drop rows nobody is waiting on, where cutting
- * creation order could hide the one blocked session the whole product exists to
- * surface.
- *
- * The fixture for this has been staged since the rows were written — `s_two` is
- * pinned *and* second, so a `limit=1` that did not reorder would return `s_one` —
- * and nothing asserted it. This is that assertion.
- *
- * What is deliberately not here is the top of the rank: these rows are restored
- * and terminal, so none of them can hold a pending permission. Blocked-outranks-
- * everything is asserted where a session actually blocks, against a live agent.
- *
- * **This has to run above the `/meta` block, and finding that out is the reason
- * to say so.** Written below it, the cut returned `s_one` — because `setMeta` is
- * exercised there with `{pinned: true}` as the *positive control for renaming a
- * terminal session*, so a second row is pinned as a side effect of an assertion
- * about something else entirely, and two rows sharing a rank and a `createdAt`
- * fall back to insertion order. The registry is module state shared by every
- * section in this file, which is the same hazard `webcheck` writes down beside
- * `sessionGroups`: an assertion about ordering must sit above anything that
- * mutates what it orders.
- */
+// A limit is safe only because it switches to listRank order, so a cut drops rows nobody is waiting on.
+// Must run above the meta block: its pin side effects change what this orders.
 process.stdout.write("\nlisting sessions, and the cut that reorders\n");
 {
   const unbounded = await get("/sessions", "u_alice");
@@ -273,11 +150,7 @@ process.stdout.write("\nlisting sessions, and the cut that reorders\n");
     cut.body.sessions.map((session: { id: string }) => session.id),
     ["s_two"],
   );
-  /*
-   * Both are always present, because a client that prunes state for sessions
-   * missing from a response has to tell "gone" from "outside the window" — and a
-   * list that quietly stops short reads as complete.
-   */
+  // total and truncated are always present, so a client can tell a gone session from one outside the window.
   check("while still reporting how many there really are", cut.body.total, 3);
   check("and saying that it stopped short", cut.body.truncated, true);
 
@@ -289,22 +162,11 @@ process.stdout.write("\nlisting sessions, and the cut that reorders\n");
   check("zero returns nothing rather than everything", none.body.sessions.length, 0);
   check("and is still honest about the total", [none.body.total, none.body.truncated], [3, true]);
 
-  /*
-   * A negative or unparseable limit clamps to zero rather than throwing or
-   * wrapping to the whole list, which is the shape that would make a typo in a
-   * query string return a hundred megabytes to a phone.
-   */
   const negative = await get("/sessions?limit=-5", "u_alice");
   check("a negative limit clamps rather than inverting the cut", negative.body.sessions.length, 0);
   check("and still says the list is not whole", negative.body.truncated, true);
 
-  /*
-   * **The unparseable arm, which is a different code path and the one that
-   * decides whether a typo returns everything.** `Math.max(0, clampInt(…))`
-   * clamps a *number*; a non-numeric string never reaches the `Math.max` at all,
-   * it takes `clampInt`'s own fallback. So `limit=-5` says nothing about
-   * `limit=abc`, and the comment above claimed both while driving one.
-   */
+  // A non-numeric limit takes boundedInt's own fallback, a different path from the negative clamp.
   for (const [name, query] of [
     ["a word", "abc"],
     ["an empty value", ""],
@@ -320,11 +182,7 @@ process.stdout.write("\nlisting sessions, and the cut that reorders\n");
   }
 }
 
-// Renaming is a POST too, and its positive control is stronger than `/config`'s:
-// `setMeta` is deliberately allowed on a terminal session, so this asserts a real
-// 200 and a real returned title rather than settling for "not 404". A route that
-// 404s for everybody would pass the negative half alone — which is exactly how
-// `stream` stayed green with its lookup deleted.
+// A stronger control than config's: setMeta is allowed on a terminal session, so this asserts a real 200 and title.
 const metaOf = async (id: string, sub: string, body: unknown) =>
   app.fetch(
     new Request(`http://d/sessions/${id}/meta`, {
@@ -337,8 +195,6 @@ check("meta is 404 for an id that does not exist", (await metaOf("s_nope", "u_al
 {
   const renamed = await metaOf("s_one", "u_alice", { title: "  Fix the\treconnect  " });
   check("and meta answers one that does", renamed.status, 200);
-  // Normalized on the way in, and answered with the snapshot rather than an echo,
-  // so a client never has to guess what was actually stored.
   check("with the normalized title, not the raw one", (await renamed.json() as any).session.title, "Fix the reconnect");
 }
 check(
@@ -353,29 +209,13 @@ check(
 );
 check("and an empty body is refused too", (await metaOf("s_one", "u_alice", {})).status, 400);
 {
-  // `null` clears, which is what re-arms derivation from the next prompt. It has
-  // to be distinguishable from "field absent", which means leave it alone.
+  // null clears and re-arms title derivation from the next prompt; an absent field leaves it alone.
   const cleared = await metaOf("s_one", "u_alice", { title: null });
   check("null clears the title back to unnamed", (await cleared.json() as any).session.title, null);
 }
 
-/* ---------------------------------------------------------------- *
- * Where a session sits in the list somebody reads
- *
- * A third mutable preference on this route, and the one that had to ride here
- * rather than on a route of its own: dropping a row into the pinned group is one
- * act that writes `pinned` **and** `rank`, and two requests can half-succeed into
- * a session that is pinned with no position or positioned without being pinned.
- * ---------------------------------------------------------------- */
 {
-  /*
-   * ⭐ **The compatibility contract, and the most load-bearing line in this block.**
-   * A client reads the field being *absent* as "this daemon cannot store an
-   * order", and hides the gesture for that machine's rows. So a daemon that can
-   * must say `null` — the ordinary "nobody has moved this one" — rather than
-   * omitting the key, or every fresh session looks like an old daemon. Nothing on
-   * either side reads a version.
-   */
+  // Compatibility contract: an absent rank reads as a daemon that cannot store order, so it must be null, never omitted.
   const listed = await app.fetch(
     new Request("http://d/sessions", { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
   );
@@ -391,20 +231,9 @@ check("and an empty body is refused too", (await metaOf("s_one", "u_alice", {}))
   const unplaced = await metaOf("s_one", "u_alice", { rank: null });
   check("and null clears it back to following its age", (await unplaced.json() as any).session.rank, null);
 
-  /*
-   * ⚠ **`1e400` parses to `Infinity`, not to a syntax error.** This value is
-   * compared against every other session's on every render: an infinite one holds
-   * the top of its folder for ever, and a `NaN` makes the comparator answer 0 for
-   * every pair — a sort that quietly stops being a total order, which on this list
-   * is rows swapping places on a poll.
-   */
+  // A non-finite rank breaks the sort: Infinity holds the top for ever, NaN stops the comparator being a total order.
   check("a position that is not a number is refused", (await metaOf("s_one", "u_alice", { rank: "3" })).status, 400);
-  /*
-   * Sent as **bytes**, not through `JSON.stringify` — which is how this arrives in
-   * the first place and the only way to reach the state. `JSON.stringify` turns an
-   * `Infinity` back into `null`, i.e. into the legal "clear it" body, so building
-   * the request the convenient way tests the opposite of what it names.
-   */
+  // Raw bytes on purpose: JSON.stringify turns Infinity into null, which is the legal clear body.
   const overflow = await app.fetch(
     new Request("http://d/sessions/s_one/meta", {
       method: "POST",
@@ -415,39 +244,13 @@ check("and an empty body is refused too", (await metaOf("s_one", "u_alice", {}))
   check("and one that is not finite is refused too", overflow.status, 400);
   check("and the refusals changed nothing", (await (await metaOf("s_one", "u_alice", { title: null })).json() as any).session.rank, null);
 
-  /*
-   * The drop-into-Pinned case, which is why this rides `/meta`: one request, one
-   * row, one `put` — so there is no ordering in which it half-applies.
-   */
+  // Drop-into-Pinned writes pinned and rank in one request, so it cannot half-apply.
   const both = await metaOf("s_one", "u_alice", { pinned: true, rank: 42 });
   const meta = (await both.json() as any).session;
   check("a pin and a position land in one request", [meta.pinned, meta.rank], [true, 42]);
 
-  /*
-   * ⚠ **A position decides display order and buys nothing from the cut**, and it
-   * had a tier of its own in `listRank` for one release.
-   *
-   * The argument for the tier was the pin's, word for word: somebody placed this
-   * row, so dropping it would make the position a lie. What took it back out is
-   * that a position is not the rare per-row act a pin is — `resolveDrop`'s
-   * re-space writes one to a whole folder at once, and the browser's window is
-   * sixty rows per machine, so positioned *terminal* rows could hide every running
-   * session on that machine. It went with the other half of the same answer: the
-   * startup prune reads `pinned` and never `rank`, so a durable position would
-   * have been a promise here that the sweep does not keep.
-   *
-   * ⚠ **`s_one` is put back first, and forgetting that is what makes this pin
-   * vacuous.** The assertion above leaves it `{pinned: true, rank: 42}`, and two
-   * pinned rows fill a `limit=2` under either rule — so the check would pass
-   * against the tier it exists to refuse.
-   *
-   * All three rows share a `createdAt` (`rowFor` stamps one `now`), so the
-   * tie-break is the stable sort's input order: s_one, s_two, s_three. With s_one
-   * plain and s_three carrying the machine's highest position, `limit=2`
-   * separates the two rules cleanly — old: s_two (pinned) then s_three (positioned
-   * beats terminal); new: s_two then s_one, because a position is not a tier and
-   * the two terminal rows tie back to input order.
-   */
+  // A position is not a listRank tier: resolveDrop re-spaces whole folders, and the prune reads pinned only.
+  // s_one is reset first, or two pinned rows fill limit=2 under either rule; equal createdAt ties fall back to input order.
   await metaOf("s_one", "u_alice", { pinned: false, rank: null });
   await metaOf("s_three", "u_alice", { rank: 1_900_000_000_000 });
   const positioned = await get("/sessions?limit=2", "u_alice");

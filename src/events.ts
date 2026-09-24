@@ -7,18 +7,10 @@ import type {
   Usage,
 } from "@agentclientprotocol/sdk";
 import type { AgentId } from "./acp/agents.js";
+import type { BackgroundTask } from "./acp/asynctasks.js";
 import { describeError } from "./http.js";
 
-/**
- * The normalized event stream.
- *
- * Every agent collapses into this union, so anything built on top of a session —
- * the daemon, the browser client, the phone — only ever has to understand these
- * shapes, never the per-agent ACP dialect.
- *
- * Optional data is modelled as `T | null` rather than `?:` so that every event
- * serializes to a stable JSON shape.
- */
+/** Every agent collapses into this union. Optional data is T | null, never ?:, so every event serializes to a stable shape. */
 export type SessionEvent =
   | SessionStartedEvent
   | AgentConfigEvent
@@ -51,87 +43,35 @@ export interface PermissionOptionSummary {
   kind: PermissionOptionKind;
 }
 
-/** One choice on an elicitation field, from either `enum` or `oneOf`. */
 export interface ElicitationOption {
-  /** What goes back on the wire — an `EnumOption.const`, or the bare string. */
   value: string;
-  /** What a person reads — an `EnumOption.title`, or the value again. */
   label: string;
   description: string | null;
 }
 
-/**
- * One question on a form the agent is asking, projected and bounded.
- *
- * ACP's `ElicitationPropertySchema` is an open union of JSON-Schema fragments;
- * this is the fixed-shape subset this system carries. Projected in `session.ts`
- * at ingest, for the reason `toCommands` gives — the agent chooses the strings,
- * so "bounded by what the agent sent" is not a bound — and *here* in `events.ts`
- * rather than beside the projection because it crosses the wire on an event and
- * on the snapshot both, which is the same reason `PermissionOptionSummary` is
- * here.
- *
- * `pattern` is deliberately absent. It is an agent-chosen regular expression, and
- * running one against user input in this process is a ReDoS on the event loop —
- * the same class of hazard as a synchronous stat on a hung mount, through another
- * door. Carrying it for a client to enforce only moves the hazard into a tab.
- * `min`/`max`/`format` are constant-time and are kept.
- */
+/** `pattern` is deliberately dropped: an agent-chosen regex is a ReDoS hazard. */
 export interface ElicitationField {
   key: string;
   kind: "string" | "number" | "integer" | "boolean" | "multi_select";
   title: string | null;
   description: string | null;
   required: boolean;
-  /** Present for a single- or multi-select, `null` for a free value. */
   options: ElicitationOption[] | null;
-  /** `minLength` | `minimum` | `minItems`, by kind. */
   min: number | null;
-  /** `maxLength` | `maximum` | `maxItems`, by kind. */
   max: number | null;
-  /** An input hint. Enforced by nobody — see `validateElicitationContent`. */
   format: "email" | "uri" | "date" | "date-time" | null;
   default: string | number | boolean | string[] | null;
-  /**
-   * The key of the field this one is an *alternative* answer to, or `null`.
-   *
-   * **The one thing read out of an elicitation property's `_meta`, and it is
-   * projected to a scalar rather than carried.** `acp/subagents.ts` does the same
-   * with `_meta.claudeCode`, for the same reason: a blob an agent chose is not
-   * something to hand a browser, and a named scalar is something a client can act
-   * on.
-   *
-   * What it answers is a question the client otherwise cannot: claude puts an
-   * optional free-text box after every `AskUserQuestion` — its own "Other" — and
-   * `applyAskElicitationResponse` uses that text **instead of** the selection,
-   * for a multi-select as well as a single one. Without this the card draws two
-   * answers to one question and sends both, and the agent silently keeps one.
-   *
-   * ⚠ **Read from a declaration and never from the key's shape.** claude declares
-   * `_meta._askUserQuestionCustomAnswer` `{questionId, isCustomAnswer}`; codex
-   * declares nothing and spells the same idea by suffixing `__other` to the
-   * question's id. Q6.54 refuses to parse either suffix by name — a client keyed
-   * on one renders that agent's question and refuses the other's — so an agent
-   * that does not declare it gets `null` here and the card behaves exactly as it
-   * did. Absence is the only way to say no, one field over.
-   *
-   * Resolved before it leaves: a key naming no other field on the form, or naming
-   * itself, is dropped. A dangling pointer would be a control clearing nothing.
-   */
+  /** Read only from a declared `_meta`, never from the key's shape (Q6.54). */
   alternativeTo: string | null;
 }
 
-/** What the agent asked, as a form somebody can be shown. */
 export interface ElicitationForm {
   fields: ElicitationField[];
 }
 
-/** One answer, already rendered for reading. */
 export interface ElicitationAnswer {
   key: string;
-  /** The field's `title`, or its `key` when the agent gave none. */
   label: string;
-  /** The chosen option's `label`, or the typed text. Never a wire value. */
   value: string;
 }
 
@@ -140,81 +80,25 @@ export interface SessionStartedEvent {
   agent: AgentId;
   sessionId: string;
   agentInfo: { name: string; version: string } | null;
-  /**
-   * Permission/plan modes, when the agent fills in ACP's legacy `modes` field.
-   *
-   * Claude does and kimi does not — but kimi is not modeless, it publishes the
-   * same taxonomy through `configOptions` under `category: "mode"` instead. So
-   * this is a fact about which field an adapter populates, not about what it can
-   * do, and {@link AgentConfigEvent} is the one to render.
-   */
   modes: AgentModes | null;
 }
 
-/** One selectable value of a select-shaped {@link AgentConfigOption}. */
 export interface AgentConfigChoice {
   value: string;
   name: string;
   description: string | null;
-  /** The heading this value sits under, when the agent grouped its choices. */
   group: string | null;
 }
 
-/**
- * One knob the agent exposes, flattened out of ACP's `SessionConfigOption`.
- *
- * `category` is ACP's own UX hint — `"mode" | "model" | "model_config" |
- * "thought_level"`, or anything else an agent invents — and it is the **only**
- * portable way to know what a knob means, because the ids are not stable across
- * agents: claude calls reasoning effort `effort` with values
- * `default|low|…|max`, kimi calls it `thinking` with values `off|…`. A client
- * keying on the id renders one agent's controls and none of the other's.
- *
- * The spec is explicit that `category` "MUST NOT be required for correctness",
- * so an unknown or absent one has to render as a plain labelled control rather
- * than disappear.
- */
+/** `category` is the only portable meaning (ids differ per agent); an unknown or absent one must still render. */
 export interface AgentConfigOption {
   id: string;
   name: string;
   description: string | null;
   category: string | null;
   kind: "select" | "boolean";
-  /** A choice's `value` when `kind` is `"select"`, the toggle state otherwise. */
   value: string | boolean;
-  /** Empty for a boolean. */
   choices: AgentConfigChoice[];
-  /**
-   * Whether `choices` is a head rather than the whole list.
-   *
-   * **Two producers set it now, and until 2026-09-19 the docblock here said one
-   * did.** It said *"set only on the snapshot that rides `GET /sessions`, never on
-   * the `agent_config` event, which carries what the agent actually said"*, and
-   * that was true when it was written and is recorded rather than deleted because
-   * the second producer exists for a reason worth knowing:
-   *
-   * - **The snapshot's cut**, `clipChoices` in `registry.ts`, at
-   *   `MAX_SNAPSHOT_CHOICES`. The list route returns sixty of these on a
-   *   four-second poll to a phone, and opencode publishes 362 models in one
-   *   control. A client wanting the rest reads `GET /sessions/:id`, which answers
-   *   whole.
-   * - **The ingest backstop**, `toConfigOptions` in `session.ts`, at
-   *   `MAX_CONFIG_BYTES`. ⚠ **This one is not recoverable from another route**: it
-   *   runs before anything is stored, so `GET /sessions/:id` answers from the same
-   *   cut record and has no more to give. What forced it was a permanent stall —
-   *   an `agent_config` event past `MAX_SOCKET_MESSAGE_BYTES` is refused by
-   *   `MessageAssembler`, fails the channel, and is reconnected onto for ever —
-   *   and the numbers are at the constant.
-   *
-   * The selected choice is always present regardless, from either producer.
-   *
-   * Optional so that every producer that is *not* cutting keeps its shape and an
-   * older client reading `undefined` reads it as "the whole list", which is what it
-   * was before this field existed and is still true of every list any agent this
-   * repository ships has been measured publishing —
-   * `daemoncheck.after-the-turn-and-config` drives 362 models with prose on each
-   * and asserts they arrive unflagged.
-   */
   truncated?: boolean;
 }
 
@@ -223,149 +107,41 @@ export interface AgentModes {
   available: { id: string; name: string; description: string | null }[];
 }
 
-/**
- * Everything an agent will let a client change mid-session.
- *
- * **Always the complete state, never a delta.** ACP's `current_mode_update`
- * carries only the new mode id, but this event is what a snapshot is rebuilt
- * from, so `session.ts` merges such an update against the last known state
- * before emitting. A client that received a partial here would have to keep its
- * own reducer and would disagree with the snapshot the moment it missed one.
- *
- * Emitted on session start, on every agent-initiated change, and after every
- * accepted `POST /sessions/:id/config` — agents change these themselves (claude
- * flips to `plan` from its own hook, and clamps the mode when a model switch
- * makes the current one impossible), so a client must render from this rather
- * than from what it last asked for.
- */
+/** Always complete, never a delta; render from this, not from what was last asked for. */
 export interface AgentConfigEvent {
   type: "agent_config";
   modes: AgentModes | null;
   options: AgentConfigOption[];
 }
 
-/** The payload half of {@link AgentConfigEvent}, as carried on a session snapshot. */
 export type AgentConfig = Omit<AgentConfigEvent, "type">;
 
-/**
- * How full the model's context window is, right now.
- *
- * **Not {@link TurnEndEvent}'s `usage`**, and the two must never be merged. That
- * one is ACP's `Usage`: cumulative token *counts* for one turn — narrative, in the
- * log, one per turn. This is *occupancy of the window at this instant* — state, on
- * the snapshot, and deliberately nowhere else. Measured 2026-07-31 against
- * claude-agent-acp 0.63.0, `usage_update` fires on every streaming token delta, so
- * putting it in the log would spend the 5000-event budget on a number that is
- * superseded microseconds later and evict the transcript it sits beside.
- *
- * Flattened out of ACP's `UsageUpdate` for the same reason `AgentConfigOption` is
- * flattened out of `SessionConfigOption`: `_meta` is unbounded and agent-specific,
- * and this rides a record `GET /sessions` returns sixty of at a time.
- *
- * `size` is 0 for "the agent did not say", never a guessed default — a consumer
- * divides by it, and a made-up denominator produces a percentage nobody measured.
- */
+/** Snapshot-only: never logged, never merged with TurnEndEvent's usage. */
 export interface ContextUsage {
-  /**
-   * What the agent says is in the window, and **the agent decides what that
-   * means** — this daemon does not compute it and cannot check it.
-   *
-   * Read as occupancy, and on codex that is true by a mechanism rather than by
-   * definition: measured 2026-08-07 against codex-acp 1.1.9, its adapter fills
-   * this from `lastTokenUsage.totalTokens`, i.e. the tokens of the **last turn**.
-   * It tracks occupancy only because codex re-sends the whole conversation as
-   * input on every request, so the last turn's input *is* the window. An agent
-   * that sent deltas instead would put a per-turn number here and nothing would
-   * notice — which is why the honest name for this field is "what the agent
-   * reported", and why {@link ContextUsage} is snapshot-only state rather than
-   * something a consumer may do arithmetic across.
-   */
   used: number;
   /** How large the window is, or 0 when the agent did not say. */
   size: number;
-  /** What the session has cost so far, when the agent reports it. */
   cost: { amount: number; currency: string } | null;
 }
 
-/**
- * One command the agent will answer to a leading slash.
- *
- * ACP's whole command surface is the `available_commands_update` arm of
- * `session/update`, and its whole *argument* surface is a hint string: there is
- * no schema, no enums, no `commands/list` RPC and no `session/execute_command`.
- * So a command is invoked by sending `"/name args"` through `session/prompt`
- * like any other text, and `hint` is prose for a placeholder rather than a
- * template anything fills in.
- *
- * Flattened out of ACP's `AvailableCommand` for the reason {@link ContextUsage}
- * is flattened out of `UsageUpdate`: `_meta` is unbounded and agent-shaped.
- */
 export interface AgentCommand {
-  /** Without the leading slash, as the agent published it. */
   name: string;
   description: string;
-  /** ACP's `input.hint`, or `null` when the command takes no argument. */
   hint: string | null;
 }
 
-/**
- * The agent's whole command list, and how much of it was cut off.
- *
- * **Full replacement, never a delta.** ACP defines the notification that way and
- * the adapter's own comment tells clients to replace their cached list — merging
- * would resurrect a command the agent has withdrawn, and the agent would then
- * refuse the thing its own menu offered.
- *
- * `dropped` is carried rather than swallowed, because a picker that quietly
- * offers less than the agent supports is the exact failure `truncateEvent`'s
- * `agent_config` arm names by hand.
- *
- * Deliberately **not** a member of {@link AgentConfig}. That type means "what a
- * caller may change", which is why {@link ContextUsage} is not in it either; a
- * command is invokable, not settable. Widening it would also feed a command list
- * into `applyAgentConfig`, which appends to a 5000-event log that evicts a
- * *prefix* — so every mode toggle would re-record the list by evicting the
- * operator's own first prompt.
- */
+/** Replaced whole, never merged; deliberately not part of AgentConfig. */
 export interface AgentCommands {
   commands: AgentCommand[];
   dropped: number;
 }
 
-/** A chunk of model output. `thought` marks reasoning rather than reply text. */
 export interface TextEvent {
   type: "text";
   role: "agent" | "user";
   thought: boolean;
   text: string;
-  /**
-   * Which message this chunk belongs to, or `null` where nothing said.
-   *
-   * ACP's own boundary primitive, and the spec states what it is for in as many
-   * words: *"All chunks belonging to the same message share the same `messageId`.
-   * A change in `messageId` indicates a new message has started."* Without it a
-   * client has no way to tell a streamed fragment of one message from a complete
-   * message of its own — both arrive as `agent_message_chunk` with a `text` block
-   * and nothing else — so a transcript joins them, which is right for tokens and
-   * wrong for messages.
-   *
-   * ⚠ **The failure this exists for, measured against `claude-agent-acp` 0.73.0
-   * and written down in full at Q3.604:** stopping twenty background tasks makes
-   * the adapter publish twenty `agent_message_chunk`s reading `**Task stopped by
-   * user:** <name>.`, each a whole message, none ending in a newline and — this
-   * is the part no reading of the spec fixes — **none carrying a `messageId` at
-   * all**, because `AsyncTaskRuntime` publishes a bare update while every path
-   * through `toAcpNotifications` calls `applyMessageId`. Joined, they render as a
-   * single paragraph of twenty run-together sentences; Q3.604 quotes two of them.
-   *
-   * So the daemon numbers what the agent did not: once a connection has been seen
-   * to use message ids, a chunk arriving without one is a message of its own and
-   * is given a `~`-prefixed id here. The tilde is not a value any agent can send
-   * — it is not in the id space of any of the five — so a client can tell the two
-   * apart, and a client that does not care simply compares for equality. An agent
-   * that never numbers anything (kimi, codex, opencode; grok is unmeasured) keeps `null` throughout
-   * and every chunk joins exactly as it does today.
-   */
+  /** Once a connection has used message ids, a chunk without one gets a `~`-prefixed id of its own (Q3.604). */
   messageId: string | null;
 }
 
@@ -377,38 +153,8 @@ export interface ToolCallEvent {
   status: ToolCallStatus;
   locations: FileLocation[];
   rawInput: unknown;
-  /**
-   * The tool call this one ran *inside*, when the agent said so.
-   *
-   * A tree edge and nothing more — no depth, no subagent id, no orchestration.
-   * Depth is *derived* from the chain rather than stored, because a stored copy
-   * disagrees with it the moment the parent is evicted below `firstSeq`, and the
-   * log evicts a prefix, so that is the common case and not an edge case.
-   *
-   * `null` means nothing said, which covers three genuinely different situations
-   * that a reader must treat the same way: a top-level call, an agent that does
-   * not report lineage at all (kimi), and a daemon older than this field. See
-   * `toolCallLineage`.
-   */
   parentToolCallId: string | null;
-  /**
-   * The agent declared this call a spawn of a subagent.
-   *
-   * Recorded because the agent said it, and deliberately **not** what a client
-   * keys its *layout* on: `packages/web` nests, counts and summarises from
-   * children, which is the only rule that degrades correctly against an agent
-   * that says nothing. What it does key on this is whether the call is drawn as
-   * a delegation at all — a spawn whose delegate makes no attributed tool call
-   * has no children ever, and claude's spawn is `kind: "think"`, so without this
-   * the same act renders as a robot or as a brain depending on what the delegate
-   * happened to do.
-   *
-   * Measured 2026-08-01 — claude drops this flag on the spawn's own completing
-   * update, which is why it is read from the call and never merged from one. It
-   * is *not* copied onto `ToolCallUpdateEvent` (see `session.ts`): an update
-   * saying nothing about it would otherwise be indistinguishable from an update
-   * denying it.
-   */
+  /** Read from the call only, never merged from an update. */
   subagent: boolean;
 }
 
@@ -418,94 +164,15 @@ export interface ToolCallUpdateEvent {
   title: string | null;
   status: ToolCallStatus | null;
   locations: FileLocation[];
-  /**
-   * The arguments, when the agent filled them in on the update rather than the
-   * call.
-   *
-   * ACP's `ToolCallUpdate` has always carried this and this daemon did not copy
-   * it, so an agent that announces a bare `tool_call` and supplies the arguments
-   * afterwards lost them entirely — the mirror image of the kimi problem
-   * `session.ts` documents, where the arguments only ever appear on the permission
-   * request. Bounded by the same `clampBlob` the call's own `rawInput` is.
-   */
   rawInput: unknown;
-  /**
-   * Images the tool handed back, kept rather than discarded.
-   *
-   * ACP lets a tool return an `image` content block, and claude and kimi both use it —
-   * measured, three times in one database, all from `Read` on a picture. It was
-   * rendered as the literal string `[image]` and the bytes were dropped on the
-   * floor, which is why asking an agent "what is in this screenshot" produced a
-   * transcript that could not show the screenshot.
-   *
-   * **A reference, never the bytes.** Base64 on the event would be catastrophic
-   * here: the tool-output budget is 32 KiB and the per-event cap 128 KiB, against
-   * a log of 8 MiB per session that evicts a *prefix* — one photograph would
-   * evict the conversation it belongs to. The bytes go to the upload root and
-   * this names them.
-   */
   images: StoredFileRef[] | null;
-  /**
-   * What the tool said, as plain text blocks.
-   *
-   * ACP sends a tool's output in `content`, and until now `session.ts` fed that to
-   * `emitDiffs` — which keeps `type: "diff"` blocks and drops everything else — so
-   * the output of every command an agent ran was thrown away at the daemon and no
-   * client could show it however it was written. Only text survives here;
-   * `type: "terminal"` is a live handle rather than a value and stays dropped.
-   *
-   * `null` means the update carried none, which is different from `[]`: an empty
-   * array is a tool that answered with nothing, and a client may say so.
-   *
-   * Capped well below the 128 KiB per-event ceiling by `MAX_TOOL_OUTPUT_BYTES` in
-   * `session.ts`, which is where it is applied — at the point the blocks are built
-   * out of ACP's `content`, so an oversized payload is never assembled whole on
-   * the agent's own RPC handler. Tool output is the largest thing an agent emits —
-   * a `cat` of a big file, a full test run — and the per-event cap is a backstop
-   * against one enormous event, not a budget for the commonest one.
-   */
   content: string[] | null;
-  /**
-   * See {@link ToolCallEvent.parentToolCallId}.
-   *
-   * Measured 2026-08-01 against claude-agent-acp 0.63.0: **4 of 10** and **5 of
-   * 14** of a child's updates arrive with no parent even though its `tool_call`
-   * carried one — the `toolResponse`-bearing updates rebuild their metadata from
-   * the tool *result* and do not re-derive lineage. So `null` here means "this
-   * update did not say", never "top level", and a reader must take the lineage
-   * first-non-null and never let a later `null` reset it.
-   */
+  /** Null means this update did not say, never top level: take lineage first-non-null. */
   parentToolCallId: string | null;
-  /**
-   * This call handed its work to something that outlives it.
-   *
-   * A backgrounded Bash call returns as soon as the command is detached, so the
-   * card reaches `completed` while the command runs on for minutes — and ACP has
-   * no tool-call status for *still running elsewhere*, which is exactly why the
-   * agent marks the update instead. A client reads this and stops drawing the
-   * card as finished work.
-   *
-   * ⚠ **The second field ever projected out of `_meta`**, and the precedent is
-   * `customAnswerFor` → `alternativeTo` (Q3.592): a declaration the agent makes
-   * about its own payload, taken as one scalar, with the rest of `_meta` still
-   * dropped at ingest. `acp/asynctasks.ts` holds the shape and the argument.
-   *
-   * `false` on every agent but claude, and on claude only where this client
-   * declared `asyncTasks` — the adapter puts the marker in the AIR namespace
-   * precisely so that a client which never asked for the task lifecycle is not
-   * promised a card state it could never resolve. So the honest reading is *"the
-   * agent said so"*, never *"it did not background anything"*.
-   */
+  /** Set only by claude, and only with `asyncTasks` declared (Q3.592). */
   backgrounded: boolean;
 }
 
-/**
- * A file the agent changed.
- *
- * Fed from two places, because the agents differ: Claude reports edits as `diff`
- * content inside tool calls, while Kimi routes writes back through the client as
- * `fs/write_text_file` requests. `source` says which path produced this event.
- */
 export interface FileChangeEvent {
   type: "file_change";
   path: string;
@@ -515,36 +182,17 @@ export interface FileChangeEvent {
   toolCallId: string | null;
 }
 
-/**
- * The agent asked for approval.
- *
- * Two producers, distinguished by `permissionId`. The daemon mints an id, parks
- * the agent's request and lets a remote client answer it, so `permissionId` is
- * set and `decision` is null until a matching `permission_resolved` arrives. A
- * bare `Session` with no resolver answers locally and reports the outcome inline:
- * `permissionId` null, `decision` already filled in, no resolution event.
- */
+/** Parked for a client when `permissionId` is set; otherwise a bare Session answered inline in `decision`. */
 export interface PermissionRequestEvent {
   type: "permission_request";
   permissionId: string | null;
   toolCallId: string | null;
   title: string;
   options: PermissionOptionSummary[];
-  /** The `optionId` we answered with, or null if we cancelled or are still waiting. */
   decision: string | null;
 }
 
-/**
- * Who settled a parked question. Only `client` is a human decision.
- *
- * Named for *answers* rather than for permissions because there are two kinds of
- * them now — an approval and an elicitation — and every member here applies
- * verbatim to both. Two identical unions would be worse than one slightly wide
- * name, but a type called `Permission*` sitting on an elicitation event is the
- * failure the `owned` → `sessionOf` rename is an invariant about: a name that
- * asserts a property nobody enforces. The string values are unchanged, so
- * nothing on disk moved.
- */
+/** turn_ended, pump_failed and no_turn are no longer written (Q2.232) and stay because stored logs hold them. */
 export type AnswerResolvedBy =
   | "client"
   | "agent_withdrew"
@@ -553,54 +201,22 @@ export type AnswerResolvedBy =
   | "turn_ended"
   | "pump_failed"
   | "no_turn"
-  /**
-   * Somebody stopped the turn while this was parked on them.
-   *
-   * Its own member rather than `session_stopped`, which is the nearest and is
-   * wrong in the way that matters: that one says the session is over and this one
-   * says it is still here and idle. Nor `turn_ended`, which is what the *pump*
-   * writes once the agent has answered — this is written before that, by the
-   * cancel itself, because ACP requires the client to answer a pending
-   * `session/request_permission` with `cancelled` after sending `session/cancel`
-   * and an agent blocked on one never reaches its own turn end until we do.
-   */
   | "turn_cancelled";
 
 export interface PermissionResolvedEvent {
   type: "permission_resolved";
   permissionId: string;
   toolCallId: string | null;
-  /** Repeated from the request so an orphaned resolution is still self-describing. */
   title: string;
   outcome: "selected" | "cancelled";
   optionId: string | null;
   by: AnswerResolvedBy;
 }
 
-/**
- * The agent asked the person a question.
- *
- * In the log rather than on the snapshot alone, and it earns that in the most
- * literal way this vocabulary allows: the answer is folded back into the tool's
- * own input, so **what somebody typed enters the model's context**. It is not
- * superseded the way a token count is, not replaced whole the way a command list
- * is, and it happens exactly once with a before and an after. Leaving it out
- * would put a tool call in the transcript whose input references an answer whose
- * question appears nowhere.
- *
- * The **form is not here** — only the prompt. An unanswered request needs no more
- * than its message to draw, a resolved one is self-describing below, and the
- * fields are agent-shaped and unbounded until the projection clamps them. They
- * live on the pending record instead and are fetched by
- * `GET /sessions/:id/elicitations/:elicitationId`, which is the same place a
- * command list lives and for the same reason.
- */
 export interface ElicitationRequestEvent {
   type: "elicitation_request";
   elicitationId: string;
-  /** The tool call this question belongs to, when the agent named one. */
   toolCallId: string | null;
-  /** The agent's own prose, clipped at ingest. */
   message: string;
 }
 
@@ -608,28 +224,9 @@ export interface ElicitationResolvedEvent {
   type: "elicitation_resolved";
   elicitationId: string;
   toolCallId: string | null;
-  /** Repeated from the request so an orphaned resolution is self-describing. */
   message: string;
   action: "accept" | "decline" | "cancel";
-  /**
-   * What was answered, already rendered — so a transcript needs no join.
-   *
-   * **This is the one place the permission pair above is deliberately not
-   * copied.** `PermissionResolvedEvent` carries only an `optionId`, so a client
-   * has to join back to the request's `options` to learn whether the answer was
-   * an approval or a refusal — and while that join was missing, a refused command
-   * was drawn with a check mark, and once the request row was merged away that
-   * was the only record of the answer. A resolution has to be self-describing or
-   * the same defect recurs one feature over.
-   *
-   * `value` is the chosen option's **label** and never its wire value: a wire
-   * value is what the agent recognises, a label is the words the person read and
-   * tapped. Each is clipped for the log alone; what reaches the agent is
-   * verbatim, because a shortened answer is a wrong answer.
-   *
-   * `null` for `decline` and `cancel`, which are answers *about* the form rather
-   * than within it.
-   */
+  /** Rendered labels, never wire values; null for decline and cancel. */
   answers: ElicitationAnswer[] | null;
   by: AnswerResolvedBy;
 }
@@ -639,67 +236,24 @@ export interface PlanEvent {
   entries: PlanEntry[];
 }
 
-/**
- * A file this daemon has on disk and can serve, named on an event.
- *
- * No path and no URL — a location is a fact about one daemon's disk and the log
- * outlives it. A client rebuilds the download URL from `(sessionId, uploadId)`,
- * which are the two things that do not move.
- */
+/** No path or URL, since the log outlives the disk: clients rebuild it from (sessionId, uploadId). */
 export interface StoredFileRef {
   uploadId: string;
-  /** The stored name: a single sanitized segment. */
   name: string;
   mime: string | null;
   bytes: number;
 }
 
-/**
- * One file that rode a prompt.
- *
- * **No path and no URL.** A filesystem location is a fact about *this* daemon's
- * disk, and the log outlives any particular one — a database moved to another
- * machine, or an upload root an operator changed, would leave every historical
- * attachment pointing at nothing. A client rebuilds the download URL from
- * `(sessionId, uploadId)`, which are the two things that do not move.
- */
 export interface PromptAttachmentRef extends StoredFileRef {
-  /**
-   * Whether the agent was sent the bytes, or only a link to them.
-   *
-   * A **decision**, taken synchronously from `(mime, bytes, acceptsImages)`
-   * before this event is appended, and the same decision `blocksFor` builds the
-   * content blocks from — so the two cannot disagree. Deliberately not an
-   * *observation* of the read that follows: observing it would need an await
-   * before the append, and the emit path never awaits.
-   *
-   * It is also the honest home for the agent's image capability. Putting that on
-   * `SessionSnapshot` was considered and refused: it only exists while an agent
-   * is running, so it would be `boolean | null` on a list that is mostly
-   * terminal and restored rows, and nothing acts on it — `resource_link` always
-   * works, so the composer's paperclip needs no gate. A result beats a
-   * prediction, and this one is durable.
-   */
   inlined: boolean;
 }
 
-/** A prompt the daemon accepted, recorded so every client sees the same transcript. */
 export interface PromptEvent {
   type: "prompt";
   text: string;
-  /** `null` rather than absent when there were none — the rule at the top of this file. */
   attachments: PromptAttachmentRef[] | null;
 }
 
-/**
- * Where this session ended up running, and anything worth knowing about it.
- *
- * In the log rather than only on the creation response, because the warning that
- * most needs to reach a human — that a worktree branches from a commit, so the
- * uncommitted work sitting in the main checkout is *not* here — would otherwise
- * live only in a 201 body nobody kept. A client attaching an hour later still
- * needs to be told.
- */
 export interface WorkspaceEvent {
   type: "workspace";
   mode: SessionWorkspace["mode"];
@@ -711,45 +265,14 @@ export interface WorkspaceEvent {
   warnings: { code: string; message: string }[];
 }
 
-/** A daemon-level lifecycle transition. Narrative only — the snapshot is authoritative. */
+/** Narrative only: the snapshot is authoritative. */
 export interface StatusEvent {
   type: "status";
   status: SessionStatus;
   exit: SessionExit | null;
 }
 
-/**
- * ACP's five reasons, plus two of this daemon's own.
- *
- * ⚠ **`agent_error` is the turn that ended in an {@link ErrorEvent}**, which ACP
- * has no reason for because ACP never got that far: `session/prompt` rejected, so
- * the agent never said why its turn stopped. Nothing existing could stand in —
- * `refusal` is the *model* declining and `cancelled` is something a person did,
- * and both would be a lie in the one row a reader trusts about what happened.
- *
- * The argument is Q2.103's, which is already written down for the cancel path and
- * applies here word for word: the daemon writes the `turn_end` itself because the
- * agent never gets to send one, and **a prompt with no turn end at all is the
- * shape this codebase calls a message that reached no model**. What it cost while
- * it was missing is Q2.218.
- *
- * ⚠ **`abandoned` is the turn the agent never answered at all**, and it is the
- * third arrival of that same argument. `session/prompt` is the one RPC in
- * `session.ts` fired with no deadline — deliberately, since a turn may legitimately
- * run for hours — and `status === "running"` is *exactly* "a `session/prompt` this
- * daemon issued has not settled". So an adapter that simply never answers pins a
- * session at `running` for the life of the process: `cancelTurn` observes the same
- * unsettled promise and cannot close it, and `parkable`'s first line refuses a
- * session that is not `idle`, so the sweep cannot see it at any age. Reported as a
- * panel reading *working* hours after the agent had finished.
- *
- * It is a reason of this daemon's own for the reason `agent_error` is: nothing in
- * ACP's five fits. `cancelled` is something a person did, `refusal` is the model
- * declining, `end_turn` is a reply ending — and this is none of those. It is the
- * daemon saying, in the one row a reader trusts, *we stopped waiting*. What decides
- * when is `TURN_SILENCE_MS` and `ManagedSession.wedged`; what writes it is
- * `Session.abandonTurn`, locally, with nothing sent to the agent.
- */
+/** ACP's reasons plus this daemon's `agent_error` and `abandoned` (Q2.103, Q2.218). */
 export type TurnStopReason = StopReason | "agent_error" | "abandoned";
 
 export interface TurnEndEvent {
@@ -758,46 +281,18 @@ export interface TurnEndEvent {
   usage: Usage | null;
 }
 
-/**
- * The agent's memory was reset, and this is where.
- *
- * Emitted when the daemon carries out a `/clear` — see `ManagedSession.clearContext`.
- * Everything above it is still in this log and still readable, because the log is
- * the daemon's rather than the agent's memory; what changed is that the agent
- * past this point knows none of it. Without the marker that reads as a
- * conversation which inexplicably forgot itself.
- *
- * Narrative rather than state, so it lives in the log rather than on the
- * snapshot: it happened once, at a point, and it is exactly the sort of thing
- * somebody scrolling back needs to find *in place*.
- *
- * Both ids are carried because this is the one event that explains why a
- * transcript and an agent disagree about what was said, and answering that later
- * without them means guessing.
- */
 export interface ContextClearedEvent {
   type: "context_cleared";
-  /** The conversation the agent is on now. */
   agentSessionId: string;
-  /** The one the transcript above belongs to. */
   previousAgentSessionId: string;
 }
 
-/** A line the agent wrote to stderr. */
 export interface AgentLogEvent {
   type: "agent_log";
   line: string;
 }
 
-/**
- * A `session/update` variant we do not normalize yet (available commands, usage,
- * plan patches, session metadata). Kept rather than dropped so nothing the agent
- * says disappears silently.
- *
- * `current_mode_update` and `config_option_update` used to land here, which is
- * how mode and effort stayed invisible: the information arrived, was stored, and
- * no client could act on it. They are {@link AgentConfigEvent} now.
- */
+/** A `session/update` variant with no event of its own, kept raw so nothing the agent says disappears. */
 export interface OtherUpdateEvent {
   type: "other";
   sessionUpdate: string;
@@ -810,12 +305,7 @@ export interface ErrorEvent {
   data: unknown;
 }
 
-/**
- * What a session is doing right now.
- *
- * Derived, never stored: see `ManagedSession.status`. `blocked` outranks
- * `running` because a blocked session is the one a human has to act on.
- */
+/** Derived, never stored. `blocked` outranks `running`. */
 export type SessionStatus =
   | "starting"
   | "idle"
@@ -824,42 +314,8 @@ export type SessionStatus =
   | "stopping"
   | "exited"
   | "failed"
-  /**
-   * The daemon ended this session, and it is coming back.
-   *
-   * Terminal — the agent was our child and went with us — but deliberately
-   * distinct from `exited`, which means somebody *decided*, and from `failed`,
-   * which means it never started. Nobody decided this one, which is why it is
-   * the only status the daemon resumes by itself.
-   *
-   * It covers a clean shutdown as well as a crash, and that took a correction.
-   * `daemon_shutdown` used to derive `exited`, so the *ordinary deploy* — much
-   * the commonest way a session is interrupted — was indistinguishable from
-   * somebody pressing Stop, while this status was reachable only through the
-   * hard-kill path that writes `daemon_restarted` at the next boot. So the
-   * warn-toned treatment a client gave `interrupted` was on the branch a deploy
-   * never took. {@link endedWithDaemon} is the one rule now; `exit.reason` still
-   * says which of the two happened.
-   */
   | "interrupted"
-  /**
-   * The daemon released this session's agent because nobody was using it, and
-   * the next message brings it back.
-   *
-   * Terminal in the same sense `interrupted` is — no process, no file
-   * descriptors, the conversation whole on disk — and distinct from it for the
-   * one reason that matters to a reader: **nothing went wrong here.** An
-   * `interrupted` session is one the daemon took away and owes back on its own,
-   * at the next boot, whether or not anybody wanted it; a parked one was let go
-   * on purpose and comes back only when somebody types into it. Clients draw the
-   * first with a warn tone and must not draw this one that way.
-   *
-   * ⚠ **And it is emphatically not `exited`.** Nobody decided this conversation
-   * was over — `DELETE /sessions/:id` is that decision and writes `stopped`. A
-   * parked session that reads as stopped is the whole defect this member exists
-   * to make unsayable, and the derivation's `default:` arm is what would have
-   * done it silently. See `ManagedSession.status`.
-   */
+  // Released for idleness, never drawn as a warning or as exited.
   | "parked";
 
 export type ExitReason =
@@ -868,104 +324,19 @@ export type ExitReason =
   | "start_failed"
   | "start_timeout"
   | "daemon_shutdown"
-  /**
-   * Legacy. Written by no code path, and read by none either.
-   *
-   * It used to *replace* the caller's reason whenever a kill could not be
-   * confirmed, which collapsed `daemon_shutdown` and `stopped` into one value —
-   * erasing, on a slow SIGKILL, precisely the distinction the resume rule turns
-   * on. `agentConfirmedDead: false` already carries that fact losslessly and
-   * beside the reason rather than instead of it. Kept in the union because rows
-   * written before that fix still carry it on disk.
-   */
+  // Never written: kept only because rows already on disk may carry it.
   | "agent_kill_failed"
   | "daemon_restarted"
-  /**
-   * The daemon ended this agent in order to open its conversation again with
-   * something different asked of it.
-   *
-   * Today that is exactly one setting — claude's `ultracode`, which is read when
-   * a conversation is opened and has no live channel — and the restart is
-   * immediately followed by a resume on the same `agentSessionId`. It is a
-   * *daemon* exit rather than a `stopped` for the reason the list below gives:
-   * nobody asked for this session to end, and if the resume that follows never
-   * lands, the daemon is the one that owes it a retry.
-   */
   | "config_changed"
-  /**
-   * Somebody signed this agent out, so every conversation on it was ended.
-   *
-   * **Signing out is a state of the whole machine, not of one screen.** The
-   * credential an agent authenticates with is read once, at spawn, so a process
-   * started while signed in goes on working long after the credential it holds
-   * has been revoked — which is a session that answers for an account its owner
-   * has just taken away. Ending them is what makes the sign-out mean what it
-   * says.
-   *
-   * **Deliberately not in `DAEMON_EXIT_REASONS`.** A person decided this, exactly
-   * as they do for `stopped`, so nothing may bring these back on its own: not the
-   * boot pass, not a typed message. What *does* bring them back is signing in
-   * again, which is the same person reversing the same decision — see
-   * `reloadCredentials`, which resumes precisely the sessions carrying this
-   * reason and leaves every hand-stopped one alone.
-   */
+  // Not in DAEMON_EXIT_REASONS: only signing in again resumes it.
   | "agent_signed_out"
-  /**
-   * Nobody had used this session for long enough that the daemon let its agent
-   * go, keeping the conversation.
-   *
-   * **Deliberately not in `DAEMON_EXIT_REASONS`**, and the exclusion is the
-   * whole design. That list means "the daemon went away and owes this back **by
-   * itself**", which drives the boot pass and the warn tone a client draws. A
-   * parked session is neither: the daemon is still running, it let the agent go
-   * on purpose, and bringing every one of them back at the next boot would
-   * refill exactly the memory parking freed — measured, five simultaneous
-   * resumes turned a 1.3s reattach into 90s. So `autoResumable` answers it
-   * `true` on a prompt and `false` at boot, and it derives its own
-   * `SessionStatus` rather than `interrupted`.
-   *
-   * What it *shares* with that list is the one thing {@link
-   * keepsItsConversation} is for: the prune may never take this row. A session
-   * the daemon released is one somebody is expected to come back to, so it is
-   * active however old it is.
-   */
+  // Not in DAEMON_EXIT_REASONS (no boot resume), but {@link keepsItsConversation} keeps it from the prune.
   | "parked";
 
-/**
- * The exits that mean the daemon went away rather than that anybody decided
- * anything.
- *
- * One rule, three consumers: the daemon's own resume pass ("which sessions do I
- * bring back"), `SessionStatus` derivation ("which of these is `interrupted`"),
- * and every client that has to answer "may I draw this as ended". Written here,
- * in the shared vocabulary, because a copy in any one of them is a copy that
- * disagrees the day a reason is added.
- *
- * Three members, and each exclusion is a decision rather than an
- * oversight. `stopped` is the one reason that means a human ended it — the whole
- * point. `start_failed`/`start_timeout` never had a conversation to return to.
- * `agent_exited` is the agent quitting under a daemon that is still running,
- * which is not a daemon absence; whether *that* is resumed is a policy question
- * the resume pass answers, not this predicate. `agent_kill_failed` is ambiguous
- * by construction — see its own note above.
- */
+/** Exits meaning the daemon went away rather than anybody deciding. */
 export const DAEMON_EXIT_REASONS = ["daemon_restarted", "daemon_shutdown", "config_changed"] as const;
 
-/**
- * The settings a person may change on a machine from its settings screen.
- *
- * **A closed list, and short on purpose.** The daemon's configuration is env only
- * — `REEMOAT_*` is read in `scripts/daemon.ts` and nothing in `src/` touches
- * `process.env` — and that rule is not being relaxed. What this names is the
- * narrow class whose owner is the person *using* the machine rather than the one
- * deploying it, which is why each entry has a control on a screen. Q2.225.
- *
- * A `Record<…, true>` for the reason `EXIT_REASON_MEMBERS` is one: exhaustive in
- * both directions, so a key added to the union is a compile error until it is
- * listed and one removed is a compile error until it is delisted. `isMachineSettingKey`
- * is what the route validates a request against, so an unknown key is refused
- * rather than written to a table nothing will read.
- */
+/** A closed list; daemon config otherwise stays env-only (Q2.225). */
 export type MachineSettingKey = "idleReleaseMinutes";
 
 const MACHINE_SETTING_MEMBERS: Record<MachineSettingKey, true> = {
@@ -978,24 +349,7 @@ export function isMachineSettingKey(value: unknown): value is MachineSettingKey 
   return typeof value === "string" && Object.hasOwn(MACHINE_SETTING_MEMBERS, value);
 }
 
-/**
- * Whether an agent's error says it could not authenticate.
- *
- * **The one signal that a credential has gone away while a conversation was
- * open**, and it comes from the agent rather than from asking a CLI: ACP errors
- * carry a `data.errorKind`, and `authentication_failed` is what claude reported
- * on 2026-08-20 when an OAuth session expired mid-session —
- * `Failed to authenticate: OAuth session expired and could not be refreshed`.
- *
- * Read defensively at every level, because this walks two `unknown`s: the error's
- * own `data`, and the payload inside it. A shape that does not match is simply
- * not an auth failure — this may never throw on the event pump, and it may never
- * guess, since what it decides is whether to end somebody's conversation.
- *
- * ⚠ **The kind, never the message.** `describeError`'s text is the agent's own
- * prose and changes with its version; matching "authenticate" in it would end a
- * conversation on the strength of a sentence somebody's CLI happens to print.
- */
+/** Judged by `data.errorKind` only, never the message; never throws. */
 export function isAuthFailure(event: { type: string; data?: unknown }): boolean {
   if (event.type !== "error") return false;
   const outer = event.data;
@@ -1010,25 +364,7 @@ export function endedWithDaemon(exit: { reason: ExitReason } | null | undefined)
   return (DAEMON_EXIT_REASONS as readonly ExitReason[]).includes(exit.reason);
 }
 
-/**
- * Whether this session ended still holding its conversation, and is owed a way
- * back — by the daemon on its own, or by the person who returns to it.
- *
- * **Wider than {@link endedWithDaemon} by exactly one member, and the two must
- * not be collapsed.** That one answers "does the daemon bring this back by
- * itself", which decides the boot pass and the warn tone a client draws;
- * `parked` is false there on purpose. This one answers "may this row be
- * deleted", which is a different question with a different loss: a parked
- * session is one somebody is *expected* to return to, so it is the last thing a
- * prune should take.
- *
- * The one caller is `SqliteSessionStore`'s `isActiveRow`, and it lives here
- * rather than there for the reason that file states about `isPersistedGiveUp`:
- * the store may not carry its own copy of the registry's vocabulary, because a
- * copy is what disagrees the day a reason is added. Q2.222 is the incident where
- * a second copy — a SQL `CASE` — ranked a reason this build could not name as
- * inactive and cut what the sweep kept.
- */
+/** Ended still holding its conversation, so the prune must keep it (Q2.222). */
 export function keepsItsConversation(
   exit: { reason: ExitReason } | null | undefined,
 ): boolean {
@@ -1036,24 +372,7 @@ export function keepsItsConversation(
   return endedWithDaemon(exit) || exit.reason === "parked";
 }
 
-/**
- * Every member of `ExitReason`, as a value, so that a string read off disk can
- * be told from one this build has never heard of.
- *
- * A `Record<ExitReason, true>` rather than an array with `satisfies`, because a
- * record is exhaustive in **both** directions: a reason added to the union is a
- * compile error here until it is listed, and one removed from the union is a
- * compile error until it is delisted. An array only checks that what is listed
- * is a member.
- *
- * Who asks is `SqliteSessionStore.prune`, and why is `compatibility.md`'s rule
- * about which way an unknown value must fail. The prune deletes a session it
- * reads as inactive, and "inactive" is decided from `exit.reason` — so a reason
- * a newer build wrote, say a fourth member of {@link DAEMON_EXIT_REASONS} that
- * this build reads as merely "not one of my three", would have its conversation
- * deleted on the rollback that `deploy/deploy.sh --ref` advertises as the way
- * back. A reason this build cannot name is one it may not act on.
- */
+/** Exhaustive both ways, so an unknown reason from a newer build is never acted on. */
 export const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
   stopped: true,
   agent_exited: true,
@@ -1071,62 +390,24 @@ export function isExitReason(value: unknown): value is ExitReason {
   return typeof value === "string" && Object.hasOwn(EXIT_REASON_MEMBERS, value);
 }
 
-/**
- * Why the daemon stopped trying, when it stopped for a reason of its own.
- *
- * `workspace_missing` and `unsupported` are settled facts about the world rather
- * than attempts that ran out — the checkout is gone, or this agent build cannot
- * reattach at all — so neither consumes an attempt and neither is retried inside
- * one daemon life. `attempts_exhausted` is the ordinary one. Which of these
- * outlives a restart is `registry.ts`'s `resumeGiveUpPersists`; the union sits
- * here, beside `ExitReason`, because one member of it is written to disk.
- */
 export type ResumeGiveUp =
   | "workspace_missing"
   | "unsupported"
   | "forgotten"
   | "attempts_exhausted";
 
-/**
- * Whether a string off disk is a give-up this version knows how to honour.
- *
- * `isExitReason`'s twin, for the other column a deletion is decided from, and
- * here for the same reason: `sessions.resume_gave_up` is a plain string, so a
- * row written by a newer build could hold a member this one does not know.
- * Both readers answer the same way for such a value — the registry reads it as
- * "not given up" and puts an agent back on the row, which costs one spawn, and
- * the prune reads it as not given up and keeps the row — because the other
- * answer on either side is a session that silently never comes back, or is
- * deleted on the rollback `deploy/deploy.sh --ref` advertises as the way back.
- */
+/** An unknown value reads as not given up. */
 export function isPersistedGiveUp(value: unknown): value is ResumeGiveUp {
   return value === "forgotten";
 }
 
-/**
- * How to signal an agent, and how to recognise it after a restart.
- *
- * Part of the persisted vocabulary rather than a runtime detail, because it is
- * written to disk and read back by a *different* process than the one that wrote
- * it — which is the whole reason it is a union and not a number.
- *
- * The two runtimes do not mean the same thing by "the process". Locally it is a
- * host pid, fenced by `os.uptime()` because pids are recycled across a reboot.
- * In a container it is a process group inside that container's PID namespace: a
- * different number space, which resets whenever the container restarts. Measured
- * 2026-07-30 across `docker restart` — a fresh pid was 309 before and 15 after,
- * while the host's uptime was unchanged, so the host fence is structurally blind
- * to it. Stored in one `agent_pid` column the two would be indistinguishable,
- * and the cost of confusing them is SIGKILL to whatever now holds that number.
- */
+/** A host pid or a container process group; confusing them sends SIGKILL to a stranger. */
 export type AgentHandle =
   | { kind: "local"; pid: number }
   | {
       kind: "container";
       containerId: string;
-      /** Process group id inside the container. */
       pgid: number;
-      /** The container's `State.StartedAt` in ms — the fence for `pgid`. */
       containerStartedAt: number;
     };
 
@@ -1134,59 +415,28 @@ export interface SessionExit {
   reason: ExitReason;
   detail: string | null;
   at: number;
-  /** Absent on exit records written before the daemon had more than one runtime. */
   agentHandle: AgentHandle | null;
-  /**
-   * Whether we saw the process actually die, rather than merely asking it to.
-   * False here is the difference between "stopped" and "probably orphaned".
-   */
   agentConfirmedDead: boolean;
 }
 
-/* ------------------------------------------------------------------------- *
- * Where a session runs.
- * ------------------------------------------------------------------------- */
-
-/** Why a session is running directly in the requested directory. */
 export type PlainReason = "not_requested" | "not_a_repo" | "unborn_head" | "git_missing";
 
-/**
- * The directory a session owns, whether or not git is involved.
- *
- * One record covers both modes so nothing downstream needs a second code path.
- * It lives here, in the shared vocabulary, rather than in `worktree.ts`, because
- * it is on the snapshot and therefore on the wire — and because `PersistedSession`
- * below has to name it without dragging the git layer into the store.
- *
- * Deliberately closure-free plain data. That is exactly why it survives a restart
- * when a pending permission cannot.
- */
 export interface SessionWorkspace {
   mode: "worktree" | "plain";
-  /** Where the agent actually runs. For `plain`, identical to `requestedCwd`. */
   root: string;
-  /** What the client asked for. Feeds `recentCwds()`, never the worktree path. */
   requestedCwd: string;
   git: {
     /** The main worktree — where `worktree add`/`remove`/`prune` must run. */
     repoRoot: string;
-    /** Absolute `$GIT_COMMON_DIR`. The repo's identity, stable across checkouts. */
     commonDir: string;
     branch: string | null;
-    /** True only when we created the branch. Gates ever deleting it. */
     createdBranch: boolean;
-    /** HEAD at creation, resolved to a sha. The diff base. Set even when `plain`. */
     baseCommit: string;
   } | null;
   plainReason: PlainReason | null;
   createdAt: number;
 }
 
-/* ------------------------------------------------------------------------- *
- * The log: sequencing, bounded storage, subscription.
- * ------------------------------------------------------------------------- */
-
-/** An event with its place in the session's total order. This is the wire shape. */
 export interface StoredEvent {
   readonly seq: number;
   readonly ts: number;
@@ -1194,7 +444,6 @@ export interface StoredEvent {
 }
 
 export interface EventStoreStats {
-  /** Lowest seq still retained; 0 when nothing is. Read `oldestAvailable` instead. */
   firstSeq: number;
   /** Highest seq ever assigned. Survives eviction — it is the resume cursor. */
   lastSeq: number;
@@ -1203,285 +452,68 @@ export interface EventStoreStats {
   approxBytes: number;
 }
 
-/**
- * The lowest seq a reader can still be served, whether or not any row survives.
- *
- * `firstSeq` alone is not enough: it is 0 when the table holds nothing for this
- * session, and `firstSeq - 1` is then -1, so every gap predicate written against
- * it silently answers "no gap". That state is reachable two ways — every insert
- * failing (a full disk burns seqs and stores nothing), and a `remove()` that
- * deleted the events and then threw before the session row — and in both the log
- * really has lost everything up to `lastSeq`. Answering `lastSeq + 1` there says
- * exactly that, and keeps `gap` true for the one client that needs to hear it:
- * the one reconnecting with a cursor it can no longer be caught up from.
- *
- * Lives here, in the shared vocabulary, because three separate places have to
- * agree on it: the gap predicate in `server.ts`, the `firstSeq` reported on the
- * wire by `hello` and `GET /sessions/:id/events`, and the `firstSeq` carried on
- * the snapshot by `registry.ts`. The snapshot used to report the raw value, so a
- * client comparing the two disagreed with the daemon about the same session — and
- * the browser's "load earlier history" button, which reads the snapshot, offered
- * to page a log that had nothing left in it.
- */
 export function oldestAvailable(stats: { firstSeq: number; lastSeq: number; count: number }): number {
   return stats.count > 0 ? stats.firstSeq : stats.lastSeq + 1;
 }
 
-/**
- * Storage only. Subscription lives in `SessionLog`, and `server.ts` never names
- * this type — which is the mechanical reason swapping in SQLite cannot reach it.
- *
- * Deliberately synchronous, `read` included. Node's SQLite bindings are
- * synchronous, so an async store buys nothing and costs a great deal: a
- * synchronous `read` lets a client attach inside one uninterruptible block, which
- * is what makes gap-free resume true by construction rather than by argument.
- */
 export interface EventStore {
-  /**
-   * Assigns the next seq and records the event.
-   *
-   * MUST NOT throw. This runs inside the agent's event path, and an exception
-   * here would unwind the turn pump — aborting the agent mid-task to report a
-   * bookkeeping fault. Implementations degrade instead.
-   */
+  /** MUST NOT throw: it runs in the agent's event path. */
   append(sessionId: string, event: SessionEvent): StoredEvent;
-  /** Events with seq > since, ascending, bounded by both `limit` and `maxBytes`. */
   read(sessionId: string, since: number, limit: number, maxBytes: number): StoredEvent[];
   stats(sessionId: string): EventStoreStats;
-  /** Forget a session entirely. */
   drop(sessionId: string): void;
 }
 
-/* ------------------------------------------------------------------------- *
- * Session metadata: what has to outlive the process.
- * ------------------------------------------------------------------------- */
-
-/**
- * A session as it survives a restart.
- *
- * `SessionSnapshot` is the live view and this is the seed it is rebuilt from.
- * They differ on purpose: this carries private bookkeeping a client has no
- * business seeing (`turnCounter`, the permission-id salt) and omits everything
- * that only means something while an agent is alive.
- */
 export interface PersistedSession {
   id: string;
   agent: AgentId;
   createdAt: number;
   workspace: SessionWorkspace;
-  /** The agent's own session id. The handle `session/resume` is given. */
   agentSessionId: string | null;
-  /** Last known agent, so a crashed daemon's orphans can be reaped on the next boot. */
   agentHandle: AgentHandle | null;
   status: SessionStatus;
   exit: SessionExit | null;
   turnCounter: number;
   lastEventAt: number | null;
-  /**
-   * Persisted so `looksLikeOurs` still recognises its own ids after a restart.
-   *
-   * One counter and one salt for *both* kinds of parked question — `perm-N-salt`
-   * and `elic-N-salt` — because the question they answer ("is this id from this
-   * session's this life") is identical and the prefix already separates the two
-   * spaces. A second pair would have cost a second persisted column, i.e. a
-   * `migrate()` ALTER and the `SCHEMA_VERSION` argument reopened, to buy gaps in
-   * each kind's numbering that nothing reads as a count.
-   *
-   * The SQL columns are still `perm_seq`/`perm_salt`: SQLite cannot rename a
-   * column without rewriting the table, and `sessions` holds every transcript on
-   * disk. That is the same trade `owner_subject` is left dead for.
-   */
   askSeq: number;
   askSalt: string;
-  /**
-   * What somebody chose about ultracode, and `null` where nobody has.
-   *
-   * Three-valued on disk as well as here — see the column in `schema.sql`. A
-   * `null` is not a missing value to be filled in with `false`: it is the state
-   * where the machine's own setting decides, which is where every session starts.
-   */
   ultracode: boolean | null;
-  /**
-   * The assembled agent this session was started as, or `null` for one started
-   * on a bare harness.
-   *
-   * A *reference* into `custom_agents` rather than a copy of what it said, so
-   * editing a preset changes what its sessions resume as. `agent` beside it
-   * still holds the harness, which is why nothing about a restart, a sign-out or
-   * a relaunch has to read this at all.
-   */
   customAgent: string | null;
-  /**
-   * Why the daemon permanently stopped trying to bring this session back, if it
-   * has — and `null` for every session where trying again is still worthwhile.
-   *
-   * The single exception to retry state living in memory, and the reason it is
-   * an exception is that the fact is about the *agent's* disk rather than about
-   * an attempt of ours: when it answers `resourceNotFound` for a session id, no
-   * restart on this side changes what it holds. Everything else — a timeout, an
-   * unreachable mount, an agent that is not signed in — is deliberately
-   * forgotten across a restart, because a restart is new information.
-   *
-   * Typed as a string rather than the union because the column is a plain
-   * string on disk and a row written by a newer build may hold a member this
-   * one does not know. `isPersistedGiveUp` is what tells the one this build
-   * honours from the rest, and both readers go through it: the registry on the
-   * way back in, and the prune, which may not delete on a value it cannot read.
-   */
+  // A plain string, since a newer build may write other values; read through isPersistedGiveUp.
   resumeGaveUp: string | null;
-  /**
-   * Monotonic floors for the event store.
-   *
-   * A session whose events were pruned would otherwise restart its sequence at 1,
-   * and a client resuming from a cursor it already holds would be handed *different
-   * events under numbers it has already seen*. These keep the sequence monotonic
-   * for the life of the session id, which is what every cursor on the wire assumes.
-   */
+  // Monotonic floors, so a pruned session never reuses a seq a client has seen.
   lastSeq: number;
   dropped: number;
-  /**
-   * What this session is called, or `null` for "never named".
-   *
-   * Deliberately never `""`: a client has to be able to tell "nobody has named
-   * this" from "somebody named it nothing", because the first renders a fallback
-   * built from the working directory and the second would render an empty header.
-   *
-   * Written once from the first prompt, and overwritten only by an explicit
-   * rename — which then wins for ever, because the derivation is guarded on this
-   * being `null`. Clearing it back to `null` lets the next prompt re-derive.
-   */
   title: string | null;
-  /**
-   * Kept at the top of the list, and never dropped by a `?limit=` cut.
-   *
-   * A preference, not a state: it outranks liveness but never outranks a pending
-   * permission, because a pin is a bookmark and a blocked session is a person
-   * being waited on.
-   */
   pinned: boolean;
-  /**
-   * Where this session sits in the list, or `null` for wherever its age puts it.
-   *
-   * **Always present, and that is the compatibility contract.** A client reads a
-   * missing field as "this daemon cannot store an order" and disables the gesture
-   * for that machine's rows; `null` is the different, ordinary answer that this
-   * daemon can and nobody has. Nothing here branches on a version.
-   *
-   * A preference like `pinned`, and read the same way — but unlike `pinned` it is
-   * comparable with the age of a row that has none, which is what lets one order
-   * cover both.
-   */
   rank: number | null;
-  /**
-   * What the agent was offering when it went, or `null` where there is nothing to
-   * remember — a session that never started one, or one that is not coming back.
-   *
-   * See {@link AgentStateMemory} for why this is stored where `agentConfigState`
-   * is not, and `revivableByPrompt` in `registry.ts` for which stops write it.
-   */
   agentState: AgentStateMemory | null;
 }
 
-/**
- * What a session's agent was offering when it went, kept for a session a message
- * would bring back.
- *
- * ⚠ **This is the one copy of agent state that outlives the process that learned
- * it, and it exists because the alternative was visible.** `agentConfigState` and
- * `agentCommandsState` describe a *process*, which is why `ManagedSession` refuses
- * to restore either from disk — see the field. But `doStop` already keeps both for
- * a stop the conversation returns from, on the argument that the options still
- * describe what that conversation *is*; and that argument does not stop being true
- * because the daemon restarted in between. Measured 2026-09-19 on this machine:
- * every one of five parked rows answered `GET /sessions/:id/commands` with
- * `revision 0, count 0`, so every one of them drew three `—` chips and an empty
- * `/` menu — permanently, because nothing publishes again until somebody types.
- *
- * What makes it honest rather than a stale claim is that nothing here reaches an
- * agent unchecked: a wake replays it through `Session.restoreConfig`, whose two
- * withdrawal guards skip any option or mode the returning agent no longer offers.
- * So the worst case is a control that accepts a tap and then quietly does not come
- * back, which is the bound parking already had within one daemon life.
- *
- * Reduced rather than verbatim — see `reduceAgentState` in `registry.ts` — because
- * opencode publishes 362 models and this blob rides the store's dirty-check key as
- * well as the disk.
- */
 export interface AgentStateMemory {
   /** The raw `agentConfigState`, never the composed `snapshot().agentConfig`. */
   config: AgentConfig;
-  /** The raw `agentCommandsState`, so the `/` menu is not empty on the way back. */
   commands: AgentCommands;
+  /** Finished background rows; absent on a blob an older build wrote (Q2.234). */
+  tasks?: BackgroundTask[];
 }
 
 export interface SessionStore {
-  /**
-   * Idempotent upsert.
-   *
-   * MUST NOT throw, for the same reason `EventStore.append` must not: this runs
-   * from `touchSafe()`, on the agent's state-change path, where a bookkeeping
-   * fault must never unwind a turn.
-   */
+  /** Idempotent upsert; MUST NOT throw. */
   put(row: PersistedSession): void;
-  /** Oldest first, matching `SessionRegistry.list()`. */
   list(): PersistedSession[];
-  /** Forget a session and everything it logged. */
   remove(id: string): void;
 }
 
 export interface MemoryEventStoreOptions {
   maxEventsPerSession?: number;
   maxBytesPerSession?: number;
-  /** Per-event ceiling. A single huge diff must not blow the per-session bound. */
   maxEventBytes?: number;
 }
 
-/**
- * **A session's log is never truncated.** No default bound, in either store.
- *
- * It was 5000 events / 8 MiB per session, evicting a *prefix* — and what that
- * means in practice was measured rather than reasoned about: session
- * `s_a7b154a7` on the development machine reached `dropped: 6144`, so its oldest
- * surviving event was an agent `text` chunk containing the two characters
- * `" for"`. A conversation somebody was still working in had lost its beginning,
- * mid-word, permanently, and the client could not distinguish that from a
- * conversation that started there.
- *
- * There is no bound that makes that acceptable, because the failure is not
- * proportional to the number. Losing the first half of a conversation is not
- * half a loss: the part that says what the work *is* — the prompt, the plan, the
- * constraints somebody typed once — is the part at the top, and it is the part a
- * prefix eviction takes first. A transcript you cannot trust to be whole is one
- * you have to keep a copy of somewhere else, which is the whole product gone.
- *
- * `Infinity` rather than deleting the machinery. `REEMOAT_LOG_EVENTS` and
- * `REEMOAT_LOG_BYTES` still bound it for an operator who wants that, and
- * `daemoncheck` drives eviction with `maxEventsPerSession: 8` — so the path stays
- * exercised rather than becoming code nobody runs. What changed is the default,
- * which is the only thing anybody was actually getting.
- *
- * **What still bounds the database is whole sessions, not parts of one.**
- * `SqliteSessionStore.prune` removes an *inactive* session untouched for 7 days,
- * or one past the 200 cap — never a live one, nor one the daemon is still coming
- * back to, and never one of the 50 rows the floor keeps at any age (active first,
- * then pins, then the most recently touched) — and removes it *entire*, with its
- * events. That line is deliberate and is the one to hold:
- * a conversation is kept whole or not at all, never trimmed to a suffix.
- *
- * The one thing that still cuts inside a session is `DEFAULT_MAX_EVENT_BYTES`,
- * and it is a different act — `truncateEvent` shortens one oversized event and
- * says so in the text it leaves behind (`…[truncated N bytes]`). Visible, local,
- * and not the removal of anything a person wrote.
- *
- * The consequence for `server.ts` is real and is handled there: the outbound WS
- * queue used to be sized *above* this window so a `since=0` attach could not
- * overflow it, and with no window there is nothing to size above. See
- * `ATTACH_REPLAY_MAX` and the `backlog` lagged reason.
- */
 export const DEFAULT_MAX_EVENTS = Number.POSITIVE_INFINITY;
 export const DEFAULT_MAX_BYTES = Number.POSITIVE_INFINITY;
 export const DEFAULT_MAX_EVENT_BYTES = 128 * 1024;
-/** Above this many evicted slots we rebuild the array rather than leak the prefix. */
 const COMPACT_THRESHOLD = 1_024;
 
 interface Retained {
@@ -1491,19 +523,12 @@ interface Retained {
 
 interface SessionState {
   events: Retained[];
-  /** Index of the oldest retained event. Eviction advances this, not a shift(). */
   head: number;
   nextSeq: number;
   dropped: number;
   bytes: number;
 }
 
-/**
- * A bounded per-session ring.
- *
- * Eviction only ever removes a prefix, so retained seqs stay contiguous and
- * `read` can locate its start by arithmetic instead of scanning.
- */
 export class MemoryEventStore implements EventStore {
   private readonly sessions = new Map<string, SessionState>();
   private readonly maxEvents: number;
@@ -1519,8 +544,7 @@ export class MemoryEventStore implements EventStore {
   append(sessionId: string, event: SessionEvent): StoredEvent {
     const state = this.stateFor(sessionId);
 
-    // Truncation happens before the seq is assigned, so the record that enters
-    // the log is the one every downstream byte count describes.
+    // Truncated before the seq is assigned, so the logged record is the one every byte count describes.
     let payload: SessionEvent;
     let bytes: number;
     try {
@@ -1554,8 +578,7 @@ export class MemoryEventStore implements EventStore {
     let bytes = 0;
     while (index < state.events.length && out.length < limit) {
       const retained = state.events[index]!;
-      // Always yield at least one event, or a single oversized record would wedge
-      // a reader that can never make progress past it.
+      // Always yield at least one event, or an oversized record wedges the reader.
       if (out.length > 0 && bytes + retained.bytes > maxBytes) break;
       out.push(retained.stored);
       bytes += retained.bytes;
@@ -1607,21 +630,8 @@ export class MemoryEventStore implements EventStore {
 }
 
 export type EventListener = (stored: StoredEvent) => void;
-/**
- * Told that a listener threw and has been evicted.
- *
- * Optional on the constructor and, for a long time, supplied by nobody — so the
- * one degradation in this daemon that costs a **live WebSocket** every event for
- * the rest of its life was also the one that reported through nothing. The
- * registry passes its own `onWarning` now; `scripts/` is what prints it.
- */
 export type ListenerErrorHandler = (listener: EventListener, error: unknown) => void;
 
-/**
- * One session's log: storage plus fan-out.
- *
- * This is the only piece of the store the server sees.
- */
 export class SessionLog {
   private readonly listeners = new Set<EventListener>();
 
@@ -1631,19 +641,7 @@ export class SessionLog {
     private readonly onListenerError?: ListenerErrorHandler,
   ) {}
 
-  /**
-   * Records an event and publishes it, synchronously and in one block.
-   *
-   * There is no `await` here, which is what guarantees seq order equals delivery
-   * order and that no listener can be registered between an event being numbered
-   * and being published.
-   *
-   * Each listener is guarded because listeners are live connections and real code
-   * throws. An unguarded loop would abort on the first failure, so every listener
-   * registered *after* the broken one would silently miss that seq — a gap opened
-   * by the very mechanism meant to prevent them — and the throw would escape into
-   * the agent's event path.
-   */
+  /** Synchronous, so seq order is delivery order; a throwing listener is evicted without skipping the others. */
   append(event: SessionEvent): StoredEvent {
     const stored = this.store.append(this.sessionId, event);
     for (const listener of [...this.listeners]) {
@@ -1657,7 +655,6 @@ export class SessionLog {
     return stored;
   }
 
-  /** Registration is in effect the moment this returns. */
   subscribe(listener: EventListener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -1683,42 +680,16 @@ export class SessionLog {
   }
 }
 
-/* ------------------------------------------------------------------------- *
- * Size accounting.
- * ------------------------------------------------------------------------- */
-
 const TRUNCATION_NOTE_BYTES = 32;
 
-/**
- * What an optional agent-chosen id costs.
- *
- * Small, and counted anyway: the `tool_call_update` arm's own comment says an
- * unaccounted payload is an event that walks past the per-event cap unnoticed,
- * and that stays true for a field that is usually short rather than becoming
- * false for one.
- */
 function idSize(id: string | null): number {
   return id === null ? 0 : id.length;
 }
 
-/**
- * What a prompt's attachment list costs.
- *
- * A real term rather than a flat constant, because `tool_call_update` was `192 +
- * title` while carrying two payloads and an unaccounted payload is an event that
- * walks past the per-event cap unnoticed.
- *
- * Bounded by construction: 10 attachments (`MAX_PROMPT_ATTACHMENTS`), 200-byte
- * names (`MAX_UPLOAD_NAME_BYTES`) and 128-byte mimes, so the worst case is about
- * 4.2 KiB against a 128 KiB per-event cap. That arithmetic is the difference
- * between a bound and a hope, which is why it is written down here rather than
- * assumed at the call site.
- */
 function attachmentBytes(attachments: PromptAttachmentRef[] | null): number {
   return refBytes(attachments);
 }
 
-/** What a list of file references costs on an event. See `attachmentBytes`. */
 function refBytes(refs: readonly StoredFileRef[] | null): number {
   if (refs === null) return 0;
   let total = 0;
@@ -1728,30 +699,6 @@ function refBytes(refs: readonly StoredFileRef[] | null): number {
   return total;
 }
 
-/**
- * Serialized size of an agent-chosen value, assuming the worst when it will not
- * serialize. Exported for `session.ts`'s form projection, which bounds a total
- * rather than a string and so needs the same answer this file's own caps use.
- */
-/**
- * Memoised on identity, because the same blob is measured more than once.
- *
- * ⚠ **This is the agent's synchronous emit path, and measuring here means
- * serializing.** There is no way to ask how large a value will be without
- * building the string, so `estimateBytes` materialises the whole of `rawInput`
- * just to discover whether the event fits — and on the branch where it does not,
- * `truncateEvent` calls `shrink`, which calls this **again** on the same value.
- * An oversized tool call was therefore stringified twice per event before it was
- * stored, and `server.ts` re-derives the size per subscriber on top of that.
- *
- * A `WeakMap` keyed on the value collapses all of it to one pass. `rawInput`
- * arrives as a parsed JSON-RPC value and is never mutated afterwards, so its
- * identity is a sound key — the same argument `changeCounts` makes in the web
- * package, and `sizeOfEvent` in its store.
- *
- * Primitives fall through: they cannot key a `WeakMap`, and stringifying one is
- * the cost of a `toString` rather than a walk.
- */
 const SIZES = new WeakMap<object, number>();
 
 export function jsonSize(value: unknown): number {
@@ -1762,8 +709,7 @@ export function jsonSize(value: unknown): number {
   try {
     size = JSON.stringify(value)?.length ?? 0;
   } catch {
-    // Cyclic or otherwise unserializable. Assume the worst rather than 0, or the
-    // bound it feeds becomes fiction.
+    // Unserializable: assume the worst rather than 0, or the bound it feeds is fiction.
     size = 4_096;
   }
   if (typeof value === "object") SIZES.set(value as object, size);
@@ -1772,27 +718,6 @@ export function jsonSize(value: unknown): number {
 
 const BYTES = new WeakMap<object, number>();
 
-/**
- * The same measurement in UTF-8 bytes, for the bounds whose names say bytes.
- *
- * ⚠ **`jsonSize` counts UTF-16 code units, and a bound that calls itself
- * `…_BYTES` may not be built on it.** `String.length` is code units, so every BMP
- * character above U+07FF — the whole of CJK, and every emoji at two units for four
- * bytes — is charged one and weighs three or four on the wire. Measured against
- * this tree: a title of 8,000 CJK characters weighs 8,002 by `jsonSize`, passes
- * `MAX_PERMISSION_SNAPSHOT_BYTES` (8,192), and is 24,002 bytes to a phone. Three
- * times the stated bound, on a pair that rides `GET /sessions` for every session
- * on the machine, on every poll, to every attached client, through the relay.
- *
- * Kept apart from {@link jsonSize} rather than replacing it: that one feeds
- * `estimateBytes` and the log's truncation heuristics, where the unit has been
- * consistent with the stored sizes since before this existed and changing it would
- * re-scale a budget nothing here is trying to move. This one is for the two
- * refusals that quote their limit back to an agent in a sentence.
- *
- * Memoised on the same argument `jsonSize` makes, in its own map so the two units
- * can never be served to each other's callers.
- */
 export function jsonBytes(value: unknown): number {
   if (value == null) return 0;
   const memo = typeof value === "object" ? BYTES.get(value as object) : undefined;
@@ -1801,9 +726,7 @@ export function jsonBytes(value: unknown): number {
   try {
     size = Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
   } catch {
-    // Cyclic or otherwise unserializable, and the worst case rather than 0 for
-    // {@link jsonSize}'s reason: the bound this feeds is a refusal, and a refusal
-    // that reads 0 is not one.
+    // Worst case rather than 0: this feeds a refusal.
     size = 4_096;
   }
   if (typeof value === "object") BYTES.set(value as object, size);
@@ -1816,55 +739,25 @@ function optionBytes(options: PermissionOptionSummary[]): number {
   return total;
 }
 
-/**
- * What a tool call's file list costs.
- *
- * ⚠ **The term this file was missing.** Both tool-call arms charged for a title,
- * a `rawInput` and (on the update) content and images, and neither charged for
- * `locations` — an array of agent-chosen paths, unbounded in both length and
- * element size until `session.ts` grew `MAX_TOOL_LOCATIONS`. An unaccounted
- * payload is an event that walks past the per-event cap unnoticed, which is what
- * the `tool_call_update` arm's own comment says about the two payloads somebody
- * *did* remember. It defeated three bounds at once, because all three read this
- * number rather than the payload: the 128 KiB per-event ceiling, the per-session
- * byte budget (`schema.sql` stores what this returns), and the WS queue's
- * `MAX_QUEUE_BYTES`.
- */
 function locationBytes(locations: readonly FileLocation[]): number {
   let total = 0;
   for (const location of locations) total += location.path.length + 24;
   return total;
 }
 
-/**
- * Roughly how much heap an event holds.
- *
- * Proportional for every variable-size variant — a flat constant would make both
- * memory bounds decorative. Note `FileChangeEvent.oldText` is null for every file
- * the agent creates, so the null guard is the common case, not the edge case.
- */
 export function estimateBytes(event: SessionEvent): number {
   switch (event.type) {
-    // The id is charged because it is agent-chosen, unlike the flat constant the
-    // rest of this record fits inside. Bounded at ingest all the same.
     case "text":
       return 64 + event.text.length + (event.messageId?.length ?? 0);
     case "prompt":
       return 64 + event.text.length + attachmentBytes(event.attachments);
     case "agent_log":
       return 64 + event.line.length;
-    // Explicit rather than the 192-byte default, because both fields are
-    // agent-chosen strings. `truncateEvent` still has nothing to do with them:
-    // a clipped session id names nothing, and this pair is what explains a
-    // transcript that disagrees with its agent.
     case "context_cleared":
       return 64 + event.agentSessionId.length + event.previousAgentSessionId.length;
     case "file_change":
       return 128 + event.path.length + event.newText.length + (event.oldText?.length ?? 0);
     case "tool_call":
-      // `subagent` is a boolean and lives inside the constant; the parent id and
-      // the tool call id are agent-chosen strings and do not. `locations` is the
-      // term that was missing — see `locationBytes`.
       return (
         256 +
         event.title.length +
@@ -1874,13 +767,6 @@ export function estimateBytes(event: SessionEvent): number {
         idSize(event.parentToolCallId)
       );
     case "tool_call_update":
-      // This used to be a flat `192 + title` with no payload term at all, which
-      // was honest while the event carried no payload. It carries two now, and an
-      // unaccounted one is an event that walks past the per-event cap unnoticed —
-      // which is exactly what `locations` then did, for as long as this comment
-      // stood above a sum that did not include it. `backgrounded` is not a term
-      // for the `tool_call` arm's reason one case up: it is a boolean, so it is
-      // inside the constant rather than proportional to anything an agent chose.
       return (
         192 +
         (event.title?.length ?? 0) +
@@ -1901,16 +787,7 @@ export function estimateBytes(event: SessionEvent): number {
       return 256 + event.title.length + optionBytes(event.options);
     case "permission_resolved":
       return 256 + event.title.length;
-    /*
-     * Proportional because the message is agent-chosen prose.
-     *
-     * This pair used to be the *argument* for writing arms out rather than
-     * leaning on a `default`, and the hazard it named — a new type charged a flat
-     * 192 against the byte budget and never truncated, silently — is now a
-     * compile error instead of a comment: neither this switch nor
-     * `truncateEvent`'s has a `default` arm any more, so adding a member to
-     * `SessionEvent` fails to build in both places until it is accounted for.
-     */
+    // No `default` arm here or in `truncateEvent`: a new event type must be accounted for in both to compile.
     case "elicitation_request":
       return 256 + event.message.length;
     case "elicitation_resolved":
@@ -1930,14 +807,8 @@ export function estimateBytes(event: SessionEvent): number {
         event.warnings.reduce((total, warning) => total + warning.message.length + 32, 0)
       );
     case "agent_config":
-      // A model list is the large part: claude advertises every model it can
-      // reach, each with a name and often a description.
       return (
         128 +
-        // `current` as well as `available`. It was charged nowhere, so a mode id
-        // this estimate could not see rode a batch whose cut is made from it —
-        // the ingest bound in `session.ts` is the real fix and this is the half
-        // that keeps the accounting honest about what it is about to write.
         (event.modes === null ? 0 : event.modes.current.length) +
         (event.modes?.available.reduce((total, mode) => total + mode.id.length + mode.name.length + 32, 0) ?? 0) +
         event.options.reduce(
@@ -1954,21 +825,6 @@ export function estimateBytes(event: SessionEvent): number {
           0,
         )
       );
-    /*
-     * Flat, and explicit rather than a `default` — which is the point of this
-     * switch no longer having one.
-     *
-     * All three are fixed-shape: union literals, numbers, and on
-     * `session_started` an `agentInfo` the adapter fills with its own name and
-     * version. None carries agent-chosen *prose*, so 192 is an honest constant
-     * rather than a placeholder, and `truncateEvent` correspondingly has nothing
-     * to cut on any of them.
-     *
-     * `session_started.modes` is the one to revisit if it ever grows: a mode list
-     * is agent-chosen and unbounded in principle, though measured it is six short
-     * ids. Left flat deliberately, because widening it is a behaviour change
-     * rather than a refactor.
-     */
     case "session_started":
     case "status":
     case "turn_end":
@@ -1976,107 +832,10 @@ export function estimateBytes(event: SessionEvent): number {
   }
 }
 
-/**
- * Clips a string to a budget, leaving the loss visible.
- *
- * Exported because `session.ts` bounds tool output before it ever builds an
- * event, and had a byte-identical copy of this plus its own second declaration of
- * `TRUNCATION_NOTE_BYTES`. Two truncation notes in one vocabulary is how a
- * transcript ends up saying the same thing two ways.
- *
- * ⚠ **The `Buffer` round trip is what makes every bound built on this one a
- * bound on memory rather than only on display, and it may not be simplified back
- * to a bare `value.slice(0, kept)`.** In V8 a slice of a long string is a
- * `SlicedString` that retains the *whole parent*, and neither a template literal
- * nor `+` copies it out — they build a `ConsString` whose left operand is still
- * that slice, so the parent stays reachable through the clipped result. Measured
- * 2026-09-14 on this tree under **node v26.3.0** (`node --expose-gc`, this
- * function and the bare-slice version it replaces run side by side, heap read as
- * a delta over a settled baseline): eight 4 MiB task descriptions clipped at a
- * budget of 538 — `kept` = 506 — retained **32.0 MiB with only the clipped
- * strings alive**, released only by dropping those strings themselves. Copying
- * the kept characters out through a `Buffer` and back yields a fresh, independent
- * string, and the same probe then measures **0.0 MiB**. ⚠ The engine is part of
- * the measurement and not decoration: `SlicedString`/`ConsString` retention is a
- * V8 implementation behaviour, and v26.3.0 is what was on this machine — the
- * `>=24` floor in `package.json` is the *supported* range and has not been
- * measured here. Without it, every bound built on
- * this clips what a reader sees and none of what the heap holds, and an agent
- * exhausts the daemon with notifications that merely *display* short — that is
- * `truncateEvent`, `session.ts`'s tool-output bound and its task prose, and
- * `registry.ts`'s resume-error, exit-detail and elicitation-answer clips. ⚠ The
- * pending-permission snapshot is **not** one of them and must not be listed as
- * one: its `rawInput` and `content` go through `clampBlob`, and its title and
- * options are *refused* at ingest rather than clipped — `daemoncheck` pins that
- * as one 8 KiB weighing, and `clampBlob`'s own note below says why it needs none
- * of this.
- *
- * The copy costs in proportion to what is *kept*, never to what arrived — which
- * is the property that lets it sit on the truncation path at all. Measured
- * 2026-09-14 against this function under `tsx` on node v26.3.0 at `kept` = 1024,
- * 200k calls after a 20k-call warm-up: ~320ns per call over a 64 KiB source and
- * ~323ns over a 16 MiB one, against ~12ns and ~11ns for the retaining version at
- * those same two sizes. So the whole of the cost is the ≤1 KiB copy,
- * a source three orders of magnitude larger does not move it, and it is paid only
- * on the branch that actually clips — an under-budget value returns above,
- * untouched and not copied.
- *
- * One consequence of the round trip, and one change made *alongside* it. They are
- * separable and are written apart on purpose, because a reader may want the
- * retention fix without the second. The round trip's own consequence is that a
- * lone surrogate already *inside* the kept region — ill-formed input that cannot
- * be encoded as UTF-8 at all — comes back as U+FFFD instead of passing through,
- * so what leaves **the truncating branch** is well-formed UTF-16 rather than
- * something the relay, `JSON.stringify` and SQLite each have a different opinion
- * about. The change made alongside it is the `kept` back-off. It is *not* forced
- * by the round trip: measured on
- * `"a".repeat(1023) + "\u{1F600}" + "b".repeat(4000)` at budget 1056, the round
- * trip with no back-off already returns a well-formed 1047-unit string ending in
- * U+FFFD. The back-off drops the whole character instead, so a transcript loses a
- * glyph rather than gaining a replacement one, and the note's count moves with
- * `kept`.
- *
- * ⚠ **That repair is one *code unit* wide either way, and that is the only
- * counter it leaves alone.** `estimateBytes` charges every string this function
- * touches by `String.length`, so it does not move. `JSON.stringify` does: it
- * writes a lone surrogate as the six-character escape `\udXXX` and U+FFFD as one
- * character and three bytes, so **both** `jsonSize` and `jsonBytes` fall.
- * Measured on `clip("ab\uD83Dcd" + "z".repeat(200), 40)`: `.length` 30 both ways,
- * `jsonSize` 37 → 32, `jsonBytes` 39 → 36. Every shift is downward, so no
- * `…_BYTES` refusal is loosened by it — but `jsonBytes` exists precisely because
- * a UTF-8 bound may not be built on a code-unit count, and neither of those two
- * may be described here as unmoved.
- *
- * ⚠ **Only the truncating branch, and this is not a sanitiser.** The first line
- * returns an under-budget value untouched — ill-formed surrogates and all — which
- * is the common path by far, so nothing downstream may skip its own handling on
- * the strength of having called this. Verified: `clip("ab\uD83Dcd", 100)` returns
- * the argument identically and its `isWellFormed()` is `false`.
- *
- * **How far the equivalence with the old bare-slice version actually goes was
- * checked rather than assumed**, because the sentence that used to stand here —
- * "for every well-formed input the result is byte-identical" — is false, and the
- * paragraph above it says why in its own words. Nothing offline pins this: it is
- * a pure function two drivers use and none exercises, so the corpus is the
- * record. Run 2026-09-14 against `HEAD:src/events.ts`'s `clip` (the bare slice,
- * which is still what is committed): 968 **well-formed** inputs — ASCII, a mixed
- * `héllo — 日本語 🎉` string and an all-astral string, each at every budget from 0
- * up, plus 64 budgets below `TRUNCATION_NOTE_BYTES` — printed 809 identical, 159
- * differing, and that every one of the 159 is a cut landing between the halves of
- * a surrogate pair. The below-note cases were identical to the last byte, which
- * is the `kept` = 0 branch where `charCodeAt(-1)` is `NaN` and the back-off
- * cannot fire. So the claim, in the only form it holds: byte-identical to what
- * this returned before for every well-formed input **whose cut does not fall
- * between the halves of a surrogate pair**, and for the ones whose cut does, a
- * deliberate and visible change — one fewer kept code unit, one more byte in the
- * note. The case above at budget 1056 was 1047 units ending
- * `\ud83d…[truncated 4001 bytes]` (`isWellFormed()` false) and is now 1046 ending
- * `…[truncated 4002 bytes]`.
- */
+/** The Buffer round trip copies out of V8's sliced string so the parent is freed; never simplify it to a bare slice. */
 export function clip(value: string, budget: number): string {
   if (value.length <= budget) return value;
   let kept = Math.max(budget - TRUNCATION_NOTE_BYTES, 0);
-  // `charCodeAt` of -1 is NaN, which fails this the same way a non-surrogate does.
   const last = value.charCodeAt(kept - 1);
   if (last >= 0xd800 && last <= 0xdbff) kept -= 1;
   const head = Buffer.from(value.slice(0, kept), "utf8").toString("utf8");
@@ -2087,88 +846,24 @@ function shrink(value: unknown): unknown {
   return { truncated: true, bytes: jsonSize(value) };
 }
 
-/**
- * Bound an agent-chosen blob, leaving the loss visible.
- *
- * Same stand-in `truncateEvent` uses, exported because the pending-permission
- * snapshot needs the identical treatment and must not grow a second, subtly
- * different idea of what truncation looks like. A client already has to handle
- * `{truncated: true, bytes}` in `rawInput`; making it handle a different shape
- * elsewhere would be gratuitous.
- *
- * This one needs no equivalent of `clip`'s `Buffer` round trip, and the reason
- * is worth writing down so nobody adds one: it never slices. Either the value is
- * under budget and passes through exactly as it arrived, retaining only itself,
- * or it is replaced wholesale by a size stand-in holding no reference to it at
- * all. There is no shape here that keeps a small piece of something large alive.
- */
 export function clampBlob(value: unknown, maxBytes: number): unknown {
   if (value === null || value === undefined) return null;
   return jsonSize(value) <= maxBytes ? value : shrink(value);
 }
 
-/**
- * Cuts an oversized event down to `maxBytes`.
- *
- * The loss is left visible in the payload — a truncation marker in the string, a
- * `{truncated: true, bytes}` stand-in for a blob — rather than the record simply
- * arriving shorter than it was.
- */
 export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEvent {
   if (estimateBytes(event) <= maxBytes) return event;
 
   switch (event.type) {
-    // `messageId` is spread through untouched, for `parentToolCallId`'s reason: a
-    // clipped id is not a shorter id, it is a boundary between two messages that
-    // were one — and it is bounded at ingest, so it is never what makes an event
-    // too big.
     case "text":
       return { ...event, text: clip(event.text, maxBytes) };
     case "prompt": {
-      /*
-       * Attachments are spread through **untouched**, and the text budget is
-       * reduced by what they already spend.
-       *
-       * Untouched for the reason `parentToolCallId` is: a clipped attachment is
-       * not a smaller attachment, it is a reference to a file that cannot be
-       * found. That is only safe because every field is bounded *at ingest* —
-       * `MAX_PROMPT_ATTACHMENTS` on the route, the name and mime caps in
-       * `uploads.ts` — so "bounded by what the client sent" is never the bound.
-       *
-       * And the budget really has to be reduced: clipping the text to the full
-       * `maxBytes` leaves an event whose attachments push it back over, which is
-       * exactly the class of miss the `tool_call_update` arm below describes.
-       */
       const spent = attachmentBytes(event.attachments);
       return { ...event, text: clip(event.text, Math.max(maxBytes - spent - 64, 512)) };
     }
     case "agent_log":
       return { ...event, line: clip(event.line, maxBytes) };
-    /*
-     * Two arms that return the event unchanged. The switch is exhaustive and has
-     * no `default`, so they are written rather than left to fall through.
-     *
-     * ⚠ **Both are bounded again, and for a while only one of them was.** This
-     * read "The message is clipped at ingest in `session.ts`" while
-     * `MAX_ELICITATION_MESSAGE_CHARS` was retired and `MAX_ELICITATION_FORM_BYTES`
-     * weighed the *form*, of which `message` is not a field — so the question was
-     * bounded by the agent and by nothing in `src/`, and one over ~1 MiB is a
-     * batch this arm refuses to cut, taken whole by `flush`, refused by the far
-     * end and reconnected onto for ever. The clip is back, at
-     * `MAX_ELICITATION_MESSAGE_CHARS` (4096), applied by
-     * `clipElicitationMessage` in `session.ts`'s `onElicitation` — which is the
-     * one place it can be applied, since the same string goes on to
-     * `PendingElicitationSnapshot` as well as onto this event. Each answer is
-     * clipped in `registry.ts`'s
-     * `settleElicitation` and refused outright over 2048 on the route; and the
-     * form they came from is refused past its own caps. So neither can reach the per-event ceiling. And if one somehow did,
-     * there is nothing here to cut: a truncated question is an unanswerable
-     * question and a truncated answer is a wrong one. Same reasoning as
-     * `MAX_PARENT_ID_CHARS` and `MAX_COMMAND_NAME_CHARS` — where shrinking would
-     * corrupt, the bound is a refusal upstream. Falling into `default` silently
-     * would say the same thing, and an absence is indistinguishable from an
-     * oversight.
-     */
+    // Never cut: a truncated question or answer is a wrong one, and both are bounded upstream.
     case "elicitation_request":
     case "elicitation_resolved":
       return event;
@@ -2180,22 +875,6 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
         newText: clip(event.newText, half),
       };
     }
-    // `parentToolCallId` is spread through untouched, on both arms, and that is
-    // a decision rather than an omission: a clipped tree edge is not a shorter
-    // field, it is an id pointing at a call that does not exist — and it would be
-    // lost on precisely the largest tool calls, which are the ones most worth
-    // attributing. That is only safe because it is bounded *before* it arrives,
-    // by `MAX_PARENT_ID_CHARS` in `acp/subagents.ts` — the agent chooses the
-    // value, so "bounded by the agent's own id length" was not a bound at all,
-    // and an unshrinkable field with no ceiling walks an event past the per-event
-    // cap. It is also why a generic `_meta` passthrough was refused: that would
-    // have to be shrinkable, and this is the alternative to shrinking.
-    //
-    // `locations` is cut on both arms, which the spread used to carry through
-    // untouched. Unlike `parentToolCallId` there is nothing to preserve: nothing
-    // acts on a location, so a shorter list is a smaller answer to the same
-    // question. It is bounded at ingest too (`MAX_TOOL_LOCATIONS`); this is the
-    // half that keeps one oversized event from staying oversized.
     case "tool_call":
       return {
         ...event,
@@ -2204,17 +883,8 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
         locations: cutLocations(event.locations),
       };
     case "tool_call_update": {
-      // The output is what makes this event large, so it is what gets clipped —
-      // and clipped per block rather than dropped, because "the command printed
-      // something and here is the start of it" is worth far more than a stand-in
-      // saying bytes existed. The arguments take the stand-in, same as a call's.
       const blocks = event.content?.length ?? 0;
       const budget = Math.max(Math.floor(maxBytes / Math.max(blocks, 1)) - 32, 64);
-      // `images` is spread through untouched, like a prompt's attachments and for
-      // the same reason: a clipped reference is not a smaller image, it is a
-      // pointer to a file that cannot be fetched. It is bounded at ingest — the
-      // name is minted here and the mime is the agent's declared one — so
-      // "bounded by what the agent sent" is never the bound.
       return {
         ...event,
         rawInput: shrink(event.rawInput),
@@ -2234,43 +904,12 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
       };
     }
     case "workspace": {
-      // The paths are the identity of the record and are never clipped; only the
-      // warning prose is, since that is the only unbounded part.
       const budget = Math.max(Math.floor(maxBytes / Math.max(event.warnings.length, 1)) - 32, 64);
       return {
         ...event,
         warnings: event.warnings.map((warning) => ({ ...warning, message: clip(warning.message, budget) })),
       };
     }
-    /*
-     * A configuration, with its prose removed and its structure left alone.
-     *
-     * Ids, names and current values are the identity of a control and are never
-     * clipped here — a picker missing a choice would silently offer the agent less
-     * than it supports. Only the prose goes, which is the same trade the
-     * `workspace` arm above makes for the same reason.
-     *
-     * ⚠ **That argument is right and it left this arm unable to shrink the large
-     * part, which was a door past `MAX_SOCKET_MESSAGE_BYTES` for as long as nothing
-     * bounded the structure at ingest.** Measured 2026-09-19 by replaying this
-     * function at `DEFAULT_MAX_EVENT_BYTES`: 20 000 choices came out at **1 318 159
-     * bytes**, one choice with a 2 MB `value` at **4 000 214**, and at a realistic
-     * 40-character value and name the cliff was **7 766 choices** — nearer than
-     * `plan.entries`' ~9 500, while three separate comments elsewhere were calling
-     * `plan` "the one door". Past the ceiling `MessageAssembler` refuses the
-     * message, `e2ee.ts` fails the channel, and `stream.ts` reconnects with its
-     * cursor unchanged onto the same event.
-     *
-     * The repair is at ingest and not here, because *here* is where the identity
-     * argument above holds: `toConfigOptions` in `session.ts` drops what
-     * round-trips, clips what does not, and marks `truncated` on anything it cut,
-     * so the "silently" is what was fixed rather than the trade.
-     * `daemoncheck.after-the-turn-and-config` now replays **every** arm of this
-     * switch against `MAX_SOCKET_MESSAGE_BYTES` and differences the labels against
-     * `SessionEvent`'s own union, so a claim about which arms can still be too big
-     * is checked instead of counted by hand. Counting by hand is how this one was
-     * missed three times.
-     */
     case "agent_config":
       return {
         ...event,
@@ -2287,41 +926,10 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
                 available: event.modes.available.map((mode) => ({ ...mode, description: null })),
               },
       };
-    /*
-     * A permission, cut where it can be.
-     *
-     * ⚠ **This arm used to return the event unchanged**, filed beside
-     * `context_cleared` under "nothing to cut", on the stated ground that
-     * permissions are "already clamped far tighter upstream by `clampBlob`,
-     * because they ride the snapshot". Every clause of that was true about the
-     * wrong fields: `clampBlob` bounds `rawInput` and `content`, and neither is
-     * a field of `PermissionRequestEvent` at all. What the event carries is
-     * `title` and `options`, and those were bounded by nothing anywhere — so the
-     * one event type whose exemption was written down in the most detail was the
-     * one with no upstream bound to point at. A comment asserting a property
-     * nothing enforces, one file over from the invariant named for it.
-     *
-     * They are clamped at ingest now (`MAX_PERMISSION_TITLE_CHARS` and friends in
-     * `session.ts`), which makes that sentence true rather than aspirational —
-     * and this arm cuts the title anyway, because the ingest cap is what keeps
-     * the ordinary event small and this is what catches the one that is not.
-     * `optionId` is left alone for `parentToolCallId`'s reason: it round-trips to
-     * the agent, so a clipped one is an answer nobody can give.
-     */
+    // Ingest refuses title and options as one 8 KiB weighing (it replaced MAX_PERMISSION_TITLE_CHARS); `optionId` round-trips, so is never cut.
     case "permission_request":
     case "permission_resolved":
       return { ...event, title: clip(event.title, maxBytes) };
-    /*
-     * Nothing to cut, stated arm by arm rather than left to a `default` — for
-     * exactly the reason the elicitation pair above gives: an absence is
-     * indistinguishable from an oversight, and with no `default` here a new
-     * event type is a compile error instead of a payload that silently walks
-     * past the per-event cap.
-     *
-     * `context_cleared` carries two agent session ids, and a clipped id names
-     * nothing. The last three are fixed-shape — union literals and numbers — and
-     * are the same three `estimateBytes` charges a flat 192.
-     */
     case "context_cleared":
     case "session_started":
     case "status":
@@ -2330,14 +938,6 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
   }
 }
 
-/**
- * The file list, shortened.
- *
- * Half the ingest cap rather than a fresh number: this only ever runs on an
- * event already over the per-event ceiling, where the list is not what anybody
- * is reading, and a second independent constant would be a second thing to keep
- * in agreement with `MAX_TOOL_LOCATIONS`.
- */
 function cutLocations(locations: readonly FileLocation[]): FileLocation[] {
   return locations.slice(0, 32).map((location) => ({ ...location, path: clip(location.path, 256) }));
 }

@@ -1,21 +1,8 @@
 import { readFileSync } from "node:fs";
 import { check, report, sleep, storage } from "./webcheck.env.js";
+import { srcFile, stripComments } from "./webcheck.source.js";
 
-/* ------------------------------------------------------------------ *
- * When a failed control-plane call ends the session
- *
- * **This is the section that exists because of one line.** `store.bootstrap`'s
- * catch used to be `error.status === 401 || error.status === 403`, and it cleared
- * the stored credential. That was harmless only because the browser never called
- * an admin route — and `requireAdmin` on the control plane answers
- * `403 forbidden` to every non-admin, so the moment there is a Users section,
- * opening it would sign a non-admin out of the entire app.
- *
- * The rule is `meansMachineGone`'s, one file over: decide on the **code**, never
- * the status. Asserted here rather than reasoned about, because the failure is
- * invisible to `typecheck` and to every other driver, and its symptom — being
- * thrown back to a sign-in screen mid-turn — arrives on somebody's phone.
- * ------------------------------------------------------------------ */
+// Whether a failure ends the session is decided by the error code, never by the status.
 
 process.stdout.write("\nwhen a failed call ends the session\n");
 {
@@ -27,18 +14,6 @@ process.stdout.write("\nwhen a failed call ends the session\n");
   check("a revoked one does too", authFailure(err(401, "session_revoked")), "credentials");
   check("an expired one says so separately", authFailure(err(401, "session_expired")), "expired");
   check("an unrecognised 401 still ends it", authFailure(err(401, "http_401")), "credentials");
-  /*
-   * **But a 401 about the request body does not**, and this one shipped as a bug
-   * that no offline assertion could have caught — every check above asks about a
-   * *credential*, and `invalid_password` is about a field.
-   *
-   * `POST /v1/me/password` answers it when the current-password box is wrong. The
-   * session carrying that request is fine, and it is the only thing standing
-   * between the person and the screen they are on. Measured in a browser: mistyping
-   * your own password returned you to the sign-in screen, and
-   * `changePasswordError`'s "That is not your current password." was unreachable
-   * because the session had already been cleared.
-   */
   check("but a wrong current password does NOT", authFailure(err(401, "invalid_password")), null);
   check("nor does a refused sign-in", authFailure(err(401, "invalid_login")), null);
   check("a disabled user ends it", authFailure(err(403, "user_disabled")), "disabled");
@@ -47,34 +22,9 @@ process.stdout.write("\nwhen a failed call ends the session\n");
   check("nor a 404", authFailure(err(404, "machine_not_found")), null);
   check("nor a 500", authFailure(err(500, "boom")), null);
   check("and a transport failure never does", authFailure(new TypeError("Failed to fetch")), null);
-  /*
-   * **`api_key_revoked` is newly reachable, and reached from a device that is not
-   * yours.** `revoked_at` was a column nothing could write, so a key was immortal
-   * and `callerAuth`'s arm for it was dead code. There are three writers now —
-   * `DELETE /v1/me/keys/:keyId`, its admin twin, and the sweep inside
-   * `POST /v1/admin/users/:id/password` — so an admin resetting somebody's
-   * password is now a thing that ends this tab, with neither of them touching it.
-   *
-   * It answers `"credentials"` rather than a fourth `AuthFailure` member on
-   * purpose: the union names what the person has to **do**, and the remedy is the
-   * sign-in screen, the same one a stolen session leads to.
-   */
   check("a revoked API key ends it", authFailure(err(401, "api_key_revoked")), "credentials");
   check("so does no credential at all", authFailure(err(401, "missing_api_key")), "credentials");
 
-  /*
-   * **Every code the control plane can answer**, walked in one pass, because the
-   * routes this client reaches roughly doubled this round and a per-code `check`
-   * is a list somebody adds a route to without noticing. The table is the whole
-   * error surface of `app.ts`; what it pins is the shape rather than the entries —
-   * six codes end a session, and every one of the other sixteen leaves the
-   * credential alone.
-   *
-   * `machine_revoked`, `key_not_found` and `overloaded` are the ones that make
-   * this worth walking: all three are new, all three are refusals about a *thing*
-   * rather than about a credential, and under the old `status === 401 || status
-   * === 403` test the first of them signed somebody out for pressing Retire twice.
-   */
   const SURFACE: ReadonlyArray<readonly [status: number, code: string]> = [
     [400, "bad_request"],
     [401, "api_key_revoked"],
@@ -84,30 +34,13 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     [401, "missing_api_key"],
     [401, "session_expired"],
     [401, "session_revoked"],
-    /*
-     * ⚠ **The newest, and it is the pair `session_revoked` one line up must not
-     * be folded into.** Both end this session; only this one also means the
-     * *installation* was retired, so the client has to give up its stored device
-     * id as well — otherwise the next sign-in offers a dead id, the server hands
-     * back a fresh device by its adopt-or-register rule, and the app quietly
-     * re-registers on every launch. The other direction is worse in a quieter
-     * way: `session_revoked` is what the per-user session cap produces, and a
-     * client that dropped its device id there would spend a device slot every
-     * time somebody signed in on an eleventh browser.
-     */
+    // device_revoked also drops the stored device id; session_revoked must not, or every sign-in past the session cap spends a device slot.
     [401, "device_revoked"],
     [403, "forbidden"],
     [403, "machine_over_limit"],
     [403, "machine_revoked"],
     [403, "no_scopes"],
-    /*
-     * **These two are one character apart in meaning and must never share a
-     * fate.** `user_disabled` is "you are banned" and ends the session;
-     * `owner_disabled` is "the owner of the machine you just touched is banned",
-     * which says nothing whatever about the caller — and a grantee signed out of
-     * the whole app for opening somebody else's suspended machine would be the
-     * worst refusal in this table. The walk below is what holds them apart.
-     */
+    // owner_disabled is about the machine's owner, not the caller, and must never end the session.
     [403, "owner_disabled"],
     [403, "user_disabled"],
     [404, "key_not_found"],
@@ -139,13 +72,6 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     SURFACE.map(([status, code]) => authFailure(err(status, code))).filter((f) => f !== null),
     ["credentials", "credentials", "credentials", "expired", "credentials", "device_revoked", "disabled"],
   );
-  /*
-   * ⚠ **The two that end a session differently, side by side.** This is the pair
-   * the table above can only say something about by counting; said here it is a
-   * deletion somebody has to make on purpose. A session retired by the per-user
-   * cap leaves the device valid — sign in again and the same row is re-bound — and
-   * a retired *device* does not.
-   */
   check(
     "a retired device is its own ending, and a revoked session is not",
     [authFailure(err(401, "device_revoked")), authFailure(err(401, "session_revoked"))],
@@ -156,8 +82,6 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     [signedOutText("device_revoked") === signedOutText("credentials"), signedOutText("device_revoked").length > 0],
     [false, true],
   );
-  // The three the brief for this section exists for, restated as one line so that
-  // deleting any of them is a visible deletion rather than a table edit.
   check(
     "the three that must never sign anybody out",
     [
@@ -174,15 +98,7 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     3,
   );
 
-  /*
-   * ⚠ **The refusal names no half of the form, and now it cannot.** `/v1/login`
-   * answers one `invalid_login` for a name nobody has, an address nobody proved, a
-   * user with no password row and a password that is simply wrong — so a sentence
-   * naming any one of them is the client putting the enumeration back that the
-   * server spends a decoy hash to avoid. It read *"That name and password do not
-   * match"*, which was merely narrow while the field took only a name and became
-   * misleading the moment it took an address too.
-   */
+  // One sentence for every cause of a refused login: naming a field would undo the server's anti-enumeration.
   check("a wrong password and an unknown name read the same", signInError(err(401, "invalid_login")), signInError(err(401, "invalid_login")));
   check(
     "and the sentence blames neither half of the form",
@@ -205,22 +121,7 @@ process.stdout.write("\nwhen a failed call ends the session\n");
   check("signing in does not enforce the password rules", signInReady("ada", "short"), true);
 }
 
-/* ------------------------------------------------------------------ *
- * How long the throttle actually said to wait
- *
- * **The number was computed twice on the server and read nowhere here.**
- * `tooManyAttempts` sends `Retry-After` *and* `detail.retryAfterSeconds`,
- * precisely so a client can wait rather than retry into the block — and both
- * halves were thrown away, while somebody facing a fifteen-minute lockout was
- * told to "wait a moment". Coming back in thirty seconds is then advice that
- * makes the wait *longer*, because a refusal during a block doubles it.
- *
- * The **body** is what is read, and it has to be: `parseBody` takes a status, a
- * status text and a string, never a `Response`, so no header can reach an
- * `ApiError` at all. That is why the server says it twice and why only one of the
- * two was ever reachable from a browser. Asserted here because the wrong number
- * and no number look identical in a screenshot.
- * ------------------------------------------------------------------ */
+// parseBody never sees a Response, so the wait is read from the body's retryAfterSeconds, not the Retry-After header.
 
 process.stdout.write("\nhow long the throttle said to wait\n");
 {
@@ -231,28 +132,16 @@ process.stdout.write("\nhow long the throttle said to wait\n");
   const throttled = (detail: unknown): unknown =>
     new ApiError(429, "too_many_attempts", "too many attempts", detail);
 
-  // The throttle's own steps: 5 failures buys 30s, doubling to a 15 min ceiling.
-  // Both ends of that range, because the wording changes unit in the middle.
+  // Both ends of the throttle's range, because the wording changes unit between them.
   check("a short block is said in seconds", tooManyAttemptsText(throttled({ retryAfterSeconds: 30 })), "Too many attempts. Wait 30 seconds and try again.");
   check("a long one is said in minutes", tooManyAttemptsText(throttled({ retryAfterSeconds: 900 })), "Too many attempts. Wait 15 minutes and try again.");
   check("and one second is not one seconds", waitText(1), "1 second");
   check("nor is one minute one minutes", waitText(60), "1 minute");
-  /*
-   * Rounded **up**, never down, and in two places. `retryAfter` ceils the
-   * server's seconds and `waitText` ceils the minutes, because telling somebody
-   * to come back before the block lifts sends them into a refusal that then
-   * extends it.
-   */
+  // Rounded up in both retryAfter and waitText: coming back before the block lifts extends it.
   check("a fractional second rounds up", retryAfter(throttled({ retryAfterSeconds: 30.2 })), 31);
   check("and 61 seconds is two minutes, not one", waitText(61), "2 minutes");
   check("59 seconds stays in seconds", waitText(59), "59 seconds");
 
-  /*
-   * **A missing detail degrades to the old sentence rather than to a wrong
-   * number.** An older control plane sends no `detail` at all, and "wait 0
-   * seconds" or "wait NaN minutes" are both worse than saying nothing precise.
-   * Every shape that is not a positive finite number takes that path.
-   */
   check("no detail at all falls back", tooManyAttemptsText(throttled(null)), "Too many attempts. Wait a moment and try again.");
   check("so does a detail without the field", tooManyAttemptsText(throttled({})), "Too many attempts. Wait a moment and try again.");
   check(
@@ -268,14 +157,6 @@ process.stdout.write("\nhow long the throttle said to wait\n");
     [null, null, null, null, null, null],
   );
 
-  /*
-   * One sentence for two forms, because it is one refusal from one throttle.
-   * `/v1/login` keys on the submitted identifier — a name or an address, whichever
-   * was typed — plus the caller's address;
-   * `passwordChangeKey` keys on the user id — different key spaces on the same
-   * counter, and a person who meets both should not have to notice that they were
-   * worded differently.
-   */
   check(
     "the sign-in form and the password form say the same thing",
     signInError(throttled({ retryAfterSeconds: 120 })),
@@ -284,18 +165,7 @@ process.stdout.write("\nhow long the throttle said to wait\n");
   check("and it carries the number", signInError(throttled({ retryAfterSeconds: 120 })), "Too many attempts. Wait 2 minutes and try again.");
 }
 
-/* ------------------------------------------------------------------ *
- * The credential this origin holds
- *
- * The first assertions `cp.ts` has ever had, despite it being loaded by this
- * driver since the day it was written — `store.js` imports it, and its
- * import-time read of `localStorage` is what the stub at the top of this file has
- * been keeping alive.
- *
- * That import already happened, against an empty store, before this section runs.
- * Which is exactly why the migration rule is `pickStored` — a pure function —
- * rather than something a driver seeds storage for and re-imports.
- * ------------------------------------------------------------------ */
+// cp.ts already read storage at import, before this runs, so the migration rule is the pure pickStored.
 
 process.stdout.write("\nthe credential this origin holds\n");
 {
@@ -308,11 +178,6 @@ process.stdout.write("\nthe credential this origin holds\n");
     cp.pickStored("rs_abc", null),
     { value: "rs_abc", kind: "session", migrated: false },
   );
-  /*
-   * The line that stops a deploy signing the fleet out. An `rk_` key written by
-   * the previous build is still a valid bearer — `callerAuth` takes either — so
-   * it is adopted under the new name rather than ignored.
-   */
   check(
     "a key the old build left still signs you in",
     cp.pickStored(null, "rk_old"),
@@ -323,36 +188,21 @@ process.stdout.write("\nthe credential this origin holds\n");
     cp.pickStored("rs_new", "rk_old"),
     { value: "rs_new", kind: "session", migrated: false },
   );
-  // An empty *fresh* name is not a credential either, so the legacy one is still
-  // adopted: `localStorage.setItem(k, "")` and a missing key must not be told
-  // apart, because a half-written value is the shape a killed tab leaves.
+  // An empty value and a missing key must read alike: a killed tab leaves a half-written value.
   check(
     "an empty fresh name does not shadow the old one",
     cp.pickStored("", "rk_old"),
     { value: "rk_old", kind: "api_key", migrated: true },
   );
-  /*
-   * The migration is about the *name*, never the value: a session token written
-   * under the old name is adopted as a session, not mislabelled an API key.
-   * Reachable twice over: the release that introduced sessions wrote them under
-   * `remoslop.apiKey`, and every release before the product rename wrote them
-   * under `remoslop.credential`.
-   */
   check(
     "a session token under the old name is still a session",
     cp.pickStored(null, "rs_old"),
     { value: "rs_old", kind: "session", migrated: true },
   );
   check("the two kinds are told apart by their prefix", [cp.credentialKind("rk_x"), cp.credentialKind("rs_x")], ["api_key", "session"]);
-  /*
-   * The prefix test is `startsWith("rk_")` and everything else is a session,
-   * which is the honest reading: `keyPrefix` on the control plane is the only
-   * side that assigns them, and a value this client cannot classify is far more
-   * likely to be a token it has not heard of than a key.
-   */
+  // Only the control plane assigns prefixes, so an unrecognised value is more likely a new token kind than a key.
   check("and anything unrecognised is treated as a session", cp.credentialKind("xx_x"), "session");
 
-  // Both kinds are sent identically. Nothing downstream may start caring which.
   check(
     "both kinds are sent the same way",
     [cp.authHeader({ value: "rs_x", kind: "session" }), cp.authHeader({ value: "rk_x", kind: "api_key" })],
@@ -367,11 +217,7 @@ process.stdout.write("\nthe credential this origin holds\n");
   cp.clearSession();
   check("clearing removes it rather than blanking it", storage.has("reemoat.credential"), false);
   check("and forgets it in memory too", cp.currentCredential(), null);
-  /*
-   * **A rename must not sign anybody out**, and the two old names are swept
-   * rather than left behind — otherwise the next `readStoredCredential` adopts a
-   * stale token from a tab that was signed out on purpose.
-   */
+  // The legacy names are swept, or the next read adopts a token from a tab signed out on purpose.
   storage.set("remoslop.credential", "rs_from_before_the_rename");
   cp.setSession("rs_after");
   check("and adopting the pre-rename name clears it", storage.has("remoslop.credential"), false);
@@ -381,26 +227,7 @@ process.stdout.write("\nthe credential this origin holds\n");
   check("signing out sweeps every legacy name", storage.has("remoslop.apiKey"), false);
 }
 
-/* ------------------------------------------------------------------ *
- * Whose refusal a 401 actually is
- *
- * `cpFetch` is the one place a dead credential is noticed, and it used to attach
- * that refusal to whatever was current when it *landed* rather than to what the
- * request carried. `CP_TIMEOUT_MS` is ten seconds, which is ten seconds of window
- * in which the credential can be replaced: a slow `GET /v1/me` sent with an
- * expiring token, a wake that notices first, a sign-in that succeeds, and then
- * the old request finally answering `401 session_expired` — which cleared the
- * **new** token from memory and from `localStorage` and dropped the tab back to
- * the gate about a session that was perfectly good and that, no `DELETE
- * /v1/me/sessions/current` having been sent, then lingered for its full thirty
- * days.
- *
- * Driven through the real `cpFetch` against a stubbed `fetch` that answers when
- * this driver says so, because the whole subject is *when* the answer arrives
- * relative to the swap. Both directions are asserted: a refusal of the credential
- * still held must go on signing the tab out, or this fix would have replaced one
- * silent failure with a worse one.
- * ------------------------------------------------------------------ */
+// A 401 belongs to the credential the request carried, not to whichever is current when it lands.
 
 process.stdout.write("\nwhose refusal a 401 actually is\n");
 {
@@ -421,15 +248,7 @@ process.stdout.write("\nwhose refusal a 401 actually is\n");
       headers: { "content-type": "application/json" },
     });
 
-  /*
-   * Answering goes through a function on purpose. `answer` is assigned inside
-   * the `fetch` stub's promise executor, and TypeScript's flow analysis does not
-   * follow an assignment made in a nested closure: inside this block it still
-   * believes the initializer, narrows the variable to `null`, and types the call
-   * `never` (TS2349). Read from another function scope it is the declared type
-   * again — and the throw is worth having anyway, since a case that answers with
-   * no request in flight is asserting against the wrong `fetch`.
-   */
+  // Answered through a function: TS narrows answer to null here because it is assigned in a nested closure (TS2349).
   const respond = (response: Response): void => {
     if (!answer) throw new Error("no request was in flight to answer");
     answer(response);
@@ -438,7 +257,6 @@ process.stdout.write("\nwhose refusal a 401 actually is\n");
   let signedOut = 0;
   cp.onSignedOut(() => void (signedOut += 1));
 
-  // The window: sent under one credential, answered after another has replaced it.
   cp.setSession("rs_stale");
   const late = cp.me().catch((error: unknown) => error);
   await sleep(20);
@@ -449,15 +267,8 @@ process.stdout.write("\nwhose refusal a 401 actually is\n");
   check("a 401 for a superseded credential does not clear the current one", cp.currentCredential()?.value, "rs_fresh");
   check("nor the copy in storage", storage.get("reemoat.credential"), "rs_fresh");
   report("and does not return the tab to the gate", signedOut === 0, `signedOut fired ${signedOut}×`);
-  /*
-   * Still a rejection, and that is deliberate rather than incidental: the call
-   * failed and its caller shows its own error. What is swallowed is only the
-   * *signal*, never the failure.
-   */
   check("the caller is still told the call failed", (caught as { code?: string }).code, "session_expired");
 
-  // The other direction, which is the capability this must not have cost: the
-  // credential that was refused is the one still held, so the tab does go.
   const now = cp.me().catch(() => null);
   await sleep(20);
   respond(refusal("session_revoked"));
@@ -465,44 +276,11 @@ process.stdout.write("\nwhose refusal a 401 actually is\n");
   check("a 401 for the credential still held clears it", cp.currentCredential(), null);
   report("and signs the tab out", signedOut === 1, `signedOut fired ${signedOut}×`);
 
-  // Put the store's own handler back — it is registered once, from `store.ts`'s
-  // module body, and this section replaced it.
+  // Restore the store's handler, which store.ts registers once at module load.
   cp.onSignedOut((failure) => store.handleSignedOut(failure));
   globalThis.fetch = realFetch;
   cp.clearSession();
 }
-
-/* ------------------------------------------------------------------ *
- * Leaving the loading screen without a reload
- *
- * `phase` was written by `bootstrap` and `handleSignedOut` and by nothing else,
- * and `bootstrap` runs once, at page load. So a tab opened while the control
- * plane was down rebuilt *everything* on the retry path — connections, daemons,
- * tokens, the session poll — and went on rendering `App`'s bare spinner for ever,
- * under a `cpError` the same patch had just cleared so it no longer even said
- * why. The only way out was a manual reload, on a phone, and no wake trigger
- * helped: `resume.ts` lands in the same function.
- *
- * Driven through `bootstrap` and `resume` against a stubbed `fetch`, because the
- * claim is about a *sequence* — down, then up — and only a sequence can tell the
- * promotion apart from `bootstrap` having simply succeeded.
- *
- * **The registry that answers with nothing in it is the case, not a corner.** The
- * first version of this promoted on `connections.size > 0`, mirroring
- * `bootstrap`'s *catch* arm rather than its success arm, and so could not fire
- * for an account that owns no machines — a fresh sign-in, or one whose machines
- * were all revoked, which is precisely who is stuck and precisely who the app
- * would send to Settings → Machines if it would only render. It is worse than a
- * stalemate: `tick`'s retry gate is `connections.size === 0 && phase ===
- * "loading"`, so the phase pinned there turns the escape hatch into a
- * `GET /v1/machines` every four seconds for ever, under a spinner whose `cpError`
- * the same patch has just cleared. So the zero-machine step below asserts `ready`
- * and the gate's own inputs, and a revert to `size > 0` fails on both.
- *
- * `me` is asserted too, since promoting without re-reading it is how an admin
- * silently loses the Users section (`visibleSections` fails closed on a null
- * `me`) until they reload.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nleaving the loading screen without a reload\n");
 {
@@ -531,33 +309,40 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
 
   cp.setSession("rs_boot");
   await store.bootstrap();
-  // The poll would otherwise fire its own `cp-retry` mid-section — `tick` calls
-  // exactly the path under test. Stopped here so each step below is the one this
-  // driver asked for.
+  // Stop the poll: tick would call the path under test mid-section.
   internals.stopPolling();
-  check("a control plane that is down leaves the app loading", store.getSnapshot().phase, "loading");
+  // With several accounts, a down control plane must still draw the app so the drawer reaches the others.
+  check("a control plane that is down still draws the app, drawer and all", store.getSnapshot().phase, "ready");
   report("and says so", store.getSnapshot().cpError !== null, `cpError: ${String(store.getSnapshot().cpError)}`);
+  {
+    const view = stripComments(srcFile("ui/SessionView.tsx"));
+    const browser = stripComments(srcFile("ui/SessionBrowser.tsx"));
+    const app = stripComments(srcFile("App.tsx"));
+    const loadingArm = app.slice(
+      app.indexOf('if (state.phase === "loading")'),
+      app.indexOf("if (state.me?.mustChangePassword === true)"),
+    );
+    report("the loading arm was found", loadingArm.includes("<Spinner />"), `${loadingArm.length} chars`);
+    // The outage is the connection pill's to say (Q3.659): no banner over the list, and the title keeps its workspace line.
+    check(
+      "and nothing above the conversations says it",
+      [/cpError/.test(view), /ControlPlaneNotice|CONTROL_PLANE_UNREACHABLE/.test(browser + view), /<ConnectionPill/.test(browser)],
+      [false, false, true],
+    );
+    check(
+      "and the list does not call an unread registry empty",
+      /state\.machines\.length === 0 && !probing && state\.cpError === null && \(/.test(browser),
+      true,
+    );
+    check("and the loading screen says nothing about an outage, which never reaches it", /cpError/.test(loadingArm), false);
+  }
 
-  /*
-   * It answers again, with **nothing in it** — the account that owns no machines,
-   * which is the one this escape exists for. The listing succeeded, so the
-   * registry is known and the app is usable; that it is empty is an answer rather
-   * than an absence, and Settings → Machines is the screen it is supposed to be
-   * showing.
-   */
   const me = { id: "u_1", name: "ada", isAdmin: true, via: "session", hasPassword: true };
   routes = (path) => (path === "/v1/machines" ? { machines: [] } : path === "/v1/me" ? me : null);
   await store.resume("cp-retry");
   check("a registry that answers with nothing in it still leaves the loading screen", store.getSnapshot().phase, "ready");
   check("and the outage banner is cleared", store.getSnapshot().cpError, null);
-  /*
-   * The second cost of the old rule, asserted as the gate's own inputs rather
-   * than by waiting four seconds for the poll it would have fired. `tick` retries
-   * on `connections.size === 0 && phase === "loading"`, both of which were true
-   * for ever under `size > 0`, so the escape hatch became a request every four
-   * seconds — the poll that gate's comment exists to prevent — with a bare
-   * spinner on screen the whole time.
-   */
+  // tick retries while there are no connections and the phase is loading, so leaving loading is what stops the poll.
   report(
     "so the four-second cp-retry stops firing, with no machine to make it stop",
     internals.connections.size === 0 && store.getSnapshot().phase !== "loading",
@@ -573,11 +358,6 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
     `me: ${JSON.stringify(store.getSnapshot().me)}`,
   );
 
-  /*
-   * And a registry with a machine in it is connected as it always was — the
-   * promotion is a phase change and not a replacement for the per-machine work,
-   * which is the half a reader of the fix above might assume it had folded in.
-   */
   routes = (path) => (path === "/v1/machines" ? { machines: [record] } : path === "/v1/me" ? me : null);
   await store.resume("cp-retry");
   check("a machine arriving later is still connected", internals.connections.has("m_cp"), true);
@@ -588,10 +368,6 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
   globalThis.fetch = realFetch;
   cp.clearSession();
 }
-
-/* ------------------------------------------------------------------ *
- * The password rules, mirrored from the control plane
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nthe password rules\n");
 {
@@ -610,30 +386,11 @@ process.stdout.write("\nthe password rules\n");
   check("length is reported before a mismatch", passwordProblem("old", "abc", "abd"), "too_short");
   check("the minimum is pinned, because it is a mirror", PASSWORD_MIN, 12);
 
-  /*
-   * **And the mirror is compared to the thing it mirrors**, which is the half
-   * the line above cannot do: it is a *third* copy of the number, so all three
-   * agree exactly as long as nobody touches the side that enforces anything.
-   * Raise `password.ts` to 14 and every driver in this repo stays green while
-   * every form still says "At least 12 characters", `canSubmit` still enables
-   * the button, and the submission lands on a `400 weak_password` the client had
-   * already promised was fine — the same shape as `canSend` disagreeing with the
-   * prompt route.
-   *
-   * Nothing else can span it. `packages/web` is type-checked by its own config
-   * and `src/` may not import the control plane at all, so the only thing that
-   * crosses the boundary is reading the other side off disk — `enrollmentLines`'
-   * technique, one size smaller: a regex rather than a function body, because
-   * these are two bare literals.
-   */
+  // The client mirrors the server's password bounds, so they are read off the control plane's password.ts; nothing else crosses that boundary.
   const policy = readFileSync(new URL("../../control-plane/src/password.ts", import.meta.url), "utf8");
   const serverBound = (name: string): number => {
     const found = new RegExp(`^export const ${name} = (\\d+);$`, "m").exec(policy)?.[1];
-    /*
-     * Loud rather than `NaN`. The day that constant becomes an expression or
-     * moves file this says which name went missing, instead of failing as a
-     * comparison against a number nobody wrote.
-     */
+    // Throws rather than comparing against NaN, naming the constant that went missing.
     if (found === undefined) throw new Error(`password.ts no longer exports ${name} as a bare numeric literal`);
     return Number(found);
   };
@@ -656,34 +413,7 @@ process.stdout.write("\nthe password rules\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * The one measurement in a text field's chrome
- *
- * Almost nothing the settings screens gained this round is reachable from here:
- * the two-step delete's row order, the `sm:` stacking on a user row and the
- * reserved control slot are all JSX props, and the sentence stating each lives
- * beside the prop. This is the exception, and it is here because it is a
- * **number that was measured** rather than a class somebody preferred.
- *
- * `SignIn` and the password form under Settings → Account are the same control
- * one screen apart and had already drifted — `py-3` against `py-2`. `index.css`
- * forces `font-size: max(16px, 1em)` on every input under a coarse pointer (the
- * rule that stops iOS zooming the page on focus), so at a 16px face those are
- * roughly 47px and 39px tall: the *same field* on either side of the 44px tap
- * minimum depending on which screen you reached it from.
- *
- * **That was pinned as `py-3` and is pinned as `min-h` now**, because padding only
- * ever reached 44px by multiplying with a line-height that lives in the type
- * scale — a rendered height that no file stated and that nothing could assert
- * without a DOM. Two controls meant to line up then differed by 10px, and the
- * class that was supposed to fix it never applied at all: Tailwind emits every
- * utility at equal specificity, `.py-3` is emitted after `.py-2`, so
- * `` `${FIELD} py-2` `` silently kept the taller box.
- *
- * What this cannot assert is the cascade or the call sites — there is no DOM here
- * and no CSS — so it pins the numbers, and the *absence* of the padding a caller
- * would try to beat.
- * ------------------------------------------------------------------ */
+// Height is stated as a min-h rather than padding, which a caller's own padding class could silently override.
 
 process.stdout.write("\nthe one measurement in a text field's chrome\n");
 {
@@ -691,13 +421,7 @@ process.stdout.write("\nthe one measurement in a text field's chrome\n");
 
   check("the field states a resting height", FIELD.includes("min-h-9"), true);
   check("and the floor that clears 44px under a thumb", FIELD.includes("[@media(pointer:coarse)]:min-h-11"), true);
-  // The height is not padding any more, and that is the property: with no `py-*`
-  // in the string there is nothing for a caller's own to lose an argument to.
   check("with no vertical padding at all", /\bpy-\d/.test(FIELD), false);
-  // Layout is deliberately absent: width, margin and `block` legitimately differ
-  // between a full-width form field and a `flex-1` one beside a Button, and
-  // folding one caller's layout in here is how the next caller writes a fourth
-  // copy to get out of it.
   check(
     "and it carries no layout for a caller to fight",
     ["w-full", "mt-", "flex-1", "block", "max-w-"].filter((token) => FIELD.includes(token)),
@@ -705,17 +429,7 @@ process.stdout.write("\nthe one measurement in a text field's chrome\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Which device a session signed in from
- *
- * Every assertion here is a claim about a string this code will never be handed
- * during development — nobody signs in from Windows on the machine this is
- * written on, and the whole point of the list is that it describes the sessions
- * that are *not* yours. So this driver is the only thing that ever exercises the
- * table, and the ordering it pins is the entire correctness argument: these
- * agents are subsets of each other on purpose, because a browser claims its
- * predecessors so that sniffing written before it existed keeps working.
- * ------------------------------------------------------------------ */
+// describeAgent's table order is its correctness: browsers' agents contain their predecessors' names.
 
 process.stdout.write("\nwhich device a session signed in from\n");
 {
@@ -740,39 +454,13 @@ process.stdout.write("\nwhich device a session signed in from\n");
   check("Chrome on a Mac", describeAgent(CHROME_MAC), "Chrome on macOS");
   check("Safari on a Mac", describeAgent(SAFARI_MAC), "Safari on macOS");
   check("Safari on a phone", describeAgent(SAFARI_IPHONE), "Safari on iPhone");
-  /*
-   * The four that the ordering exists for, and each was a wrong answer with the
-   * table in any other order.
-   *
-   * Chrome's agent ends `Chrome/141 Safari/537.36`, so testing `Safari` first
-   * calls every desktop browser Safari. Edge's is Chrome's plus `Edg/141`. On iOS
-   * every browser is WebKit and only the name differs, so without `CriOS` every
-   * iPhone in the list reads "Safari". And Android's agent begins `Linux;
-   * Android`, so `Linux` last is what stops a phone reading as a desktop.
-   */
   check("Chrome is not reported as Safari", describeAgent(CHROME_MAC)?.startsWith("Chrome"), true);
   check("Edge is not reported as Chrome", describeAgent(EDGE_WINDOWS), "Edge on Windows");
   check("Chrome on iOS is not reported as Safari", describeAgent(CHROME_IPHONE), "Chrome on iPhone");
   check("Android is not reported as Linux", describeAgent(CHROME_ANDROID), "Chrome on Android");
   check("Firefox on a desktop Linux", describeAgent(FIREFOX_LINUX), "Firefox on Linux");
 
-  /*
-   * **The ordering property itself, rather than seven agents that happen to
-   * exercise it.**
-   *
-   * Every pair below is two needles that a real agent carries *at once*, which is
-   * what makes the table's order the whole correctness argument: `firstMatch`
-   * returns on the first `includes`, so a table sorted any other way answers the
-   * broader name. The strings are synthetic and minimal on purpose — a copied
-   * agent proves one vendor's current string, this proves the rule, and the rule
-   * is what a new entry inserted in the wrong place breaks.
-   *
-   * `Linux` last is the one with a phone behind it: Android's agent begins
-   * `Mozilla/5.0 (Linux; Android 14; …)`, so `Linux` above it calls every Android
-   * device a desktop. `Chromium` above `Chrome` is the mirror — Chromium's agent
-   * carries `Chromium/141.0.0.0 Chrome/141.0.0.0` — and both are invisible to
-   * anybody developing on a Mac.
-   */
+  // Synthetic minimal pairs: firstMatch returns on the first hit, so each more specific needle must precede the broader one.
   const PAIRS: ReadonlyArray<readonly [ua: string, want: string]> = [
     ["Chrome/1 Safari/2", "Chrome"],
     ["Chrome/1 Safari/2 Edg/3", "Edge"],
@@ -792,44 +480,20 @@ process.stdout.write("\nwhich device a session signed in from\n");
     PAIRS.map(([, want]) => want),
   );
 
-  // A half-answer beats none: `curl` has no platform, and an unknown browser on a
-  // known platform still narrows it for the person reading.
   check("a platform with no known browser still says the platform", describeAgent("Mozilla/5.0 (Windows NT 10.0)"), "Windows");
   check("nothing recognised is null, never a guess", describeAgent("SomeBot/1.0"), null);
   check("an absent agent is null", describeAgent(null), null);
   check("so is one that predates the table", describeAgent(undefined), null);
   check("and so is an empty string", describeAgent("   "), null);
 
-  /*
-   * Every row is named, including your own.
-   *
-   * This used to take a `current` flag and answer "This device", which cost the
-   * browser its place on the row somebody looks at first — an account with one
-   * session then showed no browser anywhere, and the feature read as unbuilt.
-   * Which row you are on is drawn as a badge instead, because it is the one thing
-   * on the row that is certain.
-   */
   check("your own row is named too", deviceLine(CHROME_MAC), "Chrome on macOS");
 
-  /*
-   * **The two fallbacks are different sentences, and collapsing them was a real
-   * complaint.** Both used to read "Unrecognised device", and the first question
-   * anybody asked on seeing it was *what does that mean — did it fail?* It had
-   * not: those rows predate the table that records an agent at all, and nothing
-   * was ever handed to the parser.
-   *
-   * They have different remedies, which is the test for whether one word can
-   * serve both. Nothing recorded: sign in again and it will be. Something
-   * recorded that we cannot read: that row is as identified as it will ever get.
-   */
   check("a session that recorded nothing says so", deviceLine(null), "Signed in before this was recorded");
   check("and so does one whose field is empty", deviceLine("  "), "Signed in before this was recorded");
   check("an agent we cannot read is a different sentence", deviceLine("SomeBot/1.0"), "Unrecognised browser");
   check("nothing recorded is not 'recorded'", agentWasRecorded(null), false);
   check("nor is an empty string", agentWasRecorded("   "), false);
   check("an unreadable agent still counts as recorded", agentWasRecorded("SomeBot/1.0"), true);
-  // Neither fallback may be empty: a blank cell where the other rows have words
-  // reads as a rendering fault rather than as an absence.
   report(
     "every row says something",
     [null, undefined, "  ", "SomeBot/1.0", CHROME_MAC].every((ua) => deviceLine(ua).length > 0),
@@ -837,17 +501,7 @@ process.stdout.write("\nwhich device a session signed in from\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * A login transcript, read as steps
- *
- * `ui/login.ts` turns pty bytes into "open this page", "read this code" and a
- * recognised failure. It is a **reading, not a protocol** — nothing here is
- * negotiated with any agent, and a vendor may reword any of it in a release —
- * so the load-bearing case is the last one in this section: when nothing is
- * recognised the view is all-null, `transcriptIsTheAnswer` says so, and the card
- * shows the raw output. That is what makes the worst case equal to the screen
- * this replaced rather than worse than it.
- * ------------------------------------------------------------------ */
+// The login parser is a guess; when nothing is recognised the card shows the raw output.
 
 process.stdout.write("\na login transcript, read as steps\n");
 {
@@ -861,14 +515,7 @@ process.stdout.write("\na login transcript, read as steps\n");
     rawTranscriptIsOpen,
   } = await import("../src/ui/login.js");
 
-  /*
-   * The one failure string that is measured rather than guessed.
-   *
-   * On macOS the login wizard does not run for any agent: BSD `script` reads its
-   * own stdin's termios to copy onto the pty it is allocating, and it is handed a
-   * pipe. What somebody saw was this line in a `<pre>`, with nothing connecting
-   * it to "paste a token instead".
-   */
+  // The one measured failure string: BSD script on macOS cannot copy termios from a pipe.
   const TCGETATTR = "script: tcgetattr/ioctl: Operation not supported on socket\n";
   check("the macOS pty failure is recognised", extractFailure(TCGETATTR) !== null, true);
   check(
@@ -876,11 +523,7 @@ process.stdout.write("\na login transcript, read as steps\n");
     readLoginTranscript(TCGETATTR, true, true).phase,
     "failed",
   );
-  /*
-   * **A failure while the flow is still running is not `failed`.** These programs
-   * print warnings and retry, and a card that gave up on the first alarming line
-   * would abandon a login that was about to work.
-   */
+  // A failure line while the flow runs is not failed: these programs warn and retry.
   check(
     "but not while the flow is still alive",
     readLoginTranscript(TCGETATTR, false, true).phase,
@@ -892,8 +535,6 @@ process.stdout.write("\na login transcript, read as steps\n");
     true,
   );
 
-  // Deduplicated because these flows *redraw*: a spinner repaints its line and
-  // the same authorize URL is printed a dozen times.
   check(
     "a redrawn URL is offered once",
     extractUrls("go to https://example.com/device\r  go to https://example.com/device\n"),
@@ -901,26 +542,13 @@ process.stdout.write("\na login transcript, read as steps\n");
   );
 
   check("a code introduced by its own word", extractCode("Then enter the code: WDJB-MJHT"), "WDJB-MJHT");
-  /*
-   * **The newest code, from the same end the URL is read from.**
-   *
-   * These flows reprint on expiry. `extractUrls().at(-1)` always moved to the
-   * fresh page while a non-global `exec` here stayed on the first code, so the
-   * card showed a live page beside a dead code — the one pairing that cannot
-   * work. Both ends have to agree.
-   */
   const reprinted =
     "Open https://example.com/a and enter the code: AAAA-1111\n" +
     "That code expired.\n" +
     "Open https://example.com/b and enter the code: BBBB-2222\n";
   check("a reprinted flow offers the newest code", extractCode(reprinted), "BBBB-2222");
   check("beside the newest page", readLoginTranscript(reprinted, false, false).url, "https://example.com/b");
-  /*
-   * And the transient word that used to be in `FAILURES` is not: the table is
-   * matched against the *whole* transcript, so an entry about something the flow
-   * recovers from is a claim about the past stated in the present — here, a
-   * finished login drawn as failed in red beside a badge reading "signed in".
-   */
+  // FAILURES is matched against the whole transcript, so it may hold nothing the flow recovers from.
   check("an expiry it recovered from is not a failure", extractFailure(reprinted), null);
   check("so the finished run reads as done", readLoginTranscript(reprinted, true, false).phase, "done");
   check("a bare hyphenated code", extractCode("  ABCD-1234  \n"), "ABCD-1234");
@@ -929,12 +557,7 @@ process.stdout.write("\na login transcript, read as steps\n");
   // print several such words that are not codes.
   check("and a word that merely looks like one is not", extractCode("charset UTF-8\n"), null);
 
-  /*
-   * `done` and `needsInput` come from outside because neither is in the bytes:
-   * the first is the daemon saying the process exited, the second is a fact about
-   * the agent's flow read off the daemon's own table. That split is what makes
-   * "draw an input box" not a guess.
-   */
+  // done and needsInput come from the daemon, not the bytes: the process exit and the agent's flow table.
   const device = "Open https://example.com/device and enter the code: WDJB-MJHT\n";
   check(
     "a device flow waits rather than asking",
@@ -948,11 +571,6 @@ process.stdout.write("\na login transcript, read as steps\n");
   );
   check("and an exited flow with nothing wrong is done", readLoginTranscript(device, true, false).phase, "done");
 
-  /*
-   * The fallback, and the reason the parser is allowed to be a guess at all.
-   * `transcriptIsTheAnswer` is the predicate the card opens its `<details>` on,
-   * asserted here rather than restated at the call site.
-   */
   const unrecognised = "Contacting the authorization server, please stand by.\n";
   const view = readLoginTranscript(unrecognised, false, false);
   check(
@@ -968,44 +586,20 @@ process.stdout.write("\na login transcript, read as steps\n");
     false,
   );
 
-  /* ---------------------------------------------------------------- *
-   * A spent code is not an instruction
-   *
-   * ⭐ **The reported defect, and it was pinned by nothing.** A device code and a
-   * sign-in link are things to DO; once the process has exited there is nothing
-   * to open and nothing to type. The bytes still hold both — no device flow ever
-   * prints that a code was consumed, and `extractCode` reads the newest match on
-   * purpose — so a finished login left a dead link and a spent code on screen
-   * under a badge already reading "signed in". Q3.430.
-   * ---------------------------------------------------------------- */
+  // Once the process exits a code and link are spent, so neither is offered (Q3.430).
   {
     const finished = readLoginTranscript(device, true, false);
     check("an exited flow offers no page and no code", [finished.url, finished.code], [null, null]);
     check("and is still recognised as finished", finished.phase, "done");
-    // The failure branch had the same defect: a recognised failure printed in red
-    // above a code that still looked live.
     const brokenAfterCode = `${device}\nscript: tcgetattr/ioctl: Operation not supported on socket\n`;
     const failed = readLoginTranscript(brokenAfterCode, true, false);
     check("a failed flow offers neither either", [failed.url, failed.code, failed.phase], [null, null, "failed"]);
-    /*
-     * ⚠ **The trap in the fix above.** `transcriptIsTheAnswer` is "nothing was
-     * recognised", and nulling two fields on exit makes every finished run
-     * satisfy it — so without its phase guard, every login that WORKED would
-     * spring the raw pty pane open under its own success message.
-     */
+    // transcriptIsTheAnswer needs its phase guard: nulling fields on exit would otherwise open the raw pane under every success.
     check("a finished run is never its own transcript's answer", transcriptIsTheAnswer(finished), false);
     check("and neither is a failed one", transcriptIsTheAnswer(failed), false);
   }
 
-  /* ---------------------------------------------------------------- *
-   * What the card may claim once the process has exited
-   *
-   * `done` says a pty child ended: the exit status is deliberately unread, and
-   * `FAILURES` has no success counterpart. The re-probe is the only oracle, and
-   * the card used to duck it entirely — "Finished. The status above says whether
-   * it worked." — while the badge above was still drawing the pre-login listing,
-   * which is "not signed in" by construction. Q3.430.
-   * ---------------------------------------------------------------- */
+  // done only means the pty child ended; the re-probe is the only verdict on success (Q3.430).
   check("a check in flight outranks everything", loginOutcome(true, true, true), "checking");
   check("a check that could not be made is not a verdict", loginOutcome(false, true, true), "unreachable");
   check(
@@ -1013,7 +607,6 @@ process.stdout.write("\na login transcript, read as steps\n");
     [loginOutcome(false, false, true), loginOutcome(false, false, false), loginOutcome(false, false, null)],
     ["signedIn", "notSignedIn", "cannotTell"],
   );
-  // An older daemon sends no field at all; "cannot tell" is the honest reading.
   check("an absent answer is cannot-tell", loginOutcome(false, false, undefined), "cannotTell");
   {
     const finished = readLoginTranscript(device, true, false);
@@ -1029,7 +622,6 @@ process.stdout.write("\na login transcript, read as steps\n");
       ],
       [false, false, false, true, true],
     );
-    // A recognised failure already says what to do; the terminal adds nothing.
     check("never under a failure that named itself", rawTranscriptIsOpen(broken, "cannotTell"), false);
     check(
       "and the live rule is unchanged",
@@ -1038,17 +630,6 @@ process.stdout.write("\na login transcript, read as steps\n");
     );
   }
 }
-
-/* ------------------------------------------------------------------ *
- * Your own API keys, on their own screen
- *
- * The keys list left Account for a section of its own, and what moved with it
- * is a set of decisions the plan wrote down as pins rather than as prose: which
- * row is *this browser's* is decided from the credential in hand and only for
- * an API-key credential; revoking that row signs out on purpose, with the
- * credential cleared before anything can be re-read; and the list is sorted on
- * the client because the route answers `created_at ASC`.
- * ------------------------------------------------------------------ */
 
 process.stdout.write("\nyour own API keys\n");
 {
@@ -1069,27 +650,14 @@ process.stdout.write("\nyour own API keys\n");
   const read = (file: string): string =>
     stripComments(readFileSync(new URL(`../src/ui/settings/${file}`, import.meta.url), "utf8"));
 
-  /*
-   * D-K-1, client-side: `keyPrefix` on the control plane is `slice(3, 11)`, so
-   * "this browser" is a string comparison over the credential the tab holds.
-   * The session arm is the one that matters — a session token can never be a
-   * listed key, and drawing the badge or the sign-out sentence for one would be
-   * a claim about a revoke that cannot sign anybody out.
-   */
-  // Built rather than written out: a 24-character literal after `rk_` is what
-  // gitleaks' generic-api-key rule fires on, and the CI secrets job refused the
-  // commit that carried one. Only the prefix is what the predicate reads.
+  // keyPrefix is a fixed slice of the key, so this browser's row is a string comparison; a session is never a listed key.
+  // Built rather than written out: a literal rk_ key trips the CI secrets scan.
   const key = `rk_9f2a1b3c${"0".repeat(14)}`;
   check("this browser's key is the one whose prefix the credential carries", thisBrowsersKey({ value: key, kind: "api_key" }, "9f2a1b3c"), true);
   check("and a different prefix is not", thisBrowsersKey({ value: key, kind: "api_key" }, "00000000"), false);
   check("a session credential is never a listed key, whatever its bytes", thisBrowsersKey({ value: key, kind: "session" }, "9f2a1b3c"), false);
   check("and no credential is no key", thisBrowsersKey(null, "9f2a1b3c"), false);
 
-  /*
-   * Both arms of the badge, on the row's own source: the two literals exist, and
-   * neither is reachable except under the `thisBrowser` guard — so with a session
-   * credential, which never sets it, there is no such row and no such sentence.
-   */
   const keyRow = read("KeyRow.tsx");
   const guard = "thisBrowser && !revoked && (";
   const firstGuard = keyRow.indexOf(guard);
@@ -1098,62 +666,25 @@ process.stdout.write("\nyour own API keys\n");
     check(`"${literal}" is drawn exactly once`, keyRow.split(literal).length - 1, 1);
     check(`and only under the guard`, keyRow.indexOf(literal) > firstGuard, true);
   }
-  // At the row's own size: the one sentence on the screen saying an act is
-  // irreversible was its smallest type (review D9).
   check("and the consequence is drawn at text-xs", /<span className="text-xs text-muted">revoking it signs you out<\/span>/.test(keyRow), true);
-  /*
-   * **Every row is one height, and the height is the row's** (Q3.554). A live
-   * key's row was the Revoke button plus `py-2` on the cells and a revoked row
-   * its text plus the same padding, a third shorter — three rows, three
-   * heights. `h-12` on the `<tr>` clears `BUTTON_SIZE.sm` at both of its floors
-   * and the cells carry no vertical padding at all, so nothing a cell holds or
-   * omits can change what the row measures. Read off the row element rather
-   * than the file: the header row keeps its own `py-1.5`.
-   */
+  // Row height is h-12 on the row with no vertical cell padding, so contents cannot change it; the header keeps its own (Q3.554).
   const rowStart = keyRow.indexOf("<tr className={`h-12 border-t border-edge/60 align-middle ");
   const rowEnd = keyRow.indexOf("</tr>", rowStart);
   check("a key row is a fixed 48px", rowStart >= 0 && rowEnd > rowStart, true);
   check("and no cell of it pads vertically", /\b(py|pt|pb)-/.test(keyRow.slice(rowStart, rowEnd)), false);
-  // The consequence at rest is allowed only beside a one-tap control (10A), and
-  // the own-keys screen is the only caller there is. The row used to take a
-  // `confirm` prop for the admin panel that listed somebody else's keys; that
-  // panel is deleted (Q1.631), so the row mounts no `TwoStep` and offers no
-  // two-step arm to opt into.
+  // Own keys are one tap: the admin keys panel that needed a confirm is gone (Q1.631).
   const keys = read("KeysSection.tsx");
   check("own keys are one tap", [/<TwoStep\b/.test(keyRow), /\bconfirm\b/.test(keyRow), /confirm=/.test(keys)], [false, false, false]);
   check("and the screen decides this-browser from the credential in hand", /thisBrowsersKey\(credential,/.test(keys), true);
-  /*
-   * **Every Revoke names its key to a screen reader** (review D18): the prefix
-   * is two cells left of the button, so a column of buttons all reading
-   * "Revoke" is a column of one-tap acts with no subject. One button per row
-   * now — the confirming act that carried the name through `TwoStep`'s
-   * `act.ariaLabel` went with the admin panel (Q1.631).
-   */
   check("the Revoke button names its key", keyRow.split("`Revoke ${record.prefix}…`").length - 1, 1);
   check("as its own prop", /ariaLabel=\{`Revoke \$\{record\.prefix\}…`\}/.test(keyRow), true);
   check("and DangerButton forwards the name", /ariaLabel=\{ariaLabel\}/.test(read("../bits.tsx")), true);
 
-  /*
-   * **New key waits for the list, refuses at the ceiling, and not after a failed
-   * read** (review D11, D18). The three arms in the one `disabled` expression:
-   * `newKeyWaits` is `keys === null`, when the count is unknown and a tap during
-   * the skeleton could open the leaf only to be told 409; `atCeiling` is the
-   * mirror of the control plane's refusal (`pincheck` holds the two copies
-   * equal); `minting` is the request in flight. `"failed"` is deliberately not
-   * an arm — minting does not need the list.
-   */
+  // Failed is deliberately not an arm: minting does not need the list.
   check("New key is disabled while the list is unread, at the ceiling, and while minting", /disabled=\{newKeyWaits \|\| atCeiling \|\| minting\}/.test(keys), true);
   check("where waiting is the list being unread", /newKeyWaits = keys === null;/.test(keys), true);
   check("and a failed read is not a reason to wait", /newKeyWaits = [^;]*"failed"/.test(keys), false);
-  // The ceiling line is drawn beside the button, before the table, and reads
-  // "N of N; revoke one first." with N the screen's own mirror of the ceiling —
-  // six words, the consequence-at-rest cap, where the dash it carried counted as
-  // a seventh (review D10).
   const ceiling = /^const MAX_KEYS = (\d+);$/m.exec(keys)?.[1] ?? null;
-  // The line is read off the screen, under its guard, rather than restated here:
-  // a literal this driver defines is one the source can drop or reword without
-  // the two checks on its text noticing (E12's review). Both operands of the
-  // ordering are guarded, the `>= 0` idiom.
   const ceilingLine = /\{atCeiling && <p className="mt-1 text-xs text-muted">(\{`[^`]*`\})<\/p>\}/.exec(keys)?.[1] ?? null;
   check("the ceiling is a readable constant", ceiling !== null, true);
   check("the ceiling line is drawn under the guard", ceilingLine !== null, true);
@@ -1163,37 +694,14 @@ process.stdout.write("\nyour own API keys\n");
   const ceilingText = (ceilingLine ?? "").replaceAll("${MAX_KEYS}", ceiling ?? "").replace(/^\{`|`\}$/g, "");
   check("and reads N of N", ceilingText, `${ceiling} of ${ceiling}; revoke one first.`);
   check("in six words", ceilingText.split(/\s+/).length, 6);
-  /*
-   * **A failed read offers the retry beside the sentence** (review D12): `Empty
-   * failed` is the app's one failure shape, and the button re-runs `load`
-   * itself — not a reload, not `refreshMe`, which is the other arm's remedy for
-   * a control plane that could not say who you are.
-   */
   check("a failed key read says so with Try again wired to load", /<Empty failed action=\{<Button size="sm" onClick=\{load\}>Try again<\/Button>\}>\s*Could not read your keys\.\s*<\/Empty>/.test(keys), true);
-  /*
-   * **The one-time secret, on its own source** (review D12). `onDone` is
-   * required — a caller that omitted it once shipped a card with no way to
-   * dismiss a secret. A copy that could not land says so rather than doing
-   * nothing, which on a plain-http LAN origin is the common case. "Copied" is
-   * the only confirmation the tap gets, so it is announced. And the value is
-   * `text-xs`, 13px: around 10px monospace is where `0` and `O` stop being
-   * distinguishable, and this is the one string somebody transcribes into a
-   * terminal. The floor is the step, not the pixel count — `--text-xs` was 12px
-   * when this was written.
-   */
   const secret = read("OneTimeSecret.tsx");
   check("Done is required of every caller", [/onDone: \(\) => void;/.test(secret), /onDone\?:/.test(secret)], [true, false]);
   check("a copy that failed says so", /toast\("error", "Could not copy — select it by hand\."\)/.test(secret), true);
   check("and a copy that landed is announced", /<span aria-live="polite">\{copied \? "Copied" : "Copy"\}<\/span>/.test(secret), true);
   check("with the value at text-xs, never smaller", /<pre className="[^"]*\bfont-mono text-xs\b[^"]*"/.test(secret), true);
 
-  /*
-   * 5A: revoking the key this tab holds signs out **on purpose**. The order is
-   * the property — notice, clear, reload — and nothing may be re-read in between,
-   * because a `load()` there would send the dead key, answer `401
-   * api_key_revoked`, and hand the gate "Your session expired" about an act the
-   * person just chose.
-   */
+  // Revoking this tab's key: notice, clear, reload, with no re-read between, or the dead key's 401 reads as an expiry.
   const remembers = keys.indexOf("rememberRevokedKey(");
   const clears = keys.indexOf("cp.clearSession()");
   const leaves = keys.indexOf("window.location.href");
@@ -1205,15 +713,7 @@ process.stdout.write("\nyour own API keys\n");
   check("with no re-read between the clear and the reload", /load\(\)|myKeys\(/.test(between), false);
   check("and no request can 401 its way there first", keys.indexOf("load()", remembers) === -1 || keys.indexOf("load()", remembers) > leaves, true);
 
-  /*
-   * The gate's one-shot line: read once, gone — with reading and deleting as
-   * two calls (review D16). Deleting on read inside a `useState` initialiser
-   * was right only because React 19 keeps the first of StrictMode's two calls;
-   * peek in the initialiser and clear in an effect, and a second peek before
-   * the clear is the same line, which is the property that makes "once" a fact
-   * about the construction. Driven with a `Map`, because all three take the
-   * storage as an argument for exactly this reason.
-   */
+  // Peek and clear are separate calls so StrictMode's double initialiser sees the same line; storage is injected for this driver.
   const fake = new Map<string, string>();
   const jar = {
     getItem: (name: string): string | null => fake.get(name) ?? null,
@@ -1227,24 +727,13 @@ process.stdout.write("\nyour own API keys\n");
   check("reading it does not consume it: a second peek is the same line", peekRevokedKeyNotice(jar), revokedKeyNotice("9f2a1b3c"));
   clearRevokedKeyNotice(jar);
   check("and clearing is what deletes it", peekRevokedKeyNotice(jar), null);
-  // Clearing what was never written is not an error: the gate clears unconditionally.
   clearRevokedKeyNotice(jar);
   check("and clearing twice is nothing", peekRevokedKeyNotice(jar), null);
-  /*
-   * The gate's half, on its own source: the peek is in the state initialiser
-   * and the clear in an effect, each under the storage guard — and the guard is
-   * what the read side had that the write side did not (E3).
-   */
   const app = stripComments(readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"));
   check("the gate peeks in a state initialiser", /useState<string \| null>\(\(\) => \{\s*try \{\s*return peekRevokedKeyNotice\(window\.sessionStorage\)/.test(app), true);
   check("and clears in a mount effect", /useEffect\(\(\) => \{\s*try \{\s*clearRevokedKeyNotice\(window\.sessionStorage\)/.test(app), true);
   check("with nothing left that deletes on read", /takeRevokedKeyNotice/.test(app), false);
 
-  /*
-   * Newest first, revoked last: the route answers `created_at ASC` and the
-   * screen wants the key you just made at the top and the dead ones out of the
-   * way. Client-side so an older control plane answers the same screen.
-   */
   const rows = [
     { id: "a", createdAt: 1, revokedAt: null },
     { id: "b", createdAt: 3, revokedAt: 4 },
@@ -1253,24 +742,10 @@ process.stdout.write("\nyour own API keys\n");
   ];
   check("live keys newest first, revoked last", orderKeys(rows).map((row) => row.id), ["d", "c", "a", "b"]);
 
-  /*
-   * And the move itself: the account screen mints and lists nothing any more.
-   * Both calls have exactly one caller in the product, and it is the keys screen.
-   */
   const account = read("AccountSection.tsx");
   check("the account screen lists no keys", /myKeys\(/.test(account), false);
   check("and mints none", /mintMyKey\(/.test(account), false);
-  /*
-   * The device list's failure arm and its one act over N rows (review D12).
-   * A failed read draws the same shape the keys screen does, with Try again
-   * wired to the read; and ending every other sign-in confirms in place —
-   * the question names the count, the `DangerButton` acts, Cancel is last, and
-   * both arms lay out in **one** box so the last child sits on the same pixels
-   * (Q3.218's safety property). The box, the ordering and the wait are
-   * `TwoStep`'s (E7's review, Q3.552): the question is its `question`, the
-   * resting button its `rest`, and the request is handed to it whole, so the
-   * question closes on the 200 and stands beside the toast otherwise.
-   */
+  // Both arms share one TwoStep box so the last child keeps its pixels (Q3.218, Q3.552).
   check("a failed device read says so with Try again wired to refresh", /<Empty\s+failed\s+action=\{\s*<Button size="sm" onClick=\{refresh\}>\s*Try again\s*<\/Button>\s*\}\s*>\s*Could not read your sessions\.\s*<\/Empty>/.test(account), true);
   const othersQuestion = account.indexOf("Sign out ${others} other device${others === 1 ? \"\" : \"s\"}?");
   check("signing out the other devices asks, naming the count", othersQuestion >= 0, true);
@@ -1284,18 +759,9 @@ process.stdout.write("\nyour own API keys\n");
     [true, true, false],
   );
   check("the keys screen does both", /myKeys\(/.test(keys) && /mintMyKey\(/.test(keys), true);
-  // Devices folded into Account (1B): one skeleton row, no sentence over it.
   check("the device list draws one skeleton row", account.split("<SkeletonRow").length - 1, 1);
   check("and no longer narrates its own loading", /reading your sessions/.test(account), false);
 
-  /*
-   * **One sentence for a control plane that did not answer** (review D7). The
-   * three error readers return it for a transport failure, the sign-in reader
-   * builds its two-sentence version on it, and both screens here draw the
-   * constant rather than the words — read with comments stripped, and asserted
-   * as the import plus the literal's absence, since presence is the check that
-   * lets a copy stand.
-   */
   check("the constant is the sentence", CONTROL_PLANE_UNREACHABLE, "Cannot reach the control plane.");
   const transport = new TypeError("Failed to fetch");
   check(

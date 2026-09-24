@@ -2,35 +2,13 @@ import { readFileSync } from "node:fs";
 import { check, fetchChannel, report, storage } from "./webcheck.env.js";
 import { stripComments } from "./webcheck.source.js";
 
-/* ------------------------------------------------------------------ *
- * The path that does not go through the relay
- *
- * **Everything this drives is one field and one candidate**, and that is the
- * point of driving it: `Route` grew a `kind`, `probeRoute` grew a first candidate
- * and `settleAnswer` grew a rule that may only fire on one of the two arms.
- * Nothing above `MachineConnection` changed, so nothing above it can notice a
- * regression here — a local route that silently stops being offered looks exactly
- * like a fleet that is working, only slower, and one that keeps being offered
- * after the daemon on this computer became a different machine looks like an app
- * that cannot reach a machine it can plainly see.
- *
- * The harness is `webcheck.stream-and-http.ts`'s: stub `globalThis.fetch`, drive a
- * real connection. The shell is installed and removed around the sections that
- * need it — `inNativeShell()` reads the injected global on *every* call rather
- * than latching it at import time, which is what makes both arms reachable in one
- * process without re-importing anything.
- * ------------------------------------------------------------------ */
+// inNativeShell reads the injected global on every call, so installing and removing the shell reaches both arms in one process.
 
 process.stdout.write("\nthe local route, and the browser that may never take it\n");
 
 const LOCAL = "http://127.0.0.1:7887";
 const RELAY = "https://r1.example";
-/*
- * A machine that has announced a key, which `probeRoute` now requires before it
- * will settle on the relay at all. Any 43 base64url characters: nothing in this
- * module runs a handshake, and the refusal for a machine with *no* key is its own
- * assertion below.
- */
+// Any 43 base64url characters: probeRoute requires a key, but nothing here runs a handshake.
 const MACHINE_KEY = "A".repeat(43);
 
 /** What `host_local_daemon` will answer. `null` is "no daemon on this computer". */
@@ -38,17 +16,7 @@ let announced: { machineId: string; base: string; instanceId: string } | null = 
 
 type Shell = { core: { invoke: (command: string, args?: unknown) => Promise<unknown> } };
 
-/**
- * The bridge, to the extent this section needs one.
- *
- * ⚠ **`host_cp` has to be here even though nothing in this file is about the
- * control plane.** In the shell `cp.ts` sends every `/v1` request through the host
- * rather than through `fetch`, so a stub that answered only `host_local_daemon`
- * would fail the token mint — and a connection with no token never reaches a route
- * candidate at all, which reads as "the local arm is broken" for a reason that has
- * nothing to do with it. It is routed back through the same `globalThis.fetch`
- * stub, so each section still describes its fleet in one place.
- */
+// host_cp too: the shell sends every /v1 request through the host, and with no token no route candidate is reached.
 function installShell(): void {
   (globalThis as unknown as { window: { __TAURI__?: Shell } }).window.__TAURI__ = {
     core: {
@@ -73,43 +41,18 @@ function removeShell(): void {
   delete (globalThis as unknown as { window: { __TAURI__?: Shell } }).window.__TAURI__;
 }
 
-/** Every URL the client asked for, in order, so a probe nobody wanted is visible. */
 let asked: string[] = [];
 
 interface Answers {
   /** What `/fs/roots` on loopback answers. A number is a bare status. */
   roots: number | { status: number; code: string };
-  /** Whether the relay holds a tunnel. */
   relayUp?: boolean;
-  /**
-   * Whether `POST /v1/tokens` names a key for this machine.
-   *
-   * `false` omits the field entirely, which is what an Authority answers for a
-   * daemon that has never announced one — a build older than the encryption, or
-   * one whose row was cleared. It is *absence* rather than `null` on purpose:
-   * `mint` reads `issued.machine.key ?? null`, so the two have to be the same
-   * thing here or the check is about a spelling.
-   */
+  // false omits the field entirely, as the Authority does for a daemon that never announced a key.
   machineKey?: false;
-  /**
-   * How `POST /v1/tokens` refuses, where it refuses at all.
-   *
-   * ⚠ **409 rather than 401, and nothing keys on the status.**
-   * `packages/control-plane/src/app.ts` answers `409 device_key_required` for an
-   * installation that has registered no key — `relaycheck` pins that exact pair —
-   * and `meansDeviceKeyMissing` reads the **code**, which is the claim the
-   * unrelated-409 control below exists to hold. Driving it as a 401 would also
-   * drag `authFailure` → `clearSession()` into a section that is about which
-   * reason a machine settles on, and would leave the store signed out for the
-   * sections that run after this one in the same process.
-   *
-   * `"transport"` throws instead of answering: `isTransportFailure` is a
-   * negation, so an outage cannot be expressed as a status.
-   */
+  // Refused as the Authority does, 409 device_key_required (a 401 would sign the store out); transport throws, since an outage has no status.
   mint?: { status: number; code: string } | "transport";
 }
 
-/** How many times the token mint was asked, which is how a re-mint is observed. */
 let mints = 0;
 
 function stubFetch(answers: Answers): () => void {
@@ -122,13 +65,7 @@ function stubFetch(answers: Answers): () => void {
   globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
     const url = String(input);
     if (url === "/v1/tokens") {
-      /*
-       * Counted before it is refused, because `mints` is *how many times the mint
-       * was asked* and a refusal is still an ask. The device-key section below
-       * reads the count to prove the one self-repair `mint` has was **not**
-       * attempted where there is nothing to register, and a counter that only
-       * counted successes would answer 0 for both shapes.
-       */
+      // Counted before refusing: a refusal is still an ask, and the device-key section reads the count.
       mints += 1;
       const refusal = answers.mint;
       if (refusal === "transport") throw new TypeError("Failed to fetch");
@@ -166,19 +103,7 @@ async function connect(id: string, channels: never = fetchChannel) {
   const cp = await import("../src/cp.js");
   const { MachineConnection } = await import("../src/machine.js");
   cp.setSession("rs_local");
-  /*
-   * `fetchChannel`, because everything this module asserts is about *which arm*
-   * a request lands on, and the relay arm has to answer for that to be visible.
-   * The encryption itself is `webcheck.e2ee.ts`'s subject.
-   *
-   * ⚠ **Overridable, and that override is the only way one whole class of rule
-   * gets driven at all.** `fetchChannel` sends over `fetch`, so it can fail and
-   * it can answer a status — but it can never throw a `ChannelRefused`, which is
-   * the shape the *real* channel raises when the daemon turns a handshake away.
-   * Every arm `machine.ts` grew for that refusal was therefore unreachable from
-   * this driver, which is why the section at the end of this file passes a
-   * factory that refuses instead.
-   */
+  // Overridable: fetchChannel can never throw ChannelRefused, so the last section passes a refusing factory.
   return new MachineConnection(
     { id, name: "laptop", relayUrl: RELAY, relayOnline: true, enrolled: true, owned: true, scopes: [] } as never,
     () => {},
@@ -186,19 +111,8 @@ async function connect(id: string, channels: never = fetchChannel) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * A browser never touches loopback, and that is structural
- * ------------------------------------------------------------------ */
 {
-  /*
-   * ⚠ **The arm is dead in a browser rather than merely unused**, and the check is
-   * that nothing tries. A page served over `https:` cannot reach `http://127.0.0.1`
-   * at all — mixed content, refused before a byte leaves — so a browser build that
-   * probed would spend a request per route resolution to learn nothing, on the
-   * phone this client is shaped around. `canHostDaemonHere()` is the whole gate
-   * and it lives in `native.ts`, behind `localDaemon()` — two modules away from
-   * the router, and with no bridge in the page it answers `false`.
-   */
+  // A browser must not even try loopback: an https page cannot reach it (mixed content).
   removeShell();
   announced = { machineId: "m_1", base: LOCAL, instanceId: "i_x" };
   const restore = stubFetch({ roots: 200 });
@@ -213,9 +127,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   restore();
 }
 
-/* ------------------------------------------------------------------ *
- * In the shell, an announced daemon that proves itself is the route
- * ------------------------------------------------------------------ */
 {
   installShell();
   announced = { machineId: "m_2", base: LOCAL, instanceId: "i_x" };
@@ -223,11 +134,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   const connection = await connect("m_2");
   const route = await connection.resolveRoute();
   check("the app takes the local path", [route?.base, route?.kind], [LOCAL, "local"]);
-  /*
-   * The order is the assertion. `/fs/roots` carries the credential and settles
-   * *which machine this is*; `/health` is unauthenticated and therefore proves
-   * nothing, so it is asked afterwards or it would be a stranger's 200.
-   */
   check(
     "having proved it with a credential before believing anything unauthenticated",
     asked.map((url) => url.slice(LOCAL.length)),
@@ -236,19 +142,8 @@ async function connect(id: string, channels: never = fetchChannel) {
   restore();
 }
 
-/* ------------------------------------------------------------------ *
- * Which refusals are proof, and which are not
- * ------------------------------------------------------------------ */
 {
-  /*
-   * ⚠ **Any status but 401 is proof, and requiring 200 is the bug this prevents.**
-   * `src/server.ts` mounts authentication above every route and authorization per
-   * route below it, so a `403 insufficient_scope` from a read-only grant and a bare
-   * 404 from a daemon older than a route are both answers from *after* the gate —
-   * which means the signature, the issuer, the audience and the window all passed.
-   * That is the whole identity claim. A client that insisted on 200 would refuse to
-   * use a local daemon over a scope it never needed for the probe.
-   */
+  // Any status but 401 is proof: 403 and 404 come from after the auth gate, so the identity claim passed.
   installShell();
   for (const [what, roots] of [
     ["a 403 about a scope", { status: 403, code: "insufficient_scope" }],
@@ -262,23 +157,13 @@ async function connect(id: string, channels: never = fetchChannel) {
     restore();
   }
 
-  /*
-   * And the one that is not. `wrong_machine` is the only code `src/auth.ts` answers
-   * when the audience names another machine, so from loopback it means the
-   * announcement is stale — a daemon re-enrolled, or a second one took the port.
-   */
   announced = { machineId: "m_4", base: LOCAL, instanceId: "i_x" };
   const restore = stubFetch({ roots: { status: 401, code: "wrong_machine" } });
   const connection = await connect("m_4");
   const route = await connection.resolveRoute();
   check("but a wrong_machine refusal is not", [route?.base, route?.kind], [RELAY, "relay"]);
 
-  /*
-   * **Sticky, and that is about cost rather than about correctness.** Route
-   * resolution runs on a wake and on the fifteen-second offline retry, so without
-   * the memo a machine that is simply shut earns an authenticated loopback request
-   * every fifteen seconds for as long as the app is open.
-   */
+  // Sticky, to spare a loopback request on every offline retry.
   connection.forgetRoute();
   const before = asked.filter((url) => url.startsWith(LOCAL)).length;
   await connection.resolveRoute();
@@ -288,11 +173,6 @@ async function connect(id: string, channels: never = fetchChannel) {
     before,
   );
 
-  /*
-   * Until the next wake. `store.ts`'s `runResume` calls `update` per machine, which
-   * is the cadence at which a re-enrolled or restarted daemon should be re-tested —
-   * so this recovers without a reload.
-   */
   connection.update({
     id: "m_4",
     name: "laptop",
@@ -312,9 +192,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   restore();
 }
 
-/* ------------------------------------------------------------------ *
- * A route that goes stale under a live request gives itself up
- * ------------------------------------------------------------------ */
 {
   installShell();
   announced = { machineId: "m_5", base: LOCAL, instanceId: "i_x" };
@@ -346,15 +223,7 @@ async function connect(id: string, channels: never = fetchChannel) {
   const connection = await connect("m_5");
   check("it starts local", (await connection.resolveRoute())?.kind, "local");
 
-  /*
-   * The daemon is replaced under the app — the case the memo above cannot reach,
-   * because the route is already settled and no probe runs before a request. The
-   * refusal has to be read *in flight*, the local arm dropped, and the request
-   * retried on the relay so the person never sees it.
-   *
-   * ⚠ Retrying a `POST` is safe here and nowhere else: `wrong_machine` comes from
-   * the middleware above every route, so no handler ran.
-   */
+  // Retrying a POST is safe only here: wrong_machine comes from the middleware above every route, so no handler ran.
   roots = { status: 401, code: "wrong_machine" };
   const answer = await connection.request<{ sessions: string[] }>("/fs/roots", { method: "POST" });
   check("a stale route repairs itself mid-request", answer.sessions, ["from the relay"]);
@@ -364,9 +233,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   removeShell();
 }
 
-/* ------------------------------------------------------------------ *
- * The switch, and what it is stored as
- * ------------------------------------------------------------------ */
 {
   installShell();
   const { localOff, setLocalOff, localAnnouncedFor, localBaseFor } = await import("../src/localRoute.js");
@@ -378,12 +244,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   setLocalOff("m_6", true);
   check("switching it off is remembered", localOff("m_6"), true);
   check("and takes the base away", await localBaseFor("m_6"), null);
-  /*
-   * ⚠ **The two nulls Settings has to tell apart.** "No daemon announced itself"
-   * and "you switched it off" are the same absence to the router and must never be
-   * the same sentence on the screen, which is the whole reason there are two
-   * functions rather than one with a flag.
-   */
   check("while the announcement itself is still there to say so", await localAnnouncedFor("m_6"), LOCAL);
 
   check(
@@ -394,7 +254,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   setLocalOff("m_6", false);
   check("and switching it back leaves nothing behind", storage.get("reemoat.localDaemons"), '{"off":[]}');
 
-  // A daemon that announced a *different* machine is not this one, however healthy.
   announced = { machineId: "m_other", base: LOCAL, instanceId: "i_x" };
   check("an announcement for another machine is not an answer", await localBaseFor("m_6"), null);
 
@@ -403,31 +262,8 @@ async function connect(id: string, channels: never = fetchChannel) {
   removeShell();
 }
 
-/* ------------------------------------------------------------------ *
- * A machine that has announced no key is refused before a socket is dialled
- * ------------------------------------------------------------------ */
 {
-  /*
-   * ⚠ **The refusal to downgrade, and the assertion is *where* it happens.**
-   *
-   * Everything past the relay candidate reaches the machine through an encrypted
-   * channel; there is no second path, no plaintext arm and no flag that would
-   * produce one. So a daemon that has never announced an X25519 static is not a
-   * machine this client reaches badly — it is a machine it does not reach, with a
-   * reason that says what to do about it. `OFFLINE_TEXT` draws that as *"needs a
-   * newer daemon"*, which is cleared by updating that machine: the announcement
-   * rides its next dial, and nobody re-enrolls anything.
-   *
-   * ⚠ **And the half that is easy to lose: nothing is dialled.** A check that
-   * only read `offlineReason` would still pass for a client that opened a channel,
-   * failed the handshake for want of a remote static, and reported the same word —
-   * spending a dial, a `credential()` mint and a twenty-second
-   * `CHANNEL_READY_TIMEOUT_MS` per route resolution, on a phone, for a state that
-   * is knowable from a field already in hand. So the channel handed over here is
-   * one that *would* answer `/health` with a 200: if the route resolution reaches
-   * it at all, the machine settles online and the reason assertion fails loudly
-   * rather than a dial going unnoticed.
-   */
+  // No plaintext fallback, and nothing is dialled: this channel would answer 200, so a dial would fail the reason check.
   removeShell();
   let dialled = 0;
   const wouldAnswer = (() => ({
@@ -465,11 +301,6 @@ async function connect(id: string, channels: never = fetchChannel) {
     [],
   );
 
-  /*
-   * The negative control. Everything above passes for a client that has simply
-   * stopped resolving relay routes, so the same fleet with the key present has to
-   * settle on the relay through the same factory.
-   */
   restore();
   const withKey = stubFetch({ roots: 200 });
   const second = await connect("m_haskey", wouldAnswer);
@@ -478,91 +309,12 @@ async function connect(id: string, channels: never = fetchChannel) {
   withKey();
 }
 
-/* ------------------------------------------------------------------ *
- * The other key state: an installation no capability can be bound to
- * ------------------------------------------------------------------ */
 {
-  /*
-   * ⚠ **The device-side twin, and it was asserted only as a string.** Every
-   * assertion `no_device_key` had is in the section below and every one of them is
-   * about the *sentence* — that it exists, that it is not `no_token`'s, that it is
-   * not `no_machine_key`'s. **Nothing drove a connection into the state at all**,
-   * so the defect the reason exists to fix — `device_key_required` landing on
-   * `no_token`, which draws a sentence about a *credential* on **every** machine on
-   * the account for one cause that has nothing to do with any of them — is one arm
-   * of `mint`'s ternary away from returning with all of them still green. The
-   * machine-side twin got this treatment one section up when it landed; this is the
-   * half that did not.
-   *
-   * The refusal driven is `409 device_key_required`, which is what
-   * `packages/control-plane/src/app.ts` answers and what `relaycheck` pins as a
-   * pair — **not** a 401, for the reason the `mint` field's own docblock gives.
-   *
-   * ⚠ **The arm driven here is the mechanically reachable one, NOT the production
-   * one, and that distinction is the whole caveat on this section.**
-   * `registerDevice()` answers `null` wherever `describeDevice()` does, and
-   * `describeDevice()` does whenever `inNativeShell()` is false — so with the
-   * shell removed `mint`'s one self-repair finds nothing to register and what
-   * reaches the ternary is the first attempt's own error. That is what makes the
-   * arm drivable in one `settle`.
-   *
-   * ⚠ **What it is not is the browser's real state.** An earlier spelling of this
-   * paragraph said a browser reaches `no_device_key` permanently, and that is
-   * false in two independent places. `POST /v1/tokens` guards the refusal on
-   * `caller.deviceId !== null` (in `packages/control-plane/src/app.ts`, cited by
-   * symbol rather than by line for the reason `machine.ts` gives), and a
-   * browser sign-in sends no device at all (`cp.ts`'s `describeDevice()` answers
-   * null off `inNativeShell()`), so the Authority mints an **unbound** capability
-   * rather than refusing. And even if it did refuse, a browser never gets that
-   * far: `e2ee.ts`'s `deviceStaticKey()` answers null with no boot payload, so
-   * `dial()` throws a plain `Error` rather than an `ApiError`, `probe` swallows it
-   * and `probeRoute` settles `no_route`. The permanent browser state is
-   * `no_route`.
-   *
-   * The production path for `no_device_key` is the **retry** — the first of the
-   * two causes {@link OfflineReason.no_device_key} names: a shell where
-   * `registerDevice()` answers a row id and the Authority still holds no key for
-   * it, so the re-mint is refused a second time. `mints === 1` below therefore
-   * pins the shape production does **not** take.
-   *
-   * ⚠ **And `mints === 2` is not reachable from any driver in this repository**,
-   * which is a structural fact rather than work nobody has got to. An earlier
-   * spelling of this paragraph called for "a sixth fleet with a shell installed,
-   * asserting `mints === 2`"; that fleet cannot exist. `registerDevice()` answers
-   * a row id only where `describeDevice()` does, and `describeDevice()` needs a
-   * boot payload. `native.ts`'s `boot` is filled in exactly one place — inside the
-   * promise `hostReady` starts — and `hostReady` is a module-level `const`
-   * evaluated at **import**; the only two other writes to it are both guarded on
-   * `boot !== null`. Every run reaches `native.ts` long before this file:
-   * `webcheck.stream-and-http.ts` — the first module in `webcheck.ts`'s running
-   * order, where this one is line 90 of 92 — imports `cp.ts`, and with it
-   * `native.ts`, in a section body with no `__TAURI__` installed; this file's own
-   * opening section does the same, with the shell explicitly removed. So
-   * `installShell()` here is a bridge with no payload behind it, which
-   * `webcheck.native-bridge.ts` pins outright — `nativeBoot()` is `null`.
-   * `webcheck.e2ee.ts` records the same constraint for the device *key* and names
-   * the seam that answers it (`ChannelOptions.deviceKey`); `registerDevice` has no
-   * equivalent, being a static ESM binding in `machine.ts` behind a constructor
-   * that takes only a record, an `onChange` and a channel factory.
-   *
-   * A sixth fleet would therefore drive a shell whose `registerDevice()` still
-   * answers `null` — a second copy of the arm below wearing the retry's name,
-   * which is the assertion-that-cannot-fail shape this file exists to avoid. What
-   * stands in its place is the **cause**, driven at the foot of this section so
-   * the gap announces itself the day a seam closes it, and the **ordering**, read
-   * off disk, which is the only instrument that reaches it.
-   */
+  // Drives the reachable arm (no shell, nothing to register, one mint), not production's retry, which no driver can reach:
+  // native.ts fills its boot payload only at import, so an installed shell still has none.
   removeShell();
   announced = null;
 
-  /**
-   * One fleet, one connection, one route resolution — and what it settled on.
-   *
-   * A helper rather than five copies because what is interesting is the
-   * *difference* between the arms: they are identical but for how `/v1/tokens`
-   * answers, which is what makes this read as a partition over one ternary rather
-   * than as five unrelated assertions.
-   */
   const settle = async (
     id: string,
     mint?: { status: number; code: string } | "transport",
@@ -579,18 +331,7 @@ async function connect(id: string, channels: never = fetchChannel) {
         mints,
       };
     } finally {
-      /*
-       * ⚠ **`restore` was on the happy path only, and `globalThis.fetch` is
-       * process-wide.** Nothing on this path throws today — `resolveRoute`
-       * swallows the mint refusal, which is why the five arms read as a partition
-       * rather than as five `try`s — but `connect` awaits two dynamic imports,
-       * calls `cp.setSession` and runs the `MachineConnection` constructor, and a
-       * refusal added to any of them would leave the stub installed for every
-       * section after this one in the same process. That turns one real failure
-       * into a cascade of unrelated ones with the cause buried in the middle of
-       * them. The returned object is fully evaluated before this runs, so `asked`
-       * and `mints` are still captured pre-restore and no arm's value moves.
-       */
+      // In finally: globalThis.fetch is process-wide, so a throw must not leave the stub installed.
       restore();
     }
   };
@@ -599,61 +340,18 @@ async function connect(id: string, channels: never = fetchChannel) {
   check("⭐ an installation with no device key has no route", missing.route, null);
   check("and is told so as the device half rather than as a missing token", missing.reason, "no_device_key");
   check("while the machine is not drawn as reachable over a cause on this device", missing.reach, "offline");
-  /*
-   * And it cost one round trip rather than two. `mint` repairs this refusal
-   * **once** — register the key the shell is already holding, then mint again — and
-   * in a browser there is nothing to register, so the repair must not be attempted
-   * at all. The count is the only observable there is: both shapes reach the caller
-   * with the same error and settle on the same reason.
-   */
   check("having asked for exactly one capability, there being nothing to register", missing.mints, 1);
-  /*
-   * ⚠ **And nothing was probed.** A state knowable from the mint's own refusal, and
-   * read at the route candidate instead, spends a `/health` per route resolution —
-   * on a phone, every fifteen seconds — to learn what was already in hand. The same
-   * rule as the "no channel was opened" report one section up, measured with the
-   * only instrument this arm has. It is not a vacuous emptiness: the positive
-   * control at the foot of this section reads the same array through the same
-   * helper and *requires* the relay probe to be in it.
-   */
   check("and probed nothing to find that out", missing.asked, []);
 
-  /*
-   * ⚠ **The controls, and the first is the sharp one.** Everything above passes for
-   * a client that answers `no_device_key` for any refusal at all — and also for one
-   * keyed on the **status**, since `device_key_required` is a 409. So the first
-   * control is another 409 **from the same route**: `machine_not_enrolled` is what
-   * `POST /v1/tokens` answers one guard earlier, which is exactly the claim
-   * `meansDeviceKeyMissing` makes for itself — the code, never the status.
-   *
-   * That is the second reason this section is driven as a 409 rather than as the
-   * 401 it reads like. An unrelated 401 control catches the first mutant and lets
-   * the status-keyed one straight through, because a 401 is not a 409 either way.
-   */
+  // The code, never the status: another 409 from the same route must not read as the device half.
   const notEnrolled = await settle("m_notenrolled", { status: 409, code: "machine_not_enrolled" });
   check("another 409 from the same route is not the device half", notEnrolled.reason, "no_token");
   const revoked = await settle("m_revoked", { status: 403, code: "machine_revoked" });
   check("nor is a refusal that arrives under another status", revoked.reason, "no_token");
 
-  /*
-   * The arm the device one was inserted **under**, and the only row that holds it
-   * still reachable. It has to be driven from the other side of a negation:
-   * `isTransportFailure` is "not an `ApiError`", so a control plane that cannot be
-   * reached has refused nothing, and reading an outage as a missing key would send
-   * somebody to a Devices screen that cannot load either. Folding the outage into
-   * either code — the shape of edit that adds a third arm to a two-arm ternary —
-   * passes every row above and fails only here.
-   */
   const down = await settle("m_cpdown", "transport");
   check("and an unreachable control plane is neither of them", down.reason, "cp_unreachable");
 
-  /*
-   * The positive control none of the four above can supply between them: every
-   * assertion so far is satisfied by a client that has quietly stopped settling
-   * routes and reports offline for everything, so the same fleet with the mint
-   * answering has to reach the relay carrying no reason at all — and has to have
-   * asked the relay something to get there.
-   */
   const minted = await settle("m_minted");
   check(
     "while the same fleet with a mint that answers settles on the relay",
@@ -666,43 +364,15 @@ async function connect(id: string, channels: never = fetchChannel) {
     minted.asked.join(", ") || "(nothing was asked)",
   );
 
-  /*
-   * ⚠ **The cause of the gap, driven rather than argued** — so the paragraph at
-   * the head of this section is a measurement and not a recollection, and so the
-   * gap announces itself the day it closes.
-   *
-   * The claim is about `describeDevice()` rather than about this driver: with the
-   * bridge installed and no boot payload behind it, `registerDevice()` must still
-   * answer `null`, and must not have asked the control plane anything to find that
-   * out (`inNativeShell()` reads `window.__TAURI__` on every call, so the shell is
-   * seen; `nativeBoot()` is what stays `null`).
-   *
-   * It goes red two ways and both are worth having. If `describeDevice()` ever
-   * starts guessing a device where there is no boot payload, a row of the
-   * account's device limit is spent per launch — the outcome `cp.ts`'s own
-   * docblock refuses a browser name for — and this fails. And the day somebody
-   * adds the seam that makes a boot payload installable late, this fails too,
-   * which is the day this section owes the sixth fleet the paragraph above says
-   * cannot be written.
-   */
+  // Pins the cause of the gap: with the bridge but no boot payload, registerDevice answers null without asking anything.
   {
     installShell();
     const { registerDevice } = await import("../src/cp.js");
     const restore = stubFetch({ roots: 200 });
     try {
-      /*
-       * Caught rather than left to throw, so a regression that starts *sending*
-       * lands as a FAIL on this line instead of as an unhandled rejection that
-       * takes the thirty sections after this one with it.
-       */
+      // Caught so a regression that starts sending fails this line rather than the rest of the run.
       const registered = await registerDevice().catch((error: unknown) => `threw: ${String(error)}`);
       check("a shell with no boot payload describes no device to register", registered, null);
-      /*
-       * Not a vacuous emptiness: `asked` is the same array the `minted` control
-       * twenty lines up *requires* to carry the relay probe, filled through the
-       * same stub — and in the shell `cp.ts` routes every `/v1` request back
-       * through it, so a registration that went out would be in here.
-       */
       check("and asked the control plane nothing to find that out", asked, []);
     } finally {
       restore();
@@ -710,28 +380,13 @@ async function connect(id: string, channels: never = fetchChannel) {
     }
   }
 
-  /*
-   * ⚠ **The ordering the fleets above cannot produce, read off disk.** Register,
-   * then re-mint, then settle a reason — the production path for `no_device_key`,
-   * and the one thing no driver here can reach. Worth pinning precisely because
-   * the arm that *is* driven reaches the ternary from the other side: `mints === 1`
-   * above is satisfied by a `mint` with no retry in it at all.
-   *
-   * Comment-stripped, this repository's standing rule — the block sliced below is
-   * wrapped in three docblocks that restate every one of these facts in prose —
-   * and whitespace-flattened, because prettier decides where these lines wrap.
-   */
+  // The production order no fleet can reach, read off disk: register, re-mint, then settle a reason.
   {
     const mint =
       /private async mint\(firstAttempt = true\): Promise<string> \{([\s\S]*?)\n  \}/.exec(
         stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8")),
       )?.[1] ?? "";
-    /*
-     * Proof of life. Every assertion below reads a slice that defaults to the
-     * empty string, so a pattern that stopped matching `mint` at all would fail
-     * them for a reason that has nothing to do with `mint`'s body. 1327 bytes when
-     * this was written.
-     */
+    // Proof of life: every slice below defaults to the empty string.
     report("mint was found to read", mint.length > 0, `${String(mint.length)} bytes`);
     const flat = mint.replace(/\s+/g, " ");
 
@@ -740,20 +395,11 @@ async function connect(id: string, channels: never = fetchChannel) {
       flat.includes("if (firstAttempt && meansDeviceKeyMissing(error)) {"),
       true,
     );
-    /*
-     * And the recursion says so. Without the `false` the guard above is not a
-     * guard: a registration that does not take mints, is refused, registers,
-     * mints — a loop against the control plane rather than the refusal it is.
-     */
     check(
       "and the re-mint it runs says it is not the first attempt",
       flat.includes("if (registered !== null) return await this.mint(false);"),
       true,
     );
-    /*
-     * Reversed — the reason written before the repair is tried — a machine that
-     * repairs itself is still drawn offline until something asks again.
-     */
     const repairAt = mint.indexOf("registerDevice");
     const reasonAt = mint.indexOf("this.offlineReason");
     report(
@@ -761,14 +407,7 @@ async function connect(id: string, channels: never = fetchChannel) {
       repairAt > 0 && repairAt < reasonAt,
       `registerDevice at ${String(repairAt)}, offlineReason at ${String(reasonAt)}`,
     );
-    /*
-     * ⚠ **The reason is keyed on the code, never on the attempt**, which is the
-     * whole of why the first-attempt case — the one with no registration to
-     * re-fail, and the only one this file can drive — is covered by the same line.
-     * Pinned as the entire expression rather than as a `/no_device_key/` search: a
-     * third arm inserted anywhere in it, the two key arms swapped, or the transport
-     * arm folded into either code reads identically to a search and fails here.
-     */
+    // Pinned as the whole expression, so a third arm or swapped arms fail.
     check(
       "and the reason it settles is keyed on the refusal's code rather than on the attempt",
       (/this\.offlineReason = [\s\S]*?;/.exec(mint)?.[0] ?? "").replace(/\s+/g, " "),
@@ -777,41 +416,13 @@ async function connect(id: string, channels: never = fetchChannel) {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * The two key states, and the two sentences they are owed
- * ------------------------------------------------------------------ */
 {
   const { OFFLINE_TEXT } = await import("../src/ui/bits.js");
 
-  /*
-   * ⚠ **`no_device_key` was reported as `no_token`, which is a sentence about a
-   * *credential* for a cause that is a missing **key**.** "no token" sends
-   * somebody to look at their sign-in, which is working, and then at their
-   * machines, which are also working, and there was no remedy anywhere on the
-   * screen. The machine-side twin got its own reason and its own instruction when
-   * it landed; this half got neither, so every machine on the account drew
-   * "no token" for one cause that had nothing to do with any of them.
-   *
-   * The sweep over the whole table is `webcheck.machine-limit-and-probe.ts`'s and
-   * stays there. What this adds is the one pair that has to *differ*: a table is
-   * total and every entry is a non-empty phrase long before two of its entries
-   * say the same thing.
-   */
+  // The sweep over the whole table is webcheck.machine-limit-and-probe.ts's; this pins the pair that must differ.
   report("both key states have a sentence", OFFLINE_TEXT.no_device_key.length > 0 && OFFLINE_TEXT.no_machine_key.length > 0, `${OFFLINE_TEXT.no_machine_key} / ${OFFLINE_TEXT.no_device_key}`);
   check("and the device half is not the credential half's", OFFLINE_TEXT.no_device_key === OFFLINE_TEXT.no_token, false);
-  /*
-   * ⚠ **Nor the machine half's**, which is the other way this pair collapses: the
-   * two are twins pointed in opposite directions — one is *that computer needs a
-   * newer daemon*, the other is *this one cannot reach anything* — and a person
-   * told the first about the second updates a machine that was never at fault.
-   */
   check("nor the machine half's", OFFLINE_TEXT.no_device_key === OFFLINE_TEXT.no_machine_key, false);
-  /*
-   * And both read as instructions rather than as faults, which is the property
-   * that separates them from everything else in that table: they are the only two
-   * entries a person can act on, and a word like "unreachable" in either is a
-   * state somebody waits out for ever.
-   */
   check(
     "and each names the computer its remedy is on",
     [/daemon/.test(OFFLINE_TEXT.no_machine_key), /this device/.test(OFFLINE_TEXT.no_device_key)],
@@ -819,22 +430,6 @@ async function connect(id: string, channels: never = fetchChannel) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * A channel the daemon refused, said in this client's own vocabulary
- *
- * ⚠ **None of this was driven anywhere, and it could not be.** `fetchChannel` —
- * the relay arm every other section here runs on — sends over `fetch`, so it can
- * fail and it can answer a status, and it can never throw a `ChannelRefused`.
- * That class is what the *real* channel raises when the daemon turns a handshake
- * away, and `asAnsweredRefusal` is the translation that lets the rest of
- * `machine.ts` read one. Until this section there was no factory in this
- * repository that refused, so every arm below was reachable only in production.
- *
- * `ChannelRefused` is an `Error`, and `isTransportFailure` is a *negation* — "not
- * an `ApiError`" — so before the translation existed every refusal the daemon
- * took the trouble to deliver was classified as a dropped connection. Three
- * behaviours were wrong because of it, and each one is an arm below.
- * ------------------------------------------------------------------ */
 {
   removeShell();
   const { ChannelRefused } = await import("../src/e2ee.js");
@@ -843,12 +438,7 @@ async function connect(id: string, channels: never = fetchChannel) {
   /** Refusals answered, not counting the `/health` the route probe spends. */
   let refusals = 0;
 
-  /*
-   * A channel that comes up, answers the probe, and then refuses — which is the
-   * real shape of every one of these. A factory that refused the probe too would
-   * never settle a route at all, and `prepare()` would throw `503 unreachable`
-   * before a single arm below was reached.
-   */
+  // Answers the probe and then refuses, the real shape; refusing the probe too would settle no route.
   const refusing = (status: number, reason: string) =>
     (() => ({
       async request(wanted: { path: string }): Promise<{
@@ -903,31 +493,11 @@ async function connect(id: string, channels: never = fetchChannel) {
     return answer;
   };
 
-  /* -- ⚠ a 502 truncated, which is the one that was replayed --------------- */
-
   {
-    /*
-     * ⚠ **`src/e2ee.ts`'s `fail()` `end()`s the stream rather than `destroy()`ing
-     * it precisely so this frame survives and reaches the app as a refusal** —
-     * which `settleTransport` then read as a dead link, dropped the route memo,
-     * and **replayed** for any replayable method. `GET /sessions` is replayable,
-     * so it is the method this arm has to be driven with or the bug hides behind
-     * the whitelist. Q6.103 is the measurement that bought the frame; this is
-     * what it was for.
-     *
-     * The assertion is the **count**. A refusal that is thrown once and a refusal
-     * that is thrown, replayed and thrown again reach the caller with the same
-     * message, so the only thing that tells them apart is how many times the
-     * daemon was asked.
-     */
+    // The assertion is the count: a replayed refusal reaches the caller with the same message, and GET is replayable (Q6.103).
     const truncated = await refused("m_truncated", 502, "truncated");
     check("⭐ a 502 truncated is asked exactly once", truncated.attempts, 1);
     check("and reaches the caller as an answered refusal", [truncated.code, truncated.route], ["truncated", "relay"]);
-    /*
-     * And the route memo is kept. Dropping it is the other half of the replay:
-     * `forgetRoute` sends the next request through a full re-probe, so a daemon
-     * that gave up on one body costs every subsequent request a round trip.
-     */
     check("the machine is not drawn as unreachable over it", truncated.reach, "online");
     check(
       "and the sentence names what happened rather than the weather",
@@ -936,20 +506,8 @@ async function connect(id: string, channels: never = fetchChannel) {
     );
   }
 
-  /* -- 401 token_expired, the one refusal with a remedy -------------------- */
-
   {
-    /*
-     * ⚠ **The unconditional re-mint lives on the `ApiError` path and a
-     * `ChannelRefused` never joined it**, so a capability that aged out between
-     * two requests failed as weather instead of being renewed.
-     *
-     * And re-minting alone does not reach it: `src/e2ee.ts` pins the capability
-     * presented at `HELLO` onto every inner request and *replaces* whatever the
-     * client sent, so a fresh token handed to a pooled connection is a header the
-     * daemon throws away. The channel has to go with the token, which is why
-     * `settleRefusal` calls `closeChannel()` first.
-     */
+    // The channel goes with the token: the daemon pins the HELLO capability onto every inner request, so settleRefusal closes it first.
     const expired = await refused("m_expired", 401, "token_expired");
     check("⭐ a token_expired refusal is retried once", expired.attempts, 2);
     report("having minted a fresh capability in between", expired.mints > 0, `${String(expired.mints)} mint(s)`);
@@ -962,18 +520,8 @@ async function connect(id: string, channels: never = fetchChannel) {
     );
   }
 
-  /* -- 401 wrong_machine, from the arm that may not act on it -------------- */
-
   {
-    /*
-     * ⚠ **`route.kind` is the guard rather than the code alone.** Down the tunnel
-     * the relay has already derived the machine from the same verified `aud`
-     * before a byte moved, so a `wrong_machine` from *there* is two services
-     * disagreeing about one fact — not a reason for one client to abandon the
-     * only path it has. The local arm's drop-and-retry is driven four sections
-     * up; this is the same code arriving through the other door and doing
-     * nothing.
-     */
+    // Guarded on route.kind: from the relay, wrong_machine is two services disagreeing, not a reason to abandon the only path.
     const wrong = await refused("m_wrongmachine", 401, "wrong_machine");
     check("⭐ a wrong_machine from the relay is not retried", wrong.attempts, 1);
     check("and the relay route survives it", [wrong.reach, wrong.route], ["online", "relay"]);
@@ -985,18 +533,7 @@ async function connect(id: string, channels: never = fetchChannel) {
     );
   }
 
-  /* -- 401 unbound_capability, which nothing can fix from here ------------- */
-
   {
-    /*
-     * A capability with no `cnf` is refused on a channel rather than treated as
-     * unbound — without that the binding is optional, and a caller gets bearer
-     * semantics by not asking for a binding. There is no remedy on this side, so
-     * the only requirement is that the verifier's own word survives: `errorText`
-     * said *"the connection failed, and whether the request arrived is not
-     * known"* for this, for `wrong_machine` and for `wrong_device` alike, burying
-     * the one part of the failure anybody can act on.
-     */
     const unbound = await refused("m_unbound", 401, "unbound_capability");
     check("⭐ an unbound capability is reported by its own name", unbound.code, "unbound_capability");
     check("once, with no replay", unbound.attempts, 1);
@@ -1005,12 +542,6 @@ async function connect(id: string, channels: never = fetchChannel) {
       unbound.sentence,
       "laptop refused this connection: unbound_capability",
     );
-    /*
-     * The negative control for all four sentences above: the transport sentence
-     * is what they must *not* be, and it is the string every one of them used to
-     * be. Asserted against a genuine transport failure so the comparison is
-     * against the live value rather than against a copy of it typed here.
-     */
     check(
       "which is not the sentence a dropped connection draws",
       unbound.sentence === errorText(new TypeError("Failed to fetch")),
@@ -1019,58 +550,26 @@ async function connect(id: string, channels: never = fetchChannel) {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * The rules that are easier to read off disk than to drive
- * ------------------------------------------------------------------ */
 {
   const machine = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
 
-  /*
-   * ⚠ **The guard is the tag, not the predicate.** `meansWrongMachine` alone would
-   * apply the drop to the relay arm too — where the relay has already derived the
-   * machine from the same verified `aud` before a byte moved, so the code would
-   * mean two services disagreeing about one fact rather than "reach it the other
-   * way". Asserted off the source because a driver cannot make a relay send it.
-   */
+  // The guard is the local tag, not the predicate; read off source because a driver cannot make a relay send it.
   check(
     "the mid-request drop is guarded on the local tag",
     /this\.chosen\?\.kind === "local" && meansWrongMachine\(error\)/.test(machine),
     true,
   );
 
-  /*
-   * ⚠ **`forgetRoute` is not what gives the local arm up**, and calling it would be
-   * a loop: it drops the memo, and the very next `resolveRoute` probes loopback
-   * again, for ever. `denyLocal` is the one that also stops asking.
-   */
+  // denyLocal, not forgetRoute: the latter re-probes loopback on the next resolve, for ever.
   check("and it is denyLocal rather than forgetRoute that runs", /denyLocal\(\);\s*\n\s*if \(firstAttempt\)/.test(machine), true);
 
-  /*
-   * The loopback candidate has to sit **above** the `relayOnline` check. Below it,
-   * a laptop whose tunnel is down — the machine this whole feature is for, three
-   * feet away and running — never reaches the candidate at all.
-   */
-  /*
-   * ⚠ **The switch is drawn where an unreachable machine can still reach it**, and
-   * it shipped once inside the gate that hides everything read *from* the daemon.
-   * That gate is `listable = machine.enrolled && read === "readable"`, and the state
-   * it excludes — tunnel down, relay down, control plane unreachable — is the exact
-   * state where a daemon three feet away is still answering on loopback. Hidden
-   * there, the one control that repairs the screen disappears when it would have
-   * worked. Asserted by position because nothing typed can hold a placement, the
-   * same reason the plugin settings screen is pinned that way.
-   */
+  // The loopback candidate must sit above the relayOnline check, or a laptop with its tunnel down never reaches it.
+  // The switch must sit outside the listable gate: an unreachable machine is exactly when loopback repairs the screen.
   const section = readFileSync(
     new URL("../src/ui/settings/MachineSection.tsx", import.meta.url),
     "utf8",
   );
   const gateOpens = section.indexOf("{listable ? (");
-  /*
-   * The ternary's own close, found by indentation: everything inside it is nested
-   * deeper, so the first `)}` back at this JSX level is where it ends. Cheaper and
-   * less brittle than matching brackets, and it fails loudly rather than quietly if
-   * the file is ever reformatted.
-   */
   const gateCloses = section.indexOf("\n      )}", gateOpens);
   const drawn = section.indexOf("<LocalPath ");
   report(
@@ -1088,86 +587,172 @@ async function connect(id: string, channels: never = fetchChannel) {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Which machine is *this* one, and why that is not the route
- *
- * ⚠ **The 2026-09-15 reversal's other half.** The machine this app sets up is
- * labelled after the computer now, like every other machine, because that label
- * is read by a phone and by every other client of the account. What is left
- * saying "you are sitting at this one" is a badge, and the badge needs a fact
- * that is true per client: the announce file, which is what `localDaemon` reads.
- *
- * Driven above for the value (`localAnnouncedFor` against a stubbed
- * `host_local_daemon`); asserted off disk here for the two wirings a value test
- * cannot see — where the store gets it from, and when it asks again.
- * ------------------------------------------------------------------ */
+// Which computer this is comes per client from the announce file localDaemon reads, never from the route.
 {
   const store = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
 
   check("the store keeps which machine this computer is", /localMachineId: MachineId \| null;/.test(store), true);
   check("and fills it from the daemon's announce file", /const found = await localDaemon\(\);/.test(store), true);
 
-  /*
-   * ⚠ **Not `route.kind === "local"`, and this is a negative on purpose.** The
-   * route is a *preference*: `setLocalOff` turns the loopback path off per machine
-   * (driven two sections up), and a badge keyed on it would vanish from the
-   * machine somebody is sitting at the moment they chose the relay. Identity and
-   * reachability are the same file read and two different questions.
-   */
+  // Not route.kind: the route is a preference setLocalOff changes, and identity must not move with it.
   const refresher = /private async refreshLocalMachine\(\)[\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
   check("refreshLocalMachine was found to read", refresher.length > 0, true);
   check("and it never consults the routing preference", /localOff|localBaseFor|kind === "local"/.test(refresher), false);
 
-  /*
-   * ⚠ **A memo, where `localBaseFor` refuses one — so *when* it is refreshed is
-   * the whole of its correctness.** `runResume` is the funnel every wake, every
-   * machine mutation (`machinesChanged`) and the bootstrap promotion already pass
-   * through. Asked anywhere narrower and a daemon that starts *after* the app — on
-   * a laptop where both come up at login, the ordinary case — is never badged.
-   */
+  // A memo, so runResume, the funnel every wake and machine change passes, must refresh it.
   const resume = /private async runResume\([\s\S]*?\n    this\.patch\(\{ resuming: true \}\);[\s\S]{0,400}/.exec(store)?.[0] ?? "";
   check("and the resume funnel is what asks again", /await this\.refreshLocalMachine\(\);/.test(resume), true);
+  // And once before the rail's first paint, or this machine is renamed and moved just after it.
+  const boot = /async bootstrap\(\)[\s\S]*?this\.patch\(\{ phase: "ready", me/.exec(store)?.[0] ?? "";
+  check("bootstrap was found to read", boot.length > 0, true);
+  check(
+    "and it asks which computer this is inside the same wait as the listing",
+    /await Promise\.all\(\[[\s\S]*?cp\.machines\(\)[\s\S]*?this\.refreshLocalMachine\(\),\s*\]\);/.test(boot),
+    true,
+  );
+  // Seeded before that wait: on a cold launch the app-run daemon is stopped, so the live read finds nothing.
+  const seedAt = boot.indexOf("this.seedLocalMachine(boot.claimed);");
+  check("bootstrap seeds it from the boot payload's claim", seedAt > 0, true);
+  check("before the live read is asked", seedAt < boot.indexOf("await Promise.all(["), true);
+  check("and the live read is weighed rather than assigned", /this\.weighLocalMachine\(\);/.test(refresher), true);
+  check(
+    "against what is known and the machines held",
+    /weighLocalMachine\(answer: MachineId \| null = this\.announcedMachine\)[\s\S]{0,160}localMachineAfter\(known, answer, /.test(store),
+    true,
+  );
+  // Weighed again once each listing lands: a just-created machine is ours only after it.
+  check(
+    "bootstrap weighs it again before the first paint",
+    /this\.weighLocalMachine\(\);\s*this\.patch\(\{ phase: "ready", me/.test(store),
+    true,
+  );
+  check(
+    "and a resume, after its re-list",
+    (store.match(/this\.dropMachine\(id\);\s*\}\s*this\.weighLocalMachine\(\);/g) ?? []).length,
+    1,
+  );
+  check(
+    "a machine created for this computer is weighed as it the moment the listing holds it",
+    (
+      store.match(
+        /await this\.machinesChanged\("machine-added"\);\s*this\.weighLocalMachine\(machineId\(created\.machine\.id\)\);\s*await this\.settleDaemon\(created\.machine\.id/g,
+      ) ?? []
+    ).length,
+    2,
+  );
 
-  /*
-   * **The second reader of that fact, and it wants it for the same reason the
-   * badge does.** New session draws this computer's own file panel instead of
-   * walking the daemon's tree over the wire — which is only ever right where the
-   * daemon *is* this computer, and `localMachineId` is the only thing in the
-   * client that answers that. The negative beside it is the one that matters: a
-   * picker keyed on `route.kind` would put the tree back the moment somebody chose
-   * the relay on the machine they are sitting at, and a screen could not reach
-   * `route.kind` anyway — `MachineConnection` is pinned to four modules a section
-   * up and no `ui/` file is among them.
-   */
+  // The OS folder panel is only right where the daemon is this computer, which only localMachineId answers.
   const start = stripComments(readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"));
   check(
     "the OS panel is gated on which computer this is, and on the shell saying it can",
     /osDialog=\{nativeBoot\(\)\?\.picksFolder === true && state\.localMachineId === selected\}/.test(start),
     true,
   );
-  /*
-   * ⚠ **`picksFolder` rather than `inNativeShell()`, and an APK that would not
-   * compile is why.** A shell exists on Android too and has no folder panel there:
-   * `tauri-plugin-dialog` offers no `blocking_pick_folder`, because the platform's
-   * own answer is a Storage Access Framework tree URI rather than a path. So "is
-   * there a shell" is not the question — "can this shell do it" is, and the shell
-   * is what answers. `nativecheck` holds that capability to the `#[cfg]` its
-   * implementation actually carries.
-   */
+  // picksFolder, not inNativeShell: the Android shell has no folder panel.
   check("and a shell that cannot do it is not asked", /inNativeShell\(\)/.test(start), false);
   check("and never on the routing preference", /localOff|route\.kind|kind === "local"/.test(start), false);
-  /*
-   * One derivation and one mount. Two `<DirectoryPicker` call sites would be two
-   * places for the predicate to disagree with itself, and a second
-   * `localMachineId` in this file would be the copy that gets it wrong.
-   */
   check("it is derived once", (start.match(/localMachineId/g) ?? []).length, 1);
   check("and there is one picker for both arms to live in", (start.match(/<DirectoryPicker/g) ?? []).length, 1);
-  /*
-   * ⚠ **And no listing is issued on that arm.** The point of the panel is the
-   * round trip it removes; a tree drawn beside it would be two controls answering
-   * one question, which is the defect the one-writer rule in
-   * `webcheck.machine-limit-and-probe.ts` already exists for.
-   */
   check("the listing effect stands down where the panel stands up", /path === null \|\| osDialog\) return;/.test(start), true);
+}
+
+// Every publish is recorded, because a publish is all a screen ever renders from.
+process.stdout.write("\nan offline machine being re-probed\n");
+{
+  removeShell();
+  announced = null;
+  const cp = await import("../src/cp.js");
+  const { MachineConnection, daemonRead } = await import("../src/machine.js");
+  cp.setSession("rs_local");
+  const restore = stubFetch({ roots: 200, relayUp: false });
+  try {
+    const record = { id: "m_reprobe", name: "laptop", relayUrl: RELAY, relayOnline: false, enrolled: true, owned: true, scopes: [] };
+    const published: string[] = [];
+    const connection: InstanceType<typeof MachineConnection> = new MachineConnection(
+      record as never,
+      () => published.push(connection.state().reach),
+      fetchChannel,
+    );
+    const reads = (): string[] => published.map((reach) => daemonRead(reach as never));
+
+    await connection.resolveRoute();
+    check(
+      "a first probe is announced, and reads as a question until it is answered",
+      [published[0], reads().slice(0, -1).every((read) => read === "asking"), reads().at(-1)],
+      ["probing", true, "unreachable"],
+    );
+
+    // What the store's tick does every OFFLINE_RETRY_MS.
+    published.length = 0;
+    connection.forgetRoute();
+    check("the re-probe finds nothing either", await connection.resolveRoute(), null);
+    report("having published its answer", published.length > 0, `${String(published.length)} publish(es)`);
+    check("⭐ and nothing it published reads as readable", reads().filter((read) => read === "readable"), []);
+    check("nor as a question the machine had already answered", published.filter((reach) => reach !== "offline"), []);
+    check("and the reason is still the one it had", connection.state().offlineReason, "no_route");
+
+    connection.update({ ...record, relayOnline: true } as never);
+    published.length = 0;
+    connection.forgetRoute();
+    const back = await connection.resolveRoute();
+    check("a re-probe that finds it back publishes once, as the answer", [back?.kind, published], ["relay", ["online"]]);
+  } finally {
+    restore();
+  }
+}
+
+// The stand-in connections answer only state, so nothing below may yield to a poll tick before they are deleted.
+process.stdout.write("\nwhich computer this is, seeded and then sticky\n");
+{
+  const { store } = await import("../src/store.js");
+  const internals = store as unknown as {
+    seedLocalMachine(claimed: string | null): void;
+    refreshLocalMachine(): Promise<void>;
+    weighLocalMachine(): void;
+    patch(fields: { localMachineId: string | null }): void;
+    connections: Map<string, unknown>;
+  };
+  const local = (): string | null => store.getSnapshot().localMachineId;
+  const live = (id: string) => ({ machineId: id, base: LOCAL, instanceId: "i_sticky" });
+
+  installShell();
+  internals.patch({ localMachineId: null });
+  const standIn = (id: string) => ({ state: () => ({ id, name: id }) });
+  internals.connections.set("m_claim", standIn("m_claim"));
+  internals.connections.set("m_moved", standIn("m_moved"));
+  announced = null;
+
+  internals.seedLocalMachine("m_claim");
+  check("the claim is which computer this is before any daemon has answered", local(), "m_claim");
+  await internals.refreshLocalMachine();
+  check("and a live read that finds nothing — every cold launch — leaves it", local(), "m_claim");
+  announced = live("m_stranger");
+  await internals.refreshLocalMachine();
+  check("a daemon for another fleet answering first does not move it", local(), "m_claim");
+  announced = live("m_moved");
+  await internals.refreshLocalMachine();
+  check("a different machine of ours, live, replaces it", local(), "m_moved");
+  announced = null;
+  await internals.refreshLocalMachine();
+  check("and a /health that misses its probe does not clear that either", local(), "m_moved");
+  internals.seedLocalMachine("m_claim");
+  check("while a seed never replaces what a live read said", local(), "m_moved");
+  internals.patch({ localMachineId: null });
+  internals.seedLocalMachine(null);
+  check("and no claim seeds nothing", local(), null);
+
+  internals.seedLocalMachine("m_claim");
+  announced = live("m_fresh");
+  await internals.refreshLocalMachine();
+  check("a machine not in the list yet does not replace one that is", local(), "m_claim");
+  internals.connections.set("m_fresh", standIn("m_fresh"));
+  internals.weighLocalMachine();
+  check("and does once the listing that holds it has landed", local(), "m_fresh");
+
+  internals.connections.delete("m_claim");
+  internals.connections.delete("m_moved");
+  internals.connections.delete("m_fresh");
+  internals.patch({ localMachineId: null });
+  announced = null;
+  removeShell();
 }

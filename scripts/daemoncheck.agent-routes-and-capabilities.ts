@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { AGENT_IDS } from "../src/acp/agents.js";
 import { MemoryEventStore } from "../src/events.js";
-import { SessionRegistry } from "../src/registry.js";
+import { SessionRegistry, type CreateSessionOptions } from "../src/registry.js";
 import { openStores } from "../src/store/sqlite.js";
 import { check, report } from "./daemoncheck.env.js";
 import { sandbox, users, now, tokenWith, tokenFor, verifier } from "./daemoncheck.fixtures.js";
@@ -9,9 +9,6 @@ import { sandbox, users, now, tokenWith, tokenFor, verifier } from "./daemonchec
 process.stdout.write("\nthe system and assembled-agent routes\n");
 {
   const { createApp: build } = await import("../src/server.js");
-  // The other half of the pairing sweep below. `AGENT_IDS` is already imported at
-  // the top of this file; this one is not, and reaching for it here keeps the
-  // matrix driven off the table rather than off a list typed out beside it.
   const { SYSTEM_IDS } = await import("../src/acp/systems.js");
 
   const keys = new Map<string, { secret: string; updatedAt: number }>();
@@ -30,16 +27,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       save: (one: any) => void presets.set(one.id, one),
       remove: (id: string) => void presets.delete(id),
     },
-    /*
-     * ⚠ **An array and not a `Map`, unlike the two ports above it, because order
-     * is the whole subject.** A `Map` would keep insertion order and would
-     * therefore pass a round trip that a replace-in-place implementation fails —
-     * which is the same class of blindness `SqliteCustomAgentStore`'s upsert
-     * records from the other side: this section stands a `Map` in for that port,
-     * and `Map.set` is an upsert by construction, so only the real store could
-     * show the bug. Here the stand-in is the thing being ordered, so it holds an
-     * array and `replace` is a replace.
-     */
+    // An array, not a Map: a Map keeps insertion order and would pass a round trip a replace-in-place implementation fails.
     strip: {
       list: () => [...stripRows],
       replace: (entries: readonly any[]) => void stripRows.splice(0, stripRows.length, ...entries),
@@ -50,12 +38,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     },
   };
 
-  /*
-   * ⚠ **A stub, which is the whole reason `ServerOptions.asks` is a port rather
-   * than `AgentAskRuns`.** The real one spawns an agent per harness; standing in
-   * for it here is what makes the compatibility refusal reachable on a machine
-   * with no agent installed and nobody signed in.
-   */
+  // A stub for ServerOptions.asks, so the compatibility refusal is reachable with no agent installed.
   const asks = {
     capabilities: async (agent: string) => ({
       models: agent === "claude" ? [{ id: "opus", name: "Opus", description: null, group: null }] : [],
@@ -78,9 +61,6 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     roots: [users],
   }).app;
 
-  // The same server without the stores, because "answers 503 rather than
-  // pretending" is a property of every one of these routes and is exactly what a
-  // daemon built with no database has.
   const without = build({
     registry: new SessionRegistry(new MemoryEventStore()),
     verifier,
@@ -94,8 +74,6 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     method: string,
     path: string,
     body?: unknown,
-    // Defaulted rather than passed everywhere: the scope gate is one assertion
-    // out of many here and the rest are about the routes, not about who is asking.
     token: string = tokenFor("u_alice"),
   ): Promise<{ status: number; body: any }> => {
     const response = await which.fetch(
@@ -112,13 +90,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     return { status: response.status, body: text.length > 0 ? JSON.parse(text) : null };
   };
 
-  /*
-   * Status and code as one pair, with `null` where the answer carried no error.
-   * Reading `body.error.code` straight would throw out of the driver the moment a
-   * refusal became an acceptance — which is exactly the regression these
-   * assertions exist to report, and a thrown `TypeError` takes every section
-   * after it down instead of naming the one that moved.
-   */
+  // Read defensively: a TypeError on a refusal turned acceptance would take down every later section.
   const answered = (one: { status: number; body: any }): [number, string | null] => [
     one.status,
     one.body?.error?.code ?? null,
@@ -126,15 +98,6 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
 
   const listed = await call(withSystems, "GET", "/systems");
   check("every system is listed", listed.body.systems.length, SYSTEM_IDS.length);
-  /*
-   * ⚠ **The secret sweep is *below*, on the listing taken after a key is saved,
-   * and it stood here for a release where it could not fail.** Nothing has been
-   * saved at this point — the assertion one line down is that very fact — so
-   * `JSON.stringify(listed.body).includes("sekrit")` was false over a daemon
-   * holding no secret at all, and would have stayed false against a route that
-   * returned every stored key verbatim. The same shape `routedModelEnv`'s sweep
-   * had one section up: a search for a value the subject could not have held.
-   */
   check("nothing has a key yet", listed.body.systems.every((one: any) => one.keySet === false), true);
 
   check(
@@ -154,12 +117,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   );
   check("saving one works", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit" })).status, 200);
   check("and the daemon can read it back", systems.credentials.get("moonshot"), "sekrit");
-  /*
-   * Both halves off **one** listing, taken with the key genuinely in the store —
-   * which is what makes the second half an assertion rather than a sentence. The
-   * line above is the precondition it needs: a sweep for a string nothing holds
-   * is the no-op this block used to open with.
-   */
+  // Swept for the secret only once a key is saved; before that the sweep could not fail.
   const afterSave = await call(withSystems, "GET", "/systems");
   check(
     "the listing says so",
@@ -172,23 +130,11 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     false,
   );
 
-  /*
-   * ⚠ **Rotating a key, which nothing drove.** `SqliteSystemCredentialStore.save`
-   * is an upsert, and against a bare `INSERT` this second `PUT` would be a `500`
-   * out of `SQLITE_CONSTRAINT_PRIMARYKEY` — which is exactly the defect the
-   * *preset* store shipped with and this section's `Map` stand-in cannot see,
-   * because a `Map` upserts by construction. Replacing a vendor key is the
-   * ordinary act, not an edge.
-   */
+  // Rotating a key: the store's save must be an upsert, which a Map stand-in cannot show.
   check("rotating one works", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit2" })).status, 200);
   check("and the new secret is what is stored", systems.credentials.get("moonshot"), "sekrit2");
   check("with one row still, not two", systems.credentials.list().length, 1);
 
-  /*
-   * ⚠ **Assembling is refused for a pairing that cannot run, on the route and
-   * not only in the picker.** A saved preset that cannot start is a row whose
-   * only button answers 502 for ever, days after anybody could connect the two.
-   */
   const bad = await call(withSystems, "POST", "/custom-agents", {
     name: "nope",
     harness: "codex",
@@ -220,15 +166,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "invalid_agent",
   );
 
-  /* ---------------------------------------------------------------- *
-   * Clearing a key, which was driven only as a refusal
-   *
-   * ⚠ **Both halves, and the second is the one with teeth.** That the key goes is
-   * obvious; that presets naming the system are *left alone* is a decision the
-   * route's own comment makes and nothing asserted — so a change that swept them
-   * on key removal would have destroyed somebody's named agents with every driver
-   * green. This runs before the edit section below, which needs that preset.
-   * ---------------------------------------------------------------- */
+  // Clearing a key must leave the presets naming that system alone.
   {
     const cleared = await call(withSystems, "DELETE", "/systems/moonshot");
     check("clearing a key answers removed", answered(cleared), [200, null]);
@@ -242,14 +180,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length,
       1,
     );
-    /*
-     * ⚠ **An id this build does not know is `200 {removed:false}`, not `400`.**
-     * `SqliteSystemCredentialStore.list` drops a row naming a system this version
-     * cannot resolve, so a `400` before the `remove` — which is what this route
-     * did — made a key written by a newer daemon undeletable after a downgrade:
-     * unlistable, unreadable and unremovable, in plaintext. Same argument and
-     * same shape as `DELETE /custom-agents/:id`.
-     */
+    // An unknown id is 200 removed:false, or a key written by a newer daemon is undeletable after a downgrade.
     const unknown = await call(withSystems, "DELETE", "/systems/gemini");
     check("an id this build does not know is not refused", unknown.status, 200);
     check("and says it removed nothing", unknown.body.removed, false);
@@ -257,41 +188,11 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     check("and the key can be saved again", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit" })).status, 200);
   }
 
-  /* ---------------------------------------------------------------- *
-   * Editing one, which is `PATCH /custom-agents/:id`
-   *
-   * ⚠ **Every refusal below is asserted in two halves: the answer, and that the
-   * stored row is byte-identical afterwards.** A route that refuses and writes
-   * anyway answers exactly like one that refuses and does not, and the difference
-   * only shows up days later as a preset whose only button returns 502. That is
-   * the whole reason `POST`'s own refusal above carries `presets.size` beside it,
-   * and an edit needs it more than a create does: a create that half-lands leaves
-   * a row nobody had yet, while an edit that half-lands destroys one that worked.
-   *
-   * ⚠ **And the create and the edit are one predicate.** `readAssembledAgent` is
-   * a single function for exactly that reason, so the assertions here are written
-   * to fail the day somebody copies the checks back into either handler — the
-   * pairing message is compared to `POST`'s own string rather than to a literal,
-   * and the whole table of malformed bodies is driven through both routes and
-   * compared to each other.
-   * ---------------------------------------------------------------- */
+  // Every refusal is asserted twice: the answer, and that the stored rows are byte-identical afterwards.
 
   const preset = good.body.customAgent.id;
   const born = good.body.customAgent.createdAt;
-  /*
-   * The whole store as bytes, which is what "nothing changed" means here.
-   *
-   * The listing rather than the one row on purpose: a refusal that wrote a
-   * *second* row leaves the row it was sent at untouched, so a snapshot of that
-   * row alone would call it clean.
-   */
-  /*
-   * ⚠ **Both stores, because a refusal that wrote to *either* is a refusal that
-   * wrote.** It held the presets alone while the strip was the only other thing a
-   * verb in this section can touch, so a scope gate that leaked on
-   * `PUT /agent-strip` would have reordered somebody's screen with every
-   * assertion here green.
-   */
+  // Both stores, so a refusal that wrote a second row or touched the strip is caught.
   const frozen = (): string => JSON.stringify([[...presets.values()], stripRows]);
 
   const edited = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
@@ -311,14 +212,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     ],
     ["Claude Code · Opus", "claude", "anthropic", "opus"],
   );
-  /*
-   * ⚠ **`id` and `createdAt` are the daemon's, and an edit is the only place they
-   * could be lost.** `sessions.custom_agent` holds a *reference* rather than a
-   * copy and `ManagedSession.assembled` resolves it at every launch, so an edit
-   * that minted a new id would silently drop every session on the old one to its
-   * bare harness while a row that looks identical sat beside it — which is the
-   * outcome this route exists to prevent, reintroduced by the route itself.
-   */
+  // id and createdAt must survive an edit: sessions reference a preset by id and resolve it at every launch.
   check("while the id it was reached by is unchanged", edited.body.customAgent.id, preset);
   check("and so is the moment it was created", edited.body.customAgent.createdAt, born);
   check("the store holds exactly the row that was answered", presets.get(preset), edited.body.customAgent);
@@ -329,15 +223,6 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     [edited.body.customAgent],
   );
 
-  /*
-   * ⚠ **A body naming `id` or `createdAt` is answered, not refused — and it is
-   * answered with the daemon's values.** There is no field to refuse: the
-   * validator returns four fields and the route reads the other two off the
-   * stored row, so an extra key is one nothing looks at. Driven because the shape
-   * somebody reaches for instead — taking them off the body "when present" —
-   * fails with a 200 and a second row rather than with an error, and both halves
-   * of that are invisible to a status-code assertion.
-   */
   const hijack = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
     id: "ca_hijack",
     createdAt: 0,
@@ -360,22 +245,10 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       system: "anthropic",
       model: "opus",
     })),
-    /*
-     * ⚠ **Its own code, not the bare `not_found` this asserted for a release.**
-     * `POST /sessions` answers `400 not_found` for a `cwd` that does not exist —
-     * a `PathError` — so a client branching on the code alone, which `docs/API.md`
-     * says is the only thing it may branch on, could not tell "pick a different
-     * folder" from "that preset is gone".
-     */
+    // Its own code: not_found already means a missing cwd on POST /sessions.
     [404, "custom_agent_not_found"],
   );
-  /*
-   * ⚠ **The 404 is decided before the body is.** Somebody holding a listing a
-   * second out of date should be told the agent is gone rather than complained at
-   * about a field, and the two answers are indistinguishable from where they are
-   * standing. Only a request that is wrong in *both* ways can see which check ran
-   * first, so that is what this sends.
-   */
+  // The 404 is decided before the body; only a body wrong both ways shows which check ran first.
   const goneFirst = await call(withSystems, "PATCH", "/custom-agents/ca_nope", {});
   check("and an unknown id outranks a body that is also wrong", answered(goneFirst), [404, "custom_agent_not_found"]);
 
@@ -398,22 +271,11 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   await refuses("a body that is a list", [], [400, "invalid_agent"]);
   await refuses("a body that is a bare number", 7, [400, "invalid_agent"]);
 
-  /*
-   * ⚠ **An edit is a replace, and a partial body is refused by the field it left
-   * out.** This is the failure mode with no symptom. If a subset body were
-   * accepted, `hostable` would have to be weighed against the *merge* of body and
-   * stored row — and a handler that weighs it against the body alone takes
-   * `{ "system": "moonshot" }` at a codex preset, refuses that pairing at creation
-   * and saves it at edit, with a 200 and no complaint anywhere. Requiring all four
-   * leaves nothing to merge and so nothing to get wrong; these two are what say so
-   * out loud, since a route that quietly started merging would break no other
-   * assertion in this file.
-   */
+  // An edit is a replace: a partial body is refused, so nothing is ever merged with the stored row.
   await refuses("a body naming only a new system", { system: "moonshot" }, [400, "invalid_agent"]);
   await refuses("a body naming only a new name", { name: "renamed" }, [400, "invalid_agent"]);
 
-  // The positive control for the two bounds above: at the bound, not past it. A
-  // validator that refused everything would satisfy every refusal here.
+  // The positive control at the bound: a validator refusing everything would pass every refusal above.
   const atBound = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
     name: "n".repeat(80),
     harness: "claude",
@@ -422,15 +284,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   });
   check("editing: a name and a model exactly at the bound are accepted", atBound.status, 200);
 
-  /*
-   * ⚠ **The pairing is re-weighed on every edit, and it is refused in the words a
-   * create refuses it in.** An edit is the harder half of the two: a create that
-   * is refused leaves nobody worse off, while an edit can take a row that started
-   * fine yesterday and leave it unstartable. The message is compared to `POST`'s
-   * own answer rather than to a literal, which is what pins the two routes to one
-   * validator — a literal would keep passing while they drifted, as long as
-   * somebody remembered to change it here too.
-   */
+  // The message is compared to POST's own answer rather than a literal, pinning both routes to one validator.
   const editPairing = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
     name: "nope",
     harness: "codex",
@@ -439,8 +293,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   });
   check("editing: an impossible pairing is refused", answered(editPairing), [400, "incompatible_pairing"]);
   check("editing: and says which two", editPairing.body?.error?.detail ?? null, { harness: "codex", system: "moonshot" });
-  // Two halves, because the comparison alone is vacuous: two routes that had both
-  // stopped refusing would agree perfectly about `null`.
+  // Two halves: two routes that both stopped refusing would agree about null.
   const pairingWords = editPairing.body?.error?.message ?? null;
   check(
     "editing: in the very words a create refuses it in",
@@ -453,24 +306,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     ["claude", "anthropic"],
   );
 
-  /*
-   * ⚠ **The gate is swept over the whole harness × system matrix rather than at
-   * the cell that matters today.** `hostable` is the only place the matrix exists,
-   * on each side, and a rule asserted at its interesting points is a rule the next
-   * entry in `SYSTEMS` escapes silently — which is the discipline the section
-   * above already applies to the function. It is applied here to the *route*
-   * because these are two copies of one rule and only this one is reachable from
-   * the internet, and because a gate can be right about the answer and wrong about
-   * the write: each cell records what happened to the store, so an accepted
-   * pairing must have landed and a refused one must not have.
-   *
-   * ⚠ **The sweep also says the pair is weighed as a pair.** Each cell is sent at
-   * whatever the previous cell left in the store, so `codex x openai` arrives at a
-   * row holding `kimi`/`moonshot` — and a route that weighed the body's harness
-   * against the stored system, or the stored harness against the body's system,
-   * refuses it. That is the merge this route is written to make impossible, and
-   * the twenty-eight cells are where it would show.
-   */
+  // The whole harness x system matrix; each cell starts from the previous cell's row, so the pair is weighed as a pair.
   const editMatrix: string[] = [];
   for (const harness of AGENT_IDS) {
     for (const system of SYSTEM_IDS) {
@@ -517,22 +353,13 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "codex x zen: incompatible_pairing",
     "opencode x anthropic: incompatible_pairing",
     "opencode x openai: incompatible_pairing",
-    // The route's own copy of the native cell below, and the reason this sweep
-    // exists beside the pure one: `readAssembledAgent` reaches for
-    // `asks.capabilities` before it weighs the pairing, and opencode's honest
-    // answer there is `routing: null` — which the native arm never consults.
+    // readAssembledAgent consults asks.capabilities first, and opencode's routing is null, which the native arm never reads.
     "opencode x openrouter: saved",
     "opencode x xai: incompatible_pairing",
     "opencode x moonshot: incompatible_pairing",
     "opencode x zhipu: incompatible_pairing",
     "opencode x minimax: incompatible_pairing",
     "opencode x zen: saved",
-    /*
-     * The same row the pure `hostable` sweep asserts, driven through the **route**
-     * instead — which is the half that matters, since a preset is what a saved row
-     * becomes and `readAssembledAgent` is what refuses one. `grok x xai` is native,
-     * so it is the only cell here that saves.
-     */
     "grok x anthropic: incompatible_pairing",
     "grok x openai: incompatible_pairing",
     "grok x openrouter: incompatible_pairing",
@@ -543,8 +370,6 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "grok x zen: incompatible_pairing",
   ]);
 
-  // Twenty-eight edits later, with nine of them landing, the two fields the wire never
-  // named are still the ones the row was born with.
   const restored = await call(withSystems, "PATCH", `/custom-agents/${preset}`, {
     name: "Claude Code · K2",
     harness: "claude",
@@ -558,13 +383,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   );
   check("and there is still one row to show for it", presets.size, 1);
 
-  /*
-   * ⚠ **Editing is `write`, like creating and removing.** The one edit a
-   * read-only token must not be able to make is re-pointing somebody's preset at
-   * another system, which changes where their key is sent — so this is the
-   * destructive half of the two paths that decide the same predicate, and it
-   * carries the stronger authority rather than the weaker one.
-   */
+  // Editing needs write: re-pointing a preset at another system changes where its key is sent.
   const beforeScope = frozen();
   const readOnly = await call(
     withSystems,
@@ -576,14 +395,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   check("a read-only token may not edit an assembled agent", answered(readOnly), [403, "insufficient_scope"]);
   check("and nothing moved", frozen(), beforeScope);
 
-  /*
-   * ⚠ **The create and the edit may not disagree about a body.** They are one
-   * function today, and this is the assertion that fails the day somebody copies
-   * the checks back into either handler. Compared as pairs rather than against a
-   * table of literals, so it stays true through a change to any of the codes and
-   * false the moment the two paths answer differently — including in the
-   * direction that matters, where the edit accepts what the create refuses.
-   */
+  // Create and edit share one validator; compared pairwise so a copied check that drifts fails here.
   const bodies: [string, unknown][] = [
     ["nothing at all", {}],
     ["a list", []],
@@ -614,18 +426,10 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     disagreed.length === 0,
     disagreed.length === 0 ? `${bodies.length} bodies` : disagreed.join(" · "),
   );
-  // The positive half: every body in that table is malformed, so "identically"
-  // must mean identically *refused*. Without this, two routes that both started
-  // accepting one of them would agree with each other all the way down.
+  // Identically must mean identically refused: two routes that both accepted a body would agree.
   check("and every one of them is a body both refuse", swallowed, []);
   check("and not one of them wrote anything", presets.size, 1);
 
-  /*
-   * ⚠ **A preset names a harness, and `POST /sessions` fills `agent` in from it
-   * rather than making the caller keep the two in step.** Driven by sending a
-   * body whose `agent` disagrees: what must not happen is a session on the agent
-   * the body named.
-   */
   const unknownPreset = await call(withSystems, "POST", "/sessions", {
     customAgent: "ca_deadbeef",
     cwd: users,
@@ -637,34 +441,49 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     400,
   );
 
-  /*
-   * ⚠ **Removing one is idempotent, and this block used to pin the opposite.**
-   * It asserted `404` for an id with nothing under it, which is the answer that
-   * cannot survive the transport: `DELETE` is on `isReplayable` and deliberately
-   * **off** `slowRoute` — that table calls this route "a lookup plus a delete",
-   * which is the 15s budget `settleTransport` names as the one an LTE drop earns
-   * — so the request a dropped answer produces is the *same* delete, sent again.
-   * A 404 there puts `errorText` on the builder's screen over an act that
-   * succeeded. `DELETE /plugins/:pluginId` already answers this way and is
-   * already pinned that way further up; this is the same convention in the same
-   * daemon rather than a new one.
-   *
-   * The stated cost, which is the plugin route's too: a mistyped id is no longer
-   * refused. That is why the discriminator is pinned beside the status — a `200`
-   * on its own cannot tell a replay from a delete that found nothing, so an
-   * assertion on the status alone would pin nothing at all.
-   */
+  // A preset names its harness; a body.agent beside it, disagreeing or not even real, must reach nothing.
+  {
+    const { PathError } = await import("../src/browse.js");
+    const asked: [string, string | null | undefined][] = [];
+    class Recording extends SessionRegistry {
+      override async create(options: CreateSessionOptions): Promise<never> {
+        asked.push([options.agent, options.customAgent]);
+        throw new PathError("not_found", "this driver stops every create here");
+      }
+    }
+    const recorded = build({
+      registry: new Recording(new MemoryEventStore()),
+      verifier,
+      instanceId: "i_preset_harness",
+      startedAt: now,
+      systems: systems as never,
+      asks: asks as never,
+      roots: [users],
+    }).app;
+    check("the preset these rows start is on claude", presets.get(preset)?.harness, "claude");
+    const answers: [number, string | null][] = [];
+    for (const agent of ["kimi", "gemini", undefined]) {
+      const body = { customAgent: preset, cwd: users, ...(agent === undefined ? {} : { agent }) };
+      answers.push(answered(await call(recorded, "POST", "/sessions", body)));
+    }
+    check("a session started from a preset runs the preset's harness, whatever the body names", asked, [
+      ["claude", preset],
+      ["claude", preset],
+      ["claude", preset],
+    ]);
+    check("and a body agent this machine does not offer is not what answers", answers, [
+      [400, "not_found"],
+      [400, "not_found"],
+      [400, "not_found"],
+    ]);
+  }
+
+  // Removal is idempotent: a DELETE is replayed after a dropped answer, so a missing id is 200 removed:false.
   const missing = await call(withSystems, "DELETE", "/custom-agents/ca_nope");
   check("removing one that is not there is a 200", missing.status, 200);
   check("and says nothing was removed", missing.body.removed, false);
   check("and echoes back the id it was asked about", missing.body.id, "ca_nope");
 
-  /*
-   * The replay itself, which is the request the defect was about: the same
-   * delete twice, which is what a client that never saw the first answer sends.
-   * Nothing else in this file reaches it, and before the route changed the
-   * second send was a 404 over a row that really had gone.
-   */
   const doomed = good.body.customAgent.id;
   const firstTry = await call(withSystems, "DELETE", `/custom-agents/${doomed}`);
   check("removing a real one works", [firstTry.status, firstTry.body.removed, firstTry.body.id], [200, true, doomed]);
@@ -673,17 +492,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   check("sending it a second time succeeds and says so", [replay.status, replay.body.removed, replay.body.id], [200, false, doomed]);
   check("with the list still empty rather than disturbed", (await call(withSystems, "GET", "/custom-agents")).body.customAgents.length, 0);
 
-  /* ---------------------------------------------------------------- *
-   * The strip: which agents this machine's New session screen offers, ordered
-   *
-   * ⚠ **This daemon stores and does not resolve.** A `ref` is never weighed
-   * against what exists — that is `AgentStripEntry`'s stated design, so a harness
-   * signed out for a week keeps its place — which means every refusal below is
-   * about the *shape* of a body and never about whether it names something real.
-   * The assertions come in pairs for the editing block's reason: the answer, and
-   * that the stored list is byte-identical afterwards. A route that refuses and
-   * writes is the failure worth catching, and only the second half catches it.
-   * ---------------------------------------------------------------- */
+  // The daemon stores refs without resolving them, so every refusal below is about shape, never existence.
   {
     const strip = (): unknown => JSON.parse(JSON.stringify(stripRows));
     check("an untouched machine remembers nothing", (await call(withSystems, "GET", "/agent-strip")).body, {
@@ -697,33 +506,15 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     ];
     const saved = await call(withSystems, "PUT", "/agent-strip", { entries: order });
     check("a strip can be saved", [saved.status, saved.body.saved], [200, true]);
-    /*
-     * ⚠ **The answer is what the store now holds, read back, rather than the body
-     * echoed.** They are the same today; a caller that trusts the answer instead
-     * of its own copy stays right if that ever stops being true, and asserting it
-     * here is what keeps the route from being turned into an echo.
-     */
+    // The answer is what the store holds, read back, not the body echoed.
     check("and comes back in the order it was written", saved.body.entries, order);
     check("which is what the GET says too", (await call(withSystems, "GET", "/agent-strip")).body.entries, order);
-    /*
-     * ⚠ **A `ref` naming nothing on this machine is stored, and that is the design
-     * rather than a gap.** `ca_deadbeef` is no preset here and `kimi` is no
-     * installed harness; both keep their positions, and what drops them is the
-     * merge in the browser at the moment it draws. Refusing them would forget an
-     * order every time an agent was briefly unavailable.
-     */
     check(
       "including refs this machine has nothing under",
       stripRows.map((one: any) => one.ref),
       ["ca_deadbeef", "claude", "kimi"],
     );
 
-    /*
-     * ⚠ **Replace, never merge**, which is the whole reason the verb is `PUT`. A
-     * reorder is a statement about every position at once, so a route that folded a
-     * shorter body into what was already there would leave rows nobody named — and
-     * there is no caller that could say what should happen to them.
-     */
     const shorter = [{ kind: "harness", ref: "kimi", hidden: false }];
     check(
       "a shorter strip replaces rather than merging",
@@ -763,11 +554,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
         },
       ],
       [
-        // One past `MAX_STRIP_ENTRIES`. The bound is a thousand rather than the two
-        // hundred it started at, and the reason is written beside it: this client
-        // sends the **whole** list on every action, so a bound a real fleet could
-        // reach would make the screen permanently read-only rather than merely
-        // refusing an absurd body.
+        // One past MAX_STRIP_ENTRIES; the client sends the whole list on every action, so the bound must be beyond a real fleet.
         "more entries than the bound",
         {
           entries: Array.from({ length: 1001 }, (_, at) => ({
@@ -801,30 +588,9 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
         "more entries than the bound",
       ].map((why) => `${why}: 400 bad_request`),
     );
-    /*
-     * ⚠ **The second half, and it is the one with teeth.** `replace` empties the
-     * table before it refills it, so a validator that ran per entry *inside* the
-     * loop that writes would answer 400 on the eighth row of a fourteen-row body
-     * with the first seven already stored and the rest gone. Reading the whole body
-     * before touching the store is what makes that unreachable, and this is what
-     * says so.
-     */
+    // replace empties before it refills, so the whole body must be validated before the store is touched.
     check("and not one of them moved anything", JSON.stringify(strip()), before);
-    /*
-     * ⚠ **At the bound, not merely under it.** This said `repeat(64)` against a
-     * bound of 96 while the refusal above says `repeat(97)`, so the pair proved
-     * only that the bound lay somewhere in [64, 96] — lowering
-     * `MAX_STRIP_REF_CHARS` to 64 would have left both green while truncating
-     * every `ca_…` preset id and every contributed harness id longer than that.
-     * The custom-agents bounds two sections up are driven at exactly 80/81 and
-     * 256/257 and say "at the bound, not past it"; this is that, applied here.
-     *
-     * 96 is written out rather than imported because `MAX_STRIP_REF_CHARS` is
-     * module-private to `server.ts` — so the literal below and the refusal's 97
-     * are a pair, and both move together or the acceptance stops sitting on the
-     * bound. That is the same trade `pincheck` makes everywhere it compares a
-     * written-down number against a source it cannot import.
-     */
+    // At the bound: 96 mirrors MAX_STRIP_REF_CHARS, module-private to server.ts, and moves with the 97 above.
     check(
       "one at the bound is accepted, which is what makes the refusal a bound",
       (
@@ -835,13 +601,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       200,
     );
 
-    /*
-     * ⚠ **Deleting an assembled agent takes its position with it.** Not
-     * correctness — the merge in the browser drops a `ref` that resolves to nothing
-     * either way — but the only thing standing between this table and unbounded
-     * growth on a machine where presets are made and thrown away and the strip
-     * screen is never opened.
-     */
+    // Deleting a preset forgets its strip position, the only bound on this table's growth.
     const doomed = await call(withSystems, "POST", "/custom-agents", {
       name: "Doomed",
       harness: "claude",
@@ -867,19 +627,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       [{ kind: "harness", ref: "claude", hidden: false }],
     );
 
-    /* -------------------------------------------------------------- *
-     * And once against the real store, which is a combination neither
-     * half of this file otherwise covers
-     *
-     * ⚠ **Everything above drives the routes over an array, and the store
-     * section drives the store with no routes at all.** Between them sits the
-     * one thing only a database can be wrong about on this path: `replace`
-     * empties before it refills, so a `PUT` that reached SQLite and threw
-     * half-way would answer 500 with the order *gone* rather than restored —
-     * and an array `splice` cannot fail. The same gap `SqliteCustomAgentStore`'s
-     * upsert fell into from the other direction, where the stand-in was a `Map`
-     * and `Map.set` is an upsert by construction.
-     * -------------------------------------------------------------- */
+    // Once against the real store: replace empties first, and a SQLite failure mid-write is what an array stand-in cannot show.
     const realPath = join(sandbox, "strip-live", "reemoat.db");
     const real = openStores({ path: realPath, instanceId: "i_strip_live" });
     const live = build({
@@ -910,8 +658,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       (await call(live, "PUT", "/agent-strip", { entries: [written[1]] })).body.entries,
       [written[1]],
     );
-    // The rank column is doing the ordering rather than SQLite's insertion order,
-    // which is the one thing a fresh table hides — see the store section.
+    // The rank column orders rows, not SQLite's insertion order, which a fresh table hides.
     check(
       "and the order survives a write that reverses it",
       (
@@ -928,26 +675,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     reopened.close();
   }
 
-  /**
-   * Every route this section serves, and which scope each is behind.
-   *
-   * ⚠ **One table, read by two sweeps, because a route in one and not the other
-   * is exactly the gap this closes.** The scope sweep below and the no-store
-   * sweep under it are the same seven questions asked twice, and they were not:
-   * the no-store list was written out here and the scope gate was asserted at one
-   * route, `PATCH /custom-agents/:id`, in the middle of the editing block. The
-   * other four write verbs could each be downgraded from `write` to `read` in
-   * `src/server.ts` — singly or all at once — with this whole file green. The
-   * costliest of them is `PUT /systems/:system`, which is where somebody pastes a
-   * vendor API key: a read-only grant able to reach it can replace the key every
-   * routed session on this machine signs its requests with, and `DELETE` beside it
-   * can take it away.
-   *
-   * The path shapes carry their parameters rather than a literal id, so each
-   * sweep substitutes what it needs — the no-store one an id nothing can exist
-   * under, the scope one a row that really is there, which is what makes "and
-   * nothing moved" a claim about a write that could have landed.
-   */
+  /** Every route in this section and its scope, read by both the scope sweep and the no-store sweep. */
   const sectionRoutes = [
     ["GET", "/systems", "read"],
     ["PUT", "/systems/:system", "write"],
@@ -960,18 +688,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     ["PUT", "/agent-strip", "write"],
   ] as const;
 
-  /*
-   * ⚠ **The scope gate, swept over the whole table rather than pinned at one
-   * route.** `PATCH /custom-agents/:id` is asserted on its own further up with the
-   * argument for why an edit is destructive; this is the same predicate asked of
-   * every verb here, and it is what stops the next route added to this section
-   * arriving with no gate at all.
-   *
-   * A body that would really land on each write, so the second assertion is about
-   * a write that was refused rather than one that was malformed: `PUT` carries a
-   * token a reader must not be able to paste, and both preset writes carry the
-   * four fields the route accepts, aimed at a row that exists.
-   */
+  // Each write carries a body that would land, so an unchanged store proves the scope gate refused it.
   const gateTarget = await call(withSystems, "POST", "/custom-agents", {
     name: "gated",
     harness: "claude",
@@ -979,17 +696,8 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     model: "kimi-k2-thinking",
   });
   check("a row to aim the scope sweep at", gateTarget.status, 201);
-  /*
-   * ⚠ **Keyed on the *shape* and not on the verb**, since `PUT` now names two
-   * routes. A body that the route would refuse anyway makes "and nothing moved" a
-   * claim about nothing: the scope gate sits above the handler, so the only way
-   * this sweep proves the gate is what stopped the write is for the body to be one
-   * that would otherwise have landed.
-   */
   const gateBody = (method: string, shape: string): unknown => {
-    // A GET or a DELETE carries none: `new Request` refuses a body on a GET
-    // outright, and this table now holds two routes that share a path shape and
-    // differ only in the verb.
+    // GET and DELETE carry no body; new Request refuses one on a GET.
     if (method === "GET" || method === "DELETE") return undefined;
     if (shape === "/systems/:system") {
       return { token: "a-read-only-grant-must-not-be-able-to-paste-this" };
@@ -1016,12 +724,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "DELETE /custom-agents/:id: 403 insufficient_scope",
     "PUT /agent-strip: 403 insufficient_scope",
   ]);
-  /*
-   * The positive half, and it is not decoration: a `write` that had drifted onto
-   * either listing would take the assembly screen away from every read-only grant
-   * on the machine while all five refusals above went on passing. The same pair
-   * the plugin section already drives.
-   */
+  // The positive half: a write scope drifting onto a listing would lock every read-only grant out.
   check("and still reaches every listing", allowed, [
     "GET /systems: 200",
     "GET /custom-agents: 200",
@@ -1034,17 +737,12 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     true,
   );
 
-  // Every route, against a daemon with no store. `GET /systems` is the exception
-  // and is deliberately not one: the table is compiled in, so it can answer
-  // honestly with `keySet: false` everywhere rather than refusing.
+  // GET /systems is exempt: the table is compiled in, so it answers keySet false everywhere.
   for (const [method, shape] of sectionRoutes) {
     if (method === "GET" && shape === "/systems") continue;
-    // `ca_1` and `{}` are enough: with no store there is nothing to look an id up
-    // in, so the 503 is decided above both the 404 and the first field check.
     const path = shape.replace(":system", "moonshot").replace(":id", "ca_1");
     const answer = await call(without, method, path, method === "GET" || method === "DELETE" ? undefined : {});
-    // The code as well as the status: 503 is also what a route answers when an
-    // agent will not start, and these two are told apart nowhere else.
+    // The code too: 503 is also what a route answers when an agent will not start.
     check(`${method} ${path} without a store`, [answer.status, answer.body?.error?.code ?? null], [503, "systems_unavailable"]);
   }
   check(
@@ -1059,27 +757,11 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * What each harness offers, and what it will let us point it at
- *
- * ⚠ **`GET /agents/capabilities` was driven nowhere, and it is the route that
- * decides what the builder's model picker offers.** Everything about it is
- * per-harness and answered rather than thrown, so every failure it has is a row
- * quietly missing or a pairing quietly permitted — never an error anybody sees.
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\nwhat each harness says it can be pointed at\n");
 {
   const { createApp: build } = await import("../src/server.js");
   const { BUILTIN_CATALOGUE } = await import("../src/acp/systems.js");
-  /*
-   * ⚠ **A contributed harness that names *no* model variable, which is the whole
-   * point of the fixture.** `pinsModel` is `routedModelNaming(id, machine) !== null`,
-   * and among the built-ins it is true for every harness that has an arm — so a
-   * catalogue of built-ins alone cannot tell a correct implementation from one
-   * that returns a constant `true`, which is exactly what the client reads when the
-   * field is absent.
-   */
+  // A contributed harness naming no model variable: built-ins alone cannot tell pinsModel from a constant true.
   const flat = {
     id: "acme:flat",
     pluginId: "acme",
@@ -1093,8 +775,6 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
   };
   const catalogue = {
     harness: (id: string) => (id === flat.id ? flat : BUILTIN_CATALOGUE.harness(id)),
-    // Deliberately short: `claude`, one harness that will reject, and the flat one.
-    // The sweep below reads every key it returns, so a fifth would only add noise.
     harnessIds: () => ["claude", "kimi", flat.id],
     harnessState: (id: string) => (id === flat.id ? "enabled" : BUILTIN_CATALOGUE.harnessState(id)),
     system: (id: string) => BUILTIN_CATALOGUE.system(id),
@@ -1107,20 +787,13 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
 
   const asks = {
     capabilities: async (agent: string) => {
-      /*
-       * ⚠ **One harness that *throws*, because per-agent failures are answered
-       * rather than thrown and nothing proved it.** A harness that is not installed
-       * must not take down a picker that could still offer the others, and the
-       * `catch` that guarantees it is one `return` away from being deleted.
-       */
+      // kimi throws: a per-harness failure must be answered in its row, not take the picker down.
       if (agent === "kimi") throw new Error("kimi not found on PATH");
       return {
         models: [{ id: `${agent}-model`, name: agent, description: null, group: null }],
-        // Non-null on both, or `pinsModel` is never reached: the route spreads it
-        // onto `routing` and answers `null` outright where the agent published none.
+        // Non-null routing on both, or pinsModel is never reached.
         routing: { providerId: "main", supported: ["anthropic"] },
-        // Which build published the list above. Distinct per harness, so an
-        // assertion cannot pass by reading somebody else's row.
+        // Distinct per harness, so an assertion cannot pass by reading another row.
         cli: { path: `/bin/${agent}`, version: `1.2.${agent.length}`, source: "path" },
       };
     },
@@ -1138,68 +811,30 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
   const read = await app.fetch(
     new Request("http://d/agents/capabilities", { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
   );
-  /*
-   * ⚠ **Read defensively, for `answered`'s reason one section up.** Reaching
-   * straight into `.agents` throws out of the driver the moment this route stops
-   * answering one — which is exactly the regression these assertions report — and a
-   * thrown `TypeError` takes every section after it down instead of naming the one
-   * that moved. Measured: with the per-harness `catch` removed the route 500s, and
-   * an unguarded read turned one red line into a stack trace and no summary.
-   */
   const agents = (((await read.json()) as any)?.agents ?? {}) as Record<string, any>;
   const rowOf = (id: string): any => agents[id] ?? {};
 
   check("the route answers", read.status, 200);
   check("with a row per harness this machine offers", Object.keys(agents).sort(), ["acme:flat", "claude", "kimi"]);
 
-  /*
-   * **Which build published each list, carried through to the client.**
-   *
-   * ⚠ **It rides *this* answer rather than `GET /agents`, and the failing arm is
-   * the half worth pinning.** The models on a row are whatever that binary
-   * published, so a version carried beside them can be trusted to describe the
-   * same spawn — while a version taken from anywhere else could name a build that
-   * did not produce the rows under it. And on the arm where nothing was spawned
-   * there is no build to name: `null` there is the honest value, where forwarding
-   * a version would be a claim about a read that never happened.
-   */
+  // The build rides this answer beside the models it published; a harness never spawned names none.
   check("each row names the build that published its models", rowOf("claude").cli?.version, "1.2.6");
   check("and the source that decided it", rowOf("claude").cli?.source, "path");
   check("a harness that could not be asked names no build", rowOf("kimi").cli, null);
-  /*
-   * ⚠ **And the path it was resolved from does not travel.** The screen draws a
-   * program and a version; an absolute path is this host's filesystem layout, and
-   * a route that spread the whole record would hand it to anything holding the
-   * scope that reads models. Asserted as an absence, because spreading is the
-   * shorter spelling and the one somebody tidying this will reach for.
-   */
+  // The resolved path must not travel: it is this host's filesystem layout.
   check("and no row carries the path it was resolved from", Object.keys(rowOf("claude").cli ?? {}).sort(), ["source", "version"]);
   check("while still reporting why it could not", typeof rowOf("kimi").error, "string");
 
-  /*
-   * ⚠ **The pair is the assertion, and neither half is one alone.** `pinsModel`
-   * inverted leaves both halves individually plausible and the pair wrong, and an
-   * inversion is not hypothetical: the field is a boolean the client reads as
-   * *permission*, and it fails **open** — `packages/web/src/agents.ts` refuses the
-   * pairing only on an explicit `false`, because a daemon too old to send the field
-   * has no plugin catalogue and so nothing it could be false for. So a dropped or
-   * inverted field does not break the picker, it silently re-opens the pairing this
-   * field exists to close, and `POST /custom-agents` then refuses what the picker
-   * offered.
-   */
+  // The client reads pinsModel as permission and fails open, so a dropped or inverted field reopens the pairing.
   check(
     "which harnesses can be told a model to run on somebody else's system",
     [rowOf("claude").routing?.pinsModel ?? null, rowOf("acme:flat").routing?.pinsModel ?? null],
-    // claude names two variables in `ROUTED_MODEL_ENV`; the contributed one named
-    // none in its manifest, and a harness that cannot be pointed at a model must
-    // never be offered a foreign system.
     [true, false],
   );
 
   check(
     "a harness that could not be read answers for itself and not for the others",
-    // `in` rather than `??`, or a `routing` that is legitimately `null` and one that
-    // was never sent read alike — and `null` is the answer being asserted.
+    // in rather than ??, because null is the answer being asserted.
     [rowOf("kimi").models ?? "(absent)", "routing" in rowOf("kimi") ? rowOf("kimi").routing : "(absent)", typeof rowOf("kimi").error],
     [[], null, "string"],
   );
@@ -1214,10 +849,6 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
     [1, 1, null, null],
   );
 
-  /*
-   * A daemon built with no capability reader says so, rather than answering an
-   * empty catalogue that a picker would draw as "this harness offers nothing".
-   */
   const noAsks = build({
     registry,
     verifier,
@@ -1230,28 +861,12 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
   );
   check(
     "a daemon that cannot read capabilities refuses rather than answering nothing",
-    // Same defensive read, and here it is the whole assertion: a route that stopped
-    // refusing answers a body with no `error` at all.
     [refused.status, ((await refused.json()) as any)?.error?.code ?? null],
     [503, "model_unavailable"],
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Where a claude session's opening mode comes from
- *
- * ⚠ **This daemon sends no mode, and the whole point of the read is to be able
- * to say so.** Somebody asked whether the daemon was switching sessions to
- * `Bypass permissions`; it is not — `session/new` carries `cwd`, `mcpServers`
- * and ultracode's `_meta` and nothing else — and the adapter reads
- * `permissions.defaultMode` out of the user's own settings. Before this there
- * was no screen that could have answered them.
- *
- * Driven against a real directory rather than a stub, because the two things
- * that can go wrong are both about files: reading a path this daemon did not
- * create (which is why it goes through `probeText`'s deadline), and answering
- * something other than `null` for a shape nobody meant.
- * ------------------------------------------------------------------ */
+// The daemon sends no mode; the adapter reads permissions.defaultMode from the user's own settings.
 process.stdout.write("\nwhere a claude session's opening mode comes from\n");
 {
   const { claudeSettingsMode } = await import("../src/acp/agents.js");
@@ -1270,26 +885,14 @@ process.stdout.write("\nwhere a claude session's opening mode comes from\n");
   check("a mode the settings file names is reported", set?.value, "bypassPermissions");
   check("beside the file it came from, so the sentence can name it", set?.file.endsWith("/.claude/settings.json"), true);
 
-  /*
-   * ⚠ **The string as written, never normalised.** The adapter's own alias table
-   * maps `bypass` → `bypassPermissions` and `manual` → `default`, and merges
-   * project settings over the user's. Reimplementing either here would be a second
-   * copy of somebody else's precedence rule, drifting the moment they change it —
-   * so this reports one file and one string and claims nothing about the outcome.
-   */
+  // Reported as written: normalising would copy the adapter's own alias and precedence rules.
   check(
     "an alias is reported as written rather than resolved on the adapter's behalf",
     (await claudeSettingsMode({ homeDir: homeWith("alias", JSON.stringify({ permissions: { defaultMode: "bypass" } })) }))?.value,
     "bypass",
   );
 
-  /*
-   * Every shape that means "nothing here explains anything" answers `null`, and
-   * they are one answer on purpose: a screen that distinguished "no file" from
-   * "malformed file" would be reporting on somebody's editor rather than on their
-   * agent. The oversized case is the one with teeth — the path is not one this
-   * daemon created, so "as big as it happens to be" is not a bound.
-   */
+  // Every shape that explains nothing is one null answer; the file is not ours, so its size must be bounded.
   const nothings: [string, string | null][] = [
     ["no file at all", null],
     ["a file that is not JSON", "{not json"],
@@ -1304,31 +907,12 @@ process.stdout.write("\nwhere a claude session's opening mode comes from\n");
     check(`${what} reports nothing`, await claudeSettingsMode({ homeDir: homeWith(what.replace(/\W+/g, "-"), contents) }), null);
   }
 
-  // A value long enough to be a paste rather than a mode is clipped rather than
-  // put on screen whole — the same rule every other string off a file follows here.
   const long = await claudeSettingsMode({
     homeDir: homeWith("long", JSON.stringify({ permissions: { defaultMode: "m".repeat(400) } })),
   });
   check("and a value too long to be a mode is clipped", [long?.value.length, long?.value.endsWith("…")], [65, true]);
 
-  /*
-   * ⚠ **And every route that answers an availability row says the same thing,
-   * which is a census rather than a drive because the failure was a *missing*
-   * spread.**
-   *
-   * `GET /agents` and `POST /agent-auth/:agent/recheck` both answer the row a
-   * client redraws its agents screen from, and the client *replaces* the held row
-   * with the recheck's copy. `settingsMode` was added to the first alone, so one
-   * tap on *Check again* for the claude row erased the provenance line until a
-   * full re-read — repeating, field for field, the mistake the recheck route's own
-   * docblock records about `login`: it is spread by hand, *"so a third route
-   * answering an agent row has to spread it too"*.
-   *
-   * Driving it would need a real `availability()`, i.e. a CLI spawn per harness,
-   * which is the one thing this offline driver may not do. So what is asserted is
-   * that neither handler builds the row by hand any more: one helper, two callers,
-   * and a third field cannot go missing from one of them.
-   */
+  // Asserted on source, since driving it needs a CLI spawn per harness: both row routes must go through one helper.
   const { readFileSync } = await import("node:fs");
   const serverSrc = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -1343,13 +927,7 @@ process.stdout.write("\nwhere a claude session's opening mode comes from\n");
     (serverSrc.match(/await agentRowExtras\(\)/g) ?? []).length,
     2,
   );
-  /*
-   * The negative that keeps it a rule. `loginSupportOf` survives at exactly two
-   * call sites — inside the helper, and on `GET /agent-auth`, whose row is a
-   * *credentials* row with its own shape and deliberately carries no
-   * `settingsMode`. A third would be somebody hand-building an availability row
-   * again, which is the defect itself.
-   */
+  // loginSupportOf stays at two sites: the helper and GET /agent-auth's credentials row.
   check(
     "and neither of them spreads login by hand",
     (serverSrc.match(/login: loginSupportOf\(/g) ?? []).length,
@@ -1357,44 +935,15 @@ process.stdout.write("\nwhere a claude session's opening mode comes from\n");
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Which names may reach the installer script
- *
- * ⚠ **`POST /agent-install/:agent` was as wide as `agentIdParam`, and
- * `agentIdParam` is as wide as the *catalogue*.** It answers on
- * `harnessState(id) === "enabled"`, which a harness a plugin contributed
- * satisfies, and `deploy/agents.sh` has never heard of one — it validates
- * `--only` against its own five names and exits 2. The exit was then *read as an
- * install*: `spawnAgentsScript` maps every status but 3 to `"running"`, so
- * `settle` asked the machine and settled the run as `failed`, offering a retry
- * for a name that can never work. And the way out ran `onFinished`, i.e.
- * `forgetAvailability()` plus a whole `resumeInterrupted()` pass, so one HTTP
- * request from a `machine:admin` grant bought a cache flush and an auto-resume
- * sweep.
- *
- * Driven on the route rather than on `AgentInstallRuns`, because the route is
- * where the gate had to go: the run registry takes an `AgentId`, which is a
- * `string`, so nothing about this is a compile error anywhere.
- *
- * ⚠ **The accepting row is not decoration, it is the negative control.** Three
- * refusals and nothing else is exactly the shape this repository has shipped
- * green over dead code twice: a `return jsonError(…)` at the top of the handler
- * satisfies every one of them. So a harness this repository ships is asked for
- * in the same table and has to come back `201` with the script actually
- * reached, and the census at the end differences the per-row booleans against
- * the list of names the stub was handed.
- * ------------------------------------------------------------------ */
+// deploy/agents.sh knows only the shipped five, so the route must refuse a plugin's harness before the script runs.
+// The accepting kimi row is the negative control.
 
 process.stdout.write("\nwhich names may reach the installer script\n");
 {
   const { createApp: build } = await import("../src/server.js");
   const { BUILTIN_CATALOGUE } = await import("../src/acp/systems.js");
 
-  /*
-   * The script, as the daemon's own port. It answers `ok` for anything, which is
-   * the point: what is under assertion is which names get this far, so a stub
-   * that refused on its own would hide exactly the defect being driven.
-   */
+  // The stub accepts anything, so only the route decides which names get this far.
   const asked: string[] = [];
   const installs = {
     start: (agent: string) => {
@@ -1406,13 +955,7 @@ process.stdout.write("\nwhich names may reach the installer script\n");
     cancel: () => false,
   };
 
-  /*
-   * ⚠ **Two contributed harnesses, one *enabled* and one switched off**, because
-   * the route owes them different sentences and `agentIdParam` collapses both to
-   * `null`. The enabled one is the case the route used to spawn for; the disabled
-   * one is the state that may never be answered with a `400`, which is
-   * `noSuchHarness`'s whole reason for existing.
-   */
+  // One enabled and one disabled contributed harness: the route owes them different refusals.
   const contributed = (id: string): unknown => ({
     id,
     pluginId: "acme",
@@ -1445,13 +988,7 @@ process.stdout.write("\nwhich names may reach the installer script\n");
     roots: [users],
   }).app;
 
-  /**
-   * One press, as `[status, code, did the script get asked]`.
-   *
-   * The third cell is the half with teeth. A route that answers the right
-   * refusal *after* spawning has paid the cache flush and the auto-resume sweep
-   * already, and the status alone cannot see it.
-   */
+  /** One press as status, code and whether the script was asked; a refusal after spawning has already paid its cost. */
   const press = async (agent: string): Promise<[number, string | null, boolean]> => {
     const before = asked.length;
     const response = await app.fetch(
@@ -1461,9 +998,6 @@ process.stdout.write("\nwhich names may reach the installer script\n");
       }),
     );
     const text = await response.text();
-    // Read defensively for `answered`'s reason above: reaching into `.error`
-    // throws out of the driver the moment a refusal becomes an acceptance, which
-    // is the regression this section reports.
     const body = (text.length > 0 ? JSON.parse(text) : null) as { error?: { code?: string } } | null;
     return [response.status, body?.error?.code ?? null, asked.length > before];
   };
@@ -1492,12 +1026,6 @@ process.stdout.write("\nwhich names may reach the installer script\n");
   ];
   for (const [what, agent, expected] of table) check(what, await press(agent), expected);
 
-  /*
-   * The census. The booleans above are read off a length that the list below
-   * holds the names for, so the two derivations of "what got spawned" have to
-   * agree — and a fifth row added to the table without a decided answer cannot
-   * pass by failing to raise a floor.
-   */
   check("and exactly one of the four names got that far", asked, ["kimi"]);
   report(
     "the install gate was driven over a catalogue wider than the five",

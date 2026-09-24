@@ -1,6 +1,6 @@
 {
   "name": "@reemoat/protocol",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "The authenticated encryption between a Reemoat app and a remote daemon: the Noise handshake, the framing inside it, and the capability both ends read.",
   "license": "AGPL-3.0-only",
   "author": "rends-east",

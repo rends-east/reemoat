@@ -6,52 +6,15 @@ import { needsHuman, showsAsEnded } from "../wire";
 import { orderSessions } from "../sessionOrder";
 import { sessionLabel, shortPath } from "./bits";
 
-/**
- * What the sidebar draws, and in what order.
- *
- * The shape changed: machines used to be collapsible *sections* stacked down the
- * rail, and they are a horizontal tab bar now, with the chats of the selected one
- * grouped into **folders** underneath. So this file grew three new questions —
- * which machine is selected, what the folders are, and what the search box has
- * been typed into — and every one of them had to land here rather than in the
- * component, for the reason the two that were already here landed here.
- *
- * **Module state seeded from `localStorage`, not `useState`.** The phone's
- * list → detail → back unmounts the sidebar entirely, so component state silently
- * resets every time somebody reads a session. That is why the collapse set lives
- * here, and it is why the selected machine does too.
- *
- * **Anything that filters the list belongs beside the filter.** `visibleRows` is
- * *the* source of render order and `keyboard.ts` walks it; a needle held in a
- * component would mean `j`/`k` stepping onto rows the rail is not drawing — which
- * is the exact failure that got the previous search box deleted, and which two
- * comments in this file and one in `keyboard.ts` each claimed was structurally
- * impossible.
- */
+// Module state rather than component state: the phone's list/detail navigation unmounts the sidebar.
 
 const COLLAPSED_KEY = "reemoat.collapsedFolders";
 const MACHINE_KEY = "reemoat.machineTab";
 
-/**
- * A folder's identity, and it is scoped to a machine on purpose.
- *
- * `\u0000` is the one byte a POSIX path cannot contain, so the join is
- * unambiguous. The scoping is not cosmetic: two machines routinely hold a
- * checkout of the same repository at the same path, and a shared id would mean
- * collapsing `~/api` on the laptop collapses `~/api` on the server.
- */
 declare const folderIdBrand: unique symbol;
 export type FolderId = string & { readonly [folderIdBrand]: "FolderId" };
 
-/**
- * The two folders that are not directories.
- *
- * `Pinned` and `All` collapse through the same persisted set as every real
- * folder, so the behaviour and the storage are one mechanism rather than two.
- * Both begin with the separator byte and name no machine, which is what keeps
- * them out of `folderId`'s space: a real id is `<machineId>\0<path>` and a
- * machine id is never empty.
- */
+// Both start with the separator byte and name no machine, so they never collide with a real folder id.
 export const PINNED_FOLDER = "\u0000pinned" as FolderId;
 export const ALL_FOLDER = "\u0000all" as FolderId;
 
@@ -71,8 +34,7 @@ function readStored<T extends string>(key: string): T[] {
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed.filter((id) => typeof id === "string") as T[]) : [];
   } catch {
-    // Private mode, a quota, or somebody's hand-edited value. A sidebar
-    // preference is not worth failing a render for; everything starts expanded.
+    // Private mode or a hand-edited value: everything starts expanded.
     return [];
   }
 }
@@ -90,21 +52,6 @@ function bump(): void {
   for (const listener of [...listeners]) listener();
 }
 
-/*
- * **The machines' order is a thing on this screen, so it moves this screen's
- * version.**
- *
- * Both readers of the tab list — `SessionBrowser` and `MachineColumn` — already
- * subscribe to `groupsVersion`, and a second `useSyncExternalStore` in each would
- * be two subscriptions per component to keep in step for one counter, which is two
- * ways for them to disagree about whether a render happened. Registered from this
- * module's body and never removed, which is `overlay.ts`'s idiom — and it touches
- * no DOM, so a driver importing this file is unaffected.
- *
- * The order itself lives beside `store.ts` rather than here: `store.ts` applies it
- * inside `sessionGroups` and may not import from `ui/`. This line is the bridge,
- * not the state.
- */
 subscribeMachineOrder(bump);
 
 export function isFolderCollapsed(id: FolderId): boolean {
@@ -123,47 +70,13 @@ export function subscribeGroups(listener: () => void): () => void {
   return () => void listeners.delete(listener);
 }
 
-/** The value `useSyncExternalStore` compares. Changes when anything on this screen moves. */
 export function groupsVersion(): number {
   return version;
 }
 
-/* ------------------------------------------------------------------ *
- * Which machine, which slice, which needle
- * ------------------------------------------------------------------ */
-
-/**
- * Which slice of the fleet is shown.
- *
- * There is deliberately no `needs` any more. It was a filter whose whole job was
- * to answer "is anything waiting on me", and a filter is a bad place to answer
- * that: it is a mode you have to already be in. The answer travels with the rows
- * instead — a marker on the row, a count on its folder, and `waitingFloor` for
- * everything this view cannot draw at all.
- */
 export type Filter = "active" | "ended" | "all";
 
-/**
- * `"active"`, and what had to happen first is that the icon stopped being inert.
- *
- * This was `"all"` for exactly one reason, written down here at the time: the
- * filter is **the only route to an ended session anywhere in this app**, and the
- * control that reaches it was drawn as a placeholder that did nothing. Defaulting
- * to `"active"` behind a dead control would have made every finished conversation
- * permanently unreachable — a worse failure than a longer list, so the list stayed
- * long.
- *
- * The list is now what it was asked to be, and the price of that was wiring the
- * icon rather than accepting the loss: `ChatSearch` connects the existing
- * `Dropdown` to `setFilter`, so Ended is one tap away and nothing is orphaned.
- * That ordering is the point — **the default may only be narrowed while some
- * control can widen it again**, and if the filter is ever reverted to a
- * placeholder this line has to go back to `"all"` in the same commit.
- *
- * Still not persisted, for the reason the tab beside it *is*: a filter is visible
- * on screen the moment you look, so starting each visit on a known default is
- * honest, while a tab is where you were working.
- */
+// The default may be narrowed only while a control can widen it again; not persisted, unlike the tab.
 let filter: Filter = "active";
 
 export function currentFilter(): Filter {
@@ -176,23 +89,7 @@ export function setFilter(next: Filter): void {
   bump();
 }
 
-/**
- * The machine whose chats are on screen, remembered across visits.
- *
- * **Persisted, unlike the filter**, and the distinction is the one this file
- * already drew: a filter is visible on screen the moment you look, so starting
- * each visit on a known default is honest. A tab is *where you were working*, it
- * is visible as selected immediately, and coming back to a different machine's
- * list every morning is a small tax paid daily.
- */
-/**
- * The one tab that is not a machine.
- *
- * A string rather than `null`, because `null` already means something here — "no
- * machine is selected", which is the empty fleet — and a sentinel that collides
- * with an existing state is how the empty fleet ends up rendering the All list.
- * It is never a valid `MachineId`: those are `m_…`.
- */
+// Not null, which already means an empty fleet; never a valid MachineId.
 export const ALL_MACHINES = "all";
 export type MachineTabId = MachineId | typeof ALL_MACHINES;
 
@@ -205,14 +102,6 @@ export function selectMachine(id: MachineTabId): void {
   bump();
 }
 
-/**
- * The typed needle, and it is **not** persisted.
- *
- * A search you did not type is a list that looks broken — you come back to three
- * chats and no explanation. Same argument the filter's own non-persistence made,
- * one degree stronger, because a needle leaves nothing on screen naming itself
- * except the box it is in.
- */
 let query = "";
 
 export function currentQuery(): string {
@@ -225,55 +114,17 @@ export function setQuery(next: string): void {
   bump();
 }
 
-/* ------------------------------------------------------------------ *
- * Folders
- * ------------------------------------------------------------------ */
-
-/**
- * Which folder a session belongs in — the one rule, and everything else here
- * derives from it.
- *
- * `git.repoRoot` first, and the daemon has already settled the ambiguity that
- * makes this look risky: `worktree.ts` sets `repoRoot` to the **main** repository
- * root, never the per-session worktree. So a session running in
- * `~/.reemoat/worktrees/s_abc` files under the repository a human recognises,
- * which is the whole point.
- *
- * `requestedCwd` is the fallback, and it is exactly right for the case that
- * reaches it: a `plain` session, where the daemon found no git at all. It is also
- * never the ephemeral worktree path — that only ever lives in `workspace.root`,
- * which this function deliberately does not read.
- *
- * **Sessions in subdirectories of one repository collapse into one folder**, and
- * that is wanted rather than tolerated. The path has left the row — the agent's
- * name is there now — so if the folder were not the project, the list would lose
- * the one string people actually navigate by. What the subdirectory case loses is
- * given back per row by {@link rowSubpath}.
- */
+/** The main repository root (never the per-session worktree), else the requested cwd; subdirectories share a folder. */
 export function folderPathOf(row: SessionRow): string {
   const git = row.snapshot.workspace.git;
   if (git !== null && git.repoRoot.length > 0) return git.repoRoot;
   return row.snapshot.workspace.requestedCwd.trim();
 }
 
-/**
- * The shortest suffix of each path that tells it apart from the others.
- *
- * A basename alone until it collides — `~/a/api` and `~/b/api` both drawing "api"
- * is two identical rows in one list, which is the same failure `nameVisibleTo`
- * exists to prevent one service over. Widened a segment at a time, and only for
- * the paths that actually clash, so the common case stays one word.
- *
- * The cost, stated: a folder's label changes when an ambiguous sibling appears.
- * That is a rename rather than a reorder, it happens at most once per collision,
- * and both alternatives are worse — always two segments is a wall of
- * `Users/rends`, and never disambiguating is the failure above.
- */
 export function folderNames(paths: readonly string[]): string[] {
   const parts = paths.map((path) => path.split("/").filter((segment) => segment.length > 0));
   const names = paths.map((path, index) => {
     const own = parts[index] ?? [];
-    // A path with no segments at all is the filesystem root, and "/" is its name.
     if (own.length === 0) return path.length > 0 ? "/" : "";
     return own[own.length - 1] ?? "";
   });
@@ -287,8 +138,6 @@ export function folderNames(paths: readonly string[]): string[] {
     for (let index = 0; index < names.length; index += 1) {
       const own = parts[index] ?? [];
       const name = names[index] ?? "";
-      // Only widen what is still ambiguous, and only while there is more path to
-      // spend — `/api` against `/Users/rends/api` resolves when one side runs out.
       if (!clashes.has(name) || own.length < width) continue;
       names[index] = own.slice(-width).join("/");
       widened = true;
@@ -298,19 +147,6 @@ export function folderNames(paths: readonly string[]): string[] {
   return names;
 }
 
-/**
- * What is left of a row's own directory once its folder has said the rest.
- *
- * The folder is the repository; a session may have been started three levels
- * inside it. `relativeTo` already answers both questions this needs — `null` when
- * the two are the same, and `null` again for anything not underneath — so there
- * is no second containment rule here.
- *
- * The third case is real and is why the fallback is a path rather than nothing: a
- * git worktree somebody made themselves sits *outside* the main repo root while
- * still reporting it as `repoRoot`, so `relativeTo` answers `null` and the honest
- * thing to draw is where it actually is.
- */
 export function rowSubpath(row: SessionRow, folderPath: string): string | null {
   const cwd = row.snapshot.workspace.requestedCwd;
   if (cwd.length === 0 || cwd === folderPath) return null;
@@ -319,26 +155,7 @@ export function rowSubpath(row: SessionRow, folderPath: string): string | null {
   return shortPath(cwd);
 }
 
-/* ------------------------------------------------------------------ *
- * The needle
- * ------------------------------------------------------------------ */
-
-/**
- * Whether a row survives the search box.
- *
- * **`sessionLabel` first, and that is the whole reason the last search box was
- * deleted.** It matched the machine, the agent, the cwd and the raw session id,
- * and did not match the title — so the one string a person reads on the row was
- * the one thing they could not find it by.
- *
- * Two deliberate omissions. `machineName` is not matched, because the needle only
- * ever filters the selected machine's list: matching it would return an empty
- * list and read as broken. The raw session id is not matched either — a result
- * that hits on a string invisible on the row looks arbitrary.
- *
- * Substring rather than fuzzy: a fuzzy match on short strings puts unrelated rows
- * above exact ones, and there is no scoring here to sort them by.
- */
+/** Matches the title, cwd, repo root and agent; not the machine name or the raw session id. */
 export function matchesQuery(row: SessionRow, needle: string): boolean {
   const wanted = needle.trim().toLowerCase();
   if (wanted.length === 0) return true;
@@ -357,40 +174,17 @@ export function matching(rows: readonly SessionRow[], needle: string): SessionRo
   return rows.filter((row) => matchesQuery(row, needle));
 }
 
-/* ------------------------------------------------------------------ *
- * The view
- * ------------------------------------------------------------------ */
+/** Takes what is left of a page's row budget, a section's heading costing one: the swipe's neighbour draws a screen, not a machine. */
+export function takeRows<T>(list: readonly T[], left: { rows: number }, heading = 0): T[] {
+  left.rows -= heading;
+  const taken = list.slice(0, Math.max(0, left.rows));
+  left.rows -= taken.length;
+  return taken;
+}
 
-/**
- * The three module-state answers, resolved together.
- *
- * One place where state becomes a view, and both readers — the sidebar and
- * `keyboard.ts` — call it. That is what makes `visibleRows`' second parameter safe
- * to have no default: three inputs decide the order now instead of one, so a
- * default would be three chances for the two readers to disagree rather than one.
- * The one chance was enough, once: `keyboard.ts` called `visibleRows(groups)`, got
- * `"all"` while the rail drew `"active"`, and `j` walked onto rows nobody could
- * see.
- */
 export interface ListView {
   filter: Filter;
-  /**
-   * Already resolved against the fleet — never a machine that no longer exists.
-   *
-   * `null` under All as well as on an empty fleet, so every reader that asks
-   * "which machine's chats" gets the same honest answer in both: none in
-   * particular. What tells the two apart is `all`.
-   */
   machine: MachineId | null;
-  /**
-   * The whole fleet in one list, with no folders.
-   *
-   * A separate boolean rather than a third value in `machine`, because every
-   * existing reader of `machine` is asking a question that has a right answer
-   * under All — `foldersOf` builds nothing, `waitingFloor` finds everything
-   * already reachable — and widening the type would make each of them handle a
-   * case they do not have an opinion about.
-   */
   all: boolean;
   query: string;
 }
@@ -400,25 +194,8 @@ export function currentView(groups: SessionGroups): ListView {
   return { filter, machine: all ? null : selectedMachineIn(groups), all, query };
 }
 
-/**
- * Which machine's tab is selected, resolved against what actually exists.
- *
- * The remembered id is **never overwritten by the fallback**, which is the same
- * posture the collapse set takes ("only an explicit collapse is remembered"): a
- * grant revoked and restored puts you back on your tab rather than on whatever
- * happened to be first while it was gone.
- *
- * The fallback is first **in the reader's own order** — which is by name until
- * somebody has dragged a machine — and never by activity. Activity flickers on the
- * four-second poll, and a default tab that moves while you are looking at it is
- * the same failure as a list that reorders under a travelling thumb. A stored
- * order does not flicker, which is the whole of why one is allowed and the other
- * is not; `machineOrder.ts` carries that argument.
- */
+/** The remembered id is never overwritten by the fallback, which is the first tab in the reader's order. */
 export function selectedMachineIn(groups: SessionGroups): MachineId | null {
-  // The membership test is what narrows this: `selected` may be `ALL_MACHINES`,
-  // which is no machine's id, so it falls through to the first tab — and the one
-  // caller that must not do that (`currentView`) asks about All *before* calling.
   const match = groups.groups.find((group) => group.id === selected);
   if (match !== undefined) return match.id;
   return groups.groups[0]?.id ?? null;
@@ -428,24 +205,11 @@ export interface MachineTab {
   id: MachineTabId;
   name: string;
   reach: MachineGroup["reach"];
-  /** What the tab must say even when its chats are not on screen. */
   blockedCount: number;
   liveCount: number;
   selected: boolean;
 }
 
-/**
- * The tab bar, in `store.ts`'s order and no other.
- *
- * No sorting happens here, deliberately: `sessionGroups` already orders by name
- * and that is asserted one file over. Sorting again — by activity, by
- * reachability, by anything — would put the ordering in two places and make the
- * bar reshuffle under a thumb.
- *
- * Every granted machine gets a tab, including one with no sessions at all. That is
- * what preserves "start a session here" for a machine you have just added, which
- * the old per-machine section carried and which would otherwise have no home.
- */
 export function machineTabs(groups: SessionGroups, view: ListView): MachineTab[] {
   return groups.groups.map((group) => ({
     id: group.id,
@@ -457,15 +221,6 @@ export function machineTabs(groups: SessionGroups, view: ListView): MachineTab[]
   }));
 }
 
-/**
- * The All tab, which is not in the bar.
- *
- * Returned separately because it is drawn separately: it is pinned to the left of
- * the strip and outside its scroller, so it is reachable with a dozen machines
- * rather than being the first thing to scroll away. Its counts are the fleet's,
- * summed here rather than in the JSX so the tab and the list it opens cannot
- * disagree about what "everything" is.
- */
 export function allTab(groups: SessionGroups, view: ListView): MachineTab {
   return {
     id: ALL_MACHINES,
@@ -489,26 +244,8 @@ export interface Folder {
   collapsed: boolean;
 }
 
-/**
- * The selected machine's chats, in folders.
- *
- * Ordered by name, never by activity. Membership derives from `rowsOf`, which is
- * recency-sorted, so "in order of first appearance" would reshuffle the folder
- * list on every four-second poll — which `store.ts` calls the one thing this app
- * cannot do under a travelling thumb. A folder holding a waiting session does not
- * hoist either: that fact rides the header as a count, exactly as `blockedCount`
- * always has.
- *
- * **A folder whose rows all fail the needle disappears**, and that is why this
- * takes the whole view rather than just the filter. It also resolves the note this
- * file used to end on: `groupIsEmpty(group, filter)` was deleted because its two
- * call sites counted rows *after* the needle and it knew nothing about the needle.
- * This one does.
- */
+/** Ordered by name, never by activity; a folder whose rows all fail the needle disappears. */
 export function foldersOf(groups: SessionGroups, view: ListView): Folder[] {
-  // Under All there are no folders, by decision rather than by omission: a folder
-  // is a directory *on a machine*, so the same path on two hosts is two folders
-  // and merging them would be a lie about where the work is. All is a flat list.
   if (view.all) return [];
   const group = groups.groups.find((candidate) => candidate.id === view.machine);
   if (group === undefined) return [];
@@ -532,14 +269,10 @@ export function foldersOf(groups: SessionGroups, view: ListView): Folder[] {
       id,
       machineId: group.id,
       path,
-      // A folder literally named "" would sort first and read as a rendering
-      // fault. It is the bucket for a session whose daemon reported no directory
-      // at all — which the wire type forbids and an older one could still send.
       name: path.length === 0 ? "No folder" : (names[index] ?? path),
       rows,
       blockedCount: rows.filter((row) => needsHuman(row.snapshot)).length,
-      // **A query overrides collapse.** Otherwise you search, get three matches,
-      // and they are inside a folder you collapsed last month.
+      // A query overrides collapse, so a match is never hidden in a collapsed folder.
       collapsed: !searching && isFolderCollapsed(id),
     };
   });
@@ -551,20 +284,7 @@ export function foldersOf(groups: SessionGroups, view: ListView): Folder[] {
   });
 }
 
-/**
- * The whole fleet as one list, for the All tab.
- *
- * **Pinned rows are excluded, and that is the one rule this list has.** Every
- * other group in this rail draws a pinned session twice on purpose — once at the
- * top and once under its own folder — because the second copy is where you look
- * for it when you are working in that folder. Under All there are no folders, so
- * the second copy would be the same row twice in one flat list, six rows apart,
- * with nothing between them explaining why.
- *
- * Recency across machines rather than machine-then-recency: the machine is not a
- * grouping here — it is a label on the row — so ordering by it would be a
- * grouping nobody asked for and one that the tab bar already provides properly.
- */
+/** Pinned rows are excluded: with no folders, their second copy would be a duplicate in one flat list. */
 export function allRows(groups: SessionGroups, view: ListView): SessionRow[] {
   if (!view.all) return [];
   const pinned = new Set(pinnedFor(groups, view).map((row) => row.key));
@@ -577,87 +297,22 @@ export function allRows(groups: SessionGroups, view: ListView): SessionRow[] {
       rows.push(row);
     }
   }
-  /*
-   * ⚠ **`lastActivity` desc until this list got a reader.** Leaving it would make
-   * the order of a conversation depend on which tab it is being read from — manual
-   * under a machine, recency under All — which is worse than either rule on its
-   * own. Cross-machine it compares two daemons' wall clocks, exactly as the
-   * recency sort it replaces did.
-   */
   return orderSessions(rows);
 }
 
-/**
- * Every session waiting on a human that this view cannot draw anywhere.
- *
- * **The new hole, and it is closed by subtraction rather than by three rules
- * agreeing.** Only one machine's chats are on screen now, so a blocked session on
- * any other machine has no row at all — and the tab that carries its count can be
- * scrolled off the end of the bar. That is a strictly new way to hide an approval,
- * which `CLAUDE.md` calls the one failure this screen exists to prevent.
- *
- * Computed as "everything blocked, minus everything reachable", so a new section, a
- * new filter or a new needle cannot open a gap in it by accident — a rule written
- * the other way round would have to be remembered by whoever adds the next group.
- *
- * It **ignores the filter and the needle**, deliberately, for the same reason
- * `machineSubline` puts `blocked` above `offline`: a filter is a slice you asked
- * for, and being asked for an approval is not something you can ask to stop. A
- * *collapsed* folder is not lifted, though — its own header carries the count,
- * which is the mechanism this app already uses.
- */
+/** Blocked sessions this view cannot draw: everything blocked minus everything reachable. */
 export function waitingFloor(groups: SessionGroups, view: ListView): SessionRow[] {
-  /*
-   * **The needle is applied here, and leaving it out was a real hole** — found by
-   * the superset property in `webcheck` rather than by reading, which is the whole
-   * argument for stating this as a property instead of as a list.
-   *
-   * `visibleRows` draws pinned, folders and orphans through `matching`, so a
-   * blocked row that fails the search is not on screen. Computing reachability
-   * *without* the needle therefore called it reachable, and the floor did not lift
-   * it: typing four letters into the search box hid an approval, silently, on the
-   * one screen whose entire job is not to.
-   *
-   * The filter is a different case and is deliberately left applied: a row the
-   * filter excludes is genuinely not drawn, so subtraction lifts it — which is why
-   * a blocked session appears in the floor even under the Ended filter.
-   */
+  // Reachability applies the filter and needle exactly as visibleRows draws, so a searched-away blocked row is lifted.
   const reachable = new Set<string>();
   for (const row of matching(pinnedFor(groups, view), view.query)) reachable.add(row.key);
   for (const row of matching(orphansFor(groups, view.filter), view.query)) reachable.add(row.key);
-  // Under All the flat list *is* every machine, so everything is reachable and
-  // this comes back empty — which is the correct answer rather than a special
-  // case: the floor exists because one machine's chats are on screen at a time.
   for (const row of allRows(groups, view)) reachable.add(row.key);
   const group = groups.groups.find((candidate) => candidate.id === view.machine);
   if (group !== undefined) {
-    // Ignoring collapse: a collapsed folder still announces its own count, so a
-    // row inside one is reachable in the sense that matters.
     for (const row of matching(rowsOf(group, view.filter), view.query)) reachable.add(row.key);
   }
 
-  /*
-   * ⚠ **Every row in the fleet, and `groups.groups` alone is not that.**
-   *
-   * `place` in `sessionGroups` *moves* a pinned row into `groups.pinned` and a
-   * row whose machine is no longer granted into `groups.orphans`, returning
-   * `null` — so neither is ever in a `MachineGroup`'s `active`/`ended`, and
-   * neither incremented the `blockedCount` this subtraction is drawn against.
-   * Sourced from the machines alone, the floor was subtracting a set from a
-   * *subset* of itself, and a blocked row in either list could never be lifted.
-   *
-   * It needed no fleet to reach: one machine, one pinned session blocked on a
-   * permission, and a search needle that matches nothing — `visibleRows` empty,
-   * the floor empty, every count zero, and only the header dot left. That is
-   * exactly the "typing four letters into the search box hid an approval"
-   * failure the comment above records as fixed for the other groups, and the
-   * "a blocked session appears in the floor even under the Ended filter" claim
-   * ten lines up. `pinnedFor`'s docblock, `web-shell.md` and Q3.11 all assert
-   * the property this loop did not have.
-   *
-   * `reachable` and `seen` are untouched: a pin the view *does* draw is already
-   * in `reachable` via `pinnedFor`, so nothing is lifted twice.
-   */
+  // Pinned and orphaned rows are in no MachineGroup, so the fleet has to add them explicitly (Q3.11).
   const fleet: SessionRow[] = [
     ...groups.groups.flatMap((group) => [...group.active, ...group.ended]),
     ...groups.pinned,
@@ -675,30 +330,10 @@ export function waitingFloor(groups: SessionGroups, view: ListView): SessionRow[
   return out;
 }
 
-/**
- * Every session currently on screen, in the order it is drawn.
- *
- * **The single source of render order**, and that is the point rather than
- * tidiness. `keyboard.ts` used to re-flatten the lists under a comment saying "the
- * same order the rail renders" — a claim that was true by coincidence. Both call
- * this now, so the rail and the keyboard cannot disagree.
- *
- * *Sessions* rather than rows: the rail draws a pinned session twice on purpose
- * and this returns it once, because `keyboard.ts` locates the caret with
- * `findIndex(row.key === currentKey)`, which answers with the **first** match — so
- * from the machine copy, `j` would resolve to the pinned copy's index and jump
- * across the whole list.
- *
- * The second parameter is a `ListView` and has **no default**. It had one, and the
- * default is what caused the divergence described above; with three inputs
- * deciding the order there would be three of them.
- */
+/** The single source of render order, shared with keyboard.ts; each session once even when pinned. */
 export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[] {
   const searching = view.query.trim().length > 0;
   const out: SessionRow[] = [...waitingFloor(groups, view)];
-  // Pinned collapses through the same set as a folder, and a query overrides it
-  // for the same reason: you search, get a match, and it is inside something you
-  // shut last month.
   if (searching || !isFolderCollapsed(PINNED_FOLDER)) {
     out.push(...matching(pinnedFor(groups, view), view.query));
   }
@@ -709,9 +344,7 @@ export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[]
     if (folder.collapsed) continue;
     out.push(...folder.rows);
   }
-  // Filtered like everything else, and the needle is applied *outside*
-  // `orphansFor` so the call in `SessionBrowser.tsx` keeps the exact shape
-  // `webcheck` reads off disk.
+  // The needle is applied outside orphansFor so SessionBrowser.tsx keeps the call shape webcheck reads.
   out.push(...matching(orphansFor(groups, view.filter), view.query));
 
   const seen = new Set<string>();
@@ -722,86 +355,22 @@ export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[]
   });
 }
 
-/**
- * The pinned group's rows under a view: the filter, **and the machine tab**.
- *
- * ⚠ **A pin belongs to the machine its session is on.** The section was drawn
- * fleet-wide — "this one, wherever it lives" — so every machine tab showed the
- * same pinned rows, which read as the pins being copied to each machine rather
- * than as a shortcut across them; reported in those words. Under a machine tab
- * only that machine's pins are drawn; under All, every pin. A pinned row whose
- * machine is gone has no tab to be under and is drawn on every one, which is
- * `orphansFor`'s own rule for the same rows unpinned.
- *
- * Takes the whole `ListView` for `visibleRows`' reason: three inputs deciding
- * the order means three places to disagree, and `waitingFloor` subtracts what
- * this draws — so a pin on another machine now counts toward "waiting elsewhere",
- * which is the truthful answer once it is not on screen.
- */
+/** Pins are cut to the selected machine's tab; a pin whose machine is gone shows on every tab. */
 export function pinnedFor(groups: SessionGroups, view: ListView): SessionRow[] {
   return pinnedHere(underFilter(groups.pinned, view.filter), groups, view);
 }
 
-/**
- * The machine cut, on its own, because two callers have to make it identically.
- *
- * Its own function rather than a line inside `pinnedFor` for the reason that
- * function's own docblock gives about `visibleRows`: a rule stated twice is two
- * places to disagree. `siblingsOf` is the second caller, and it disagreed —
- * see the note there.
- */
 function pinnedHere(rows: readonly SessionRow[], groups: SessionGroups, view: ListView): SessionRow[] {
   if (view.all || view.machine === null) return [...rows];
   const known = new Set(groups.groups.map((group) => group.id));
   return rows.filter((row) => row.ref.machineId === view.machine || !known.has(row.ref.machineId));
 }
 
-/**
- * The orphan group's rows under a filter, and it is exported for the same reason
- * `pinnedFor` is: so the JSX and this file cannot mean different things by "the
- * rows on screen".
- *
- * `visibleRows` above has filtered orphans since the day an ended one sat in the
- * Active list — but `SessionBrowser` went on mapping `groups.orphans` raw, so the
- * "No longer granted" section drew rows this function excludes. That is the exact
- * divergence the single-source rule exists to make impossible, and it is worse on
- * this list than anywhere else: `keyboard.ts` locates the caret with
- * `findIndex(row.key === currentKey)`, which answers `-1` for a row only the JSX
- * knows about, so `j` from an orphan jumped to the top of the fleet.
- *
- * Orphans are drawn on **every** tab, unconditionally, because their machines have
- * no tab by construction. That is also what lets `waitingFloor` treat them as
- * reachable and stay a subtraction.
- */
 export function orphansFor(groups: SessionGroups, filter: Filter): SessionRow[] {
   return underFilter(groups.orphans, filter);
 }
 
-/**
- * The rows this one shares a group with, in the order they are drawn in.
- *
- * A row's group is where it *lives* — Pinned, its own folder, or "No longer
- * granted" — and this deliberately ignores the filter and the search box, which
- * the drag cannot ignore because a finger can only land on what is on screen. For
- * a keyboard move that is the right difference: `Move down` past a row the Ended
- * filter is hiding still puts the two in the order the reader asked for, whereas
- * skipping it would make one press mean different distances depending on a
- * control somewhere else on the screen.
- *
- * A machine with no tab answers `orphans`, matching where `sessionGroups` filed
- * it, so the menu on an orphan acts on the list the orphan is actually in.
- *
- * ⚠ **Pinned is cut to the selected machine here, and the filter still is not,
- * and the two are not the same kind of hiding.** A row the filter is withholding
- * is one the reader chose to hide, and stepping past it keeps one press meaning
- * one place however that control is set. A pin on *another machine* is on a list
- * this tab cannot draw at all: `pinnedFor` cuts it, so `Alt`+`↓` on the last pin
- * drawn under this tab used to compute a position between two pins nobody can
- * see, write it, and look like it had done nothing. Worse on the re-spacing path,
- * which then wrote fresh positions to another machine's rows — a write with no
- * visible cause anywhere on screen. The cut comes from `pinnedHere`, the same
- * function the drawn list goes through, so the two cannot drift apart again.
- */
+/** Rows in the same group in draw order, ignoring filter and search; pins cut to the selected machine. */
 export function siblingsOf(row: SessionRow, groups: SessionGroups): SessionRow[] {
   if (row.snapshot.pinned === true) return orderSessions(pinnedHere(groups.pinned, groups, currentView(groups)));
   const group = groups.groups.find((candidate) => candidate.id === row.ref.machineId);
@@ -810,43 +379,14 @@ export function siblingsOf(row: SessionRow, groups: SessionGroups): SessionRow[]
   return orderSessions([...group.active, ...group.ended].filter((other) => folderPathOf(other) === path));
 }
 
-/** One list sliced by the filter. The single rule, so no two call sites can disagree. */
 function underFilter(rows: readonly SessionRow[], filter: Filter): SessionRow[] {
-  // The reader's order, for the two groups that come through here — `pinnedFor`
-  // and `orphansFor`. `rowsOf` is the third site; between them every list the rail
-  // draws is ordered once, at the point it is produced.
   if (filter === "all") return orderSessions(rows);
-  // `showsAsEnded`, the same rule `sessionLists` buckets by — a session the
-  // daemon interrupted is not one anybody ended, so the Ended filter must not
-  // collect it. This also feeds `visibleRows`, so `j`/`k` cannot walk a row the
-  // filter says is not there.
+  // An interrupted session is not ended, so the Ended filter must not collect it.
   const ended = (row: SessionRow): boolean => showsAsEnded(row.snapshot);
   return orderSessions(rows.filter((row) => (filter === "ended" ? ended(row) : !ended(row))));
 }
 
-/**
- * What a machine's tab says beyond its name, as a *kind* rather than a string.
- *
- * One slot, five possible occupants, and the precedence between them is the whole
- * content of this function — which is exactly why it is here and not a ternary in
- * JSX. The thing it decides is whether an approval can be hidden, which
- * `CLAUDE.md` calls the one failure this screen exists to prevent.
- *
- * The order:
- *
- *   `blocked`  — "5 live" is not the sentence to lead with when one of them is
- *                waiting for you. It wins even when the machine is unreachable;
- *                the tab's own `Dot` still carries reachability in that case,
- *                so nothing is lost, and a hidden approval would be.
- *   `offline`  — before `degraded`, because a machine you cannot reach is a
- *                bigger fact than which token was used to try.
- *   `degraded` — folded in here rather than mounting a badge beside the name.
- *                `machine.ts` raises it on any transport failure while minting
- *                and clears it on the next successful mint, so on a phone
- *                dropping to LTE it toggles repeatedly — and as a badge it moved
- *                the machine name's truncation point every time.
- *   `idle`/`live` — the ordinary case.
- */
+/** Precedence is blocked, offline, degraded, then idle/live, so an approval is never hidden. */
 export type MachineSubline =
   | { kind: "blocked"; count: number }
   | { kind: "offline" }
@@ -867,33 +407,12 @@ export function machineSubline(group: {
   return { kind: "live", count: group.liveCount };
 }
 
-/**
- * Whether that slot is the one thing the header emphasises.
- *
- * The name says "warns" and there is no warning colour any more; it is kept
- * anyway, because renaming it would cost two assertion edits on the one screen
- * where an approval must never be hidden and buy nothing. **"warn" now names a
- * rank, not a hue** — the caller draws it as `text-fg font-semibold` against
- * `text-muted`.
- */
 export function sublineWarns(subline: MachineSubline): boolean {
   return subline.kind === "blocked" || subline.kind === "degraded";
 }
 
 export function rowsOf(group: MachineGroup, filter: Filter): SessionRow[] {
-  /*
-   * **One of the three places the reader's order is applied**, the others being
-   * `underFilter` and `allRows`. It is applied where the rows are *produced*
-   * rather than where they are drawn, so `visibleRows` — which calls all three —
-   * needs no edit and cannot disagree with `keyboard.ts` about what `j` steps onto.
-   *
-   * ⚠ **Under `all` the two buckets are concatenated, so sorting the union is
-   * required rather than tidy**: two sorted lists laid end to end are not one
-   * sorted list, and an ended row would otherwise sit below a live one it was
-   * dragged above. That terminal rows now interleave with live ones under this
-   * filter is the honest consequence of the position being the reader's — a second
-   * rule pushing them down would silently undo a drop onto one.
-   */
+  // Under all the union must be sorted: two sorted lists end to end are not one sorted list.
   if (filter === "ended") return orderSessions(group.ended);
   return orderSessions(filter === "all" ? [...group.active, ...group.ended] : group.active);
 }

@@ -5,33 +5,9 @@ import { store } from "../store";
 import type { Me } from "../wire";
 import { Button, FIELD, SETTINGS_HEADING } from "./bits";
 import { GateCard } from "./gate/GateCard";
+import { UseAnotherAccount } from "./UseAnotherAccount";
 
-/**
- * The wall an admin-created account lands on, and the only way past it.
- *
- * **Reached by state, not by a URL**, which is why it lives here beside
- * `SignIn.tsx` rather than in `ui/gate/`: filing it with the routed screens
- * would invite somebody to give it a route, and a route is a thing you can leave
- * by typing another one.
- *
- * **It is not a `Sheet`.** A sheet has a ✕ and registers `useDismissible`, so
- * Escape would reveal the app behind an obligation the server is still
- * enforcing. The screen has no dismissal, so it must not be built from the
- * primitive whose entire job is dismissal. It returns before `<AppShell>` in
- * `App.tsx`, so a typed `/settings/account` renders this too — the client half
- * of a gate whose real half is `requirePasswordCurrent` on the control plane.
- *
- * **The current password is required and not waived.** The temporary password is
- * the thing they just typed to get here, so they have it; waiving it would build
- * a route where a lifted session token becomes ownership of the account in one
- * request, which is the argument `POST /v1/me/password` has always made.
- *
- * **Sign out stays reachable**, and it has to: somebody who has lost the
- * temporary password has exactly one way out of this screen, and without it they
- * are clearing site data. `ghost` rather than `DangerButton` — `--color-danger`
- * is for at most one control in a view, this view's one real decision is the
- * password, and signing out is the most *reversible* thing on screen.
- */
+/** Reached by state rather than a route, and not a Sheet since it must not be dismissible; the enforcing half is requirePasswordCurrent on the control plane. */
 export function ForcedPasswordChange({ me }: { me: Me }): ReactNode {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -50,21 +26,11 @@ export function ForcedPasswordChange({ me }: { me: Me }): ReactNode {
     void cp
       .changePassword(current, next)
       .then(() => {
-        /*
-         * `bootstrap`, not `refreshMe`.
-         *
-         * The tab has **no machines listed** — `bootstrap`'s tolerant catch
-         * returned an empty list while the wall stood — so re-reading one
-         * boolean would take the wall down and reveal an app with an empty
-         * fleet. `bootstrap` re-reads `me` and lists machines in one call, which
-         * is exactly the state a fresh sign-in is in.
-         */
+        // bootstrap rather than refreshMe: the machine list came back empty while the wall stood, so it is re-read along with me.
         return store.bootstrap();
       })
       .catch((cause: unknown) => {
-        // `401 invalid_password` does **not** sign anybody out: `authFailure`
-        // answers `null` for that code, a guard added after it bit somebody on
-        // this exact shape of screen.
+        // An invalid_password 401 does not sign anybody out: authFailure answers null for that code.
         setError(changePasswordError(cause));
         setBusy(false);
       });
@@ -78,9 +44,12 @@ export function ForcedPasswordChange({ me }: { me: Me }): ReactNode {
       title="Choose your own password"
       lead="This account was created for you with a temporary password. It has to be replaced before you can go any further."
       footer={
-        <Button tone="ghost" onClick={() => void store.signOut()}>
-          Sign out
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <UseAnotherAccount />
+          <Button tone="ghost" onClick={() => void store.signOut()}>
+            Sign out
+          </Button>
+        </div>
       }
     >
       <form onSubmit={submit}>

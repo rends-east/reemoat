@@ -4,8 +4,6 @@ paths:
   - packages/control-plane/src/quota.ts
   - packages/web/src/quota.ts
   - packages/web/src/enrollment.ts
-  - packages/web/src/offer.ts
-  - packages/web/src/ui/MachineOffer.tsx
   - packages/web/src/ui/settings/MachinesSection.tsx
   - packages/web/src/ui/settings/MachineSection.tsx
 ---
@@ -281,19 +279,10 @@ appears without a wake.
 | Grants listing | 500 per page, 2000 max, with a `total` |
 | Machines per user | **Ceiling 50; the limit is `machines.per_user`**, unset resolving to 50. Plus **one live enrollment code each** — minting burns the previous, which is why "how many codes may somebody hold" is not a number. The count is `machine_owners` rows with **no revoked filter**, so a revoke has to `releaseOwner` or the slot is spent for ever; `PUT …/owner` counts rows for *other* machines, so re-labelling one you already own is never your fifty-first |
 
-**The offer to rent a machine is drawn only where a machine may still be added.**
-`REEMOAT_CP_MACHINES_OFFER_URL` is read once in `main.ts` and is unset by
-default — environment-only on purpose, see `cp-accounts.md`. It is published on
-`GET /v1/instance` as `machines.offer`, `machineOffer` reads it
-fail-closed, and `machineOfferHref` puts `me.email` in the query with
-`URLSearchParams` — never concatenation, which loses the whole query into a
-fragment on a base ending `#…`. `MachineOffer` draws it, decides for itself
-whether to draw at all, and appears in `MachinesSection`, `SessionBrowser` and
-`AppShell` only, always **inside the `mayAddMachine`/`canAdd` arm and below
-`installCommand`**. Both halves are asserted by
-`webcheck.shell-and-enrollment.ts`. In the other arm it would sell a host this
-control plane refuses at the dial — a bought machine comes back here to enroll
-and that needs a free slot — beside the very sentence saying there is none, which
-is `machineQuotaNotice`'s `null`-iff-`mayAddMachine` property read out loud.
-Below the command because the two pinned proximity windows above it end at
-`installCommand(`; an offer inserted before it lengthens them.
+**There is no link to rent a machine, and that is a deletion rather than an unset
+default.** One sat under `installCommand` on all three screens until 2026-09-23
+(Q1.650); `webcheck.shell-and-enrollment.ts` asserts the names it had are gone from
+the client, and `deploycheck` that `main.ts` no longer reads
+`REEMOAT_CP_MACHINES_OFFER_URL` by name — only its retirement list names it, to warn
+an env file that still sets it. Bringing it back starts at Q1.632, whose placement
+argument — inside the `mayAddMachine` arm, below the command — still holds.

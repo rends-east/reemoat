@@ -6,11 +6,12 @@ paths:
   # `web-shell.md`: the three heading constants live there, and a change to one
   # of them is a typography change before it is a shell change.
   - packages/web/src/index.css
-  # The two judgement-call sites for the cursor ban below: the app's only
+  # The judgement-call sites for the cursor ban below: the app's only
   # `<summary>`, and the two resize separators. A rule scoped away from the file
   # it governs is the one `docscheck` failure with no symptom.
   - packages/web/src/ui/AppShell.tsx
   - packages/web/src/ui/PaneHandle.tsx
+  - packages/web/src/ui/SessionView.tsx
   - packages/web/src/ui/settings/AgentsPanel.tsx
   - packages/web/src/ui/bits.tsx
   - packages/web/src/paths.ts
@@ -59,7 +60,9 @@ those are paths, and this is a sentence about one there is no path for."*
 
 - **Mono**: paths, ids, keys, a one-time secret, commands, diff bodies, code
   fences — anything transcribed into a terminal or compared against one.
-- **Sans**: the agent's replies, refusal text, every sentence *about* a path.
+- **Sans**: the agent's replies, refusal text, every sentence *about* a path — and
+  a person's own message, which is drawn verbatim in `pre-wrap` and is still
+  somebody's prose rather than a machine's string (Q3.646).
 - **⚠ Never both for one fact.** This rule was followed from memory for four
   releases and had already been missed four times, all of them one workspace path
   drawn in mono by the picker and in sans everywhere else. Q3.579, Q3.580.
@@ -124,6 +127,12 @@ The app lives at 12–13px: `text-2xs` and `text-xs` are ~300 of ~430 uses,
 `text-2xl` and `text-3xl` do not exist. That is a density decision, not an
 oversight.
 
+**Under a finger the whole scale is two pixels up**, on the owner's word: one
+`@layer theme` block under `@media (pointer: coarse)` restates all six steps and
+their line-heights, so no call site changes and a phone reads 14–16px. Keyed on the
+pointer, never a breakpoint, as the 16px field rule is. The two count badges step
+from `h-4` to `h-5` with it. The one arbitrary size stays where it is. Q3.662.
+
 - **Every size comes from the scale.** There is exactly **one** arbitrary size in
   the app — `text-[11px]` on the installer line in `CommandLine.tsx` — and it is
   named in the driver's allowlist rather than tolerated silently. A second one
@@ -144,7 +153,9 @@ oversight.
 ## Nothing in this client changes the mouse
 
 **There is no `cursor` declaration and no `cursor-*` utility anywhere in
-`packages/web/src`, with exactly one named exception.** `index.css` carried an
+`packages/web/src`, with exactly two named exceptions** — the separators'
+`col-resize`, and the text caret on the conversation header's session name, which
+is edited in place (the owner's word, Q3.665). `index.css` carried an
 `@layer base` rule putting the hand shape on every enabled `button`, every
 `[role="button"]` and the one `<summary>` — restored on purpose after Tailwind v4's
 preflight dropped it, on the argument that with the accent colour gone an unfilled
@@ -236,11 +247,10 @@ constants, two of them byte-identical local `const label` declarations in two fi
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-**Six** sites spend the idiom outside the constants **on purpose**, and every one
+**Five** sites spend the idiom outside the constants **on purpose**, and every one
 of them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
 louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
-`MachineOffer`'s `or` (no `font-semibold` — the word between two doors is not a
-heading), `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
+`AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
 rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why), `MenuDrawer`'s `DRAWER_HEADING` (`text-faint` at that panel's own `px-3`, because
 `MENU_HEADING` carries `px-2.5` and put the word 2px inboard of the rows it heads),
 and `TaskPanel`'s `FINISHED_HEADING` (`text-faint`, spent by **both** arms of the

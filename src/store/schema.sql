@@ -1,12 +1,4 @@
--- Reemoat durable state. Re-applied on every open; every statement is idempotent.
---
--- Read at runtime with readFileSync(new URL("./schema.sql", import.meta.url)).
--- There is no build step, so this file simply sits beside the module that loads
--- it. If a bundler ever appears, it has to be carried across as an asset.
---
--- Pragmas are deliberately NOT here: `PRAGMA journal_mode = WAL` returns a row,
--- so it has to go through prepare().get() where the result can be checked.
--- See openStores().
+-- Re-applied on every open: every statement must be idempotent.
 
 CREATE TABLE IF NOT EXISTS sessions (
   id               TEXT PRIMARY KEY,
@@ -14,163 +6,39 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
 
-  -- The agent's own session id. This is the whole resume story: ACP hands it
-  -- back from session/new and accepts it on session/resume, and every agent
-  -- keeps its side of it on disk.
   agent_session_id TEXT,
-  -- Last known agent, so a crashed daemon's orphans can be reaped on the next
-  -- boot. Which of these carry it depends on where the agent ran, and the two
-  -- are deliberately not one column:
-  --
-  --   agent_pid                 a host pid, when the agent was a child of the
-  --                             daemon. Signalled only behind an os.uptime()
-  --                             fence, because pids are recycled across a reboot.
-  --   container_id +            a process group inside that container's own PID
-  --   agent_pgid +              namespace, which is a different number space.
-  --   container_started_at      Fenced by the container's StartedAt instead:
-  --                             measured 2026-07-30, a `docker restart` reset the
-  --                             namespace (a fresh pid was 309 before and 15
-  --                             after) while host uptime did not move at all, so
-  --                             the host fence cannot see it.
-  --
-  -- Exactly one group is non-NULL. Stored in one column the two would be
-  -- indistinguishable, and the cost of confusing them is SIGKILL to whichever
-  -- process now holds that number.
+  -- Exactly one group is non-NULL: a host pid and a container pgid are different number spaces.
   agent_pid        INTEGER,
   container_id     TEXT,
   agent_pgid       INTEGER,
   container_started_at INTEGER,
 
-  status           TEXT    NOT NULL,   -- last derived status; informational, never authoritative
-  exit_json        TEXT,               -- SessionExit as JSON, NULL while live
+  status           TEXT    NOT NULL,
+  exit_json        TEXT,
   turn_counter     INTEGER NOT NULL DEFAULT 0,
   last_event_at    INTEGER,
 
-  -- Persisted so looksLikeOurs() still recognises its own ids after a restart,
-  -- and answers "that was settled and forgotten" rather than the much worse "no
-  -- such thing on this session".
-  --
-  -- These count *every* parked question, not only permissions: perm-N-salt and
-  -- elic-N-salt are minted from the same counter, because the question the salt
-  -- answers ("is this id from this session's this life") is identical for both
-  -- and the prefix already separates the two spaces. A second pair would have
-  -- meant a second column, i.e. a migrate() ALTER, to buy gaps in each kind's
-  -- numbering that nothing reads as a count.
-  --
-  -- The column names are therefore stale, and stay so on purpose: SQLite cannot
-  -- rename a column without rewriting the table, and this one holds every
-  -- session on disk. Same trade owner_subject is left dead for, two comments
-  -- down. In TypeScript they are askSeq/askSalt.
+  -- perm_* counts every parked question; renaming would rewrite the table.
   perm_seq         INTEGER NOT NULL DEFAULT 0,
   perm_salt        TEXT    NOT NULL DEFAULT '',
 
-  -- Why the daemon permanently stopped trying to put an agent back on this
-  -- session. NULL — the value every row starts with — means it is still worth
-  -- trying, which is what almost every session deserves for ever.
-  --
-  -- The one exception to retry state living in memory. Everything else the pass
-  -- learns (a timeout, an unreachable mount, an agent that is not signed in) is
-  -- deliberately forgotten across a restart, because a restart is new
-  -- information. This is written only when the *agent* says it no longer holds
-  -- the conversation, which is a fact about its disk that no restart of ours
-  -- changes -- and which was costing three agent spawns per dead session on
-  -- every boot before it was written down. See resumeGiveUpPersists().
-  --
-  -- Also here rather than only in migrate(), because this file creates the
-  -- table on a fresh database and migrate() only ever adds to an existing one.
   resume_gave_up   TEXT,
 
-  -- Monotonic floors for the event store. A session whose events were pruned
-  -- would otherwise restart its sequence at 1, handing a resuming client
-  -- different events under numbers it has already seen. See seedFloors().
   last_seq         INTEGER NOT NULL DEFAULT 0,
   dropped          INTEGER NOT NULL DEFAULT 0,
 
-  -- Dead as of schema v6, and left here on purpose.
-  --
-  -- v2 added it and said "recorded, never enforced ... so that when filtering is
-  -- wanted it is a query change rather than an archaeology problem". v2-v5
-  -- enforced it: one daemon answered for several people and every read path
-  -- filtered on this column. v6 stopped, because the daemon serves one person
-  -- again. Nothing reads or writes it; new rows leave it NULL.
-  --
-  -- Not removed, and the asymmetry with the credential tables is deliberate:
-  -- SQLite cannot drop a column without copy-drop-rename of the whole table, and
-  -- `sessions` holds every transcript on disk. Risking all of that to reclaim one
-  -- nullable column per row is a bad trade. The credential tables were rewritten
-  -- because they are small and hold secrets.
+  -- Dead since schema v6; kept because dropping a column rewrites the whole table.
   owner_subject    TEXT,
 
-  -- What this session is called, and whether it is kept at the top of the list.
-  --
-  -- Added in schema v5, same two-places rule as owner_subject above: fresh
-  -- databases get them here, existing ones from the guarded ALTER in migrate().
-  --
-  -- These are the only columns on this table that are *meant* to change after
-  -- creation, so unlike agent and created_at they are named in the upsert's DO
-  -- UPDATE clause.
-  --
-  -- NULL title means never named — deliberately not '', so a client renders its
-  -- own fallback rather than an empty header. The first prompt fills it in once;
-  -- a manual rename leaves it non-null and therefore wins for ever.
-  --
-  -- `pinned` carries a DEFAULT where owner_subject above deliberately does not:
-  -- SQLite refuses ADD COLUMN ... NOT NULL without one, and 0 is the honest value
-  -- here because nothing that predates the column was ever pinned. NULL was the
-  -- honest value for an owner nobody recorded, which is why that one never had a
-  -- default.
   title            TEXT,
   pinned           INTEGER NOT NULL DEFAULT 0,
 
-  -- Where this session sits in the list somebody reads, and NULL for "wherever
-  -- its age puts it".
-  --
-  -- A position clock rather than an index: the unit is a millisecond, unset means
-  -- created_at, and a drag writes a synthetic instant between its two new
-  -- neighbours. That is what lets a stored position and a never-touched row be
-  -- compared at all -- one number line, so a session nobody has moved has an
-  -- honest place on it and a session created a moment ago is still at the top of
-  -- its folder without anything being written here.
-  --
-  -- Nullable on ultracode's grounds rather than pinned's: 0 would be a real
-  -- position, and the oldest one, so every row that predates this column would
-  -- sort to the bottom of its folder the day it shipped.
-  --
-  -- REAL because a drop between two adjacent milliseconds has to land strictly
-  -- between them. The client detects the day that runs out and re-spaces the
-  -- window rather than writing a tie; see `rankBetween` in packages/web.
   rank             REAL,
 
-  -- Whether somebody chose ultracode for this session, and NULL for nobody has.
-  --
-  -- Nullable on owner_subject's grounds rather than pinned's: there is no honest
-  -- default. "Never chosen" follows REEMOAT_CLAUDE_ULTRACODE at every launch,
-  -- "chosen off" outranks it for ever, and a 0 that meant both would make every
-  -- session that predates this column permanently disagree with the machine's own
-  -- setting. Also in the DO UPDATE clause, being one of the few things about a
-  -- session that is meant to change after creation.
   ultracode        INTEGER,
 
-  -- What the agent was offering when it went: the config and the command list, as
-  -- one JSON blob. NULL for a session that never started an agent and for one that
-  -- is not coming back, which are the same honest value — there is nothing to
-  -- remember.
-  --
-  -- The one copy of agent state that outlives the process that learned it. The
-  -- argument is at `AgentStateMemory` in src/events.ts and the write gate is
-  -- `revivableByPrompt` in src/registry.ts; what makes it safe is that a wake
-  -- replays it through `Session.restoreConfig`, which drops anything the returning
-  -- agent no longer offers.
-  --
-  -- Nullable with no DEFAULT on `resume_gave_up`'s grounds, and in the DO UPDATE
-  -- clause on `ultracode`'s: it is a fact about the session that is meant to change
-  -- after creation. `SCHEMA_VERSION` does not move — a nullable column an older
-  -- daemon never selects is invisible to it, so a rollback keeps working, and such
-  -- a daemon simply draws the strip the way it did before.
   agent_state_json TEXT,
 
-  -- The SessionWorkspace record. The denormalized columns beside it exist so
-  -- "which worktrees do I own" is one query rather than N blob parses.
   workspace_json   TEXT    NOT NULL,
   workspace_mode   TEXT    NOT NULL,
   workspace_root   TEXT    NOT NULL,
@@ -180,124 +48,29 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions (created_at);
 
--- Column order is load-bearing. `payload` is last so SQLite's record decoder can
--- stop before it: eviction and startup read seq/ts/bytes for every row in a
--- session, and must not fault in the overflow pages of a 128 KiB diff just to
--- answer "how big was it".
---
--- There is deliberately no foreign key to `sessions`. It would buy a cascade we
--- can write as one extra DELETE, and cost an index probe on every INSERT — on
--- the agent's synchronous emit path.
+-- Column order is load-bearing: payload last, so reading seq/ts/bytes stops before it.
 CREATE TABLE IF NOT EXISTS events (
   session_id TEXT    NOT NULL,
   seq        INTEGER NOT NULL,
   ts         INTEGER NOT NULL,
-  -- estimateBytes() of the stored payload, NOT length(payload). That is the
-  -- currency the per-session bound is denominated in, and the one server.ts
-  -- independently re-derives for its outbound queue. Using JSON length here
-  -- would silently redefine what "8 MiB per session" means.
   bytes      INTEGER NOT NULL,
   payload    TEXT    NOT NULL,
   PRIMARY KEY (session_id, seq)
 );
 
--- ⚠ **There is deliberately no covering index for `loadCounters`, and it was
--- tried.** `(session_id, seq, bytes)` does make the boot aggregate answerable
--- without touching the table — measured, 400 000 events over 554 MB went from
--- 102ms to 25ms. It was taken back out because of what it costs on the other
--- side: the same 3000 appends went from 32.6ms to 47.0ms, +45%, about 4.8us an
--- event. Those 400 000 events therefore buy 77ms once per boot for ~1.9s of extra
--- insert time, on the agent's synchronous emit path.
---
--- Which is the trade refused fourteen lines above for the foreign key, and an
--- index *insert* is strictly dearer than the index *probe* declined there. The
--- premise was wrong too: `payload` being last means the record decoder stops
--- before it, so reading `bytes` never faulted in a diff's overflow pages — the
--- cost being removed was a per-row b-tree seek, not a wide scan.
---
--- If the boot aggregate ever does become the problem, the answer is not here: it
--- is to keep the counters on the `sessions` row, where `seedFloors` already floors
--- them, or to derive them per session on demand rather than for the whole table at
--- open.
-
--- Single row. What this machine learned at enrollment, and the only thing it
--- ever needs from a control plane.
---
--- Nothing in here expires. A public key has no expiry, which is precisely what
--- lets an enrolled daemon keep verifying tokens with the control plane switched
--- off permanently. `code_fp` is a fingerprint of the enrollment code that was
--- redeemed, not the code itself: it is what makes "restarted with the same code"
--- (do nothing) distinguishable from "restarted with a new code" (re-enroll)
--- without a separate flag anybody could set wrongly.
 CREATE TABLE IF NOT EXISTS identity (
   id            INTEGER PRIMARY KEY CHECK (id = 1),
   machine_id    TEXT    NOT NULL,
   issuer        TEXT    NOT NULL,
-  -- [{ kid, jwk }] — plural, so a key rotation can be in flight and this daemon
-  -- can trust the old and new keys at once.
   keys_json     TEXT    NOT NULL,
   control_plane TEXT    NOT NULL,
   code_fp       TEXT    NOT NULL,
   enrolled_at   INTEGER NOT NULL,
-  -- The relay tunnel credential, and where to present it. Both NULL when the
-  -- control plane runs no relay, which is also the value every identity written
-  -- before these columns existed carries — so "no relay" needs no second flag.
-  --
-  -- This is the only recoverable secret in the file. Everything else identity
-  -- holds is public; a daemon needs this one to prove it is itself on a
-  -- connection it makes later, which a public key cannot do.
   tunnel_key    TEXT,
   relay_url     TEXT
 );
 
--- A pasted agent credential, keyed by agent and variable name.
---
--- v6 rekeyed this from `(owner_subject, agent, env_name)`: it used to be one
--- credential per person, and there is one person now.
---
--- It exists because the alternative is a shell on the host. Every agent
--- authenticates out of band and reads its tokens from disk, and from a phone
--- there is no terminal to run a login in — which is the whole product, not an
--- edge case. The wizard drives the CLI under a pty; this is the other path, for
--- a token minted somewhere else.
---
--- `env_name` rather than a fixed column per agent: what a credential *is* is the
--- name of the environment variable the CLI reads it from (`CLAUDE_CODE_OAUTH_TOKEN`,
--- `KIMI_API_KEY`, `CODEX_API_KEY`), and that is per agent and liable to grow —
--- codex was the third and this table did not move. Storing the name beside the
--- value keeps `agentEnv` — which merges these at spawn — from having to know any
--- of them.
---
--- The secret is stored in the clear, and that is the same posture as the rest of
--- this file: it already holds every transcript, and `identity.tunnel_key`
--- alongside. The protection is the 0700 directory and the 0600 file, which is
--- also why the directory mode is chmodded rather than only the database — SQLite
--- writes `-wal` and `-shm` beside it on its own schedule.
---
--- Keyed by (agent, env_name) since schema v6. It used to carry an owner as well,
--- and dropping that is the one migration in this file that rewrites a table —
--- see migrateCredentialsToV6, and note that this CREATE is a no-op against an
--- existing v5 table, so the rewrite there is what actually moves it.
---
--- Retention: **none, deliberately.** A row here goes when the route that wrote it
--- is asked to remove it, or when a paste replaces it, and at no other time.
---
--- ⚠ **There was an age-plus-emptiness sweep in `prune()` and it is a reversal
--- that it is gone.** It cost a real thing and bought an argued one: `updated_at`
--- moves only on a paste, so the age half was permanently true of any key in use
--- and the rule collapsed to "no sessions left" — eight idle days, since unpinned
--- sessions aged out at seven then, by creation. A machine put down over a holiday
--- came back with its
--- tokens gone. Against that, deleting a local copy revokes nothing at the vendor,
--- and `identity.tunnel_key` sits in this same file with no sweep at all, so the
--- file carries a live secret either way. Q7.124 has the whole argument.
---
--- The protection is the one the rest of this file already rests on: a 0700
--- directory and a 0600 file, which is what `~/.claude/.credentials.json` and
--- `~/.codex/auth.json` are protected by too, and neither of those self-expires.
---
--- A new *table*, so `schema.sql` alone is enough — `migrate()` exists only for
--- new columns on tables that already exist.
+-- No retention by design (Q7.124); secrets in the clear, protected by the 0700 directory and 0600 file.
 CREATE TABLE IF NOT EXISTS agent_credentials (
   agent         TEXT    NOT NULL,
   env_name      TEXT    NOT NULL,
@@ -307,47 +80,13 @@ CREATE TABLE IF NOT EXISTS agent_credentials (
 );
 
 
--- Files staged for a prompt, and the accounting that bounds them.
---
--- The bytes live under the upload root (`~/.reemoat/uploads` by default), one
--- directory per upload; this table is the index. **The row is the commit point**:
--- bytes on disk with no row here are an aborted or interrupted upload and are
--- swept, and a row whose directory has gone is dropped rather than served.
---
--- On disk rather than in memory, and the argument is *accounting* rather than
--- describability. A `prompt` event carries name/mime/bytes, so a transcript can
--- describe an attachment from the log alone — an in-memory registry in
--- `agentauth.ts`'s shape would pass that test. What it fails is the per-session
--- byte budget: a restart would reset every total to zero, and a daemon restart is
--- the ordinary outcome of `deploy.sh`, so one session could write the whole quota
--- again after every one. `agentauth.ts` gets away with memory because a pty dies
--- with its parent. A file does not.
---
--- `consumed_at` is NULL until a prompt names the upload, and it selects which
--- retention applies: an unconsumed file is somebody who attached and walked away,
--- and dies on its own TTL; a consumed one has no TTL and lives until its session
--- row is pruned. That is the only lifetime that matches "this conversation still
--- exists" — keying it on the `prompt` event would delete files while the session
--- is open, because the log evicts a *prefix*.
---
--- No foreign key to `sessions`, the same answer `events` gives: `prune()` deletes
--- orphans in the same transaction, and `PRAGMA foreign_keys` is off by design.
---
--- A new *table*, so `schema.sql` alone is enough and `SCHEMA_VERSION` stays 6 —
--- `migrate()` exists only for new columns on tables that already exist. Leaving
--- the version alone is deliberate rather than lazy: `refuseNewerSchema` throws on
--- a file stamped newer than the running build, so a bump would turn every
--- rollback into a daemon that will not start, to buy nothing.
+-- The row is the commit point; NULL consumed_at is staged and expires, otherwise it lives as long as its session.
 CREATE TABLE IF NOT EXISTS uploads (
   session_id  TEXT    NOT NULL,
   upload_id   TEXT    NOT NULL,
-  -- The stored name: sanitized, a single path segment. Never what was sent.
   name        TEXT    NOT NULL,
-  -- What was sent, echoed back once so a client can say "we saved it as …".
   orig_name   TEXT    NOT NULL,
-  -- As the client declared it. Never re-derived, and never echoed on a download.
   mime        TEXT,
-  -- Counted while reading the body, never taken from Content-Length.
   bytes       INTEGER NOT NULL,
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER,
@@ -356,9 +95,6 @@ CREATE TABLE IF NOT EXISTS uploads (
 
 CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads (created_at);
 
--- Single row. Exists so a second daemon pointed at this file refuses to start
--- rather than interleaving sequence numbers with the first one and driving every
--- append in both processes into the degradation path.
 CREATE TABLE IF NOT EXISTS daemon (
   id          INTEGER PRIMARY KEY CHECK (id = 1),
   instance_id TEXT    NOT NULL,
@@ -366,88 +102,26 @@ CREATE TABLE IF NOT EXISTS daemon (
   started_at  INTEGER NOT NULL
 );
 
--- Plugins installed on this machine.
---
--- A new *table* again, so `schema.sql` alone is enough and `SCHEMA_VERSION` stays
--- 6, for the reason the `uploads` comment above already gives in full: a bump
--- turns every rollback into a daemon that will not start, to buy nothing.
---
--- One row per plugin rather than one per version, and that is the update story
--- rather than a space saving: an update *replaces* this row, and the only thing
--- that survives it is `plugin_data`, which is keyed on the id below. Two rows
--- would make "which version is installed" a query with an answer that can be two.
---
--- `manifest_json` is the validated manifest, stored whole rather than exploded
--- into columns. It is read back through `parseManifest` on every open — so a row
--- written by a newer build whose manifest this one cannot validate is refused as
--- a plugin rather than half-understood as a set of columns, which is what a
--- column per field would silently produce.
 CREATE TABLE IF NOT EXISTS plugins (
   id            TEXT PRIMARY KEY,
   version       TEXT    NOT NULL,
   manifest_json TEXT    NOT NULL,
-  -- Switched off by a person, and it survives an update: re-enabling somebody's
-  -- disabled plugin because they updated it would be this daemon deciding
-  -- something on their behalf.
   enabled       INTEGER NOT NULL DEFAULT 1,
   installed_at  INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
-  -- The archive's filename. A forensic trail; nothing reads it for a decision.
   source        TEXT
 );
 
--- What a plugin has put here.
---
--- **Keyed on the plugin's id and never on its version**, which is the whole of
--- what makes an update an update: a board keeps its cards across 0.1.0 → 0.2.0
--- because no part of this key mentions a version. Dropped only when the plugin is
--- uninstalled — a board whose cards outlive the board is litter nothing collects.
---
--- A table rather than a JSON blob on the `plugins` row, for the bound rather than
--- for the shape: the per-plugin byte and key ceilings are enforced by counting
--- rows, and a blob makes "how many keys does this plugin hold" a parse.
 CREATE TABLE IF NOT EXISTS plugin_data (
   plugin_id  TEXT    NOT NULL,
   key        TEXT    NOT NULL,
-  -- JSON, serialized on the host side so the byte the quota counts is the byte
-  -- that lands here.
   value      TEXT    NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (plugin_id, key)
 );
 
 
--- A credential for a *system* — Anthropic, OpenAI, Moonshot — as opposed to one
--- for a CLI.
---
--- `agent_credentials` above is keyed on the environment variable a CLI reads its
--- token from, because that is what a pasted agent credential *is*. This one is
--- not, and the difference is the whole reason it is a second table rather than a
--- second key: a system credential is never merged into an environment. It is
--- handed to ACP's `providers/set` over the agent's stdio, as a header value, so
--- there is no variable name to store — which is the whole of what this shape
--- difference buys.
---
--- It does NOT buy "no variable to leak", and that sentence stood here for a
--- release. `claude-agent-acp` 0.63.0 turns those headers back into
--- `ANTHROPIC_CUSTOM_HEADERS` on the `claude` CLI it spawns, so a routed session's
--- key is as visible to the agent as a pasted one. Read the note in
--- `src/acp/systems.ts` before relying on the difference for anything.
---
--- One row per system rather than per (system, harness): the point of naming the
--- thing you sign in to is that one Moonshot key serves `kimi` natively and
--- `claude` routed, and storing it twice would make "signed in" a question with
--- two answers.
---
--- Stored in the clear, for the same reason and with the same protection as every
--- other secret here: the 0700 directory and the 0600 file.
---
--- Retention follows `agent_credentials` exactly, which since Q7.124 means there
--- is none: `prune()` names neither table, and a key goes when
--- `DELETE /systems/:system` is called or a paste replaces it.
---
--- A new table, so `schema.sql` alone is enough; `migrate()` is only for columns
--- on tables that already exist, and `SCHEMA_VERSION` does not move for either.
+-- No retention (Q7.124); passed over ACP, never merged into an environment.
 CREATE TABLE IF NOT EXISTS system_credentials (
   system        TEXT    NOT NULL PRIMARY KEY,
   secret        TEXT    NOT NULL,
@@ -455,29 +129,7 @@ CREATE TABLE IF NOT EXISTS system_credentials (
 );
 
 
--- An agent somebody assembled: a harness, a system, and a model.
---
--- Per machine, because every ingredient already is. The harness is a binary on
--- this host, the credential is in the table above on this host, and which models
--- a harness offers is a fact about the CLI installed here — so a list that
--- followed a person between machines would be a list of things that may not
--- exist on the one they are looking at.
---
--- `harness` and `system` are stored as text and **validated on the way out**, not
--- merely cast. That is Q7.31's named precondition: `fromRow` used to cast
--- `agent` straight to `AgentId`, so a row naming something no longer in the union
--- restored as a well-typed value and failed later in `resolveAgent`, with a
--- worktree already made. A custom agent would have been a second such cast, so
--- the rule is applied to all three.
---
--- `model` is not validated against anything and cannot be: for a native pairing
--- the list belongs to a CLI that updates on its own schedule, and for a routed
--- one it belongs to somebody else's API. What refuses a stale model is the agent
--- or the provider, at the moment it is used, by name.
---
--- No uniqueness beyond the id: two rows may name the same triple. They are
--- somebody's own named presets, and refusing a duplicate would be this daemon
--- having an opinion about what a person calls their own tools.
+-- harness and system are validated on read, model never (Q7.31).
 CREATE TABLE IF NOT EXISTS custom_agents (
   id            TEXT    NOT NULL PRIMARY KEY,
   name          TEXT    NOT NULL,
@@ -486,52 +138,12 @@ CREATE TABLE IF NOT EXISTS custom_agents (
   model         TEXT    NOT NULL,
   created_at    INTEGER NOT NULL
 );
--- Machine-wide preferences a person set from the settings screen.
---
--- A new *table*, so `schema.sql` alone is enough and `SCHEMA_VERSION` stays 6 —
--- the reason `uploads` and `plugins` already give: a bump turns every rollback
--- into a daemon that will not start, to buy nothing.
---
--- ⚠ **This is deliberately not "the daemon's config".** That is env only and
--- stays so: `REEMOAT_*` is read in `scripts/daemon.ts`, nothing in `src/` touches
--- `process.env`, and an operator provisioning a fleet writes an env file. What
--- this table holds is the narrow class of settings whose *owner is the person
--- using the machine* rather than the person deploying it — the ones with a
--- control on a screen. `agent_strip` above is the same class and predates the
--- table only because one preference did not need a general home.
---
--- Key/value rather than a column each, and the keys are enumerated in
--- `MACHINE_SETTING_KEYS` rather than here: a row whose key this build cannot name
--- is ignored on read and never written, which is `compatibility.md`'s rule for
--- which way an unknown value must fail applied to a downgrade. A column per
--- setting would make that a migration instead.
 CREATE TABLE IF NOT EXISTS machine_settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
 
--- Which agents the New session strip offers on this machine, and in what order.
---
--- A **partial** record, and that is the whole design. It holds a position and a
--- switch for the things somebody has actually moved or hidden; what the strip
--- draws is that list merged against what the machine currently offers, so an
--- agent this table has never heard of appends at the end and is visible. A new
--- harness must not arrive already switched off.
---
--- `ref` is deliberately **not** validated against anything, on the way in or on
--- the way out — the opposite of `custom_agents.harness` one table up, and for a
--- reason that is the mirror of that one. There, a row naming something outside
--- the union restores as a well-typed lie and fails later with a worktree already
--- made. Here the row *is* the memory: a harness signed out for a week and a
--- preset this build cannot resolve both keep their positions, and the merge drops
--- what does not resolve at the moment it draws. Validating here would mean
--- forgetting an order every time an agent was briefly unavailable, which is
--- precisely what somebody would notice.
---
--- No `machine` column: this database *is* one machine. The strip is per machine
--- and not per person for the reason the daemon stopped asking who the subject is
--- — `custom_agents` beside it is shared the same way.
 CREATE TABLE IF NOT EXISTS agent_strip (
   kind          TEXT    NOT NULL,
   ref           TEXT    NOT NULL,
@@ -541,80 +153,8 @@ CREATE TABLE IF NOT EXISTS agent_strip (
 );
 
 
--- The X25519 static key this machine is known by to an app that reaches it.
---
--- **The only key this daemon generates rather than learns.** That is why it is
--- its own table instead of two more columns on `identity`: that row is described
--- as *what this machine learned at enrollment, and the only thing it ever needs
--- from a control plane*, and a key generated here falsifies both halves of the
--- sentence. `identity` is also `CHECK (id = 1)` and this table has to hold more
--- than one row — the live key plus every key ever retired — the same reason
--- `signing_keys` is plural on the control plane.
---
--- ⚠ **`private_key` is the second recoverable secret in this file**, beside
--- `identity.tunnel_key`, and it is a stronger one: the tunnel key proves which
--- machine this is to a relay, while this one decrypts what an app sends. It sits
--- in the same 0600 file in the same 0700 directory as the transcripts it
--- protects, which is the same argument `identity.tunnel_key` already makes — a
--- second file would be a second set of permissions to get right and no second
--- protection. Anything that can read this file can already read the work.
---
--- ⚠ **At most one row may have `retired_at IS NULL`, and it is enforced — but
--- not here.** The partial unique index `machine_keys_one_live` is created by
--- `migrate()` in `sqlite.ts`, deliberately rather than by this file, because this
--- file is one `exec` that runs *before* `claimDaemonLock` and before any repair.
--- Two daemons racing on one file could once both mint a key (the lock was a read
--- and then an unconditional write), so databases holding two live rows exist; a
--- `CREATE UNIQUE INDEX` here would throw at schema load on exactly those files and
--- the daemon would never start. The repair that has to precede it *retires a row*,
--- which is destructive and must not run before the lock is claimed.
---
--- ⚠ **"Nothing *rotates* a key today" was true when this table was written and
--- is not true now**, and everything this paragraph used to conclude rested on
--- it. `retired_at` was added ahead of a rotation deliberately rather than
--- speculatively — the column costs nothing, and a rotation that had to add it
--- later would have to add it to a table a live daemon is reading — and the
--- rotation that arrived is the case that argument was made for.
---
--- **Four things touch `retired_at`, not three.** `active()` filters on it,
--- `retire()` and `migrateMachineKeysToOneLive` write a timestamp into it, and
--- `promote()` in `sqlite.ts` — the dial's answer to a 409 — writes both halves:
--- it retires every other live row and then writes `retired_at = NULL` back onto
--- the candidate, which makes it the only writer in this tree that *un*-retires
--- anything. That is what makes a retirement reversible by code rather than only
--- by hand, and it is why a retirement keeps the row: `promote` needs the private
--- half of a key that was taken out of the answer.
---
--- **What the rotation moved is which key is announced, not how many are live,
--- and that distinction is why this index stays.** A rotation in the full sense
--- would mean an *overlap* — announce the new key, keep answering on the old
--- until no app offers it — and nothing in this build can answer on two statics
--- at once: `scripts/daemon.ts` hands the tunnel one static, and the 409 arm
--- swaps the public and private halves together rather than holding two pairs. So
--- the overlap is still something a rotation would have to **add**, and it would
--- still have to remove this index to get it.
---
--- ⚠ **"A 409 on every dial, for ever" is no longer what a second live row costs,
--- and that sentence was the whole justification written here.** The rotation
--- recovers from exactly that state — it is what it exists for — so the index can
--- no longer be argued for as the only thing standing between a file and a
--- permanently dark machine. What a second live row still costs is smaller and is
--- real: `active()` orders `created_at DESC`, so it answers the *later* key, which
--- is the one trust-on-first-use never pinned; every start then announces a key
--- the control plane will refuse, and the machine is reachable only after a 409
--- and a redial that promotes the row which should have been live all along. A
--- recoverable wrong answer is still a wrong answer, and this index is what stops
--- the state being created instead of cleaned up after.
---
--- A new table, so `SCHEMA_VERSION` does not move: this file is
--- `CREATE … IF NOT EXISTS` and is re-applied on every open. The index does not
--- move it either: an older daemon inserts here only when it has no live key, so
--- it can never reach the constraint.
+-- At most one live row, enforced by an index migrate() creates after the lock, not here.
 CREATE TABLE IF NOT EXISTS machine_keys (
-  -- base64url(sha256(RFC 7638 thumbprint of the public JWK)). Derived rather
-  -- than random, so the same key is the same id wherever it is named — which is
-  -- what lets an operator compare what the daemon logged with what `cpctl`
-  -- prints, by eye.
   kth         TEXT PRIMARY KEY,
   public_key  TEXT    NOT NULL,
   private_key TEXT    NOT NULL,

@@ -109,7 +109,9 @@ a forgotten password. `mailConfigured` reports it as a **non-blocking** problem,
 worded without the words *"is not set"* because `isMissing` keys on those and a
 sentence carrying them would stop the instance sending mail at all. The comparison
 needs the API's own origin, which is a property of the *request* rather than of
-this process, so `GET /v1/admin/settings` is the one caller that can make it.
+this process, so `GET /v1/admin/settings` is the one caller that can make it. It
+passes one only while this process serves no gate bundle (`servesGate` in `app.ts`),
+since a control plane serving its gate is where the links belong.
 
 And the gate itself takes a **pasted link or code**, which is the remedy for the
 other half of the same problem: a mail client that rewrites the URL and drops the

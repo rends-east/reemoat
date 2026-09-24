@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Nothing. The webview calls this app's own commands, which are not ACL-gated, and the three Tauri plugins here are used from Rust only — so a permission for any of them would be a door the webview could walk through on a page that renders agent output. `pnpm nativecheck` pins this list empty and pins the plugin prefixes out of it.",
+  "description": "Nothing. The webview calls this app's own commands, which are not ACL-gated, and the three Tauri plugins here are used from Rust only — so a permission for any of them would be a door the webview could walk through on a page that renders agent output. `pnpm nativecheck` pins this list empty and pins the plugin prefixes out of it. `main` is the window, and every account's webview is a child of it, so this one entry covers all of them.",
   "windows": ["main"],
   "permissions": []
 }

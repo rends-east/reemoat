@@ -164,7 +164,8 @@ rewriting a table holding every transcript on disk); in TypeScript the type is
 **`decline` and `cancel` are different acts and the route offers both.** Declining
 runs the tool with empty answers and the turn *carries on*; cancelling throws and
 the tool call dies. The card offers Skip and Send; cancel is what every sweep sends
-— stopping the session, and now also stopping the *turn*.
+— stopping the session, and now also stopping the *turn*. grok's own requests have
+one word for both (`acp-extensions.md`).
 
 **Nothing answers on your behalf.** `Session.onPermission` falls back to allow-once
 with no resolver because that is a defensible default; a question has none, so a
@@ -380,8 +381,8 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   popover names the agent and points at `/usage`. **Asking for it ourselves is not
   possible** — ACP has no request for usage, and sending `/usage` as a *prompt*
   spends the session's one turn. Q7.26, Q7.27.
-- **`usage_update._meta` is dropped, and it carries `_claude/rateLimit`** — the
-  field that answers "why has this stalled". `_meta` is an unbounded agent-shaped
+- **`usage_update._meta` is dropped bar `_claude/origin` (Q2.233)**, and it carries
+  `_claude/rateLimit` — the field that answers "why has this stalled". `_meta` is an unbounded agent-shaped
   blob and `contextUsage` rides a snapshot returned sixty at a time. Q7.25.
 - **`available_commands_update` always arrives outside a turn**, scheduled
   `setTimeout(…, 0)` after `session/new`, so it lands before any prompt exists to
@@ -422,7 +423,6 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   ⚠ **And it publishes no `mode` at all, in any session** — `configOptions` is those
   two and `modes` is absent. What the composer does with that is
   `web-composer.md`'s. Q6.109, Q6.111.
-  Q6.109.
 - **`session/set_config` and `session/set_config_option` are different methods,
   and only the second is this daemon's.** opencode answers `-32601` to the first
   and implements the second — so an upstream issue closing "per-session model

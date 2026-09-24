@@ -111,7 +111,8 @@ refused before it is resident. Q2.38.
   the *creating* origin, whose `localStorage` holds `reemoat.credential`, and this
   route serves **any regular file under a session's workspace**, so a rendered HTML or
   SVG executes on the daemon's own origin. Never `window.open(blobUrl)`, never
-  `target="_blank"` without `download`, never an `<iframe src=blobUrl>`. `daemoncheck`
+  a `blob:` URL behind `target="_blank"` (an object URL reaches an anchor only with
+  `download`; `webcheck` pins every `_blank` anchor), never an `<iframe src=blobUrl>`. `daemoncheck`
   pins the pair the query credential rests on: the 401 on `/files?…&token=` and the
   still-working handshake. Q5.71.
 - **Symlinks are never content-diffed.** `git diff --no-index` follows the link, so
@@ -171,7 +172,7 @@ refused before it is resident. Q2.38.
 | `src/uploads.ts` | Files staged for a prompt: the root, the streaming write, the sanitizer, the TTL sweep, the content blocks they become. Declares `UploadRow`/`UploadIndex` |
 | `src/changes.ts` | What a session changed, and the diff for one file of it. Paths come out **relative to `workspace.root`**: git speaks repo-root-relative on both commands, `-z` is what makes `status` agree with `diff` (so `--relative` is the bug rather than the fix), and `repoPrefix`/`toWorkspaceRelative` translate once on the way out (Q7.90). Containment is the two halves above, `probeRequestable` answering `"ok" \| "escapes_tree" \| "git_dir" \| null` and `probeContained` being the two-answer form over it. `markBinary` runs after the file cap through `probeBinary`'s deadline, never as syscalls inside the parser (Q7.88) |
 | `src/browse.ts` | Directory listing so a remote client can pick a `cwd`. `REEMOAT_ROOTS` narrows what is *listed* and nothing else; `resolveCwd` is deliberately unconfined |
-| `src/stall.ts` | Asking the filesystem something that may never be answered: the bounded probe, the permit gate, the memory of which paths do not reply. `probeBinary` is git's own NUL heuristic through that deadline — git having listed a path says nothing about whether the next syscall returns (Q7.88). `probeRealpath` is the third answer beside `probeExists`/`probeFile` and the bounded form of `paths.ts`'s synchronous `resolved()`, reached everywhere a path somebody *else* named is resolved |
+| `src/stall.ts` | Asking the filesystem something that may never be answered: the bounded probe, the permit gate, the memory of which paths do not reply. `probeBinary` is git's own NUL heuristic through that deadline — git having listed a path says nothing about whether the next syscall returns (Q7.88). `probeRealpath` is the third answer beside `probeExists`/`probeFile` and the bounded form of `paths.ts`'s synchronous `resolved()`, reached everywhere a path somebody *else* named is resolved. `probeBuild` is `probeRealpath` plus a `stat` of the target: which *file* a CLI's path names, compared by `LocalRuntime.agentCli` on every use (Q6.112) |
 | `src/mounts.ts` | The kernel's mount table, and which filesystems answer over a network. Read from `/proc/self/mounts` or `mount(8)` — never `statfs`, which asks the server the question it is hanging on |
 | `src/paths.ts` | `containedIn` / `atOrUnder`: realpath first, then compare segment-wise. The one containment primitive — and `containedInResolved` / `atOrUnderResolved`, the same segment-wise rule with the resolving already done, which is what an async caller compares two `probeRealpath` answers with rather than writing a second prefix test (Q5.100) |
 | `packages/web/src/paths.ts` | `relativeTo` and `filenameFor`: the join between absolute agent paths and the workspace-relative path the download route takes |

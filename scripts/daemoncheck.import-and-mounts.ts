@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { crc32, deflateRawSync, gzipSync } from "node:zlib";
 import { join } from "node:path";
 import {
@@ -14,35 +14,36 @@ import {
 } from "../src/archive.js";
 import { forgetStalled, isStalled, listDirs, makeDir, PathError, probeExists, resolveCwd } from "../src/browse.js";
 import { isRemoteType, mountFor, parseBsdMounts, parseLinuxMounts, readMounts } from "../src/mounts.js";
+import { attempt, probeBuild, stallKeyFor } from "../src/stall.js";
 import { atOrUnder, atOrUnderResolved, containedIn, containedInResolved } from "../src/paths.js";
 import { WebSocketServer } from "ws";
 import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
 import { DAEMON_VERSION } from "../src/version.js";
 import { AGENT_CLIS_HEADER, DAEMON_VERSION_HEADER, RELAY_PROTOCOL_VERSION, formatAgentClis } from "../src/relay/protocol.js";
+import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
+import { MemoryEventStore } from "../src/events.js";
+import { SessionRegistry } from "../src/registry.js";
+import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentCliChoice } from "../src/runtime/types.js";
+import { createApp } from "../src/server.js";
 import { check } from "./daemoncheck.env.js";
-import { sandbox, users, tokenWith, tokenFor, registry, app, get } from "./daemoncheck.fixtures.js";
+import {
+  sandbox,
+  users,
+  tokenWith,
+  tokenFor,
+  registry,
+  app,
+  get,
+  storeOf,
+  rowFor,
+  verifier,
+  credentials,
+  now,
+  stubAgentConfig,
+} from "./daemoncheck.fixtures.js";
 
-/* ------------------------------------------------------------------ *
- * Importing a codebase
- *
- * The guard here is unlike every other one in this file, because this is the
- * only route that takes a *path* from somebody else and creates a file at it.
- * Everywhere else a path is either one this daemon made or one a person picked
- * out of a listing of what already exists; an archive member is a string written
- * by whoever built the archive, and `paths.ts` is explicit that none of the
- * containment primitives may be used to authorise an action on one.
- *
- * So the assertions below come in pairs on purpose: the refusal, and then that
- * **nothing was created** — including no staging directory. A refusal that
- * leaves half a tree behind is not a refusal, and the second half is the one
- * that would rot silently.
- *
- * The archives are built here rather than shelled out to `zip` and `tar`, for
- * two reasons: neither is guaranteed on a CI box, and neither will *produce*
- * most of what needs testing — GNU tar refuses to write a `../` member at all,
- * which is exactly the member worth being sure about.
- * ------------------------------------------------------------------ */
+// Archives are built by hand: CI may lack zip and tar, and GNU tar will not write a ../ member at all.
 
 process.stdout.write("\nimporting a codebase\n");
 {
@@ -61,13 +62,7 @@ process.stdout.write("\nimporting a codebase\n");
     encrypted?: boolean;
     /** Raw name bytes, which also clears the UTF-8 flag. */
     rawName?: Buffer;
-    /**
-     * A tar size field that disagrees with the bytes that follow it.
-     *
-     * The whole point of a header field somebody else wrote: every archive this
-     * driver builds honestly is one the reader could have trusted. Only a member
-     * that *declares* more than it carries exercises the bound.
-     */
+    /** A tar size field that disagrees with the bytes after it, which is what exercises the declared-size bound. */
     declaredSize?: number;
   }
 
@@ -102,16 +97,7 @@ process.stdout.write("\nimporting a codebase\n");
     return gzipSync(Buffer.concat(parts));
   };
 
-  /**
-   * A pax `x` header carrying `path=`, then the member it renames.
-   *
-   * ⚠ **The length prefix counts BYTES** — itself, the space, the key, the value
-   * and the newline. This computed it with `String.length`, which is UTF-16 code
-   * units and only agrees for ASCII; every fixture here was ASCII, so the helper
-   * and a reader that also walked in units agreed with each other and the whole
-   * subject went untested. Writing the record the way an archiver does is what
-   * lets the cases below say anything.
-   */
+  // The pax length prefix counts bytes, not UTF-16 units.
   const paxMember = (realPath: string, data: Buffer): Member[] => {
     const make = (len: number): string => `${len} path=${realPath}\n`;
     let len = Buffer.byteLength(make(0), "utf8");
@@ -189,8 +175,7 @@ process.stdout.write("\nimporting a codebase\n");
         method: "POST",
         headers: { authorization: `Bearer ${tokenFor("u_alice")}` },
         body: new Uint8Array(archive),
-        // Node refuses a streaming request body without it, and this is what a
-        // browser sends too.
+        // Node refuses a streaming request body without it.
         duplex: "half",
       } as RequestInit),
     );
@@ -229,23 +214,10 @@ process.stdout.write("\nimporting a codebase\n");
     ["a tar hardlink", buildTarGz([...good, { name: "app/hard", type: "1", link: "/etc/passwd" }]), "not_a_regular_file", 400, "archive_unsafe"],
     ["a device node", buildTarGz([...good, { name: "app/dev", type: "3" }]), "not_a_regular_file", 400, "archive_unsafe"],
     ["a .git the daemon would run hooks out of", buildZip([...good, { name: "app/.git/hooks/post-checkout", data: Buffer.from("#!/bin/sh\n") }]), "git_directory", 400, "archive_unsafe"],
-    /*
-     * ⚠ **The case variants, and they are not pedantry.** The exact-case
-     * comparison these replaced was measured letting `.GIT/config` through, on
-     * the APFS this is developed on — where the imported directory is then
-     * reachable as `.git`, `git rev-parse --git-dir` answers `.git`, and the
-     * `git status` in `changes.ts` runs the `core.fsmonitor` out of it. Both
-     * readers, because the refusal is shared and a regression could reach either.
-     */
+    // APFS does not tell .GIT from .git, and the git status in changes.ts would run its core.fsmonitor.
     ["the same .git spelled .GIT, which APFS does not tell apart", buildZip([...good, { name: "app/.GIT/config", data: Buffer.from("[core]\n") }]), "git_directory", 400, "archive_unsafe"],
     ["and .Git in a tar", buildTarGz([...good, { name: "app/.Git/config", data: Buffer.from("[core]\n") }]), "git_directory", 400, "archive_unsafe"],
-    /*
-     * The one member body read whole rather than streamed, so the one whose
-     * declared size becomes an allocation. Declared 200 MiB, carries nothing:
-     * unbounded, this exact archive was measured at 2.2 GB resident and three
-     * minutes of synchronous copying with the event loop stopped throughout,
-     * and it finished by calling the archive *empty*.
-     */
+    // Declares 200 MiB and carries nothing: this header is read whole, so its declared size must be bounded.
     ["a pax header that declares more than this daemon will hold", buildTarGz([{ name: "app/", dir: true }, { name: "PaxHeader/x", type: "x", data: Buffer.from("x"), declaredSize: 200 * 1024 * 1024 }]), "path_too_long", 400, "archive_unsafe"],
     ["and the GNU long-name header beside it", buildTarGz([{ name: "app/", dir: true }, { name: "././@LongLink", type: "L", data: Buffer.from("x"), declaredSize: 200 * 1024 * 1024 }]), "path_too_long", 400, "archive_unsafe"],
     ["an encrypted member", buildZip([...good, { name: "app/s", data: Buffer.from("x"), encrypted: true }]), "encrypted", 400, "archive_unsafe"],
@@ -285,23 +257,7 @@ process.stdout.write("\nimporting a codebase\n");
   }
 
   {
-    /*
-     * ⭐ **A pax record naming a non-ASCII file, which is the commonest tarball a
-     * Mac produces and was refused whole.**
-     *
-     * bsdtar writes a `path=` record for *any* name outside ASCII, not only for a
-     * long one — so `tar -czf app.tar.gz app` over a folder holding one accented
-     * filename went through here. `paxPath` compared the byte length against
-     * UTF-16 indices, over-read the record by one unit per multi-byte character,
-     * and answered a name carrying the record's trailing newline and the next
-     * length digit. `safeMemberPath` then called that `control_char` and the
-     * route refused the **entire archive** with 400.
-     *
-     * The long name is the other half of the same defect: past the guard it
-     * answered `null` instead, and `extractTgz` fell back to the truncated
-     * 100-byte ustar field — so the file arrived under a name nobody wrote, and
-     * two such siblings collided on `EEXIST` and failed the import at 503.
-     */
+    // bsdtar writes a pax path record for any non-ASCII name, so the record must be measured in bytes.
     const into = target();
     const accented = "app/tëst.txt";
     const long = "app/" + "ä".repeat(60) + "-datei.txt";
@@ -327,15 +283,7 @@ process.stdout.write("\nimporting a codebase\n");
     check("and that is the one folder in the target", out.left, ["my-thing"]);
   }
 
-  /*
-   * The containment gate itself, held against strings rather than archives.
-   *
-   * `safeMemberPath` is pure precisely so this is possible — its docblock says a
-   * driver "can hold every hostile string ever published against it without a
-   * temp directory" — and four of its eleven refusals had no assertion anywhere,
-   * because reaching them through a built archive is awkward and reaching them
-   * here is one line each.
-   */
+  // safeMemberPath is pure, so hostile strings are held against it without a temp directory.
   {
     const rows: [string, string, string | null][] = [
       ["a plain member is allowed through", "app/src/index.ts", null],
@@ -356,15 +304,7 @@ process.stdout.write("\nimporting a codebase\n");
       check(label, verdict.ok ? null : verdict.reason, reason);
     }
 
-    /*
-     * The archive's own root, which is a skip and not a refusal.
-     *
-     * `tar -czf x.tar.gz .` writes `./` first, and `safeMemberPath` answers
-     * `escapes_root` for it — correctly, on its own terms: every segment dropped,
-     * nothing left, the same shape as `a/../../x`. So one of the two ordinary ways
-     * to make an archive was refused whole, under the message meant for a
-     * traversal attempt. The line between the two is what this table is.
-     */
+    // The archive's own root, which tar of . writes first, is a skip rather than an escapes_root refusal.
     const roots: [string, string, boolean][] = [
       ["what bsdtar writes for the directory itself", "./", true],
       ["and the bare form", ".", true],
@@ -380,12 +320,7 @@ process.stdout.write("\nimporting a codebase\n");
   }
 
   {
-    /*
-     * The whole archive, the way `tar -czf x.tar.gz .` actually arrives — the
-     * `./` member first, then everything under it. Driven rather than left to the
-     * pure table, because what broke was not the predicate but the reader
-     * throwing on the first member and taking the archive with it.
-     */
+    // Driven whole: the reader must skip the root member rather than throw on it.
     const into = target();
     const out = await send(
       into,
@@ -402,20 +337,12 @@ process.stdout.write("\nimporting a codebase\n");
     check("and the root member is not counted as one", out.body.import.entries, 3);
     check("the nested file arrived", readFileSync(join(into, "myproj/src/index.js"), "utf8"), "console.log(1)\n");
     check("and no folder was made for the dot itself", readdirSync(join(into, "myproj")).sort(), ["README.md", "src"]);
-    // The other half of the same rule: a name the *folder* takes, which is the
-    // one place a query parameter becomes a directory.
+    // A query-parameter folder name is the one place a parameter becomes a directory.
     check("a folder named .git is refused whatever its case", importFolderName(".GIT.zip"), "imported");
     check("and so is the lowercase one", importFolderName(".git.tar.gz"), "imported");
   }
 
-  /*
-   * The last word on a folder name, which the *archive's* own choice used to skip.
-   *
-   * Both sources reach `settleFolderName` now; only the query parameter also gets
-   * `importFolderName`'s allowlist in front of it. The pair of tables below is
-   * that split: what must be settled either way, and what must survive when the
-   * name came out of the archive rather than off the wire.
-   */
+  // Both folder-name sources reach settleFolderName; only the query parameter also gets importFolderName's allowlist.
   {
     const settled: [string, string, string][] = [
       ["a leading dash, which is what makes a name an option", "-rf", "rf"],
@@ -426,25 +353,13 @@ process.stdout.write("\nimporting a codebase\n");
       ["two of them", "..", "imported"],
       [".git by any spelling, here too", ".GIT", "imported"],
       ["a name longer than anybody meant", "a".repeat(200), "a".repeat(100)],
-      /*
-       * ⚠ A hazard the sweeper created rather than one it found. `sweepStaleStaging`
-       * deletes anything under the target wearing this exact name and older than an
-       * hour, on the reasoning that only this daemon ever generates one. Publishing
-       * an archive's folder under it would make that false — and the folder would be
-       * deleted by the next import into the same directory, an hour after somebody
-       * was told it existed.
-       */
+      // sweepStaleStaging deletes this exact name after an hour, so an archive may not publish a folder under it.
       ["a name this daemon would later mistake for its own litter", ".reemoat-import-00112233445566aa", "imported"],
       ["but only the exact shape of it", ".reemoat-import-nothex", ".reemoat-import-nothex"],
     ];
     for (const [label, raw, want] of settled) check(label, settleFolderName(raw), want);
 
-    /*
-     * And what it must NOT do, which is why this is not `importFolderName`.
-     * Running the allowlist over an archive's own folder would answer `My-Project`
-     * and turn every non-Latin name into a row of dashes — a worse answer than the
-     * question deserves, and one nobody asked for.
-     */
+    // Not importFolderName: an archive's own folder keeps its spaces and non-Latin names.
     check("a space is not a threat", settleFolderName("My Project"), "My Project");
     check("nor is an alphabet", settleFolderName("проект"), "проект");
     check("a cap never splits a surrogate pair", [...settleFolderName("🙂".repeat(200))].length, 100);
@@ -458,15 +373,7 @@ process.stdout.write("\nimporting a codebase\n");
     check("and that is what is on disk", out.left, ["rf"]);
   }
 
-  /*
-   * ⚠ **Litter from a run that never reached its `finally`.**
-   *
-   * `discardStaging` cleans up on every path the process survives, and an OOM is
-   * not one — which the unbounded extended header above made reachable. Swept on
-   * the way in, because staging lives inside a target this daemon only learns
-   * about when somebody names it, so the next import is the one moment the path
-   * is known. Three narrowings, one case each.
-   */
+  // Staging left by a run that never reached its finally is swept by the next import into the same target.
   {
     const into = target();
     const hex = (n: string) => join(into, `.reemoat-import-${n}`);
@@ -501,15 +408,7 @@ process.stdout.write("\nimporting a codebase\n");
     check("and a name this daemon never generates is not ours to delete", existsSync(notOurs), true);
   }
 
-  /*
-   * ⚠ **Two imports in flight at once, which is the assertion the 409 never had.**
-   *
-   * The guard used to read `importing` and then `await resolveCwd` before writing
-   * it, so every request that arrived during that suspension read `false` — the
-   * bound did not hold for the case the route's own docblock is about, which is
-   * the 256 streams the relay allows arriving together. Firing without awaiting
-   * is what tells the two apart: serialised, this passes either way.
-   */
+  // Fired together without awaiting: a serialised pair passes whether or not the guard holds.
   {
     const first = target();
     const second = target();
@@ -519,8 +418,7 @@ process.stdout.write("\nimporting a codebase\n");
     const refused = a.status === 409 ? a : b;
     check("and the other is told the machine is busy", refused.body.error.code, "import_busy");
     check("and the refused one created nothing", refused.left, []);
-    // The flag is released rather than wedged: a third import after both settle
-    // must still be accepted, or the route is dead for the daemon's whole life.
+    // The flag must be released rather than wedged, or the route is dead for the daemon's whole life.
     const third = target();
     check("a later import still works", (await send(third, buildZip(good))).status, 201);
   }
@@ -536,9 +434,7 @@ process.stdout.write("\nimporting a codebase\n");
   }
 
   {
-    // The destination already being a symlink is the case `rename` answers
-    // `ENOTDIR` to rather than `EEXIST`, and the one where getting it wrong means
-    // writing through somebody's link.
+    // A symlinked destination is where rename answers ENOTDIR rather than EEXIST; mishandled, it writes through the link.
     const into = target();
     mkdirSync(join(into, "elsewhere"));
     symlinkSync(join(into, "elsewhere"), join(into, "app"));
@@ -549,13 +445,7 @@ process.stdout.write("\nimporting a codebase\n");
 
   {
     const into = target();
-    /*
-     * Built from one buffer repeated rather than a single half-gigabyte member,
-     * so the *driver* does not need the memory the daemon is refusing to spend.
-     * Zeros deflate to almost nothing, so the archive stays far under the wire
-     * bound — which is the point: this refusal has to come from the unpacked
-     * counter, not from the one on the way in.
-     */
+    // Repeated zeros keep the archive under the wire bound, so the refusal must come from the unpacked counter.
     const slab = Buffer.alloc(50 * 1024 * 1024);
     const slabs: Member[] = [{ name: "app/", dir: true }];
     for (let i = 0; i * slab.length <= MAX_IMPORT_UNPACKED_BYTES; i += 1) {
@@ -595,8 +485,6 @@ process.stdout.write("\nimporting a codebase\n");
   }
 
   {
-    // The exemption is a predicate over both streaming routes now, so the thing
-    // worth pinning is that it is still *narrow*: every other POST is bounded.
     const into = target();
     const res = await app.fetch(
       new Request("http://d/fs/mkdir", {
@@ -625,26 +513,6 @@ process.stdout.write("\nimporting a codebase\n");
   }
 }
 
-/* ------------------------------------------------------------------ *
- * A directory that does not answer
- *
- * The failure this guards against was measured on 2026-08-02 and is the reason
- * `stalled` exists: `~/OrbStack` is a hard NFS mount inside the default browse
- * root, `describe`'s timeout bounds the *response* while libuv cannot cancel the
- * *work*, and each abandoned `readdir` keeps a threadpool slot for the life of
- * the process. Two listings of that home directory exhausted the default pool of
- * four, after which every `await` on `node:fs/promises` in the daemon queued for
- * ever — so `POST /fs/mkdir` and `POST /sessions` never answered and the browser
- * gave up at 15s with `TimeoutError: signal timed out`, while `/health`, which
- * touches no files, went on reporting the daemon up.
- *
- * A stalled mount is the one thing a driver cannot synthesize, which is what
- * `probeTimeoutMs` is for: at 0 the deadline fires before any filesystem call
- * can complete, so the *decision* is exercised on a perfectly healthy disk and
- * nothing is left wedged. What is asserted is the decision — refuse, remember,
- * and let the pending probe clear the memory when it settles.
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\na directory that does not answer\n");
 {
   forgetStalled();
@@ -664,9 +532,7 @@ process.stdout.write("\na directory that does not answer\n");
   check("and it is not reported as missing, which would be a lie", code === "not_found", false);
   check("and it is remembered, so the next caller spends nothing", isStalled(home), true);
 
-  // The refusal is immediate and needs no filesystem call at all. This is the
-  // half that turns one lost slot into exactly one, rather than one per attempt
-  // — and a person whose folder did not appear taps the button again.
+  // The remembered refusal needs no filesystem call, so a stall costs one threadpool slot rather than one per attempt.
   const before = Date.now();
   let second: string | null = null;
   try {
@@ -678,17 +544,11 @@ process.stdout.write("\na directory that does not answer\n");
   check("immediately, rather than at the client's own timeout", Date.now() - before < 100, true);
   check("and nothing was created", existsSync(join(home, "never-created")), false);
 
-  // The still-pending probe is the re-arm: when the mount answers again, the
-  // memory clears itself. A TTL would re-arm the leak on a mount that is still
-  // down, which is why there is not one.
+  // The pending probe clears the memory when it settles; a TTL would re-arm the leak on a mount still down.
   await new Promise((resolve) => setTimeout(resolve, 50));
   check("the memory clears itself once the probe settles", isStalled(home), false);
   check("so the path works again with no intervention", await resolveCwd(home), home);
 
-  // A listing of a path that will not answer refuses on the same deadline, and
-  // that is the whole point: before this, it queued behind a syscall that never
-  // returns, held the request open until the client gave up, and spent three
-  // more slots doing it.
   forgetStalled();
   let listCode: string | null = null;
   try {
@@ -699,21 +559,13 @@ process.stdout.write("\na directory that does not answer\n");
   check("a listing that misses its deadline refuses too", listCode, "unresponsive");
   forgetStalled();
 
-  // And the healthy listing is unchanged, which is the half that says the
-  // deadline has not been put in front of ordinary use.
   const healthy = await listDirs(home, { roots: [users], showHidden: false });
   check("while a healthy listing is untouched", healthy.path, home);
-  // The non-emptiness is its own line, the same shape the live mount table gets
-  // below: `every` on an empty array is `true`, so a listing that came back with
-  // no children at all would have passed the line under this one while proving
-  // the opposite of what it claims.
+  // Non-emptiness is its own line: every over an empty array is true.
   check("and it found children to describe", healthy.entries.length > 0, true);
   check("and still describes them", healthy.entries.every((e) => e.entries !== null), true);
 }
 
-/* The status a stalled path earns, which is not the one a missing path earns.
- * A client that read "not answering" as "gone" would prune a perfectly good
- * recent-directory row for a mount that is merely asleep. */
 {
   const stalledStatus = await app.fetch(
     new Request("http://d/fs/list?path=" + encodeURIComponent(join(users, "u_alice", "proj")), {
@@ -723,49 +575,13 @@ process.stdout.write("\na directory that does not answer\n");
   check("a healthy listing is still a 200", stalledStatus.status, 200);
 }
 
-/* ------------------------------------------------------------------ *
- * The kernel's mount table
- *
- * Read so that a stall on a network filesystem is remembered as the *mount*
- * rather than as one directory on it: ask `~/OrbStack` once and every directory
- * beneath it is answered for free, where per-path memory would spend two
- * threadpool slots learning the same fact about each of them.
- *
- * The parsers are the part that cannot be checked by running this on one
- * machine — a host is only ever Linux or BSD, and getting the other format
- * wrong is silent — so both are driven from text here.
- * ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ *
- * a workspace on a filesystem that stopped answering
- *
- * The picker was not the only route reaching a caller-named path. For a `plain`
- * session `workspace.root` *is* the `cwd` that was asked for, and `server.ts`
- * checked it with `existsSync` in front of `GET /sessions/:id/changes` — a
- * synchronous filesystem call, on somebody else's path, reachable with
- * `session:read`. On a stalled mount that stops the event loop, which is the
- * whole daemon and not one request; `browse.ts` had already been rewritten to
- * avoid exactly this, which is why the mechanism lives in `stall.ts` now rather
- * than inside the module that first needed it.
- *
- * The other half is that "gone" and "did not answer" stopped being the same
- * answer. Telling somebody their working directory no longer exists, when what
- * happened is that a NAS went to sleep, is a confident lie about their work.
- * ------------------------------------------------------------------ */
-
 process.stdout.write("\na workspace on a filesystem that stopped answering\n");
 {
   const live = join(users, "u_alice", "proj");
   check("a directory that answers says so", await probeExists(live), true);
   check("and one that is genuinely absent says that", await probeExists(join(users, "u_alice", "no-such-dir")), false);
-  // The third answer, forced with a deadline that has already passed — the same
-  // seam `listDirs` uses, because a real stalled mount is the one thing a driver
-  // cannot synthesize.
   check("a deadline that has passed is neither", await probeExists(live, { probeTimeoutMs: 0 }), null);
 
-  // That probe left the path in the memory, so the route below is answered from
-  // it without touching the disk at all. This is the behaviour that matters: the
-  // cost is paid once, not once per request.
   check("and the path is remembered as not answering", isStalled(live), true);
 
   const changes = await get("/sessions/s_one/changes", "u_alice");
@@ -774,26 +590,115 @@ process.stdout.write("\na workspace on a filesystem that stopped answering\n");
   const diff = await get("/sessions/s_one/changes/diff?path=notes.txt", "u_alice");
   check("and so does the diff route", diff.status, 503);
 
-  // A session whose directory really is missing still gets the 409 it always
-  // got: the two answers are distinct, which is the entire point of the third.
   forgetStalled();
   const changesLive = await get("/sessions/s_one/changes", "u_alice");
   check("once it answers again, so does the route", changesLive.status, 200);
+
+  // LocalRuntime's cliBuild re-chooses a CLI on missing and keeps its choice on null, so the two answers may not merge.
+  const builds = join(sandbox, "build-probe");
+  mkdirSync(builds, { recursive: true });
+  const cli = join(builds, "cli");
+  writeFileSync(cli, "#!/bin/sh\nexit 0\n");
+  const dangling = join(builds, "dangling");
+  symlinkSync(join(builds, "no-such-target"), dangling);
+  check("a file that answers is named as one", (await probeBuild(cli))?.kind, "file");
+  check("one that is genuinely absent is missing", (await probeBuild(join(builds, "no-such-cli")))?.kind, "missing");
+  check("and so is a link to nothing", (await probeBuild(dangling))?.kind, "missing");
+  check("while a deadline that has passed is neither", await probeBuild(cli, { probeTimeoutMs: 0 }), null);
+  forgetStalled();
 }
 
-/* ------------------------------------------------------------------ *
- * one stalled server answers for everything beneath it
- *
- * The parsers below are covered; what was not covered is the reason they exist.
- * `stallKeyFor` keys a path on a network filesystem by its **mount point**, so
- * probing one directory under a dead NAS teaches the daemon about every other —
- * and a local path keys by itself, because `/` is a mount point too and keying
- * local paths by their mount would let one unreadable directory mark the entire
- * filesystem as not answering.
- *
- * Without the `mounts` seam every probe in this driver took the `remote: false`
- * arm, so the whole payoff of reading the kernel's table was asserted nowhere.
- * ------------------------------------------------------------------ */
+process.stdout.write("\nwhat a route answers about a path that is gone, and one that does not answer\n");
+{
+  // A probe that never settles holds the stall until forgetStalled, so no route can outrun the memory.
+  const holdStalled = async (path: string): Promise<void> => {
+    const mounts = await readMounts();
+    await attempt(stallKeyFor(path, mounts), { timeoutMs: 0, mounts }, () => new Promise<never>(() => {}));
+  };
+  const send = async (
+    to: typeof app,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<[number, string | null]> => {
+    const response = await to.fetch(
+      new Request(`http://d${path}`, {
+        method,
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+    const text = await response.text();
+    const parsed = text.length > 0 ? (JSON.parse(text) as { error?: { code?: string } }) : null;
+    return [response.status, parsed?.error?.code ?? null];
+  };
+
+  forgetStalled();
+  const share = join(users, "u_alice", "stalled-share");
+  mkdirSync(share, { recursive: true });
+  const listing = `/fs/list?path=${encodeURIComponent(share)}`;
+  check("a directory that answers is listed", (await send(app, "GET", listing))[0], 200);
+  await holdStalled(share);
+  check("one that stops answering is a 503 rather than the route's 404", await send(app, "GET", listing), [503, "unresponsive"]);
+  check(
+    "and so is making a folder in it, rather than the route's 400",
+    await send(app, "POST", "/fs/mkdir", { parent: share, name: "never-created" }),
+    [503, "unresponsive"],
+  );
+  check("with nothing created", existsSync(join(share, "never-created")), false);
+  forgetStalled();
+
+  class NoLaunch extends LocalRuntime {
+    launches = 0;
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<never> {
+      this.launches += 1;
+      throw new Error("nothing may be launched into a workspace that is not there");
+    }
+  }
+  const runtime = new NoLaunch();
+  const root = join(users, "u_alice", "vanishing");
+  const vanishing = new SessionRegistry(new MemoryEventStore(), storeOf([rowFor("s_vanishing", root)]), undefined, runtime);
+  vanishing.restore({ reapOrphans: false });
+  const { app: vanished } = createApp({
+    registry: vanishing,
+    verifier,
+    instanceId: "i_vanishing",
+    startedAt: now,
+    credentials,
+    roots: [users],
+  });
+  check("a workspace that is still there is served", (await send(vanished, "GET", "/sessions/s_vanishing/changes"))[0], 200);
+
+  rmSync(root, { recursive: true, force: true });
+  const gone = [
+    await send(vanished, "GET", "/sessions/s_vanishing/changes"),
+    await send(vanished, "GET", "/sessions/s_vanishing/files?path=notes.txt"),
+    await send(vanished, "POST", "/sessions/s_vanishing/resume"),
+  ];
+  check("one that is gone is a 409 on every route that needs it", gone, [
+    [409, "workspace_missing"],
+    [409, "workspace_missing"],
+    [409, "workspace_missing"],
+  ]);
+  // The same path, now unable to say whether it is there: 503 must not claim the work is gone, nor 409 that it is merely slow.
+  await holdStalled(root);
+  const unanswered = [
+    await send(vanished, "GET", "/sessions/s_vanishing/changes"),
+    await send(vanished, "POST", "/sessions/s_vanishing/resume"),
+  ];
+  check("while one that does not answer is a 503 that says so instead", unanswered, [
+    [503, "workspace_unresponsive"],
+    [503, "workspace_unresponsive"],
+  ]);
+  check("and neither started an agent", runtime.launches, 0);
+  forgetStalled();
+  await vanishing.shutdown();
+}
+
+// stallKeyFor keys a network path by its mount point and a local one by itself, since / is a mount point too.
 
 process.stdout.write("\none stalled server answers for everything beneath it\n");
 {
@@ -811,21 +716,15 @@ process.stdout.write("\none stalled server answers for everything beneath it\n")
     { point: nas, type: "nfs", remote: true },
   ];
 
-  // One probe, against one directory, with a deadline that has already passed.
-  // Navigating *into* it is refused rather than degraded: a listing of a
-  // directory we cannot resolve has nothing to show, and saying so beats a
-  // spinner until the client's own timeout.
   const listCode = await listDirs(inside, { roots: [sandbox], showHidden: false, probeTimeoutMs: 0, mounts }).then(
     () => "ok",
     (error: unknown) => (error as { code?: string }).code,
   );
   check("navigating into it is refused", listCode, "unresponsive");
 
-  // What was learned is the *mount*, not the directory.
   check("the mount point is what is remembered", isStalled(nas), true);
   check("and not the directory that was asked about", isStalled(inside), false);
 
-  // Which is the whole point: a sibling under the same dead server costs nothing.
   check("so a sibling under it is already known", isStalled(nas), true);
   const cwdCode = await resolveCwd(sibling, { mounts }).then(
     () => "ok",
@@ -902,13 +801,7 @@ process.stdout.write("\nthe mount table\n");
   check("the root filesystem is in it", live.some((m) => m.point === "/"), true);
 }
 
-/* The containment primitive the browse path now uses directly.
- *
- * `atOrUnderResolved` is the segment-wise comparison with the resolving step
- * lifted out, because both sides arrive resolved and `realpathSync` on a
- * caller-supplied path is exactly what this module must not do on the event
- * loop. It is the same rule, so it has to answer the same way — above all on
- * the prefix case that a bare `startsWith` gets wrong. */
+// atOrUnderResolved is the segment-wise rule with resolving lifted out, and must answer the same, above all on a shared prefix.
 {
   check("a root is at-or-under itself", atOrUnderResolved("/wt/proj", "/wt/proj"), true);
   check("but is not contained in itself", containedInResolved("/wt/proj", "/wt/proj"), false);
@@ -925,9 +818,7 @@ process.stdout.write("\nthe mount table\n");
 }
 
 const worktrees = await get("/worktrees", "u_alice");
-// The registry's own policy root, which is the same one `createWorkspace` uses —
-// they disagreed once, and the containment check that guards the only `rmSync`
-// in the codebase then refused every time while the route reported success.
+// The route must report the registry's policy root, the same one createWorkspace uses.
 check("the worktree root reported is the one sessions are created under", worktrees.body.root, registry.workspacePolicy.worktreeRoot);
 
 const health = (await (await app.fetch(new Request("http://d/health"))).json()) as Record<string, unknown>;
@@ -935,46 +826,11 @@ check("health still answers without a token", health.ok, true);
 check("and still carries the clock, which is what it is for", typeof health.time, "number");
 check("but no longer counts other people's sessions", "sessions" in health, false);
 check("nor how long one has been blocked", "blocked" in health, false);
-/*
- * What this daemon is, on the one route a client can read before it holds a
- * token — which is the client that most needs to know, `packages/web` shipping
- * inside the control plane's image and therefore arriving newer than the daemon
- * it is pointed at every Tuesday.
- *
- * Asserted here rather than nowhere: `pincheck` said this literal could only be
- * read off the file because "no offline driver starts a daemon and a relay
- * together", which is true and is not the claim — this route needs no relay, and
- * this driver has been fetching the object three lines up all along.
- *
- * `version` against the constant and `protocol` against the negotiation's own
- * maximum, because that is the pair a client uses to tell an old machine from a
- * new one without either of them branching on it.
- */
+// version and protocol are what a client reads before holding a token to tell an old daemon from a new one.
 check("health names the build this daemon is", health.version, DAEMON_VERSION);
 check("and the tunnel protocol it speaks", health.protocol, RELAY_PROTOCOL_VERSION);
 
-/* ------------------------------------------------------------------ *
- * A relay URL this daemon cannot dial
- *
- * `relaycheck` owns the tunnel's protocol; what is driven here is the one thing
- * about it that is not about the relay at all — whether a daemon whose
- * `REEMOAT_CP_RELAY_URL` is wrong still runs. `tunnel.ts`'s header promises a
- * relay that is down, unreachable or rejecting costs nothing but log lines, and
- * this was the input that broke that promise before any socket was involved.
- *
- * `target.protocol = "ws:"` is a **silent no-op** for a scheme the URL spec does
- * not call special, so `htps://relay.example` — which `new URL` accepts, and
- * which `enroll.ts` and the control plane's own validation both accept for the
- * same reason — kept its scheme, fell through the guard that looked like it had
- * normalized it, and threw out of `new WebSocket` *outside* the try. There is no
- * `uncaughtException` handler in `scripts/daemon.ts`, and under a unit carrying
- * `KeepAlive`/`RunAtLoad` that is a permanent crash loop whose every pass re-runs
- * `restore()` and auto-resume, spawning agents that are killed seconds later.
- *
- * Every assertion below is written so a regression fails a *line* rather than
- * taking the process down: the throw is caught here and reported as a value,
- * because the whole subject of this section is a throw nobody caught.
- * ------------------------------------------------------------------ */
+// A relay URL with a scheme that cannot be dialled must be reported as a rejection, never thrown out of start.
 
 process.stdout.write("\na relay URL this daemon cannot dial\n");
 {
@@ -1001,44 +857,21 @@ process.stdout.write("\na relay URL this daemon cannot dial\n");
   const mistyped = await dialFrom("htps://relay.example");
   check("a mistyped scheme does not throw out of start()", mistyped.threw, null);
   check("it is reported as a refusal instead", mistyped.events.map((line) => line.split(" ")[0]), ["rejected"]);
-  // Naming the scheme rather than saying "unusable", because the whole content of
-  // this failure is one letter in an env file somebody has to find.
   check("naming the scheme it would not dial", mistyped.events[0]?.includes("htps"), true);
   check("and nothing was ever dialled", mistyped.events.some((line) => line.startsWith("connecting")), false);
 
-  // The arm that already existed, kept as the control: a refusal that swallowed
-  // everything would pass the three lines above without the guard meaning a thing.
+  // The control: a refusal that swallowed everything would pass the lines above.
   const unparseable = await dialFrom("not a url at all");
   check("a URL that does not parse is refused the same way", unparseable.events.map((line) => line.split(" ")[0]), ["rejected"]);
 
-  /*
-   * And the other half of the same edit: `ws`/`wss` were **added** to the allowed
-   * set, because a relay URL already stored in that form is what an older
-   * enrollment wrote and it still has to dial. Without this line the guard could
-   * be "fixed" by refusing everything that is not http/https, which would take the
-   * fleet off the network rather than off the crash loop.
-   */
+  // ws and wss stay allowed: an older enrollment stored the relay URL that way and it must still dial.
   const wsForm = await dialFrom("ws://127.0.0.1:1");
   check("a URL already stored in ws form is dialled rather than refused", wsForm.threw, null);
   check("and it really reached the dial", wsForm.events[0]?.split(" ")[0], "connecting");
   check("keeping the scheme it arrived with", wsForm.events[0]?.includes("ws://127.0.0.1:1"), true);
 }
 
-/* ------------------------------------------------------------------ *
- * What the daemon announces about its CLIs, and off what
- *
- * `relaycheck` owns the far end — the header read, bounded, written to the row,
- * answered by the fleet route. What is driven here is the daemon's half, which
- * that driver reaches only as a value it hands in: that the inventory is read off
- * `agentCli`, the same choice a launch resolves through, so the report names the
- * build a session would get; that a harness with no CLI is left out rather than
- * sent as anything; and that a daemon with nothing to announce sends **no
- * header**, which is what makes it indistinguishable on the wire from one older
- * than the header — the property the whole "optional on the reader" rule rests
- * on. The last two are read off a bare WebSocket server rather than believed
- * from the function, because the function's answer and the header's presence
- * are two edits apart.
- * ------------------------------------------------------------------ */
+// A daemon with nothing to announce sends no CLI header, so it is indistinguishable from one older than the header.
 
 process.stdout.write("\nwhat the daemon announces about its CLIs\n");
 {
@@ -1060,11 +893,7 @@ process.stdout.write("\nwhat the daemon announces about its CLIs\n");
   check("a machine with no CLI for any harness announces nothing", await announcedAgentClis(runtimeWith({})), {});
   check("in the order the harnesses ship, which is the order the header carries", Object.keys(await announcedAgentClis(runtimeWith({ opencode: choice("1"), claude: choice("2") }))), ["claude", "opencode"]);
 
-  /*
-   * The wire. A bare `ws` server standing in for the relay, reading the upgrade
-   * request's headers and nothing else — the handshake completes so the tunnel
-   * believes it connected, and is torn down at once.
-   */
+  // A bare ws server stands in for the relay and reads only the upgrade request's headers.
   const heard = async (options: { agentClis?: () => Promise<Record<string, string | null>> }): Promise<Record<string, string | undefined>> => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise<void>((resolve) => server.on("listening", resolve));

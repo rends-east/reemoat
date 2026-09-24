@@ -1,30 +1,14 @@
-/**
- * Everything this driver pulls out of `packages/web/src`, in one place.
- *
- * It stays a barrel rather than being pushed down into the sections that use
- * each name, and that is not tidiness — it is the ordering. These module bodies
- * evaluate once, here, in this order, exactly as they did when this was the top
- * of one file. At least one section depends on *when* a `../src` module is first
- * evaluated: `webcheck.shell-and-enrollment.ts` imports `router.js` from inside a
- * block that has just rewritten `window.location.pathname`, and ESM hands that
- * same instance to every later importer.
- */
+/** A barrel for ordering: these ../src bodies evaluate once, here, in this order, and ESM hands each instance to every later importer. */
 
-// Type-only, so it is erased outright rather than being a static import running
-// ahead of the `window` stub below. The history cases need real `StoredEvent`s:
-// `fillWindow` filters and orders them, and a fixture cast to `never` would let
-// a shape it cannot actually accept through.
+// Type-only, so erased and never run ahead of the window stub.
 import type { NavMove } from "../src/nav.js";
 import type { StoredEvent, SystemInfo } from "../src/wire.js";
 
-// The stubs, before any `../src` module body runs — `machine.ts` computes
-// `ROUTE_MODE` from the URL at load time. Importing them for their side effect is
-// the ordering pin that statement order used to give for free.
+// Imported for its side effect: the window stubs must exist before any ../src module body runs.
 import "./webcheck.env.js";
 
 export type { NavMove, StoredEvent, SystemInfo };
 
-// Dynamic, so the stub above is in place before any module body runs.
 export const { SessionStream } = await import("../src/stream.js");
 export const { askedQuestion, permissionLayout, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, planControls, detailContext, readInput, truncationNotice, withheldDetail } = await import(
   "../src/permission.js"
@@ -34,9 +18,6 @@ export const {
   ATTACH_REPLAY_MAX,
   HISTORY_PAGE,
   MAX_AUTO_HISTORY,
-  // Imported rather than written out as `12`. The bound was restated here as a
-  // literal, which makes the assertion one-sided: lowering the cap to 1 still
-  // passed, and raising it failed with a message naming no constant.
   MAX_HELD_TRANSCRIPTS,
   MAX_TRANSCRIPT_BYTES,
   commandsPlan,
@@ -45,6 +26,8 @@ export const {
   fillWindow,
   gapPlan,
   loadStop,
+  localMachineAfter,
+  machinesAsDrawn,
   nextCut,
   reattachSince,
   sessionGroups,
@@ -71,9 +54,8 @@ export const {
   visibleRows,
   waitingFloor,
 } = await import("../src/ui/groups.js");
-export const { MAX_MACHINE_ORDER, dropSlot, nextOrder, orderMachines, setMachineOrder } = await import(
-  "../src/machineOrder.js"
-);
+export const { LOCAL_DISPLAY_NAME, MAX_MACHINE_ORDER, dropSlot, machineDisplayName, nextOrder, orderMachines, setMachineOrder } =
+  await import("../src/machineOrder.js");
 export const { expandConfig, prune, reduceConfig } = await import("../src/configMemory.js");
 export const { RANK_STEP, canReorder, compareRows, effectiveRank, orderSessions, rankBetween, resolveDrop } = await import(
   "../src/sessionOrder.js"
@@ -98,8 +80,18 @@ export const {
   withChoice,
   effortFollowUp,
 } = await import("../src/ui/agentConfig.js");
-export const { acceptsMidTurn, canCancelTurn, cancelInFlight, hasLiveAgent, isTerminal, needsHuman, queuedSeqs, showsWorking } =
-  await import("../src/wire.js");
+export const {
+  acceptsMidTurn,
+  canCancelTurn,
+  cancelInFlight,
+  hasLiveAgent,
+  isTerminal,
+  needsHuman,
+  queuedSeqs,
+  showsWorking,
+  workingUnprompted,
+  workStartedAt,
+} = await import("../src/wire.js");
 export const {
   TRANSCRIPT_SILENT,
   buildTail,
@@ -124,6 +116,7 @@ export const {
   supersedes,
   toolSummary,
   outstandingTasks,
+  streamedSinceTool,
   stillRunning,
   isDelegation,
   MAX_CHILDREN,
@@ -132,12 +125,15 @@ export const {
   composerPlaceholder,
   focusWorthKeeping,
   markKeyNav,
+  sentText,
   shouldFocusComposer,
   shouldReleaseComposer,
   takeKeyNav,
+  VERBATIM_FIELD,
 } = await import(
   "../src/ui/composing.js"
 );
 export const { hugWidth } = await import("../src/ui/hug.js");
+export const { FOOT_EXACT_PX, FOOT_SLACK_PX, followsAfterScroll, gapBelow, wheelLeavesFoot } = await import("../src/ui/follow.js");
 
 export type Stream = InstanceType<typeof SessionStream>;

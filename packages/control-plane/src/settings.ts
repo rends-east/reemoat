@@ -2,59 +2,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { checkEmailAddress } from "./mail/address.js";
 import { MAX_MACHINES_PER_USER } from "./machines.js";
 
-/**
- * Settings an admin may change at runtime, and the environment underneath them.
- *
- * **The rule is one line: a row in `instance_settings` wins, the environment is
- * the fallback, and absence of both is `unset`.** That is why the table is
- * key/value — the absence of a row *is* "read the environment", so the storage
- * shape and the fallback rule are the same sentence rather than two mechanisms
- * that have to agree.
- *
- * Everything here reads live. **There is no cache**, and that is deliberate
- * rather than lazy: a cache needs an invalidation path, and this repository has
- * already paid for exactly that mistake once — `app.ts`'s SPA fallback held a
- * copy of `index.html` taken at registration, `pnpm web:build` rewrote `dist/`
- * under the running process, and `/` served the new HTML while every deep link
- * served chunks Vite had deleted. Reloading on a session gave a blank page with
- * no error. A settings read is one indexed probe on a table with a dozen rows,
- * the same cost `GET /v1/me` already pays for `hasPassword`.
- *
- * **Nothing seeds the table**, for a reason worth stating where somebody would
- * add one: `schema.sql` is re-executed on *every* open, so an `INSERT … ON
- * CONFLICT DO UPDATE` seed would overwrite an admin's change at every restart.
- * The symptom is "registration turns itself back on after a deploy", which reads
- * as a bug in the toggle rather than in the seed.
- *
- * **When the environment changes under a database override, nothing happens.**
- * The row keeps winning until somebody clears it. The alternative — "the newer
- * one wins" — needs a fourth column remembering what the environment *was*, and
- * produces a rule nobody can reason about after a container restart. Instead
- * `readSetting` carries the provenance and `GET /v1/admin/settings` shows both
- * sides, so an operator can see their new variable being shadowed and clear the
- * override in one act.
- */
+// An instance_settings row wins, else the environment, else unset. Read live with no cache; nothing seeds the table, since schema.sql re-runs on every open.
 
-/* ------------------------------------------------------------------ *
- * The keys
- * ------------------------------------------------------------------ */
-
-/**
- * Every setting, in one array.
- *
- * Exported and iterated rather than described, so a driver can assert the
- * environment mapping for *all* of them by looping. A second hand-maintained
- * list of environment names is exactly the coupling `.dockerignore` and
- * `deploy/docker/Dockerfile` earned their warning for; here there is one list
- * and one function.
- */
 export const SETTING_KEYS = [
-  /*
-   * First, and deliberately not grouped with `registration.*` or `mail.*`: the
-   * admin screen draws these in order and reads a run of one prefix as a
-   * section, so filing "how many machines each person gets" under registration
-   * would be a heading making a claim about it.
-   */
+  // First and apart from registration.*: the admin screen reads a run of one prefix as a section.
   "machines.per_user",
   "registration.enabled",
   "registration.email_domains",
@@ -73,35 +24,15 @@ export const SETTING_KEYS = [
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
 
-/**
- * The one setting whose value never leaves this process.
- *
- * A set rather than a `key === "smtp.password"` test at each call site, because
- * there are three call sites (the projection, the write validator, and the
- * startup banner) and the day a second secret arrives is the day two of them get
- * updated.
- */
 export const SECRET_SETTING_KEYS: ReadonlySet<SettingKey> = new Set<SettingKey>(["smtp.password"]);
 
 export function isSettingKey(value: string): value is SettingKey {
   return (SETTING_KEYS as readonly string[]).includes(value);
 }
 
-/**
- * The environment variable a key falls back to, computed rather than tabulated.
- *
- * `smtp.host` → `REEMOAT_CP_SMTP_HOST`, `mail.public_url` →
- * `REEMOAT_CP_MAIL_PUBLIC_URL`. Pure, so `relaycheck` asserts it over every
- * member of `SETTING_KEYS` in a loop instead of transcribing the list, which
- * would then be free to drift from the ones `main.ts` reads.
- */
 export function envNameFor(key: SettingKey): string {
   return `REEMOAT_CP_${key.replace(/\./g, "_").toUpperCase()}`;
 }
-
-/* ------------------------------------------------------------------ *
- * Reading
- * ------------------------------------------------------------------ */
 
 export type SettingSource = "database" | "environment" | "unset";
 
@@ -117,14 +48,6 @@ interface SettingStatements {
   clear: ReturnType<DatabaseSync["prepare"]>;
 }
 
-/**
- * Compiled once per database, `sessions.ts`' pattern and for its reason.
- *
- * `registrationMode` and `mailConfigured` are reached by `GET /v1/instance`,
- * which the signed-out screen calls on every cold load, and by every public
- * registration route. Keyed by handle so several in-memory databases in one
- * driver cannot collide, and weak so closing one does not retain it.
- */
 const settingStatements = new WeakMap<DatabaseSync, SettingStatements>();
 
 function statements(db: DatabaseSync): SettingStatements {
@@ -145,22 +68,7 @@ function statements(db: DatabaseSync): SettingStatements {
   return held;
 }
 
-/**
- * One setting, with where it came from.
- *
- * **An empty string in the database is a value, not an absence**, and that is
- * the detail every other function here depends on: `smtp.username = ""` means
- * "this server wants no username", which is a different statement from "fall
- * back to the environment". So the database is consulted for *presence* of a
- * row, never for truthiness of its value — and clearing an override is its own
- * verb rather than writing `""`.
- *
- * The environment half is trimmed and an empty variable is treated as unset,
- * which is the opposite rule and the right one: `FOO=` in a `.env` file is how
- * people comment a value out, and `deploy/lib.sh` writes every value
- * single-quoted so a genuinely-empty-on-purpose environment value is not
- * expressible anyway.
- */
+/** A row wins even when its value is empty; an empty environment variable counts as unset. */
 export function readSetting(db: DatabaseSync, key: SettingKey): Resolved {
   const row = statements(db).read.get(key);
   if (row !== undefined) return { value: String(row["value"]), source: "database" };
@@ -176,9 +84,6 @@ export function readString(db: DatabaseSync, key: SettingKey, fallback: string |
 export function readBoolean(db: DatabaseSync, key: SettingKey, fallback: boolean): boolean {
   const raw = readSetting(db, key).value;
   if (raw === null) return fallback;
-  // Exactly these two, and anything else falls back rather than being coerced.
-  // `Boolean("false")` is `true`, which is the classic way an operator turns a
-  // feature on by trying to turn it off.
   if (raw === "true") return true;
   if (raw === "false") return false;
   return fallback;
@@ -192,15 +97,7 @@ export function readPort(db: DatabaseSync, key: SettingKey, fallback: number): n
   return parsed;
 }
 
-/**
- * A bounded whole number, falling back on anything else.
- *
- * `readPort`'s rule, generalised because a second numeric setting arrived: a
- * value written by an older release, or an environment variable an operator
- * typo'd, must not throw on a path the relay runs per request. The route's
- * `checkSettingValue` is what refuses a bad value at the door; this is what
- * keeps a bad one that got in from being worse than the default.
- */
+/** Falls back on anything out of range: a bad stored value must not throw on a per-request path. */
 export function readInteger(
   db: DatabaseSync,
   key: SettingKey,
@@ -226,10 +123,6 @@ export function readEnum<T extends string>(
   return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
 }
 
-/* ------------------------------------------------------------------ *
- * Writing
- * ------------------------------------------------------------------ */
-
 export function writeSetting(
   db: DatabaseSync,
   key: SettingKey,
@@ -240,14 +133,9 @@ export function writeSetting(
   statements(db).write.run(key, value, now, updatedBy);
 }
 
-/** Drop the override. The environment underneath it becomes live again. */
 export function clearSetting(db: DatabaseSync, key: SettingKey): boolean {
   return Number(statements(db).clear.run(key).changes) === 1;
 }
-
-/* ------------------------------------------------------------------ *
- * Validation — hand-written, no zod, like everything else here
- * ------------------------------------------------------------------ */
 
 export const SMTP_SECURITIES = ["implicit_tls", "starttls", "plaintext"] as const;
 export type SmtpSecurity = (typeof SMTP_SECURITIES)[number];
@@ -255,16 +143,7 @@ export type SmtpSecurity = (typeof SMTP_SECURITIES)[number];
 export const SMTP_AUTHS = ["plain", "login", "none"] as const;
 export type SmtpAuth = (typeof SMTP_AUTHS)[number];
 
-/**
- * Whether a value is admissible for a key, as a sentence or `null`.
- *
- * Returns the *message*, so the route can put it in the envelope and the admin
- * screen can render it. Every value is a string, including `"587"` and
- * `"true"` — the column is TEXT, so accepting a JSON number would mean
- * `String()`-ing it on the way in and returning a string on the way out, and a
- * route whose response does not round-trip its own request is the shape of bug
- * this codebase keeps finding.
- */
+/** The refusal sentence, or `null`. Values are strings only, so a GET answers exactly what was PUT. */
 export function checkSettingValue(key: SettingKey, value: string): string | null {
   if (value.length > 2048) return `${key} is too long`;
   // Control characters in any of these end up in an SMTP header or a shell-read
@@ -272,24 +151,7 @@ export function checkSettingValue(key: SettingKey, value: string): string | null
   if (/[\x00-\x1f\x7f]/.test(value)) return `${key} may not contain control characters`;
 
   switch (key) {
-    /*
-     * How many machines each person may own.
-     *
-     * **`"0"` must pass**, and it is the one value this arm exists to admit: it
-     * is the whole point of the setting — an instance where nobody gets a
-     * machine until an admin grants them one. A validator written with a
-     * truthiness test refuses precisely the value the feature is for, and every
-     * other test passes.
-     *
-     * `String(parsed) === value.trim()` rather than `Number.isInteger` alone,
-     * because `Number.parseInt("5 machines")` is `5`: without it the route
-     * accepts a string, stores `"5 machines"`, and answers a `GET` with
-     * something other than what was `PUT`. This file's own header calls that the
-     * shape of bug this codebase keeps finding.
-     *
-     * The ceiling is `MAX_MACHINES_PER_USER`, which is a *different* bound and
-     * stays — anti-abuse rather than commercial. See `machines.ts`.
-     */
+    // 0 must pass (nobody gets a machine until an admin grants one); the String comparison refuses trailing text parseInt accepts.
     case "machines.per_user": {
       const parsed = Number.parseInt(value, 10);
       return Number.isInteger(parsed) &&
@@ -332,36 +194,14 @@ export function checkSettingValue(key: SettingKey, value: string): string | null
         ? null
         : "mail.public_url must be http or https";
     }
-    /*
-     * **The two addresses are checked here, because there is nowhere else.**
-     *
-     * The comment this replaces said they were "checked where they are used" —
-     * they were not. `checkEmailAddress` has call sites for every address that
-     * arrives in a request *body* and none for one that arrives as a setting, so
-     * a display name typed into the From field went straight into
-     * `MAIL FROM:<…>` and `From:`, `mailConfigured` reported `configured: true`
-     * on the strength of the field being non-empty, and every message on the
-     * instance failed — the exact "counts as configured and then every single
-     * message dies" outcome this file already warns about for credentials.
-     *
-     * Empty is allowed through: `mail.reply_to` is optional, and an empty
-     * `mail.from` is caught by `mailConfigured` as *missing*, which is a better
-     * sentence than "malformed".
-     */
+    // Checked here because nothing else checks an address that arrives as a setting; empty passes, and mailConfigured reports a missing mail.from.
     case "mail.from":
     case "mail.reply_to": {
       if (value === "") return null;
       const checked = checkEmailAddress(value);
       return checked.ok ? null : `${key}: ${checked.message}`;
     }
-    /*
-     * The rest is free text: the domain list is parsed by `parseEmailDomains`,
-     * and host, username, password and the instance name are the remote server's
-     * business or nobody's. Enumerated rather than left to a `default` arm, so a
-     * key added to `SETTING_KEYS` is a compile error here — the house rule this
-     * file's sibling switches (`originText`, `incompleteLinkRemedy`) already
-     * follow, and the one CLAUDE.md states for every switch over a union.
-     */
+    // Free text, listed rather than a default arm so a key added to SETTING_KEYS fails to compile here.
     case "registration.email_domains":
     case "mail.from_name":
     case "smtp.host":
@@ -370,10 +210,6 @@ export function checkSettingValue(key: SettingKey, value: string): string | null
       return null;
   }
 }
-
-/* ------------------------------------------------------------------ *
- * The two questions everything else asks
- * ------------------------------------------------------------------ */
 
 export interface MailConfig {
   host: string;
@@ -389,44 +225,14 @@ export interface MailConfig {
   publicUrl: string;
 }
 
-/**
- * The default port, and it is 587 rather than 25 on purpose.
- *
- * Port 25 outbound is blocked by AWS, GCP, DigitalOcean, Hetzner and Azure, and
- * a blocked port does not refuse — it hangs until the connect timeout. Under the
- * threadpool coupling described in `mail/outbox.ts` a hang is the most expensive
- * failure available, so the default is the one that answers.
- */
+/** 587, not 25: port 25 outbound is blocked by most clouds and hangs rather than refusing. */
 export const DEFAULT_SMTP_PORT = 587;
 
-/**
- * Whether this instance can send mail, and what is missing if it cannot.
- *
- * `problems` is a list of human sentences rather than a boolean, because the
- * admin screen has to say *what to fix* — `main.ts`'s "say what to change"
- * discipline applied to a screen instead of stderr. `configured` is exactly
- * `problems.length === 0`, so the two can never disagree.
- */
+/** `problems` are sentences for the admin screen; only the missing settings make `configured` false. */
 export function mailConfigured(
   db: DatabaseSync,
-  /**
-   * The origin this API answers on — **and only when it is serving no browser
-   * UI**. `null` or absent otherwise.
-   *
-   * ⚠ **One argument carrying a whole precondition, deliberately, rather than a
-   * `servesWeb` boolean and an origin.** The warning below needs both facts and
-   * is meaningless with either alone, so a caller that can supply one but not the
-   * other has nothing useful to pass — and two optional arguments is exactly the
-   * shape where somebody passes the origin, forgets the boolean, and gets a
-   * confident sentence about a correctly configured instance.
-   *
-   * Absent means *not asked*, which produces no warning: the readers here that
-   * cannot know — `registrationMode` and `mailUsable`, both of which want only
-   * `configured` — must not start reporting a problem they have no evidence for.
-   * `GET /v1/admin/settings` is the one caller that knows both, because the
-   * origin is a property of the request rather than of this process.
-   */
-  apiOriginServingNoWeb?: string | null,
+  /** The request's API origin, passed only while this process serves no gate bundle; absent produces no origin warning. */
+  apiOriginServingNoGate?: string | null,
 ): { configured: boolean; problems: string[] } {
   const problems: string[] = [];
   if (readString(db, "smtp.host") === null) problems.push("smtp.host is not set");
@@ -435,20 +241,7 @@ export function mailConfigured(
     problems.push("mail.public_url is not set, so links in messages would have nowhere to point");
   }
 
-  /*
-   * Credentials, when the server is going to ask for them.
-   *
-   * `sendMessage` skips AUTH entirely when either half is missing, so without
-   * this an instance carrying a host, a from address and a URL counts as
-   * configured — registration starts demanding an address — and then every
-   * single message dies at `530 Authentication required`. Diagnosable from the
-   * delivery log, and only after somebody could not sign up.
-   *
-   * `auth: "none"` is the honest way to say a server wants no credential (a
-   * loopback mailpit, a relay that authorises by source address), so it is the
-   * setting that turns this check off rather than an empty username doing it by
-   * accident.
-   */
+  // Without this, sendMessage skips AUTH and every message dies at 530; smtp.auth none is how to say a server wants no credential.
   const auth = readEnum<SmtpAuth>(db, "smtp.auth", SMTP_AUTHS, "plain");
   if (auth !== "none") {
     if (!usable(readString(db, "smtp.username"))) {
@@ -457,16 +250,7 @@ export function mailConfigured(
     if (!usable(readString(db, "smtp.password"))) problems.push("smtp.password is not set");
   }
 
-  /*
-   * A warning that is not a refusal, because both readings are real.
-   *
-   * Most submission servers — Private Email among them — insist the envelope
-   * sender is the mailbox you authenticated as, or one of its aliases, and
-   * answer `550 sender not allowed` otherwise. But a relay that authorises a
-   * whole verified domain legitimately sends as any address in it, so refusing
-   * here would refuse a correct configuration. Said rather than enforced, and
-   * only when both halves look like addresses.
-   */
+  // A warning, not a refusal: a relay authorising a whole domain may legitimately send as any address in it.
   const username = readString(db, "smtp.username");
   const from = readString(db, "mail.from");
   if (
@@ -482,85 +266,36 @@ export function mailConfigured(
     );
   }
 
-  /*
-   * ⚠ **A link that will land on a JSON error, which nothing else can notice.**
-   *
-   * Every mailed link is `mail.public_url` plus `/confirm`, `/reset` or
-   * `/verify` — paths this service answers with a *page* only while it is serving
-   * a browser UI, and the default deployment serves none. Pointed here with no
-   * bundle, `POST /v1/forgot` — documented as the only remedy for a forgotten
-   * password — mails a link to an error envelope, and the first symptom is a
-   * person saying it is broken. `cpctl admin settings` and the admin screen both
-   * read this list, so the operator is told at the moment they can act.
-   *
-   * **A warning, not a refusal**, and the wording is what makes it one: `isMissing`
-   * keys on the words *"is not set"*, so a sentence carrying them would stop this
-   * instance sending mail at all — over a configuration that is merely pointed at
-   * the wrong host. The remedy is also not obvious enough to guess at: an operator
-   * may be serving the client from another origin, or relying on the app's own
-   * paste-a-link screens, and both are correct.
-   */
+  // A warning, never a refusal: the sentence must not contain the phrase isMissing matches, or it would stop all mail.
   const publicUrl = readString(db, "mail.public_url");
-  if (apiOriginServingNoWeb !== null && apiOriginServingNoWeb !== undefined && publicUrl !== null) {
-    /*
-     * Compared as **origins**, so a trailing slash, a path or a port spelled its
-     * default way do not make one address look like two — `config.rs` makes the
-     * same argument for the server picker, one process over. A value neither side
-     * can parse simply does not match, which is the quiet direction and the right
-     * one: an unparseable `mail.public_url` is a separate problem and inventing a
-     * second sentence about it here would be guessing.
-     */
+  if (apiOriginServingNoGate !== null && apiOriginServingNoGate !== undefined && publicUrl !== null) {
     let sameOrigin = false;
     try {
-      sameOrigin = new URL(publicUrl).origin === new URL(apiOriginServingNoWeb).origin;
+      sameOrigin = new URL(publicUrl).origin === new URL(apiOriginServingNoGate).origin;
     } catch {
       sameOrigin = false;
     }
     if (sameOrigin) {
       problems.push(
-        `mail.public_url (${publicUrl}) points at this control plane, which serves no browser UI — ` +
-          "links in messages answer an error rather than a page. Point it at wherever you serve the " +
-          "client, or tell people to paste the link into the Reemoat app, which takes one",
+        `mail.public_url (${publicUrl}) points at this control plane, which is running without its gate ` +
+          "bundle — links in messages answer an error rather than a page. Build it with " +
+          "pnpm --filter @reemoat/web build:gate, or point mail.public_url at wherever the gate is served",
       );
     }
   }
 
-  /*
-   * `problems` is therefore not the same question as `configured`, and the split
-   * is deliberate: the sender warning is advice, and letting it block delivery
-   * would make a correct relay setup unusable. Everything that is *missing*
-   * blocks; the two things that are merely *suspicious* do not.
-   */
   return { configured: !problems.some(isMissing), problems };
 }
 
-/** A problem that stops a message being sent, as opposed to one that warns. */
 function isMissing(problem: string): boolean {
   return problem.includes("is not set");
 }
 
-/**
- * Whether a credential half is something you could actually present.
- *
- * **Not the same question as `readSetting`'s "is there a row".** An empty string
- * in the database is a *value* — that rule is about provenance, and it is what
- * lets somebody say "this server wants no username" without falling back to the
- * environment. It is not about usability: `AUTH PLAIN \0\0password` is not a
- * sign-in, it is a malformed one, and the server answers 535 to it.
- *
- * So the way to say a server needs no credential is `smtp.auth = "none"`, which
- * says it, rather than an empty username saying it by omission.
- */
+/** An empty credential is a malformed sign-in, not an absent one; smtp.auth none says a server wants none. */
 function usable(value: string | null): boolean {
   return value !== null && value.trim().length > 0;
 }
 
-/**
- * Everything the transport needs, or `null` when this instance cannot send.
- *
- * One function so no caller assembles a half-configuration and discovers the
- * missing half at the socket.
- */
 export function mailConfig(db: DatabaseSync): MailConfig | null {
   if (!mailConfigured(db).configured) return null;
   const security = readEnum<SmtpSecurity>(db, "smtp.security", SMTP_SECURITIES, "starttls");
@@ -569,10 +304,7 @@ export function mailConfig(db: DatabaseSync): MailConfig | null {
     port: readPort(db, "smtp.port", DEFAULT_SMTP_PORT),
     security,
     auth: readEnum<SmtpAuth>(db, "smtp.auth", SMTP_AUTHS, "plain"),
-    // Normalized through the same predicate `mailConfigured` uses, so the check
-    // and the transport cannot disagree about whether there is a credential:
-    // `sendMessage` skips AUTH on a `null`, and an empty string reaching it
-    // would send `AUTH PLAIN \0\0password` instead.
+    // Same predicate as mailConfigured, so an empty credential becomes null and AUTH is skipped rather than sent malformed.
     username: usable(readString(db, "smtp.username")) ? readString(db, "smtp.username") : null,
     password: usable(readString(db, "smtp.password")) ? readString(db, "smtp.password") : null,
     rejectUnauthorized: readBoolean(db, "smtp.tls_reject_unauthorized", true),
@@ -585,12 +317,6 @@ export function mailConfig(db: DatabaseSync): MailConfig | null {
 
 export interface RegistrationMode {
   enabled: boolean;
-  /**
-   * Whether a registration must carry an address. Derived from whether mail
-   * works, never stored — the matrix has one input the admin sets and one the
-   * SMTP configuration decides, and storing the product of the two is how they
-   * come to disagree.
-   */
   requiresEmail: boolean;
 }
 
@@ -601,13 +327,6 @@ export function registrationMode(db: DatabaseSync): RegistrationMode {
   };
 }
 
-/**
- * The domains registration will accept, lowercased, or an empty list for "any".
- *
- * Comma-separated because it is one field on one screen and a JSON array in a
- * TEXT column would be a second encoding to get wrong. A leading `@` and
- * surrounding whitespace are tolerated because both are what people type.
- */
 export function parseEmailDomains(raw: string | null): string[] {
   if (raw === null) return [];
   return raw
@@ -616,13 +335,6 @@ export function parseEmailDomains(raw: string | null): string[] {
     .filter((part) => part.length > 0);
 }
 
-/**
- * Whether a folded address is admissible here.
- *
- * Takes the *folded* address, so the caller cannot forget to fold and get a
- * refusal that depends on how somebody capitalised their own domain. An empty
- * allowlist admits everything, which is what makes the field optional.
- */
 export function emailDomainAllowed(emailFolded: string, domains: readonly string[]): boolean {
   if (domains.length === 0) return true;
   const at = emailFolded.lastIndexOf("@");

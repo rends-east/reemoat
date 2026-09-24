@@ -264,17 +264,17 @@ price of moving the party to the environment; `legal-pages.md` is the area.
 `REEMOAT_CP_PLUGIN_CATALOGUE_URL` cannot be a row because
 `createControlPlaneApp` builds the `Content-Security-Policy` from it **once**, so
 a database-owned value could name an origin the document's own `connect-src`
-refuses. `REEMOAT_CP_MACHINES_OFFER_URL` could technically be a row and is
-deliberately not one: it points at one particular shop run by whoever runs the
+refuses. `REEMOAT_CP_APP_DOWNLOAD_URL` could technically be a row and is
+deliberately not one: it names one particular build published by whoever runs the
 deployment, and `SETTING_KEYS` is drawn on the Server settings screen of *every*
-instance — a row there would put a commercial switch, with somebody's business
-behind it, in front of every admin of every fork. Both are read in `main.ts`,
-validated with `isBrowserReachable`, warned-and-ignored rather than fatal, and
-handed to the app as constructor options; both are published on
-`GET /v1/instance` as **an address rather than a boolean**, because a client that
-renders one cannot be told "there is one" and left to invent where it goes.
-Neither has a compiled-in default — this is AGPL software and forks run their own
-control planes. `webcheck.shell-and-enrollment.ts` asserts from both sides that
-no `SETTING_KEYS` member names the offer and that `main.ts` is where it is read;
-`deploycheck` asserts both are documented in `.env.example`, since the
-`SETTING_KEYS` sweep there cannot reach them.
+instance — a row there would put one deployment's download in front of every admin
+of every fork. Both are read in `main.ts`, validated with `isBrowserReachable`,
+warned-and-ignored rather than fatal, and handed to the app as constructor
+options; both are published on `GET /v1/instance` as **an address rather than a
+boolean**, because a client that renders one cannot be told "there is one" and
+left to invent where it goes. Neither has a compiled-in default — this is AGPL
+software and forks run their own control planes. `deploycheck` asserts both are
+documented in `.env.example`, since the `SETTING_KEYS` sweep there cannot reach
+them. ⚠ **`REEMOAT_CP_MACHINES_OFFER_URL` was one of these and is deleted**
+(Q1.650): its value is passed to nothing, `main.ts` warns once when an env file
+still sets it, and `deploycheck` asserts it is not read by name any more.

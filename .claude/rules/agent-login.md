@@ -158,7 +158,12 @@ absent harness is installed. Nothing is compared by `--version` any more; the
 number is read only for the report on `GET /agents/capabilities`, and a copy that
 will not say still runs. Cached ten minutes (`AGENT_CLI_TTL_MS`), because
 `deploy/agents.sh` moves the file under the running daemon, and cleared at once by
-`forgetAvailability()` when it has.
+`forgetAvailability()` when it has — and a held choice is weighed against the file
+behind its path on every use (`probeBuild`, bounded by `stall.ts`), so a build that
+moved *without* this daemon — the CLI's own updater, another daemon, `deploy.sh` —
+is re-chosen at its next use; "could not tell" keeps it, and the hit is fenced on
+`probeGeneration` like the decision. ⚠ A running agent is still the build it was
+started on: its model list moves only when a new process publishes one. Q6.112.
 `resolveLoginBinary` answers only whether any binary exists at all — an override
 counts, a copy on PATH or in `MANAGED_CLI_DIRS` counts — and its two synchronous
 callers compare it to `null` and nothing else. `daemoncheck` pins the pair by name.

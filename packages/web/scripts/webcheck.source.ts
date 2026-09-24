@@ -5,15 +5,6 @@ export function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
-/**
- * Every `.ts`/`.tsx` under `packages/web/src`, and the reader for one.
- *
- * Here rather than in the driver that first needed it, because the second driver
- * to want a census over the whole client would otherwise write a third copy of a
- * directory walk — and a sweep that misses a directory is a check that passes by
- * not looking. `webcheck.native-bridge.ts` was the first caller; the menu
- * placement census is the second.
- */
 const SRC_ROOT = new URL("../src/", import.meta.url);
 
 export function srcFile(rel: string): string {

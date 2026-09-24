@@ -1,43 +1,12 @@
 /**
- * Putting one plugin on several machines, and taking it off again.
- *
- * ⚠ **A plugin is installed on a machine, and this module exists to make that
- * legible rather than to hide it.** The code is on one host's disk and its data
- * is in one daemon's database; there is no fleet-side staging, no account-wide
- * plugin, and nothing here remembers a choice past the act. What "install on all
- * machines" means is *the machines in your list at the moment you pressed it* —
- * a snapshot, expanded here, and never a standing policy. A policy that also
- * caught machines enrolled later would be code arriving on a host nobody named
- * it on, which is Q7.42's argument about fleet rollout wearing different
- * clothes.
- *
- * The decision half is pure so `webcheck` can assert it as a partition; the
- * execution half is a `Promise.allSettled` over `store.daemonFor`, which is the
- * shape `store.ts` already uses internally for every per-machine fan-out it does.
- *
- * DOM-free, so `webcheck` can import it.
+ * Installs are per machine: "all machines" means the machines listed at the moment of the press, never a standing policy (Q7.42).
+ * DOM-free so webcheck can import it.
  */
 
 import { isNewer } from "./catalogue";
 import type { MachineId } from "./ids";
 import { daemonRead, type MachineState } from "./machine";
 
-/**
- * Why a chosen machine was not even attempted.
- *
- * A closed union rather than free text, so `webcheck` can assert the partition
- * over every machine state and the sentences live in one table.
- *
- * ⚠ **`asking` is the newest of the five and it is not a refusal, which is the
- * whole reason it is a member rather than a fifth spelling of `unreachable`.** The
- * four before it are answers somebody can act on — three bans and an outage — while
- * this one is *this client* not having asked yet. Folded into `unreachable` it made
- * a machine nobody had put a question to report a failure it had not had, for the
- * seconds between `bootstrap` promoting to `phase: "ready"` and the first probe
- * landing. See {@link skipReasonFor}, where the repair is, and `machine.ts`'s
- * `daemonRead`, which is where the same partition was already drawn for three
- * settings screens.
- */
 export type SkipReason = "over_limit" | "owner_disabled" | "not_admin" | "unreachable" | "asking";
 
 export interface SkippedTarget {
@@ -46,15 +15,6 @@ export interface SkippedTarget {
   reason: SkipReason;
 }
 
-/**
- * What happened on one machine.
- *
- * `updated` carries both versions because that is the sentence somebody wants —
- * "0.2.0 → 0.2.1" answers "did anything change" in a way "updated" does not.
- * `installed` and `updated` are separate arms rather than one with a nullable
- * `from`, because the daemon distinguishes them (`replaced`) and a client that
- * collapsed them would be guessing at the thing the daemon took care to say.
- */
 export type TargetOutcome =
   | { kind: "pending" }
   | { kind: "sending"; fraction: number }
@@ -64,37 +24,7 @@ export type TargetOutcome =
   | { kind: "skipped"; reason: SkipReason }
   | { kind: "failed"; message: string };
 
-/**
- * Which of the chosen machines can be attempted, and which cannot.
- *
- * ⚠ **The two lists are a partition of `chosen` — every id is in exactly one —
- * and that is the property `webcheck` asserts** rather than the five reasons. A
- * machine that fell out of both would be one somebody selected and never heard
- * about again, which is the failure this whole screen is shaped to prevent.
- *
- * The order of the tests is the order of the *remedies*, `machineBadgeText`'s
- * rule: a banned owner needs an admin, an over-limit machine needs one retired,
- * a missing grant needs its owner, and only then is "it is asleep" worth saying.
- * A machine in more than one of those states names the one that has to be fixed
- * first. Waiting is last because it is not a remedy at all — there is nothing to
- * do about it and it is over in a second or two.
- *
- * ⚠ **Four of the five disable the row's box, and the fifth deliberately does
- * not.** This read "all four disable the row" while there were four, and the state
- * that has since been split out of `unreachable` is the one it would have been
- * wrong about. The four are answers: three that could only ever be *refused*
- * (`ensureToken` throws for the first two locally with no network at all, and a
- * daemon answers the third `403 insufficient_scope`) and one where there is nothing
- * honest to draw at all — the client cannot read what is installed on a machine it
- * cannot reach (`fetchPlugins` leaves the list empty on failure, which is
- * indistinguishable from "none"), so a box drawn either way is a claim.
- *
- * `asking` is none of that. It is the window before the first probe, so it still
- * offers **no act** — what is installed there is genuinely not known yet — and it
- * leaves the **checkbox alone**, because ticking a row chooses a machine rather
- * than asserting anything about it, and a selection made during that window is
- * still the right selection two seconds later. `MachineInstalls` draws that half.
- */
+/** eligible and skipped partition chosen: every chosen id lands in exactly one, in remedy order. */
 export function planTargets(
   machines: readonly MachineState[],
   chosen: ReadonlySet<MachineId>,
@@ -110,54 +40,20 @@ export function planTargets(
   return { eligible, skipped };
 }
 
-/**
- * Why this machine cannot be installed to, or `null`.
- *
- * Ordered by remedy, with the one that has no remedy last: waiting is not
- * something anybody can be told to fix.
- */
 export function skipReasonFor(machine: MachineState): SkipReason | null {
   if (machine.ownerDisabled) return "owner_disabled";
   if (machine.overLimit) return "over_limit";
-  /*
-   * ⚠ **`machine:admin`, not `session:write`.** A route's scope is the caller's
-   * and installing is an act on the machine rather than on a session — so a grant
-   * that can drive every session on somebody's host all day may not put code on
-   * it. Checked here so the row says why, rather than in the daemon's 403, which
-   * arrives after somebody has waited for an upload.
-   */
+  // machine:admin rather than session:write: installing puts code on the machine, not on a session.
   if (!machine.scopes.includes("machine:admin")) return "not_admin";
-  /*
-   * ⚠ **`daemonRead` rather than `daemonReadable`, and the line this replaces was
-   * `if (!daemonReadable(machine.reach)) return "unreachable"`.** That answers
-   * `false` for `unknown` as well as for `offline`, and `unknown` is not a machine
-   * that failed to answer — it is one nobody has asked. `bootstrap` promotes to
-   * `phase: "ready"` on the *machine list*, before a single probe, and
-   * `resumeMachine` calls `forgetRoute()` on every wake, so on a cold load every
-   * row on this screen reported an outage that had not happened: greyed, box
-   * disabled, acts stripped, and "not reachable right now" written under the name.
-   * `machine.ts` had already partitioned this for three settings screens; these two
-   * predicates are what it was never applied to.
-   *
-   * The three tests above stay ahead of it, because a ban is true whatever a probe
-   * would have said. `probing` is `readable` and therefore attempted, which is
-   * `daemonReadable`'s own decision kept rather than reopened.
-   */
+  // Attempted though daemonRead says asking: the act's request joins the probe in flight, so it waits for the answer.
+  if (machine.reach === "probing") return null;
+  // daemonRead rather than daemonReadable: a machine nobody has probed yet is asking, not unreachable.
   const read = daemonRead(machine.reach);
   if (read === "asking") return "asking";
   if (read === "unreachable") return "unreachable";
   return null;
 }
 
-/**
- * The sentence a skipped machine carries.
- *
- * Named for the *remedy* rather than for the state, which is what the machines
- * screen already does one file over: "over the machine limit" tells somebody
- * nothing they can act on, and "retire another" does. The exception is `asking`,
- * which has no remedy and says the state precisely because there is nothing to
- * offer somebody there.
- */
 export function skipText(reason: SkipReason): string {
   switch (reason) {
     case "owner_disabled":
@@ -167,33 +63,13 @@ export function skipText(reason: SkipReason): string {
     case "not_admin":
       return "you have access to its sessions but not to the machine itself";
     case "unreachable":
-      // Says what is unknown rather than what failed: nothing was attempted, and
-      // what is installed there cannot be read either.
       return "not reachable right now, so what is installed there cannot be read";
     case "asking":
-      /*
-       * ⚠ **A wait, and it may not borrow the sentence above it.** This state was
-       * *inside* that arm until the partition split them, so a row said a host was
-       * not reachable two seconds before it turned out to be online — the same
-       * defect `reachText` records one file over, where the fix was the same words:
-       * a machine nobody has measured is "not checked yet", and nothing here has
-       * earned "not reachable".
-       */
       return "not checked yet, so what is installed there is not known";
   }
 }
 
-/**
- * One machine's result, as a line under its name.
- *
- * ⚠ **The `enabled` half is the most common question this feature will
- * generate.** Installing does not switch a plugin on, and an update **inherits
- * the switch position** — `host.ts` is explicit that re-enabling somebody's
- * disabled plugin because they updated it would be the daemon deciding something
- * on their behalf. So a plugin somebody switched off is still off after an
- * update, and if this line does not say so, *"I updated it and it does not
- * work"* is what arrives instead.
- */
+/** Says when the plugin is switched off: an install never enables it and an update inherits the switch. */
 export function outcomeText(outcome: TargetOutcome): string {
   switch (outcome.kind) {
     case "pending":
@@ -215,62 +91,9 @@ export function outcomeText(outcome: TargetOutcome): string {
   }
 }
 
-/**
- * The three things one machine can be *reported* as able to do — of which a row
- * draws two.
- *
- * ⚠ **`remove` is in this union and not on the row, and the two facts are not in
- * tension.** {@link rowActs} answers the wider question, because the bulk bar's
- * counts are derived from it and the bar's Remove is the only removal on this
- * screen; {@link drawnActs} narrows it to what a row may put under a thumb. A row
- * that could not *report* a removable machine would take the bar's Remove down
- * with it, which is why the two are separate functions rather than one predicate
- * with a flag.
- *
- * ⚠ **So a row's trailing group holds at most one icon, and it is always
- * reversible by pressing something else on the same row.** Install and update are
- * mutually exclusive — an update is an install onto a machine that already has it
- * — so there is no ordering rule left to state here. There was one: the row used
- * to end with a bin, and Q3.218's measured safety property (the confirming pair
- * replaces the trailing group in place and ends with Cancel, so a second tap lands
- * on the undo) governed where that bin sat. Both went together in Q3.469 — a bin
- * 44px from a checkbox, guarded by a question that had to *replace the row* to fit
- * — and the measurement did not go with them: it governs the **bar** now, and is
- * written at the bar in `MachineInstalls`.
- */
 export type RowAct = "install" | "update" | "remove";
 
-/**
- * What one row offers.
- *
- * ⚠ **`install` and `remove` are never both present**, which is what makes a row's
- * trailing group readable at a glance rather than a state somebody has to parse.
- * **`update` never appears without `remove`**: an update is an install onto a
- * machine that already has it, so a row offering Update alone would claim an
- * install state it does not hold.
- *
- * ⚠ **A blocked row offers nothing, all five `skipReasonFor` states included.**
- * Under the draft this was a rule about `unreachable` — an unticked box on a
- * machine nobody can read would be a claim about what is installed there. Under
- * live acts it is stronger: an Install button there fires a request that cannot
- * land, and a Remove button claims there is something to remove.
- *
- * ⚠ **`asking` is the fifth and it is empty for a different reason**, which is
- * worth knowing before somebody "fixes" it: the other four are refusals, this one
- * is an absence of knowledge. Nothing is offered because `pluginsByMachine` holds
- * nothing for a machine that has not answered a session list, so *every* act would
- * be drawn from a guess about what is installed there. It is also the one state
- * that leaves the row's checkbox live — see {@link planTargets}.
- *
- * ⚠ **A busy row offers nothing either**, which is also what stops a second bulk
- * press double-sending: the counts the bar reads are derived from this, so a
- * machine with a request out is in none of them.
- *
- * `canInstall` is forced here rather than trusted from the caller — the same move
- * the draft's own decision made, and for its reason: a screen that offered Install
- * for an archive it does not hold would produce a request with nothing to send,
- * and this is the one place that can be made unreachable rather than unlikely.
- */
+/** A blocked or busy row offers nothing, which also keeps a second bulk press from double-sending. */
 export function rowActs(
   row: { installed: boolean; behind: boolean; blocked: boolean; busy: boolean },
   canInstall: boolean,
@@ -283,38 +106,11 @@ export function rowActs(
   return acts;
 }
 
-/**
- * The acts a **row** draws, which is {@link rowActs} minus the one that cannot be
- * undone.
- *
- * ⚠ **Removal is a bulk act only, and the row offers none.** A bin 44px from a
- * checkbox is an unrecoverable act reachable by one stray tap on the busiest strip
- * of this screen — and the question that guarded it had to *replace the row* to
- * fit, which is a control answering for itself in the space it occupies. Off the
- * row, a removal always goes through a selection: two deliberate acts, one place
- * to confirm, and one sentence naming every machine it reaches instead of a
- * truncated one naming the row it happens to sit on.
- *
- * ⚠ **`rowActs` still reports it**, because the *bar* reads that answer to decide
- * whether its own Remove may move. What is narrowed here is what is **drawn**, and
- * the two are separate for exactly that reason: a row that could not report a
- * removable machine would take the bar's Remove down with it.
- *
- * The property worth asserting is not the filter — it is that everything a row
- * draws is reversible by pressing something else on the same row.
- */
+/** Removal is a bulk act only; rowActs still reports it so the bar's Remove can move (Q3.469). */
 export function drawnActs(acts: readonly RowAct[]): RowAct[] {
   return acts.filter((one) => one !== "remove");
 }
 
-/**
- * What one of those icons is called.
- *
- * ⚠ **It names the machine, because `IconButton.label` is the accessible name.**
- * Seven rows each announcing "Remove" is seven controls a screen reader cannot tell
- * apart, on the one list where the difference between them is which host loses its
- * `plugin_data`.
- */
 export function rowActLabel(act: RowAct, machineName: string): string {
   switch (act) {
     case "install":
@@ -326,20 +122,12 @@ export function rowActLabel(act: RowAct, machineName: string): string {
   }
 }
 
-/**
- * What the selection adds up to.
- *
- * ⚠ **Counts rather than machines**, which is the rule the draft's own decision
- * kept and for its reason: it is what lets `webcheck` sweep the whole space instead
- * of the cells somebody thought of.
- */
 export interface Selection {
   /** How many machines are selected at all, shown or not. */
   selected: number;
   installable: number;
   updatable: number;
   removable: number;
-  /** Selected machines whose settings could be written right now. */
   configurable: number;
   /** Whether this screen holds an archive at all. `false` on the Offline path. */
   canInstall: boolean;
@@ -347,24 +135,7 @@ export interface Selection {
 
 export type BulkAct = "install" | "update" | "remove" | "settings";
 
-/**
- * Which of the four bulk controls will move.
- *
- * ⚠ **Install, Update and Remove are "any"; Settings is "every", and the asymmetry
- * is the decision rather than an oversight.** The first three are fan-outs: a
- * machine the act cannot reach falls out and says so on its own row, which is the
- * partition {@link planTargets} is built around. Settings is a **navigation** —
- * there is one screen and nothing to skip — so a selection of seven that opened a
- * screen about a subset would be the "selected and never heard about again" failure
- * wearing different clothes.
- *
- * ⚠ **`configurable` is clamped to `selected` rather than trusted.** The caller
- * derives both from the same walk, so agreeing is the expected case — but a count
- * larger than the selection would enable Settings over a selection holding a
- * machine that cannot take it, which is the one state this control exists to
- * refuse. `draftAct` made the identical move with `canInstall`, and for the
- * identical reason.
- */
+/** Install, Update and Remove need any capable machine; Settings needs every selected one. Counts are clamped to selected. */
 export function bulkEnabled(counts: Selection): Record<BulkAct, boolean> {
   const selected = Math.max(0, counts.selected);
   const at = (n: number): number => Math.min(Math.max(0, n), selected);
@@ -376,44 +147,11 @@ export function bulkEnabled(counts: Selection): Record<BulkAct, boolean> {
   };
 }
 
-/**
- * Whether an installed machine is behind what this screen can offer.
- *
- * One export rather than the expression inline in two places — the row's Update
- * icon and {@link installedSubline}'s middle arm — because with the rule written
- * twice they can disagree, and a row drawing Update beside a line saying nothing is
- * available is the shape that produces a bug report nobody can reproduce.
- */
 export function isBehind(version: string, available: string | null): boolean {
   return available !== null && isNewer(available, version);
 }
 
-/**
- * Why a selected machine cannot be configured, or `null`. Ordered by remedy.
- *
- * ⚠ **Not {@link skipReasonFor}, and the scope is why.** Installing is an act on
- * the *machine* and takes `machine:admin`; a settings pane is read behind
- * `session:read` and written behind `session:write`. So a grant that can drive
- * every session on somebody's host all day may not put code on it and *may*
- * configure what is already there — and reusing the install predicate here would
- * grey out the one control that grant is entitled to.
- *
- * ⚠ **`not_installed` and `no_pane` sit BELOW `no_scope`, `asking` and
- * `unreachable`, and the obvious order is a bug.** `store.fetchPlugins` swallows
- * every failure into an empty list — and never runs at all for a machine that has
- * not answered a session list — so a 403 for a missing scope, a daemon nobody can
- * reach and a daemon nobody has asked yet all three produce `installed === null`,
- * and answering *"that machine does not have this plugin"* about any of them is a
- * claim this client cannot make. That is `skipReasonFor`'s own argument about
- * `unreachable`, one field over and one extra time. It also happens to be the
- * remedy order: two bans, then three things that cannot be known, then two facts.
- *
- * ⚠ **`enabled` is not consulted**, `offersSettings`' standing rule: a plugin
- * somebody switched off is the commonest reason to open its settings.
- *
- * Takes a structural subset rather than `PluginSummary`, `machineBadgeText`'s
- * posture, so a driver can sweep it without building a whole wire object.
- */
+/** Not skipReasonFor: settings need session scopes, not machine:admin. The unknowable states outrank not_installed, since a failed fetch also reads as null. */
 export type SettingsBlock =
   | "owner_disabled"
   | "over_limit"
@@ -431,15 +169,6 @@ export function settingsBlockFor(
   if (machine.ownerDisabled) return "owner_disabled";
   if (machine.overLimit) return "over_limit";
   if (!machine.scopes.includes("session:read")) return "no_scope";
-  /*
-   * ⚠ **{@link skipReasonFor}'s repair, made a second time because these two are
-   * deliberately not one predicate.** This was
-   * `if (!daemonReadable(machine.reach)) return "unreachable"`, so a machine nobody
-   * had asked yet wrote *"laptop is not reachable right now, so its settings cannot
-   * be read"* into the bar's notice and greyed Settings over a fleet that was about
-   * to answer — and `settingsNotice` names the first blocker in fleet order, so one
-   * unasked machine spoke for the whole selection.
-   */
   const read = daemonRead(machine.reach);
   if (read === "asking") return "asking";
   if (read === "unreachable") return "unreachable";
@@ -448,7 +177,6 @@ export function settingsBlockFor(
   return null;
 }
 
-/** Why that machine is blocking the control, as the sentence beside it. */
 export function settingsBlockText(block: SettingsBlock, machineName: string, version: string | null): string {
   switch (block) {
     case "owner_disabled":
@@ -458,9 +186,6 @@ export function settingsBlockText(block: SettingsBlock, machineName: string, ver
     case "no_scope":
       return `you have access to ${machineName}'s sessions but not to what is installed on it`;
     case "asking":
-      // Not "cannot be read" but "not read yet", and the difference is the whole of
-      // this arm: nothing has been asked, so nothing has failed. `skipReasonFor`'s
-      // own note about borrowing the sentence below applies here word for word.
       return `${machineName} has not been checked yet, so its settings have not been read`;
     case "unreachable":
       return `${machineName} is not reachable right now, so its settings cannot be read`;
@@ -473,21 +198,7 @@ export function settingsBlockText(block: SettingsBlock, machineName: string, ver
   }
 }
 
-/**
- * Why the Settings control will not move, and the empty string where it will.
- *
- * One blocker is said in full and several are counted — {@link installedSummary}'s
- * rule and its reason: a name answers "which one", and a list of six is a paragraph
- * in a strip meant to hold a sentence and four buttons.
- *
- * ⚠ **The empty string rather than `null`**, so one value feeds the visible line
- * and the `aria-describedby` pointing at it. `EventList` records what the other
- * arrangement costs: a notice gated on a second condition read empty in exactly the
- * state it had been added for.
- *
- * The caller passes these in **fleet order**, so the machine named is the first one
- * on screen rather than whichever the poll happened to return first.
- */
+/** The empty string rather than null, so one value feeds the line and its aria-describedby. Callers pass fleet order. */
 export function settingsNotice(
   blocked: readonly { name: string; block: SettingsBlock; version: string | null }[],
 ): string {
@@ -497,18 +208,8 @@ export function settingsNotice(
   return blocked.length === 1 ? `${one}.` : `${one}, and ${blocked.length - 1} more.`;
 }
 
-/** Which machines the header leaves on screen. */
 export type InstallFilter = "all" | "installed" | "absent";
 
-/**
- * Whether one machine survives the search box and the filter beside it.
- *
- * The id is matched as well as the name, unlike `matchesQuery`'s reasoning one
- * module over but for its conclusion: a machine's id is drawn on the row exactly
- * where `ambiguousNames` says the name cannot tell two hosts apart, and a needle
- * that could not reach it would be unable to separate the one pair search is most
- * needed for.
- */
 export function rowShown(
   row: { id: string; name: string; installed: boolean },
   needle: string,
@@ -523,16 +224,7 @@ export function rowShown(
   return true;
 }
 
-/**
- * The machines the header leaves on screen, in fleet order.
- *
- * ⚠ **It exists so that there is exactly one call.** The select-all box's meaning
- * and the scroller's contents are the same list, and two calls is how the box comes
- * to select rows the list is not drawing — which is the failure `groups.ts` states
- * as its own standing rule about a filter and the keyboard.
- *
- * Generic, so the caller hands in its richer row and gets it back typed.
- */
+/** One call feeds both the select-all box and the scroller, so they cannot disagree. */
 export function shownRows<T extends { id: string; name: string; installed: boolean }>(
   rows: readonly T[],
   needle: string,
@@ -541,35 +233,14 @@ export function shownRows<T extends { id: string; name: string; installed: boole
   return rows.filter((row) => rowShown(row, needle, filter));
 }
 
-/**
- * What the line under the machine list says about the selection.
- *
- * ⚠ **It closes a hazard the filter opens.** Select four machines, then narrow the
- * filter so two of them disappear: the bulk bar still acts on four. That has to be
- * the behaviour — hiding a row is not unselecting it, and a bar that silently
- * dropped two would be the "selected and never heard about again" failure
- * {@link planTargets}' partition exists to prevent — but it has to be **said**, or
- * one press removes a plugin from two machines that are not on screen.
- */
+/** Hidden rows stay selected, so the line has to say so. */
 export function selectionLine(selected: number, hidden: number): string {
   if (selected <= 0) return "nothing selected";
   if (hidden <= 0) return selected === 1 ? "1 machine selected" : `${selected} machines selected`;
   return `${selected} selected, ${hidden} of them not shown`;
 }
 
-/**
- * What stands where the machine list would be, when nothing is in it.
- *
- * ⚠ **Real quotation marks, and never `JSON.stringify`.** `MarketList` quotes a
- * needle through a serialiser one screen over, which is right by accident for every
- * ordinary query and shows somebody their own input escaped for one holding a quote
- * or a backslash. Copying that into its second call site is how it becomes a
- * convention.
- *
- * Total over every combination rather than a chain with a fall-through, because an
- * empty box where a list should be is the one state with nothing else on screen to
- * explain it.
- */
+/** Real quotation marks, never JSON.stringify, which would show the query escaped. */
 export function noRowsText(total: number, needle: string, filter: InstallFilter): string {
   if (total === 0) return "You have no machines yet, so there is nowhere to put a plugin.";
   const wanted = needle.trim();
@@ -579,54 +250,13 @@ export function noRowsText(total: number, needle: string, filter: InstallFilter)
   return "You have no machines yet, so there is nowhere to put a plugin.";
 }
 
-/**
- * What the foot asks before it takes a plugin off machines.
- *
- * ⚠ **Only the removals are named.** A `reconfigure` installs too, and that half
- * is undone by unticking and pressing again — putting it in the question would
- * spend the person's attention on the reversible part of an act whose whole
- * reason for asking is `plugin_data` that nothing brings back.
- *
- * One machine is named and several are counted, `installedSummary`'s rule and its
- * reason: a name answers "which one" and a list of six is a paragraph in a strip
- * meant to hold a sentence and two buttons.
- */
 export function removalQuestion(names: readonly string[]): string {
   if (names.length === 1) return `Remove it from ${names[0]} and everything it kept there?`;
   return `Remove it from ${names.length} machines and everything it kept on them?`;
 }
 
-/**
- * How many machines are named before a list becomes a count.
- *
- * Three is where the line stops being readable at a phone's width and starts being
- * a paragraph; past it the count is the more useful of the two.
- *
- * ⚠ **One symbol because three summaries share the judgement, and a bare `3` in
- * each is three places to change it.** `installedSummary`, `scopeSummary` and
- * `failureSummary` draw different sentences about different lists in the same
- * strip, and the two later docblocks already cite the first one's rule *in prose*
- * — so the rule was written once and the number three times, which is the
- * arrangement where they come to disagree about when somebody stops being told
- * which machines and starts being told how many.
- */
 export const NAMES_BEFORE_COUNT = 3;
 
-/**
- * What the collapsed row says about where a plugin is.
- *
- * ⚠ **This replaced a summary drawn *after* an act, and the difference is the
- * whole point.** The screen used to answer "did that work" with a panel and a
- * Clear button — a notification about something that had already happened, which
- * somebody then had to dismiss. This is the same answer given *before* anybody
- * presses anything and given again after, on the closed row beside the word
- * Machines. The boxes inside are a draft of where the plugin should go; this line
- * is where it actually is, and it is what makes opening the list optional.
- *
- * Names rather than a bare count while there are few enough to read, because
- * "on laptop" answers the question somebody actually has and "on 1 of 3" makes
- * them open the list to find out which.
- */
 export function installedSummary(total: number, names: readonly string[]): string {
   if (total === 0) return "no machines";
   if (names.length === 0) return "not installed anywhere";
@@ -635,106 +265,23 @@ export function installedSummary(total: number, names: readonly string[]): strin
   return `on ${names.length} of ${total} machines`;
 }
 
-/**
- * Which machines a settings form is about to be written to, as the line above it.
- *
- * {@link installedSummary}'s rule and its reason, and {@link NAMES_BEFORE_COUNT}
- * rather than a second `3`: one name answers "which", and past the threshold the
- * count is the more useful of the two. The full list rides a `title`, so nothing
- * is unreachable.
- *
- * ⚠ **It never says "all machines", and that is the difference from
- * {@link installedSummary}.** That one reports a *fact* — where the plugin is —
- * while this reports a **scope somebody chose**, and "all" is the word most likely
- * to be read as a standing policy rather than as a snapshot. Q7.42's own hazard,
- * on the one line whose whole job is to say what the choice was.
- */
+/** Never says "all": this is a chosen snapshot, not a standing policy (Q7.42). */
 export function scopeSummary(names: readonly string[]): string {
   if (names.length === 0) return "no machines";
   if (names.length <= NAMES_BEFORE_COUNT) return names.join(", ");
   return `${names.length} machines`;
 }
 
-/**
- * What one installed machine's row says under its name.
- *
- * ⚠ **The third argument changed meaning when the draft went, and it kept its
- * slot.** It was `ticked` — "this box is about to remove it" — and there is no
- * draft any more, so it is `enabled`, read straight off the daemon's row. Every
- * surviving call passes `true` and means something different by it, which is
- * precisely the change a diff cannot show; the parameter was renamed so the
- * declaration moves, and the sentence below appears nowhere in the old body so the
- * repurposed assertions fail against it rather than passing by accident.
- *
- * ⚠ **Switched off outranks both comparisons, and it is the whole of the surviving
- * sentence about an update.** An install never switches a plugin on and an update
- * **inherits** the switch — `host.ts` is explicit that re-enabling somebody's
- * disabled plugin because they updated it would be the daemon deciding on their
- * behalf. Under the draft that fact lived in `outcomeText`, which this screen never
- * actually rendered: it wrote `null` on success and let the store answer. So *"I
- * updated it and it does not work"* had nothing preventing it. Here it is a
- * standing fact on the row rather than a notice after an act.
- *
- * ⚠ **And it replaces the version comparison rather than joining it**, because the
- * Update icon beside this line is drawn *only* when the machine is behind — so a
- * second copy of that fact costs a clause of a truncated 10px line at 390px, while
- * "switched off" has no other representation on the row at all.
- *
- * `available` is what *this screen* can install — the catalogue's version on a
- * market entry, the chosen archive's on an import — so the wording names the offer
- * rather than the market, and stays true on both.
- */
+/** Switched off outranks the version comparison: an update inherits the switch position. */
 export function installedSubline(version: string, available: string | null, enabled: boolean): string {
   if (!enabled) return `${version} · switched off`;
   if (available === null) return version;
-  /*
-   * The same string `InstalledList`'s badge already draws for this fact one screen
-   * over. It read "will be updated to 0.4.0" while the boxes were a draft; with
-   * live acts there is nothing drafted, and two phrasings for one fact is how they
-   * come to disagree.
-   */
   if (isBehind(version, available)) return `${version} · ${available} available`;
-  /*
-   * ⚠ **Ahead of the offer, which is an ordinary state rather than a fault.** It is
-   * what a machine looks like while somebody is iterating on a plugin locally, and
-   * what a whole fleet looks like between a build and its publication. Said
-   * plainly, and *not* as an error: nothing here is broken and there is nothing to
-   * fix — the row simply draws no Update.
-   */
   if (isNewer(version, available)) return `${version} · newer than the ${available} offered here`;
   return version;
 }
 
-/**
- * What the foot of the install screen says about the machines an act did not
- * reach, and the empty string where it reached all of them.
- *
- * ⚠ **A failure has to be said outside the collapsed list, because the closed row
- * cannot say one.** {@link installedSummary} is that row's whole answer and it is
- * derived from what is *installed* — a machine that failed has no row in
- * `pluginsByMachine`, so it is left out of "on laptop, mini" rather than named,
- * and a fan-out where three of five hosts refused reads as a smaller fleet. The
- * panel holding the per-machine reasons is collapsed and `inert`, and the tick
- * that reaches every machine sits *above* the disclosure — so the commonest path
- * on this screen is also the one that never opens it.
- *
- * ⚠ **It names which machines and never what happened on them.** A `POST` that
- * failed in transit says nothing about whether the daemon acted — `MachineInstalls`
- * declines to retry anything but `plugin_busy` for exactly that reason, because the
- * daemon may be halfway through unpacking — so "nothing was installed" is a claim
- * this line is not entitled to make. The reason is the row's own, and the row is
- * open by the time this is read.
- *
- * One name, then names up to {@link NAMES_BEFORE_COUNT}, then a count:
- * {@link installedSummary}'s rule and its reason, sharing the threshold rather
- * than a third copy of it.
- *
- * ⚠ **The empty string rather than `null`, so one string feeds both the visible
- * line and the live region beside it.** `EventList` records what the other
- * arrangement costs: a notice gated on a second condition read empty in exactly
- * the state it had been added for, and the truncation was inaudible as well as
- * invisible.
- */
+/** Names the machines an act failed on, never what happened there. The empty string feeds both the line and its live region. */
 export function failureSummary(names: readonly string[]): string {
   if (names.length === 0) return "";
   if (names.length === 1) return `Failed on ${names[0]} — the row says why.`;
