@@ -247,9 +247,8 @@ constants, two of them byte-identical local `const label` declarations in two fi
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-**Five** sites spend the idiom outside the constants **on purpose**, and every one
-of them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
-louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
+**Four** sites spend the idiom outside the constants **on purpose**, and every one
+of them says so at the code: `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
 `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
 rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why), `MenuDrawer`'s `DRAWER_HEADING` (`text-faint` at that panel's own `px-3`, because
 `MENU_HEADING` carries `px-2.5` and put the word 2px inboard of the rows it heads),
@@ -265,7 +264,8 @@ an exception to them — the third constant, and the one that does not live in
 `bits.tsx`.
 
 ⚠ **This said *four* for a release, and nothing could see that it had stopped being
-true** — it has since said *five*, and the same thing happened again. `DRAWER_HEADING` arrived with its own docblock arguing for itself, and the
+true** — it then said *five*, and the same thing happened again; it says *four* again
+because the waiting band is gone (Q3.674). `DRAWER_HEADING` arrived with its own docblock arguing for itself, and the
 only sweep that existed was for a *colour appended to a constant*, which this is
 not — so the number was the whole record of the set and the record was wrong. It is
 not prose any more: `webcheck.typography.ts` carries the **census**, a table of
@@ -273,7 +273,7 @@ every file that spends the idiom with its hit count, differenced against the swe
 above over comment-stripped source. A sixth site fails it as *found, not listed*; a
 deleted one fails it as *listed, not found*. A count could do neither, which is the
 general shape — a census, never a `length === N`. It also requires a comment to
-close immediately above each of the five, which is what makes the "says so at the
+close immediately above each of the four, which is what makes the "says so at the
 code" clause above enforced rather than asserted.
 
 **The background panel's head is spelled out at its own height, and composing the

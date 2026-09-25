@@ -2397,7 +2397,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
 
     // Only the last marker or prompt decides whether the conversation is empty; an older clear must not.
     const clr = own.get("s_clr");
-    clr?.log.append({ type: "prompt", text: "we talked about it", attachments: [] });
+    clr?.log.append({ type: "prompt", text: "we talked about it", attachments: [], from: null });
     clr?.log.append({ type: "context_cleared", agentSessionId: "a_newer", previousAgentSessionId: "conv_1" });
 
     own.get("s_clr")?.markInterrupted(true, null);

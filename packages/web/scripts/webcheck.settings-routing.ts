@@ -48,12 +48,12 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never))),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, links: false, leaf: null },
   );
   check(
     "a system path round-trips",
     parseSettingsRoute(seg(settingsPath("machines", "m_1" as never, "moonshot"))),
-    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false, links: false, leaf: null },
   );
   check(
     "a system this build does not know still parses",
@@ -78,17 +78,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a segment that is not `systems` drops to the machine",
     parseSettingsRoute(["machines", "m_1", "sessions", "kimi"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, links: false, leaf: null },
   );
   check(
     "the machine's agent strip parses",
     parseSettingsRoute(["machines", "m_1", "agents"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, links: false, leaf: null },
   );
   check(
     "and the old one-agent address opens that agent's card again",
     parseSettingsRoute(["machines", "m_1", "agents", "claude"]),
-    { section: "machines", machineId: "m_1", system: null, signin: "claude", agents: true, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: "claude", agents: true, links: false, leaf: null },
   );
   check(
     "which is the address Set up emits, under the list rather than beside it",
@@ -105,7 +105,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
         longest.length,
       ],
       [
-        { section: "machines", machineId: "m_1", system: null, signin: "byo:gemini", agents: true, leaf: null },
+        { section: "machines", machineId: "m_1", system: null, signin: "byo:gemini", agents: true, links: false, leaf: null },
         longest,
         65,
       ],
@@ -113,7 +113,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     check(
       "while a segment longer than any id falls to the list",
       parseSettingsRoute(["machines", "m_1", "agents", "x".repeat(500)]),
-      { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
+      { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, links: false, leaf: null },
     );
     check(
       "and so does the Sign-ins list's harness leaf, at the same length",
@@ -132,7 +132,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "and it round-trips",
     parseSettingsRoute(seg(agentStripPath("m_1" as never))),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: true, links: false, leaf: null },
   );
   check(
     "the two leaves under a machine are exclusive",
@@ -146,7 +146,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a machine id under another section is ignored",
     parseSettingsRoute(["account", "m_1", "agents", "kimi"]),
-    { section: "account", machineId: null, system: null, signin: null, agents: false, leaf: null },
+    { section: "account", machineId: null, system: null, signin: null, agents: false, links: false, leaf: null },
   );
   check(
     "the caller's decoder is what runs",
@@ -157,17 +157,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check(
     "a bare plugins segment is the machine",
     parseSettingsRoute(["machines", "m_1", "plugins"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, links: false, leaf: null },
   );
   check(
     "and so is one that still names a plugin",
     parseSettingsRoute(["machines", "m_1", "plugins", "board"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, links: false, leaf: null },
   );
   check(
     "including one nobody has installed",
     parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, links: false, leaf: null },
   );
   {
     const source = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
@@ -175,17 +175,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   }
   check(
     "a system goes up to its machine",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", signin: null, agents: false, leaf: null }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", signin: null, agents: false, links: false, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   check(
     "the agent strip goes up to its machine, wherever it was opened from",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, leaf: null }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, links: false, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   check(
     "a sign-in goes up to its machine, like the two leaves beside it",
-    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false, leaf: null }),
+    settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false, links: false, leaf: null }),
     { path: "/settings/machines/m_1", withinNav: false },
   );
   {
@@ -195,6 +195,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       system: null,
       signin: "claude",
       agents: true,
+      links: false,
       leaf: null,
     };
     const fromNew = "/new/m_1/%2FUsers%2Fme%2Fsrc";
@@ -210,7 +211,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   }
   check(
     "and it is titled by what it is rather than by which machine",
-    settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, leaf: null }),
+    settingsPaneTitle({ section: "machines", machineId: "m_1" as never, system: null, signin: null, agents: true, links: false, leaf: null }),
     "Agents",
   );
   {
@@ -219,6 +220,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       machineId: "m_1" as never,
       system: null,
       signin: null, agents: true,
+      links: false,
       leaf: null,
     };
     const fromNew = "/new/m_1/%2FUsers%2Fme%2Fsrc";
@@ -231,11 +233,11 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       "and nothing else in this sheet reads it",
       [
         settingsUp(
-          { section: "machines" as const, machineId: "m_1" as never, system: null, signin: null, agents: false, leaf: null },
+          { section: "machines" as const, machineId: "m_1" as never, system: null, signin: null, agents: false, links: false, leaf: null },
           fromNew,
         ),
         settingsUp(
-          { section: "account" as const, machineId: null, system: null, signin: null, agents: false, leaf: null },
+          { section: "account" as const, machineId: null, system: null, signin: null, agents: false, links: false, leaf: null },
           fromNew,
         ),
       ],
@@ -397,6 +399,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     ["machines", "m_1"],
     ["machines", "m_1", "agents"],
     ["machines", "m_1", "agents", "claude"],
+    ["machines", "m_1", "links"],
     ["machines", "m_1", "systems"],
     ["machines", "m_1", "systems", "moonshot"],
     ["account", "password"],

@@ -31,6 +31,7 @@ export function depthOf(route: Route): number {
       return route.step === null ? 2 : 3;
     case "settings":
       if (route.agents) return typeof route.signin === "string" ? 5 : 4;
+      if (route.links) return 4;
       if (route.system !== null) return 4;
       if (route.signin !== null) return 4;
       if (route.machineId !== null) return 3;

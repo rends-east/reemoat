@@ -2,7 +2,7 @@ import type { ClientHttp2Session, ClientHttp2Stream } from "node:http2";
 import { constants as h2 } from "node:http2";
 import { DEFAULT_RELAY_ID, type PresenceWriter } from "./presence.js";
 import {
-  MAX_STREAMS_PER_SUBJECT,
+  MAX_LINK_STREAMS_PER_TUNNEL,
   STREAM_ENCRYPTION_HEADER,
   STREAM_SUBJECT_HEADER,
   STREAM_VERSION_HEADER,
@@ -19,6 +19,14 @@ export interface TunnelStats {
   requestsProxied: number;
 }
 
+/** Whose share of a tunnel a stream is counted against: the subject for a person, the link for a machine (Q7.150). */
+export interface StreamLimiter {
+  key: string;
+  max: number;
+  /** Also counted against MAX_LINK_STREAMS_PER_TUNNEL. */
+  link: boolean;
+}
+
 export interface RelayView {
   isOnline(machineId: string): boolean;
   stats(): TunnelStats[];
@@ -30,8 +38,9 @@ export class RelayTunnel {
   private closed = false;
   private opened = 0;
   private active = 0;
-  // Live streams per caller, so one grantee cannot hold the whole tunnel. Entries are deleted at zero.
-  private readonly perSubject = new Map<string, number>();
+  private linkActive = 0;
+  // Live streams per limiter key, so one grantee or one link cannot hold the whole tunnel. Entries are deleted at zero.
+  private readonly perLimiter = new Map<string, number>();
 
   constructor(
     readonly machineId: string,
@@ -55,10 +64,11 @@ export class RelayTunnel {
   }
 
   /** A CONNECT stream the daemon splices to its own listener. encryption has no default: the relay must never choose the mode. */
-  open(subject: string, encryption: string): ClientHttp2Stream | null {
+  open(subject: string, limiter: StreamLimiter, encryption: string): ClientHttp2Stream | null {
     if (this.isClosed) return null;
     // Checked before the stream exists, so a grantee cannot exhaust MAX_CONCURRENT_STREAMS and lock out the owner.
-    if ((this.perSubject.get(subject) ?? 0) >= MAX_STREAMS_PER_SUBJECT) return null;
+    if ((this.perLimiter.get(limiter.key) ?? 0) >= limiter.max) return null;
+    if (limiter.link && this.linkActive >= MAX_LINK_STREAMS_PER_TUNNEL) return null;
     let stream: ClientHttp2Stream;
     try {
       stream = this.session.request({
@@ -73,12 +83,14 @@ export class RelayTunnel {
     }
     this.opened += 1;
     this.active += 1;
-    this.perSubject.set(subject, (this.perSubject.get(subject) ?? 0) + 1);
+    if (limiter.link) this.linkActive += 1;
+    this.perLimiter.set(limiter.key, (this.perLimiter.get(limiter.key) ?? 0) + 1);
     const done = (): void => {
       if (this.active > 0) this.active -= 1;
-      const held = this.perSubject.get(subject) ?? 0;
-      if (held <= 1) this.perSubject.delete(subject);
-      else this.perSubject.set(subject, held - 1);
+      if (limiter.link && this.linkActive > 0) this.linkActive -= 1;
+      const held = this.perLimiter.get(limiter.key) ?? 0;
+      if (held <= 1) this.perLimiter.delete(limiter.key);
+      else this.perLimiter.set(limiter.key, held - 1);
     };
     stream.once("close", done);
     return stream;

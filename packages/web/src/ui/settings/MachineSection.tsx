@@ -9,7 +9,7 @@ import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
 import { inNativeShell } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
-import { agentStripPath, settingsPath } from "../../settings";
+import { agentLinksPath, agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import { enrolledByText, type MachineSettingsView } from "../../wire";
 import {
@@ -172,6 +172,18 @@ export function MachineSection({
               <NotReachable machine={machine} />
             </Empty>
           )}
+        </section>
+      )}
+
+      {/* Outside the listable gate: the links are the control plane's, readable while the daemon is not. */}
+      {owned && machine.enrolled && (
+        <section className={SETTINGS_SECTION}>
+          <ChoiceRow
+            title="Agent links"
+            subline="Which of your machines its agents can message."
+            trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
+            onClick={() => navigate(agentLinksPath(machineId))}
+          />
         </section>
       )}
 

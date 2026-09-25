@@ -42,6 +42,9 @@ import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
+import { PeerHub } from "../src/peers/hub.js";
+import { PeerMcpEndpoint } from "../src/peers/mcp.js";
+import { createPeerNetwork } from "../src/peers/links.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
 
@@ -275,6 +278,21 @@ const registry = new SessionRegistry(
   uploads,
   (detail: string) => console.error(`session: ${detail}`),
 );
+// Listening before anything launches: the endpoint is handed to every agent after its initialize.
+const PEER_MESSAGES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no", "never"]);
+const peerMessages = !PEER_MESSAGES_OFF.has((process.env["REEMOAT_PEER_MESSAGES"] ?? "").trim().toLowerCase());
+const peers = new PeerHub({
+  registry,
+  enabled: peerMessages,
+  machineId,
+  network: createPeerNetwork(stores.peerLinks, stores.machineKeys),
+  outbox: stores.peerOutbox,
+  onWarning: (detail: string) => console.error(`peers: ${detail}`),
+});
+const peerEndpoint = peerMessages ? await PeerMcpEndpoint.listen(peers) : null;
+peers.setEndpoint(peerEndpoint?.url ?? null);
+registry.setPeerMcpServers((sessionId, capabilities) => peers.mcpServersFor(sessionId, capabilities));
+peers.startOutbox();
 // Before restore, or a preset's sessions resume on the bare harness; the harness goes back so ManagedSession.assembled can spot a changed preset.
 registry.setMachineCatalogue(contributions);
 registry.setCustomAgents((id) => {
@@ -424,6 +442,7 @@ const { app, injectWebSocket } = createApp({
   uploads,
   roots,
   plugins: pluginHost,
+  peers: { hub: peers, links: stores.peerLinks },
 });
 
 if ((process.env["REEMOAT_RELAY"] ?? "").trim().length > 0) {
@@ -648,6 +667,9 @@ async function shutdown(signal: string): Promise<void> {
   await pluginHost?.shutdown();
   await uploads.shutdown();
   await registry.shutdown();
+  // After the agents: a tool call in flight during their stop still gets an answer.
+  peers.close();
+  await peerEndpoint?.close();
   // After registry shutdown: stopping a session writes its exit record.
   stores.close();
   clearTimeout(hard);

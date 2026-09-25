@@ -248,10 +248,27 @@ export interface PromptAttachmentRef extends StoredFileRef {
   inlined: boolean;
 }
 
+/** Another session's message, as this daemon verified it; every field is ours, none is the sender's say-so except name. */
+export interface PeerOrigin {
+  /** Both start or join a turn: message is what another agent wrote, notice is this daemon saying what became of one. */
+  kind: "message" | "notice";
+  name: string;
+  ref: string;
+  /** null is this machine. */
+  machineId: string | null;
+  machineLabel: string | null;
+  harness: string;
+  messageId: string;
+  hops: number;
+}
+
 export interface PromptEvent {
   type: "prompt";
+  /** Exactly what the agent received, envelope included, so a client that ignores from still shows who wrote it. */
   text: string;
   attachments: PromptAttachmentRef[] | null;
+  /** null for a person's message. */
+  from: PeerOrigin | null;
 }
 
 export interface WorkspaceEvent {
@@ -686,6 +703,12 @@ function idSize(id: string | null): number {
   return id === null ? 0 : id.length;
 }
 
+function peerOriginBytes(from: PeerOrigin | null): number {
+  if (from === null) return 0;
+  return 128 + from.name.length + from.ref.length + (from.machineId?.length ?? 0) + (from.machineLabel?.length ?? 0) +
+    from.harness.length + from.messageId.length;
+}
+
 function attachmentBytes(attachments: PromptAttachmentRef[] | null): number {
   return refBytes(attachments);
 }
@@ -750,7 +773,8 @@ export function estimateBytes(event: SessionEvent): number {
     case "text":
       return 64 + event.text.length + (event.messageId?.length ?? 0);
     case "prompt":
-      return 64 + event.text.length + attachmentBytes(event.attachments);
+      // ?? null: events logged before from existed are read back without it.
+      return 64 + event.text.length + attachmentBytes(event.attachments) + peerOriginBytes(event.from ?? null);
     case "agent_log":
       return 64 + event.line.length;
     case "context_cleared":
@@ -858,7 +882,7 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "text":
       return { ...event, text: clip(event.text, maxBytes) };
     case "prompt": {
-      const spent = attachmentBytes(event.attachments);
+      const spent = attachmentBytes(event.attachments) + peerOriginBytes(event.from ?? null);
       return { ...event, text: clip(event.text, Math.max(maxBytes - spent - 64, 512)) };
     }
     case "agent_log":

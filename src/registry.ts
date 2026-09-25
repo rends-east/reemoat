@@ -27,6 +27,7 @@ import {
   type AgentConfigOption,
   type AgentHandle,
   type AgentModes,
+  type PeerOrigin,
   type AnswerResolvedBy,
   type ContextUsage,
   type ElicitationAnswer,
@@ -658,12 +659,25 @@ export interface QueuedPrompt {
 interface QueuedEntry extends QueuedPrompt {
   text: string;
   attachments: readonly UploadRow[];
+  peer: boolean;
   /** Acceptance order, taken before the first await of sendMidTurn; never the log seq, which is 0 for a refused append and would sort first. */
   order: number;
 }
 
 /** Counts queued and in-flight sends together, so a refused message has written nothing (Q2.218). */
 export const MAX_QUEUED_PROMPTS = 8;
+
+/** Of MAX_QUEUED_PROMPTS, so other agents can never make a person's own message answer 429. */
+export const MAX_QUEUED_PEER_PROMPTS = 4;
+
+/** Stops nobody chose. Another agent may wake a session that ended for one of these; a person's stop is theirs to undo. */
+export const PEER_WAKE_REASONS: readonly ExitReason[] = [
+  "parked",
+  "config_changed",
+  "agent_exited",
+  "daemon_restarted",
+  "daemon_shutdown",
+];
 
 export function stoppedBeforeDelivery(count: number): string {
   return count === 1
@@ -791,6 +805,8 @@ export interface ManagedSessionOptions {
   resolveCustomAgent?: (id: string) => { harness: AgentId; system: SystemId; model: string } | null;
   machineCatalogue?: () => MachineCatalogue;
   onWarning?: (detail: string) => void;
+  /** Asked at every launch, after initialize; absent injects nothing. */
+  peerMcpServers?: (sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[];
 }
 
 export interface UploadsPort {
@@ -831,6 +847,13 @@ export class ManagedSession {
   private queueSeq = 0;
   // A reservation held across every await of sendMidTurn; without it concurrent sends all read an empty queue and pass MAX_QUEUED_PROMPTS.
   private midTurnAccepted = 0;
+  private midTurnPeerAccepted = 0;
+  // Both reset by a person's message: how many turns other agents have caused since, and the deepest hop among them.
+  private peerTurns = 0;
+  private peerDepthValue = 0;
+  private readonly peerMcpServers:
+    | ((sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[])
+    | null;
   private lastEventAt: number | null = null;
   // Only agent events move this: wedged must not be reset by the person's own messages, which move lastEventAt.
   private lastAgentEventAt: number | null = null;
@@ -948,6 +971,7 @@ export class ManagedSession {
     this.runtime = options.runtime ?? new LocalRuntime();
     this.uploads = options.uploads ?? null;
     this.elicitationAllowed = options.elicitationAllowed ?? (() => true);
+    this.peerMcpServers = options.peerMcpServers ?? null;
 
     const init = options.restore ?? {};
     this.createdAt = init.createdAt ?? Date.now();
@@ -1288,7 +1312,7 @@ export class ManagedSession {
     // The agent is mid-cycle without a turn: clearing would decide that cycle's fate, which is Stop's to decide (Q2.232).
     if (this.unpromptedSinceState !== null || this.awaitingCount > 0) return { kind: "busy", status: this.status };
 
-    const seq = this.safeAppend({ type: "prompt", text, attachments: [] })?.seq ?? 0;
+    const seq = this.safeAppend({ type: "prompt", text, attachments: [], from: null })?.seq ?? 0;
     // Set before the await: nothing else may address the agent while its session id is replaced.
     this.clearing = true;
     this.touchSafe();
@@ -1362,6 +1386,7 @@ export class ManagedSession {
       machine: this.machineCatalogue(),
       keepImage: this.keepAgentImage,
       ultracode: this.ultracodeWanted,
+      mcpServers: this.peerMcpServers === null ? null : (capabilities) => this.peerMcpServers!(this.id, capabilities),
     };
   }
 
@@ -1980,7 +2005,7 @@ export class ManagedSession {
   }
 
   /** Synchronous: answers the 202 with turn and seq; attachment bytes are read later in pump. */
-  prompt(text: string, attachments: readonly UploadRow[] = []): PromptResult {
+  prompt(text: string, attachments: readonly UploadRow[] = [], from: PeerOrigin | null = null): PromptResult {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
@@ -1990,13 +2015,42 @@ export class ManagedSession {
     if (this.turn !== null) return { kind: "turn_in_flight", status: this.status };
 
     const turn = this.armTurn();
-    const seq = this.recordPrompt(session, text, attachments);
+    const seq = this.recordPrompt(session, text, attachments, from);
     this.runTurn(session, text, attachments, turn);
     return { kind: "accepted", turn, seq };
   }
 
+  /** The prompt route's two steps as one, for a caller with no HTTP answers to keep apart. */
+  async submit(text: string, from: PeerOrigin): Promise<MidTurnResult> {
+    const result = this.prompt(text, [], from);
+    if (result.kind === "turn_in_flight") return await this.sendMidTurn(text, [], from);
+    return result;
+  }
+
+  /** One line in the transcript when other agents are turned away, so the person sees why the session went quiet. */
+  notePeersPaused(limit: number): void {
+    this.safeAppend({
+      type: "error",
+      message: `stopped taking work from other agents after ${limit} turns in a row with no message from you; send anything to lift it`,
+      data: null,
+    });
+    this.touchSafe();
+  }
+
+  get peerTurnsSinceHuman(): number {
+    return this.peerTurns;
+  }
+
+  get peerDepth(): number {
+    return this.peerDepthValue;
+  }
+
   /** Steers into the running turn or queues; logged once, as a prompt event, when accepted (Q2.218). */
-  async sendMidTurn(text: string, attachments: readonly UploadRow[] = []): Promise<MidTurnResult> {
+  async sendMidTurn(
+    text: string,
+    attachments: readonly UploadRow[] = [],
+    from: PeerOrigin | null = null,
+  ): Promise<MidTurnResult> {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
@@ -2005,18 +2059,26 @@ export class ManagedSession {
 
     // The turn ended after the route's first try; the ordinary path re-guards everything.
     const turn = this.turn;
-    if (turn === null) return this.asMidTurn(this.prompt(text, attachments));
+    if (turn === null) return this.asMidTurn(this.prompt(text, attachments, from));
 
     // Counts sends still in flight too, or concurrent sends overshoot before any push. See MAX_QUEUED_PROMPTS.
     if (this.queuedPrompts.length + this.midTurnAccepted >= MAX_QUEUED_PROMPTS) {
       return { kind: "queue_full", limit: MAX_QUEUED_PROMPTS };
+    }
+    const peer = from !== null;
+    if (peer) {
+      const held = this.queuedPrompts.filter((entry) => entry.peer).length;
+      if (held + this.midTurnPeerAccepted >= MAX_QUEUED_PEER_PROMPTS) {
+        return { kind: "queue_full", limit: MAX_QUEUED_PEER_PROMPTS };
+      }
+      this.midTurnPeerAccepted += 1;
     }
 
     this.midTurnAccepted += 1;
     // Taken before the first await: the queue is ordered by acceptance. See QueuedEntry.order.
     const order = ++this.acceptOrder;
     try {
-      const seq = this.recordPrompt(session, text, attachments);
+      const seq = this.recordPrompt(session, text, attachments, from);
 
       let promptRequired = false;
       // No steer once a cancel is pending: that turn is being torn down and nothing would answer; the queue survives a cancel.
@@ -2074,6 +2136,7 @@ export class ManagedSession {
         at: Date.now(),
         text,
         attachments,
+        peer,
         order,
       };
       // Inserted by acceptance order, never seq (0 for a failed append), so the agent sees messages in log order.
@@ -2087,6 +2150,7 @@ export class ManagedSession {
     } finally {
       // Released only here, so a throwing steer cannot hold a slot for good.
       this.midTurnAccepted -= 1;
+      if (peer) this.midTurnPeerAccepted -= 1;
     }
   }
 
@@ -2109,9 +2173,21 @@ export class ManagedSession {
   }
 
   /** Called once, on acceptance; delivery never appends a second prompt event. */
-  private recordPrompt(session: Session, text: string, attachments: readonly UploadRow[]): number {
-    // Only the first prompt names the session, from its text; a manual rename keeps the field non-null.
-    if (this.titleValue === null) this.titleValue = deriveSessionTitle(text);
+  private recordPrompt(
+    session: Session,
+    text: string,
+    attachments: readonly UploadRow[],
+    from: PeerOrigin | null,
+  ): number {
+    if (from === null) {
+      // Only a person's first prompt names the session; an envelope would make a poor title.
+      if (this.titleValue === null) this.titleValue = deriveSessionTitle(text);
+      this.peerTurns = 0;
+      this.peerDepthValue = 0;
+    } else {
+      this.peerTurns += 1;
+      this.peerDepthValue = Math.max(this.peerDepthValue, from.hops);
+    }
 
     // Same inputs blocksFor uses, so the logged inlined flag matches what the agent gets.
     const caps = { image: session.acceptsImages };
@@ -2126,7 +2202,7 @@ export class ManagedSession {
             inlined: inlinesImage(row.mime, row.bytes, caps),
           }));
 
-    const seq = this.safeAppend({ type: "prompt", text, attachments: refs })?.seq ?? 0;
+    const seq = this.safeAppend({ type: "prompt", text, attachments: refs, from })?.seq ?? 0;
 
     // Marked even if the append failed; a queued message spends at accept so the 24-hour sweep cannot collect its files.
     if (attachments.length > 0) {
@@ -2179,9 +2255,14 @@ export class ManagedSession {
 
     const entry = this.queuedPrompts.shift();
     if (entry === undefined) return;
+    // Consecutive peer messages go as one turn: each already has its own prompt event, and none carries files.
+    let text = entry.text;
+    while (entry.peer && this.queuedPrompts[0]?.peer === true) {
+      text += `\n\n${this.queuedPrompts.shift()!.text}`;
+    }
     const turn = this.armTurn();
     // No recordPrompt: logged, and its uploads spent, at acceptance.
-    this.runTurn(session, entry.text, entry.attachments, turn);
+    this.runTurn(session, text, entry.attachments, turn);
   }
 
   /** Cancels the turn but keeps the agent; sends, then sweeps pending permissions, which ACP requires be answered cancelled. */
@@ -2828,6 +2909,8 @@ export type SessionObserver = (
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, ManagedSession>();
+  // Re-read at every launch through the thunk handed to each session, so setting it after restore still reaches them.
+  private peerMcpServersBy: ((sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[]) | null = null;
   private readonly observers = new Set<SessionObserver>();
   private shuttingDown = false;
   /** One switch for the boot pass and the prompt-path resume; injected because this file reads no env. */
@@ -3090,14 +3173,35 @@ export class SessionRegistry {
   }
 
   /** Wakes a terminal session before a prompt, parked ones even with auto-resume off; used by the route and the plugin API. */
-  async wakeForPrompt(managed: ManagedSession): Promise<void> {
-    if (
+  /** Everything a message waits for before it is sent, in the prompt route's order; the plugin API's skipping of it was a bug. */
+  async readyForMessage(managed: ManagedSession): Promise<"ready" | "workspace_missing" | "workspace_unresponsive"> {
+    // A restart this daemon started is waited out, so everything below reads a settled session.
+    await managed.whenRestarted();
+    // Never a synchronous check: for a plain session the root is the caller's cwd and may be a stalled mount.
+    const present = await probeExists(managed.workspace.root);
+    if (present === null) return "workspace_unresponsive";
+    if (present === false) return "workspace_missing";
+    await this.wakeForPrompt(managed);
+    return "ready";
+  }
+
+  setPeerMcpServers(provide: ((sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[]) | null): void {
+    this.peerMcpServersBy = provide;
+  }
+
+  /** Whether wakeForPrompt would put an agent back on this ended session. */
+  wakesOnPrompt(managed: ManagedSession): boolean {
+    return (
       managed.terminal &&
       (this.autoResumeEnabled || managed.exit?.reason === "parked") &&
       // Same gate as the boot pass: an agent that forgot this conversation will say so again.
       !managed.resumeSettled &&
       autoResumable(managed.exit, managed.agentSessionId, "prompt")
-    ) {
+    );
+  }
+
+  async wakeForPrompt(managed: ManagedSession): Promise<void> {
+    if (this.wakesOnPrompt(managed)) {
       try {
         await managed.resume();
       } catch {
@@ -3187,6 +3291,7 @@ export class SessionRegistry {
       elicitationAllowed: () => this.elicitationAllowed,
       ultracodeDefault: () => this.ultracodeByDefault,
       onWarning: this.onWarning,
+      peerMcpServers: (sessionId, capabilities) => this.peerMcpServersBy?.(sessionId, capabilities) ?? [],
     });
     this.sessions.set(id, managed);
     // Before start, so an attach from zero sees the workspace before the agent's output.
@@ -3218,6 +3323,7 @@ export class SessionRegistry {
         resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
       machineCatalogue: () => this.machine,
         onWarning: this.onWarning,
+        peerMcpServers: (sessionId, capabilities) => this.peerMcpServersBy?.(sessionId, capabilities) ?? [],
       });
       this.sessions.set(row.id, managed);
       // Every restored row is announced, with no origin: a restart is nobody's act.

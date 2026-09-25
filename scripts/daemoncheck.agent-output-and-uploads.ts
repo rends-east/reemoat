@@ -855,13 +855,13 @@ process.stdout.write("\nwhat an attachment costs an event\n");
     bytes: 1234,
     inlined: false,
   }));
-  const bare = { type: "prompt", text: "hi", attachments: null } as const;
-  const laden = { type: "prompt" as const, text: "hi", attachments: refs };
+  const bare = { type: "prompt", text: "hi", attachments: null, from: null } as const;
+  const laden = { type: "prompt" as const, text: "hi", attachments: refs, from: null };
 
   check("an attachment is accounted rather than ignored", estimateBytes(laden) > estimateBytes(bare), true);
   check("and ten maximal ones stay far under the per-event cap", estimateBytes(laden) < 128 * 1024, true);
 
-  const long = { type: "prompt" as const, text: "y".repeat(200 * 1024), attachments: refs };
+  const long = { type: "prompt" as const, text: "y".repeat(200 * 1024), attachments: refs, from: null };
   const cut = truncateEvent(long, 128 * 1024) as typeof long;
   // Untouched: a clipped attachment is a reference to a file that cannot be found.
   check("every attachment survives truncation byte for byte", cut.attachments, refs);

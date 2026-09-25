@@ -96,6 +96,9 @@ export function agentEnv(): NodeJS.ProcessEnv {
 /** claude's session flag, reachable only through _meta.claudeCode.options on session open, so changing it means reopening the session. */
 export const ULTRACODE_SETTING = "ultracode";
 
+/** Claude Code's own way to find other sessions, withdrawn from every claude session: it never lists what this daemon runs (Q2.242). */
+export const CLAUDE_WITHDRAWN_PEER_TOOLS: readonly string[] = ["ListAgents"];
+
 /** undefined rather than an empty object, so the request carries no _meta key at all. */
 export function sessionMetaFor(
   agent: string,
@@ -103,8 +106,16 @@ export function sessionMetaFor(
 ): Record<string, unknown> | undefined {
   // grok keeps its question tool whatever the client declares, so withdrawing it is this key, measured (Q6.113).
   if (agent === "grok") return flags.elicitation ? undefined : { askUserQuestion: false };
-  if (agent !== "claude" || !flags.ultracode) return undefined;
-  return { claudeCode: { options: { settings: { [ULTRACODE_SETTING]: true } } } };
+  if (agent !== "claude") return undefined;
+  // Never settings for the withdrawal: the adapter drops its CLAUDE_MODEL_CONFIG settings whenever any are passed.
+  return {
+    claudeCode: {
+      options: {
+        ...(flags.ultracode ? { settings: { [ULTRACODE_SETTING]: true } } : {}),
+        disallowedTools: [...CLAUDE_WITHDRAWN_PEER_TOOLS],
+      },
+    },
+  };
 }
 
 /** The stream is explicit because codex answers its status on stderr. */

@@ -16,6 +16,7 @@ await import("./daemoncheck.restart-and-resume.js");
 await import("./daemoncheck.permissions-and-turns.js");
 await import("./daemoncheck.after-the-turn-and-config.js");
 await import("./daemoncheck.mid-turn-messages.js");
+await import("./daemoncheck.peer-messages.js");
 await import("./daemoncheck.grok-extensions.js");
 await import("./daemoncheck.plugin-manifest-and-store.js");
 await import("./daemoncheck.plugin-surfaces.js");

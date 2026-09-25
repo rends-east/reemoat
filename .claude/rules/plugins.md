@@ -93,9 +93,9 @@ comparing, with a loud skip where this side is absent. Q4.105.
   Q1.613.
 - **Six contribution points, and the set is closed**: a screen, a settings pane, an
   action on a session's menu, server-side hooks, a **harness** and a **provider**. The
-  client is shaped around *does anything anywhere need me*, and the signals answering
-  it are computed by subtraction (`waitingFloor`) — so a contribution able to insert
-  rows into the session list would open a hole nothing else can see. A transcript card
+  client is shaped around *does anything anywhere need me*, answered where each row
+  already is, and where a row sits is its reader's alone (Q3.674) — so a contribution
+  able to insert rows into the session list would move rows no reader moved. A transcript card
   and a slash command are non-goals with their seams named. Q3.446. The last two are
   `plugin-contributions.md`.
 

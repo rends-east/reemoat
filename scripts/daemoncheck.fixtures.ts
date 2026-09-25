@@ -136,6 +136,12 @@ export function tokenFor(sub: string): string {
   return tokenWith(sub, ["session:read", "session:write", "machine:admin"]);
 }
 
+/** Claims of the caller's choosing over the defaults, signed with the key the verifier trusts: a link capability, or a broken one. */
+export function signedClaims(extra: Record<string, unknown>, scp: string[] = ["session:message"]): string {
+  const claims = { iss: "reemoat-cp", sub: "u_alice", aud: "m_self", jti: `t_${extra["lnk"] ?? "x"}`, iat, nbf: iat, exp: iat + 300, scp, ...extra };
+  return signToken(claims as TokenClaims, kid, privateKey);
+}
+
 export const verifier = new SignedTokenVerifier({ identity });
 
 /** Enough of a store to drive `restore()`; nothing here is ever written back. */

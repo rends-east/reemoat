@@ -69,7 +69,6 @@ import {
   takeRows,
   toggleFolder,
   isFolderCollapsed,
-  waitingFloor,
   type Filter,
   type Folder,
   type FolderId,
@@ -119,17 +118,11 @@ export function SessionBrowser({
     },
     [drag.scrollerRef, swipe.scrollerRef],
   );
-  const floor = waitingFloor(groups, view);
   const needle = currentQuery();
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
       <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} />
-
-      {/* First: `visibleRows` walks floor, pinned, folders, orphans, and the draw order must match. */}
-      {floor.length > 0 && (
-        <WaitingElsewhere rows={floor} state={state} activeKey={activeKey} />
-      )}
 
       {/* Below lg only; above it `MachineColumn` draws the machines as a column. */}
       {state.machines.length > 0 && (
@@ -616,34 +609,6 @@ function MachineTabs({
   );
 }
 
-function WaitingElsewhere({
-  rows,
-  state,
-  activeKey,
-}: {
-  rows: SessionRow[];
-  state: AppState;
-  activeKey: SessionKey | null;
-}): ReactNode {
-  return (
-    <div className="shrink-0 border-y border-edge bg-raised">
-      {/* Not `SETTINGS_HEADING`: the same tracking-wider caps at text-fg, the one band louder than the rows under it. */}
-      <p className="px-3 pt-2 pb-1 text-2xs font-semibold tracking-wider text-fg uppercase">
-        Waiting elsewhere · {rows.length}
-      </p>
-      {rows.map((row) => (
-        <SessionLine
-          key={row.key}
-          row={row}
-          state={state}
-          selected={row.key === activeKey}
-          showMachine
-        />
-      ))}
-    </div>
-  );
-}
-
 const FILTERS: readonly { value: Filter; label: string }[] = [
   { value: "active", label: "Active" },
   { value: "ended", label: "Ended" },
@@ -991,7 +956,7 @@ function SidebarFoot({ machine }: { machine: MachineId | null }): ReactNode {
           New session
         </Button>
       </div>
-      {/* No plugin rows in the rail: `waitingFloor` is computed by subtraction. */}
+      {/* No plugin rows in the rail: where a row sits is its reader's, and nothing else may move one (Q3.674). */}
     </div>
   );
 }

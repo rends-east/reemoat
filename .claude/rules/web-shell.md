@@ -79,18 +79,13 @@ It is shaped around one question asked from a phone: **does anything anywhere ne
 me** — and the answer travels *with the rows* rather than living in a mode you
 have to enter. These are the rules a change here must not break:
 
-- **An approval cannot be hidden.** A waiting session says so on the status dot
-  every row already carries — a filled dot with a permanent ring — plus a
-  **semibold row title** and a count on its folder's header, so a *collapsed*
-  folder still says how many rows under it are waiting. Three signals rather than
-  one, because with the palette monochrome there is no amber left to spend.
-  ⚠ **Blocked rows no longer hoist inside a folder** — the position is its
-  reader's. Q3.569. Only one machine's chats are on screen at a
-  time, so `waitingFloor` in `groups.ts` carries the rest, computed by
-  **subtraction** — everything blocked, minus everything this view can draw — so a
-  new section, filter or needle cannot open a gap by accident. It ignores the
-  filter and the needle deliberately, and `webcheck` asserts it as a **superset
-  property** over every filter × every tab × a set of queries. Q3.200.
+- **A waiting session says so where it is, and never moves.** The status dot every
+  row already carries — a filled dot with a permanent ring — plus a **semibold row
+  title**, a count on its folder's header (so a *collapsed* folder still says so)
+  and one on its machine's tab. Nothing lifts it: not inside a folder (Q3.569) and
+  not across machines, since there is no waiting section any more, and `webcheck`
+  sweeps every filter × tab × query to assert a waiting row is drawn exactly where
+  the same row not waiting would be. Q3.674, reversing Q3.200.
   **`Sheet` draws no waiting count** (Q3.434, reversing Q3.201).
 - **`machineSubline` keeps `blocked` above `offline`**, and no row or banner says a
   machine or the server is unreachable: `ConnectionPill` does, floating at the
@@ -397,7 +392,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/store.ts` | All client state, and `resume()`, the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs |
 | `packages/web/src/resume.ts` | Noticing the phone woke. Four triggers, one debounced call |
 | `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the **seven** sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
-| `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |
+| `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs` and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
 | `packages/web/src/ui/rail.ts` | How wide the rail is: `MACHINE_COLUMN_PX` plus the list's own three numbers, and the migration for a width stored before the column existed. The mechanism is `paneWidth.ts`, shared with the background panel; `docked-panels.md` is that area |
 | `packages/web/src/ui/Sheet.tsx` | Route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone, a centred card above `sm`. **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head; only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN`, or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` a **definite** height, never a `max-h` it can shrink under; `SHEET_BODY` a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |

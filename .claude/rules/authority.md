@@ -42,10 +42,12 @@ long as nothing running *needs* a read from here. And this process holds the
 Ed25519 key that mints every token in the fleet; what it must not also hold is
 anybody's source.
 
-**Three lightweight facts it does keep, named so the next idea can be measured
+**Four lightweight facts it does keep, named so the next idea can be measured
 against them**: tunnel presence (`relay_tunnels`, `machine_last_seen`), what a
-daemon announced about itself on the handshake (`machines.daemon_*`), and mail
-waiting to go out. Each is about *reachability* or is this service's own. A
+daemon announced about itself on the handshake (`machines.daemon_*`), which of one
+owner's machines may open a channel to which (`machine_links`), and mail waiting to
+go out. Each is about *reachability* or is this service's own. A message between
+agents is none of them: it waits on the sending daemon, never here (Q7.150). A
 session title, a transcript index, a file listing or a count of turns would not
 be — each reads as convenient and each ends with somebody's work in the process
 that holds the signing key.

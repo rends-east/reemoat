@@ -10,8 +10,8 @@ control plane is always addressed directly.
 **A daemon is reached over an encrypted channel, and there is no other way in.**
 The app opens a WebSocket to the relay at **`/__relay/channel`**, the relay
 authorizes it — verify the capability, take the machine from `aud`, read the live
-user, machine and grant rows — and then splices it to that machine's tunnel as raw
-bytes. Inside it the app and the daemon run
+user, machine and grant rows, and for a link capability the link's row as well — and
+then splices it to that machine's tunnel as raw bytes. Inside it the app and the daemon run
 `Noise_IK_25519_ChaChaPoly_BLAKE2s` between themselves, and every route below
 travels as frames in that session. The relay carries bytes it holds no key for.
 
@@ -74,7 +74,7 @@ auth gate.
 
 ---
 
-## The daemon — 62 routes
+## The daemon — 67 routes
 
 Runs on your machine, reachable through the relay's encrypted channel.
 
@@ -236,9 +236,23 @@ plugin_failed` for anything the plugin's own code raised.
 | `GET /sessions/:id/uploads/:uploadId` | Read an upload back, by the id the prompt named it with |
 | `GET /sessions/:id/files` | Read a file back out of the workspace |
 
+### Another machine's agents
+
+A **link capability** reaches these and nothing else: its one scope, `session:message`,
+is refused by every other route, and a person's capability — which never carries it —
+is refused by these. Minted by this machine's own Authority for the other machine's
+key, and delivered to that machine by its owner's app. `.claude/rules/agent-messaging.md`.
+
+| | |
+|---|---|
+| `GET /peer/agents` | The sessions here another machine's agents may reach, as the rows `list_agents` shows: a folder's name, never its path. `403 not_a_link` for a capability that is not one, `403 messaging_off` under `REEMOAT_PEER_MESSAGES=off` |
+| `POST /peer/messages` | `{id, from: {ref, name, harness, hops}, to, message, notify}`. **A refusal rides a `200`** as `{ok: false, code, message}`, because the sending agent reads it: the codes are the ones `send_message` answers with. The sending machine is the one the capability names, never the body; the same `id` from one link is delivered once |
+| `POST /peer/notices` | That a session there went idle or ended without answering, for a message this machine sent with `notify`. `202`, or `409 unexpected_notice` for one nothing here asked for — a link cannot wake a session by claiming to answer it |
+| `GET /peers/links` · `PUT /peers/links` | `machine:admin`. The link capabilities this machine holds for reaching others, written whole by the owner's app exactly as the control plane minted them, and read back with the last error each met |
+
 ---
 
-## The control plane — 64 routes
+## The control plane — 67 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -281,6 +295,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
 | `DELETE /v1/machines/:id/grants/me` | **Give up a share somebody made to you.** The three routes above all resolve through ownership, so a grantee could reach none of them — and a share is written for any `userId` with no consent asked, so what somebody can do to you unasked now has something you can do about it. Your own grant only, and there is no `userId` parameter: the caller is the subject, and a route that took an id would be `DELETE /v1/admin/grants` under another name. `409 grant_is_owner` on a machine you own, because `GET /v1/machines` joins `grants` and an owner without one owns a machine in no list — retiring it is the verb for that; `404 grant_not_found` for both "no such grant" and "no such machine", which is the same anti-mapping rule |
 | `POST /v1/tokens` | The short-lived capability the app spends on one machine. Quota is checked **after** the grant is proved. The answer is also **how a client learns where that machine is and what it will answer as**: `machine.relayUrl`, `machine.relayOnline`, and `machine.key` — the machine's X25519 static, which is IK's precondition and therefore the thing without which no channel can be opened at all. `null` there means a machine that has not dialled since it learned to announce one, and the client turns that into a sentence about updating it rather than into a session without it: there is no mode to fall back to. A route and a key are the same kind of fact — *how to reach this thing* — so they are minted together rather than fetched twice and left to disagree. **`409 device_key_required`** refuses a signed-in installation that has registered no device key: a capability minted for it could not open a channel, so the answer is a refusal with a remedy rather than a credential that fails later about the wrong thing. An **API key** is the deliberate exception and is minted **without** a binding, because a key is no sign-in and has no device to bind to — such a capability works over loopback and is refused by any daemon it reaches on a channel, which is the honest shape rather than a let-off |
+| `POST` · `GET /v1/machines/:id/links` · `DELETE /v1/links/:id` | **Let one of your machines' agents message another's.** `POST` is asked of the **source**, which must be yours (`404 machine_not_found` otherwise, grantee or not), enrolled (`409 machine_not_enrolled`), keyed (`409 machine_key_missing` — the link is bound to that key) and switched on (`403 machine_over_limit` / `owner_disabled`). It answers one link per **other** machine you own that is enrolled, keyed, live, granted to you and within your limit — `{links: [{id, token, expiresAt, target: {id, name, key, relayUrl}}]}`, an empty list when there is none — finding the live `lk_` row or writing one, and minting each a fresh capability every time: `aud` the target, `sub` you, `scp` exactly `["session:message"]`, `cnf.jkt` the **source machine's** key from this service's own pin, `lnk`/`src`/`srcl` naming the link, the source and your label for it, and **90 days** of life, since revocation is the relay reading the row on every channel rather than expiry. Nothing about it is a grant, and no grant ever carries that scope. The app hands the answer to the source's daemon; the Authority holds no message. `GET` lists the live links a machine of yours is either end of, while both ends are live. `DELETE` is yours if you own either end, answers `204` — again on a repeat, so a retried `DELETE` is safe — and `404 link_not_found` for "no such link" and "not yours" alike. The relay refuses a removed link's next channel as `404 machine_not_found`. Q7.150 |
 
 ### Admin
 

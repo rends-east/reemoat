@@ -173,9 +173,9 @@ function OverlaySheet({
 function screenOf(route: Route): string {
   switch (route.name) {
     case "settings":
-      // The strip flag and the sign-in harness each make a separate screen (Q3.640).
+      // The strip flag, the links flag and the sign-in harness each make a separate screen (Q3.640).
       return `settings/${route.section ?? ""}/${route.machineId ?? ""}/${route.system ?? ""}/${
-        route.agents ? "agents" : ""
+        route.agents ? "agents" : route.links ? "links" : ""
       }/${route.signin ?? ""}`;
     case "new":
       return "new";

@@ -41,7 +41,6 @@ import {
   siblingsOf,
   toggleFolder,
   visibleRows,
-  waitingFloor,
 } from "./webcheck.modules.js";
 
 // Tailwind v4 emits utilities alphabetically, so a utility appended to a shared class string (MENU_ROW, menuRow) never overrides one it already sets.
@@ -691,14 +690,9 @@ process.stdout.write("\nmachine groups\n");
 
   setQuery("zzz-matches-nothing");
   check(
-    "a needle that hides a pinned blocked row does not hide the approval",
+    "a needle hides a pinned blocked row as it hides any other: the search is its reader's (Q3.674)",
     visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
-    ["m_a/pb"],
-  );
-  check(
-    "and it is the floor that is holding it up",
-    waitingFloor(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
-    ["m_a/pb"],
+    [],
   );
   setQuery("");
 }
@@ -983,7 +977,7 @@ process.stdout.write("\nwhat is actually on screen\n");
     "m_a/blocked",
   ]);
   selectMachine("m_b" as never);
-  check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_a/blocked", "m_b/kept", "m_b/other"]);
+  check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_b/kept", "m_b/other"]);
   selectMachine("all" as never);
   check("and under All every pin is drawn", keys(visibleRows(groups, currentView(groups))).slice(0, 2), ["m_a/far", "m_b/kept"]);
   selectMachine("m_b" as never);
@@ -998,14 +992,19 @@ process.stdout.write("\nwhat is actually on screen\n");
 
   selectMachine("m_b" as never);
   check("selecting the other machine draws its folders", foldersOf(groups, currentView(groups)).map((f) => f.name), ["web"]);
-  check("and the session waiting on the machine you left is lifted to the top", keys(visibleRows(groups, currentView(groups))), [
-    "m_a/blocked",
+  check("and nothing from the machine you left, however long it has been waiting", keys(visibleRows(groups, currentView(groups))), [
     "m_b/kept",
     "m_b/other",
   ]);
-  check("the floor holds exactly that row", keys(waitingFloor(groups, currentView(groups))), ["m_a/blocked"]);
+  check(
+    "which that machine's tab still counts, so the wait is said without moving anything",
+    machineTabs(groups, currentView(groups)).map((t) => [t.id, t.blockedCount]),
+    [
+      ["m_a", 1],
+      ["m_b", 0],
+    ],
+  );
   selectMachine("m_a" as never);
-  check("and nothing is lifted while its own machine is selected", keys(waitingFloor(groups, currentView(groups))), []);
 
   const folder = foldersOf(groups, currentView(groups))[0]!;
   toggleFolder(folder.id);
@@ -1030,31 +1029,40 @@ process.stdout.write("\nwhat is actually on screen\n");
   const view = currentView(groups);
   check("the default is the chats that are still going", view.filter, "active");
   selectMachine("m_b" as never);
-  check("the ended filter shows terminal rows, and still anything waiting", keys(visibleRows(groups, { ...currentView(groups), filter: "ended" })), ["m_a/blocked", "m_b/done"]);
-  check("and active shows the live ones", keys(visibleRows(groups, { ...currentView(groups), filter: "active" })), ["m_a/blocked", "m_b/kept", "m_b/other"]);
+  check("the ended filter shows terminal rows and nothing else", keys(visibleRows(groups, { ...currentView(groups), filter: "ended" })), ["m_b/done"]);
+  check("and active shows the live ones", keys(visibleRows(groups, { ...currentView(groups), filter: "active" })), ["m_b/kept", "m_b/other"]);
 
-  // Asserted as a superset over every filter, tab and needle, `all` included, so a new section cannot open a gap.
-  const everyBlocked = rows
-    .filter((r) => ((r.snapshot as { pendingPermissions?: unknown[] }).pendingPermissions?.length ?? 0) > 0)
-    .map((r) => r.key);
+  // Swept, because "waiting moves nothing" is a claim about every view: the same list with nobody waiting draws the same.
+  const calm = sessionGroups({
+    sessions: rows.map((r) =>
+      r.key === "m_a/blocked"
+        ? row("blocked", "m_a", { createdAt: 1, status: "idle", pendingPermissions: [], workspace: workspaceAt("/home/u/api") })
+        : r,
+    ),
+    machines: [machineOf("m_a", "alpha"), machineOf("m_b", "beta")],
+  } as never);
   const filters = ["active", "ended", "all"] as const;
   const machines = ["m_a", "m_b", "all"] as const;
   const needles = ["", "web", "zzz-matches-nothing"];
-  let holes: string[] = [];
+  const moved: string[] = [];
   for (const f of filters) {
     for (const m of machines) {
       selectMachine(m as never);
       for (const q of needles) {
         setQuery(q);
-        const shown = new Set(keys(visibleRows(groups, { ...currentView(groups), filter: f })));
-        for (const key of everyBlocked) {
-          if (!shown.has(key)) holes.push(`${f}/${m}/"${q}" hides ${key}`);
-        }
+        const waiting = keys(visibleRows(groups, { ...currentView(groups), filter: f }));
+        const quiet = keys(visibleRows(calm, { ...currentView(calm), filter: f }));
+        if (JSON.stringify(waiting) !== JSON.stringify(quiet)) moved.push(`${f}/${m}/"${q}": ${waiting.join(",")} vs ${quiet.join(",")}`);
       }
     }
   }
   setQuery("");
-  check("no filter, tab or search can hide a session waiting on you", holes, []);
+  check("waiting on somebody never moves a row, adds one or takes one away, in any filter, tab or search", moved, []);
+  check(
+    "and no section lifts waiting sessions out of their place",
+    [stripComments(srcFile("ui/SessionBrowser.tsx")).includes("Waiting elsewhere"), srcFile("ui/groups.ts").includes("waitingFloor")],
+    [false, false],
+  );
 
   selectMachine("all" as never);
   {
@@ -1069,7 +1077,6 @@ process.stdout.write("\nwhat is actually on screen\n");
       "m_b/other",
       "m_a/blocked",
     ]);
-    check("and nothing has to be lifted, because nothing is elsewhere", waitingFloor(groups, view).length, 0);
   }
   selectMachine("m_a" as never);
   setQuery("");

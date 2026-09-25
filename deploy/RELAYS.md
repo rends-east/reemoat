@@ -95,6 +95,15 @@ the machine flips offline for a retry interval. With N relays behind one name
 that is one request in N. `REEMOAT_CP_RELAY_URLS` is what stops it being a coin
 flip, and it is why the map has to exist before the second relay does.
 
+**Each relay reads the same map, for daemons holding a link.** A daemon sending to
+another machine (Q7.150) dials the shared name, so it can land on a relay that
+does not hold the target. That relay answers **`421 wrong_relay`** with
+`x-reemoat-relay-url` naming the relay that does — read off `relay_tunnels` and
+this map, and only after the capability has been authorized. A relay with no map,
+or a holder the map does not name, answers `503 no_tunnel` as before. A malformed
+map is warned about and ignored by a relay, never fatal: the API already refuses
+it, and a relay that exited over a redirect would take every tunnel with it.
+
 ## What each relay needs
 
 **The API** switches to `external`, which is what makes it read presence from

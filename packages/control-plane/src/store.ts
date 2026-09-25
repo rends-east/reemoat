@@ -57,11 +57,12 @@ export function openControlStore(options: OpenControlStoreOptions): ControlStore
   };
 }
 
-// Prepared once per database: the relay's authorize runs all three on every request. Weak so a closed database is not retained.
+// Prepared once per database: the relay's authorize runs these on every request, link on a link's. Weak so a closed database is not retained.
 interface Statements {
   grant: ReturnType<DatabaseSync["prepare"]>;
   machine: ReturnType<DatabaseSync["prepare"]>;
   user: ReturnType<DatabaseSync["prepare"]>;
+  link: ReturnType<DatabaseSync["prepare"]>;
 }
 
 const statementCache = new WeakMap<DatabaseSync, Statements>();
@@ -73,6 +74,7 @@ function statements(db: DatabaseSync): Statements {
       grant: db.prepare("SELECT scopes FROM grants WHERE user_id = ? AND machine_id = ?"),
       machine: db.prepare("SELECT id, name, enrolled_at, revoked_at FROM machines WHERE id = ?"),
       user: db.prepare("SELECT id, name, disabled_at FROM users WHERE id = ?"),
+      link: db.prepare("SELECT source_machine_id, target_machine_id, revoked_at FROM machine_links WHERE id = ?"),
     };
     statementCache.set(db, held);
   }
@@ -102,6 +104,23 @@ export function machineById(db: DatabaseSync, machineId: string): MachineRow | n
     id: String(row["id"]),
     name: String(row["name"]),
     enrolled: row["enrolled_at"] !== null,
+    revoked: row["revoked_at"] !== null,
+  };
+}
+
+export interface LinkRow {
+  sourceMachineId: string;
+  targetMachineId: string;
+  revoked: boolean;
+}
+
+/** Read live on every channel a link token opens, so revoking the row stops every token minted for it at once. */
+export function linkById(db: DatabaseSync, linkId: string): LinkRow | null {
+  const row = statements(db).link.get(linkId);
+  if (!row) return null;
+  return {
+    sourceMachineId: String(row["source_machine_id"]),
+    targetMachineId: String(row["target_machine_id"]),
     revoked: row["revoked_at"] !== null,
   };
 }

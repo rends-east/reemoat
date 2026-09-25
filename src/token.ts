@@ -29,6 +29,10 @@ export interface TokenClaims {
   cnf?: { jkt: string };
   /** Advisory device id for refusal messages; never branch on it, `cnf` is the binding. */
   dev?: string;
+  /** A link capability's id, and the machine on its other end: all three or none (Q7.150). */
+  lnk?: string;
+  src?: string;
+  srcl?: string;
 }
 
 export type DecodeFailure =
@@ -158,6 +162,18 @@ export function parseClaims(payloadJson: string): TokenClaims | null {
   const dev = fields["dev"];
   if (dev !== undefined && (typeof dev !== "string" || dev.length === 0)) return null;
 
+  // Refused whole rather than half-read: a link id without its source would attribute a message to nobody.
+  const lnk = fields["lnk"];
+  const src = fields["src"];
+  const srcl = fields["srcl"];
+  const linked = lnk !== undefined || src !== undefined || srcl !== undefined;
+  if (
+    linked &&
+    (typeof lnk !== "string" || lnk.length === 0 || typeof src !== "string" || src.length === 0 || typeof srcl !== "string")
+  ) {
+    return null;
+  }
+
   return {
     iss,
     sub,
@@ -169,6 +185,7 @@ export function parseClaims(payloadJson: string): TokenClaims | null {
     scp: scp as string[],
     ...(confirmation === undefined ? {} : { cnf: confirmation }),
     ...(dev === undefined ? {} : { dev: dev as string }),
+    ...(linked ? { lnk: lnk as string, src: src as string, srcl: srcl as string } : {}),
   };
 }
 

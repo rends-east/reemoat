@@ -171,6 +171,8 @@ export interface SessionOptions {
   model?: string | null;
   // Passed in, never read from a module (Q2.215). Absent means BUILTIN_CATALOGUE.
   machine?: MachineCatalogue | null;
+  // Called after initialize, once per agent process: /clear reuses the answer.
+  mcpServers?: ((capabilities: acp.McpCapabilities) => acp.McpServer[]) | null;
 }
 
 export interface ResumeOptions extends SessionOptions {
@@ -238,6 +240,7 @@ export class Session {
   private cwd = "";
 
   private sessionMeta: Record<string, unknown> | undefined;
+  private mcpServers: acp.McpServer[] = [];
 
   private constructor(
     readonly agent: AgentId,
@@ -258,7 +261,7 @@ export class Session {
     const opened = await withDeadline(
       this.client.agent.request(acp.methods.agent.session.new, {
         cwd: this.cwd,
-        mcpServers: [],
+        mcpServers: this.mcpServers,
         ...metaParam(this.sessionMeta),
       }),
       NEW_SESSION_TIMEOUT_MS,
@@ -442,12 +445,13 @@ export class Session {
       throw error;
     }
 
+    const mcpServers = mcpServersOf(options, client);
     let response: acp.NewSessionResponse;
     try {
       response = await withDeadline(
         client.agent.request(acp.methods.agent.session.new, {
           cwd: options.cwd,
-          mcpServers: [],
+          mcpServers,
           ...metaParam(sessionMetaOf(options)),
         }),
         LAUNCH_SESSION_TIMEOUT_MS,
@@ -466,7 +470,7 @@ export class Session {
 
     runtime.forgetStartRefusal(options.agent);
 
-    const session = Session.adopt(options, client, response.sessionId, response);
+    const session = Session.adopt(options, client, response.sessionId, response, mcpServers);
     try {
       const unpinned = await pinNativeModel(session, options);
       if (unpinned !== null) throw new SystemRoutingError(unpinned);
@@ -525,13 +529,14 @@ export class Session {
       throw new ResumeUnsupportedError(config.displayName);
     }
 
+    const mcpServers = mcpServersOf(options, client);
     let response: acp.ResumeSessionResponse;
     try {
       response = await withDeadline(
         client.agent.request(acp.methods.agent.session.resume, {
           sessionId: options.agentSessionId,
           cwd: options.cwd,
-          mcpServers: [],
+          mcpServers,
           ...metaParam(sessionMetaOf(options)),
         }),
         LAUNCH_SESSION_TIMEOUT_MS,
@@ -552,7 +557,7 @@ export class Session {
 
     runtime.forgetStartRefusal(options.agent);
 
-    const session = Session.adopt(options, client, options.agentSessionId, response);
+    const session = Session.adopt(options, client, options.agentSessionId, response, mcpServers);
 
     // For a native pairing this is the only pin on resume (Q2.215); it demotes rather than refuses (Q2.216).
     let unpinned: string | null;
@@ -581,6 +586,7 @@ export class Session {
     client: AcpClient,
     sessionId: string,
     opened: { modes?: acp.SessionModeState | null; configOptions?: acp.SessionConfigOption[] | null },
+    mcpServers: acp.McpServer[],
     ): Session {
     const session = new Session(
       options.agent,
@@ -591,6 +597,8 @@ export class Session {
       options.keepImage,
     );
     session.cwd = options.cwd;
+    // Kept as sent: /clear opens its new conversation with exactly these.
+    session.mcpServers = mcpServers;
     session.sessionMeta = sessionMetaOf(options);
     session.unregister = client.registerSession(sessionId, session.handlers());
     session.unsubscribeLogs = client.onLog((line) => {
@@ -1606,6 +1614,10 @@ function toLocations(
 // Clipped, not refused: the id identifies the call, and clip is deterministic.
 function boundToolCallId(id: string): string {
   return clip(id, MAX_PARENT_ID_CHARS);
+}
+
+function mcpServersOf(options: SessionOptions, client: AcpClient): acp.McpServer[] {
+  return options.mcpServers?.(client.initializeResult.agentCapabilities?.mcpCapabilities ?? {}) ?? [];
 }
 
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {

@@ -18,6 +18,7 @@ import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
 import { LogsSection } from "./LogsSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachineLinksSection } from "./MachineLinksSection";
 import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
@@ -94,6 +95,8 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
           ) : drilled && route.machineId !== null ? (
             route.agents ? (
               <MachineAgentsSection state={state} machineId={route.machineId} harness={route.signin} />
+            ) : route.links ? (
+              <MachineLinksSection state={state} machineId={route.machineId} />
             ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (

@@ -21,6 +21,8 @@ import type {
   InstallRunView,
   LoginChunk,
   LoginRunView,
+  MachineLinkGrant,
+  PeerLinkView,
   PermissionOptionSummary,
   RootListing,
   SessionList,
@@ -125,6 +127,17 @@ export class DaemonClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
     });
+  }
+
+  /** Replaces the whole set the daemon holds; an older daemon answers the bare 404 `meansRouteAbsent` reads. */
+  putPeerLinks(links: readonly MachineLinkGrant[]): Promise<{
+    links: { id: string; target: { id: string; name: string }; expiresAt: number }[];
+  }> {
+    return this.machine.request("/peers/links", { method: "PUT", body: JSON.stringify({ links }) });
+  }
+
+  peerLinks(): Promise<{ links: PeerLinkView[] }> {
+    return this.machine.request<{ links: PeerLinkView[] }>("/peers/links");
   }
 
   agentStrip(): Promise<{ entries: AgentStripEntry[] }> {

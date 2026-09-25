@@ -29,6 +29,7 @@ import { taskFinished } from "../wire";
 import { TASK_NOUNS, taskTokens, type BackgroundReporting } from "../tasks";
 import type { PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
+import { PeerMessageRow } from "./PeerMessage";
 import { Markdown } from "./Markdown";
 import { COLUMN, Dot, Empty, Icon, Badge, shortDuration, TAP_GROW_Y, TranscriptSkeleton } from "./bits";
 import { WorkingMark } from "./Mark";
@@ -521,6 +522,11 @@ function PromptRow({
   files: FileAccess | null;
 }): ReactNode {
   const waiting = useContext(QueuedContext).has(seq);
+  const onResized = useContext(ResizedContext);
+  // Another agent's message is never drawn as the person's own; an older daemon sends no from at all.
+  if (event.from != null) {
+    return <PeerMessageRow from={event.from} text={event.text} waiting={waiting} onResized={onResized} />;
+  }
   return (
     <>
       <UserBubble

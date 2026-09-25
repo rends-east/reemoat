@@ -185,10 +185,26 @@ export interface PromptAttachmentRef extends StoredFileRef {
   inlined: boolean;
 }
 
+/** Mirrors src/events.ts: another session's message, as its daemon verified it. */
+export interface PeerOrigin {
+  /** An unknown kind from a newer daemon is drawn as a message, which is the one that claims least. */
+  kind: "message" | "notice";
+  name: string;
+  ref: string;
+  machineId: string | null;
+  machineLabel: string | null;
+  harness: string;
+  messageId: string;
+  hops: number;
+}
+
 export interface PromptEvent {
   type: "prompt";
+  /** What the agent received; for another agent's message, the envelope with it. */
   text: string;
   attachments?: PromptAttachmentRef[];
+  /** Absent from an older daemon; null for a person's message. */
+  from?: PeerOrigin | null;
 }
 
 export interface UploadAccepted {
@@ -993,6 +1009,31 @@ export interface IssuedToken {
   };
   // The lifetime is expiresAt minus serverTime; never compare expiresAt with the local clock.
   serverTime?: number;
+}
+
+/** One link as `POST /v1/machines/:id/links` answers it; `PUT /peers/links` is sent the same objects, unread and unchanged. */
+export interface MachineLinkGrant {
+  id: string;
+  token: string;
+  expiresAt: number;
+  target: { id: string; name: string; key: string; relayUrl: string | null };
+}
+
+/** `GET /v1/machines/:id/links`: a live link with this machine at either end. */
+export interface MachineLinkRecord {
+  id: string;
+  source: { id: string; name: string };
+  target: { id: string; name: string };
+  createdAt: number;
+}
+
+/** `GET /peers/links`: what the daemon holds, and what it last hit using each. */
+export interface PeerLinkView {
+  id: string;
+  target: { id: string; name: string; relayUrl: string | null };
+  expiresAt: number;
+  lastError: string | null;
+  lastErrorAt: number | null;
 }
 
 export interface Me {

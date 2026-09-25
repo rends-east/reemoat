@@ -300,40 +300,11 @@ export function allRows(groups: SessionGroups, view: ListView): SessionRow[] {
   return orderSessions(rows);
 }
 
-/** Blocked sessions this view cannot draw: everything blocked minus everything reachable. */
-export function waitingFloor(groups: SessionGroups, view: ListView): SessionRow[] {
-  // Reachability applies the filter and needle exactly as visibleRows draws, so a searched-away blocked row is lifted.
-  const reachable = new Set<string>();
-  for (const row of matching(pinnedFor(groups, view), view.query)) reachable.add(row.key);
-  for (const row of matching(orphansFor(groups, view.filter), view.query)) reachable.add(row.key);
-  for (const row of allRows(groups, view)) reachable.add(row.key);
-  const group = groups.groups.find((candidate) => candidate.id === view.machine);
-  if (group !== undefined) {
-    for (const row of matching(rowsOf(group, view.filter), view.query)) reachable.add(row.key);
-  }
-
-  // Pinned and orphaned rows are in no MachineGroup, so the fleet has to add them explicitly (Q3.11).
-  const fleet: SessionRow[] = [
-    ...groups.groups.flatMap((group) => [...group.active, ...group.ended]),
-    ...groups.pinned,
-    ...groups.orphans,
-  ];
-
-  const seen = new Set<string>();
-  const out: SessionRow[] = [];
-  for (const row of fleet) {
-    if (!needsHuman(row.snapshot)) continue;
-    if (reachable.has(row.key) || seen.has(row.key)) continue;
-    seen.add(row.key);
-    out.push(row);
-  }
-  return out;
-}
-
 /** The single source of render order, shared with keyboard.ts; each session once even when pinned. */
 export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[] {
   const searching = view.query.trim().length > 0;
-  const out: SessionRow[] = [...waitingFloor(groups, view)];
+  // Nothing is lifted out of its place for needing somebody: a waiting row stays where it is and says so on its dot (Q3.674).
+  const out: SessionRow[] = [];
   if (searching || !isFolderCollapsed(PINNED_FOLDER)) {
     out.push(...matching(pinnedFor(groups, view), view.query));
   }

@@ -207,10 +207,32 @@ transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
   this. Q5.12.
 - **Reconnect backoff is reset by a connection that survived, not one that
   opened.** Q5.20.
-- **A tunnel with no daemon is a 503, never a queue.** Q5.21.
-- **The relay reads four tables and writes two, and never on the *request*
+- **A tunnel with no daemon is a 503, never a queue.** Q5.21. What waits for a
+  machine that is off waits on the sending daemon (`agent-messaging.md`).
+- **A link capability is authorized on its row, and every refusal of its own is the
+  unknown machine's 404.** With `lnk` present, `linkClaimsOf` needs `src` and
+  `srcl` (else `401 malformed_token`), then `linkIsLive` the row live, its target
+  `aud`, its source `src`, and the source live, within its owner's limit and not
+  owner-disabled — before the user and grant checks, which still run on `sub` and
+  `aud`. Deleting the row refuses every token minted for it at the next channel,
+  which is the only revocation a 90-day capability has. Q1.652, Q5.121.
+- **A link's streams are its own budget, never its owner's.** `RelayAuth.limiter` is
+  `sub` at `MAX_STREAMS_PER_SUBJECT` for a person and `lnk:<id>` at
+  `MAX_STREAMS_PER_LINK` for a link, and every link stream on a tunnel shares
+  `MAX_LINK_STREAMS_PER_TUNNEL`; `STREAM_SUBJECT_HEADER` stays the owner. Past either
+  cap is `503 no_tunnel`, as for a person. `LinkConnectBudget` spends one token per
+  link channel **before** the tunnel lookup — `429 link_rate_limited` — in memory,
+  per relay process. Q5.121.
+- **`421 wrong_relay` is answered only after authorize**, only where
+  `dbRelayView.relayFor` names another slot the map names, carrying
+  `RELAY_URL_HEADER`; a row naming this relay, an unmapped slot or no map is 503. A
+  malformed map is a warning in `relay/main.ts`, never an exit. A page cannot read an
+  upgrade's status, so only a linked daemon sees it, and follows it once. Q1.653.
+- **The relay reads six tables and writes two, and never on the *request*
   path.** `machines`, `users`, `grants` and a ≤1/s-cached `signing_keys.public_jwk`
-  per proxied request; `machine_tunnel_keys` on dial. The writes are
+  per proxied request, plus `machine_links` per *link* channel (`linkById`);
+  `machine_tunnel_keys` on dial; and `relay_tunnels`, only for a tunnel it does not
+  hold while `REEMOAT_CP_RELAY_URLS` is set (the 421). The writes are
   `relay_tunnels`, on register, on unregister and on a 5s flush; and `machines`'
   four `daemon_*` columns, **on dial only** — `recordDaemonBuild`, which is what
   `cpctl admin fleet` reads back. The fourth is `daemon_agents`, the CLI
@@ -299,7 +321,7 @@ transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
 
 | | |
 |---|---|
-| Relay streams | `STREAM_WINDOW_BYTES` of h2 window per stream — 1 MiB, raised from 256 KiB as the coupled half of `EVENTS_PAGE_BYTES` (Q6.104), and **this is the flow control**, granted on consumption. 256 concurrent streams per tunnel, **64 per caller** on one tunnel (`MAX_STREAMS_PER_SUBJECT`), 8 MiB connection window (`CONNECTION_WINDOW_BYTES`). The per-caller share is keyed on the verified `sub` — the same value that rides `STREAM_SUBJECT_HEADER` and confers nothing there — because a grant is full access and the tunnel budget is shared. Q1.100 |
+| Relay streams | `STREAM_WINDOW_BYTES` of h2 window per stream — 1 MiB, raised from 256 KiB as the coupled half of `EVENTS_PAGE_BYTES` (Q6.104), and **this is the flow control**, granted on consumption. 256 concurrent streams per tunnel, **64 per caller** on one tunnel (`MAX_STREAMS_PER_SUBJECT`), 8 MiB connection window (`CONNECTION_WINDOW_BYTES`). The per-caller share is keyed on the verified `sub` — the same value that rides `STREAM_SUBJECT_HEADER` and confers nothing there — because a grant is full access and the tunnel budget is shared. Q1.100. **4 per link** and 32 across every link on one tunnel (`MAX_STREAMS_PER_LINK`, `MAX_LINK_STREAMS_PER_TUNNEL`), never counted against the owner's 64; a link opens 20 channels at once and then one a second (`LINK_CONNECT_BURST`, `LINK_CONNECT_REFILL_MS`). Q5.121 |
 | Tunnel | 8 MiB socket-buffer valve (`MAX_TUNNEL_BUFFERED_BYTES`, should be unreachable), 20s ping / 2 misses, reconnect 1s→30s with **full** jitter, backoff resets only after 60s up (`TUNNEL_STABLE_AFTER_MS`) |
 
 ## Known gotchas

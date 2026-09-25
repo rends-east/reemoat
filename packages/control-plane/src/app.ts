@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { ALL_SCOPES, AUTH_LEEWAY_MS, type Scope } from "../../../src/auth.js";
+import { ALL_SCOPES, AUTH_LEEWAY_MS, LINK_SCOPE, type Scope } from "../../../src/auth.js";
 import { bearerToken, boundedInt, describeError, gzipResponses, jsonError, readJsonObject } from "../../../src/http.js";
 import {
   RELAY_PROTOCOL_MIN_VERSION,
@@ -185,6 +185,10 @@ export function drainDeferred(): number {
 
 export const DEFAULT_TOKEN_TTL_SECONDS = 300;
 
+/** A link capability's life: revocation is the relay reading the row per channel, not expiry (Q7.150). */
+export const LINK_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
+
+
 /** A token is accepted over nbf minus leeway to exp plus leeway, so below this floor the leeway dominates its lifetime. */
 export const MIN_TOKEN_TTL_SECONDS = (2 * AUTH_LEEWAY_MS) / 1000;
 
@@ -245,6 +249,13 @@ export interface ControlPlaneOptions {
   mail?: MailSender | null;
   // How many of your own proxies front this listener; decides how much of x-forwarded-for is believed (net.ts).
   trustedProxyHops?: number;
+}
+
+/** src/token.ts's claims plus the three a link adds; signToken serializes whatever it is handed. */
+interface LinkTokenClaims extends TokenClaims {
+  lnk: string;
+  src: string;
+  srcl: string;
 }
 
 interface Caller {
@@ -353,7 +364,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const writeThrottle = new LoginThrottle(WRITE_THROTTLE);
 
   // Null means carry on. Recorded with fail, since a legitimate write is still a write.
-  // There are **fourteen** call sites; relaycheck compares that word with the calls.
+  // There are **sixteen** call sites; relaycheck compares that word with the calls.
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
     const key = writeKey(caller.userId, what);
@@ -2061,6 +2072,182 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       // So a client can tell "my clock is wrong" from "the token was refused".
       serverTime: Date.now(),
     });
+  });
+
+  // Resolved like POST /v1/tokens, then owned by the caller or a 404, so the link routes probe nothing.
+  const ownedRef = (c: Context<AppEnv>): OwnedMachine | null => {
+    const caller = c.get("caller");
+    const resolved = resolveMachineRef(db, caller.userId, c.req.param("id") ?? "");
+    const owner = resolved === null ? null : ownerOf(db, resolved);
+    return owner !== null && owner.userId === caller.userId ? owner : null;
+  };
+
+  // A link per other machine the caller owns, each with a capability bound to this machine's pinned key (Q7.150).
+  app.post("/v1/machines/:id/links", (c) => {
+    const writeGuard = spendWrite(c, "links");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const source = ownedRef(c);
+    const row =
+      source === null
+        ? undefined
+        : db.prepare("SELECT name, enrolled_at, revoked_at FROM machines WHERE id = ?").get(source.id);
+    if (source === null || !row) return jsonError(c, 404, "machine_not_found", "no such machine");
+    if (row["revoked_at"] !== null) return jsonError(c, 403, "machine_revoked", "this machine has been revoked");
+    if (row["enrolled_at"] === null) {
+      return jsonError(c, 409, "machine_not_enrolled", "this machine has not enrolled yet");
+    }
+    const standing = machineStanding(db, source.id);
+    if (standing !== null && standing.ownerDisabled) {
+      return jsonError(c, 403, "owner_disabled", "this machine's owner has been disabled, so it is switched off");
+    }
+    if (standing !== null && standing.over) {
+      return jsonError(
+        c,
+        403,
+        "machine_over_limit",
+        "this machine is over your machine limit and is switched off, so it can reach no other machine. Retire " +
+          "another machine, or ask whoever runs this control plane to raise the limit.",
+      );
+    }
+    // From this service's own pin, never from the request: it is the key the target will demand on the handshake.
+    const sourceKey = machineKeyFor(db, source.id);
+    if (sourceKey === null) {
+      return jsonError(
+        c,
+        409,
+        "machine_key_missing",
+        "this machine has not announced its key yet, so no link can be bound to it. Update it and let it reconnect.",
+      );
+    }
+    const signing = activeSigningKeys(db)[0];
+    if (!signing) return jsonError(c, 503, "no_signing_key", "this control plane has no signing key");
+
+    const targets = db
+      .prepare(
+        "SELECT o.machine_id, o.label, m.machine_key FROM machine_owners o " +
+          "JOIN machines m ON m.id = o.machine_id " +
+          "JOIN grants g ON g.machine_id = o.machine_id AND g.user_id = o.user_id " +
+          "WHERE o.user_id = ? AND o.machine_id != ? AND m.enrolled_at IS NOT NULL AND m.revoked_at IS NULL " +
+          "AND m.machine_key IS NOT NULL ORDER BY o.created_at ASC, o.machine_id ASC",
+      )
+      .all(caller.userId, source.id)
+      .map((target) => ({
+        id: String(target["machine_id"]),
+        name: String(target["label"]),
+        key: String(target["machine_key"]),
+      }))
+      .filter((target) => {
+        const held = machineStanding(db, target.id);
+        return held === null || (!held.ownerDisabled && !held.over);
+      });
+
+    const now = Date.now();
+    const findLive = db.prepare(
+      "SELECT id FROM machine_links WHERE source_machine_id = ? AND target_machine_id = ? AND revoked_at IS NULL",
+    );
+    const insert = db.prepare(
+      "INSERT INTO machine_links (id, source_machine_id, target_machine_id, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    const linkIds: string[] = [];
+    // Never return between BEGIN and COMMIT: the shared connection would stay inside the transaction.
+    db.exec("BEGIN");
+    try {
+      for (const target of targets) {
+        const live = findLive.get(source.id, target.id);
+        const id = live === undefined ? newId("lk") : String(live["id"]);
+        if (live === undefined) insert.run(id, source.id, target.id, caller.userId, now);
+        linkIds.push(id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    const jkt = jwkThumbprint(x25519Jwk(Buffer.from(sourceKey, "base64url")));
+    const sourceLabel = labelOrName(source.label, String(row["name"]));
+    const seconds = Math.floor(now / 1000);
+    return c.json({
+      links: targets.map((target, index) => {
+        const claims: LinkTokenClaims = {
+          iss: issuer,
+          sub: caller.userId,
+          aud: target.id,
+          jti: newId("t"),
+          iat: seconds,
+          nbf: seconds,
+          exp: seconds + LINK_TOKEN_TTL_SECONDS,
+          // The only scope a link carries, and no grant ever stores it: an older daemon drops it and refuses every route.
+          scp: [LINK_SCOPE],
+          cnf: { jkt },
+          lnk: linkIds[index]!,
+          src: source.id,
+          srcl: sourceLabel,
+        };
+        return {
+          id: claims.lnk,
+          token: signToken(claims, signing.kid, signing.privateKey),
+          expiresAt: claims.exp * 1000,
+          target: { id: target.id, name: target.name, key: target.key, relayUrl: relayUrlFor(target.id) },
+        };
+      }),
+    });
+  });
+
+  // Both directions, and only while both ends are live; each end is named as the caller names it.
+  app.get("/v1/machines/:id/links", (c) => {
+    const caller = c.get("caller");
+    const owned = ownedRef(c);
+    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
+    const rows = db
+      .prepare(
+        "SELECT l.id, l.source_machine_id, l.target_machine_id, l.created_at, " +
+          "s.name AS source_name, so.label AS source_label, t.name AS target_name, tl.label AS target_label " +
+          "FROM machine_links l " +
+          "JOIN machines s ON s.id = l.source_machine_id " +
+          "JOIN machines t ON t.id = l.target_machine_id " +
+          "LEFT JOIN machine_owners so ON so.machine_id = s.id AND so.user_id = ? " +
+          "LEFT JOIN machine_owners tl ON tl.machine_id = t.id AND tl.user_id = ? " +
+          "WHERE l.revoked_at IS NULL AND s.revoked_at IS NULL AND t.revoked_at IS NULL " +
+          "AND (l.source_machine_id = ? OR l.target_machine_id = ?) " +
+          "ORDER BY l.created_at ASC, l.id ASC",
+      )
+      .all(caller.userId, caller.userId, owned.id, owned.id);
+    return c.json({
+      links: rows.map((row) => ({
+        id: String(row["id"]),
+        source: {
+          id: String(row["source_machine_id"]),
+          name: labelOrName(row["source_label"], String(row["source_name"])),
+        },
+        target: {
+          id: String(row["target_machine_id"]),
+          name: labelOrName(row["target_label"], String(row["target_name"])),
+        },
+        createdAt: Number(row["created_at"]),
+      })),
+    });
+  });
+
+  // Owner of either end. Idempotent, so a retried DELETE after a lost answer is a 204 rather than a 404.
+  app.delete("/v1/links/:id", (c) => {
+    const writeGuard = spendWrite(c, "links");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const linkId = c.req.param("id") ?? "";
+    const row = db.prepare("SELECT source_machine_id, target_machine_id FROM machine_links WHERE id = ?").get(linkId);
+    const ownsAnEnd =
+      row !== undefined &&
+      [row["source_machine_id"], row["target_machine_id"]].some(
+        (machineId) => ownerOf(db, String(machineId))?.userId === caller.userId,
+      );
+    // One 404 for no such link and somebody else's, so link ids cannot be probed.
+    if (!ownsAnEnd) return jsonError(c, 404, "link_not_found", "no such link");
+    db.prepare("UPDATE machine_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(Date.now(), linkId);
+    return c.body(null, 204);
   });
 
   // Given an email this invites and returns no secret; without one, a generated password is shown once under a change obligation.

@@ -19,6 +19,8 @@ export interface SettingsRoute {
   agents: boolean;
   /** Under `…/signin/` only a harness no provider speaks for (Q3.540); under `…/agents/` any harness (Q3.640). */
   signin: string | null;
+  /** `…/links`: which of your other machines this one's agents can message. */
+  links: boolean;
   leaf: SettingsLeaf | null;
 }
 
@@ -109,12 +111,15 @@ export function parseSettingsRoute(
   const section = parseSettingsSection(segments[0]);
   if (section === "account" || section === "keys") {
     const leaf = leafOf(section, segments[1]);
-    return { section, machineId: null, system: null, signin: null, agents: false, leaf };
+    return { section, machineId: null, system: null, signin: null, agents: false, links: false, leaf };
   }
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, system: null, signin: null, agents: false, leaf: null };
+    return { section, machineId: null, system: null, signin: null, agents: false, links: false, leaf: null };
   }
   const machine = machineId(decode(segments[1]));
+  if (segments[2] === "links") {
+    return { section, machineId: machine, system: null, signin: null, agents: false, links: true, leaf: null };
+  }
   if (segments[2] === "agents") {
     const named = segments[3] === undefined ? "" : decode(segments[3]);
     return {
@@ -123,6 +128,7 @@ export function parseSettingsRoute(
       system: null,
       signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
       agents: true,
+      links: false,
       leaf: null,
     };
   }
@@ -134,11 +140,12 @@ export function parseSettingsRoute(
       system: null,
       signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
       agents: false,
+      links: false,
       leaf: null,
     };
   }
   if (segments[2] !== "systems" || segments[3] === undefined) {
-    return { section, machineId: machine, system: null, signin: null, agents: false, leaf: null };
+    return { section, machineId: machine, system: null, signin: null, agents: false, links: false, leaf: null };
   }
   const wanted = decode(segments[3]);
   return {
@@ -147,6 +154,7 @@ export function parseSettingsRoute(
     system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
     signin: null,
     agents: false,
+    links: false,
     leaf: null,
   };
 }
@@ -196,6 +204,10 @@ export function agentSetupPath(machine: MachineId, agent: string): string {
   return `${agentStripPath(machine)}/${encodeURIComponent(agent)}`;
 }
 
+export function agentLinksPath(machine: MachineId): string {
+  return `${settingsPath("machines", machine)}/links`;
+}
+
 export function harnessSigninPath(machine: MachineId, agent: string): string {
   return `${settingsPath("machines", machine)}/signin/${encodeURIComponent(agent)}`;
 }
@@ -222,7 +234,7 @@ export function settingsUp(
     if (route.agents && typeof route.signin === "string") {
       return { path: agentStripPath(route.machineId), withinNav: false };
     }
-    if (route.system !== null || route.signin !== null || route.agents) {
+    if (route.system !== null || route.signin !== null || route.agents || route.links) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };
@@ -239,6 +251,7 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === "machines" && route.machineId !== null && route.agents) {
     return typeof route.signin === "string" ? "Setup" : "Agents";
   }
+  if (route.section === "machines" && route.machineId !== null && route.links) return "Agent links";
   if (route.section === "machines" && route.machineId !== null && route.system !== null) {
     return "Sign-in";
   }

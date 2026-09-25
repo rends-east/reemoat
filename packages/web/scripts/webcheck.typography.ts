@@ -125,19 +125,12 @@ process.stdout.write("\nthe three caps constants, and the colour that may not be
 
 process.stdout.write("\nevery site of the caps idiom, and the ones that are outside the constants\n");
 {
-  // A census against the table below, over comment-stripped text since two files quote the idiom in prose. Q5.115.
+  // A census against the table below, over comment-stripped text since bits.tsx quotes the idiom in prose. Q5.115.
   type Site = { file: string; hits: number; constant: boolean; anchor: string; why: string };
 
   const SITES: Site[] = [
     { file: "ui/bits.tsx", hits: 2, constant: true, anchor: "", why: "MENU_HEADING and SETTINGS_HEADING" },
     { file: "ui/settings/SettingField.tsx", hits: 1, constant: true, anchor: "", why: "FIELD_LABEL, the third constant" },
-    {
-      file: "ui/SessionBrowser.tsx",
-      hits: 1,
-      constant: false,
-      anchor: 'text-2xs font-semibold tracking-wider text-fg uppercase',
-      why: "the waiting-elsewhere band, at text-fg — louder than the rows under it on purpose",
-    },
     {
       file: "ui/settings/MachineSection.tsx",
       hits: 1,
@@ -186,7 +179,7 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
     SITES.map((site) => `${site.file} ×${site.hits}`).sort(),
   );
 
-  for (const file of ["ui/bits.tsx", "ui/SessionBrowser.tsx"]) {
+  for (const file of ["ui/bits.tsx"]) {
     const raw = srcFile(file);
     report(
       `${file} quotes the idiom in a comment, so stripping is what keeps the count honest`,

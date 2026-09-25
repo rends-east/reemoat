@@ -104,6 +104,8 @@ export interface StoreBundle {
   uploads: SqliteUploadStore;
   plugins: SqlitePluginRecordStore;
   pluginData: SqlitePluginDataStore;
+  peerLinks: SqlitePeerLinkStore;
+  peerOutbox: SqlitePeerOutboxStore;
   /** Ids the prune deleted: the caller removes their upload directories, which the prune runs too early to reach. */
   prunedSessions: string[];
   close(): void;
@@ -166,6 +168,8 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const uploads = new SqliteUploadStore(db);
   const plugins = new SqlitePluginRecordStore(db, options.onDegraded);
   const pluginData = new SqlitePluginDataStore(db);
+  const peerLinks = new SqlitePeerLinkStore(db);
+  const peerOutbox = new SqlitePeerOutboxStore(db);
 
   return {
     db,
@@ -181,6 +185,8 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     uploads,
     plugins,
     pluginData,
+    peerLinks,
+    peerOutbox,
     prunedSessions,
     close() {
       try {
@@ -1842,3 +1848,173 @@ function parseStored(text: string): unknown {
 
 /** Per-pair JSON overhead beside the two strings, rounded up; the envelope fits the page budget's headroom. */
 const SCAFFOLD_BYTES = 20;
+
+export interface PeerLink {
+  id: string;
+  targetMachineId: string;
+  targetName: string;
+  /** The target's machine key, base64url: the static this daemon must reach on the handshake. */
+  targetKey: string;
+  relayUrl: string | null;
+  token: string;
+  expiresAt: number;
+  updatedAt: number;
+  lastError: string | null;
+  lastErrorAt: number | null;
+}
+
+/** The owner's app writes the whole set at once; only the errors are this daemon's own. */
+export class SqlitePeerLinkStore {
+  private readonly listStmt: StatementSync;
+  private readonly deleteAllStmt: StatementSync;
+  private readonly insertStmt: StatementSync;
+  private readonly errorStmt: StatementSync;
+
+  constructor(private readonly db: DatabaseSync) {
+    this.listStmt = db.prepare(
+      "SELECT id, target_machine_id, target_name, target_key, relay_url, token, expires_at, updated_at, last_error, last_error_at " +
+        "FROM peer_links ORDER BY target_name ASC, id ASC",
+    );
+    this.deleteAllStmt = db.prepare("DELETE FROM peer_links");
+    this.insertStmt = db.prepare(
+      "INSERT INTO peer_links (id, target_machine_id, target_name, target_key, relay_url, token, expires_at, updated_at, last_error, last_error_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    this.errorStmt = db.prepare("UPDATE peer_links SET last_error = ?, last_error_at = ? WHERE id = ?");
+  }
+
+  list(): PeerLink[] {
+    return this.listStmt.all().map((row) => ({
+      id: String(row["id"]),
+      targetMachineId: String(row["target_machine_id"]),
+      targetName: String(row["target_name"]),
+      targetKey: String(row["target_key"]),
+      relayUrl: row["relay_url"] === null ? null : String(row["relay_url"]),
+      token: String(row["token"]),
+      expiresAt: Number(row["expires_at"]),
+      updatedAt: Number(row["updated_at"]),
+      lastError: row["last_error"] === null ? null : String(row["last_error"]),
+      lastErrorAt: row["last_error_at"] === null ? null : Number(row["last_error_at"]),
+    }));
+  }
+
+  /** An error on a link that is replaced with the same id survives, since it is still true of that link. */
+  replaceAll(links: readonly Omit<PeerLink, "updatedAt" | "lastError" | "lastErrorAt">[], now = Date.now()): void {
+    const errors = new Map(this.list().map((link) => [link.id, link]));
+    this.db.exec("BEGIN");
+    try {
+      this.deleteAllStmt.run();
+      for (const link of links) {
+        const held = errors.get(link.id);
+        this.insertStmt.run(
+          link.id,
+          link.targetMachineId,
+          link.targetName,
+          link.targetKey,
+          link.relayUrl,
+          link.token,
+          link.expiresAt,
+          now,
+          held?.lastError ?? null,
+          held?.lastErrorAt ?? null,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Nothing to roll back: the BEGIN itself failed.
+      }
+      throw error;
+    }
+  }
+
+  noteError(id: string, message: string | null, at = Date.now()): void {
+    this.errorStmt.run(message, message === null ? null : at, id);
+  }
+}
+
+export interface OutboxEntry {
+  id: string;
+  senderSession: string;
+  linkId: string;
+  targetMachineId: string;
+  targetName: string;
+  /** The request body exactly as it will be sent, so a retry is byte-for-byte the first try and the receiver's id check holds. */
+  body: string;
+  createdAt: number;
+  nextAt: number;
+  attempts: number;
+  lastError: string | null;
+}
+
+export class SqlitePeerOutboxStore {
+  private readonly addStmt: StatementSync;
+  private readonly dueStmt: StatementSync;
+  private readonly retryStmt: StatementSync;
+  private readonly removeStmt: StatementSync;
+  private readonly countStmt: StatementSync;
+  private readonly countForStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.addStmt = db.prepare(
+      "INSERT INTO peer_outbox (id, sender_session, link_id, target_machine_id, target_name, body, created_at, next_at, attempts, last_error) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    this.dueStmt = db.prepare(
+      "SELECT id, sender_session, link_id, target_machine_id, target_name, body, created_at, next_at, attempts, last_error " +
+        "FROM peer_outbox WHERE next_at <= ? ORDER BY next_at ASC, created_at ASC LIMIT ?",
+    );
+    this.retryStmt = db.prepare("UPDATE peer_outbox SET next_at = ?, attempts = attempts + 1, last_error = ? WHERE id = ?");
+    this.removeStmt = db.prepare("DELETE FROM peer_outbox WHERE id = ?");
+    this.countStmt = db.prepare("SELECT COUNT(*) AS n FROM peer_outbox");
+    this.countForStmt = db.prepare("SELECT COUNT(*) AS n FROM peer_outbox WHERE sender_session = ?");
+  }
+
+  add(entry: OutboxEntry): void {
+    this.addStmt.run(
+      entry.id,
+      entry.senderSession,
+      entry.linkId,
+      entry.targetMachineId,
+      entry.targetName,
+      entry.body,
+      entry.createdAt,
+      entry.nextAt,
+      entry.attempts,
+      entry.lastError,
+    );
+  }
+
+  due(now: number, limit: number): OutboxEntry[] {
+    return this.dueStmt.all(now, limit).map((row) => ({
+      id: String(row["id"]),
+      senderSession: String(row["sender_session"]),
+      linkId: String(row["link_id"]),
+      targetMachineId: String(row["target_machine_id"]),
+      targetName: String(row["target_name"]),
+      body: String(row["body"]),
+      createdAt: Number(row["created_at"]),
+      nextAt: Number(row["next_at"]),
+      attempts: Number(row["attempts"]),
+      lastError: row["last_error"] === null ? null : String(row["last_error"]),
+    }));
+  }
+
+  retry(id: string, nextAt: number, error: string): void {
+    this.retryStmt.run(nextAt, error, id);
+  }
+
+  remove(id: string): void {
+    this.removeStmt.run(id);
+  }
+
+  count(): number {
+    return Number(this.countStmt.get()?.["n"] ?? 0);
+  }
+
+  countFor(senderSession: string): number {
+    return Number(this.countForStmt.get(senderSession)?.["n"] ?? 0);
+  }
+}

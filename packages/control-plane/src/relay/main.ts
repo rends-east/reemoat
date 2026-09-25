@@ -7,6 +7,7 @@ import { createRelayListener, RELAY_HEALTH_PATH } from "./listener.js";
 import {
   claimRelayId,
   createPresenceWriter,
+  dbRelayView,
   DEFAULT_RELAY_ID,
   PRESENCE_FLUSH_INTERVAL_MS,
   RELAY_CLAIM_STALE_MS,
@@ -14,6 +15,7 @@ import {
 } from "./presence.js";
 import { newId } from "../keys.js";
 import { TunnelRegistry } from "./registry.js";
+import { parseRelayUrls } from "./routing.js";
 
 // The relay's own entry point: restarting it costs every tunnel, so it deploys apart from the API.
 // It mints no signing key, prunes nothing, sends no mail and holds no private key.
@@ -34,6 +36,16 @@ if (!Number.isInteger(relayPort) || relayPort < 1 || relayPort > 65535) {
 const issuer = (process.env["REEMOAT_CP_ISSUER"] ?? DEFAULT_ISSUER).trim() || DEFAULT_ISSUER;
 
 const relayId = (process.env["REEMOAT_CP_RELAY_ID"] ?? DEFAULT_RELAY_ID).trim() || DEFAULT_RELAY_ID;
+
+// Read here only to name a sibling in a 421; the API refuses a malformed value, while this process must not, for one redirect.
+const relayUrls = parseRelayUrls(process.env["REEMOAT_CP_RELAY_URLS"]);
+if (relayUrls === "invalid") {
+  console.error(
+    "REEMOAT_CP_RELAY_URLS is malformed, so this relay ignores it: a channel for a machine another\n" +
+      "  relay holds is refused 503 no_tunnel rather than 421 wrong_relay. The control plane refuses\n" +
+      "  to start on the same value and says what shape it wants.",
+  );
+}
 
 const dbPath = resolveDbPath(process.env["REEMOAT_CP_DB"]);
 
@@ -89,6 +101,8 @@ const relay = createRelayListener({
   port: relayPort,
   registry: tunnels,
   presence,
+  siblings:
+    relayUrls === null || relayUrls === "invalid" ? null : { view: dbRelayView(store.db), urls: relayUrls, relayId },
   onEvent: (event, detail) => console.error(`relay: ${event} ${detail}`),
   onListenError: (error) => {
     const detail = error.code === "EADDRINUSE" ? " — already in use" : "";

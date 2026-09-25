@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1059 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1076 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -436,6 +436,13 @@ terminal an ACP-spawned agent never has (Q4.113) — grok is the one that *would
 in the background, which is why it is spawned with `--no-auto-update`: when a
 build moves on this fleet is `src/agentupdate.ts`'s decision, not the agent's.
 
+**An agent can ask another session's agent to act, and only that agent's own harness
+weighs the request.** Every agent that takes the `reemoat` MCP server can hand work to
+every other session on the machine and on its owner's other machines, so a sandboxed
+codex can ask an unconfined claude on another computer. The daemon bounds how much
+(Q2.238, Q5.121) and never what; permissions for it are not built (Q7.151).
+`REEMOAT_PEER_MESSAGES=off` removes the tools and refuses every message.
+
 **`~/.claude/settings.json` can bypass the permission machinery entirely.** Where
 it blanket-allows `Bash`, `Edit` or `Write`, the inner CLI decides for itself and
 the permission state machine never sees a request — so a permission path that
@@ -476,6 +483,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `daemon-sessions.md` | `src/registry.ts`, `src/session.ts`, `src/events.ts`, `src/store/` | What a restart brings back and what it does not · the two verbs for stopping · what the agent says after the turn ends · what ends a turn the agent never answers, and the three traps in doing it · the log's invariants |
 | `daemon-bounds.md` | the same globs | Every number the daemon holds and what moves each · what the log is bounded by and what it is not · what a ceiling releases rather than refuses · why this is a file of its own |
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
+| `agent-messaging.md` | `src/peers/`, `packages/web/src/peer.ts`, `ui/PeerMessage.tsx` | How one session's agent reaches another's · why every message is acted on, and what the idle notice stands in for · why delivery is the prompt route's and not a copy · what the envelope may carry · what stops a loop · which ended sessions another agent may wake |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
 | `acp-extensions.md` | `src/acp/xai.ts`, `src/acp/client.ts` | The three requests grok sends that ACP has no method for, measured · which door each is routed onto and how each is answered · how grok withdraws one, and why a handler's position decides it · its own question timeout, and the tool withdrawn when questions are off |
 | `agent-login.md` | `src/agentauth.ts`, `src/runtime/`, `packages/web/src/ui/login.ts` | How a credential reaches the host with no terminal · the pty and the two `script`s · what each CLI's status probe prints and on which stream |

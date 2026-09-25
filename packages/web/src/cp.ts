@@ -19,6 +19,8 @@ import type {
   DeviceRecord,
   EnrollmentCode,
   IssuedToken,
+  MachineLinkGrant,
+  MachineLinkRecord,
   MachineRecord,
   Me,
   SessionRecord,
@@ -469,6 +471,23 @@ export function revokeMachine(id: string): Promise<{
   outstandingTokensExpireWithinSeconds?: number;
 }> {
   return cpFetch(`/v1/machines/${encodeURIComponent(id)}/revoke`, { method: "POST" });
+}
+
+/** Finds or makes a link from this machine to every other one the caller owns, and mints each a fresh token. */
+export async function linkMachine(id: string): Promise<MachineLinkGrant[]> {
+  const body = await cpFetch<{ links: MachineLinkGrant[] }>(`/v1/machines/${encodeURIComponent(id)}/links`, {
+    method: "POST",
+  });
+  return body.links;
+}
+
+export async function machineLinks(id: string): Promise<MachineLinkRecord[]> {
+  const body = await cpFetch<{ links: MachineLinkRecord[] }>(`/v1/machines/${encodeURIComponent(id)}/links`);
+  return body.links;
+}
+
+export async function revokeLink(id: string): Promise<void> {
+  await cpFetch<null>(`/v1/links/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function mintToken(machine: string): Promise<IssuedToken> {

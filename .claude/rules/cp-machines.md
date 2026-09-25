@@ -286,3 +286,18 @@ the client, and `deploycheck` that `main.ts` no longer reads
 `REEMOAT_CP_MACHINES_OFFER_URL` by name — only its retirement list names it, to warn
 an env file that still sets it. Bringing it back starts at Q1.632, whose placement
 argument — inside the `mayAddMachine` arm, below the command — still holds.
+
+## Links between one owner's machines
+
+**A link is the owner's verb, and it is not a grant.** `POST /v1/machines/:id/links`
+resolves `:id` as `POST /v1/tokens` does, then requires the caller to *own* it (a
+grantee gets 404), and answers a link per other machine the caller owns that is
+enrolled, keyed, live, granted to them and within the limit — finding the live
+`machine_links` row or writing one, and minting a fresh capability on every call.
+Each has `aud` the target, `sub` the owner and `LINK_SCOPE` only, and `cnf.jkt` is
+the **source's** key from `machineKeyFor`, never from the request. It lives
+`LINK_TOKEN_TTL_SECONDS`, because revocation is the relay reading the row.
+`DELETE /v1/links/:id` belongs to the owner of either end and is idempotent; the
+next sync links the pair again with a new id, so it replaces a token rather than
+parting two machines (Q7.151). No link path writes `grants`, and `LINK_SCOPE` must
+never enter `ALL_SCOPES`, which is what a grant stores. Q1.652.

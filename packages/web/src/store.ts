@@ -1,4 +1,5 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
+import { LinkSync, linkCandidate, type LinkCandidate, type LinkScope, type LinkSyncStatus } from "./agentLinks";
 import { forgetAttachments } from "./attach";
 import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
 import { claimEcho, clearEcho, landEcho, settleEcho, type PendingEcho } from "./echo";
@@ -14,6 +15,7 @@ import { describe, MachineConnection, type MachineState } from "./machine";
 import {
   addNativeAccount,
   confirmNativeAccount,
+  controlPlaneOrigin,
   DAEMON_CONFIG,
   DAEMON_EXIT,
   daemonState,
@@ -488,6 +490,15 @@ class AppStore implements StreamSink {
   private commandsWanted = new Map<SessionKey, number>();
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly links = new LinkSync({
+    link: (id) => cp.linkMachine(id),
+    push: async (id, links) => {
+      const daemon = this.daemons.get(machineId(id));
+      if (daemon === undefined) throw new Error("that machine is no longer in the list");
+      await daemon.putPeerLinks(links);
+    },
+    now: () => Date.now(),
+  });
   private resumeInFlight: Promise<void> | null = null;
   private resumeQueued = false;
   private epoch = 0;
@@ -1009,7 +1020,33 @@ class AppStore implements StreamSink {
       [...this.connections.values()].map((connection) => this.resumeMachine(connection, epoch)),
     );
 
-    if (epoch === this.epoch) this.patch({ resuming: false, lastResumeAt: Date.now() });
+    if (epoch === this.epoch) {
+      this.patch({ resuming: false, lastResumeAt: Date.now() });
+      // After the listing and the probes, so each machine's reach and daemon are this wake's answer.
+      const scope = this.linkScope();
+      if (scope !== null) void this.links.syncAll(scope, this.linkCandidates());
+    }
+  }
+
+  private linkScope(): LinkScope | null {
+    const me = this.snapshot.me;
+    return me === null ? null : { origin: controlPlaneOrigin(), account: me.id };
+  }
+
+  private linkCandidates(): LinkCandidate[] {
+    return [...this.connections.values()].map((connection) => linkCandidate(connection.state()));
+  }
+
+  /** A person's act: past the timing rules, never past a machine that cannot be reached. */
+  async resyncLinks(id: MachineId): Promise<void> {
+    const scope = this.linkScope();
+    if (scope === null) return;
+    await this.links.syncOne(scope, this.linkCandidates(), id, true);
+  }
+
+  linkStatus(id: MachineId): LinkSyncStatus | null {
+    const connection = this.connections.get(id);
+    return connection === undefined ? null : this.links.status(linkCandidate(connection.state()));
   }
 
   private async resumeMachine(connection: MachineConnection, epoch: number): Promise<void> {

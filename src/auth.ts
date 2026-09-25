@@ -3,12 +3,16 @@ import { decodeToken, jwkToPublicKey, looksLikeSignedToken, parseClaims, verifyS
 
 // Who is asking. No network access here: a daemon verifies with keys it already holds, so a control-plane outage cannot reach a session.
 
-export type Scope = "session:read" | "session:write" | "machine:admin";
+export type Scope = "session:read" | "session:write" | "machine:admin" | "session:message";
 
+/** Every scope a grant can hold. */
 export const ALL_SCOPES: readonly Scope[] = ["session:read", "session:write", "machine:admin"];
 
+/** Carried only by a link capability, never by a grant: another machine's agents talking to this one's (Q7.150). */
+export const LINK_SCOPE: Scope = "session:message";
+
 function isScope(value: string): value is Scope {
-  return (ALL_SCOPES as readonly string[]).includes(value);
+  return value === LINK_SCOPE || (ALL_SCOPES as readonly string[]).includes(value);
 }
 
 export const AUTH_LEEWAY_MS = 60_000;
@@ -24,6 +28,8 @@ export interface Principal {
   /** Advisory, for the audit trail only; cnf is the binding that decides. */
   deviceId: string | null;
   via: "shared_secret" | "signed";
+  /** Set only for a link capability: which machine's daemon is asking, as its Authority named it. */
+  link: { id: string; sourceMachineId: string; sourceLabel: string } | null;
 }
 
 export interface ChannelIdentity {
@@ -82,6 +88,7 @@ export class SharedSecretVerifier implements TokenVerifier {
         tokenId: null,
         deviceId: null,
         via: "shared_secret",
+        link: null,
       },
     };
   }
@@ -217,6 +224,10 @@ export class SignedTokenVerifier implements TokenVerifier {
         tokenId: claims.jti,
         deviceId: claims.dev ?? null,
         via: "signed",
+        link:
+          claims.lnk === undefined || claims.src === undefined
+            ? null
+            : { id: claims.lnk, sourceMachineId: claims.src, sourceLabel: claims.srcl ?? claims.src },
       },
     };
   }

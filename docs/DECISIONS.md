@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 144 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 93 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 418 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 146 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 101 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 421 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 115 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 73 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 149 | `###` |
-| | | **1059** | |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 74 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 151 | `###` |
+| | | **1076** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1059 rather than the 526
+dividers. So the count is over **both** depths, and it says 1076 rather than the 539
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -4435,6 +4435,62 @@ one page.
 **Status.** Reversed an earlier decision — Q1.643's device id per server, which is
 per account now; Q1.640's keyring key is extended rather than reversed.
 
+### Q1.652 — How does one of somebody's machines get a capability for another, when a daemon may ask the control plane nothing?
+
+**Decision.** The owner's app asks for it, per source machine, with `POST
+/v1/machines/:id/links`: owner-only, it answers one `lk_` link per other machine
+the owner has that is enrolled, keyed, live, granted and within the limit, finding
+the row or writing one and minting a capability fresh on every call. It carries
+`aud` the target, `sub` the owner, `scp` exactly `LINK_SCOPE`, `cnf.jkt` the source
+machine's key from this service's own pin, and `lnk`, `src` and `srcl` naming the
+link, the source and the owner's label for it; it lives `LINK_TOKEN_TTL_SECONDS`, 90
+days. The app hands the answer to the source's daemon unread (`PUT /peers/links`).
+`DELETE /v1/links/:id` belongs to the owner of either end and answers 204, again on
+a repeat.
+
+**Why the long life is safe.** `cnf` binds the capability to a private key that
+never leaves the source machine, so a copy opens nothing anywhere else; and
+revocation does not wait for expiry, because the relay reads the row at every
+channel (Q5.121). A short life would need the owner's app awake to re-mint, and the
+links would die with the owner's phone. The row is the authority, which is why a
+repeat keeps the link id and why the relay can key a budget on it. The scope is
+stored nowhere, since a grant is full access, and a daemon older than it drops the
+scope and refuses every route — it fails closed.
+
+**Rejected.**
+- *The sender's Authority minting for the receiver* — two control planes would then
+  have to trust each other; with the receiver's own Authority minting, they need no
+  trust at all (Q7.150).
+- *The source key taken from the request* — `cnf` would bind to whatever the caller
+  claimed.
+- *Revoking links in the three machine-revoke paths* — the relay already refuses a
+  revoked end, and the listing hides it.
+- *404 on a second DELETE* — a DELETE is the write a client may replay (Q5.18).
+
+**Known limitation.** The source's `owner_disabled` and `machine_revoked` refusals
+are answered but unreachable through the routes: sign-in refuses a disabled caller
+first, and revoking a machine releases its ownership.
+
+**Status.** Current.
+
+### Q1.653 — What does a relay tell a daemon that dialled the wrong one?
+
+**Decision.** `421 wrong_relay` carrying `RELAY_URL_HEADER`, from `relay_tunnels`
+and `REEMOAT_CP_RELAY_URLS`, which `relay/main.ts` now reads too — only after
+authorize, and only where the presence row names another slot the map names.
+Everything else stays `503 no_tunnel`. The daemon follows one, never two.
+
+**Why.** A browser is routed by the `relayUrl` a fresh token carries (Q7.92); a
+daemon holding a 90-day link cannot re-ask, and dialling the shared name lands on
+the right relay one time in N. A redirect costs one round trip and no trust between
+relays, where a forward would put one relay on another's data path (Q4.35).
+Answering after authorize keeps where a machine is from becoming an oracle, and a
+row naming this relay is a tunnel it has just lost, which bounds a bounce at one.
+
+**Rejected.** *Exiting on a malformed map, as the API does* — the relay holds every
+tunnel, so it warns and answers 503.
+
+**Status.** Current.
 
 ## Session lifecycle, questions and attachments
 
@@ -8538,6 +8594,221 @@ SDK's `-32601`: an unknown request must stay a failure the agent reports.
   price of a second parse of a stream that carries one notification per token.
 
 **Status.** Current.
+
+### Q2.236 — How does one session's agent reach another session's?
+
+**Decision.** Through an MCP server this daemon injects into every agent that
+declares an http MCP client, named `reemoat`, with two tools: `list_agents` and
+`send_message` (three until Q2.243). `SessionOptions.mcpServers` is a callback called
+after `initialize`, because `mcpCapabilities` is only known then, and `launchOptions`
+hands it to `session/new`, `session/resume` and the `/clear` path alike.
+`PeerMcpEndpoint` is its own listener on `127.0.0.1` with a port the OS picks, and
+`PeerHub` is the one place every peer message passes through.
+
+**Why MCP.** ACP has no notion of another session, and an agent can only be handed
+a tool it calls through MCP; Claude Code's own cross-session SendMessage and
+Codex's `send_message` are built-in tools for the same reason, and the one ACP host
+that already does this (Paseo) injects an http MCP server exactly so. What an agent
+sends arrives as a `prompt`, through the prompt route's own machinery (Q2.243).
+
+**Why its own listener.** The daemon's HTTP server binds `REEMOAT_HOST`, which may
+not be loopback, and `REEMOAT_PORT=0` means it has no listener at all.
+
+**A bearer per launch.** `mcpServersFor` mints one each time an agent is handed the
+server and retires the one before, so a replaced process stops naming the session.
+It identifies the caller; it does not confine it, since every agent runs as the
+same user and can read another's — the same position as `agentEnv()`.
+
+**Rejected.**
+- *A stdio shim per session* — one more process per agent, for the one transport
+  every measured harness already has in http (Q6.114). Kept for a harness that
+  needs it; none does yet.
+- *MCP over ACP* (`type: "acp"`, an RFD) — it would remove the listener, but
+  `codex-acp` advertises `acp: false` and kimi drops such entries.
+- *The MCP SDK* — it brings zod, which this repository does not use.
+
+**Status.** Current. Between machines, see Q7.150.
+
+### Q2.237 — Why two verbs, and why does a report arrive with the notice?
+
+**Decision.** Codex's pair, not Claude Code's single verb. `assign_task` is work:
+it starts a turn on an idle session, steers into a running one, and queues behind a
+turn that cannot be steered — `submit`, the prompt route's two steps. `send_message`
+is context: logged at once and never starting a turn, and put ahead of the next
+turn's text, whoever starts it.
+`assign_task` subscribes its sender to the recipient going idle by default; the
+notice is delivered through `submit`, so a report the recipient left as context
+reaches the sender **in the same turn as the notice**.
+
+**Why.** A message that must not interrupt should cost nothing until something
+else wakes the reader, and a reply to a task is exactly that. Codex splits the two
+for the same reason (`send_message` does not trigger a turn; `followup_task` does).
+Its `wait_agent` is not copied: in one reported run 89 waits, 88 timed out, cost
+6.5% of the tokens — the push is the notice.
+
+**Where it differs from Codex.** There, context enters the history at once and the
+model sees it on its next step. ACP cannot add to a history without a prompt, and
+a steer on claude pre-empts the running turn (`mid-turn-messages.md`), so context
+here always waits for the next turn; what is urgent goes as `assign_task`.
+
+**Measured** 2026-09-25, claude 2.1.281 assigning codex 0.156.1: `list_agents`,
+then `assign_task`; codex woke, read the file, reported with `send_message`; the
+idle notice woke claude with the report ahead of it and claude answered in that
+turn — 25 s end to end, no polling.
+
+**Status.** Reversed by Q2.243 the same day: every message is acted on, and there is
+no context verb.
+
+### Q2.238 — What stops two agents talking to each other for ever?
+
+**Decision.** This daemon, never the model's good sense: `PEER_TURN_BUDGET` turns
+caused by agents in a session with no message from its person, after which work
+from agents is refused and the person is told once; `MAX_PEER_HOPS`, from
+`peerDepth`, the deepest hop delivered since the person last wrote; a token bucket
+per sending session; the same words to the same session inside a minute; and a
+size cap. A person's message resets both counters.
+
+**Why a budget and not only hops.** A hop count survives only while every agent
+passes it on, and a cycle of two never grows deep; counting at the receiver stops
+both. Notices count, or two agents assigning each other work would never stop.
+Since Q2.243 every message wakes its reader, so the budget is also what stops two
+agents thanking each other. Claude Code reaches the same place with a 50-message
+queue per session.
+
+**And the queue.** Peer entries hold at most `MAX_QUEUED_PEER_PROMPTS` of
+`MAX_QUEUED_PROMPTS`, so other agents can never make a person's own message answer
+429; consecutive ones go as one turn.
+
+**Status.** Current. The numbers are first guesses, not measurements.
+
+### Q2.239 — Which ended sessions may another agent reach?
+
+**Decision.** Those that ended for a reason in `PEER_WAKE_REASONS`: parked, a config
+restart, an agent that exited, the daemon going away. A person's Stop is not among
+them: that session is neither listed nor woken.
+
+**Why.** `revivableByPrompt` answers whether a *person's* message may bring a
+session back, and says yes to `stopped`. An agent doing it would undo a person's
+decision without asking them.
+
+**Status.** Current.
+
+### Q2.240 — Where does a message for a machine that is off wait?
+
+**Decision.** On the sending daemon, in `peer_outbox`. A send whose answer is the
+relay's `503` — or no answer — is held and reported `pending`, then retried by
+`pumpOutbox` from 30 s to 10 min apart for 24 h, **byte-identical**, so the
+receiving daemon's per-link message-id check delivers it once however many tries it
+took. A refusal on a later try, or the day running out, wakes the sender with a
+notice saying so, within the budget any notice is (Q2.243). At most
+`MAX_OUTBOX_PER_SESSION` per session and `MAX_OUTBOX` on the machine.
+
+**Why here.** A tunnel with no daemon is a 503, never a queue (Q5.21), and the
+Authority may hold none of an agent's work (`authority.md`). Claude Code holds a
+message for an offline session on its own servers; the only process here that may
+hold it is the one whose agent wrote it.
+
+**Status.** Current.
+
+### Q2.241 — What does a daemon take on a linked machine's word?
+
+**Decision.** Which *session* on that machine sent a message, and nothing else.
+Which *machine* is the capability's (`principal.link`, all three link claims or
+the token is malformed). Every link has its own token bucket here, whatever the
+other daemon says it enforces; a message id is delivered once per link for a day; a
+notice is taken only when this machine asked for it, once (`expectedNotices`), so a
+link cannot wake a session by claiming to answer it; a listing row is re-read field
+by field (`remoteRowOf`), and one whose ref names a machine is dropped. A link
+reaches `/peer/*` only: `session:message` opens no other route, and a person's
+capability never carries it.
+
+**Why.** A linked machine is another computer running as the same person, which is
+not the same as being right: a looping agent or a compromised host there must cost
+this machine a bounded amount of work, never its owner's attention.
+
+**Status.** Current.
+
+### Q2.242 — Why does no claude session have its own ListAgents, and why are this daemon's tools loaded up front?
+
+**Symptom.** Reported by the owner on 2026-09-25: a claude session driven over ACP,
+asked about other agents, called Claude Code's own `ListAgents` rather than
+`list_agents`. Claude Code 2.1.28x ships cross-session messaging, and the tool is in
+an SDK session too. It lists Claude sessions on the machine and nothing this daemon
+runs, so it answers a different question and sounds right doing it. And `list_agents`
+was one step further away: claude defers an MCP tool's schema behind its tool search
+(Q6.114).
+
+**Decision.** Two changes, each where it belongs:
+- `sessionMetaFor` sends `disallowedTools` naming `CLAUDE_WITHDRAWN_PEER_TOOLS` to
+  every claude session, whether or not it was handed the `reemoat` server.
+  claude-agent-acp appends it to its own list, and a disallowed tool is not in the
+  model's context at all. `session/new`, `session/resume` and `/clear` all carry it.
+- Each of this daemon's tools carries `_meta["anthropic/alwaysLoad"]: true`, which
+  claude reads per tool and which keeps it out of the tool search. It costs their
+  schemas in every claude session's prompt. Every other harness ignores the key.
+
+**Widened the same day.** It was first withdrawn only where the tools were handed,
+so that a daemon with `REEMOAT_PEER_MESSAGES=off` took nothing of claude's away.
+The owner's call: it is never wanted here, because what it lists is never what this
+daemon runs, with the tools or without them.
+
+**Measured** 2026-09-25, claude 2.1.282 under claude-agent-acp 0.73.0. Asked to name
+every tool it had for other agents, it gave the three `mcp__reemoat__*` and
+`SendMessage`, and no `ListAgents`. Asked which sessions it could message, it called
+`mcp__reemoat__list_agents` first, with no ToolSearch before it.
+
+**Why SendMessage stays.** It is also how claude continues a named subagent it
+started, a background one included. Withdrawing it would cost claude its own
+orchestration to save a tool that no longer has a listing to feed it. The server's
+instructions say that a harness's own messaging tools do not reach these sessions.
+
+**Rejected.**
+- *Passing it as settings* (a deny rule, or Claude Code's crossSessionInbound). The adapter
+  drops the settings it builds from `CLAUDE_MODEL_CONFIG` whenever any are passed, so
+  a model override would vanish from every session.
+
+**Status.** Current. Claude Code's inbound cross-session messages are not refused, for
+the same settings reason.
+
+### Q2.243 — Why does every message between agents start or join a turn?
+
+**Symptom.** The owner, 2026-09-25, on a transcript row *Note from …· read with its
+next turn* holding grok's count to a hundred: only messages the other session reacts
+to. A note is logged at once and then does nothing until something else wakes its
+reader, which on screen is a message that went nowhere.
+
+**Decision.** One verb. `send_message` is what `assign_task` was: it starts a turn on
+an idle session, steers into a running one, and queues behind a turn that cannot be
+steered. Nothing is held for somebody else's turn, so there is no buffer and no
+refusal for a full one, and an answer is a message like any other: it wakes
+whoever it is for. `notify_when_idle` is off unless asked for, and the notice it
+asks for **stands in for an answer**: writing back to the subscriber cancels it
+(`answered`), and on the subscriber's machine the answer's arrival forgets the
+notice it was expecting. A subscription that runs out lapses silently, and a message
+the outbox gives up on wakes its sender with a notice.
+
+**Why the notice is off by default.** A reply goes by the same verb as a task. On by
+default, every reply would subscribe its writer to its reader going idle, and the
+end of every exchange would wake the one who answered for nothing.
+
+**What it costs.** An answer is a turn of its own for its reader, where Q2.237's
+report rode the idle notice's turn; an assignment that is answered still costs its
+sender one wake, not two, since the notice is not sent. A reply to a reply is a turn
+too, and nothing but the tool's wording and `PEER_TURN_BUDGET` stops two agents
+thanking each other.
+
+**Rejected.**
+- *Keeping `assign_task` as the one name.* An answer would have gone as a task.
+- *Steering context into a running turn and buffering it only for an idle one.* The
+  idle session is the case that read as lost.
+
+**Measured** 2026-09-25, claude 2.1.282 asking codex 0.157.0 on one machine, no
+notice asked for: `list_agents`, then `send_message`; codex read the file and
+answered with `send_message`; the answer woke claude, which summarised it and sent
+nothing back. Two turns for claude, one for codex, no notice, and nothing more in the
+minute after — 36 s end to end.
+
+**Status.** Current. Reverses Q2.237.
 
 ## The web client
 
@@ -13339,7 +13610,7 @@ something you can ask to stop, so the floor ignores both controls.
 computed reachability *without* the needle, so four letters typed into the search
 box hid an approval — which no amount of reading had caught.
 
-**Status.** Current
+**Status.** Reversed by Q3.674, the owner's call of 2026-09-25: there is no waiting section any more.
 
 #### Q3.201 — Which screens owe the waiting count, now that Settings is a pop-up?
 
@@ -26739,6 +27010,78 @@ order; the page's next boot or show repeats the theme.
 
 **Status.** Current.
 
+#### Q3.672 — Where are a machine's agent links shown, and what can be done about one?
+
+**Decision.** A leaf under the machine, `/settings/machines/:id/links`, reached by a
+row on the machine screen for its owner once it is enrolled — outside the
+reachability gate, because the list is the control plane's. A sentence says why the
+list is what it is (your own machines on this server, both ways, never a shared
+one), then a table: the direction first, so each row reads as a sentence, the other
+machine, and for an outgoing link the daemon's `lastError`, or *not handed to … yet*
+when the daemon holds no token for it. A bare 404 from `GET /peers/links` is one
+plain sentence that the daemon needs updating; the control plane's own unrouted
+`not_found` is *this server is too old for agent links*, with no retry.
+
+**Replace is one tap** (Q3.219, Q3.220 — ending a token widens nothing), and it
+re-syncs the link's source, whose daemon held the token.
+
+**Why it is not called Revoke.** The next sync links every eligible pair again with
+a new id, so the action ends a link and its token and hands over a new one: it
+answers a token that got out, and the screen says so. Parting two of your machines
+is Q7.151.
+
+**Rejected.** *A two-step confirm* — nothing widens. *Dropping the re-created link
+before the PUT* — the control plane would still hold a live row, and another device
+would push it again.
+
+**Status.** Current.
+
+#### Q3.673 — When does the app re-mint a machine's links?
+
+**Decision.** At the end of every `resume` and never from the poll, with
+`linkSyncDecision` as the whole rule. Refusals first: not owned, not enrolled, over
+the limit or owner-disabled, offline, or a daemon too old. Then a forced sync goes
+ahead; a failure under 15 minutes old waits; after that, never synced, a changed
+target set, the earliest expiry under 45 days away, or a last sync over a day old.
+The last sync is kept under `reemoat.agentLinks`, keyed by origin, account and
+machine.
+
+**Why the client's own target count.** The control plane also skips a target with no
+pinned key; compared against its answer, that skip would read as a change on every
+wake, and every wake would mint again. **Why `instanceId` and not the version.**
+Rule 1 of `compatibility.md`: nothing may behave differently by version label, and
+an update is always a restart, at the cost of one 404 per restart. **Why a retry
+wait.** A sync is a control-plane write, and the per-account throttle is shared with
+`POST /v1/tokens`.
+
+**Status.** Current. A renamed machine's label reaches other daemons only at the next
+daily re-sync.
+
+#### Q3.674 — Is there a section for sessions waiting on another machine?
+
+**Decision.** No. Removed on the owner's call on 2026-09-25, after a grok session on
+another machine sat in it for sixteen minutes, asking to call
+`reemoat__send_message`. A waiting session is shown where it already is, and
+nothing lifts it:
+- by its dot with a ring and its semibold title;
+- by its folder header's count;
+- by its machine tab's count.
+
+Q3.569 took hoisting out inside a folder; this takes it out across machines, and
+`visibleRows` now starts with nothing. webcheck sweeps every filter, tab and query:
+a waiting row is drawn exactly where the same row not waiting would be. It also
+asserts the absence of the section and of `waitingFloor`.
+
+**Why.** The section moved rows by need. The list is its reader's arrangement, and a
+row that jumps to the top whenever an agent asks something rearranges it for the
+agent's reasons. The machine tab still counts what is waiting there, so the wait is
+still said without moving anything.
+
+**What this gives up, stated.** Q3.200's closure. A filter or a search can now hide
+a waiting session. A machine tab scrolled off the end of the bar hides its count.
+
+**Status.** Reversed an earlier decision — Q3.200.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -29614,6 +29957,27 @@ anything. So a leaked one is a working credential against any path that does not
 run this check, and the log is the one place it can leak in full.
 
 **Status.** Current
+
+#### Q5.121 — Whose budget does a link's stream spend, and what refuses a link?
+
+**Rule.** A link's streams count against the link, never against the owner its
+`sub` names: `MAX_STREAMS_PER_LINK` per link and `MAX_LINK_STREAMS_PER_TUNNEL`
+across every link on one tunnel. Channel opens spend `LinkConnectBudget` — a burst
+of `LINK_CONNECT_BURST`, one back every `LINK_CONNECT_REFILL_MS` — before the tunnel
+lookup, and an empty bucket is `429 link_rate_limited`. Every refusal that belongs
+to the link itself is the unknown machine's `404 machine_not_found`.
+
+**Why.** It is Q7.150's precondition. Keyed on `sub`, a looping agent spends its
+owner's 64 streams, and the owner's own phone is then refused `503 no_tunnel` on
+their own machine, which the client reads as the machine being off (Q1.100). The
+caller never sleeps, so it needs a rate as well, and spending it before the lookup
+bounds hammering a machine that is off too. One 404 keeps a link token from mapping
+which links and machines are alive.
+
+**Rejected.** *A code of its own for a link past its stream share* — the per-person
+cap has always answered 503.
+
+**Status.** Current.
 
 ### The client and the socket
 
@@ -33641,6 +34005,30 @@ run reached. `initialize` now advertises `cached_token` beside `grok.com`
 **Status.** Current, for 1.0.40. `pincheck` pins no grok build, so a shape change
 arrives with grok's own updater; the parser refuses rather than guesses and the
 driver holds these requests verbatim.
+
+### Q6.114 — What does each harness do with an injected http MCP server?
+
+**Measured** 2026-09-25, a loopback server with a bearer in `headers`, a new session
+then a `session/resume` with a fresh bearer:
+
+| Harness | `mcpCapabilities` | Handshake | Tool as seen | Permission |
+|---|---|---|---|---|
+| claude 2.1.281 (agent-sdk 0.3.257) | `http`, `sse` | `server/discover` at 2026-07-28, then `initialize` 2025-11-25; tries a GET | `mcp__reemoat__<tool>`, loaded through ToolSearch first | a request per call: allow once, always, reject |
+| codex 0.156.1 (codex-acp) | `http`; `sse` and `acp` false | `initialize` 2025-06-18 | `mcp.reemoat.<tool>`, `rawInput` `{server, tool, arguments}` | none reached the client: its own *Guardian Review* approved |
+| grok 1.0.40 | `http`, `sse` | `server/discover`, then `initialize` 2025-11-25 | through its `use_tool`, as `reemoat__<tool>`, found with `search_tool` | a request per call |
+| kimi 0.29.2 | `http`, `sse` | `initialize` 2025-11-25, a GET | not reached: kimi ended every turn empty on this machine, with or without the server | — |
+
+All four carried the bearer on every request and none sent `Origin`. Every one
+re-handshook on resume with the new bearer, which is why one is minted per launch.
+opencode is not installed here and is unmeasured.
+
+**What follows.** `server/discover` must be answered `-32601`: that is the answer
+both fall back from. claude and grok defer an MCP tool's schema until searched, so
+the three tools cost them their names until used; codex loads them whole. A
+permission card per send on claude and grok is the harness's policy, and is left
+alone until agent messaging has permissions of its own (Q7.150).
+
+**Status.** Current, for these versions.
 
 ## Open questions and deliberate non-goals
 
@@ -39866,3 +40254,66 @@ somebody about it. The owner's call, for this iteration.
 are per account now; its rejected "start every root at launch", since every listed
 account's set-up daemon starts with the app; and its recorded widening and race,
 both closed by Q1.651 and Q5.120.
+
+### Q7.150 — Can agents on different machines, relays or control planes message each other?
+
+**Position.** Built for one owner's machines on one server (Q1.652, Q2.240,
+Q2.241, Q5.121, Q1.653); across owners and servers the design below holds and the
+minting is not built (Q7.151). What the architecture did not carry before, and
+what now carries it:
+
+- **A daemon cannot open a stream.** The relay is the HTTP/2 client on a tunnel, so
+  only it opens streams. A daemon would have to dial a peer's relay at
+  `/__relay/channel` as an app does: a Noise_IK initiator whose static is its
+  machine key.
+- **A daemon cannot get a capability.** `POST /v1/tokens` needs a person's
+  credential, and the daemon makes exactly one control-plane request, ever.
+
+**The design.** A *link* capability minted by the **receiving** machine's Authority
+— `aud` the receiver, `cnf.jkt` the **sender's machine key**, one narrow scope
+`session:message`, a link id — delivered to the sending daemon by the owner's app
+over its own channel, the shape provisioning already uses. The receiving daemon's
+checks do not change (`iss`, `aud`, `cnf` against the handshake). Because the
+receiver's own Authority mints it, **two control planes need no trust between
+them**, and two relays of one need only a redirect to where the tunnel is, not a
+forward. Queued messages would live on the sending daemon: the Authority may hold
+none of an agent's work, and a tunnel with no daemon is a 503, never a queue.
+
+**What must be fixed first, or it is a denial of service.** The relay's stream
+budget per caller is keyed on the token's `sub`, a user; a link token carries the
+owner's, so a looping agent on one machine would spend the owner's own budget on
+the other and lock their phone out of their own machine. Link streams need a key
+and a ceiling of their own, and the relay a connection rate per link, since the
+caller is now a machine that never sleeps.
+
+**What it would cost, stated.** A link lets one machine's agents ask another's to
+do anything those agents can do, as the owner; a link token lives weeks where a
+capability lives minutes, and revocation rests on the relay reading the row at
+every connection; the daemon becomes a network client; the relay learns which
+machine talks to which. Encryption end to end is unchanged — the relay carries
+bytes it holds no key for, as for an app.
+
+**Status.** Current for one owner on one server; the rest is Q7.151.
+
+### Q7.151 — Can two of your own machines be kept apart, or another person's machine be linked?
+
+**Position.** Neither, yet. The app links every eligible pair of one owner's
+machines on one server, and the Agent links screen's Replace re-mints rather than
+parts them (Q3.672). What keeps a machine's agents from being reached today is its
+daemon's `REEMOAT_PEER_MESSAGES=off`, which refuses every message and listing.
+
+**What it would take.** Parting a pair: a stored opt-out that `POST
+/v1/machines/:id/links` respects, and a control that sets it. Another person's
+machine: an invitation, shaped like an enrollment code, redeemed by the other
+owner's app, after which the receiving Authority mints for the foreign key as it
+does for one of the owner's own. A machine on another server: the same capability,
+minted by that server's Authority for this machine's key, which needs the native
+host to act across two of the person's accounts — the page never names another
+account (`native-accounts.md`). None of the three needs a change to the relay or to
+a daemon.
+
+**Why not yet.** Each is a decision about who may ask whose agents to act, which is
+the permission design this feature deliberately did not include: a link lets one
+machine's agents ask another's to do anything those can do, as their owner.
+
+**Status.** Not built.
