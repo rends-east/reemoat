@@ -11,7 +11,16 @@ import {
 } from "../registry.js";
 import type { OutboxEntry, PeerLink, SqlitePeerOutboxStore } from "../store/sqlite.js";
 import type { PeerAnswer } from "./channel.js";
-import { address, parseAddress, peerMessage, peerName, peerNotice } from "./envelope.js";
+import {
+  address,
+  isPeerName,
+  MAX_PEER_ADDRESS_CHARS,
+  MAX_PEER_HARNESS_CHARS,
+  parseAddress,
+  peerMessage,
+  peerName,
+  peerNotice,
+} from "./envelope.js";
 
 export const PEER_SERVER_NAME = "reemoat";
 export const MAX_PEER_MESSAGE_CHARS = 32_000;
@@ -37,9 +46,10 @@ export const MAX_OUTBOX = 512;
 const OUTBOX_BATCH = 16;
 export const REMOTE_LIST_TIMEOUT_MS = 3_000;
 const REMOTE_LIST_CONCURRENCY = 8;
-const MAX_REMOTE_NAME_CHARS = 64;
-const MAX_REMOTE_HARNESS_CHARS = 64;
 const MAX_REMOTE_REF_CHARS = 64;
+// A session id: no slash, so a row cannot name a machine, and nothing that can close a quote or a tag.
+const REMOTE_REF = /^[\w-]+$/;
+const MAX_ECHOED_ADDRESS_CHARS = 64;
 
 export type PeerStatus = "working" | "idle" | "waiting_for_user" | "asleep" | "starting";
 
@@ -558,58 +568,62 @@ export class PeerHub {
   }
 
   private async resolve(callerId: string, to: string): Promise<Resolved> {
+    if (to.length > MAX_PEER_ADDRESS_CHARS) {
+      return refuse("bad_request", `an address is at most ${MAX_PEER_ADDRESS_CHARS} characters; use one as list_agents printed it`);
+    }
     const { name, ref } = parseAddress(to);
-    // Every session, so one that ended is named as ended rather than as unknown.
-    const local = this.registry.list();
-    const wanted = (name ?? "").toLowerCase();
 
     if (ref !== null && ref.includes("/")) {
       const slash = ref.indexOf("/");
       const machineId = ref.slice(0, slash);
       const sessionId = ref.slice(slash + 1);
+      // The address agents elsewhere are handed for a session here.
+      if (machineId === this.machineId) return this.resolveLocal(callerId, to, sessionId);
       const link = this.linkTo(machineId);
       if (link === null) return refuse("unknown_recipient", `this machine has no link to ${machineId}`);
-      const rows = await this.remoteRows(link);
-      const row = typeof rows === "string" ? null : rows.find((one) => one.ref === ref) ?? null;
-      return { ok: true, kind: "remote", link, sessionId, name: row?.name ?? name ?? sessionId };
+      // The name as the address gives it: a label the ref settles, never worth a listing to look up.
+      return { ok: true, kind: "remote", link, sessionId, name: name !== null && isPeerName(name) ? name : sessionId };
     }
+    if (ref !== null) return this.resolveLocal(callerId, to, ref);
+    const bare = name ?? "";
+    // A bare word that is a session's id is its ref: no name holds an underscore.
+    if (this.registry.get(bare) !== undefined) return this.resolveLocal(callerId, to, bare);
 
-    const localMatches =
-      ref !== null
-        ? local.filter((managed) => managed.id === ref)
-        : local.filter((managed) => managed.id === name || this.nameOf(managed).toLowerCase() === wanted);
+    const wanted = bare.toLowerCase();
+    // What list_agents shows the caller, and nothing else.
+    const localMatches = this.localRows(callerId).filter((row) => !row.self && row.name.toLowerCase() === wanted);
     const remoteMatches: PeerRow[] = [];
-    if (ref === null && this.network !== null) {
+    // A bare name must be one session's across every machine list_agents shows, so it waits on their listings.
+    if (this.network !== null) {
       for (const [, rows] of await this.remoteListings()) {
         if (typeof rows !== "string") remoteMatches.push(...rows.filter((row) => row.name.toLowerCase() === wanted));
       }
     }
     const total = localMatches.length + remoteMatches.length;
     if (total === 0) {
-      const names = this.localRows(callerId)
-        .filter((row) => !row.self)
-        .map((row) => row.address);
-      return refuse(
-        "unknown_recipient",
-        names.length === 0
-          ? `no session is called ${JSON.stringify(to)}; run list_agents to see what there is`
-          : `no session is called ${JSON.stringify(to)}; on this machine there are: ${names.slice(0, 12).join(", ")}`,
-      );
+      const caller = this.registry.get(callerId);
+      if (caller !== undefined && this.nameOf(caller).toLowerCase() === wanted) return refuse("self", "that is this session");
+      return this.unknownRecipient(callerId, to);
     }
     if (total > 1) {
-      const candidates = [
-        ...localMatches.map((managed) => address(this.nameOf(managed), managed.id)),
-        ...remoteMatches.map((row) => row.address),
-      ];
+      const candidates = [...localMatches, ...remoteMatches].map((row) => row.address);
       return refuse("ambiguous_recipient", `more than one session is called that; use one of: ${candidates.join(", ")}`);
     }
     if (remoteMatches.length === 1) {
       const row = remoteMatches[0]!;
       const slash = row.ref.indexOf("/");
-      const link = this.linkTo(row.ref.slice(0, slash))!;
+      // The owner's app may have replaced the links while the listings were in flight.
+      const link = this.linkTo(row.ref.slice(0, slash));
+      if (link === null) return refuse("unknown_recipient", `this machine no longer has a link to ${row.machine.label ?? "that machine"}`);
       return { ok: true, kind: "remote", link, sessionId: row.ref.slice(slash + 1), name: row.name };
     }
-    const target = localMatches[0]!;
+    return this.resolveLocal(callerId, to, localMatches[0]!.ref);
+  }
+
+  private resolveLocal(callerId: string, to: string, sessionId: string): Resolved {
+    // Any session, so one that ended is named as ended rather than as unknown.
+    const target = this.registry.get(sessionId);
+    if (target === undefined) return this.unknownRecipient(callerId, to);
     if (target.id === callerId) return refuse("self", "that is this session");
     if (this.peerStatus(target) === null) {
       return refuse(
@@ -618,6 +632,19 @@ export class PeerHub {
       );
     }
     return { ok: true, kind: "local", target };
+  }
+
+  private unknownRecipient(callerId: string, to: string): Resolved {
+    const names = this.localRows(callerId)
+      .filter((row) => !row.self)
+      .map((row) => row.address);
+    const asked = JSON.stringify(to.length > MAX_ECHOED_ADDRESS_CHARS ? `${to.slice(0, MAX_ECHOED_ADDRESS_CHARS)}…` : to);
+    return refuse(
+      "unknown_recipient",
+      names.length === 0
+        ? `no session is called ${asked}; run list_agents to see what there is`
+        : `no session is called ${asked}; on this machine there are: ${names.slice(0, 12).join(", ")}`,
+    );
   }
 
   private linkTo(machineId: string): PeerLink | null {
@@ -877,14 +904,23 @@ function shortString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f]/.test(value);
 }
 
+function refString(value: unknown): value is string {
+  return shortString(value, MAX_REMOTE_REF_CHARS) && REMOTE_REF.test(value);
+}
+
+/** What reaches the prompt as the sender's name, so only what peerName could have made (Q2.241). */
+function nameString(value: unknown): value is string {
+  return typeof value === "string" && isPeerName(value);
+}
+
 function peerOf(value: unknown): { ref: string; name: string; harness: string; hops: number } | null {
   if (typeof value !== "object" || value === null) return null;
   const from = value as Record<string, unknown>;
   const hops = from["hops"];
   if (
-    !shortString(from["ref"], MAX_REMOTE_REF_CHARS) ||
-    !shortString(from["name"], MAX_REMOTE_NAME_CHARS) ||
-    !shortString(from["harness"], MAX_REMOTE_HARNESS_CHARS) ||
+    !refString(from["ref"]) ||
+    !nameString(from["name"]) ||
+    !shortString(from["harness"], MAX_PEER_HARNESS_CHARS) ||
     typeof hops !== "number" ||
     !Number.isInteger(hops) ||
     hops < 0
@@ -936,10 +972,9 @@ function remoteRowOf(value: unknown): Omit<PeerRow, "address" | "machine" | "sel
   const title = row["title"];
   const folder = row["folder"];
   if (
-    !shortString(row["name"], MAX_REMOTE_NAME_CHARS) ||
-    !shortString(row["ref"], MAX_REMOTE_REF_CHARS) ||
-    row["ref"].includes("/") ||
-    !shortString(row["harness"], MAX_REMOTE_HARNESS_CHARS) ||
+    !nameString(row["name"]) ||
+    !refString(row["ref"]) ||
+    !shortString(row["harness"], MAX_PEER_HARNESS_CHARS) ||
     typeof row["status"] !== "string" ||
     !STATUSES.has(row["status"]) ||
     (title !== null && typeof title !== "string") ||
