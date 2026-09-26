@@ -2,13 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { PeerOrigin } from "../events.js";
-import {
-  PEER_WAKE_REASONS,
-  type ManagedSession,
-  type MidTurnResult,
-  type SessionRegistry,
-  type SessionSnapshot,
-} from "../registry.js";
+import type { ManagedSession, MidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
 import type { OutboxEntry, PeerLink, SqlitePeerOutboxStore } from "../store/sqlite.js";
 import type { PeerAnswer } from "./channel.js";
 import {
@@ -458,7 +452,7 @@ export class PeerHub {
       );
     }
     const text = peerMessage(from, body, replyable);
-    const ready = await this.registry.readyForMessage(target);
+    const ready = await this.registry.readyForMessage(target, "peer");
     if (ready !== "ready") return refuse("workspace_missing", `${to} cannot take work: its folder is gone or not answering`);
     // Subscribed before delivery, or a turn that ends inside submit would never be seen to start.
     const subscription = subscriber === null ? null : this.subscribe(subscriber, target);
@@ -709,12 +703,8 @@ export class PeerHub {
       case "parked":
       case "interrupted":
       case "exited":
-      case "failed": {
-        const reason = managed.exit?.reason;
-        return reason !== undefined && PEER_WAKE_REASONS.includes(reason) && this.registry.wakesOnPrompt(managed)
-          ? "asleep"
-          : null;
-      }
+      case "failed":
+        return this.registry.wakesOnPrompt(managed, "peer") ? "asleep" : null;
     }
   }
 
@@ -808,6 +798,8 @@ export class PeerHub {
   }
 
   private onSnapshot(subscription: Subscription, target: ManagedSession, snapshot: SessionSnapshot): void {
+    // A restart hands the same conversation back and its end announces what is left; a shutdown ends nobody's work.
+    if (target.restarting || this.registry.isShuttingDown) return;
     if (snapshot.exit !== null) {
       this.fire(subscription, target, this.peerStatus(target) === null ? "ended" : "idle");
       return;
@@ -842,7 +834,7 @@ export class PeerHub {
     if (session === undefined || this.peerStatus(session) === null) return;
     // The budget holds for notices too, or two agents handing each other work would never stop.
     if (session.peerTurnsSinceHuman >= PEER_TURN_BUDGET) return;
-    if ((await this.registry.readyForMessage(session)) !== "ready") return;
+    if ((await this.registry.readyForMessage(session, "peer")) !== "ready") return;
     await session.submit(text, from);
   }
 
