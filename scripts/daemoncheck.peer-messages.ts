@@ -709,3 +709,465 @@ process.stdout.write("\nmessages between agents\n");
     };
   }
 }
+
+// Delivery semantics a retry leans on: once per message id even mid-delivery, what the outbox waits out, and what off switches off.
+process.stdout.write("\nmessages between agents: retries, the outbox and the switch\n");
+{
+  const acp = await import("@agentclientprotocol/sdk");
+  const { WebSocketServer, createWebSocketStream } = await import("ws");
+  const { createServer } = await import("node:http");
+  const { generateStaticKey, localStaticKey } = await import("@reemoat/protocol");
+  const { PEER_CHANNEL_PATH, peerRequest } = await import("../src/peers/channel.js");
+  const { OUTBOX_RETRY_MAX_MS } = await import("../src/peers/hub.js");
+  const { serveSecureSession } = await import("../src/e2ee.js");
+  const { jwkThumbprint, x25519Jwk } = await import("../src/token.js");
+
+  /** session/resume is answered only once this settles, so a delivery to a parked session can be held in flight. */
+  let resumeHeld: Promise<void> = Promise.resolve();
+  const delivered: string[] = [];
+  const turns: (() => void)[] = [];
+  let launched = 0;
+  const spawn = (): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (m: unknown) => toClient.write(`${JSON.stringify(m)}\n`);
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { sessionCapabilities: { resume: {} } }, authMethods: [] },
+            });
+            break;
+          case acp.methods.agent.session.new:
+            send({ jsonrpc: "2.0", id, result: { sessionId: `s_retry_${++launched}` } });
+            break;
+          case acp.methods.agent.session.resume: {
+            const sessionId = message["params"]?.["sessionId"];
+            void resumeHeld.then(() => send({ jsonrpc: "2.0", id, result: { sessionId } }));
+            break;
+          }
+          case acp.methods.agent.session.prompt:
+            delivered.push(
+              (message["params"]?.["prompt"] ?? []).map((block: any) => (block?.type === "text" ? block.text : "")).join(""),
+            );
+            turns.push(() => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } }));
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      handle: null,
+      onceStartError: () => () => {},
+      onceExit: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    };
+  };
+  class RetryRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "kimi", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<AgentProcess> {
+      return spawn();
+    }
+  }
+
+  let clock = now;
+  const registry = new SessionRegistry(new MemoryEventStore(), null, undefined, new RetryRuntime(), null);
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 40));
+  const finishTurns = async (): Promise<void> => {
+    for (let round = 0; round < 3; round += 1) {
+      for (const end of turns.splice(0)) end();
+      await settle();
+    }
+  };
+  const promptsOf = (managed: ManagedSession): PromptEvent[] =>
+    managed.log
+      .read(0, 10_000, 1 << 24)
+      .map((stored) => stored.event)
+      .filter((event): event is PromptEvent => event.type === "prompt");
+  const storesFor = () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8"));
+    const links = new SqlitePeerLinkStore(db);
+    links.replaceAll([
+      {
+        id: "lk_there",
+        targetMachineId: "m_there",
+        targetName: "there",
+        targetKey: Buffer.alloc(32, 9).toString("base64url"),
+        relayUrl: "https://relay.example",
+        token: "t.o.k",
+        expiresAt: clock + 90 * 86_400_000,
+      },
+    ]);
+    return { links, outbox: new SqlitePeerOutboxStore(db) };
+  };
+  const listingOf = (ref: string): PeerAnswer => ({
+    ok: true,
+    status: 200,
+    body: { agents: [{ name: "target", ref, harness: "kimi", status: "idle", title: null, folder: "app" }] },
+  });
+
+  const lead = await registry.create({ agent: "kimi", cwd: tmp("peer-retry-lead-") });
+  const fromHere = { id: "lk_back", sourceMachineId: "m_here", sourceLabel: "here" };
+  const fromThere = { id: "lk_in", sourceMachineId: "m_there", sourceLabel: "there" };
+  const receiver = new PeerHub({ registry, enabled: true, now: () => clock });
+
+  process.stdout.write("  a retry that lands while the first try is still being delivered\n");
+  const parked = await registry.create({ agent: "kimi", cwd: tmp("peer-retry-parked-") });
+  // A conversation with a turn in it is resumed rather than opened, and the resume is the answer the stub can hold back.
+  parked.prompt("warm up");
+  await settle();
+  await finishTurns();
+  const task = (id: string, to: string, message: string) => ({
+    id,
+    from: { ref: lead.id, name: "lead", harness: "kimi", hops: 1 },
+    to,
+    message,
+    notify: false,
+  });
+  let release = (): void => {};
+  const holdResume = (): void => {
+    resumeHeld = new Promise((resolve) => {
+      release = resolve;
+    });
+  };
+  const tryTwice = async (id: string, text: string): Promise<string[]> => {
+    const firstTry = receiver.receive(fromHere, task(id, parked.id, text));
+    await settle();
+    const secondTry = receiver.receive(fromHere, task(id, parked.id, text));
+    await settle();
+    release();
+    const tries = await Promise.all([firstTry, secondTry]);
+    await settle();
+    return tries.map((one) => (one.ok ? one.delivery : one.code));
+  };
+
+  holdResume();
+  void parked.applyCredentialChange();
+  await settle();
+  check("behind an agent restart, it joins the first try and is answered with it", await tryTwice("pm_restart", "run it once"), [
+    "started_turn",
+    "started_turn",
+  ]);
+  check(
+    "and is given to the agent once, and logged once",
+    [
+      delivered.filter((text) => text.includes("run it once")).length,
+      promptsOf(parked).filter((one) => one.from?.messageId === "pm_restart").length,
+    ],
+    [1, 1],
+  );
+  await finishTurns();
+
+  await parked.stop("parked");
+  holdResume();
+  check("behind the resume of a parked session too, rather than being refused as starting", await tryTwice("pm_once", "run this one too"), [
+    "started_turn",
+    "started_turn",
+  ]);
+  check("where it is given to the agent once", delivered.filter((text) => text.includes("run this one too")).length, 1);
+  const thirdTry = await receiver.receive(fromHere, task("pm_once", parked.id, "run this one too"));
+  check("and a try after it landed is answered duplicate", thirdTry.ok ? null : thirdTry.code, "duplicate");
+  await finishTurns();
+
+  process.stdout.write("  the sender's outbox, against a receiver that got the first try\n");
+  const joined = storesFor();
+  const late: Promise<unknown>[] = [];
+  let timingOut = true;
+  const target = (id: string): string => `x [m_there/${id}]`;
+  let listed = parked.id;
+  const sender = new PeerHub({
+    registry,
+    enabled: true,
+    machineId: "m_here",
+    outbox: joined.outbox,
+    now: () => clock,
+    network: {
+      links: () => joined.links.list(),
+      request: async (_link, request) => {
+        if (request.path === "/peer/agents") return listingOf(listed);
+        const answer = receiver.receive(fromHere, JSON.parse(JSON.stringify(request.body)));
+        if (!timingOut) return { ok: true, status: 200, body: await answer };
+        // This daemon stopped waiting; the delivery over there goes on.
+        late.push(answer);
+        return { ok: false, status: 0, code: "timeout", relayUrl: null };
+      },
+      noteError: () => {},
+    },
+  });
+  const endpoint = await PeerMcpEndpoint.listen(sender);
+  sender.setEndpoint(endpoint.url);
+  const bearer = (sender.mcpServersFor(lead.id, { http: true })[0] as { headers: { value: string }[] }).headers[0]!.value;
+  await parked.stop("parked");
+  resumeHeld = new Promise((resolve) => {
+    release = resolve;
+  });
+  clock += PEER_DUPLICATE_WINDOW_MS;
+  const called = await fetch(endpoint.url, {
+    method: "POST",
+    headers: { authorization: bearer, "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "send_message", arguments: { to: target(parked.id), message: "held, then joined", notify_when_idle: true } },
+    }),
+  });
+  const tool = ((await called.json()) as any).result as { content: { text: string }[]; structuredContent: any };
+  check(
+    "a held message promises no idle notice: nobody knows yet whether that machine can send one",
+    [tool.structuredContent?.status, tool.content[0]!.text.includes("woken")],
+    ["pending", false],
+  );
+  const leadBefore = promptsOf(lead).length;
+  timingOut = false;
+  clock += OUTBOX_RETRY_MIN_MS;
+  const pumped = sender.pumpOutbox();
+  await settle();
+  release();
+  await pumped;
+  await Promise.all(late.splice(0));
+  await settle();
+  check(
+    "a retry that joins the delivery in flight is a delivery: gone from the outbox, there once, and nobody told otherwise",
+    [
+      joined.outbox.count(),
+      promptsOf(parked).filter((one) => one.text.includes("held, then joined")).length,
+      promptsOf(lead).length - leadBefore,
+    ],
+    [0, 1, 0],
+  );
+  await finishTurns();
+
+  const idle = await registry.create({ agent: "kimi", cwd: tmp("peer-retry-idle-") });
+  listed = idle.id;
+  timingOut = true;
+  clock += PEER_DUPLICATE_WINDOW_MS;
+  const slow = await sender.send(lead.id, { to: target(idle.id), message: "answered after this daemon gave up", notify: true });
+  await Promise.all(late.splice(0));
+  await finishTurns();
+  check("held when the first try's answer never came", [slow.ok && slow.delivery, slow.ok && slow.notify], ["pending", false]);
+  timingOut = false;
+  clock += OUTBOX_RETRY_MIN_MS;
+  await sender.pumpOutbox();
+  await settle();
+  check(
+    "a retry answered duplicate is a delivery, not a failure: gone, delivered once, and nobody told otherwise",
+    [
+      joined.outbox.count(),
+      promptsOf(idle).filter((one) => one.text.includes("answered after this daemon gave up")).length,
+      promptsOf(lead).length - leadBefore,
+    ],
+    [0, 1, 0],
+  );
+  const idleNotice = { id: "pn_after_dup", subscriber: lead.id, from: { ref: idle.id, name: "target", harness: "kimi", hops: 1 }, what: "idle" };
+  check("and the idle notice it asked for is still taken", await sender.receiveNotice(fromThere, idleNotice), true);
+  await settle();
+  await finishTurns();
+  await endpoint.close();
+  sender.close();
+
+  process.stdout.write("  what is held and what is refused\n");
+  const scripted = storesFor();
+  let answerWith: () => PeerAnswer = () => ({ ok: false, status: 503, code: "no_tunnel", relayUrl: null });
+  const holder = new PeerHub({
+    registry,
+    enabled: true,
+    machineId: "m_here",
+    outbox: scripted.outbox,
+    now: () => clock,
+    network: {
+      links: () => scripted.links.list(),
+      request: async (_link, request) => (request.path === "/peer/agents" ? listingOf("s_far") : answerWith()),
+      noteError: () => {},
+    },
+  });
+  const envelope = (code: string) => ({ error: { code, message: code, detail: null } });
+  const unreachable: [string, PeerAnswer][] = [
+    ["the relay's 502, a tunnel that failed", { ok: false, status: 502, code: "tunnel_failed", relayUrl: null }],
+    ["the relay's 504, a daemon that never opened the stream", { ok: false, status: 504, code: "tunnel_timeout", relayUrl: null }],
+    ["a 421 still pointing elsewhere after the one it follows", { ok: false, status: 421, code: "wrong_relay", relayUrl: null }],
+    ["a channel that closed with no answer", { ok: false, status: 0, code: "closed", relayUrl: null }],
+    ["its daemon's own 503 while shutting down", { ok: true, status: 503, body: envelope("shutting_down") }],
+    ["its daemon's 503 with no hub behind the route", { ok: true, status: 503, body: envelope("peers_unavailable") }],
+  ];
+  for (const [name, answer] of unreachable) {
+    answerWith = () => answer;
+    clock += PEER_SEND_REFILL_MS;
+    const one = await holder.send(lead.id, { to: target("s_far"), message: `held: ${name}`, notify: false });
+    check(`held, not refused: ${name}`, one.ok ? one.delivery : one.code, "pending");
+  }
+  const refusals: [string, PeerAnswer][] = [
+    ["a capability the relay no longer takes", { ok: false, status: 401, code: "token_expired", relayUrl: null }],
+    ["a daemon that does not take it as a link", { ok: true, status: 403, body: envelope("not_a_link") }],
+  ];
+  for (const [name, answer] of refusals) {
+    answerWith = () => answer;
+    clock += PEER_SEND_REFILL_MS;
+    const one = await holder.send(lead.id, { to: target("s_far"), message: `refused: ${name}`, notify: false });
+    check(`still refused: ${name}`, one.ok ? one.delivery : one.code, "link_refused");
+  }
+  holder.close();
+
+  const waiting = storesFor();
+  const waiter = new PeerHub({
+    registry,
+    enabled: true,
+    machineId: "m_here",
+    outbox: waiting.outbox,
+    now: () => clock,
+    network: {
+      links: () => waiting.links.list(),
+      request: async (_link, request) => (request.path === "/peer/agents" ? listingOf("s_far") : answerWith()),
+      noteError: () => {},
+    },
+  });
+  answerWith = () => ({ ok: false, status: 503, code: "no_tunnel", relayUrl: null });
+  clock += PEER_DUPLICATE_WINDOW_MS;
+  await waiter.send(lead.id, { to: target("s_far"), message: "wait these out", notify: false });
+  const refusedBy = (code: string): PeerAnswer => ({ ok: true, status: 200, body: { ok: false, code, message: `refused: ${code}` } });
+  const waitedOut: [string, PeerAnswer][] = [
+    ["the relay's 429 on a link opening channels too fast", { ok: false, status: 429, code: "link_rate_limited", relayUrl: null }],
+    ["that machine's own bucket for this link", refusedBy("rate_limited")],
+    ["a session being cleared or restarted", refusedBy("busy")],
+    ["a session still starting", refusedBy("starting")],
+    ["a session whose queue is full", refusedBy("queue_full")],
+  ];
+  const beforeWait = promptsOf(lead).length;
+  const kept: number[] = [];
+  for (const [, answer] of waitedOut) {
+    answerWith = () => answer;
+    clock += OUTBOX_RETRY_MAX_MS;
+    await waiter.pumpOutbox();
+    kept.push(waiting.outbox.count());
+  }
+  await settle();
+  check(
+    "a held message waits out a refusal that says not yet, and nobody is told it failed",
+    [kept, promptsOf(lead).length - beforeWait],
+    [waitedOut.map(() => 1), 0],
+  );
+  answerWith = () => refusedBy("ended");
+  clock += OUTBOX_RETRY_MAX_MS;
+  await waiter.pumpOutbox();
+  await settle();
+  check(
+    "while one that says never still drops it and says so",
+    [waiting.outbox.count(), promptsOf(lead).at(-1)?.text.includes("never delivered: refused: ended")],
+    [0, true],
+  );
+  await finishTurns();
+  waiter.close();
+
+  process.stdout.write("  switched off\n");
+  const before = storesFor();
+  before.outbox.add({
+    id: "pm_before_off",
+    senderSession: lead.id,
+    linkId: "lk_there",
+    targetMachineId: "m_there",
+    targetName: target("s_far"),
+    body: JSON.stringify({
+      id: "pm_before_off",
+      from: { ref: lead.id, name: "lead", harness: "kimi", hops: 1 },
+      to: "s_far",
+      message: "held from before the switch",
+      notify: true,
+    }),
+    createdAt: clock,
+    nextAt: clock,
+    attempts: 0,
+    lastError: "offline",
+  });
+  let sentWhileOff = 0;
+  const off = new PeerHub({
+    registry,
+    enabled: false,
+    machineId: "m_here",
+    outbox: before.outbox,
+    now: () => clock,
+    network: {
+      links: () => before.links.list(),
+      request: async () => {
+        sentWhileOff += 1;
+        return { ok: true, status: 200, body: { ok: true, id: "pm_before_off", delivery: "started_turn", position: null, notify: true } };
+      },
+      noteError: () => {},
+    },
+  });
+  off.startOutbox(5);
+  await settle();
+  await off.pumpOutbox();
+  check("nothing it held is sent, on its timer or when pumped, and it stays held", [sentWhileOff, before.outbox.count()], [0, 1]);
+  const offNotice = { id: "pn_off", subscriber: lead.id, from: { ref: "s_far", name: "target", harness: "kimi", hops: 1 }, what: "idle" };
+  check("and no notice is taken", await off.receiveNotice(fromThere, offNotice), false);
+  off.close();
+
+  process.stdout.write("  the channel itself\n");
+  const channels = new WebSocketServer({ host: "127.0.0.1", port: 0, path: PEER_CHANNEL_PATH });
+  await new Promise<void>((resolve) => channels.once("listening", () => resolve()));
+  let onChannel: (ws: import("ws").WebSocket) => void = () => {};
+  channels.on("connection", (ws) => onChannel(ws));
+  const machineKey = generateStaticKey();
+  const deviceKey = generateStaticKey();
+  const channelTarget = {
+    relayUrl: `http://127.0.0.1:${(channels.address() as { port: number }).port}`,
+    machineKey: Buffer.from(machineKey.publicKey).toString("base64url"),
+    token: signedClaims({ lnk: "lk_channel", src: "m_other", srcl: "studio", cnf: { jkt: jwkThumbprint(x25519Jwk(deviceKey.publicKey)) } }),
+  };
+  const ask = () =>
+    peerRequest(channelTarget, localStaticKey(deviceKey.secretKey), { method: "POST", path: "/peer/messages", body: { id: "pm_c" } }, 5_000);
+
+  onChannel = (ws) => ws.once("message", () => ws.close());
+  const openedAt = Date.now();
+  const closed = await ask();
+  check(
+    "a channel that closes with no answer settles when it closes, not on the timer",
+    [closed, Date.now() - openedAt < 2_000],
+    [{ ok: false, status: 0, code: "closed", relayUrl: null }, true],
+  );
+
+  const vacant = createServer();
+  await new Promise<void>((resolve) => vacant.listen(0, "127.0.0.1", () => resolve()));
+  const vacantPort = (vacant.address() as { port: number }).port;
+  await new Promise<void>((resolve) => vacant.close(() => resolve()));
+  onChannel = (ws) =>
+    serveSecureSession({
+      stream: createWebSocketStream(ws),
+      staticKey: localStaticKey(machineKey.secretKey),
+      verifier,
+      local: { host: "127.0.0.1", port: vacantPort },
+    });
+  const failed = await ask();
+  check(
+    "a daemon's refusal keeps its own status, so a loopback that did not answer is a 502 and not a refused link",
+    failed.ok ? null : [failed.status, failed.code],
+    [502, "tunnel_failed"],
+  );
+  await new Promise<void>((resolve) => channels.close(() => resolve()));
+
+  receiver.close();
+  for (const managed of [lead, parked, idle]) await managed.stop();
+}

@@ -149,13 +149,19 @@ export async function peerRequest(
             break;
           }
           case FRAME.FAILED: {
+            let status = 401;
             let reason = "refused";
             try {
-              reason = String((JSON.parse(new TextDecoder().decode(frame.payload)) as { reason?: unknown }).reason ?? reason);
+              const failed = JSON.parse(new TextDecoder().decode(frame.payload)) as { code?: unknown; reason?: unknown };
+              reason = String(failed.reason ?? reason);
+              // Its own status, so the daemon's 502 (its loopback did not answer) reads as the relay's does.
+              if (typeof failed.code === "number" && Number.isInteger(failed.code) && failed.code >= 400 && failed.code < 600) {
+                status = failed.code;
+              }
             } catch {
               // The code alone is enough to report.
             }
-            fail(401, reason);
+            fail(status, reason);
             break;
           }
         }
@@ -167,5 +173,7 @@ export async function peerRequest(
       fail(res.statusCode ?? 0, res.statusMessage ?? "refused", typeof moved === "string" ? moved : null);
     });
     ws.on("error", () => fail(0, "unreachable"));
+    // A channel that ends with neither an answer nor a refusal is settled now rather than by the timer.
+    ws.on("close", () => fail(0, "closed"));
   });
 }

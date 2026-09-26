@@ -35,6 +35,11 @@ export const OUTBOX_RETRY_MAX_MS = 10 * 60_000;
 export const MAX_OUTBOX_PER_SESSION = 32;
 export const MAX_OUTBOX = 512;
 const OUTBOX_BATCH = 16;
+/** A machine not reachable now rather than a link refused: the relay's 421, 502, 503 and 504, the daemon's own 502, and no answer at all. */
+const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([421, 502, 503, 504]);
+const UNREACHABLE_CODES: ReadonlySet<string> = new Set(["unreachable", "timeout", "closed"]);
+/** What a held message waits out rather than reports: its machine unreachable, or the session there not free to take it yet. */
+const HELD_REFUSALS: ReadonlySet<PeerRefusal> = new Set(["offline", "rate_limited", "busy", "starting", "queue_full"]);
 export const REMOTE_LIST_TIMEOUT_MS = 3_000;
 const REMOTE_LIST_CONCURRENCY = 8;
 const MAX_REMOTE_NAME_CHARS = 64;
@@ -170,6 +175,7 @@ export class PeerHub {
   private readonly buckets = new Map<string, { tokens: number; at: number }>();
   private readonly recent = new Map<string, number>();
   private readonly seenMessageIds = new Map<string, number>();
+  private readonly receiving = new Map<string, Promise<SendResult>>();
   private readonly pausedNoted = new Set<string>();
   private readonly subscriptions = new Set<Subscription>();
   private readonly remoteLists = new Map<string, { at: number; answer: Promise<PeerRow[] | string> }>();
@@ -305,7 +311,19 @@ export class PeerHub {
     this.forgetStale(at);
     const seen = `${link.id}\0${message.id}`;
     if (this.seenMessageIds.has(seen)) return refuse("duplicate", "that message was already delivered");
+    // A retry landing while the first try is still being delivered gets that try's answer, never a second delivery (Q2.240).
+    const inFlight = this.receiving.get(seen);
+    if (inFlight !== undefined) return await inFlight;
+    const delivery = this.deliverReceived(link, message, seen, at);
+    this.receiving.set(seen, delivery);
+    try {
+      return await delivery;
+    } finally {
+      this.receiving.delete(seen);
+    }
+  }
 
+  private async deliverReceived(link: IncomingLink, message: RemoteMessage, seen: string, at: number): Promise<SendResult> {
     const target = this.registry.get(message.to);
     if (target === undefined) return refuse("unknown_recipient", "no such session on that machine");
     if (this.peerStatus(target) === null) {
@@ -334,6 +352,7 @@ export class PeerHub {
 
   /** POST /peer/notices: only the one this machine asked for, once. */
   async receiveNotice(link: IncomingLink, body: unknown): Promise<boolean> {
+    if (!this.enabled) return false;
     const notice = remoteNoticeOf(body);
     if (notice === null) return false;
     const expected = expectationKey(link.sourceMachineId, notice.from.ref, notice.subscriber);
@@ -361,7 +380,7 @@ export class PeerHub {
   }
 
   startOutbox(intervalMs = OUTBOX_RETRY_MIN_MS): void {
-    if (this.outbox === null || this.outboxTimer !== null) return;
+    if (!this.enabled || this.outbox === null || this.outboxTimer !== null) return;
     this.outboxTimer = setInterval(() => void this.pumpOutbox(), intervalMs);
     this.outboxTimer.unref();
   }
@@ -375,7 +394,8 @@ export class PeerHub {
   }
 
   private async pumpOnce(): Promise<void> {
-    if (this.outbox === null || this.network === null) return;
+    // Switched off, held entries are left as they are: nothing is sent, and nobody is woken about them.
+    if (!this.enabled || this.outbox === null || this.network === null) return;
     const at = this.now();
     for (const entry of this.outbox.due(at, OUTBOX_BATCH)) {
       const link = this.linkTo(entry.targetMachineId);
@@ -400,7 +420,12 @@ export class PeerHub {
         else this.expectedNotices.delete(expected);
         continue;
       }
-      if (result.code === "offline" && at - entry.createdAt < OUTBOX_TTL_MS) {
+      // An earlier try got there after this daemon stopped waiting: delivered, and the notice it armed stays armed.
+      if (result.code === "duplicate") {
+        this.outbox.remove(entry.id);
+        continue;
+      }
+      if (HELD_REFUSALS.has(result.code) && at - entry.createdAt < OUTBOX_TTL_MS) {
         this.outbox.retry(entry.id, at + outboxBackoff(entry.attempts + 1), result.message);
         continue;
       }
@@ -508,7 +533,8 @@ export class PeerHub {
         attempts: 0,
         lastError: result.message,
       });
-      return { ok: true, id: messageId, delivery: "pending", position: null, to, notify };
+      // Armed, not promised: whether the target holds a link back is only known once it answers.
+      return { ok: true, id: messageId, delivery: "pending", position: null, to, notify: false };
     }
     if (notify && !(result.ok && result.notify)) this.expectedNotices.delete(expected);
     return result;
@@ -519,10 +545,10 @@ export class PeerHub {
       this.network?.noteError(link, message);
       return refuse(code, message);
     };
+    const offline = (why: string): SendResult =>
+      failed("offline", `${link.targetName} is not reachable right now (${why}); try again later`);
     if (!answer.ok) {
-      if (answer.status === 503 || answer.code === "unreachable" || answer.code === "timeout") {
-        return failed("offline", `${link.targetName} is not reachable right now (${answer.code}); try again later`);
-      }
+      if (UNREACHABLE_STATUSES.has(answer.status) || UNREACHABLE_CODES.has(answer.code)) return offline(answer.code);
       if (answer.status === 429) return refuse("rate_limited", `${link.targetName}'s relay is refusing messages this fast; wait and retry`);
       return failed(
         "link_refused",
@@ -532,6 +558,8 @@ export class PeerHub {
     if (answer.status === 404) {
       return failed("peer_too_old", `${link.targetName}'s daemon is too old to take messages from agents; it needs updating`);
     }
+    // Its daemon's own 503 (shutting_down, peers_unavailable) is a machine going away, not a refusal of the link.
+    if (answer.status === 503) return offline(envelopeCode(answer.body) ?? "503");
     const body = answer.body as Partial<SendResult> | null;
     if (answer.status !== 200 || body === null || typeof body !== "object" || typeof body.ok !== "boolean") {
       return failed("link_refused", `${link.targetName} answered ${answer.status}`);
@@ -871,6 +899,12 @@ function outboxBackoff(attempt: number): number {
 
 function expectationKey(machineId: string, targetRef: string, subscriberRef: string): string {
   return `${machineId}\0${targetRef}\0${subscriberRef}`;
+}
+
+function envelopeCode(body: unknown): string | null {
+  const error = typeof body === "object" && body !== null ? (body as { error?: unknown }).error : undefined;
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" ? code : null;
 }
 
 function shortString(value: unknown, max: number): value is string {
