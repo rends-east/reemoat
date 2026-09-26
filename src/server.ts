@@ -1406,7 +1406,7 @@ export function createApp(options: ServerOptions): AppBundle {
 
     // Shared with messages from other agents. A restart is waited out rather than answered turn_in_flight; no signed-in probe (Q7.99).
     // The workspace is checked on every message: a folder deleted while open otherwise surfaces as an agent's internal error.
-    const readiness = await registry.readyForMessage(managed);
+    const readiness = await registry.readyForMessage(managed, "person");
     if (readiness !== "ready") return workspaceRefused(c, managed, readiness);
 
     // /clear is carried out here, not forwarded: claude forks underneath ACP and never reports the new id. Exact match only.

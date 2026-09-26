@@ -688,6 +688,271 @@ process.stdout.write("\nmessages between agents\n");
   check("switched off, nothing is injected", off.mcpServersFor(lead.id, { http: true }), []);
   check("and nothing is sent", (await off.send(lead.id, { to: workerAddress, message: "x", notify: false })).ok, false);
 
+  process.stdout.write("  what may wake a session, who may join a wake, and what a wake must not undo\n");
+  {
+    const { rmSync } = await import("node:fs");
+    const { PluginApi, PluginApiError } = await import("../src/plugins/api.js");
+    const { parseManifest } = await import("../src/plugins/manifest.js");
+    const { hostGit } = await import("../src/git.js");
+    const { memoryPluginData } = await import("./daemoncheck.fixtures.js");
+
+    // Its own registry, so a launch can be held open and the whole of it shut down at the end.
+    let launchGate: Promise<void> | null = null;
+    const outs: PassThrough[] = [];
+    class HeldRuntime extends PeerRuntime {
+      override async launch(agent: AgentId): Promise<AgentProcess> {
+        if (launchGate !== null) await launchGate;
+        const launchedProcess = await super.launch(agent);
+        outs.push(launchedProcess.stdout as PassThrough);
+        return launchedProcess;
+      }
+    }
+    const held = new SessionRegistry(new MemoryEventStore(), null, undefined, new HeldRuntime(), null);
+    const heldHub = new PeerHub({ registry: held, enabled: true, now: () => clock });
+    const heldApp = createApp({ registry: held, verifier, instanceId: "i_peers_held", startedAt: now, credentials, roots: [users] }).app;
+    const kimi = (prefix: string) => held.create({ agent: "kimi", cwd: tmp(prefix) });
+    const at = (managed: ManagedSession): string => `x [${managed.id}]`;
+    const outcome = (result: { ok: true; delivery: string } | { ok: false; code: string }): string =>
+      result.ok ? result.delivery : result.code;
+    const until = async (done: () => boolean): Promise<void> => {
+      for (let i = 0; i < 50 && !done(); i += 1) await settle();
+    };
+    const holdRestart = (managed: ManagedSession): (() => void) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      managed.whenRestarted = () => gate;
+      return release;
+    };
+    const holdLaunches = (): (() => void) => {
+      let release!: () => void;
+      launchGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        launchGate = null;
+        release();
+      };
+    };
+    const parsedManifest = parseManifest(
+      JSON.stringify({ id: "wake", name: "Wake", version: "1.0.0", api: 1, scopes: ["sessions.write"], net: [], contributes: {} }),
+    );
+    if (!parsedManifest.ok) throw new Error(parsedManifest.message);
+    const writer = parsedManifest.manifest;
+    const plugin = new PluginApi({ registry: held, data: memoryPluginData(), git: hostGit });
+    const pluginPrompt = async (managed: ManagedSession, text: string): Promise<string> => {
+      try {
+        await plugin.call(writer, "sessions.prompt", { id: managed.id, text });
+        return "ok";
+      } catch (error) {
+        return error instanceof PluginApiError ? error.code : "threw";
+      }
+    };
+
+    const sender = await kimi("peer-wake-sender-");
+
+    const stoppedMidDelivery = await kimi("peer-wake-stop-");
+    const releaseDelivery = holdRestart(stoppedMidDelivery);
+    clock += PEER_SEND_REFILL_MS;
+    const racing = heldHub.send(sender.id, { to: at(stoppedMidDelivery), message: "take this on", notify: false });
+    await settle();
+    await held.stop(stoppedMidDelivery.id);
+    releaseDelivery();
+    const raced = await racing;
+    await settle();
+    check(
+      "a person's Stop landing while another agent's message waits is not undone by that message",
+      [outcome(raced), stoppedMidDelivery.exit?.reason, stoppedMidDelivery.terminal, agentOf(stoppedMidDelivery).prompts.length],
+      ["ended", "stopped", true, 0],
+    );
+
+    const noticed = await kimi("peer-wake-noticed-");
+    const noticeWorker = await kimi("peer-wake-notice-worker-");
+    clock += PEER_SEND_REFILL_MS;
+    await heldHub.send(noticed.id, { to: at(noticeWorker), message: "tell me when you are done", notify: true });
+    await settle();
+    const releaseNotice = holdRestart(noticed);
+    agentOf(noticeWorker).finish();
+    await settle();
+    await held.stop(noticed.id);
+    releaseNotice();
+    await settle();
+    check(
+      "nor by an idle notice",
+      [noticed.exit?.reason, noticed.terminal, agentOf(noticed).prompts.length],
+      ["stopped", true, 0],
+    );
+
+    const asleep = await kimi("peer-wake-join-");
+    await asleep.stop("parked");
+    const openLaunch = holdLaunches();
+    clock += PEER_SEND_REFILL_MS;
+    const waking = heldHub.send(sender.id, { to: at(asleep), message: "first, and it wakes you", notify: false });
+    await settle();
+    const whileWaking = asleep.status;
+    clock += PEER_SEND_REFILL_MS;
+    const joining = heldHub.send(sender.id, { to: at(asleep), message: "second, while you wake", notify: false });
+    await settle();
+    openLaunch();
+    const joined = [await waking, await joining];
+    await settle();
+    check(
+      "a second message to a session already waking joins the wake rather than being refused as starting",
+      [whileWaking, joined.map(outcome).sort()],
+      ["starting", ["queued", "started_turn"]],
+    );
+    agentOf(asleep).finish();
+    await settle();
+    check(
+      "and both reach its agent",
+      [agentOf(asleep).prompts.length, ["first, and it wakes you", "second, while you wake"].every((words) => agentOf(asleep).prompts.some((text) => text.includes(words)))],
+      [2, true],
+    );
+    agentOf(asleep).finish();
+    await settle();
+
+    const subscriber = await kimi("peer-wake-subscriber-");
+    const reporter = await kimi("peer-wake-reporter-");
+    clock += PEER_SEND_REFILL_MS;
+    await heldHub.send(subscriber.id, { to: at(reporter), message: "report back when done", notify: true });
+    await settle();
+    await subscriber.stop("parked");
+    const openAgain = holdLaunches();
+    clock += PEER_SEND_REFILL_MS;
+    const wakingSubscriber = heldHub.send(sender.id, { to: at(subscriber), message: "wake for this", notify: false });
+    await settle();
+    agentOf(reporter).finish();
+    await settle();
+    openAgain();
+    await wakingSubscriber;
+    await settle();
+    agentOf(subscriber).finish();
+    await settle();
+    check(
+      "and an idle notice that arrives while its reader wakes is delivered rather than lost",
+      [agentOf(subscriber).prompts.length, agentOf(subscriber).prompts.some((text) => text.includes("without writing back"))],
+      [2, true],
+    );
+    agentOf(subscriber).finish();
+    await settle();
+
+    const asker = await kimi("peer-wake-asker-");
+    const restarted = await kimi("peer-wake-restarted-");
+    const restartedOut = outs.at(-1)!;
+    restarted.prompt("a long job of its own");
+    await settle();
+    clock += PEER_SEND_REFILL_MS;
+    const behind = await heldHub.send(asker.id, { to: at(restarted), message: "then this", notify: true });
+    await settle();
+    // The shape of an expired credential mid-turn: onAgentUnusable restarts the agent, stopping it config_changed on the way.
+    const failing = agentOf(restarted).held;
+    agentOf(restarted).held = null;
+    restartedOut.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: failing,
+        error: { code: -32603, message: "Failed to authenticate: OAuth session expired", data: { errorKind: "authentication_failed" } },
+      })}\n`,
+    );
+    await until(() => agentOf(restarted).prompts.length === 2);
+    await settle();
+    check(
+      "an agent restarted mid-turn is not reported as having gone idle",
+      [outcome(behind), agentOf(asker).prompts.length, (agentOf(restarted).prompts.at(-1) ?? "").includes("then this")],
+      ["queued", 0, true],
+    );
+    agentOf(restarted).finish();
+    await until(() => agentOf(asker).prompts.length > 0);
+    check(
+      "and the notice outlives the restart, so the real end is reported",
+      [agentOf(asker).prompts.length, (agentOf(asker).prompts.at(-1) ?? "").includes("without writing back")],
+      [1, true],
+    );
+    agentOf(asker).finish();
+    await settle();
+
+    const spent = await kimi("peer-wake-budget-");
+    for (let i = 0; i < PEER_TURN_BUDGET; i += 1) {
+      if (spent.prompt(`peer ${i}`, [], { ...origin(sender), hops: 3 }).kind !== "accepted") break;
+      await settle();
+      agentOf(spent).finish();
+      await settle();
+    }
+    const spentBefore = [spent.peerTurnsSinceHuman, spent.peerDepth];
+    const byPlugin = await pluginPrompt(spent, "a hook's prompt");
+    await settle();
+    agentOf(spent).finish();
+    await settle();
+    clock += PEER_SEND_REFILL_MS;
+    const stillPaused = await heldHub.send(sender.id, { to: at(spent), message: "past the budget", notify: false });
+    check(
+      "a plugin's prompt neither counts against the budget other agents spend nor lifts it",
+      [spentBefore, byPlugin, [spent.peerTurnsSinceHuman, spent.peerDepth], outcome(stillPaused)],
+      [[PEER_TURN_BUDGET, 3], "ok", [PEER_TURN_BUDGET, 3], "recipient_paused"],
+    );
+    check("and is logged as nobody's, as before", promptsOf(spent).at(-1)?.from ?? null, null);
+    const cleared = await heldApp.fetch(
+      new Request(`http://d/sessions/${spent.id}/prompt`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        body: JSON.stringify({ text: "/clear" }),
+      }),
+    );
+    const spentAfterClear = [spent.peerTurnsSinceHuman, spent.peerDepth];
+    clock += PEER_SEND_REFILL_MS;
+    const afterClear = await heldHub.send(sender.id, { to: at(spent), message: "after the clear", notify: false });
+    check(
+      "a person's /clear lifts the budget and the hop depth as a person's message does",
+      [cleared.status, spentAfterClear, outcome(afterClear)],
+      [202, [0, 0], "started_turn"],
+    );
+    agentOf(spent).finish();
+    await settle();
+
+    const folderless = await kimi("peer-wake-folderless-");
+    rmSync(folderless.workspace.root, { recursive: true, force: true });
+    check("a plugin's prompt into a folder that is gone is refused as the route refuses it", await pluginPrompt(folderless, "hello"), "workspace_missing");
+
+    const credentialed = await kimi("peer-wake-credential-");
+    const openRestart = holdLaunches();
+    const restarting = credentialed.applyCredentialChange();
+    await settle();
+    const midRestart = credentialed.restarting;
+    const promptedMidRestart = pluginPrompt(credentialed, "after the restart");
+    await settle();
+    openRestart();
+    await restarting;
+    check("and one sent during an agent restart waits it out rather than answering not ready", [midRestart, await promptedMidRestart], [true, "ok"]);
+    await settle();
+    agentOf(credentialed).finish();
+    await settle();
+
+    check(
+      "a plugin still wakes what a person's message would, a person's own Stop included",
+      [await pluginPrompt(stoppedMidDelivery, "carry on"), stoppedMidDelivery.terminal],
+      ["ok", false],
+    );
+    await settle();
+    agentOf(stoppedMidDelivery).finish();
+    await settle();
+
+    const parkedReader = await kimi("peer-wake-parked-reader-");
+    const shutWorker = await kimi("peer-wake-shut-worker-");
+    clock += PEER_SEND_REFILL_MS;
+    await heldHub.send(parkedReader.id, { to: at(shutWorker), message: "a long job", notify: true });
+    await settle();
+    await parkedReader.stop("parked");
+    await held.shutdown();
+    await settle();
+    check(
+      "a shutdown ending the work is no idle notice, and wakes nothing back up",
+      [parkedReader.exit?.reason, promptsOf(parkedReader).length, agentOf(parkedReader).prompts.length],
+      ["parked", 0, 0],
+    );
+    heldHub.close();
+  }
+
   hub.close();
   await endpoint.close();
   for (const managed of [lead, worker, plain]) await managed.stop();

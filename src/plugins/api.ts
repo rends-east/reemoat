@@ -231,10 +231,16 @@ export class PluginApi {
         // Parsed before the claim so a malformed body stamps nothing.
         const prompt = text(input["text"], "text");
         // Claim the turn before prompting (pump can append turn_end synchronously) and undo on refusal; cancel and stop are never stamped.
-        // Wake a parked session first, as the prompt route does, and before the claim: a wake is not a turn.
-        await registry.wakeForPrompt(managed);
+        // The route's waits and wake, as a person's, and before the claim: a wake is not a turn.
+        const readiness = await registry.readyForMessage(managed, "person");
+        if (readiness === "workspace_unresponsive") {
+          throw new PluginApiError(readiness, `${managed.workspace.root} did not answer; the filesystem it is on may have stalled`);
+        }
+        if (readiness === "workspace_missing") {
+          throw new PluginApiError(readiness, `${managed.workspace.root} no longer exists`);
+        }
         const undo = this.options.origins?.claimTurn(managed.id, manifest.id);
-        const result = managed.prompt(prompt);
+        const result = managed.prompt(prompt, [], "plugin");
         if (result.kind !== "accepted") {
           undo?.();
           // A turn in flight stays session_busy: a steered message never produces the turn_end that spends the origin claim.

@@ -679,6 +679,9 @@ export const PEER_WAKE_REASONS: readonly ExitReason[] = [
   "daemon_shutdown",
 ];
 
+/** Who a message that wakes a session is from; a peer wakes only a stop in PEER_WAKE_REASONS (Q2.239). */
+export type Waker = "person" | "peer";
+
 export function stoppedBeforeDelivery(count: number): string {
   return count === 1
     ? "the session stopped before this message reached the agent"
@@ -864,7 +867,7 @@ export class ManagedSession {
   private clearing = false;
 
   // With clearing, refused at every method that addresses the agent: nothing else may talk to it while either holds.
-  private get restarting(): boolean {
+  get restarting(): boolean {
     return this.restart !== null;
   }
 
@@ -876,6 +879,11 @@ export class ManagedSession {
   /** Resolves at once when there is no restart and never rejects; only the prompt route waits. */
   whenRestarted(): Promise<void> {
     return this.restart?.done ?? Promise.resolve();
+  }
+
+  /** Resolves once a launch already under way settles, at once with none; never rejects. */
+  whenResumed(): Promise<void> {
+    return this.resuming?.catch(() => {}) ?? Promise.resolve();
   }
 
   private restart: { readonly config: AgentConfig; readonly done: Promise<void> } | null = null;
@@ -1313,6 +1321,8 @@ export class ManagedSession {
     if (this.unpromptedSinceState !== null || this.awaitingCount > 0) return { kind: "busy", status: this.status };
 
     const seq = this.safeAppend({ type: "prompt", text, attachments: [], from: null })?.seq ?? 0;
+    // A person's /clear is their message, so it lifts what other agents built up as recordPrompt does.
+    this.heardFromPerson();
     // Set before the await: nothing else may address the agent while its session id is replaced.
     this.clearing = true;
     this.touchSafe();
@@ -2004,8 +2014,8 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /** Synchronous: answers the 202 with turn and seq; attachment bytes are read later in pump. */
-  prompt(text: string, attachments: readonly UploadRow[] = [], from: PeerOrigin | null = null): PromptResult {
+  /** Synchronous: answers the 202 with turn and seq; attachment bytes are read later in pump. "plugin" is logged as null. */
+  prompt(text: string, attachments: readonly UploadRow[] = [], from: PeerOrigin | "plugin" | null = null): PromptResult {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
@@ -2177,14 +2187,16 @@ export class ManagedSession {
     session: Session,
     text: string,
     attachments: readonly UploadRow[],
-    from: PeerOrigin | null,
+    from: PeerOrigin | "plugin" | null,
   ): number {
-    if (from === null) {
-      // Only a person's first prompt names the session; an envelope would make a poor title.
+    if (from === null || from === "plugin") {
+      // Only a person's (or a plugin's) first prompt names the session; an envelope would make a poor title.
       if (this.titleValue === null) this.titleValue = deriveSessionTitle(text);
-      this.peerTurns = 0;
-      this.peerDepthValue = 0;
-    } else {
+    }
+    // A plugin's prompt neither counts nor resets, or a hook loop would lift PEER_TURN_BUDGET and MAX_PEER_HOPS.
+    if (from === null) {
+      this.heardFromPerson();
+    } else if (from !== "plugin") {
       this.peerTurns += 1;
       this.peerDepthValue = Math.max(this.peerDepthValue, from.hops);
     }
@@ -2202,7 +2214,8 @@ export class ManagedSession {
             inlined: inlinesImage(row.mime, row.bytes, caps),
           }));
 
-    const seq = this.safeAppend({ type: "prompt", text, attachments: refs, from })?.seq ?? 0;
+    const logged = from === "plugin" ? null : from;
+    const seq = this.safeAppend({ type: "prompt", text, attachments: refs, from: logged })?.seq ?? 0;
 
     // Marked even if the append failed; a queued message spends at accept so the 24-hour sweep cannot collect its files.
     if (attachments.length > 0) {
@@ -2212,6 +2225,12 @@ export class ManagedSession {
       );
     }
     return seq;
+  }
+
+  /** Only a person's message resets what other agents have built up since the last one. */
+  private heardFromPerson(): void {
+    this.peerTurns = 0;
+    this.peerDepthValue = 0;
   }
 
   /** The only read of attachment bytes, shared by pump and sendMidTurn so both decide image support as recordPrompt logged it. */
@@ -3172,16 +3191,18 @@ export class SessionRegistry {
     return 0;
   }
 
-  /** Wakes a terminal session before a prompt, parked ones even with auto-resume off; used by the route and the plugin API. */
-  /** Everything a message waits for before it is sent, in the prompt route's order; the plugin API's skipping of it was a bug. */
-  async readyForMessage(managed: ManagedSession): Promise<"ready" | "workspace_missing" | "workspace_unresponsive"> {
+  /** Everything a message waits for before it is sent, in the prompt route's order; the route, the plugin API and the hub all call it. */
+  async readyForMessage(
+    managed: ManagedSession,
+    waker: Waker,
+  ): Promise<"ready" | "workspace_missing" | "workspace_unresponsive"> {
     // A restart this daemon started is waited out, so everything below reads a settled session.
     await managed.whenRestarted();
     // Never a synchronous check: for a plain session the root is the caller's cwd and may be a stalled mount.
     const present = await probeExists(managed.workspace.root);
     if (present === null) return "workspace_unresponsive";
     if (present === false) return "workspace_missing";
-    await this.wakeForPrompt(managed);
+    await this.wakeForPrompt(managed, waker);
     return "ready";
   }
 
@@ -3189,25 +3210,33 @@ export class SessionRegistry {
     this.peerMcpServersBy = provide;
   }
 
-  /** Whether wakeForPrompt would put an agent back on this ended session. */
-  wakesOnPrompt(managed: ManagedSession): boolean {
+  /** Whether wakeForPrompt would put an agent back on this ended session; never once shutdown has begun. */
+  wakesOnPrompt(managed: ManagedSession, waker: Waker): boolean {
+    const reason = managed.exit?.reason;
     return (
+      !this.shuttingDown &&
       managed.terminal &&
-      (this.autoResumeEnabled || managed.exit?.reason === "parked") &&
+      // A person's Stop is theirs to undo (Q2.239); read in resume()'s own tick, so one landing mid-delivery holds.
+      (waker === "person" || (reason !== undefined && PEER_WAKE_REASONS.includes(reason))) &&
+      (this.autoResumeEnabled || reason === "parked") &&
       // Same gate as the boot pass: an agent that forgot this conversation will say so again.
       !managed.resumeSettled &&
       autoResumable(managed.exit, managed.agentSessionId, "prompt")
     );
   }
 
-  async wakeForPrompt(managed: ManagedSession): Promise<void> {
-    if (this.wakesOnPrompt(managed)) {
+  /** Wakes an ended session before a message, parked ones even with auto-resume off, or joins a launch already under way. */
+  async wakeForPrompt(managed: ManagedSession, waker: Waker): Promise<void> {
+    if (this.wakesOnPrompt(managed, waker)) {
       try {
         await managed.resume();
       } catch {
         // Swallowed: resume restores the original exit, so the caller reports how the session really ended.
       }
+      return;
     }
+    // Joined, or a second message finds no agent yet and is refused as still starting.
+    await managed.whenResumed();
   }
 
   async create(options: CreateSessionOptions): Promise<ManagedSession> {

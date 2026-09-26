@@ -57,22 +57,25 @@ polls cost it 6.5% of a run's tokens.
 **The idle notice is off unless asked for, and stands in for an answer.**
 `notify_when_idle` wakes its sender once if the recipient goes idle or ends
 *without writing back*; writing back cancels it (`answered`), and on the other
-machine the answer's arrival forgets the notice it was expecting. On by default,
+machine the answer's arrival forgets the notice it was expecting. An agent restart
+is neither and keeps it; a daemon shutdown sends nothing. On by default,
 every reply would subscribe its writer to the reader, and the end of every exchange
 would wake the one who answered for nothing.
 
 ## Delivery is the prompt route's, not a copy
 
 - `readyForMessage` is the route's three waits — a restart, the workspace, a
-  released agent — in the route's order. The route calls it too. The plugin API's
-  `sessions.prompt` skipping them is the bug this avoids repeating.
+  released agent — in the route's order, and a launch already under way is joined
+  rather than answered as starting. The route and the plugin API's
+  `sessions.prompt` call it as `"person"`, this hub as `"peer"` (`Waker`).
 - `submit` is `prompt` then `sendMidTurn`, for a caller with no HTTP answers to
   keep apart. **The route does not use it**: its two `busy`s answer differently.
 - A peer message is a `prompt` event with `from` set, and `text` is **exactly what
   the agent received**, envelope included — so a client that predates `from`
   still shows `<peer-message from=…>` inside the bubble, never the person's words.
-- `recordPrompt` names a session only from a person's message, and only a
-  person's message resets `peerTurnsSinceHuman` and `peerDepth`.
+- `recordPrompt` names a session only from a person's message or a plugin's, and
+  only a person's — a `/clear` included — resets `peerTurnsSinceHuman` and
+  `peerDepth`. A plugin's neither resets nor counts, and is logged with `from: null`.
 - Peer entries hold at most `MAX_QUEUED_PEER_PROMPTS` of the queue, so another
   agent can never make a person's own message answer 429; consecutive ones are
   sent as one turn by `deliverQueued`.
@@ -100,7 +103,8 @@ it is dropped rather than refused.
 
 A live session, or one that ended for a reason in `PEER_WAKE_REASONS` — a stop
 nobody chose. **A person's Stop is theirs to undo**: another agent can neither list
-nor wake that session.
+nor wake that session. `wakesOnPrompt` is asked in the tick `resume()` starts in,
+so a Stop landing while a message waits in `readyForMessage` still holds.
 
 ## The row
 
