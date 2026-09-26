@@ -83,8 +83,12 @@ would wake the one who answered for nothing.
 sender — only `name` is derived from what anybody typed. `defuse` breaks every
 tag a harness or this daemon writes (`peer-message`, `system-reminder`,
 `teammate-message`, …) and every `Human:`/`Assistant:` line, so a body cannot close
-its own envelope or pass as the harness. Attributes are escaped. The prompt starts
-with `<`, so no adapter reads it as a slash command.
+its own envelope or pass as the harness. Attributes are escaped, and so is a
+sender's name or address wherever this daemon's own words carry it — the footer, a
+notice's sentence. Another machine's name for its session is taken only if
+`peerName` could have made it (`isPeerName`), because a name with a space in it
+writes a sentence of its own there. The prompt starts with `<`, so no adapter reads
+it as a slash command.
 
 ## What stops a loop (Q2.238)
 
@@ -101,6 +105,11 @@ it is dropped rather than refused.
 A live session, or one that ended for a reason in `PEER_WAKE_REASONS` — a stop
 nobody chose. **A person's Stop is theirs to undo**: another agent can neither list
 nor wake that session.
+
+**The ref settles an address and the name is a label.** One naming this machine
+resolves here. A bare name is matched against what `list_agents` shows the caller
+— never the caller, never a stopped session — on **every** machine, so it waits on
+the listings `list_agents` warms; a qualified address fetches none.
 
 ## The row
 
