@@ -44,7 +44,8 @@ listener at all. Hand-written Streamable HTTP, JSON answers only, no SDK (zod).
   adapter's own model settings — and each tool carries `anthropic/alwaysLoad`, or
   claude defers it behind its tool search and reaches for its own first. Its
   `SendMessage` stays: it is how claude continues its own subagents (Q2.242).
-- `REEMOAT_PEER_MESSAGES=off` injects nothing and refuses every send.
+- `REEMOAT_PEER_MESSAGES=off` injects nothing, refuses every send, takes no notice and
+  pumps no outbox: what was held before the switch stays in `peer_outbox`, unsent.
 
 ## One verb, and every message is acted on (Q2.243)
 
@@ -138,16 +139,21 @@ hold back behind the label.
   on it, on that daemon's word. `session:message` reaches `/peer/*` and nothing else,
   and a person's capability never carries it.
 - **A linked machine is not trusted to limit itself.** Every link has its own token
-  bucket here, a message id is delivered once per link, and a notice is taken only
+  bucket here, a message id is delivered once per link — a retry landing while the
+  first try is still being delivered gets that try's answer — and a notice is taken only
   when this machine asked for it, once (`expectedNotices`). A remote listing row is
   re-read field by field (`remoteRowOf`) and one naming a machine is dropped.
-- **Offline is not a refusal.** A message for a machine whose tunnel is down goes to
+- **Offline is not a refusal.** A message for a machine that cannot be reached — no
+  tunnel, the relay's 421, 502 or 504, its daemon's own 503, no answer — goes to
   `peer_outbox` and is retried, byte-identical so its id holds, from 30 s to 10 min
-  apart for 24 h; a refusal or expiry wakes the sender with a notice saying so.
+  apart for 24 h. A retry waits out `rate_limited`, `busy`, `starting` and
+  `queue_full`, and `duplicate` is an earlier try that landed; any other refusal, or
+  expiry, wakes the sender with a notice saying so.
   The relay may queue nothing and the Authority may hold none of an agent's work, so
   this daemon is the only place it can wait.
 - **No link back, no reply.** The envelope says so, and `send_message` does not
-  promise a notice it cannot deliver.
+  promise a notice it cannot deliver — nor one for a message it is holding, since
+  whether the target has a link back is known only once it answers.
 
 ## Handing machines their links (the app)
 
