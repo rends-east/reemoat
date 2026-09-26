@@ -153,4 +153,6 @@ rule 1). Nothing toasts; the Agent links screen is where failures are read.
 **Agent links is a machine's leaf**, `/settings/machines/:id/links`, for its owner,
 a table — Direction · Machine · Replace. **Replace does not unlink**: the next sync
 links every pair of your machines again, so it ends a link and its token and hands
-the machine a new one, and the screen says so (Q7.151).
+the machine a new one, and the screen says so (Q7.151). Its forced run forgets the
+source's `LinkSyncRecord` first, so a machine it could not reach, or a hand-over that
+failed, is owed a sync at the next wake rather than read as current for a day.

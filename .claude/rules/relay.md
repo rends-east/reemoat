@@ -210,12 +210,12 @@ transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
 - **A tunnel with no daemon is a 503, never a queue.** Q5.21. What waits for a
   machine that is off waits on the sending daemon (`agent-messaging.md`).
 - **A link capability is authorized on its row, and every refusal of its own is the
-  unknown machine's 404.** With `lnk` present, `linkClaimsOf` needs `src` and
-  `srcl` (else `401 malformed_token`), then `linkIsLive` the row live, its target
-  `aud`, its source `src`, and the source live, within its owner's limit and not
-  owner-disabled — before the user and grant checks, which still run on `sub` and
-  `aud`. Deleting the row refuses every token minted for it at the next channel,
-  which is the only revocation a 90-day capability has. Q1.652, Q5.121.
+  unknown machine's 404.** `parseClaims` reads `lnk`, `src` and `srcl` all or none
+  (else `401 malformed_token`); with `lnk` present, `linkIsLive` needs the row live,
+  its target `aud`, its source `src`, and the source live, within its owner's limit
+  and not owner-disabled — before the user and grant checks, which still run on
+  `sub` and `aud`. Deleting the row refuses every token minted for it at the next
+  channel, which is the only revocation a 90-day capability has. Q1.652, Q5.121.
 - **A link's streams are its own budget, never its owner's.** `RelayAuth.limiter` is
   `sub` at `MAX_STREAMS_PER_SUBJECT` for a person and `lnk:<id>` at
   `MAX_STREAMS_PER_LINK` for a link, and every link stream on a tunnel shares

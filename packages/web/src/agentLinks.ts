@@ -171,6 +171,17 @@ export function writeLinkRecord(key: string, record: LinkSyncRecord): void {
   }
 }
 
+export function forgetLinkRecord(key: string): void {
+  const held = readRecords();
+  if (!(key in held)) return;
+  delete held[key];
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(held));
+  } catch {
+    // Unwritten means the old record stands until it goes stale, a day at most.
+  }
+}
+
 export interface LinkSyncDeps {
   /** `POST /v1/machines/:id/links`. */
   link(machineId: string): Promise<MachineLinkGrant[]>;
@@ -223,6 +234,8 @@ export class LinkSync {
     const machine = machines.find((one) => one.id === id);
     if (machine === undefined) return { verdict: { sync: false, why: "unknown_machine" }, outcome: "skipped" };
     const key = linkRecordKey(scope, id);
+    // Forced only by a Replace, whose revoked token the record describes: a run that does not land leaves the next wake owing one.
+    if (force) forgetLinkRecord(key);
     const targets = linkTargets(machines, id);
     const now = this.deps.now();
     const verdict = linkSyncDecision({

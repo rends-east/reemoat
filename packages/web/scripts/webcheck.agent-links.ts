@@ -397,6 +397,103 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   storage.delete("reemoat.agentLinks");
 }
 
+process.stdout.write("\na Replace the machine could not take is still owed at the next wake\n");
+{
+  let clock = 1_800_000_000_000;
+  const scope = { origin: "https://cp.example", account: "u_1" };
+  const key = linkRecordKey(scope, "m_a");
+  const grants = (): Grant[] => [
+    { id: "lk_a_b", token: "tok-a-b", expiresAt: clock + 90 * DAY, target: { id: "m_b", name: "studio", key: "k_b", relayUrl: null } },
+  ];
+  const calls: string[] = [];
+  let linkRefusal: unknown = null;
+  let pushRefusal: unknown = null;
+  const deps = {
+    link: async (id: string) => {
+      calls.push(`link ${id}`);
+      if (linkRefusal !== null) throw linkRefusal;
+      return grants();
+    },
+    push: async (id: string) => {
+      calls.push(`push ${id}`);
+      if (pushRefusal !== null) throw pushRefusal;
+    },
+    now: () => clock,
+  };
+  const sync = new LinkSync(deps);
+  const online = [machine("m_a"), machine("m_b")];
+  const offline = [machine("m_a", { relayOnline: false }), machine("m_b")];
+  const wake = async (on = sync): Promise<string[]> => {
+    calls.length = 0;
+    await on.syncAll(scope, online);
+    return calls.filter((one) => one.endsWith("m_a"));
+  };
+
+  storage.delete("reemoat.agentLinks");
+  await wake();
+  clock += 60_000;
+  check("a machine handed its links a minute ago is left alone", await wake(), []);
+
+  const unreached = await sync.syncOne(scope, offline, "m_a", true);
+  check("a Replace cannot reach a machine that is offline", [unreached.verdict.why, unreached.outcome], ["offline", "skipped"]);
+  check("and forgets what was last handed to it", readLinkRecord(key), null);
+  clock += 60_000;
+  check("so the next wake that reaches it hands it a new set, not one a day later", await wake(), ["link m_a", "push m_a"]);
+  clock += 60_000;
+  check("after which it is left alone again", await wake(), []);
+
+  await sync.syncOne(scope, offline, "m_a", true);
+  clock += 60_000;
+  check("the debt outlives the page: a reopened app hands the set over too", await wake(new LinkSync(deps)), [
+    "link m_a",
+    "push m_a",
+  ]);
+
+  pushRefusal = new ApiError(503, "no_tunnel", "that machine is not connected");
+  const unpushed = await sync.syncOne(scope, online, "m_a", true);
+  check("a Replace the daemon did not take is a failure, and leaves no record", [unpushed.outcome, readLinkRecord(key)], ["failed", null]);
+  pushRefusal = null;
+  clock += LINK_RETRY_AFTER_MS - 1;
+  check("it waits out the retry interval like any other failure", await wake(), []);
+  clock += 1;
+  check("and is then handed over, rather than read as current until the day is out", await wake(), ["link m_a", "push m_a"]);
+
+  linkRefusal = new ApiError(429, "rate_limited", "too many requests");
+  const unminted = await sync.syncOne(scope, online, "m_a", true);
+  check("so is one the control plane refused to mint", [unminted.outcome, readLinkRecord(key)], ["failed", null]);
+  linkRefusal = null;
+  clock += LINK_RETRY_AFTER_MS;
+  check("which the next wake past the interval hands over", await wake(), ["link m_a", "push m_a"]);
+
+  const landed = await sync.syncOne(scope, online, "m_a", true);
+  check("a Replace that lands is remembered like any sync", [landed.outcome, readLinkRecord(key)?.syncedAt], ["synced", clock]);
+  clock += 60_000;
+  check("so the wake after it asks nothing", await wake(), []);
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow = new LinkSync({
+    ...deps,
+    link: async (id) => {
+      await gate;
+      return deps.link(id);
+    },
+  });
+  storage.delete("reemoat.agentLinks");
+  const inFlight = slow.syncOne(scope, online, "m_a");
+  const behind = slow.syncOne(scope, offline, "m_a", true);
+  release();
+  const [first, forced] = await Promise.all([inFlight, behind]);
+  check(
+    "a Replace behind a wake in flight forgets the record that wake wrote, since it may name the revoked token",
+    [first.outcome, forced.verdict.why, readLinkRecord(key)],
+    ["synced", "offline", null],
+  );
+  storage.delete("reemoat.agentLinks");
+}
+
 process.stdout.write("\nthe Agent links screen's rows\n");
 {
   const links = [

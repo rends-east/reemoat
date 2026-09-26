@@ -251,13 +251,6 @@ export interface ControlPlaneOptions {
   trustedProxyHops?: number;
 }
 
-/** src/token.ts's claims plus the three a link adds; signToken serializes whatever it is handed. */
-interface LinkTokenClaims extends TokenClaims {
-  lnk: string;
-  src: string;
-  srcl: string;
-}
-
 interface Caller {
   userId: string;
   name: string;
@@ -2171,7 +2164,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const seconds = Math.floor(now / 1000);
     return c.json({
       links: targets.map((target, index) => {
-        const claims: LinkTokenClaims = {
+        const claims = {
           iss: issuer,
           sub: caller.userId,
           aud: target.id,
@@ -2185,7 +2178,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           lnk: linkIds[index]!,
           src: source.id,
           srcl: sourceLabel,
-        };
+        } satisfies TokenClaims;
         return {
           id: claims.lnk,
           token: signToken(claims, signing.kid, signing.privateKey),

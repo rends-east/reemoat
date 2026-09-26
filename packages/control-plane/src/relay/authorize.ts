@@ -59,7 +59,7 @@ export function createRelayAuthorizer(db: DatabaseSync, issuer: string): RelayAu
   };
 
   // The row, both of its ends against the token, and the source's own standing; the target's is checked below with every caller's.
-  const linkIsLive = (linkId: string, sourceMachineId: string, targetMachineId: string): boolean => {
+  const linkIsLive = (linkId: string, sourceMachineId: string | undefined, targetMachineId: string): boolean => {
     const row = linkById(db, linkId);
     if (row === null || row.revoked) return false;
     if (row.targetMachineId !== targetMachineId || row.sourceMachineId !== sourceMachineId) return false;
@@ -116,12 +116,8 @@ export function createRelayAuthorizer(db: DatabaseSync, issuer: string): RelayAu
         return { ok: false, status: 404, code: "machine_not_found", message: "no such machine" };
       }
 
-      const link = linkClaimsOf(decoded.payloadJson);
-      if (link === "malformed") {
-        return { ok: false, status: 401, code: "malformed_token", message: "token claims are malformed" };
-      }
       // Every link refusal is the unknown machine's 404, so a link token cannot map which machine or link is alive.
-      if (link !== null && !linkIsLive(link.id, link.sourceMachineId, machineId)) {
+      if (claims.lnk !== undefined && !linkIsLive(claims.lnk, claims.src, machineId)) {
         return { ok: false, status: 404, code: "machine_not_found", message: "no such machine" };
       }
 
@@ -171,33 +167,10 @@ export function createRelayAuthorizer(db: DatabaseSync, issuer: string): RelayAu
         expiresAt: claims.exp * 1000,
         tokenId: claims.jti,
         limiter:
-          link === null
+          claims.lnk === undefined
             ? { key: claims.sub, max: MAX_STREAMS_PER_SUBJECT, link: false }
-            : { key: `lnk:${link.id}`, max: MAX_STREAMS_PER_LINK, link: true },
+            : { key: `lnk:${claims.lnk}`, max: MAX_STREAMS_PER_LINK, link: true },
       };
     },
   };
-}
-
-export interface LinkClaims {
-  id: string;
-  sourceMachineId: string;
-}
-
-/** Call only after the signature verified. parseClaims drops what it does not know, so the link claims are read here; a half-formed link is malformed, never an ordinary token. */
-export function linkClaimsOf(payloadJson: string): LinkClaims | null | "malformed" {
-  let fields: Record<string, unknown>;
-  try {
-    fields = JSON.parse(payloadJson) as Record<string, unknown>;
-  } catch {
-    return "malformed";
-  }
-  const lnk = fields["lnk"];
-  if (lnk === undefined) return null;
-  const src = fields["src"];
-  const srcl = fields["srcl"];
-  if (typeof lnk !== "string" || lnk.length === 0) return "malformed";
-  if (typeof src !== "string" || src.length === 0) return "malformed";
-  if (typeof srcl !== "string") return "malformed";
-  return { id: lnk, sourceMachineId: src };
 }

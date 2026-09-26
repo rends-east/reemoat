@@ -7310,6 +7310,66 @@ process.stdout.write("\nlinks between machines one person owns\n");
   }
 }
 
+process.stdout.write("\na link's claims, read once and by parseClaims\n");
+{
+  const authorizer = createRelayAuthorizer(db, ISSUER);
+  const owner = addUser("u_claims_owner");
+  const source = addMachine("m_claims_source");
+  const target = addMachine("m_claims_target");
+  grant(owner, target);
+  const linkId = "lk_c1a1c1a1c1a1c1a1";
+  db.prepare(
+    "INSERT INTO machine_links (id, source_machine_id, target_machine_id, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(linkId, source, target, owner, now);
+  const signed = (link: Record<string, unknown>): string => {
+    const seconds = Math.floor(Date.now() / 1000);
+    const claims = { iss: ISSUER, sub: owner, aud: target, jti: newId("t"), iat: seconds, nbf: seconds, exp: seconds + 300 };
+    return signToken({ ...claims, scp: ["session:message"], ...link } as unknown as TokenClaims, signing.kid, signing.privateKey);
+  };
+  const decided = (token: string): unknown => {
+    const answer = authorizer.authorize(token);
+    return answer.ok ? answer.limiter : [answer.status, answer.code];
+  };
+  const whole = { lnk: linkId, src: source, srcl: "claims-source" };
+
+  check("a whole link is counted on the link's own share", decided(signed(whole)), {
+    key: `lnk:${linkId}`,
+    max: MAX_STREAMS_PER_LINK,
+    link: true,
+  });
+  check("and a capability with none of the three on its person's", decided(signed({})), {
+    key: owner,
+    max: MAX_STREAMS_PER_SUBJECT,
+    link: false,
+  });
+  check(
+    "any part of a link without the rest is malformed, a source with no link included, never read as a person's",
+    [
+      { src: source, srcl: "claims-source" },
+      { lnk: linkId, srcl: "claims-source" },
+      { lnk: linkId, src: source },
+      { ...whole, lnk: "" },
+      { ...whole, src: "" },
+      { ...whole, srcl: 7 },
+      { ...whole, lnk: null },
+    ].map((link) => decided(signed(link))),
+    Array(7).fill([401, "malformed_token"]),
+  );
+  check("the source parseClaims handed over is compared to the row's", decided(signed({ ...whole, src: target })), [
+    404,
+    "machine_not_found",
+  ]);
+  db.prepare("UPDATE machine_links SET revoked_at = ? WHERE id = ?").run(Date.now(), linkId);
+  check("and so is the row's revocation", decided(signed(whole)), [404, "machine_not_found"]);
+
+  const authorizeTs = readFileSync(new URL("../packages/control-plane/src/relay/authorize.ts", import.meta.url), "utf8");
+  check(
+    "the payload is parsed once per channel, by parseClaims, with no second reader beside it",
+    [(authorizeTs.match(/payloadJson/g) ?? []).length, /parseClaims\(decoded\.payloadJson\)/.test(authorizeTs)],
+    [1, true],
+  );
+}
+
 // While the shared relay is still up: it starts two daemons of its own against it.
 await peerEndToEnd({ db, issuer: ISSUER, relayUrl, registry, check, waitForTunnel });
 
