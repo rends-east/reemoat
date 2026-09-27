@@ -139,16 +139,18 @@ hold back behind the label.
   on it, on that daemon's word. `session:message` reaches `/peer/*` and nothing else,
   and a person's capability never carries it.
 - **A linked machine is not trusted to limit itself.** Every link has its own token
-  bucket here, a message id is delivered once per link — a retry landing while the
-  first try is still being delivered gets that try's answer — and a notice is taken only
-  when this machine asked for it, once (`expectedNotices`). A remote listing row is
-  re-read field by field (`remoteRowOf`) and one naming a machine is dropped.
+  bucket here, a message id is delivered once per sending machine, whatever link it
+  came over — a retry landing while the first try is still being delivered gets that
+  try's answer — and a notice is taken only when this machine asked for it, once
+  (`expectedNotices`). A remote listing row is re-read field by field
+  (`remoteRowOf`) and one naming a machine is dropped.
 - **Offline is not a refusal.** A message for a machine that cannot be reached — no
   tunnel, the relay's 421, 502 or 504, its daemon's own 503, no answer — goes to
   `peer_outbox` and is retried, byte-identical so its id holds, from 30 s to 10 min
   apart for 24 h. A retry waits out `rate_limited`, `busy`, `starting` and
-  `queue_full`, and `duplicate` is an earlier try that landed; any other refusal, or
-  expiry, wakes the sender with a notice saying so.
+  `queue_full`, and `duplicate` is an earlier try that landed, which re-arms the idle
+  notice the hold may have outlasted; any other refusal, or expiry, wakes the sender
+  with a notice saying so.
   The relay may queue nothing and the Authority may hold none of an agent's work, so
   this daemon is the only place it can wait.
 - **No link back, no reply.** The envelope says so, and `send_message` does not

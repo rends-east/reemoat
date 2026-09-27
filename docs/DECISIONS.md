@@ -8715,7 +8715,8 @@ hold it is the one whose agent wrote it.
 **Decision.** Which *session* on that machine sent a message, and nothing else.
 Which *machine* is the capability's (`principal.link`, all three link claims or
 the token is malformed). Every link has its own token bucket here, whatever the
-other daemon says it enforces; a message id is delivered once per link for a day; a
+other daemon says it enforces; a message id is delivered once per sending machine for a
+day, since a Replace between two tries hands the same sender a new link id; a
 notice is taken only when this machine asked for it, once (`expectedNotices`), so a
 link cannot wake a session by claiming to answer it; a listing row is re-read field
 by field (`remoteRowOf`), and one whose ref names a machine is dropped. A link

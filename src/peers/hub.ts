@@ -313,7 +313,8 @@ export class PeerHub {
     if (wait > 0) return refuse("rate_limited", `that machine is taking messages too fast; wait ${Math.ceil(wait / 1000)}s`);
     const at = this.now();
     this.forgetStale(at);
-    const seen = `${link.id}\0${message.id}`;
+    // Keyed on the machine, not the link: a Replace between two tries mints a new link id for the same sender.
+    const seen = `${link.sourceMachineId}\0${message.id}`;
     if (this.seenMessageIds.has(seen)) return refuse("duplicate", "that message was already delivered");
     // A retry landing while the first try is still being delivered gets that try's answer, never a second delivery (Q2.240).
     const inFlight = this.receiving.get(seen);
@@ -424,9 +425,10 @@ export class PeerHub {
         else this.expectedNotices.delete(expected);
         continue;
       }
-      // An earlier try got there after this daemon stopped waiting: delivered, and the notice it armed stays armed.
+      // An earlier try got there after this daemon stopped waiting: delivered. Re-armed, since the hold may outlast the first arming.
       if (result.code === "duplicate") {
         this.outbox.remove(entry.id);
+        if (body.notify) this.expectedNotices.set(expected, this.now() + IDLE_SUBSCRIPTION_MS);
         continue;
       }
       if (HELD_REFUSALS.has(result.code) && at - entry.createdAt < OUTBOX_TTL_MS) {

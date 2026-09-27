@@ -21,6 +21,7 @@ import {
   peerNotice,
 } from "../src/peers/envelope.js";
 import {
+  IDLE_SUBSCRIPTION_MS,
   MAX_PEER_HOPS,
   PEER_DUPLICATE_WINDOW_MS,
   PEER_LINK_BURST,
@@ -1388,6 +1389,13 @@ process.stdout.write("\nmessages between agents: retries, the outbox and the swi
   check("where it is given to the agent once", delivered.filter((text) => text.includes("run this one too")).length, 1);
   const thirdTry = await receiver.receive(fromHere, task("pm_once", parked.id, "run this one too"));
   check("and a try after it landed is answered duplicate", thirdTry.ok ? null : thirdTry.code, "duplicate");
+  const replacedLink = { id: "lk_back_replaced", sourceMachineId: "m_here", sourceLabel: "here" };
+  const afterReplace = await receiver.receive(replacedLink, task("pm_once", parked.id, "run this one too"));
+  check(
+    "and so is one over the link a Replace minted in its place, since the message is the machine's",
+    [afterReplace.ok ? null : afterReplace.code, delivered.filter((text) => text.includes("run this one too")).length],
+    ["duplicate", 1],
+  );
   await finishTurns();
 
   process.stdout.write("  the sender's outbox, against a receiver that got the first try\n");
@@ -1468,7 +1476,8 @@ process.stdout.write("\nmessages between agents: retries, the outbox and the swi
   await finishTurns();
   check("held when the first try's answer never came", [slow.ok && slow.delivery, slow.ok && slow.notify], ["pending", false]);
   timingOut = false;
-  clock += OUTBOX_RETRY_MIN_MS;
+  // Held past the arming made at the send, so the notice is taken only if the duplicate re-armed it.
+  clock += IDLE_SUBSCRIPTION_MS + OUTBOX_RETRY_MIN_MS;
   await sender.pumpOutbox();
   await settle();
   check(
@@ -1481,7 +1490,7 @@ process.stdout.write("\nmessages between agents: retries, the outbox and the swi
     [0, 1, 0],
   );
   const idleNotice = { id: "pn_after_dup", subscriber: lead.id, from: { ref: idle.id, name: "target", harness: "kimi", hops: 1 }, what: "idle" };
-  check("and the idle notice it asked for is still taken", await sender.receiveNotice(fromThere, idleNotice), true);
+  check("and the idle notice it asked for is still taken, though the hold outlasted the first arming", await sender.receiveNotice(fromThere, idleNotice), true);
   await settle();
   await finishTurns();
   await endpoint.close();
