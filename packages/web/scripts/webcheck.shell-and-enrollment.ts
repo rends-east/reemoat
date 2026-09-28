@@ -315,7 +315,7 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
     `\\bcursor\\s*[:=]\\s*["'\`]?(?:${CURSOR_VALUES})\\b|\\bcursor-(?:${CURSOR_VALUES})\\b`,
   );
   // The session title is the second, on the owner's word: a name edited in place shows the text caret (Q3.665).
-  const CURSOR_ALLOWED: readonly string[] = ["src/ui/PaneHandle.tsx", "src/ui/SessionView.tsx"];
+  const CURSOR_ALLOWED: readonly string[] = ["src/ui/MentionLink.tsx", "src/ui/PaneHandle.tsx", "src/ui/SessionView.tsx"];
   const cursorOffenders = files
     .filter((file) => cursorPattern.test(stripped(readFileSync(file, "utf8"))))
     .map((file) => file.slice(file.indexOf("/packages/web/") + "/packages/web/".length));
@@ -326,7 +326,7 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
   check("and one written as an inline style", cursorPattern.test('style={{ cursor: "pointer" }}'), true);
   check("and it does not see the wire's byte cursor", cursorPattern.test("  cursor: number;"), false);
   check("nor its assignments", [cursorPattern.test("cursor = next;"), cursorPattern.test("cursor?: string;")], [false, false]);
-  check("one control changes the mouse, and it is named", cursorOffenders.sort(), [...CURSOR_ALLOWED].sort());
+  check("only the named controls change the mouse", cursorOffenders.sort(), [...CURSOR_ALLOWED].sort());
   // The utility arm also runs over raw text in src/ and scripts/, since Tailwind's scanner reads comments.
   const rawUtility = new RegExp(`\\bcursor-(?:${CURSOR_VALUES})\\b`);
   const authored: string[] = [...files];

@@ -3,7 +3,16 @@ import type { Me } from "./wire";
 
 // Not in `router.ts`: webcheck cannot import that module, whose body touches `window`.
 
-export type SettingsSection = "account" | "devices" | "keys" | "machines" | "logs" | "server" | "email" | "users";
+export type SettingsSection =
+  | "account"
+  | "devices"
+  | "keys"
+  | "machines"
+  | "permissions"
+  | "logs"
+  | "server"
+  | "email"
+  | "users";
 
 export type SettingsGroup = "server";
 
@@ -19,8 +28,6 @@ export interface SettingsRoute {
   agents: boolean;
   /** Under `…/signin/` only a harness no provider speaks for (Q3.540); under `…/agents/` any harness (Q3.640). */
   signin: string | null;
-  /** `…/links`: which of your other machines this one's agents can message. */
-  links: boolean;
   leaf: SettingsLeaf | null;
 }
 
@@ -57,6 +64,13 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
   {
     id: "machines",
     title: "Machines",
+    blurb: null,
+    adminOnly: false,
+    group: null,
+  },
+  {
+    id: "permissions",
+    title: "Permissions",
     blurb: null,
     adminOnly: false,
     group: null,
@@ -111,15 +125,12 @@ export function parseSettingsRoute(
   const section = parseSettingsSection(segments[0]);
   if (section === "account" || section === "keys") {
     const leaf = leafOf(section, segments[1]);
-    return { section, machineId: null, system: null, signin: null, agents: false, links: false, leaf };
+    return { section, machineId: null, system: null, signin: null, agents: false, leaf };
   }
   if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, system: null, signin: null, agents: false, links: false, leaf: null };
+    return { section, machineId: null, system: null, signin: null, agents: false, leaf: null };
   }
   const machine = machineId(decode(segments[1]));
-  if (segments[2] === "links") {
-    return { section, machineId: machine, system: null, signin: null, agents: false, links: true, leaf: null };
-  }
   if (segments[2] === "agents") {
     const named = segments[3] === undefined ? "" : decode(segments[3]);
     return {
@@ -128,7 +139,6 @@ export function parseSettingsRoute(
       system: null,
       signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
       agents: true,
-      links: false,
       leaf: null,
     };
   }
@@ -140,12 +150,11 @@ export function parseSettingsRoute(
       system: null,
       signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
       agents: false,
-      links: false,
       leaf: null,
     };
   }
   if (segments[2] !== "systems" || segments[3] === undefined) {
-    return { section, machineId: machine, system: null, signin: null, agents: false, links: false, leaf: null };
+    return { section, machineId: machine, system: null, signin: null, agents: false, leaf: null };
   }
   const wanted = decode(segments[3]);
   return {
@@ -154,7 +163,6 @@ export function parseSettingsRoute(
     system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
     signin: null,
     agents: false,
-    links: false,
     leaf: null,
   };
 }
@@ -204,10 +212,6 @@ export function agentSetupPath(machine: MachineId, agent: string): string {
   return `${agentStripPath(machine)}/${encodeURIComponent(agent)}`;
 }
 
-export function agentLinksPath(machine: MachineId): string {
-  return `${settingsPath("machines", machine)}/links`;
-}
-
 export function harnessSigninPath(machine: MachineId, agent: string): string {
   return `${settingsPath("machines", machine)}/signin/${encodeURIComponent(agent)}`;
 }
@@ -234,7 +238,7 @@ export function settingsUp(
     if (route.agents && typeof route.signin === "string") {
       return { path: agentStripPath(route.machineId), withinNav: false };
     }
-    if (route.system !== null || route.signin !== null || route.agents || route.links) {
+    if (route.system !== null || route.signin !== null || route.agents) {
       return { path: settingsPath("machines", route.machineId), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };
@@ -251,7 +255,6 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === "machines" && route.machineId !== null && route.agents) {
     return typeof route.signin === "string" ? "Setup" : "Agents";
   }
-  if (route.section === "machines" && route.machineId !== null && route.links) return "Agent links";
   if (route.section === "machines" && route.machineId !== null && route.system !== null) {
     return "Sign-in";
   }

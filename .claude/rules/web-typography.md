@@ -73,7 +73,9 @@ the rule's one deliberate exemption.** A row is the tightest slot in the app: at
 ~0.6em average advance against sans's ~0.5em spends about a fifth of the characters
 on the family, and a row exists to be *scanned*, so characters are the whole of what
 it has to spend. `sessionLabel` answers a human-typed title or, failing that,
-`displayCwd`; the subline names the agent, the machine and what is left of the path.
+`displayCwd`; the subline is the nickname, the harness's mark (`AgentMark`, its
+vendor's own, Q3.680) and the machine (`MachineLabel`), one gap apart, and no path
+(Q3.681).
 All of it is sans, at one size, because a line that changed family halfway is what
 made the row unreadable when this was first tried.
 
@@ -153,9 +155,10 @@ from `h-4` to `h-5` with it. The one arbitrary size stays where it is. Q3.662.
 ## Nothing in this client changes the mouse
 
 **There is no `cursor` declaration and no `cursor-*` utility anywhere in
-`packages/web/src`, with exactly two named exceptions** — the separators'
-`col-resize`, and the text caret on the conversation header's session name, which
-is edited in place (the owner's word, Q3.665). `index.css` carried an
+`packages/web/src`, with exactly three named exceptions** — the separators'
+`col-resize`, the text caret on the conversation header's session name, which
+is edited in place (the owner's word, Q3.665), and the pointer over a clickable
+`@name`, which then sits in a pill (the owner's word, Q3.682). `index.css` carried an
 `@layer base` rule putting the hand shape on every enabled `button`, every
 `[role="button"]` and the one `<summary>` — restored on purpose after Tailwind v4's
 preflight dropped it, on the argument that with the accent colour gone an unfilled

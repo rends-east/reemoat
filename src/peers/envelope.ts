@@ -10,7 +10,7 @@ const PEER_NAME = /^[\p{L}\p{N}:-]+$/u;
 
 // Tags a harness or this daemon writes itself; a peer's copy of one is defused so it reads as text.
 const IMITATED_TAG =
-  /<(\/?)(peer-message|peer-notice|system-reminder|system|cross-session-message|teammate-message|user|assistant)\b/gi;
+  /<(\/?)(peer-message|peer-notice|session-mentions|system-reminder|system|cross-session-message|teammate-message|user|assistant)\b/gi;
 const ROLE_LINE = /^([ \t]*)(Human|Assistant|System):/gim;
 
 export function defuse(body: string): string {
@@ -74,6 +74,28 @@ export function peerNotice(from: PeerOrigin, what: "idle" | "ended" | "undeliver
       break;
   }
   return `${head("peer-notice", from)}${sentence}</peer-notice>`;
+}
+
+/** A session a person's `@name` names, as list_agents shows it. */
+export interface MentionTarget {
+  name: string;
+  ref: string;
+  title: string | null;
+  harness: string;
+  folder: string;
+  machine: { label: string | null; isThis: boolean };
+}
+
+/** The block sent after a person's message: who its `@name`s are, in this daemon's words (Q2.246). */
+export function mentionNote(targets: readonly MentionTarget[], canSend: boolean): string {
+  const lines = targets.map((target) => {
+    const to = attribute(address(target.name, target.ref));
+    const machine = target.machine.isThis ? "this machine" : `the machine ${attribute(target.machine.label ?? "linked to this one")}`;
+    const titled = target.title === null ? "" : `, titled "${attribute(target.title)}"`;
+    const send = canSend ? `; send_message to="${to}" reaches it` : "";
+    return `@${attribute(target.name)} is the session ${to}${titled}: ${attribute(target.harness)} in the folder ${attribute(target.folder)} on ${machine}${send}.`;
+  });
+  return `<session-mentions>\nAdded by Reemoat, not written by your user: the sessions their message names with @.\n${lines.join("\n")}\n</session-mentions>`;
 }
 
 function slug(text: string): string {

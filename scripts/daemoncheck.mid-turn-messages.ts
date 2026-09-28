@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { PassThrough } from "node:stream";
 import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
 import { MemoryEventStore, type SessionEvent, type StoredEvent } from "../src/events.js";
@@ -6,6 +7,8 @@ import { MAX_QUEUED_PROMPTS, SessionRegistry, stoppedBeforeDelivery } from "../s
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
+import { PeerHub } from "../src/peers/hub.js";
+import { SqlitePeerLinkStore } from "../src/store/sqlite.js";
 import { tmp } from "./tmp.js";
 import { check } from "./daemoncheck.env.js";
 import { users, now, tokenFor, verifier, credentials, stubAgentConfig } from "./daemoncheck.fixtures.js";
@@ -23,6 +26,9 @@ process.stdout.write("\na message sent while the agent is working\n");
   const steerMeta: string[] = [];
   /** The agent session each prompt was addressed to, so a prompt sent to the conversation a clear abandoned is visible. */
   const promptSessions: string[] = [];
+  /** Prompts and steers block by block, so a mention note sent beside the words is told apart from them. */
+  const promptBlocksSeen: string[][] = [];
+  const steerBlocksSeen: string[][] = [];
 
   interface StubOptions {
     /** true advertises support, false sends no _meta, declined sends supported false: only the last reaches supportsSteering's decision. */
@@ -50,7 +56,8 @@ process.stdout.write("\na message sent while the agent is working\n");
     }
   }
 
-  const standUp = async (options: StubOptions, warnings?: string[]) => {
+  /** withPeers serves the route a hub and registers `mira` first, so a message can name somebody and the stub's own session is still the last one launched. */
+  const standUp = async (options: StubOptions, warnings?: string[], withPeers = false) => {
     const resumeRefused = { on: false };
     let lastAgent: {
       toClient: PassThrough;
@@ -78,11 +85,9 @@ process.stdout.write("\na message sent while the agent is working\n");
           if (line.trim().length === 0) continue;
           const message = JSON.parse(line) as Record<string, any>;
           const id = message["id"];
-          const textOf = (params: any): string =>
-            (params?.["prompt"] ?? [])
-              .filter((block: any) => block?.type === "text")
-              .map((block: any) => block.text)
-              .join("");
+          const blocksOf = (params: any): string[] =>
+            (params?.["prompt"] ?? []).filter((block: any) => block?.type === "text").map((block: any) => block.text);
+          const textOf = (params: any): string => blocksOf(params).join("");
 
           switch (message["method"]) {
             case acp.methods.agent.initialize:
@@ -124,11 +129,13 @@ process.stdout.write("\na message sent while the agent is working\n");
               break;
             case acp.methods.agent.session.prompt:
               promptsSeen.push(textOf(message["params"]));
+              promptBlocksSeen.push(blocksOf(message["params"]));
               promptSessions.push(String(message["params"]?.["sessionId"] ?? ""));
               heldPromptId = id;
               break;
             case "_session/steering": {
               steersSeen.push(textOf(message["params"]));
+              steerBlocksSeen.push(blocksOf(message["params"]));
               // The opt-in is recorded here, the only place that can see it.
               steerMeta.push(JSON.stringify(message["params"]?.["_meta"] ?? null));
               const answerSteer = () => {
@@ -206,6 +213,14 @@ process.stdout.write("\na message sent while the agent is working\n");
       // An adapter that ignores the steering opt-in and starts its own turn is reported here and nowhere else.
       (detail: string) => warnings?.push(detail),
     );
+    let peers: { hub: PeerHub; links: SqlitePeerLinkStore } | null = null;
+    let mira: Awaited<ReturnType<typeof registry.create>> | null = null;
+    if (withPeers) {
+      const db = new DatabaseSync(":memory:");
+      db.exec(readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8"));
+      peers = { hub: new PeerHub({ registry, enabled: true }), links: new SqlitePeerLinkStore(db) };
+      mira = await registry.create({ agent: "kimi", cwd: tmp("midturn-mira-"), nickname: "mira" });
+    }
     const { app } = createApp({
       registry,
       verifier,
@@ -213,9 +228,11 @@ process.stdout.write("\na message sent while the agent is working\n");
       startedAt: now,
       credentials,
       roots: [users],
+      peers,
     });
     const managed = await registry.create({ agent: "kimi", cwd: tmp("midturn-") });
     return {
+      mira,
       registry,
       app,
       managed,
@@ -417,6 +434,61 @@ process.stdout.write("\na message sent while the agent is working\n");
     // Delivered once. A drain that re-read a shifted entry would show up here as
     // a third prompt on the wire and nowhere else.
     check("the queue delivered it exactly once", promptsSeen.length, 2);
+  }
+
+  // The mention note is sent after the words on both doors, and logged once, at acceptance (Q2.246).
+  {
+    steerBlocksSeen.length = 0;
+    const { app, managed, mira, finishTurn } = await standUp({ advertises: true, answers: "injected" }, undefined, true);
+    const promptEvents = () =>
+      managed.log
+        .read(0, 1000, 1 << 20)
+        .map((stored) => stored.event)
+        .flatMap((event) => (event.type === "prompt" ? [event] : []));
+    await post(app, managed.id, "start the long thing");
+    await quiesce();
+    const steered = await post(app, managed.id, "ask @mira about it");
+    check("a message naming a session mid-turn is still steered in", [steered.status, steered.body?.steered], [202, true]);
+    check(
+      "with the note riding the steer as a block after the words",
+      [steerBlocksSeen.at(-1)?.length, steerBlocksSeen.at(-1)?.[0], steerBlocksSeen.at(-1)?.[1]?.startsWith("<session-mentions>")],
+      [2, "ask @mira about it", true],
+    );
+    check(
+      "and logged once, carrying whom it named",
+      [promptEvents().length, promptEvents().at(-1)?.mentions],
+      [2, [{ name: "mira", ref: mira?.id }]],
+    );
+    finishTurn();
+    await quiesce();
+  }
+
+  {
+    promptBlocksSeen.length = 0;
+    const { app, managed, mira, finishTurn } = await standUp({ advertises: false, answers: null }, undefined, true);
+    const promptEvents = () =>
+      managed.log
+        .read(0, 1000, 1 << 20)
+        .map((stored) => stored.event)
+        .flatMap((event) => (event.type === "prompt" ? [event] : []));
+    await post(app, managed.id, "start the long thing");
+    await quiesce();
+    const queued = await post(app, managed.id, "then ask @mira");
+    check("a message naming a session waits like any other", [queued.status, queued.body?.queued, promptBlocksSeen.length], [202, true, 1]);
+    finishTurn();
+    await quiesce();
+    check(
+      "and is delivered with its note as the block after the words",
+      [promptBlocksSeen.at(-1)?.length, promptBlocksSeen.at(-1)?.[0], promptBlocksSeen.at(-1)?.[1]?.startsWith("<session-mentions>")],
+      [2, "then ask @mira", true],
+    );
+    check(
+      "with one prompt event for it, written when it was taken, and none on delivery",
+      [promptEvents().length, promptEvents().at(-1)?.text, promptEvents().at(-1)?.mentions],
+      [2, "then ask @mira", [{ name: "mira", ref: mira?.id }]],
+    );
+    finishTurn();
+    await quiesce();
   }
 
   {

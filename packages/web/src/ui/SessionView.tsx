@@ -41,6 +41,7 @@ import { useFollow } from "./follow";
 import { FileAccessContext, type FileAccess } from "./files";
 import { saveBlob } from "./download";
 import { Header } from "./Header";
+import { MentionScope } from "./MentionLink";
 import { ElicitationCard } from "./ElicitationCard";
 import { PermissionCard } from "./PermissionCard";
 import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
@@ -49,7 +50,9 @@ import { TASK_PANEL_GUTTER } from "./TaskPanel";
 import {
   COLUMN,
   Icon,
+  MachineLabel,
   TranscriptSkeleton,
+  nicknameLine,
   sessionLabel,
   sessionNotice,
 } from "./bits";
@@ -96,6 +99,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   const closeTasks = useCallback(() => setTasksOpen(false), []);
   // Opaque, because below lg a back swipe draws the list under it (Q3.663).
   const back = useBackSwipe();
+  const mentionScope = useMemo(() => ({ here: sessionRef.machineId as string, mentions: [] }), [sessionRef.machineId]);
 
   if (row === undefined) {
     const why = missingRowReason(machine?.reach ?? null, state.listed.has(sessionRef.machineId));
@@ -151,6 +155,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         }
         subtitle={
           <WorkspaceLine
+            nickname={nicknameLine(session)}
             machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
             workspace={session.workspace}
             roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
@@ -172,16 +177,19 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
       <ExitNotice row={row} machineName={row.machineName} />
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Transcript
-          sessionRef={sessionRef}
-          state={state}
-          tailRequest={tailRequest}
-          stale={stale}
-          askHeight={askHeight}
-          tasksOpen={tasksOpen}
-          onOpenTasks={openTasks}
-          onCloseTasks={closeTasks}
-        />
+        {/* Every `@name` drawn below resolves against this conversation's machine first (Q3.682). */}
+        <MentionScope.Provider value={mentionScope}>
+          <Transcript
+            sessionRef={sessionRef}
+            state={state}
+            tailRequest={tailRequest}
+            stale={stale}
+            askHeight={askHeight}
+            tasksOpen={tasksOpen}
+            onOpenTasks={openTasks}
+            onCloseTasks={closeTasks}
+          />
+        </MentionScope.Provider>
 
         {/* Keyed per request, or two parked requests reconcile as one instance and carry state across. */}
         {/* Not gated on a transcript: a cold open without a connection has none, and the card fetches its own context. */}
@@ -307,10 +315,12 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
 }
 
 function WorkspaceLine({
+  nickname,
   machineName,
   workspace,
   roots,
 }: {
+  nickname: string | null;
   machineName: string;
   workspace: SessionSnapshot["workspace"];
   roots: readonly string[];
@@ -319,7 +329,13 @@ function WorkspaceLine({
   const branch = workspace.git?.branch ?? null;
   return (
     <span className="flex min-w-0 items-center gap-1.5">
-      <span className="shrink-0">{machineName}</span>
+      {nickname !== null && (
+        <>
+          <span className="shrink-0">{nickname}</span>
+          <span className="shrink-0 text-faint">·</span>
+        </>
+      )}
+      <MachineLabel name={machineName} className="shrink-0" />
       <span className="shrink-0 text-faint">·</span>
       <span className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
       {workspace.mode === "worktree" && branch !== null && (

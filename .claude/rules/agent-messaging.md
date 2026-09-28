@@ -7,8 +7,10 @@ paths:
   - scripts/relaycheck.peer-e2e.ts
   - packages/web/scripts/webcheck.peer-messages.ts
   - packages/web/src/agentLinks.ts
-  - packages/web/src/ui/settings/MachineLinksSection.tsx
   - packages/web/scripts/webcheck.agent-links.ts
+  - packages/web/src/ui/settings/PermissionsSection.tsx
+  - packages/web/scripts/webcheck.permissions.ts
+  - packages/control-plane/src/permissions.ts
 ---
 
 # Messages between agents
@@ -46,6 +48,7 @@ listener at all. Hand-written Streamable HTTP, JSON answers only, no SDK (zod).
   `SendMessage` stays: it is how claude continues its own subagents (Q2.242).
 - `REEMOAT_PEER_MESSAGES=off` injects nothing, refuses every send, takes no notice and
   pumps no outbox: what was held before the switch stays in `peer_outbox`, unsent.
+  No switch below can lift it.
 
 ## One verb, and every message is acted on (Q2.243)
 
@@ -111,10 +114,42 @@ nobody chose. **A person's Stop is theirs to undo**: another agent can neither l
 nor wake that session. `wakesOnPrompt` is asked in the tick `resume()` starts in,
 so a Stop landing while a message waits in `readyForMessage` still holds.
 
-**The ref settles an address and the name is a label.** One naming this machine
-resolves here. A bare name is matched against what `list_agents` shows the caller
+**The ref settles an address and the name is a label.** The name is the session's
+nickname (Q2.245), one per machine, so a bare name is ambiguous only across
+machines; an older daemon elsewhere still names its sessions by `peerName`'s slug.
+One naming this machine resolves here. A bare name is matched against what `list_agents` shows the caller
 — never the caller, never a stopped session — on **every** machine, so it waits on
 the listings `list_agents` warms; a qualified address fetches none.
+
+## Who may switch it off (Q2.244, Q1.654)
+
+**Three switches, each only narrowing: the account's, a machine's, a
+conversation's.** A conversation takes part only when all of them and the env allow it.
+
+- **The first two live on the Authority** (`account_permissions`,
+  `machine_permissions`) and reach a daemon with its links: the mint answer's
+  `messaging` and `policyAt`, forwarded in `PUT /peers/links`. Off revokes the
+  affected `machine_links` rows in the same write, so the relay cuts two machines
+  before either daemon hears. A daemon keeps the newer `policyAt`, and an absent
+  `messaging` changes nothing. Its copy is not a fence: `machine:admin` can push one.
+- **The third is the session's `peer_messages_off`**, set by `POST /sessions/:id/meta`.
+  A conversation that is off is not listed, is refused both ways
+  (`conversation_messaging_off`), and gets no tools at its next launch.
+- **Every gate reads `allowed` live**: `mcpServersFor`, `callTool`, `localRows`,
+  `send`, `receive`, `receiveNotice`, the outbox pump and the idle notices. A new
+  path needs the same check, or off stops meaning off.
+- **A running agent keeps its tool names**, and a call is answered with a sentence.
+  Never revoke its bearer for this: a `401` reads to claude as a sign-in to start.
+- **Off drops what is waiting**: queued peer prompts, idle-notice subscriptions and
+  the outbox, with one quiet line per sender and no wake.
+- **A machine may be isolated instead**: its sessions message each other and nothing
+  crosses to or from another machine (`reachesOthers`, `messaging_isolated`). The
+  Authority revokes its links and mints none; going isolated empties the outbox and
+  touches nothing local.
+- **Link sync reads the listing's `agentMessaging`, never `me`'s**, and syncs again
+  on `policy_changed`, loopback-only machines included, 30 s after a failure rather
+  than 15 minutes. A keyless machine gets its switch from the `machine_key_missing`
+  refusal's `detail`, pushed with an empty set.
 
 ## The row
 
@@ -123,6 +158,14 @@ as a `UserBubble`; `peerBody` takes the body out of the envelope. A notice is on
 faint line. It is markdown, because another agent wrote it, and *Show all* mounts a
 fresh `Markdown` rather than changing its text, which the stream throttle would
 hold back behind the label.
+
+## A person's `@name` (Q2.246)
+
+On the person's prompt route only, `mentionNote` adds a second text block after the
+message, `<session-mentions>`, naming each session the `@names` matched and how to
+reach it. It never awaits a listing: another machine is read from `remoteSettled`,
+its last successful one. The tag is in `IMITATED_TAG`, so a body cannot forge it,
+and no envelope or plugin prompt gets one. `session-nicknames.md` has the rest.
 
 ## Another machine (Q7.150)
 
@@ -169,11 +212,5 @@ every wake), when the earliest pushed token has under 45 days left, or when the
 last sync is over a day old. A failure waits `LINK_RETRY_AFTER_MS`, since a sync
 spends the write budget a token mint does. A bare 404 from the daemon means too
 old, remembered against its `instanceId`, never its version label (compatibility
-rule 1). Nothing toasts; the Agent links screen is where failures are read.
-
-**Agent links is a machine's leaf**, `/settings/machines/:id/links`, for its owner,
-a table — Direction · Machine · Replace. **Replace does not unlink**: the next sync
-links every pair of your machines again, so it ends a link and its token and hands
-the machine a new one, and the screen says so (Q7.151). Its forced run forgets the
-source's `LinkSyncRecord` first, so a machine it could not reach, or a hand-over that
-failed, is owed a sync at the next wake rather than read as current for a day.
+rule 1). Nothing toasts, no line under a switch says whether it has taken hold, and
+no screen lists links (Q3.675, Q3.676).

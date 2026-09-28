@@ -457,7 +457,7 @@ carries none — so a crash loses them. Q2.234.
 | File | Holds |
 |---|---|
 | `src/events.ts` | The `SessionEvent` union (the wire vocabulary), `SessionWorkspace`, `StoredEvent`, `EventStore`, `SessionStore`, `MemoryEventStore`, `SessionLog`, size accounting |
-| `src/store/schema.sql` | Tables for sessions, events, agent credentials, the single-row daemon lock. v4: the agent handle is four columns. v5: `title`/`pinned`. v6: `forge_accounts` dropped, `agent_credentials` rekeyed, `owner_subject` left dead |
+| `src/store/schema.sql` | Tables for sessions, events, agent credentials, the single-row daemon lock. v4: the agent handle is four columns. v5: `title`/`pinned`. v6: `forge_accounts` dropped, `agent_credentials` rekeyed, `owner_subject` left dead. `peer_messages_off` is `migrate()`'s alone |
 | `src/store/sqlite.ts` | `openStores`, `SqliteEventStore`, `SqliteSessionStore`, `SqliteAgentCredentialStore` — durability behind the same synchronous interfaces |
 | `src/session.ts` | One ACP session: spawn, prompt, cancel a turn, normalized events, clean shutdown |
 | `src/registry.ts` | Session lifecycle, derived status, the permission state machine, the turn pump and how a turn is stopped |

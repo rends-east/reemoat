@@ -1,4 +1,4 @@
-import { ListTodo, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
+import { Check, ListTodo, MessagesSquare, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
@@ -51,6 +51,9 @@ export function SessionMenu({
     isResumable(session) &&
     (!isParked(session) || parkedByOlderDaemon(session));
   const pinned = session?.pinned === true;
+  // Only where the daemon can turn it off and the machine allows it at all: under an off machine it would switch nothing (Q2.244).
+  const machineAllows = state.machines.find((one) => one.id === sessionRef.machineId)?.agentMessaging === true;
+  const peerMessages = machineAllows ? session?.peerMessages : undefined;
 
   // Pointerdown rather than blur, which fires before a menu button's click lands; Escape belongs to overlay.ts.
   useDismissible("menu", () => setOpen(false), open);
@@ -84,7 +87,10 @@ export function SessionMenu({
       .finally(() => setBusy(false));
   };
 
-  const setMeta = (patch: { pinned?: boolean; rank?: number | null }, whatDidNotHappen: string): void => {
+  const setMeta = (
+    patch: { pinned?: boolean; rank?: number | null; peerMessages?: boolean },
+    whatDidNotHappen: string,
+  ): void => {
     const issued = store.setSessionMeta(sessionRef, patch, (message) => toast("error", message));
     if (!issued) toast("error", `That machine is not reachable right now, ${whatDidNotHappen}`);
   };
@@ -163,6 +169,18 @@ export function SessionMenu({
               setMeta({ pinned: !pinned }, "so the pin was not changed.");
             }}
           />
+          {/* The mark follows the daemon's snapshot, never the press: the store draws only a pin or a position early. */}
+          {peerMessages !== undefined && (
+            <MenuCheckItem
+              icon={MessagesSquare}
+              label="Agent messaging"
+              checked={peerMessages}
+              onClick={() => {
+                setOpen(false);
+                setMeta({ peerMessages: !peerMessages }, "so agent messaging was not changed.");
+              }}
+            />
+          )}
 
           {/* Plugins sit above the separator so Stop stays the last row whatever is installed. */}
           {offers.length > 0 && <div className="my-1 border-t border-edge/60" />}
@@ -245,6 +263,33 @@ function MenuItem({
       {note !== undefined && (
         <span className="min-w-0 max-w-[45%] shrink-0 truncate text-2xs text-muted">{note}</span>
       )}
+    </button>
+  );
+}
+
+/** A setting of this session rather than an act on it; `checked` is what the daemon last said. Q3.675. */
+function MenuCheckItem({
+  icon,
+  label,
+  checked,
+  onClick,
+}: {
+  icon: ComponentType<{ size?: number | string; className?: string }>;
+  label: string;
+  checked: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      onClick={onClick}
+      title={label}
+      className="tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-fg hover:bg-raised"
+    >
+      <Icon as={icon} size={13} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="inline-flex w-4 shrink-0 justify-center">{checked && <Icon as={Check} size={13} />}</span>
     </button>
   );
 }

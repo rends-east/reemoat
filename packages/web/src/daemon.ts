@@ -22,7 +22,8 @@ import type {
   LoginChunk,
   LoginRunView,
   MachineLinkGrant,
-  PeerLinkView,
+  MentionListing,
+  PeerMessagingState,
   PermissionOptionSummary,
   RootListing,
   SessionList,
@@ -129,15 +130,19 @@ export class DaemonClient {
     });
   }
 
-  /** Replaces the whole set the daemon holds; an older daemon answers the bare 404 `meansRouteAbsent` reads. */
-  putPeerLinks(links: readonly MachineLinkGrant[]): Promise<{
+  /**
+   * Replaces the whole set the daemon holds; an older daemon answers the bare 404 `meansRouteAbsent` reads.
+   * `policy` is the control plane's own answer or null, never made up here: an absent one leaves the daemon's alone (Q1.654).
+   */
+  putPeerLinks(
+    links: readonly MachineLinkGrant[],
+    policy: { messaging: boolean; isolated?: boolean; policyAt?: number } | null = null,
+  ): Promise<{
     links: { id: string; target: { id: string; name: string }; expiresAt: number }[];
+    messaging?: PeerMessagingState;
   }> {
-    return this.machine.request("/peers/links", { method: "PUT", body: JSON.stringify({ links }) });
-  }
-
-  peerLinks(): Promise<{ links: PeerLinkView[] }> {
-    return this.machine.request<{ links: PeerLinkView[] }>("/peers/links");
+    const body = policy === null ? { links } : { links, ...policy };
+    return this.machine.request("/peers/links", { method: "PUT", body: JSON.stringify(body) });
   }
 
   agentStrip(): Promise<{ entries: AgentStripEntry[] }> {
@@ -271,6 +276,8 @@ export class DaemonClient {
     cwd: string;
     worktree?: boolean | "auto" | "require" | "never";
     branch?: string;
+    // 409 `nickname_taken`, 400 `invalid_nickname`; an older daemon ignores it and answers a snapshot without one.
+    nickname?: string;
   }): Promise<{ session: SessionSnapshot }> {
     return this.machine.request<{ session: SessionSnapshot }>("/sessions", {
       method: "POST",
@@ -485,10 +492,15 @@ export class DaemonClient {
     return this.machine.request(`/sessions/${encodeURIComponent(id)}/commands`);
   }
 
+  /** 503 `peers_unavailable` without messaging; an older daemon answers the bare 404 `meansRouteAbsent` reads. */
+  mentions(id: SessionId): Promise<MentionListing> {
+    return this.machine.request<MentionListing>(`/sessions/${encodeURIComponent(id)}/mentions`);
+  }
+
   /** Absent leaves a field alone and null clears it. Keep rank declared: nothing else mirrors the route's fields. */
   setSessionMeta(
     id: SessionId,
-    patch: { title?: string | null; pinned?: boolean; rank?: number | null },
+    patch: { title?: string | null; pinned?: boolean; rank?: number | null; nickname?: string; peerMessages?: boolean },
   ): Promise<{ session: SessionSnapshot }> {
     return this.machine.request(`/sessions/${encodeURIComponent(id)}/meta`, {
       method: "POST",

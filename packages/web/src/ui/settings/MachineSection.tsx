@@ -4,12 +4,12 @@ import * as cp from "../../cp";
 import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
-import { daemonRead } from "../../machine";
+import { daemonRead, type MachineState } from "../../machine";
 import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
 import { inNativeShell } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
-import { agentLinksPath, agentStripPath, settingsPath } from "../../settings";
+import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import { enrolledByText, type MachineSettingsView } from "../../wire";
 import {
@@ -24,6 +24,7 @@ import {
   SETTINGS_HEADING,
   SETTINGS_SECTION,
   Spinner,
+  SwitchRow,
   TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
@@ -175,15 +176,10 @@ export function MachineSection({
         </section>
       )}
 
-      {/* Outside the listable gate: the links are the control plane's, readable while the daemon is not. */}
-      {owned && machine.enrolled && (
+      {/* Outside the listable gate: the switch is the control plane's, and turning it off reaches the relay at once (Q1.654). */}
+      {owned && machine.enrolled && machine.agentMessagingMachine !== undefined && (
         <section className={SETTINGS_SECTION}>
-          <ChoiceRow
-            title="Agent links"
-            subline="Which of your machines its agents can message."
-            trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
-            onClick={() => navigate(agentLinksPath(machineId))}
-          />
+          <MachineMessaging machine={machine} accountOn={state.me?.permissions?.agentMessaging} />
         </section>
       )}
 
@@ -214,6 +210,60 @@ export function MachineSection({
         </section>
       )}
     </div>
+  );
+}
+
+/** The machine's own switch; while the account's is off it is drawn off and cannot be pressed, and keeps its own answer. */
+function MachineMessaging({
+  machine,
+  accountOn,
+}: {
+  machine: MachineState;
+  accountOn: boolean | undefined;
+}): ReactNode {
+  const [busy, setBusy] = useState<"messaging" | "isolated" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const own = machine.agentMessagingMachine === true;
+  const effective = machine.agentMessaging === true;
+  const isolated = machine.agentMessagingIsolated === true;
+  // The account's switch outranks this one, and so does the machine's own configuration: either draws it off and locked.
+  const locked = accountOn === false || (own && !effective) || store.linkStatus(machine.id)?.env === false;
+  const messagingOn = own && !locked;
+
+  const save = (which: "messaging" | "isolated", patch: { agentMessaging?: boolean; isolated?: boolean }): void => {
+    setBusy(which);
+    setError(null);
+    void store
+      .saveMachinePermissions(machine.id, patch)
+      .catch((cause: unknown) => setError(errorText(cause)))
+      .finally(() => setBusy(null));
+  };
+
+  return (
+    <>
+      <SwitchRow
+        title="Agent messaging"
+        subline="Its agents can message your other sessions."
+        on={messagingOn}
+        busy={busy === "messaging"}
+        disabled={locked || busy === "isolated"}
+        onToggle={() => save("messaging", { agentMessaging: !own })}
+      />
+      {/* Drawn locked rather than absent: the owner asked for it to unlock under the switch above (Q3.675). */}
+      {machine.agentMessagingIsolated !== undefined && (
+        <div className="mt-2">
+          <SwitchRow
+            title="Isolate sessions on this machine"
+            subline="Its sessions message only each other."
+            on={messagingOn && isolated}
+            busy={busy === "isolated"}
+            disabled={!messagingOn || busy === "messaging"}
+            onToggle={() => save("isolated", { isolated: !isolated })}
+          />
+        </div>
+      )}
+      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
+    </>
   );
 }
 

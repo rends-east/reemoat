@@ -24,6 +24,7 @@ import {
   type BackgroundTask,
 } from "../src/acp/asynctasks.js";
 import { IdleParking } from "../src/idlepark.js";
+import { NICKNAMES } from "../src/nickname.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
@@ -115,6 +116,48 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
     "and the ceiling grows then clamps",
     [1, 2, 3, 4, 5, 6, 9].map((n) => resumeBackoffMs(n, () => 0.999999)),
     [1999, 3999, 7999, 15999, 31999, 59999, 59999],
+  );
+}
+
+process.stdout.write("\nwhich nickname a restored session answers to\n");
+{
+  const saved = new Map<string, PersistedSession>();
+  const store: SessionStore = {
+    put: (row) => void saved.set(row.id, row),
+    list: () => [...saved.values()],
+    remove: (id) => void saved.delete(id),
+  };
+  // Listed newest first, so only a walk in age order hands the older of the two the name they share.
+  const rows: PersistedSession[] = [
+    { ...rowFor("s_nick_newer", join(users, "u_alice", "nick-newer"), { nickname: "mira" }), createdAt: now + 2 },
+    { ...rowFor("s_nick_older", join(users, "u_alice", "nick-older"), { nickname: "mira" }), createdAt: now + 1 },
+    { ...rowFor("s_nick_none", join(users, "u_alice", "nick-none")), createdAt: now + 3 },
+    { ...rowFor("s_nick_bad", join(users, "u_alice", "nick-bad"), { nickname: "Bad_Name" }), createdAt: now + 4 },
+  ];
+  for (const row of rows) saved.set(row.id, row);
+  const first = new SessionRegistry(new MemoryEventStore(), store);
+  first.restore({ reapOrphans: false });
+  const nickOf = (registry: SessionRegistry, id: string): string => registry.get(id)?.nickname ?? "<missing>";
+  check("of two rows holding one nickname, the older keeps it", nickOf(first, "s_nick_older"), "mira");
+  check(
+    "and the newer is given another from the list",
+    [nickOf(first, "s_nick_newer") !== "mira", NICKNAMES.includes(nickOf(first, "s_nick_newer"))],
+    [true, true],
+  );
+  check("a row an older build wrote with none is given one from the list", NICKNAMES.includes(nickOf(first, "s_nick_none")), true);
+  check("and one that is not a nickname is picked afresh rather than kept", NICKNAMES.includes(nickOf(first, "s_nick_bad")), true);
+  check("every one of them distinct", new Set(rows.map((row) => nickOf(first, row.id))).size, rows.length);
+  check(
+    "and written back, since nothing else would",
+    rows.map((row) => saved.get(row.id)?.nickname),
+    rows.map((row) => nickOf(first, row.id)),
+  );
+  const second = new SessionRegistry(new MemoryEventStore(), store);
+  second.restore({ reapOrphans: false });
+  check(
+    "so the next restart answers to the same ones",
+    rows.map((row) => nickOf(second, row.id)),
+    rows.map((row) => nickOf(first, row.id)),
   );
 }
 

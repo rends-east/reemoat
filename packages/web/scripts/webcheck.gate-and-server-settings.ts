@@ -811,18 +811,15 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
-  check("a non-admin sees five rows", navRows(plain).map((row) => row.spec.id), ["account", "devices", "keys", "machines", "logs"]);
+  const own = ["account", "devices", "keys", "machines", "permissions", "logs"];
+  check("a non-admin sees six rows", navRows(plain).map((row) => row.spec.id), own);
   check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
-  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "devices", "keys", "machines", "logs"]);
-  check(
-    "an admin sees eight",
-    navRows(admin).map((row) => row.spec.id),
-    ["account", "devices", "keys", "machines", "logs", "server", "email", "users"],
-  );
+  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), own);
+  check("an admin sees nine", navRows(admin).map((row) => row.spec.id), [...own, "server", "email", "users"]);
   check(
     "with the heading on the first row of its group only",
     navRows(admin).map((row) => row.heading),
-    [null, null, null, null, null, "server", null, null],
+    [null, null, null, null, null, null, "server", null, null],
   );
   const adminIndex = (id: string): number => navRows(admin).findIndex((row) => row.spec.id === id);
   check("and Server sits above Users", adminIndex("server") < adminIndex("users"), true);

@@ -6,7 +6,7 @@ import { RailRow } from "../bits";
 /** The market tabs as the `sm` rail; below it `PluginsSheet` draws a strip, and both read `MARKET_TABS`. */
 export function MarketNav({ active }: { active: MarketTab }): ReactNode {
   return (
-    <div className="py-1">
+    <div className="space-y-0.5 px-2 py-1">
       {MARKET_TABS.map((tab) => (
         <RailRow
           key={tab.id}

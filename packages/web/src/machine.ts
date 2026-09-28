@@ -115,6 +115,10 @@ export interface MachineState {
   overLimit: boolean;
   ownerDisabled: boolean;
   enrolledBy: string | null;
+  /** Undefined on a machine not yours or from a control plane that cannot say: the listing's own, never derived from `me`. */
+  agentMessaging: boolean | undefined;
+  agentMessagingMachine: boolean | undefined;
+  agentMessagingIsolated: boolean | undefined;
   scopes: Scope[];
   route: Route | null;
   reach: Reach;
@@ -149,6 +153,9 @@ export class MachineConnection {
   private overLimit: boolean;
   private ownerDisabled: boolean;
   private enrolledBy: string | null;
+  private agentMessaging: boolean | undefined;
+  private agentMessagingMachine: boolean | undefined;
+  private agentMessagingIsolated: boolean | undefined;
   private scopes: Scope[];
 
   private token: { value: string; expiresAt: number } | null = null;
@@ -185,8 +192,19 @@ export class MachineConnection {
     this.overLimit = record.overLimit === true;
     this.ownerDisabled = record.ownerDisabled === true;
     this.enrolledBy = record.enrolledBy ?? null;
+    this.agentMessaging = record.agentMessaging;
+    this.agentMessagingMachine = record.agentMessagingMachine;
+    this.agentMessagingIsolated = record.agentMessagingIsolated;
     this.scopes = record.scopes;
     this.onChange = onChange;
+  }
+
+  /** As `PUT …/permissions` answered; the sum follows it, since the switch is pressable only while the account's is on. */
+  noteOwnMessaging(answer: { agentMessaging: boolean; isolated: boolean }): void {
+    this.agentMessagingMachine = answer.agentMessaging;
+    this.agentMessaging = answer.agentMessaging;
+    this.agentMessagingIsolated = answer.isolated;
+    this.onChange();
   }
 
   update(record: MachineRecord): void {
@@ -198,6 +216,9 @@ export class MachineConnection {
     this.lastSeenAt = record.lastSeenAt;
     this.owned = record.owned === true;
     this.enrolledBy = record.enrolledBy ?? null;
+    this.agentMessaging = record.agentMessaging;
+    this.agentMessagingMachine = record.agentMessagingMachine;
+    this.agentMessagingIsolated = record.agentMessagingIsolated;
     // Going over drops token and route (the relay refuses); coming back resets reach so the next resume re-probes.
     const was = this.switchedOff();
     this.overLimit = record.overLimit === true;
@@ -228,6 +249,9 @@ export class MachineConnection {
       overLimit: this.overLimit,
       ownerDisabled: this.ownerDisabled,
       enrolledBy: this.enrolledBy,
+      agentMessaging: this.agentMessaging,
+      agentMessagingMachine: this.agentMessagingMachine,
+      agentMessagingIsolated: this.agentMessagingIsolated,
       scopes: this.scopes,
       route: this.chosen,
       reach: this.reach,

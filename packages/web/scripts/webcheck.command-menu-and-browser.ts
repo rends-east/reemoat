@@ -880,8 +880,8 @@ process.stdout.write("\nwhat is actually on screen\n");
 
     const read = (file: string) => stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
     check(
-      "a row under All names its machine through the one rule",
-      /showMachine && ` · \$\{machineDisplayName\(\{ id: row\.ref\.machineId, name: row\.machineName \}, state\.localMachineId\)\}`/.test(read("ui/SessionBrowser.tsx")),
+      "every row names its machine, through the one rule",
+      /const machine = machineDisplayName\(\{ id: row\.ref\.machineId, name: row\.machineName \}, state\.localMachineId\);/.test(read("ui/SessionBrowser.tsx")),
       true,
     );
     check(
@@ -945,9 +945,9 @@ process.stdout.write("\nwhat is actually on screen\n");
   {
     const rail = stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8"));
     check(
-      "the rail draws a folderless row with folderLabel, and no longer with displayCwd",
+      "the rail draws no path under a row, by folderLabel or by displayCwd (Q3.681)",
       [/folderLabel\(row\.snapshot\.workspace\.requestedCwd, roots\)/.test(rail), /displayCwd\(/.test(rail)],
-      [true, false],
+      [false, false],
     );
     // Sliced per element: a distance-bounded negative regex would pass once the forbidden prop moved further away.
     const rows = rail.match(/<SessionLine[\s\S]*?\/>/g) ?? [];

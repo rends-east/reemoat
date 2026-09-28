@@ -437,7 +437,7 @@ process.stdout.write("\nwhere a row says it works\n");
   check("and with no roots it is what it always was", sessionLabel(row(null, "/Users/rends/api")), "…/rends/api");
 
   const browser = readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8");
-  check("the row compares its location against its own label", /const subpath = located === label \? null : located;/.test(browser), true);
+  check("the row draws no location under its label, since the machine took that place (Q3.681)", /const (?:subpath|located) =/.test(browser), false);
   check("and the label is built from the same roots", /sessionLabel\(row, roots\)/.test(browser), true);
 }
 

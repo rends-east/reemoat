@@ -1,18 +1,18 @@
 import { createHash, randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
-import type { PeerOrigin } from "../events.js";
-import type { ManagedSession, MidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
-import type { OutboxEntry, PeerLink, SqlitePeerOutboxStore } from "../store/sqlite.js";
+import type { PeerOrigin, PeerPolicyKey, PromptMention } from "../events.js";
+import type { ManagedSession, MentionNote, MidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
+import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore } from "../store/sqlite.js";
 import type { PeerAnswer } from "./channel.js";
 import {
   address,
   isPeerName,
   MAX_PEER_ADDRESS_CHARS,
   MAX_PEER_HARNESS_CHARS,
+  mentionNote,
   parseAddress,
   peerMessage,
-  peerName,
   peerNotice,
 } from "./envelope.js";
 
@@ -49,6 +49,18 @@ const MAX_REMOTE_REF_CHARS = 64;
 // A session id: no slash, so a row cannot name a machine, and nothing that can close a quote or a tag.
 const REMOTE_REF = /^[\w-]+$/;
 const MAX_ECHOED_ADDRESS_CHARS = 64;
+/** Distinct `@name`s one message may have resolved; the rest are left as the text. */
+export const MAX_MENTIONS = 8;
+// After whitespace or at the start, so an email address or `@types/node` names nobody.
+const MENTION = /(^|\s)@([A-Za-z][A-Za-z0-9-]{1,31})(?![A-Za-z0-9@/-])/g;
+
+export const MACHINE_MESSAGING_OFF = "Agent messaging is off on this machine.";
+export const CONVERSATION_MESSAGING_OFF = "Agent messaging is off for this conversation.";
+export const RECIPIENT_MESSAGING_OFF = "That conversation does not take messages from agents.";
+const REMOTE_MESSAGING_OFF = "Agent messaging is off on that machine.";
+export const MACHINE_ISOLATED = "This machine's sessions are isolated: they can message only each other.";
+export const REMOTE_ISOLATED = "Agent messaging on that machine is limited to its own sessions.";
+const POLICY_KEY: PeerPolicyKey = "peerMessagesPolicy";
 
 export type PeerStatus = "working" | "idle" | "waiting_for_user" | "asleep" | "starting";
 
@@ -69,6 +81,12 @@ export interface PeerListing {
   unreachable: { machine: string; reason: string }[];
   /** How agents on linked machines address the caller; null with no links, or before enrollment. */
   selfElsewhere: string | null;
+}
+
+/** GET /sessions/:id/mentions: what list_agents shows the session, less the session itself. */
+export interface MentionListing {
+  agents: PeerRow[];
+  unreachable: { machine: string; reason: string }[];
 }
 
 export type PeerDelivery = "started_turn" | "injected" | "queued" | "pending";
@@ -92,7 +110,9 @@ export type PeerRefusal =
   | "workspace_missing"
   | "offline"
   | "peer_too_old"
-  | "link_refused";
+  | "link_refused"
+  | "conversation_messaging_off"
+  | "messaging_isolated";
 
 export type SendResult =
   | { ok: true; id: string; delivery: PeerDelivery; position: number | null; to: string; notify: boolean }
@@ -130,7 +150,6 @@ export interface IncomingLink {
 export interface PeerNetwork {
   links(): PeerLink[];
   request(link: PeerLink, request: { method: "GET" | "POST"; path: string; body?: unknown }, timeoutMs?: number): Promise<PeerAnswer>;
-  noteError(link: PeerLink, message: string | null): void;
 }
 
 type Subscriber = { kind: "local"; sessionId: string } | { kind: "remote"; machineId: string; sessionRef: string };
@@ -148,7 +167,31 @@ type Resolved =
   | { ok: true; kind: "remote"; link: PeerLink; sessionId: string; name: string }
   | { ok: false; code: PeerRefusal; message: string };
 
-export type PeerOutbox = Pick<SqlitePeerOutboxStore, "add" | "due" | "retry" | "remove" | "count" | "countFor">;
+export type PeerOutbox = Pick<SqlitePeerOutboxStore, "add" | "due" | "retry" | "remove" | "count" | "countFor" | "take">;
+
+/** What the owner's Authority last said about this machine, as its app delivered it; `at` orders two deliveries (Q1.654). */
+export interface PeerPolicy {
+  on: boolean;
+  /** Its sessions message each other and nothing on another machine (Q2.244). */
+  isolated: boolean;
+  at: number;
+}
+
+/** One delivery: a flag it leaves out is left as it is, which is how an older app says nothing about it. */
+export interface PeerPolicyDelivery {
+  on?: boolean;
+  isolated?: boolean;
+  at: number;
+}
+
+export interface PeerMessagingState {
+  policy: boolean;
+  isolated: boolean;
+  env: boolean;
+  policyAt: number;
+}
+
+export type PeerPolicyStore = Pick<SqliteMachineSettingsStore, "readPolicy" | "writePolicy">;
 
 export interface PeerHubOptions {
   registry: SessionRegistry;
@@ -157,6 +200,7 @@ export interface PeerHubOptions {
   machineId?: string | null;
   network?: PeerNetwork | null;
   outbox?: PeerOutbox | null;
+  policy?: PeerPolicyStore | null;
   now?: () => number;
   onWarning?: (detail: string) => void;
 }
@@ -164,7 +208,10 @@ export interface PeerHubOptions {
 /** Everything a machine's sessions may say to each other and to linked machines' sessions; the one door every peer message passes through. */
 export class PeerHub {
   private readonly registry: SessionRegistry;
+  /** REEMOAT_PEER_MESSAGES: a ceiling no policy lifts. */
   readonly enabled: boolean;
+  private readonly policyStore: PeerPolicyStore | null;
+  private policy: PeerPolicy;
   private readonly network: PeerNetwork | null;
   private readonly machineId: string | null;
   private readonly outbox: PeerOutbox | null;
@@ -183,6 +230,8 @@ export class PeerHub {
   private readonly pausedNoted = new Set<string>();
   private readonly subscriptions = new Set<Subscription>();
   private readonly remoteLists = new Map<string, { at: number; answer: Promise<PeerRow[] | string> }>();
+  // Each link's last listing that succeeded, keyed by link id: what a mention resolves against, so a prompt never waits on a machine.
+  private readonly remoteSettled = new Map<string, PeerRow[]>();
   // Notices this machine asked another for; anything else a link sends as a notice is refused.
   private readonly expectedNotices = new Map<string, number>();
 
@@ -192,19 +241,89 @@ export class PeerHub {
     this.network = options.network ?? null;
     this.machineId = options.machineId ?? null;
     this.outbox = options.outbox ?? null;
+    this.policyStore = options.policy ?? null;
+    this.policy = storedPolicy(this.policyStore?.readPolicy(POLICY_KEY) ?? null);
     this.now = options.now ?? Date.now;
     this.warn = options.onWarning ?? null;
+  }
+
+  /** Read at every gate, never captured: the policy moves at runtime (Q2.244). */
+  get allowed(): boolean {
+    return this.enabled && this.policy.on;
+  }
+
+  /** Whether anything may cross to or from another machine; an isolated machine's sessions still message each other. */
+  get reachesOthers(): boolean {
+    return this.allowed && !this.policy.isolated;
+  }
+
+  messagingState(): PeerMessagingState {
+    return { policy: this.policy.on, isolated: this.policy.isolated, env: this.enabled, policyAt: this.policy.at };
+  }
+
+  /** A delivery older than the one applied changes nothing; answers whether this one did (Q1.654). */
+  setPolicy(next: PeerPolicyDelivery): boolean {
+    if (next.at < this.policy.at) return false;
+    const was = this.policy;
+    this.policy = { on: next.on ?? was.on, isolated: next.isolated ?? was.isolated, at: next.at };
+    this.policyStore?.writePolicy(POLICY_KEY, JSON.stringify(this.policy));
+    if (was.on && !this.policy.on) this.switchedOff();
+    else if (this.policy.on && !was.isolated && this.policy.isolated) this.isolatedFromOthers();
+    return true;
+  }
+
+  /** A conversation's own switch going off; its queue is the session's to drop (Q2.244). */
+  conversationSwitchedOff(sessionId: string): void {
+    for (const subscription of this.subscriptions) {
+      const subscriber = subscription.subscriber;
+      if (subscription.targetId === sessionId || (subscriber.kind === "local" && subscriber.sessionId === sessionId)) {
+        this.cancel(subscription);
+      }
+    }
+    for (const key of this.expectedNotices.keys()) {
+      if (key.endsWith(`\0${sessionId}`)) this.expectedNotices.delete(key);
+    }
+    this.noteUnsent(this.outbox?.take(sessionId) ?? []);
+  }
+
+  private switchedOff(): void {
+    for (const subscription of this.subscriptions) this.cancel(subscription);
+    this.expectedNotices.clear();
+    this.remoteLists.clear();
+    this.registry.dropQueuedPeer();
+    this.noteUnsent(this.outbox?.take() ?? []);
+  }
+
+  /** Only what crosses machines goes: local queues, local subscriptions and local sessions are left as they are. */
+  private isolatedFromOthers(): void {
+    for (const subscription of this.subscriptions) {
+      if (subscription.subscriber.kind === "remote") this.cancel(subscription);
+    }
+    this.expectedNotices.clear();
+    this.remoteLists.clear();
+    this.noteUnsent(this.outbox?.take() ?? [], "isolated");
+  }
+
+  private noteUnsent(entries: readonly OutboxEntry[], why: "off" | "isolated" = "off"): void {
+    const bySender = new Map<string, number>();
+    for (const entry of entries) bySender.set(entry.senderSession, (bySender.get(entry.senderSession) ?? 0) + 1);
+    for (const [sessionId, unsent] of bySender) this.registry.get(sessionId)?.notePeerMessagesOff(unsent, why);
   }
 
   setEndpoint(url: string | null): void {
     this.endpoint = url;
   }
 
+  /** Asked at every launch, so the process being replaced loses its bearer even when the new one gets none. */
   mcpServersFor(sessionId: string, capabilities: acp.McpCapabilities): acp.McpServer[] {
-    if (!this.enabled || this.endpoint === null || capabilities.http !== true) return [];
-    const token = randomBytes(32).toString("base64url");
     const previous = this.tokenBySession.get(sessionId);
-    if (previous !== undefined) this.sessionByToken.delete(previous);
+    if (previous !== undefined) {
+      this.sessionByToken.delete(previous);
+      this.tokenBySession.delete(sessionId);
+    }
+    if (!this.allowed || this.endpoint === null || capabilities.http !== true) return [];
+    if (this.registry.get(sessionId)?.peerMessages === false) return [];
+    const token = randomBytes(32).toString("base64url");
     this.tokenBySession.set(sessionId, token);
     this.sessionByToken.set(token, sessionId);
     return [
@@ -225,10 +344,19 @@ export class PeerHub {
     return sessionId;
   }
 
+  /** Why a caller holding a valid bearer may not use the tools now; a tool error, never a 401, which an MCP client reads as a sign-in. */
+  callRefusal(callerId: string): string | null {
+    if (!this.allowed) return MACHINE_MESSAGING_OFF;
+    if (this.registry.get(callerId)?.peerMessages === false) return CONVERSATION_MESSAGING_OFF;
+    return null;
+  }
+
   /** This machine's reachable sessions, as another machine's daemon is shown them. */
   localRows(callerId: string | null = null): PeerRow[] {
     const rows: PeerRow[] = [];
+    if (!this.allowed) return rows;
     for (const managed of this.registry.list()) {
+      if (!managed.peerMessages) continue;
       const status = this.peerStatus(managed);
       if (status === null) continue;
       rows.push(this.rowOf(managed, status, managed.id === callerId));
@@ -237,6 +365,7 @@ export class PeerHub {
   }
 
   async list(callerId: string): Promise<PeerListing> {
+    if (this.callRefusal(callerId) !== null) return { agents: [], unreachable: [], selfElsewhere: null };
     const agents = this.localRows(callerId);
     const unreachable: PeerListing["unreachable"] = [];
     const listings = await this.remoteListings();
@@ -251,15 +380,53 @@ export class PeerHub {
     return { agents, unreachable, selfElsewhere };
   }
 
+  async mentionListing(callerId: string): Promise<MentionListing> {
+    const { agents, unreachable } = await this.list(callerId);
+    return { agents: agents.filter((row) => !row.self), unreachable };
+  }
+
+  /** Synchronous: resolved against this machine's rows and the listings already settled, never a fetch (Q2.246). */
+  mentionNote(callerId: string, text: string): MentionNote | null {
+    // An agent reads a command at index 0, and a block beside one is unmeasured.
+    if (text.startsWith("/")) return null;
+    // The same switches list_agents answers to: nothing is named where nothing could be reached (Q2.244).
+    if (this.callRefusal(callerId) !== null) return null;
+    const names: string[] = [];
+    for (const match of text.matchAll(MENTION)) {
+      const name = match[2]!.toLowerCase();
+      if (!names.includes(name)) names.push(name);
+      if (names.length === MAX_MENTIONS) break;
+    }
+    if (names.length === 0) return null;
+
+    const rows = this.localRows(callerId).filter((row) => !row.self);
+    if (this.network !== null && this.reachesOthers) {
+      const at = this.now();
+      for (const link of this.network.links()) {
+        if (link.expiresAt > at) rows.push(...(this.remoteSettled.get(link.id) ?? []));
+      }
+    }
+    const targets = names.flatMap((name) => rows.filter((row) => row.name.toLowerCase() === name));
+    if (targets.length === 0) return null;
+    const mentions: PromptMention[] = targets.map((row) => ({ name: row.name, ref: row.ref }));
+    return { text: mentionNote(targets, this.tokenBySession.has(callerId)), mentions };
+  }
+
   async send(callerId: string, request: SendRequest): Promise<SendResult> {
-    if (!this.enabled) return refuse("messaging_off", "messages between agents are switched off on this machine");
+    if (!this.allowed) return refuse("messaging_off", MACHINE_MESSAGING_OFF);
     const sender = this.registry.get(callerId);
     if (sender === undefined) return refuse("unknown_caller", "this session no longer exists");
+    const closed = this.senderRefusal(sender);
+    if (closed !== null) return closed;
     const invalid = invalidMessage(request.message);
     if (invalid !== null) return invalid;
 
     const resolved = await this.resolve(callerId, request.to);
     if (!resolved.ok) return resolved;
+    // resolve may have waited on another machine's listing.
+    const since = this.senderRefusal(sender);
+    if (since !== null) return since;
+    if (resolved.kind === "remote" && !this.reachesOthers) return refuse("messaging_isolated", MACHINE_ISOLATED);
 
     const hops = sender.peerDepth + 1;
     if (hops > MAX_PEER_HOPS) {
@@ -287,6 +454,7 @@ export class PeerHub {
             request.message,
             true,
             request.notify ? { kind: "local", sessionId: callerId } : null,
+            callerId,
           )
         : await this.sendRemote(sender, resolved, request, messageId, hops);
     if (!result.ok) return result;
@@ -303,7 +471,8 @@ export class PeerHub {
 
   /** POST /peer/messages: a linked machine's agent writing to one of this machine's sessions. */
   async receive(link: IncomingLink, body: unknown): Promise<SendResult> {
-    if (!this.enabled) return refuse("messaging_off", "messages between agents are switched off on that machine");
+    if (!this.allowed) return refuse("messaging_off", REMOTE_MESSAGING_OFF);
+    if (!this.reachesOthers) return refuse("messaging_isolated", REMOTE_ISOLATED);
     const message = remoteMessageOf(body);
     if (message === null) return refuse("bad_request", "unreadable message");
     const invalid = invalidMessage(message.message);
@@ -331,6 +500,7 @@ export class PeerHub {
   private async deliverReceived(link: IncomingLink, message: RemoteMessage, seen: string, at: number): Promise<SendResult> {
     const target = this.registry.get(message.to);
     if (target === undefined) return refuse("unknown_recipient", "no such session on that machine");
+    if (!target.peerMessages) return refuse("conversation_messaging_off", RECIPIENT_MESSAGING_OFF);
     if (this.peerStatus(target) === null) {
       return refuse("ended", `${address(this.nameOf(target), target.id)} has ended or was stopped by its person`);
     }
@@ -347,7 +517,7 @@ export class PeerHub {
     };
     const subscriber: Subscriber | null =
       message.notify && back !== null ? { kind: "remote", machineId: link.sourceMachineId, sessionRef: message.from.ref } : null;
-    const result = await this.deliverLocal(target, from, message.message, back !== null, subscriber);
+    const result = await this.deliverLocal(target, from, message.message, back !== null, subscriber, null);
     if (!result.ok) return result;
     this.seenMessageIds.set(seen, at);
     // Its sender answered: the notice this machine was waiting on for that pair is no longer coming.
@@ -357,7 +527,7 @@ export class PeerHub {
 
   /** POST /peer/notices: only the one this machine asked for, once. */
   async receiveNotice(link: IncomingLink, body: unknown): Promise<boolean> {
-    if (!this.enabled) return false;
+    if (!this.reachesOthers) return false;
     const notice = remoteNoticeOf(body);
     if (notice === null) return false;
     const expected = expectationKey(link.sourceMachineId, notice.from.ref, notice.subscriber);
@@ -403,6 +573,10 @@ export class PeerHub {
     if (!this.enabled || this.outbox === null || this.network === null) return;
     const at = this.now();
     for (const entry of this.outbox.due(at, OUTBOX_BATCH)) {
+      // Before every entry: switching off or isolating takes the outbox whole, and a pass already running must stop sending.
+      if (!this.reachesOthers) return;
+      // The batch was read before the await: a conversation switched off since has had its rows taken already.
+      if (this.registry.get(entry.senderSession)?.peerMessages === false) continue;
       const link = this.linkTo(entry.targetMachineId);
       if (link === null) {
         this.outbox.remove(entry.id);
@@ -464,6 +638,7 @@ export class PeerHub {
     body: string,
     replyable: boolean,
     subscriber: Subscriber | null,
+    senderId: string | null,
   ): Promise<SendResult> {
     const to = address(this.nameOf(target), target.id);
     if (target.peerTurnsSinceHuman < PEER_TURN_BUDGET) {
@@ -481,6 +656,8 @@ export class PeerHub {
     const text = peerMessage(from, body, replyable);
     const ready = await this.registry.readyForMessage(target, "peer");
     if (ready !== "ready") return refuse("workspace_missing", `${to} cannot take work: its folder is gone or not answering`);
+    const closed = this.deliveryRefusal(target, senderId);
+    if (closed !== null) return closed;
     // Subscribed before delivery, or a turn that ends inside submit would never be seen to start.
     const subscription = subscriber === null ? null : this.subscribe(subscriber, target);
     const result = await target.submit(text, from);
@@ -522,6 +699,11 @@ export class PeerHub {
     const answer = await this.network!.request(link, { method: "POST", path: "/peer/messages", body });
     const result = this.remoteResult(link, answer, to);
     if (!result.ok && result.code === "offline" && this.outbox !== null) {
+      const closed = this.senderRefusal(sender) ?? (this.reachesOthers ? null : refuse("messaging_isolated", MACHINE_ISOLATED));
+      if (closed !== null) {
+        this.expectedNotices.delete(expected);
+        return closed;
+      }
       if (this.outbox.countFor(sender.id) >= MAX_OUTBOX_PER_SESSION || this.outbox.count() >= MAX_OUTBOX) {
         this.expectedNotices.delete(expected);
         return refuse("offline", `${link.targetName} is offline and too many messages are already waiting for machines that are; try later`);
@@ -547,30 +729,26 @@ export class PeerHub {
   }
 
   private remoteResult(link: PeerLink, answer: PeerAnswer, to: string): SendResult {
-    const failed = (code: PeerRefusal, message: string): SendResult => {
-      this.network?.noteError(link, message);
-      return refuse(code, message);
-    };
+    // No link records its failures: nothing reads them since the links screen went (Q3.676).
     const offline = (why: string): SendResult =>
-      failed("offline", `${link.targetName} is not reachable right now (${why}); try again later`);
+      refuse("offline", `${link.targetName} is not reachable right now (${why}); try again later`);
     if (!answer.ok) {
       if (UNREACHABLE_STATUSES.has(answer.status) || UNREACHABLE_CODES.has(answer.code)) return offline(answer.code);
       if (answer.status === 429) return refuse("rate_limited", `${link.targetName}'s relay is refusing messages this fast; wait and retry`);
-      return failed(
+      return refuse(
         "link_refused",
         `${link.targetName} refused this machine's link (${answer.code}); its owner's app renews links when it next opens`,
       );
     }
     if (answer.status === 404) {
-      return failed("peer_too_old", `${link.targetName}'s daemon is too old to take messages from agents; it needs updating`);
+      return refuse("peer_too_old", `${link.targetName}'s daemon is too old to take messages from agents; it needs updating`);
     }
     // Its daemon's own 503 (shutting_down, peers_unavailable) is a machine going away, not a refusal of the link.
     if (answer.status === 503) return offline(envelopeCode(answer.body) ?? "503");
     const body = answer.body as Partial<SendResult> | null;
     if (answer.status !== 200 || body === null || typeof body !== "object" || typeof body.ok !== "boolean") {
-      return failed("link_refused", `${link.targetName} answered ${answer.status}`);
+      return refuse("link_refused", `${link.targetName} answered ${answer.status}`);
     }
-    this.network?.noteError(link, null);
     if (!body.ok) {
       const refusal = body as { code?: unknown; message?: unknown };
       return refuse(
@@ -598,6 +776,7 @@ export class PeerHub {
     const { name, ref } = parseAddress(to);
 
     if (ref !== null && ref.includes("/")) {
+      if (!this.reachesOthers) return refuse("messaging_isolated", MACHINE_ISOLATED);
       const slash = ref.indexOf("/");
       const machineId = ref.slice(0, slash);
       const sessionId = ref.slice(slash + 1);
@@ -634,6 +813,7 @@ export class PeerHub {
       return refuse("ambiguous_recipient", `more than one session is called that; use one of: ${candidates.join(", ")}`);
     }
     if (remoteMatches.length === 1) {
+      if (!this.reachesOthers) return refuse("messaging_isolated", MACHINE_ISOLATED);
       const row = remoteMatches[0]!;
       const slash = row.ref.indexOf("/");
       // The owner's app may have replaced the links while the listings were in flight.
@@ -649,6 +829,7 @@ export class PeerHub {
     const target = this.registry.get(sessionId);
     if (target === undefined) return this.unknownRecipient(callerId, to);
     if (target.id === callerId) return refuse("self", "that is this session");
+    if (!target.peerMessages) return refuse("conversation_messaging_off", RECIPIENT_MESSAGING_OFF);
     if (this.peerStatus(target) === null) {
       return refuse(
         "ended",
@@ -678,9 +859,10 @@ export class PeerHub {
   }
 
   private async remoteListings(): Promise<[PeerLink, PeerRow[] | string][]> {
-    if (this.network === null || !this.enabled) return [];
+    if (this.network === null || !this.reachesOthers) return [];
     const at = this.now();
     const links = this.network.links().filter((link) => link.expiresAt > at);
+    for (const id of this.remoteSettled.keys()) if (!links.some((link) => link.id === id)) this.remoteSettled.delete(id);
     const out: [PeerLink, PeerRow[] | string][] = [];
     for (let i = 0; i < links.length; i += REMOTE_LIST_CONCURRENCY) {
       const batch = links.slice(i, i + REMOTE_LIST_CONCURRENCY);
@@ -697,15 +879,12 @@ export class PeerHub {
     if (cached !== undefined && at - cached.at < REMOTE_LIST_TTL_MS) return cached.answer;
     const answer = this.network!.request(link, { method: "GET", path: "/peer/agents" }, REMOTE_LIST_TIMEOUT_MS).then(
       (reply): PeerRow[] | string => {
-        if (!reply.ok) {
-          const reason = reply.status === 503 ? "offline" : reply.code;
-          this.network?.noteError(link, `listing failed: ${reason}`);
-          return reason;
-        }
+        if (!reply.ok) return reply.status === 503 ? "offline" : reply.code;
         if (reply.status === 404) return "its daemon is too old for messages from agents";
+        if (reply.status === 403 && errorCodeOf(reply.body) === "messaging_off") return "agent messaging is off there";
+        if (reply.status === 403 && errorCodeOf(reply.body) === "messaging_isolated") return "its sessions are isolated";
         const rows = (reply.body as { agents?: unknown } | null)?.agents;
         if (reply.status !== 200 || !Array.isArray(rows)) return `answered ${reply.status}`;
-        this.network?.noteError(link, null);
         return rows.flatMap((row) => {
           const remote = remoteRowOf(row);
           if (remote === null) return [];
@@ -713,7 +892,12 @@ export class PeerHub {
           return [{ ...remote, ref, address: address(remote.name, ref), machine: { label: link.targetName, isThis: false }, self: false }];
         });
       },
-    );
+    ).then((rows) => {
+      // A failed listing forgets the last good one, as list_agents does.
+      if (typeof rows === "string") this.remoteSettled.delete(link.id);
+      else this.remoteSettled.set(link.id, rows);
+      return rows;
+    });
     this.remoteLists.set(link.id, { at, answer });
     return answer;
   }
@@ -738,6 +922,22 @@ export class PeerHub {
     }
   }
 
+  private senderRefusal(sender: ManagedSession): SendResult | null {
+    if (!this.allowed) return refuse("messaging_off", MACHINE_MESSAGING_OFF);
+    if (!sender.peerMessages) return refuse("messaging_off", CONVERSATION_MESSAGING_OFF);
+    return null;
+  }
+
+  /** After delivery's awaits: any of the three switches may have gone off during them. */
+  private deliveryRefusal(target: ManagedSession, senderId: string | null): SendResult | null {
+    if (!this.allowed) return refuse("messaging_off", senderId === null ? REMOTE_MESSAGING_OFF : MACHINE_MESSAGING_OFF);
+    if (senderId === null && !this.reachesOthers) return refuse("messaging_isolated", REMOTE_ISOLATED);
+    if (!target.peerMessages) return refuse("conversation_messaging_off", RECIPIENT_MESSAGING_OFF);
+    const sender = senderId === null ? undefined : this.registry.get(senderId);
+    if (sender !== undefined && !sender.peerMessages) return refuse("messaging_off", CONVERSATION_MESSAGING_OFF);
+    return null;
+  }
+
   private rowOf(managed: ManagedSession, status: PeerStatus, self: boolean): PeerRow {
     const name = this.nameOf(managed);
     return {
@@ -753,8 +953,9 @@ export class PeerHub {
     };
   }
 
+  /** The nickname is the address; a title is only what the session is about (Q2.245). */
   private nameOf(managed: ManagedSession): string {
-    return peerName(managed.title, basename(managed.workspace.requestedCwd), managed.agent);
+    return managed.nickname;
   }
 
   private localOrigin(sender: ManagedSession, messageId: string, hops: number): PeerOrigin {
@@ -844,6 +1045,7 @@ export class PeerHub {
   private fire(subscription: Subscription, target: ManagedSession, what: "idle" | "ended"): void {
     if (!this.subscriptions.has(subscription)) return;
     this.cancel(subscription);
+    if (!this.allowed || !target.peerMessages) return;
     const subscriber = subscription.subscriber;
     const done =
       subscriber.kind === "local"
@@ -860,11 +1062,13 @@ export class PeerHub {
 
   /** A notice from this daemon: it wakes like a message, and is dropped rather than refused past the budget. */
   private async wake(sessionId: string, from: PeerOrigin, text: string): Promise<void> {
+    if (!this.allowed) return;
     const session = this.registry.get(sessionId);
-    if (session === undefined || this.peerStatus(session) === null) return;
+    if (session === undefined || !session.peerMessages || this.peerStatus(session) === null) return;
     // The budget holds for notices too, or two agents handing each other work would never stop.
     if (session.peerTurnsSinceHuman >= PEER_TURN_BUDGET) return;
     if ((await this.registry.readyForMessage(session, "peer")) !== "ready") return;
+    if (!this.allowed || !session.peerMessages) return;
     await session.submit(text, from);
   }
 
@@ -873,6 +1077,7 @@ export class PeerHub {
     target: ManagedSession,
     what: "idle" | "ended",
   ): Promise<void> {
+    if (!this.reachesOthers) return;
     const link = this.linkTo(subscriber.machineId);
     if (link === null) return;
     const notice: RemoteNotice = {
@@ -881,8 +1086,7 @@ export class PeerHub {
       from: { ref: target.id, name: this.nameOf(target), harness: target.agent, hops: target.peerDepth },
       what,
     };
-    const answer = await this.network!.request(link, { method: "POST", path: "/peer/notices", body: notice });
-    if (!answer.ok) this.network?.noteError(link, `an idle notice was not delivered: ${answer.code}`);
+    await this.network!.request(link, { method: "POST", path: "/peer/notices", body: notice });
   }
 
   private noticeFrom(target: ManagedSession): PeerOrigin {
@@ -901,6 +1105,36 @@ export class PeerHub {
 
 function refuse(code: PeerRefusal, message: string): { ok: false; code: PeerRefusal; message: string } {
   return { ok: false, code, message };
+}
+
+/**
+ * Anything unreadable is the default, on and not isolated at 0: the state before this feature, and what a machine nobody
+ * has set is. A value written before isolation existed has no `isolated`, and reads as not isolated.
+ */
+function storedPolicy(raw: string | null): PeerPolicy {
+  const unset: PeerPolicy = { on: true, isolated: false, at: 0 };
+  if (raw === null) return unset;
+  try {
+    const parsed = JSON.parse(raw) as { on?: unknown; isolated?: unknown; at?: unknown };
+    const isolated = parsed.isolated ?? false;
+    if (
+      typeof parsed.on === "boolean" &&
+      typeof isolated === "boolean" &&
+      typeof parsed.at === "number" &&
+      Number.isFinite(parsed.at) &&
+      parsed.at >= 0
+    ) {
+      return { on: parsed.on, isolated, at: parsed.at };
+    }
+  } catch {
+    // Unreadable is unset.
+  }
+  return unset;
+}
+
+function errorCodeOf(body: unknown): string | null {
+  const error = (body as { error?: { code?: unknown } } | null)?.error;
+  return typeof error?.code === "string" ? error.code : null;
 }
 
 function invalidMessage(message: string): { ok: false; code: PeerRefusal; message: string } | null {

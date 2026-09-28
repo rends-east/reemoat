@@ -30,6 +30,16 @@ import { clearEcho, sendFloor, setEcho, type PendingEcho } from "../echo";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
+import {
+  ensureMentions,
+  filterMentions,
+  mentionCompletion,
+  mentionListingFor,
+  mentionQuery,
+  mentionStateFor,
+  mentionsVersion,
+  subscribeMentions,
+} from "../mentions";
 import { formatBytes } from "../paths";
 import { store, type AgentCommandList, type AppState } from "../store";
 import {
@@ -68,6 +78,7 @@ import {
   typedConfigCommand,
 } from "./commands";
 import { CommandMenu } from "./CommandMenu";
+import { MentionMenu } from "./MentionMenu";
 import { SendSlot } from "./SendSlot";
 import { slotOccupant } from "./slotSwap";
 import { toast } from "./Toast";
@@ -315,14 +326,41 @@ export function Composer({
   const rows: readonly unknown[] = choices ?? matches;
   const menuOpen = !dismissed && rows.length > 0 && (stage !== null || query !== null);
 
+  // Exclusive with the `/` menu by construction: a slash draft or a staged control asks no `@` question. Q3.678.
+  const mention = dismissed || query !== null || stage !== null ? null : mentionQuery(text, caret);
+  useSyncExternalStore(subscribeMentions, mentionsVersion);
+  const listing = mentionListingFor(key);
+  const mentioned = useMemo(
+    () => (mention === null || listing === null ? [] : filterMentions(listing.agents, mention.query)),
+    [listing, mention?.query],
+  );
+  const mentionOpen = mentioned.length > 0;
+  // A bare `@` that offers nobody says so, rather than looking like a key that does nothing; a typed name that matches nobody closes.
+  const mentionState = mentionStateFor(key);
+  const mentionNotice =
+    mention === null || mention.query !== "" || mentionOpen
+      ? null
+      : mentionState === "listed"
+        ? "No other session can be reached from here"
+        : mentionState === "failed"
+          ? "Could not list the sessions here"
+          : null;
+  const listLength = menuOpen ? rows.length : mentionOpen ? mentioned.length : 0;
+  const mentionAsked = mention !== null;
+  // Keyed on the daemon's instance too: a daemon that answered 404 is asked again once it has been updated.
+  const mentionDaemon = state.machines.find((one) => one.id === sessionRef.machineId)?.health?.instanceId ?? null;
+  useEffect(() => {
+    if (mentionAsked) ensureMentions(sessionRef, store.daemonFor(sessionRef.machineId), mentionDaemon);
+  }, [key, mentionAsked, mentionDaemon]);
+
   // Reset on the question, never on list identity (which moves every poll), or aiming at `/dontAsk` can land on `/default`.
   useEffect(() => {
     setActive(0);
-  }, [query?.query, stage]);
+  }, [query?.query, stage, mention?.start, mention?.query]);
 
   useEffect(() => {
-    setActive((at) => (at < rows.length ? at : 0));
-  }, [rows.length]);
+    setActive((at) => (at < listLength ? at : 0));
+  }, [listLength]);
 
   // Release the caret when a request parks so the card's keys work (not for a plan); above the early returns for hook order.
   const parked = row !== undefined && needsHuman(row.snapshot) && !revising;
@@ -430,6 +468,21 @@ export function Composer({
     const value = choices?.[index]?.value;
     if (stage === null || value === undefined) return;
     applyValue(stage, value);
+  };
+
+  // Synchronous, so it needs no `onScreen`; the text is sent as typed and the daemon resolves the name.
+  const chooseMention = (index: number): void => {
+    const target = mentioned[index];
+    if (mention === null || target === undefined) return;
+    const next = mentionCompletion(text, mention, target.name);
+    if (next.text === text) {
+      // The caret effect runs on a text change, and there is none.
+      areaRef.current?.setSelectionRange(next.caret, next.caret);
+      setCaret(next.caret);
+      return;
+    }
+    update(next.text);
+    pendingCaret.current = next.caret;
   };
 
   const submit = (event?: FormEvent): void => {
@@ -640,6 +693,18 @@ export function Composer({
             onDismiss={closeMenu}
           />
         )}
+        {(mentionOpen || mentionNotice !== null) && (
+          <MentionMenu
+            rows={mentioned}
+            notice={mentionNotice}
+            unreachable={listing?.unreachable.map((one) => one.machine) ?? []}
+            active={active}
+            anchorRef={areaRef}
+            onHover={setActive}
+            onChoose={chooseMention}
+            onDismiss={closeMenu}
+          />
+        )}
         <textarea
           ref={areaRef}
           {...VERBATIM_FIELD}
@@ -662,16 +727,17 @@ export function Composer({
             // React does not forward `isComposing`; the pointer is read per keystroke so an attached keyboard is seen.
             const action = composerKey(
               { ...event, isComposing: event.nativeEvent.isComposing },
-              menuOpen,
+              menuOpen || mentionOpen,
               !window.matchMedia("(pointer: coarse)").matches,
             );
             if (action === null) return;
             event.preventDefault();
             if (action === "send") submit();
-            else if (action === "next") setActive((at) => (at + 1) % rows.length);
-            else if (action === "prev") setActive((at) => (at - 1 + rows.length) % rows.length);
+            else if (action === "next") setActive((at) => (at + 1) % listLength);
+            else if (action === "prev") setActive((at) => (at - 1 + listLength) % listLength);
             else if (action === "choose") {
-              if (stage === null) choose(active);
+              if (mentionOpen) chooseMention(active);
+              else if (stage === null) choose(active);
               else chooseValue(active);
             } else {
               // `useKeyboard` blurs on a window Escape, which would also close the soft keyboard.
@@ -693,9 +759,11 @@ export function Composer({
           // `combobox` on a textarea drops the multiline semantics, so they are restored explicitly.
           aria-multiline={true}
           aria-autocomplete="list"
-          aria-expanded={menuOpen}
-          aria-controls={menuOpen ? "composer-command-menu" : undefined}
-          aria-activedescendant={menuOpen ? `composer-command-${active}` : undefined}
+          aria-expanded={menuOpen || mentionOpen}
+          aria-controls={menuOpen ? "composer-command-menu" : mentionOpen ? "composer-mention-menu" : undefined}
+          aria-activedescendant={
+            menuOpen ? `composer-command-${active}` : mentionOpen ? `composer-mention-${active}` : undefined
+          }
           // `no-focus-ring`: the unlayered focus-visible rule beats any layered outline utility, and a textarea matches it on every tap.
           className="no-focus-ring block min-h-11 w-full resize-none overflow-hidden bg-transparent px-2 py-2.5 text-sm outline-none"
         />

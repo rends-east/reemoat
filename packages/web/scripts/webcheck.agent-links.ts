@@ -3,16 +3,15 @@ import { srcFile, stripComments } from "./webcheck.source.js";
 import { ApiError } from "../src/http.js";
 
 const {
-  LINK_DIRECTION_TEXT,
   LINK_RENEW_WITHIN_MS,
   LINK_RESYNC_AFTER_MS,
   LINK_RETRY_AFTER_MS,
   LinkSync,
-  linkNote,
+  POLICY_RETRY_AFTER_MS,
   linkRecordKey,
-  linkRows,
   linkSyncDecision,
   linkTargets,
+  messagingEcho,
   readLinkRecord,
 } = await import("../src/agentLinks.js");
 
@@ -28,6 +27,8 @@ const machine = (id: string, over: Partial<Candidate> = {}): Candidate => ({
   reachable: true,
   overLimit: false,
   ownerDisabled: false,
+  messaging: true,
+  isolated: false,
   daemon: `i_${id}`,
   ...over,
 });
@@ -35,7 +36,9 @@ const machine = (id: string, over: Partial<Candidate> = {}): Candidate => ({
 process.stdout.write("\nwhen a machine is handed its links again\n");
 {
   const now = 1_800_000_000_000;
-  const record = (over: Partial<{ targets: string[]; earliestExpiresAt: number | null; syncedAt: number }> = {}) => ({
+  const record = (
+    over: Partial<{ targets: string[]; earliestExpiresAt: number | null; syncedAt: number; messaging: boolean; isolated: boolean }> = {},
+  ) => ({
     targets: ["m_b", "m_c"],
     earliestExpiresAt: now + 80 * DAY,
     syncedAt: now - 60_000,
@@ -129,7 +132,6 @@ process.stdout.write("\nwhen a machine is handed its links again\n");
     ["not_enrolled", machine("m_a", { enrolled: false })],
     ["switched_off", machine("m_a", { overLimit: true })],
     ["switched_off", machine("m_a", { ownerDisabled: true })],
-    ["offline", machine("m_a", { relayOnline: false })],
     ["offline", machine("m_a", { reachable: false })],
   ];
   check(
@@ -140,13 +142,79 @@ process.stdout.write("\nwhen a machine is handed its links again\n");
       { sync: false, why },
     ]),
   );
+  check(
+    "a machine off the relay that this app reaches over loopback is left alone, unless somebody pressed something",
+    [decide({ machine: machine("m_a", { relayOnline: false }), last: null }), decide({ machine: machine("m_a", { relayOnline: false }), force: true })],
+    [
+      { sync: false, why: "offline" },
+      { sync: true, why: "forced" },
+    ],
+  );
   check("nor does a revoke reach past a daemon too old to take the answer", decide({ force: true, tooOldOn: "i_m_a" }).why, "daemon_too_old");
+
+  const off = machine("m_a", { messaging: false });
+  check(
+    "a machine switched off since its last handover is handed the policy, and one switched back on too",
+    [decide({ machine: off }), decide({ last: record({ messaging: false }) })],
+    [
+      { sync: true, why: "policy_changed" },
+      { sync: true, why: "policy_changed" },
+    ],
+  );
+  check(
+    "while one handed the same policy is left alone, and a record older than the flag reads as on",
+    [decide({ machine: off, last: record({ messaging: false }) }).why, decide().why],
+    ["current", "current"],
+  );
+  check(
+    "a changed policy is named before changed targets, since turning a source off empties them too",
+    decide({ machine: off, targets: [] }).why,
+    "policy_changed",
+  );
+  const loopback = machine("m_a", { messaging: false, relayOnline: false, reachable: true });
+  check(
+    "a changed policy reaches a machine this app has over loopback alone, where its local agents are",
+    [decide({ machine: loopback }), decide({ machine: { ...loopback, messaging: true } })],
+    [
+      { sync: true, why: "policy_changed" },
+      { sync: false, why: "offline" },
+    ],
+  );
+  check(
+    "but never one that cannot be reached at all",
+    decide({ machine: machine("m_a", { messaging: false, relayOnline: false, reachable: false }) }).why,
+    "offline",
+  );
+  check(
+    "and it still waits out a failure unless forced",
+    [decide({ machine: off, failedAt: now }).why, decide({ machine: off, failedAt: now, force: true }).why],
+    ["backing_off", "forced"],
+  );
+  check(
+    "but its own short wait, not the links': a switch that has not landed leaves local agents messaging",
+    [
+      decide({ machine: off, failedAt: now - POLICY_RETRY_AFTER_MS + 1 }).why,
+      decide({ machine: off, failedAt: now - POLICY_RETRY_AFTER_MS }).why,
+      decide({ failedAt: now - POLICY_RETRY_AFTER_MS, last: record({ syncedAt: now - 2 * DAY }) }).why,
+    ],
+    ["backing_off", "policy_changed", "backing_off"],
+  );
 
   // Swept against an oracle written out separately, over every combination of the inputs above.
   const bools = [false, true];
-  const lasts = [null, record(), record({ targets: ["m_b"] }), record({ earliestExpiresAt: now + 10 * DAY }), record({ syncedAt: now - 2 * DAY })];
+  const lasts = [
+    null,
+    record(),
+    record({ targets: ["m_b"] }),
+    record({ earliestExpiresAt: now + 10 * DAY }),
+    record({ syncedAt: now - 2 * DAY }),
+    record({ messaging: false }),
+    record({ messaging: true }),
+    record({ isolated: true }),
+    record({ messaging: false, isolated: true }),
+  ];
   const tooOlds = [undefined, null, "i_m_a", "i_other"];
-  const fails = [null, now - 60_000, now - LINK_RETRY_AFTER_MS];
+  const fails = [null, now - 1_000, now - 60_000, now - LINK_RETRY_AFTER_MS];
   let swept = 0;
   const wrong: string[] = [];
   for (const owned of bools)
@@ -154,25 +222,33 @@ process.stdout.write("\nwhen a machine is handed its links again\n");
       for (const relayOnline of bools)
         for (const reachable of bools)
           for (const overLimit of bools)
-            for (const last of lasts)
-              for (const tooOldOn of tooOlds)
-                for (const failedAt of fails)
-                  for (const force of bools) {
-                    swept += 1;
-                    const one = machine("m_a", { owned, enrolled, relayOnline, reachable, overLimit });
-                    const got = linkSyncDecision({ machine: one, targets: ["m_b", "m_c"], last, tooOldOn, failedAt, now, force }).sync;
-                    const eligible = owned && enrolled && relayOnline && reachable && !overLimit;
-                    const tooOld = tooOldOn !== undefined && tooOldOn === one.daemon;
-                    const waiting = failedAt !== null && now - failedAt < LINK_RETRY_AFTER_MS;
-                    const due =
-                      last === null ||
-                      last.targets.join() !== "m_b,m_c" ||
-                      (last.earliestExpiresAt !== null && last.earliestExpiresAt - now < LINK_RENEW_WITHIN_MS) ||
-                      now - last.syncedAt > LINK_RESYNC_AFTER_MS;
-                    const want = eligible && !tooOld && (force || (!waiting && due));
-                    if (got !== want) wrong.push(JSON.stringify({ owned, enrolled, relayOnline, reachable, overLimit, last, tooOldOn, failedAt, force }));
-                  }
-  report("the sweep covered the whole grid", swept === 2 ** 6 * lasts.length * tooOlds.length * fails.length, `${String(swept)} cases`);
+            for (const messaging of bools)
+              for (const isolated of bools)
+              for (const last of lasts)
+                for (const tooOldOn of tooOlds)
+                  for (const failedAt of fails)
+                    for (const force of bools) {
+                      swept += 1;
+                      const one = machine("m_a", { owned, enrolled, relayOnline, reachable, overLimit, messaging, isolated });
+                      const got = linkSyncDecision({ machine: one, targets: ["m_b", "m_c"], last, tooOldOn, failedAt, now, force }).sync;
+                      const handed = last === null || !("messaging" in last) ? true : last.messaging;
+                      const handedIsolated = last !== null && "isolated" in last ? last.isolated : false;
+                      const moved = handed !== messaging || handedIsolated !== isolated;
+                      const eligible = owned && enrolled && reachable && (relayOnline || moved || force) && !overLimit;
+                      const tooOld = tooOldOn !== undefined && tooOldOn === one.daemon;
+                      const waiting = failedAt !== null && now - failedAt < (moved ? POLICY_RETRY_AFTER_MS : LINK_RETRY_AFTER_MS);
+                      const due =
+                        last === null ||
+                        moved ||
+                        last.targets.join() !== "m_b,m_c" ||
+                        (last.earliestExpiresAt !== null && last.earliestExpiresAt - now < LINK_RENEW_WITHIN_MS) ||
+                        now - last.syncedAt > LINK_RESYNC_AFTER_MS;
+                      const want = eligible && !tooOld && (force || (!waiting && due));
+                      if (got !== want) {
+                        wrong.push(JSON.stringify({ owned, enrolled, relayOnline, reachable, overLimit, messaging, isolated, last, tooOldOn, failedAt, force }));
+                      }
+                    }
+  report("the sweep covered the whole grid", swept === 2 ** 8 * lasts.length * tooOlds.length * fails.length, `${String(swept)} cases`);
   check("and the decision matches the oracle on every one of them", wrong.slice(0, 3), []);
 
   check(
@@ -191,6 +267,28 @@ process.stdout.write("\nwhen a machine is handed its links again\n");
       "m_a",
     ),
     ["m_b", "m_offline", "m_z"],
+  );
+  check(
+    "a machine with messaging off is nobody's target, and one that is off itself has none",
+    [
+      linkTargets([machine("m_a"), machine("m_b"), machine("m_quiet", { messaging: false })], "m_a"),
+      linkTargets([machine("m_a", { messaging: false }), machine("m_b")], "m_a"),
+    ],
+    [["m_b"], []],
+  );
+  check(
+    "an isolated machine is nobody's target and has none, while it still messages at home (Q2.244)",
+    [
+      linkTargets([machine("m_a"), machine("m_b"), machine("m_alone", { isolated: true })], "m_a"),
+      linkTargets([machine("m_a", { isolated: true }), machine("m_b")], "m_a"),
+    ],
+    [["m_b"], []],
+  );
+  const alone = machine("m_a", { isolated: true });
+  check(
+    "isolating a machine, or letting it out again, is a policy to hand over like the switch",
+    [decide({ machine: alone }).why, decide({ last: record({ isolated: true }) }).why, decide({ machine: alone, last: record({ isolated: true }) }).why],
+    ["policy_changed", "policy_changed", "current"],
   );
 }
 
@@ -219,6 +317,7 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   const calls: string[] = [];
   const minted = new Map<string, Grant[]>();
   const pushedLinks = new Map<string, readonly Grant[]>();
+  const pushedPolicy = new Map<string, unknown>();
   let daemonRefusal: ((id: string) => unknown) | null = null;
   let controlPlaneRefusal: unknown = null;
   const sync = new LinkSync({
@@ -227,11 +326,12 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
       if (controlPlaneRefusal !== null) throw controlPlaneRefusal;
       const answer = grants(id);
       minted.set(id, answer);
-      return answer;
+      return { links: answer };
     },
-    push: async (id, links) => {
+    push: async (id, links, policy) => {
       calls.push(`push ${id}`);
       pushedLinks.set(id, links);
+      pushedPolicy.set(id, policy);
       const refusal = daemonRefusal?.(id);
       if (refusal !== undefined) throw refusal;
       return { links: [] };
@@ -267,9 +367,14 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   );
   const held = readLinkRecord(linkRecordKey(scope, "m_a"));
   check(
-    "what was handed over is remembered: the earliest expiry, when, and who it would link to by this client's count",
+    "what was handed over is remembered: the earliest expiry, when, who it would link to by this client's count, and the switches",
     held,
-    { targets: ["m_b", "m_c", "m_off"], earliestExpiresAt: clock + 60 * DAY, syncedAt: clock },
+    { targets: ["m_b", "m_c", "m_off"], earliestExpiresAt: clock + 60 * DAY, syncedAt: clock, messaging: true, isolated: false },
+  );
+  check(
+    "a control plane that answered no policy hands the daemon none, so an older server never switches one off",
+    ["m_a", "m_b", "m_c"].map((id) => pushedPolicy.get(id)),
+    [null, null, null],
   );
   check(
     "under a key naming the server, the account and the machine",
@@ -305,7 +410,7 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   const withOld = [...fleet, machine("m_d"), old];
   const first = await sync.syncOne(scope, withOld, "m_old");
   check("an older daemon's 404 is recognised as one", first.outcome, "daemon_too_old");
-  check("and says so to the screen, without calling it a failure", sync.status(old), { tooOld: true, failure: null });
+  check("and remembers it, without calling it a failure", sync.status(old), { tooOld: true, failure: null, env: null });
   calls.length = 0;
   clock += 2 * DAY;
   await sync.syncAll(scope, withOld);
@@ -353,7 +458,7 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
     link: async (id) => {
       calls.push(`link ${id}`);
       await gate;
-      return grants(id);
+      return { links: grants(id) };
     },
     push: async (id) => {
       calls.push(`push ${id}`);
@@ -383,7 +488,7 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   let threw = false;
   try {
     const answered = await new LinkSync({
-      link: async (id) => grants(id),
+      link: async (id) => ({ links: grants(id) }),
       push: async () => undefined,
       now: () => clock,
     }).syncOne(scope, fleet, "m_a");
@@ -397,7 +502,7 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   storage.delete("reemoat.agentLinks");
 }
 
-process.stdout.write("\na Replace the machine could not take is still owed at the next wake\n");
+process.stdout.write("\na forced sync the machine could not take is still owed at the next wake\n");
 {
   let clock = 1_800_000_000_000;
   const scope = { origin: "https://cp.example", account: "u_1" };
@@ -412,7 +517,7 @@ process.stdout.write("\na Replace the machine could not take is still owed at th
     link: async (id: string) => {
       calls.push(`link ${id}`);
       if (linkRefusal !== null) throw linkRefusal;
-      return grants();
+      return { links: grants() };
     },
     push: async (id: string) => {
       calls.push(`push ${id}`);
@@ -422,7 +527,7 @@ process.stdout.write("\na Replace the machine could not take is still owed at th
   };
   const sync = new LinkSync(deps);
   const online = [machine("m_a"), machine("m_b")];
-  const offline = [machine("m_a", { relayOnline: false }), machine("m_b")];
+  const offline = [machine("m_a", { relayOnline: false, reachable: false }), machine("m_b")];
   const wake = async (on = sync): Promise<string[]> => {
     calls.length = 0;
     await on.syncAll(scope, online);
@@ -435,7 +540,7 @@ process.stdout.write("\na Replace the machine could not take is still owed at th
   check("a machine handed its links a minute ago is left alone", await wake(), []);
 
   const unreached = await sync.syncOne(scope, offline, "m_a", true);
-  check("a Replace cannot reach a machine that is offline", [unreached.verdict.why, unreached.outcome], ["offline", "skipped"]);
+  check("a forced sync cannot reach a machine this app cannot reach", [unreached.verdict.why, unreached.outcome], ["offline", "skipped"]);
   check("and forgets what was last handed to it", readLinkRecord(key), null);
   clock += 60_000;
   check("so the next wake that reaches it hands it a new set, not one a day later", await wake(), ["link m_a", "push m_a"]);
@@ -451,7 +556,7 @@ process.stdout.write("\na Replace the machine could not take is still owed at th
 
   pushRefusal = new ApiError(503, "no_tunnel", "that machine is not connected");
   const unpushed = await sync.syncOne(scope, online, "m_a", true);
-  check("a Replace the daemon did not take is a failure, and leaves no record", [unpushed.outcome, readLinkRecord(key)], ["failed", null]);
+  check("a forced sync the daemon did not take is a failure, and leaves no record", [unpushed.outcome, readLinkRecord(key)], ["failed", null]);
   pushRefusal = null;
   clock += LINK_RETRY_AFTER_MS - 1;
   check("it waits out the retry interval like any other failure", await wake(), []);
@@ -466,7 +571,7 @@ process.stdout.write("\na Replace the machine could not take is still owed at th
   check("which the next wake past the interval hands over", await wake(), ["link m_a", "push m_a"]);
 
   const landed = await sync.syncOne(scope, online, "m_a", true);
-  check("a Replace that lands is remembered like any sync", [landed.outcome, readLinkRecord(key)?.syncedAt], ["synced", clock]);
+  check("a forced sync that lands is remembered like any sync", [landed.outcome, readLinkRecord(key)?.syncedAt], ["synced", clock]);
   clock += 60_000;
   check("so the wake after it asks nothing", await wake(), []);
 
@@ -487,153 +592,220 @@ process.stdout.write("\na Replace the machine could not take is still owed at th
   release();
   const [first, forced] = await Promise.all([inFlight, behind]);
   check(
-    "a Replace behind a wake in flight forgets the record that wake wrote, since it may name the revoked token",
+    "a forced sync behind a wake in flight forgets the record that wake wrote, since it may name a revoked token",
     [first.outcome, forced.verdict.why, readLinkRecord(key)],
     ["synced", "offline", null],
   );
   storage.delete("reemoat.agentLinks");
 }
 
-process.stdout.write("\nthe Agent links screen's rows\n");
+process.stdout.write("\nthe messaging policy rides the links, and only as the control plane said it (Q1.654)\n");
 {
-  const links = [
-    { id: "lk_2", source: { id: "m_z", name: "zeta" }, target: { id: "m_a", name: "laptop" }, createdAt: 2 },
-    { id: "lk_1", source: { id: "m_a", name: "laptop" }, target: { id: "m_z", name: "zeta" }, createdAt: 1 },
-    { id: "lk_3", source: { id: "m_b", name: "beta" }, target: { id: "m_a", name: "laptop" }, createdAt: 3 },
-    { id: "lk_x", source: { id: "m_b", name: "beta" }, target: { id: "m_z", name: "zeta" }, createdAt: 4 },
-  ];
-  const rows = linkRows(links, "m_a");
-  check(
-    "each row names the other machine and which way it goes, grouped by machine, outgoing first",
-    rows.map((row) => `${LINK_DIRECTION_TEXT[row.direction]} ${row.other.name}`),
-    ["can be messaged by beta", "can message zeta", "can be messaged by zeta"],
-  );
-  check("a link between two other machines is not this machine's row", rows.some((row) => row.id === "lk_x"), false);
-  check(
-    "and every row knows whose daemon holds its token",
-    rows.map((row) => row.source),
-    ["m_b", "m_a", "m_z"],
-  );
-  const out = rows.find((row) => row.id === "lk_1");
-  const into = rows.find((row) => row.id === "lk_2");
-  if (out === undefined || into === undefined) throw new Error("fixture rows missing");
-  const view = (id: string, lastError: string | null) => ({
-    id,
-    target: { id: "m_z", name: "zeta", relayUrl: null },
-    expiresAt: 0,
-    lastError,
-    lastErrorAt: lastError === null ? null : 1,
+  const clock = 1_800_000_000_000;
+  const scope = { origin: "https://cp.example", account: "u_1" };
+  const grant: Grant = {
+    id: "lk_a_b",
+    token: "tok",
+    expiresAt: clock + 90 * DAY,
+    target: { id: "m_b", name: "studio", key: "k_b", relayUrl: null },
+  };
+  const pushed: { id: string; links: readonly Grant[]; policy: unknown }[] = [];
+  let answer: { messaging?: boolean; policyAt?: number } = {};
+  let echo: unknown = undefined;
+  const sync = new LinkSync({
+    link: async () => ({ links: [grant], ...answer }),
+    push: async (id, links, policy) => {
+      pushed.push({ id, links, policy });
+      return echo === undefined ? { links: [] } : { links: [], messaging: echo };
+    },
+    now: () => clock,
   });
+  storage.delete("reemoat.agentLinks");
+  const fleet = [machine("m_a", { messaging: false }), machine("m_b")];
+
+  answer = { messaging: false, policyAt: 7 };
+  echo = { policy: false, isolated: false, env: true, policyAt: 7 };
+  await sync.syncOne(scope, fleet, "m_a");
   check(
-    "an outgoing row carries the daemon's last error, and nothing when there is none",
-    [linkNote(out, [view("lk_1", "peer_too_old: zeta's daemon is older than agent links")], "laptop"), linkNote(out, [view("lk_1", null)], "laptop")],
-    [{ text: "peer_too_old: zeta's daemon is older than agent links", failed: true }, null],
+    "the control plane's flag and stamp reach the daemon beside the very links it answered",
+    [pushed[0]?.policy, pushed[0]?.links[0] === grant],
+    [{ messaging: false, policyAt: 7 }, true],
   );
   check(
-    "one the daemon does not hold says so rather than claiming a link that cannot be used",
-    linkNote(out, [], "laptop"),
-    { text: "Not handed to laptop yet.", failed: false },
+    "and what was handed over is remembered, so a moved switch is noticed",
+    [readLinkRecord(linkRecordKey(scope, "m_a"))?.messaging, readLinkRecord(linkRecordKey(scope, "m_a"))?.policyAt],
+    [false, 7],
+  );
+  check("a daemon's echo is kept for the one thing read from it, its own configuration", sync.status(fleet[0]!), {
+    tooOld: false,
+    failure: null,
+    env: true,
+  });
+
+  pushed.length = 0;
+  answer = { messaging: false };
+  echo = undefined;
+  await sync.syncOne(scope, fleet, "m_a", true);
+  check("a stamp the control plane left out is not made up", pushed[0]?.policy, { messaging: false });
+  check("and a daemon whose answer echoes nothing says nothing about it", sync.status(fleet[0]!).env, null);
+
+  echo = { policy: false, isolated: false, env: false, policyAt: 7 };
+  await sync.syncOne(scope, fleet, "m_a", true);
+  check("a daemon switched off in its own configuration says so", sync.status(fleet[0]!).env, false);
+
+  check(
+    "the echo is read field by field, and anything malformed is an older daemon's silence",
+    [
+      messagingEcho({ messaging: { policy: true, isolated: true, env: true, policyAt: 1 } }),
+      messagingEcho({ messaging: { policy: "yes", isolated: false, env: true, policyAt: 1 } }),
+      messagingEcho({ messaging: { policy: true, isolated: false, env: true } }),
+      messagingEcho({ messaging: { policy: true, env: true, policyAt: 1 } }),
+      messagingEcho({ messaging: null }),
+      messagingEcho({ links: [] }),
+      messagingEcho(null),
+    ],
+    [{ policy: true, isolated: true, env: true, policyAt: 1 }, null, null, null, null, null, null],
+  );
+
+  pushed.length = 0;
+  const minted: string[] = [];
+  let answers = [
+    { messaging: true, policyAt: 8 },
+    { messaging: false, policyAt: 9 },
+  ];
+  const stale = new LinkSync({
+    link: async (id) => {
+      minted.push(id);
+      const next = answers.shift() ?? { messaging: false, policyAt: 9 };
+      return { links: [], ...next };
+    },
+    push: async (id, links, policy) => {
+      pushed.push({ id, links, policy });
+      return { links: [], messaging: { policy: false, isolated: false, env: true, policyAt: 9 } };
+    },
+    now: () => clock,
+  });
+  await stale.syncOne(scope, fleet, "m_a", true);
+  check(
+    "an answer minted before somebody moved the switch is asked for again, once",
+    [minted.length, pushed.map((one) => one.policy)],
+    [2, [{ messaging: true, policyAt: 8 }, { messaging: false, policyAt: 9 }]],
+  );
+  minted.length = 0;
+  answers = [
+    { messaging: true, policyAt: 8 },
+    { messaging: true, policyAt: 8 },
+    { messaging: true, policyAt: 8 },
+  ];
+  await stale.syncOne(scope, fleet, "m_a", true);
+  check("and never more than once, whatever the daemon keeps saying", minted.length, 2);
+
+  pushed.length = 0;
+  storage.delete("reemoat.agentLinks");
+  let refusal: unknown = new ApiError(409, "machine_key_missing", "no key", { messaging: true, policyAt: 11 });
+  const keyless = new LinkSync({
+    link: async () => {
+      throw refusal;
+    },
+    push: async (id, links, policy) => {
+      pushed.push({ id, links, policy });
+      return { links: [], messaging: { policy: true, isolated: false, env: true, policyAt: 11 } };
+    },
+    now: () => clock,
+  });
+  const refused = await keyless.syncOne(scope, fleet, "m_a", true);
+  check(
+    "a machine that can hold no link is still handed its switch, with an empty set, and the link failure stands",
+    [refused.outcome, pushed[0]?.links.length, pushed[0]?.policy, keyless.status(fleet[0]!).failure?.text],
+    ["failed", 0, { messaging: true, policyAt: 11 }, "no key"],
   );
   check(
-    "while an incoming row, or a daemon not read yet, says nothing",
-    [linkNote(into, [view("lk_2", "boom")], "laptop"), linkNote(out, null, "laptop")],
-    [null, null],
+    "and the handover is remembered without calling its links synced",
+    [readLinkRecord(linkRecordKey(scope, "m_a"))?.messaging, readLinkRecord(linkRecordKey(scope, "m_a"))?.syncedAt],
+    [true, 0],
+  );
+  pushed.length = 0;
+  refusal = new ApiError(503, "no_signing_key", "no signing key");
+  await keyless.syncOne(scope, fleet, "m_a", true);
+  refusal = new ApiError(409, "machine_key_missing", "no key", { messaging: "yes", policyAt: 11 });
+  await keyless.syncOne(scope, fleet, "m_a", true);
+  check("but never from a refusal that carries no policy, or a malformed one", pushed.length, 0);
+  storage.delete("reemoat.agentLinks");
+
+
+  storage.set(
+    "reemoat.agentLinks",
+    JSON.stringify({
+      [linkRecordKey(scope, "m_old")]: { targets: ["m_b"], earliestExpiresAt: null, syncedAt: clock },
+      [linkRecordKey(scope, "m_bad")]: { targets: ["m_b"], earliestExpiresAt: null, syncedAt: clock, messaging: "off" },
+    }),
+  );
+  check(
+    "a record written before the flag still reads, as on, while one with a mangled flag is dropped",
+    [
+      readLinkRecord(linkRecordKey(scope, "m_old")) !== null,
+      linkSyncDecision({ machine: machine("m_old"), targets: ["m_b"], last: readLinkRecord(linkRecordKey(scope, "m_old")), tooOldOn: undefined, failedAt: null, now: clock }).why,
+      readLinkRecord(linkRecordKey(scope, "m_bad")),
+    ],
+    [true, "current", null],
+  );
+  storage.delete("reemoat.agentLinks");
+}
+
+process.stdout.write("\nnothing is said under a switch: the account's outranks the machine's (Q3.675)\n");
+{
+  const machinePage = stripComments(srcFile("ui/settings/MachineSection.tsx"));
+  const fn = machinePage.slice(machinePage.indexOf("function MachineMessaging("), machinePage.indexOf("function RenameMachine("));
+  const permissions = stripComments(srcFile("ui/settings/PermissionsSection.tsx"));
+  const agentLinks = stripComments(srcFile("agentLinks.ts"));
+  check(
+    "no line explains a switch, on the machine page or on Permissions",
+    [/<p className="[^"]*text-muted/.test(fn), /Not in force|not in force/.test(permissions), /MESSAGING_NOTE_TEXT|messagingNotes|notInForce/.test(agentLinks)],
+    [false, false, false],
+  );
+  check(
+    "the machine's switch is drawn off and locked by the account's switch and by its own configuration",
+    /const locked = accountOn === false \|\| \(own && !effective\) \|\| store\.linkStatus\(machine\.id\)\?\.env === false;/.test(fn) &&
+      /on=\{messagingOn\}/.test(fn) &&
+      /disabled=\{locked \|\|/.test(fn),
+    true,
   );
 }
 
-process.stdout.write("\nwhere Agent links lives, and what reaches it\n");
+process.stdout.write("\nthere is no Agent links screen (Q3.676)\n");
 {
-  const { agentLinksPath, parseSettingsRoute, settingsPaneTitle, settingsUp, settingsUpLabel } = await import(
-    "../src/settings.js"
-  );
-  const { depthOf, navMove } = await import("../src/nav.js");
-  const seg = (path: string): string[] => path.split("/").filter((part) => part.length > 0).slice(1);
-  const links = parseSettingsRoute(seg(agentLinksPath("m_1" as never)));
-  check("the address is under its machine", agentLinksPath("m_1" as never), "/settings/machines/m_1/links");
-  check("and parses back to the machine's links screen", links, {
-    section: "machines",
-    machineId: "m_1",
-    system: null,
-    signin: null,
-    agents: false,
-    links: true,
-    leaf: null,
-  });
+  const { parseSettingsRoute, settingsPaneTitle, settingsUp } = await import("../src/settings.js");
+  const { depthOf } = await import("../src/nav.js");
+  const { existsSync, readdirSync, readFileSync: read } = await import("node:fs");
+  const old = parseSettingsRoute(["machines", "m_1", "links"]);
   check(
-    "no other address is the links screen",
+    "an old /settings/machines/:id/links address falls up to its machine, as any unknown leaf does",
+    [old, settingsPaneTitle(old), settingsUp(old)],
+    [parseSettingsRoute(["machines", "m_1"]), settingsPaneTitle(parseSettingsRoute(["machines", "m_1"])), settingsUp(parseSettingsRoute(["machines", "m_1"]))],
+  );
+  check("and sits at the machine's depth", depthOf({ name: "settings", ...old } as never), 3);
+  check("the route carries no flag for it", "links" in old, false);
+
+  const root = new URL("../src/", import.meta.url);
+  check("the screen's file is gone", existsSync(new URL("ui/settings/MachineLinksSection.tsx", root)), false);
+  const walk = (dir: URL): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? walk(new URL(`${entry.name}/`, dir)) : /\.tsx?$/.test(entry.name) ? [new URL(entry.name, dir).pathname] : [],
+    );
+  const mentions = walk(root).filter((file) => /Agent links|MachineLinksSection|agentLinksPath|resyncLinks|revokeLink|machineLinks\(/.test(stripComments(read(file, "utf8"))));
+  check("nothing in the client names it, draws it or calls for it", mentions, []);
+
+  const cp = stripComments(srcFile("cp.ts"));
+  const daemon = stripComments(srcFile("daemon.ts"));
+  check(
+    "the client asks the control plane only to mint links, and the daemon only to take them",
     [
-      parseSettingsRoute(["machines", "m_1"]).links,
-      parseSettingsRoute(["machines", "m_1", "agents"]).links,
-      parseSettingsRoute(["machines", "m_1", "systems", "moonshot"]).links,
-      parseSettingsRoute(["machines", "m_1", "signin", "claude"]).links,
-      parseSettingsRoute(["account", "links"]).links,
-      parseSettingsRoute(["machines", "links"]).links,
+      (cp.match(/\/links`/g) ?? []).length,
+      /`\/v1\/links\//.test(cp),
+      (daemon.match(/"\/peers\/links"/g) ?? []).length,
+      /request\("\/peers\/links", \{ method: "PUT"/.test(daemon),
     ],
-    [false, false, false, false, false, false],
-  );
-  check("and a segment under it falls to the screen rather than past it", parseSettingsRoute(["machines", "m_1", "links", "lk_1"]).links, true);
-  check("its chevron goes up to its machine, never to the list", settingsUp(links), { path: "/settings/machines/m_1", withinNav: false });
-  check("and says so", [settingsPaneTitle(links), settingsUpLabel(links)], ["Agent links", "Machine settings"]);
-  const at = (segments: string[]) => ({ name: "settings", ...parseSettingsRoute(segments) }) as never;
-  check("it is a fourth depth, beside the Agents list", [depthOf(at(["machines", "m_1", "links"])), depthOf(at(["machines", "m_1", "agents"]))], [4, 4]);
-  check(
-    "so opening it from the machine slides in and its chevron slides back",
-    [navMove(at(["machines", "m_1"]), at(["machines", "m_1", "links"])), navMove(at(["machines", "m_1", "links"]), at(["machines", "m_1"]))],
-    ["section-push", "section-pop"],
-  );
-
-  const app = stripComments(srcFile("App.tsx"));
-  check("and it is a screen of its own in the sheet, not the machine's", /route\.links \? "links"/.test(app), true);
-
-  const settings = stripComments(srcFile("ui/settings/Settings.tsx"));
-  check("Settings draws the screen from one place", (settings.match(/<MachineLinksSection /g) ?? []).length, 1);
-  check("behind the machine's own flag", /route\.links \? \(\s*<MachineLinksSection state=\{state\} machineId=\{route\.machineId\} \/>/.test(settings), true);
-
-  const section = stripComments(srcFile("ui/settings/MachineSection.tsx"));
-  const row = section.indexOf('title="Agent links"');
-  const opens = section.lastIndexOf("{owned && machine.enrolled && (", row);
-  const gateOpens = section.indexOf("{listable ? (");
-  const gateCloses = section.indexOf("\n      )}", gateOpens);
-  const local = section.indexOf("<LocalPath ");
-  report(
-    "the machine's screen reaches it by a row, for its owner, once it is enrolled",
-    row > 0 && opens > 0 && row - opens < 200,
-    `row at ${String(row)}, gate at ${String(opens)}`,
-  );
-  check("the row leaves the screen rather than opening under itself", /onClick=\{\(\) => navigate\(agentLinksPath\(machineId\)\)\}/.test(section), true);
-  report(
-    "outside the reachability gate, since the links are the control plane's",
-    gateCloses > gateOpens && opens > gateCloses && row < local,
-    `gate ${String(gateOpens)}..${String(gateCloses)}, row at ${String(row)}, this device at ${String(local)}`,
-  );
-
-  const screen = stripComments(srcFile("ui/settings/MachineLinksSection.tsx"));
-  check("the screen is a table, per the rule for anything holding a credential", /<LinkTable>/.test(screen) && /<table /.test(screen), true);
-  check(
-    "whose Replace is one tap, like an API key's revoke, since ending a token widens nothing",
-    [/<TwoStep/.test(screen), /\{busy \? <Spinner \/> : "Replace"\}/.test(screen)],
-    [false, true],
-  );
-  check(
-    "and it re-syncs the machine that held the token, then reads both lists again",
-    /\.then\(\(\) => store\.resyncLinks\(asMachineId\(row\.source\)\)\)\s*\.then\(\(\) => Promise\.all\(\[loadLinks\(\), loadHeld\(\)\]\)\)/.test(screen),
-    true,
-  );
-  check("the screen says why the list is what it is", /It lists your own machines on this\s+server and nothing else/.test(screen), true);
-  check(
-    "and, plainly, when this machine's daemon is too old for any of it",
-    /\{machine\.name\}’s daemon needs updating before its agents can reach other machines\./.test(screen),
-    true,
-  );
-  check("reading that off the daemon's bare 404 through the one predicate", /meansRouteAbsent\(cause\)/.test(screen) && !/http_404/.test(screen), true);
-  check("and it says the pair is linked again, since the next sync mints a new link", /this app then hands the machine a new\s+one/.test(screen), true);
-  check(
-    "a server older than links is said once, with no retry that would ask it again",
-    [
-      /cause\.code === "not_found" \? "absent" : "failed"/.test(screen),
-      /links === "absent" \? \(\s*<Empty>This server is too old for agent links\.<\/Empty>/.test(screen),
-    ],
-    [true, true],
+    [1, false, 1, true],
   );
 }
 
@@ -663,18 +835,22 @@ process.stdout.write("\nthe sync rides the machine list, and nothing else\n");
 
   const daemon = stripComments(srcFile("daemon.ts"));
   check(
-    "the daemon is sent { links } and nothing wrapped around them",
-    /request\("\/peers\/links", \{ method: "PUT", body: JSON\.stringify\(\{ links \}\) \}\)/.test(daemon),
-    true,
+    "the daemon is sent { links } unread, with the control plane's policy beside them only when it answered one",
+    [
+      /const body = policy === null \? \{ links \} : \{ links, \.\.\.policy \};/.test(daemon),
+      /request\("\/peers\/links", \{ method: "PUT", body: JSON\.stringify\(body\) \}\)/.test(daemon),
+    ],
+    [true, true],
+  );
+  check(
+    "and the policy is only ever what the control plane typed as one",
+    [/typeof body\.messaging === "boolean"/.test(stripComments(srcFile("cp.ts"))), /answer\.messaging === undefined\s*\? null/.test(module)],
+    [true, true],
   );
   const cp = stripComments(srcFile("cp.ts"));
   check(
-    "and the three control-plane routes are the contract's",
-    [
-      /`\/v1\/machines\/\$\{encodeURIComponent\(id\)\}\/links`, \{\s*method: "POST",/.test(cp),
-      /cpFetch<\{ links: MachineLinkRecord\[\] \}>\(`\/v1\/machines\/\$\{encodeURIComponent\(id\)\}\/links`\)/.test(cp),
-      /`\/v1\/links\/\$\{encodeURIComponent\(id\)\}`, \{ method: "DELETE" \}/.test(cp),
-    ],
-    [true, true, true],
+    "and the one control-plane route is the contract's",
+    /`\/v1\/machines\/\$\{encodeURIComponent\(id\)\}\/links`, \{\s*method: "POST",/.test(cp),
+    true,
   );
 }

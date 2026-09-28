@@ -9,7 +9,7 @@ import {
   type Ref,
   type RefObject,
 } from "react";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Server, X } from "lucide-react";
 import { errorText } from "../http";
 import { listNavKey, nextOptionIndex } from "../keys";
 import { folderLabel, shortPath } from "../paths";
@@ -67,6 +67,22 @@ export function sessionLabel(
   const title = row.snapshot.title?.trim();
   if (title !== undefined && title.length > 0) return title;
   return folderLabel(row.snapshot.workspace.requestedCwd, roots);
+}
+
+/** A machine where a session line names it: the server mark, then the name, which is what truncates. Q3.681. */
+export function MachineLabel({ name, className = "" }: { name: string; className?: string }): ReactNode {
+  return (
+    <span className={`flex min-w-0 items-center gap-1 ${className}`}>
+      <Icon as={Server} size={12} />
+      <span className="truncate">{name}</span>
+    </span>
+  );
+}
+
+/** `@mira`, drawn under what the session is about rather than instead of it; null from a daemon older than nicknames. Q3.677. */
+export function nicknameLine(snapshot: { nickname?: string | null }): string | null {
+  const name = snapshot.nickname;
+  return typeof name === "string" && name.length > 0 ? `@${name}` : null;
 }
 
 export type StatusTone =
@@ -856,8 +872,8 @@ export function RailRow({
   return (
     <button
       onClick={onClick}
-      className={`tap press flex min-h-11 w-full items-center gap-2 px-4 py-3.5 text-left hover:bg-raised ${
-        active ? "bg-raised" : ""
+      className={`tap press flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-3 text-left ${
+        active ? "bg-raised" : "hover:bg-raised/50"
       }`}
     >
       <span className="min-w-0 flex-1">
@@ -924,6 +940,70 @@ export function ChoiceRow({
           {selected && <Icon as={Check} size={14} />}
         </span>
       )}
+    </button>
+  );
+}
+
+/**
+ * A switch's track and knob, and nothing a reader can press: the row around it carries `role="switch"`. On, the knob is
+ * `bg-fg`, a glyph-sized mark, and the track takes `raised`, the tone this app gives state (Q3.209, Q3.670).
+ */
+export function SwitchKnob({ on }: { on: boolean }): ReactNode {
+  return (
+    <span
+      aria-hidden
+      className={`flex h-5 w-9 shrink-0 items-center rounded-full border border-edge-strong ${on ? "bg-raised" : ""}`}
+    >
+      <span
+        data-keeps-motion=""
+        className={`size-3.5 rounded-full transition-transform duration-200 ease-out ${
+          on ? "translate-x-4.5 bg-fg" : "translate-x-0.5 bg-edge-strong"
+        }`}
+      />
+    </span>
+  );
+}
+
+/**
+ * A settings row that is a switch. It draws what the server last answered and never the press: `busy` holds it while
+ * the write is out, so a switch waiting on a server reads as waiting rather than as flipped (Q3.220, Q3.675).
+ */
+export function SwitchRow({
+  title,
+  subline = null,
+  on,
+  busy = false,
+  disabled = false,
+  onToggle,
+}: {
+  title: string;
+  subline?: string | null;
+  on: boolean;
+  busy?: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}): ReactNode {
+  const still = busy || disabled;
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-busy={busy || undefined}
+      disabled={still}
+      onClick={onToggle}
+      className={`tap press flex min-h-14 w-full items-center gap-2.5 rounded-lg ${
+        disabled ? "border border-edge" : "border border-edge-strong"
+      } bg-surface px-3 text-left ${still ? "" : "hover:bg-raised"}`}
+    >
+      <span className="min-w-0 flex-1">
+        <span className={`block truncate text-sm ${disabled ? "text-muted" : ""}`}>{title}</span>
+        {subline !== null && subline.length > 0 && (
+          <span className="block truncate text-2xs text-faint">{subline}</span>
+        )}
+      </span>
+      {busy && <Spinner />}
+      <SwitchKnob on={on} />
     </button>
   );
 }

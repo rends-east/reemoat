@@ -21,8 +21,8 @@ export function SettingsNav({
   const rows = navRows(state.me);
 
   return (
-    <nav aria-label="Settings" className="py-1">
-      <ul>
+    <nav aria-label="Settings" className="px-2 py-1">
+      <ul className="space-y-0.5">
         {rows.map(({ spec, heading }) => (
           // `aria-current` rides the item because `RailRow` forwards no attributes.
           <li
@@ -31,7 +31,7 @@ export function SettingsNav({
           >
             {heading !== null && (
               // Inside the item it precedes, since a `ul` may hold only `li`.
-              <h2 className={`px-4 pt-4 pb-1 ${SETTINGS_HEADING}`}>{GROUP_TITLES[heading]}</h2>
+              <h2 className={`px-3 pt-4 pb-1 ${SETTINGS_HEADING}`}>{GROUP_TITLES[heading]}</h2>
             )}
             <RailRow
               title={spec.title}

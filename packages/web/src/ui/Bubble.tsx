@@ -2,21 +2,25 @@ import { Download, Paperclip } from "lucide-react";
 import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { formatBytes } from "../paths";
 import { previewable } from "../preview";
-import type { PromptAttachmentRef } from "../wire";
+import type { PromptAttachmentRef, PromptMention } from "../wire";
 import type { FileAccess } from "./files";
 import { ImagePreview } from "./ImagePreview";
 import { Icon } from "./bits";
 import { hugBubble } from "./hug";
+import { MentionText } from "./MentionLink";
 
 /** The person's message as a right-aligned bubble, one component for every call site, drawn exactly as sent: never parsed (Q3.646). */
 export function UserBubble({
   text,
   attachments = [],
   files = null,
+  mentions,
 }: {
   text: string;
   attachments?: readonly PromptAttachmentRef[];
   files?: FileAccess | null;
+  /** The names the daemon resolved for this message, which its `@name` links lead to first. */
+  mentions?: readonly PromptMention[];
 }): ReactNode {
   const box = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
@@ -33,9 +37,11 @@ export function UserBubble({
         className="sel-root ml-auto w-fit min-w-0 max-w-[85%] select-none rounded-xl rounded-br-md bg-raised px-3.5 py-2.5 lg:max-w-[26rem]"
       >
         {/* `sel-root` on the box is what stops WebKit's gap fill (Q3.638). */}
-        {/* One text node, which is what `hug.ts` measures; `pre-wrap` keeps every space and break, `wrap-anywhere` breaks a long token. */}
+        {/* The words as typed, each `@name` a link (Q3.682); `hug.ts` joins a line's text nodes. `pre-wrap` keeps every space and break, `wrap-anywhere` breaks a long token. */}
         {text.trim().length > 0 && (
-          <div className="select-text text-sm whitespace-pre-wrap text-fg wrap-anywhere">{text}</div>
+          <div className="select-text text-sm whitespace-pre-wrap text-fg wrap-anywhere">
+            <MentionText text={text} mentions={mentions} />
+          </div>
         )}
         {attachments.length > 0 && (
           <ul className="mt-1.5 space-y-1 select-text">

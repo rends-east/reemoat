@@ -378,6 +378,53 @@ process.stdout.write("\nwhat a plugin is allowed to ask the daemon for\n");
     // Not `sessions.read`: reading an agent's model list spawns that agent.
     ["model.list", "model"],
   ]);
+
+  // Through the registry's one door for a nickname, so a plugin is refused exactly where the route is (Q2.245).
+  {
+    const nicknamed = new SessionRegistry(
+      new MemoryEventStore(),
+      storeOf([
+        rowFor("s_plug_a", tmp("plug-nick-a-"), { nickname: "alba" }),
+        rowFor("s_plug_b", tmp("plug-nick-b-"), { nickname: "bruno" }),
+      ]),
+    );
+    nicknamed.restore({ reapOrphans: false });
+    const nicknameApi = new PluginApi({ registry: nicknamed, data: memoryPluginData(), git: hostGit });
+    const writer = manifestWith(["sessions.write"]);
+    const codeOfCall = async (method: string, args: unknown): Promise<string> => {
+      try {
+        await nicknameApi.call(writer, method, args);
+        return "ok";
+      } catch (error) {
+        return error instanceof PluginApiError ? error.code : "threw";
+      }
+    };
+    check(
+      "a plugin may change a session's nickname",
+      [await codeOfCall("sessions.setMeta", { id: "s_plug_a", nickname: "Alma" }), nicknamed.get("s_plug_a")?.nickname],
+      ["ok", "alma"],
+    );
+    check("but not to one another session holds", await codeOfCall("sessions.setMeta", { id: "s_plug_a", nickname: "bruno" }), "nickname_taken");
+    check(
+      "nor to one that is not a nickname, nor to none",
+      [
+        await codeOfCall("sessions.setMeta", { id: "s_plug_a", nickname: "s_x" }),
+        await codeOfCall("sessions.setMeta", { id: "s_plug_a", nickname: null }),
+      ],
+      ["invalid_nickname", "invalid_nickname"],
+    );
+    check("and none of those refusals changed it", nicknamed.get("s_plug_a")?.nickname, "alma");
+    // A cwd that is not there: a create that got past the nickname would fail as session_create_failed instead.
+    check(
+      "a create asking for one that is taken, or is not one, says so rather than failing as a create",
+      [
+        await codeOfCall("sessions.create", { agent: "claude", cwd: "/nowhere-in-particular", nickname: "bruno" }),
+        await codeOfCall("sessions.create", { agent: "claude", cwd: "/nowhere-in-particular", nickname: "-x" }),
+        await codeOfCall("sessions.create", { agent: "claude", cwd: "/nowhere-in-particular", nickname: "free-name" }),
+      ],
+      ["nickname_taken", "invalid_nickname", "session_create_failed"],
+    );
+  }
 }
 
 process.stdout.write("\nasking an agent one question, and every way that is refused\n");

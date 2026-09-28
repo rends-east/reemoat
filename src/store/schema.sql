@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   owner_subject    TEXT,
 
   title            TEXT,
+  -- Unique per machine by the registry's reservation, not an index: an older row may hold a duplicate until restore re-picks it.
+  nickname         TEXT,
   pinned           INTEGER NOT NULL DEFAULT 0,
 
   rank             REAL,

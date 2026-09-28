@@ -294,7 +294,7 @@ person's own message is not markdown at all — see below.
   `::after` this replaced is **gone**, not kept beside it. Blink is byte-identical
   either way, paint and copy. Q3.638.
 - **A person's message is drawn exactly as sent, and never parsed.** `UserBubble`
-  draws one text node, `whitespace-pre-wrap wrap-anywhere`: `1)` stays text, not a
+  draws it as typed, each `@name` a button (Q3.682), `whitespace-pre-wrap wrap-anywhere`: `1)` stays text, not a
   `::marker`; `**x**` stays asterisks. Every row of a person's words is that
   component. ⚠ **Reverses Q3.639**: with no parse there is no `<br>` to double. No
   anchor — it turns a drag into a link drag. The composer sends `sentText` (blank

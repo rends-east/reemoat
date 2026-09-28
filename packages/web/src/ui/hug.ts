@@ -10,6 +10,29 @@ export function hugWidth(lineWidths: readonly number[], chrome: number): number 
   return Math.ceil(widest) + chrome;
 }
 
+export interface LineRect {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/** One width per drawn line, however many text nodes share it: an `@name` link splits a line into three (Q3.682). */
+export function lineSpans(rects: readonly LineRect[]): number[] {
+  const lines: LineRect[] = [];
+  for (const rect of rects) {
+    const middle = (rect.top + rect.bottom) / 2;
+    const line = lines.find((one) => middle >= one.top && middle <= one.bottom);
+    if (line === undefined) {
+      lines.push({ ...rect });
+    } else {
+      line.left = Math.min(line.left, rect.left);
+      line.right = Math.max(line.right, rect.right);
+    }
+  }
+  return lines.map((line) => line.right - line.left);
+}
+
 /** False when a child is laid out to the box, since hugging would clip it: the attachment chips and an image. */
 export function huggable(bubble: Element): boolean {
   return bubble.querySelector("ul, img") === null;
@@ -38,16 +61,16 @@ function reflow(): void {
   });
 }
 
-/** Per text node, never one range over the wrapper, whose own border box would come back as a line. */
+/** Per text node, never one range over the wrapper, whose own border box would come back as a line; then joined per line. */
 function lineWidths(inner: Element): number[] {
-  const lines: number[] = [];
+  const rects: LineRect[] = [];
   const walker = document.createTreeWalker(inner, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
     const range = document.createRange();
     range.selectNodeContents(node);
-    for (const rect of range.getClientRects()) lines.push(rect.width);
+    for (const rect of range.getClientRects()) rects.push({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom });
   }
-  return lines;
+  return lineSpans(rects);
 }
 
 function schedule(): void {

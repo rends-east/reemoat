@@ -262,13 +262,21 @@ export interface PeerOrigin {
   hops: number;
 }
 
+/** A session a person's `@name` named, as the note beside the message resolved it (Q2.246). */
+export interface PromptMention {
+  name: string;
+  ref: string;
+}
+
 export interface PromptEvent {
   type: "prompt";
-  /** Exactly what the agent received, envelope included, so a client that ignores from still shows who wrote it. */
+  /** Exactly the text block the agent received, envelope included, so a client that ignores from still shows who wrote it; files and the mention note are blocks of their own. */
   text: string;
   attachments: PromptAttachmentRef[] | null;
   /** null for a person's message. */
   from: PeerOrigin | null;
+  /** Present only on a person's message whose note named somebody. */
+  mentions?: PromptMention[];
 }
 
 export interface WorkspaceEvent {
@@ -365,6 +373,9 @@ export const MACHINE_SETTING_KEYS = Object.keys(MACHINE_SETTING_MEMBERS) as Mach
 export function isMachineSettingKey(value: unknown): value is MachineSettingKey {
   return typeof value === "string" && Object.hasOwn(MACHINE_SETTING_MEMBERS, value);
 }
+
+/** Beside the settings in machine_settings, and written only by PUT /peers/links: PATCH /settings never names it (Q1.654). */
+export type PeerPolicyKey = "peerMessagesPolicy";
 
 /** Judged by `data.errorKind` only, never the message; never throws. */
 export function isAuthFailure(event: { type: string; data?: unknown }): boolean {
@@ -502,8 +513,11 @@ export interface PersistedSession {
   lastSeq: number;
   dropped: number;
   title: string | null;
+  /** null only on a row an older build wrote; restore() backfills it. */
+  nickname: string | null;
   pinned: boolean;
   rank: number | null;
+  peerMessagesOff: boolean;
   agentState: AgentStateMemory | null;
 }
 
@@ -713,6 +727,12 @@ function attachmentBytes(attachments: PromptAttachmentRef[] | null): number {
   return refBytes(attachments);
 }
 
+function mentionBytes(mentions: readonly PromptMention[] | undefined): number {
+  let total = 0;
+  for (const mention of mentions ?? []) total += 32 + mention.name.length + mention.ref.length;
+  return total;
+}
+
 function refBytes(refs: readonly StoredFileRef[] | null): number {
   if (refs === null) return 0;
   let total = 0;
@@ -774,7 +794,13 @@ export function estimateBytes(event: SessionEvent): number {
       return 64 + event.text.length + (event.messageId?.length ?? 0);
     case "prompt":
       // ?? null: events logged before from existed are read back without it.
-      return 64 + event.text.length + attachmentBytes(event.attachments) + peerOriginBytes(event.from ?? null);
+      return (
+        64 +
+        event.text.length +
+        attachmentBytes(event.attachments) +
+        peerOriginBytes(event.from ?? null) +
+        mentionBytes(event.mentions)
+      );
     case "agent_log":
       return 64 + event.line.length;
     case "context_cleared":
@@ -882,7 +908,7 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "text":
       return { ...event, text: clip(event.text, maxBytes) };
     case "prompt": {
-      const spent = attachmentBytes(event.attachments) + peerOriginBytes(event.from ?? null);
+      const spent = attachmentBytes(event.attachments) + peerOriginBytes(event.from ?? null) + mentionBytes(event.mentions);
       return { ...event, text: clip(event.text, Math.max(maxBytes - spent - 64, 512)) };
     }
     case "agent_log":

@@ -108,6 +108,16 @@ import {
 } from "./machines.js";
 import { DEFAULT_TRUSTED_PROXY_HOPS, callerAddressOf } from "./net.js";
 import {
+  accountMessaging,
+  isolatedMachineIds,
+  machineMessaging,
+  messagingOffMachineIds,
+  messagingPolicy,
+  nextPolicyAt,
+  writeAccountMessaging,
+  writeMachineMessaging,
+} from "./permissions.js";
+import {
   clearMachineLimit,
   effectiveLimit,
   instanceMachineLimit,
@@ -357,7 +367,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const writeThrottle = new LoginThrottle(WRITE_THROTTLE);
 
   // Null means carry on. Recorded with fail, since a legitimate write is still a write.
-  // There are **sixteen** call sites; relaycheck compares that word with the calls.
+  // There are **seventeen** call sites; relaycheck compares that word with the calls.
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
     const key = writeKey(caller.userId, what);
@@ -1255,6 +1265,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       machineCount: owned,
       machineLimit: quota.limit,
       canAddMachine: owned < quota.limit,
+      permissions: { agentMessaging: accountMessaging(db, caller.userId).on },
     });
   });
 
@@ -1657,6 +1668,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     // Over-limit machines are listed, not filtered, so the owner can still retire one.
     const overLimit = overLimitMachineIds(db);
     const ownerDisabled = ownerDisabledMachineIds(db);
+    const accountOn = accountMessaging(db, caller.userId).on;
+    const messagingOff = messagingOffMachineIds(db, caller.userId);
+    const isolated = isolatedMachineIds(db, caller.userId);
     // Names whoever else enrolled a machine for this caller, so a freed name re-registered on someone else's hardware is visible. A name to show, not a flag to trust.
     const enrolledByIds = new Set(
       rows.map((row) => String(row["enrolled_by"] ?? "")).filter((id) => id.length > 0 && id !== caller.userId),
@@ -1692,6 +1706,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         relayOnline: relayOnline(String(row["id"])),
         lastSeenAt: lastSeenAt(String(row["id"])),
         enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? ""), row["enrolled_at"] !== null),
+        // The owner's alone: a grantee is shown neither, so draws no switch it could not throw.
+        ...(row["label"] === null
+          ? {}
+          : {
+              agentMessaging: accountOn && !messagingOff.has(String(row["id"])),
+              agentMessagingMachine: !messagingOff.has(String(row["id"])),
+              agentMessagingIsolated: isolated.has(String(row["id"])),
+            }),
       })),
     });
   });
@@ -1746,6 +1768,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           scopes: [...ALL_SCOPES],
           relayUrl,
           relayOnline: false,
+          agentMessaging: accountMessaging(db, caller.userId).on,
+          agentMessagingMachine: true,
+          agentMessagingIsolated: false,
         },
         enrollment: { code: enrollment.code, expiresAt: enrollment.expiresAt },
         // From the server, not the browser's origin: in dev that is Vite's proxy port, which a machine cannot reach.
@@ -2067,7 +2092,81 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     });
   });
 
-  // Resolved like POST /v1/tokens, then owned by the caller or a 404, so the link routes probe nothing.
+  const readAgentMessaging = (body: Record<string, unknown> | null): boolean | null => {
+    const value = body?.["agentMessaging"];
+    return typeof value === "boolean" ? value : null;
+  };
+
+  // Off revokes in the write's own transaction, so the relay refuses every outstanding link token before any daemon hears (Q1.654).
+  app.put("/v1/me/permissions", async (c) => {
+    const writeGuard = spendWrite(c, "permissions");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const on = readAgentMessaging(await readJsonObject(c));
+    if (on === null) return jsonError(c, 400, "bad_request", "agentMessaging must be true or false");
+    const at = nextPolicyAt(db);
+    db.exec("BEGIN");
+    try {
+      writeAccountMessaging(db, caller.userId, on, at);
+      if (!on) {
+        db.prepare(
+          "UPDATE machine_links SET revoked_at = ? WHERE revoked_at IS NULL AND (" +
+            "source_machine_id IN (SELECT machine_id FROM machine_owners WHERE user_id = ?) OR " +
+            "target_machine_id IN (SELECT machine_id FROM machine_owners WHERE user_id = ?))",
+        ).run(at, caller.userId, caller.userId);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return c.json({ agentMessaging: on, policyAt: at });
+  });
+
+  // The machine's own row; what its daemon enforces is this and its owner's account row together (Q2.244).
+  // Either field alone is a write of that field; isolated is kept while the machine is off.
+  app.put("/v1/machines/:id/permissions", async (c) => {
+    const writeGuard = spendWrite(c, "permissions");
+    if (writeGuard !== null) return writeGuard;
+
+    const body = await readJsonObject(c);
+    const owned = ownedMachine(c);
+    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
+    const given = { on: body?.["agentMessaging"], isolated: body?.["isolated"] };
+    const wellTyped = Object.values(given).every((value) => value === undefined || typeof value === "boolean");
+    if (!wellTyped || (given.on === undefined && given.isolated === undefined)) {
+      return jsonError(c, 400, "bad_request", "give agentMessaging or isolated, each true or false");
+    }
+    const held = machineMessaging(db, owned.id);
+    const next = {
+      on: typeof given.on === "boolean" ? given.on : held.on,
+      isolated: typeof given.isolated === "boolean" ? given.isolated : held.isolated,
+    };
+    const at = nextPolicyAt(db);
+    db.exec("BEGIN");
+    try {
+      writeMachineMessaging(db, owned.id, next, at);
+      // Isolated ends its links as off does, so the relay refuses both directions before its daemon hears (Q1.654).
+      if (!next.on || next.isolated) {
+        db.prepare(
+          "UPDATE machine_links SET revoked_at = ? WHERE revoked_at IS NULL AND " +
+            "(source_machine_id = ? OR target_machine_id = ?)",
+        ).run(at, owned.id, owned.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return c.json({
+      agentMessaging: next.on,
+      isolated: next.isolated,
+      policyAt: messagingPolicy(db, owned.userId, owned.id).at,
+    });
+  });
+
+  // Resolved like POST /v1/tokens, then owned by the caller or a 404, so the mint probes nothing.
   const ownedRef = (c: Context<AppEnv>): OwnedMachine | null => {
     const caller = c.get("caller");
     const resolved = resolveMachineRef(db, caller.userId, c.req.param("id") ?? "");
@@ -2091,6 +2190,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     if (row["enrolled_at"] === null) {
       return jsonError(c, 409, "machine_not_enrolled", "this machine has not enrolled yet");
     }
+    // Ahead of the key check: a machine that cannot hold a link still has to be told it may not message (Q1.654).
+    const policy = messagingPolicy(db, caller.userId, source.id);
+    if (!policy.on) return c.json({ links: [], messaging: false, isolated: policy.isolated, policyAt: policy.at });
+    if (policy.isolated) return c.json({ links: [], messaging: true, isolated: true, policyAt: policy.at });
     const standing = machineStanding(db, source.id);
     if (standing !== null && standing.ownerDisabled) {
       return jsonError(c, 403, "owner_disabled", "this machine's owner has been disabled, so it is switched off");
@@ -2112,6 +2215,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         409,
         "machine_key_missing",
         "this machine has not announced its key yet, so no link can be bound to it. Update it and let it reconnect.",
+        // A machine with no key holds no link, so the app may still hand it this switch with an empty set (Q1.654).
+        { messaging: true, isolated: false, policyAt: policy.at },
       );
     }
     const signing = activeSigningKeys(db)[0];
@@ -2134,6 +2239,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       .filter((target) => {
         const held = machineStanding(db, target.id);
         return held === null || (!held.ownerDisabled && !held.over);
+      })
+      .filter((target) => {
+        const held = machineMessaging(db, target.id);
+        return held.on && !held.isolated;
       });
 
     const now = Date.now();
@@ -2186,61 +2295,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           target: { id: target.id, name: target.name, key: target.key, relayUrl: relayUrlFor(target.id) },
         };
       }),
+      messaging: true,
+      isolated: false,
+      policyAt: policy.at,
     });
-  });
-
-  // Both directions, and only while both ends are live; each end is named as the caller names it.
-  app.get("/v1/machines/:id/links", (c) => {
-    const caller = c.get("caller");
-    const owned = ownedRef(c);
-    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
-    const rows = db
-      .prepare(
-        "SELECT l.id, l.source_machine_id, l.target_machine_id, l.created_at, " +
-          "s.name AS source_name, so.label AS source_label, t.name AS target_name, tl.label AS target_label " +
-          "FROM machine_links l " +
-          "JOIN machines s ON s.id = l.source_machine_id " +
-          "JOIN machines t ON t.id = l.target_machine_id " +
-          "LEFT JOIN machine_owners so ON so.machine_id = s.id AND so.user_id = ? " +
-          "LEFT JOIN machine_owners tl ON tl.machine_id = t.id AND tl.user_id = ? " +
-          "WHERE l.revoked_at IS NULL AND s.revoked_at IS NULL AND t.revoked_at IS NULL " +
-          "AND (l.source_machine_id = ? OR l.target_machine_id = ?) " +
-          "ORDER BY l.created_at ASC, l.id ASC",
-      )
-      .all(caller.userId, caller.userId, owned.id, owned.id);
-    return c.json({
-      links: rows.map((row) => ({
-        id: String(row["id"]),
-        source: {
-          id: String(row["source_machine_id"]),
-          name: labelOrName(row["source_label"], String(row["source_name"])),
-        },
-        target: {
-          id: String(row["target_machine_id"]),
-          name: labelOrName(row["target_label"], String(row["target_name"])),
-        },
-        createdAt: Number(row["created_at"]),
-      })),
-    });
-  });
-
-  // Owner of either end. Idempotent, so a retried DELETE after a lost answer is a 204 rather than a 404.
-  app.delete("/v1/links/:id", (c) => {
-    const writeGuard = spendWrite(c, "links");
-    if (writeGuard !== null) return writeGuard;
-
-    const caller = c.get("caller");
-    const linkId = c.req.param("id") ?? "";
-    const row = db.prepare("SELECT source_machine_id, target_machine_id FROM machine_links WHERE id = ?").get(linkId);
-    const ownsAnEnd =
-      row !== undefined &&
-      [row["source_machine_id"], row["target_machine_id"]].some(
-        (machineId) => ownerOf(db, String(machineId))?.userId === caller.userId,
-      );
-    // One 404 for no such link and somebody else's, so link ids cannot be probed.
-    if (!ownsAnEnd) return jsonError(c, 404, "link_not_found", "no such link");
-    db.prepare("UPDATE machine_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(Date.now(), linkId);
-    return c.body(null, 204);
   });
 
   // Given an email this invites and returns no secret; without one, a generated password is shown once under a change obligation.
@@ -2786,6 +2844,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       deleteEmailState(db, userId);
       db.prepare("DELETE FROM password_obligations WHERE user_id = ?").run(userId);
       db.prepare("DELETE FROM user_machine_limits WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM account_permissions WHERE user_id = ?").run(userId);
       db.prepare("DELETE FROM devices WHERE user_id = ?").run(userId);
       codesInvalidated += burnUserCodes(db, userId, "user_deleted", removedAt);
       for (const row of db

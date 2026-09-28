@@ -4,7 +4,7 @@ import { relativeTo } from "../paths";
 import type { MachineGroup, SessionGroups, SessionRow } from "../store";
 import { needsHuman, showsAsEnded } from "../wire";
 import { orderSessions } from "../sessionOrder";
-import { sessionLabel, shortPath } from "./bits";
+import { nicknameLine, sessionLabel, shortPath } from "./bits";
 
 // Module state rather than component state: the phone's list/detail navigation unmounts the sidebar.
 
@@ -162,6 +162,8 @@ export function matchesQuery(row: SessionRow, needle: string): boolean {
   const git = row.snapshot.workspace.git;
   const haystack = [
     sessionLabel(row),
+    // With its `@`, so `mira` and `@mira` both find it.
+    nicknameLine(row.snapshot) ?? "",
     row.snapshot.workspace.requestedCwd,
     git?.repoRoot ?? "",
     row.snapshot.agent,

@@ -45,7 +45,8 @@ anybody's source.
 **Four lightweight facts it does keep, named so the next idea can be measured
 against them**: tunnel presence (`relay_tunnels`, `machine_last_seen`), what a
 daemon announced about itself on the handshake (`machines.daemon_*`), which of one
-owner's machines may open a channel to which (`machine_links`), and mail waiting to
+owner's machines may open a channel to which (`machine_links`, and the switches that
+withhold them, `account_permissions` and `machine_permissions`), and mail waiting to
 go out. Each is about *reachability* or is this service's own. A message between
 agents is none of them: it waits on the sending daemon, never here (Q7.150). A
 session title, a transcript index, a file listing or a count of turns would not

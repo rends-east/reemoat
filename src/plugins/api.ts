@@ -11,7 +11,13 @@ import {
 
 import { AgentAskError, type AgentAskRuns } from "../agentask.js";
 import type { GitExec } from "../git.js";
-import type { ElicitationContentValue, ManagedSession, SessionRegistry } from "../registry.js";
+import {
+  NicknameError,
+  type ElicitationContentValue,
+  type ManagedSession,
+  type SessionMetaChange,
+  type SessionRegistry,
+} from "../registry.js";
 import { DESCRIBE_TIMEOUT_MS, probeFile } from "../stall.js";
 import type { PluginOrigins } from "./origin.js";
 import type { PluginManifest, PluginScope } from "./protocol.js";
@@ -211,6 +217,7 @@ export class PluginApi {
           raw === true ? "require" : raw === false ? "never" : raw === "auto" || raw === "require" || raw === "never" ? raw : undefined;
         const branchRaw = input["branch"];
         const branch = typeof branchRaw === "string" && branchRaw.length > 0 ? branchRaw : null;
+        const nickname = optionalNickname(input);
         try {
           // origin stops a session.created hook from recursing; it must be an argument because create announces before it returns.
           const managed = await registry.create({
@@ -218,10 +225,12 @@ export class PluginApi {
             cwd,
             worktree,
             branch,
+            nickname,
             origin: manifest.id,
           });
           return summarize(managed);
         } catch (error) {
+          if (error instanceof NicknameError) throw new PluginApiError(error.code, error.message);
           throw new PluginApiError("session_create_failed", error instanceof Error ? error.message : String(error));
         }
       }
@@ -261,13 +270,25 @@ export class PluginApi {
 
       case "sessions.setMeta": {
         const managed = this.session(input);
-        const change: { title?: string | null; pinned?: boolean } = {};
+        const change: SessionMetaChange = {};
         if (Object.hasOwn(input, "title")) {
           const title = input["title"];
           change.title = title === null ? null : text(title, "title");
         }
         if (Object.hasOwn(input, "pinned")) change.pinned = input["pinned"] === true;
-        return managed.setMeta(change);
+        if (Object.hasOwn(input, "nickname")) {
+          const nickname = input["nickname"];
+          if (typeof nickname !== "string") {
+            throw new PluginApiError("invalid_nickname", "nickname must be a string: a session always has one");
+          }
+          change.nickname = nickname;
+        }
+        try {
+          return registry.setMeta(managed, change);
+        } catch (error) {
+          if (error instanceof NicknameError) throw new PluginApiError(error.code, error.message);
+          throw error;
+        }
       }
 
       case "agents.list":
@@ -524,6 +545,14 @@ export class PluginApi {
 
 function summarize(managed: ManagedSession): unknown {
   return managed.snapshot();
+}
+
+/** Absent or null picks one, as the route does; anything else must be a string. */
+function optionalNickname(input: Record<string, unknown>): string | null {
+  const value = input["nickname"];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new PluginApiError("invalid_nickname", "nickname must be a string");
+  return value;
 }
 
 function text(value: unknown, field: string): string {

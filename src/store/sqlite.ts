@@ -18,6 +18,7 @@ import {
   DEFAULT_MAX_EVENT_BYTES,
   keepsItsConversation,
   type MachineSettingKey,
+  type PeerPolicyKey,
   estimateBytes,
   isExitReason,
   isPersistedGiveUp,
@@ -243,6 +244,7 @@ function migrate(db: DatabaseSync): void {
   if (!hasSession("resume_gave_up")) db.exec("ALTER TABLE sessions ADD COLUMN resume_gave_up TEXT");
 
   if (!hasSession("title")) db.exec("ALTER TABLE sessions ADD COLUMN title TEXT");
+  if (!hasSession("nickname")) db.exec("ALTER TABLE sessions ADD COLUMN nickname TEXT");
   if (!hasSession("pinned")) {
     db.exec("ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
   }
@@ -254,6 +256,10 @@ function migrate(db: DatabaseSync): void {
   if (!hasSession("custom_agent")) db.exec("ALTER TABLE sessions ADD COLUMN custom_agent TEXT");
 
   if (!hasSession("agent_state_json")) db.exec("ALTER TABLE sessions ADD COLUMN agent_state_json TEXT");
+
+  if (!hasSession("peer_messages_off")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN peer_messages_off INTEGER NOT NULL DEFAULT 0");
+  }
 
 
   const identityColumns = db.prepare("PRAGMA table_info(identity)").all();
@@ -720,21 +726,23 @@ export class SqliteSessionStore implements SessionStore {
       `INSERT INTO sessions (
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
-         turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned, rank,
-         ultracode, custom_agent, agent_state_json,
+         turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, nickname, pinned, rank,
+         ultracode, custom_agent, agent_state_json, peer_messages_off,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
-         :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned, :rank,
-         :ultracode, :custom_agent, :agent_state_json,
+         :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :nickname, :pinned, :rank,
+         :ultracode, :custom_agent, :agent_state_json, :peer_messages_off,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
        ON CONFLICT(id) DO UPDATE SET
          updated_at       = excluded.updated_at,
          title            = excluded.title,
+         nickname         = excluded.nickname,
          pinned           = excluded.pinned,
          rank             = excluded.rank,
+         peer_messages_off = excluded.peer_messages_off,
          ultracode        = excluded.ultracode,
          agent_state_json = excluded.agent_state_json,
          agent_session_id = excluded.agent_session_id,
@@ -1014,6 +1022,7 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     last_seq: row.lastSeq,
     dropped: row.dropped,
     title: row.title,
+    nickname: row.nickname,
     // 1/0 here rather than at the statement: the dirty-check key is JSON of this object.
     pinned: row.pinned ? 1 : 0,
     rank: row.rank,
@@ -1021,6 +1030,7 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     // Never in the DO UPDATE, like agent: what a session was started as is immutable.
     custom_agent: row.customAgent,
     agent_state_json: row.agentState === null ? null : JSON.stringify(row.agentState),
+    peer_messages_off: row.peerMessagesOff ? 1 : 0,
     workspace_json: JSON.stringify(row.workspace),
     workspace_mode: row.workspace.mode,
     workspace_root: row.workspace.root,
@@ -1191,12 +1201,14 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       lastSeq: Number(row["last_seq"] ?? 0),
       dropped: Number(row["dropped"] ?? 0),
       title: row["title"] == null ? null : String(row["title"]),
+      nickname: row["nickname"] == null ? null : String(row["nickname"]),
       pinned: Number(row["pinned"] ?? 0) !== 0,
       // Read by shape: coercing NULL gives 0, which is a real position, the oldest.
       rank: typeof row["rank"] === "number" && Number.isFinite(row["rank"]) ? row["rank"] : null,
       ultracode: row["ultracode"] == null ? null : Number(row["ultracode"]) !== 0,
       customAgent: row["custom_agent"] == null ? null : String(row["custom_agent"]),
       agentState: toAgentState(row["agent_state_json"]),
+      peerMessagesOff: Number(row["peer_messages_off"] ?? 0) !== 0,
     };
   } catch {
     return null;
@@ -1442,6 +1454,15 @@ export class SqliteMachineSettingsStore {
   }
 
   write(key: MachineSettingKey, value: string): void {
+    this.setStmt.run(key, value);
+  }
+
+  readPolicy(key: PeerPolicyKey): string | null {
+    const row = this.getStmt.get(key);
+    return row === undefined ? null : String(row["value"]);
+  }
+
+  writePolicy(key: PeerPolicyKey, value: string): void {
     this.setStmt.run(key, value);
   }
 }
@@ -1859,28 +1880,24 @@ export interface PeerLink {
   token: string;
   expiresAt: number;
   updatedAt: number;
-  lastError: string | null;
-  lastErrorAt: number | null;
 }
 
-/** The owner's app writes the whole set at once; only the errors are this daemon's own. */
+/** The owner's app writes the whole set at once. `last_error` is left NULL: nothing reads it since the links screen went (Q3.676). */
 export class SqlitePeerLinkStore {
   private readonly listStmt: StatementSync;
   private readonly deleteAllStmt: StatementSync;
   private readonly insertStmt: StatementSync;
-  private readonly errorStmt: StatementSync;
 
   constructor(private readonly db: DatabaseSync) {
     this.listStmt = db.prepare(
-      "SELECT id, target_machine_id, target_name, target_key, relay_url, token, expires_at, updated_at, last_error, last_error_at " +
+      "SELECT id, target_machine_id, target_name, target_key, relay_url, token, expires_at, updated_at " +
         "FROM peer_links ORDER BY target_name ASC, id ASC",
     );
     this.deleteAllStmt = db.prepare("DELETE FROM peer_links");
     this.insertStmt = db.prepare(
-      "INSERT INTO peer_links (id, target_machine_id, target_name, target_key, relay_url, token, expires_at, updated_at, last_error, last_error_at) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO peer_links (id, target_machine_id, target_name, target_key, relay_url, token, expires_at, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
-    this.errorStmt = db.prepare("UPDATE peer_links SET last_error = ?, last_error_at = ? WHERE id = ?");
   }
 
   list(): PeerLink[] {
@@ -1893,19 +1910,14 @@ export class SqlitePeerLinkStore {
       token: String(row["token"]),
       expiresAt: Number(row["expires_at"]),
       updatedAt: Number(row["updated_at"]),
-      lastError: row["last_error"] === null ? null : String(row["last_error"]),
-      lastErrorAt: row["last_error_at"] === null ? null : Number(row["last_error_at"]),
     }));
   }
 
-  /** An error on a link that is replaced with the same id survives, since it is still true of that link. */
-  replaceAll(links: readonly Omit<PeerLink, "updatedAt" | "lastError" | "lastErrorAt">[], now = Date.now()): void {
-    const errors = new Map(this.list().map((link) => [link.id, link]));
+  replaceAll(links: readonly Omit<PeerLink, "updatedAt">[], now = Date.now()): void {
     this.db.exec("BEGIN");
     try {
       this.deleteAllStmt.run();
       for (const link of links) {
-        const held = errors.get(link.id);
         this.insertStmt.run(
           link.id,
           link.targetMachineId,
@@ -1915,8 +1927,6 @@ export class SqlitePeerLinkStore {
           link.token,
           link.expiresAt,
           now,
-          held?.lastError ?? null,
-          held?.lastErrorAt ?? null,
         );
       }
       this.db.exec("COMMIT");
@@ -1930,9 +1940,6 @@ export class SqlitePeerLinkStore {
     }
   }
 
-  noteError(id: string, message: string | null, at = Date.now()): void {
-    this.errorStmt.run(message, message === null ? null : at, id);
-  }
 }
 
 export interface OutboxEntry {
@@ -1956,6 +1963,8 @@ export class SqlitePeerOutboxStore {
   private readonly removeStmt: StatementSync;
   private readonly countStmt: StatementSync;
   private readonly countForStmt: StatementSync;
+  private readonly takeAllStmt: StatementSync;
+  private readonly takeForStmt: StatementSync;
 
   constructor(db: DatabaseSync) {
     this.addStmt = db.prepare(
@@ -1970,6 +1979,9 @@ export class SqlitePeerOutboxStore {
     this.removeStmt = db.prepare("DELETE FROM peer_outbox WHERE id = ?");
     this.countStmt = db.prepare("SELECT COUNT(*) AS n FROM peer_outbox");
     this.countForStmt = db.prepare("SELECT COUNT(*) AS n FROM peer_outbox WHERE sender_session = ?");
+    const columns = "id, sender_session, link_id, target_machine_id, target_name, body, created_at, next_at, attempts, last_error";
+    this.takeAllStmt = db.prepare(`SELECT ${columns} FROM peer_outbox ORDER BY created_at ASC`);
+    this.takeForStmt = db.prepare(`SELECT ${columns} FROM peer_outbox WHERE sender_session = ? ORDER BY created_at ASC`);
   }
 
   add(entry: OutboxEntry): void {
@@ -1988,18 +2000,7 @@ export class SqlitePeerOutboxStore {
   }
 
   due(now: number, limit: number): OutboxEntry[] {
-    return this.dueStmt.all(now, limit).map((row) => ({
-      id: String(row["id"]),
-      senderSession: String(row["sender_session"]),
-      linkId: String(row["link_id"]),
-      targetMachineId: String(row["target_machine_id"]),
-      targetName: String(row["target_name"]),
-      body: String(row["body"]),
-      createdAt: Number(row["created_at"]),
-      nextAt: Number(row["next_at"]),
-      attempts: Number(row["attempts"]),
-      lastError: row["last_error"] === null ? null : String(row["last_error"]),
-    }));
+    return this.dueStmt.all(now, limit).map(outboxEntryOf);
   }
 
   retry(id: string, nextAt: number, error: string): void {
@@ -2017,4 +2018,26 @@ export class SqlitePeerOutboxStore {
   countFor(senderSession: string): number {
     return Number(this.countForStmt.get(senderSession)?.["n"] ?? 0);
   }
+
+  /** Removes and answers every entry, or only one session's. */
+  take(senderSession: string | null = null): OutboxEntry[] {
+    const rows = (senderSession === null ? this.takeAllStmt.all() : this.takeForStmt.all(senderSession)).map(outboxEntryOf);
+    for (const row of rows) this.removeStmt.run(row.id);
+    return rows;
+  }
+}
+
+function outboxEntryOf(row: Record<string, unknown>): OutboxEntry {
+  return {
+    id: String(row["id"]),
+    senderSession: String(row["sender_session"]),
+    linkId: String(row["link_id"]),
+    targetMachineId: String(row["target_machine_id"]),
+    targetName: String(row["target_name"]),
+    body: String(row["body"]),
+    createdAt: Number(row["created_at"]),
+    nextAt: Number(row["next_at"]),
+    attempts: Number(row["attempts"]),
+    lastError: row["last_error"] === null ? null : String(row["last_error"]),
+  };
 }

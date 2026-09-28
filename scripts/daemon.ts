@@ -287,11 +287,15 @@ const peers = new PeerHub({
   machineId,
   network: createPeerNetwork(stores.peerLinks, stores.machineKeys),
   outbox: stores.peerOutbox,
+  // What the owner's app last delivered; the env above is a ceiling it never lifts (Q2.244).
+  policy: stores.machineSettings,
   onWarning: (detail: string) => console.error(`peers: ${detail}`),
 });
+// Whenever the env allows, whatever the policy: a switch turned back on needs no restart to be served.
 const peerEndpoint = peerMessages ? await PeerMcpEndpoint.listen(peers) : null;
 peers.setEndpoint(peerEndpoint?.url ?? null);
 registry.setPeerMcpServers((sessionId, capabilities) => peers.mcpServersFor(sessionId, capabilities));
+registry.setPeerMessagesOff((sessionId) => peers.conversationSwitchedOff(sessionId));
 peers.startOutbox();
 // Before restore, or a preset's sessions resume on the bare harness; the harness goes back so ManagedSession.assembled can spot a changed preset.
 registry.setMachineCatalogue(contributions);

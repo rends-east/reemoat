@@ -152,7 +152,7 @@ have to enter. These are the rules a change here must not break:
   folder — but both groups are on **one screen at one time**, so that was the same
   row drawn twice. Three things follow: `blockedCount` does not count it (a
   header's count is about the rows under *that* header), a pinned orphan is in
-  `pinned` only, and `showPath` is back on. Nothing is hidden — `waitingFloor`
+  `pinned` only, and its row names its machine as every row does. Nothing is hidden — `waitingFloor`
   subtracts what the view draws, and it draws `pinnedFor`. Q3.11.
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
@@ -176,8 +176,8 @@ have to enter. These are the rules a change here must not break:
 - **A path is cut against the daemon's own `REEMOAT_ROOTS`, and drawn once.**
   `displayCwd` cuts the longest matching root (`~/thing`); under none, or with no
   roots yet, it falls back to `shortPath`, never an invented prefix. Fetched once
-  per machine into `rootsByMachine`. A row whose title *is* its directory does not
-  repeat it underneath. Q3.441.
+  per machine into `rootsByMachine`. A row draws no path under its title, only its
+  machine (Q3.681). Q3.441.
 - **A folder is a working directory**, keyed `git.repoRoot ?? requestedCwd` and
   scoped to a machine (` `, the one byte a POSIX path cannot hold — otherwise
   collapsing `~/api` on the laptop collapses it on the server). `repoRoot` is the
@@ -294,8 +294,8 @@ string in it; the screen's name is `settingsPaneTitle`, withdrawn with
 inverts it (Q3.473). Either way the `<h1>` holds one **unconditional** text node:
 it is what `aria-labelledby` resolves to. Q3.427.
 
-**Creating a session asks three things** — machine, agent, folder — and neither
-whether to use a worktree nor the first prompt. Q3.86, Q3.87.
+**Creating a session asks four things** — machine, agent, nickname, folder — and neither
+whether to use a worktree nor the first prompt. Q3.86, Q3.87, Q3.677.
 
 **What it deliberately does not do: no UI for sharing a machine** — that is the
 owner's `cpctl share`; the admin route is deleted. Users and machines both have one:
@@ -391,7 +391,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ids.ts` | Branded `MachineId`/`SessionId`/`SessionKey`, and the three rules that make `(machineId, sessionId)` structural |
 | `packages/web/src/store.ts` | All client state, and `resume()`, the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs |
 | `packages/web/src/resume.ts` | Noticing the phone woke. Four triggers, one debounced call |
-| `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the **seven** sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
+| `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs` and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
 | `packages/web/src/ui/rail.ts` | How wide the rail is: `MACHINE_COLUMN_PX` plus the list's own three numbers, and the migration for a width stored before the column existed. The mechanism is `paneWidth.ts`, shared with the background panel; `docked-panels.md` is that area |
@@ -401,8 +401,8 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: its two columns each own their scroller, so the New session button sits at the bottom of one of them |
 | `packages/web/src/ui/SessionBrowser.tsx` | The list column: one header row (menu · search · filter · bell, the `<h1>` `sr-only`), the waiting floor, the machine tabs **below `lg` only**, Pinned above the selected machine's folders, orphans, and a footer that is one button. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
-| `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — plus `Background tasks` in the header's copy, the panel's second door. `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the ring of the daemon *this app started for this server*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, agent messaging, stop, resume — plus `Background tasks` in the header's copy, the panel's second door. `RenameField` |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, Devices, **API keys**, Machines, **Permissions**, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the ring of the daemon *this app started for this server*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds

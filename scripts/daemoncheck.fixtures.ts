@@ -152,7 +152,7 @@ export function storeOf(rows: PersistedSession[]): SessionStore {
 export function rowFor(
   id: string,
   root: string,
-  meta: { title?: string | null; pinned?: boolean; rank?: number | null } = {},
+  meta: { title?: string | null; nickname?: string | null; pinned?: boolean; rank?: number | null } = {},
 ): PersistedSession {
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, "notes.txt"), "hi\n", "utf8");
@@ -183,8 +183,10 @@ export function rowFor(
     lastSeq: 0,
     dropped: 0,
     title: meta.title ?? null,
+    nickname: meta.nickname ?? null,
     pinned: meta.pinned ?? false,
     rank: meta.rank ?? null,
+    peerMessagesOff: false,
     ultracode: null,
     customAgent: null,
     agentState: null,

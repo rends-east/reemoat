@@ -1,17 +1,17 @@
 import { announceableMachineKey } from "../machinekey.js";
 import type { PeerLink, SqliteMachineKeyStore, SqlitePeerLinkStore } from "../store/sqlite.js";
 import { peerRequest, type PeerAnswer } from "./channel.js";
-import type { PeerNetwork } from "./hub.js";
+import type { PeerNetwork, PeerPolicyDelivery } from "./hub.js";
 
 export const MAX_PEER_LINKS = 128;
 const MAX_LINK_TOKEN_CHARS = 8_192;
 const MAX_LINK_FIELD_CHARS = 256;
 
-export type LinkInput = Omit<PeerLink, "updatedAt" | "lastError" | "lastErrorAt">;
+export type LinkInput = Omit<PeerLink, "updatedAt">;
 
 /** The key is read at every request, never captured: a 409 on the dial can promote another one (machineKeyRotation). */
 export function createPeerNetwork(
-  links: Pick<SqlitePeerLinkStore, "list" | "noteError">,
+  links: Pick<SqlitePeerLinkStore, "list">,
   machineKeys: Pick<SqliteMachineKeyStore, "active">,
 ): PeerNetwork {
   return {
@@ -28,13 +28,6 @@ export function createPeerNetwork(
         answer = await peerRequest({ ...target, relayUrl: answer.relayUrl }, staticKey, request, timeoutMs);
       }
       return answer;
-    },
-    noteError: (link, message) => {
-      try {
-        links.noteError(link.id, message);
-      } catch {
-        // A diagnostic only; the caller has already been told.
-      }
     },
   };
 }
@@ -76,6 +69,29 @@ export function linksFromBody(body: unknown): LinkInput[] | string {
     });
   }
   return out;
+}
+
+/**
+ * The policy riding the same body, or null when it carries none. Each flag it leaves out is left as it is: an app
+ * older than the flag says nothing about it, and must not reset it by saying nothing (Q1.654).
+ */
+export function policyFromBody(body: unknown): PeerPolicyDelivery | null | string {
+  if (typeof body !== "object" || body === null) return null;
+  const record = body as Record<string, unknown>;
+  const messaging = record["messaging"];
+  const isolated = record["isolated"];
+  if (messaging === undefined && isolated === undefined) return null;
+  if (messaging !== undefined && typeof messaging !== "boolean") return "messaging must be true or false";
+  if (isolated !== undefined && typeof isolated !== "boolean") return "isolated must be true or false";
+  const at = record["policyAt"];
+  if (at !== undefined && (typeof at !== "number" || !Number.isFinite(at) || at < 0)) {
+    return "policyAt must be a non-negative number";
+  }
+  return {
+    ...(messaging === undefined ? {} : { on: messaging }),
+    ...(isolated === undefined ? {} : { isolated }),
+    at: at ?? 0,
+  };
 }
 
 function field(value: unknown): value is string {

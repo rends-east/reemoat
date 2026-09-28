@@ -18,10 +18,10 @@ import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
 import { LogsSection } from "./LogsSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
-import { MachineLinksSection } from "./MachineLinksSection";
 import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
+import { PermissionsSection } from "./PermissionsSection";
 import { SettingsNav } from "./SettingsNav";
 import { ServerSection } from "./ServerSection";
 import { UsersSection } from "./UsersSection";
@@ -95,8 +95,6 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
           ) : drilled && route.machineId !== null ? (
             route.agents ? (
               <MachineAgentsSection state={state} machineId={route.machineId} harness={route.signin} />
-            ) : route.links ? (
-              <MachineLinksSection state={state} machineId={route.machineId} />
             ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
@@ -126,6 +124,10 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <KeysSection me={state.me} />;
     case "devices":
       return <DevicesSection />;
+    case "permissions":
+      return (
+        <PermissionsSection me={state.me} />
+      );
     case "logs":
       return <LogsSection />;
     case "server":

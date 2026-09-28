@@ -25,13 +25,13 @@ process.stdout.write("\na message from another agent is drawn as one, never as t
   check("text that is not an envelope comes through whole", peerBody("just words"), "just words");
 
   const origin = { name: "reviewer", ref: "s_1", machineId: null, machineLabel: null, harness: "codex", messageId: "pm_1", hops: 1 };
-  check("a message says so", peerHeadline({ ...origin, kind: "message" }), "Message from reviewer");
-  check("a notice is only who it is about", peerHeadline({ ...origin, kind: "notice" }), "From reviewer");
-  check("another machine is named", peerHeadline({ ...origin, kind: "message", machineLabel: "studio" }), "Message from reviewer on studio");
+  check("a message says so", peerHeadline({ ...origin, kind: "message" }), "Message from @reviewer");
+  check("a notice is only who it is about", peerHeadline({ ...origin, kind: "notice" }), "From @reviewer");
+  check("another machine is named", peerHeadline({ ...origin, kind: "message", machineLabel: "studio" }), "Message from @reviewer on studio");
   check(
     "a kind from a newer daemon, or a note an older build logged, claims no more than a message does",
     ["invented", "context", "task"].map((kind) => peerHeadline({ ...origin, kind: kind as never })),
-    ["Message from reviewer", "Message from reviewer", "Message from reviewer"],
+    ["Message from @reviewer", "Message from @reviewer", "Message from @reviewer"],
   );
 
   // wire.ts hand-mirrors src/events.ts; a field the daemon adds and the client lacks would be dropped silently.
@@ -45,6 +45,9 @@ process.stdout.write("\na message from another agent is drawn as one, never as t
   const wire = srcFile("wire.ts");
   check("PeerOrigin has the daemon's fields, all of them", fieldsOf(wire, "PeerOrigin"), fieldsOf(daemon, "PeerOrigin"));
   check("and PromptEvent carries from on both sides", [fieldsOf(daemon, "PromptEvent").includes("from"), fieldsOf(wire, "PromptEvent").includes("from")], [true, true]);
+  const hub = readFileSync(new URL("../../../src/peers/hub.ts", import.meta.url), "utf8");
+  check("PeerMessagingState has the daemon's fields, all of them", fieldsOf(wire, "PeerMessagingState"), fieldsOf(hub, "PeerMessagingState"));
+  check("and they are not none", fieldsOf(hub, "PeerMessagingState").length > 0, true);
 
   const row = stripComments(srcFile("ui/EventList.tsx"));
   const promptRow = row.slice(row.indexOf("function PromptRow("), row.indexOf("function TextRun("));

@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 146 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 101 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 421 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 104 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 429 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 74 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 151 | `###` |
-| | | **1076** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 153 | `###` |
+| | | **1090** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1076 rather than the 539
+dividers. So the count is over **both** depths, and it says 1090 rather than the 545
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -4445,8 +4445,8 @@ the row or writing one and minting a capability fresh on every call. It carries
 machine's key from this service's own pin, and `lnk`, `src` and `srcl` naming the
 link, the source and the owner's label for it; it lives `LINK_TOKEN_TTL_SECONDS`, 90
 days. The app hands the answer to the source's daemon unread (`PUT /peers/links`).
-`DELETE /v1/links/:id` belongs to the owner of either end and answers 204, again on
-a repeat.
+Nothing removes one link by hand any more: a machine switched off or isolated has
+every link it is either end of revoked (Q1.654, Q3.676).
 
 **Why the long life is safe.** `cnf` binds the capability to a private key that
 never leaves the source machine, so a copy opens nothing anywhere else; and
@@ -4489,6 +4489,59 @@ row naming this relay is a tunnel it has just lost, which bounds a bounce at one
 
 **Rejected.** *Exiting on a malformed map, as the API does* — the relay holds every
 tunnel, so it warns and answers 503.
+
+**Status.** Current.
+
+### Q1.654 — Where is the permission to message between agents kept, and how does a daemon learn it?
+
+**Decision.** On the Authority, as two tables where no row means on —
+`account_permissions` for the account's switch and `machine_permissions` for each
+machine's — written by `PUT /v1/me/permissions` and `PUT /v1/machines/:id/permissions`,
+both owner-only. It reaches a daemon **with its links**: the mint answer carries
+`messaging`, the value in force for its source, and `policyAt`, and the app forwards
+both in `PUT /peers/links` beside the links they govern (`policyFromBody`).
+
+- **Switching off, or isolating a machine, revokes the affected `machine_links`
+  rows in the same transaction.** A link token lives ninety days, and `linkIsLive` reads the row at
+  every channel, so the relay refuses the next message between two machines before
+  either daemon has heard anything — including one that is off.
+- **A machine with no key still hears its switch.** Off is answered before the key
+  is asked about, as `200 {links: [], messaging: false}`. On is refused
+  `machine_key_missing` as before, and the refusal's `detail` carries `messaging` and
+  `policyAt`: the app hands that to the daemon with an empty set, since a keyless
+  machine holds no link. `no_signing_key` carries nothing, because a machine
+  refused for that may still hold good links.
+- **`policyAt` only grows** (`nextPolicyAt`), and a daemon keeps the newer of what it
+  holds and what it is handed. Two devices, or a sync already in flight when the
+  switch moves, would otherwise put back what somebody just turned off. The links in
+  a stale push are still taken, since the relay already refuses the revoked ones, and
+  the app that sees an echo newer than its answer mints again, once.
+- **A switch that has not landed retries after 30 s, not the links' 15 minutes**
+  (`POLICY_RETRY_AFTER_MS`). Until then that machine's own agents are still messaging.
+  A person's press also passes the relay check for a machine this app reaches
+  over loopback.
+- **A push without `messaging` leaves the stored value alone.** That is an app that
+  predates this, and it must not switch a machine back on by saying nothing.
+- **Isolation is a column of `machine_permissions`**, added by `migrate()` for a
+  database that already had the table. An isolated source is answered
+  `{links: [], messaging: true, isolated: true}` and an isolated target is left out,
+  so the relay refuses both directions before the daemon hears.
+- **The listing carries the value in force, and link sync reads only the listing.**
+  Compared against a `me` refreshed only on promote, a stale account flag would read
+  as a change on every wake and mint again each time — the trap Q3.673 already names
+  for the target count.
+
+**Why the Authority.** It is the one place every device reads, and the one place
+reachable while a machine is not. "Which machines may open a channel to which" is
+already one of its facts (`authority.md`). The alternative was a fan-out to every
+daemon, and that is a snapshot: a machine offline at the time misses it, one enrolled
+later arrives on, and switching back on erases every machine somebody had turned off
+by hand.
+
+**What the daemon's copy is not.** A fence. A grantee holding `machine:admin` can
+push its own, and a grantee with `session:write` runs agents as the owner. The relay
+reading the revoked row is the one boundary, and it covers only traffic between
+machines.
 
 **Status.** Current.
 
@@ -8811,6 +8864,130 @@ minute after — 36 s end to end.
 
 **Status.** Current. Reverses Q2.237.
 
+### Q2.244 — Who may switch off messages between agents, and at which levels?
+
+**Decision.** Three switches, each only narrowing the one above: the account's, a
+machine's and a conversation's. `REEMOAT_PEER_MESSAGES=off` is still a ceiling none
+of them can lift. A conversation takes part only when all four allow it. The first
+two are Q1.654's, applied by `setPolicy`. The third is `peer_messages_off` on the
+session row, set by `POST /sessions/:id/meta` with the same `session:write` a rename
+needs, because it narrows and a grantee who can prompt the session already has more.
+
+- **Off is checked where it is used, on the live value.** The flag stopped being
+  read once at boot, and every path that bypassed it is gated: the local rows of
+  `list_agents` behind an already-handed bearer, `/peer/notices`, the outbox pump,
+  and the idle notices.
+- **A running agent keeps the tool names.** Its tool list was fixed at launch, so
+  a call is answered with a sentence rather than a missing tool. The bearer stays
+  valid, because a `401` from an http MCP server reads to claude as a sign-in to
+  start. Switching back on reaches conversations that start or resume afterwards.
+- **Switching off drops what was waiting.** Queued peer prompts not yet delivered
+  (`dropQueuedPeer`), idle-notice subscriptions, and the outbox, with one quiet line
+  in each sender's transcript (`notePeerMessagesOff`) and no wake. What cannot be
+  taken back:
+  - a message already steered into a running turn;
+  - a turn another agent already started;
+  - a send already inside `sendMidTurn`;
+  - an outbox request already on the wire.
+- **A conversation that is off neither sends nor receives.** Other agents do not
+  see it, and it is refused both ways with `conversation_messaging_off`. A parked
+  one is refused without being woken first.
+- **A machine may instead be isolated.** Its sessions still message each other,
+  but nothing reaches them from another machine and they reach none
+  (`reachesOthers`, `messaging_isolated`). Going isolated empties the outbox with the
+  same quiet line and forgets what was owed abroad; nothing local is touched. The
+  flag is kept while the machine is off.
+
+**Rejected.**
+- *A per-conversation switch that only stops the conversation being woken.* A
+  sender that is never answered.
+- *Revoking bearers on off.* See the second point.
+
+**Status.** Current. Q2.238 bounds how much agents may say to each other; this
+decides whether they may.
+### Q2.245 — What is a session's nickname, and what keeps it one session's?
+
+**Decision.** Every session has a nickname — `mira`, `otto` — and it is the name
+other agents address it by: `nameOf` answers it, so `list_agents` prints it,
+`send_message to="mira"` resolves it and a peer message reads *Message from mira*.
+- **Shape**: `NICKNAME`, lowercase latin, digits and single hyphens, starting with
+  a letter, 2–32 characters. It passes every daemon's `isPeerName`, the older ones
+  included, so a listing row is never dropped on another machine. It holds no `_`,
+  which `PeerHub.resolve` reads as a session id.
+- **One per machine**, case-insensitive, over every session the registry holds,
+  ended ones included, and over the names being created right now.
+  `reserveNickname` takes the name synchronously at the top of `create`, before the
+  capacity check, the create token and `createWorkspace`, so the loser of two
+  concurrent creates gets `409 nickname_taken` and has made nothing.
+- **Always present.** A create that names none gets `pickNickname`: a free name
+  from `NICKNAMES`, then one of them with the first free `-2`, `-3`. `restore()`
+  gives one to every row written before the column, walking rows oldest first so
+  the older of two duplicates keeps its name. A nickname cannot be cleared.
+
+The title is unchanged: still derived from the first message, still renamed by a
+person, still printed by `list_agents` as what the session is about. It stopped
+being the address.
+
+**Why.** A title is what a session is about, and that makes it a poor address. It
+is long, it moves with every rename, and two sessions share one as soon as two
+people ask for the same fix — which is why a bare name had to answer
+`ambiguous_recipient` even among one machine's sessions. A handle a person chose,
+or accepted, stays put.
+
+**Rejected.**
+- *A UNIQUE index.* `put` swallows its errors, and a rolled-back build writes NULL
+  into the column; a reservation in memory is the one check both creates pass
+  through.
+- *One per account, across machines.* No daemon sees another's rows without the
+  network, and the Authority holds no sessions. The app's dice avoids every name it
+  can see instead (Q3.677), and an ambiguous name is answered by listing each match.
+
+**Status.** Current.
+
+### Q2.246 — What does the agent get when a person writes `@mira`?
+
+**Decision.** The text exactly as typed, then a second text block the daemon writes:
+`<session-mentions>`, saying it is Reemoat's note and not the person's, one line per
+session named — its address, title, harness, folder and machine — and
+`send_message to="…"` only where this session's agent was handed the tools.
+`mentionNote` builds it on the person's prompt route and nowhere else.
+- **It never waits on the network.** Local rows are read in place; another
+  machine's are its last successful listing, `remoteSettled`, which a failed
+  listing clears so the note never names what `list_agents` would call unreachable.
+  Opening the `@` menu warms it (Q3.678).
+- **At most eight names** a message, and a name two machines share lists both.
+- **The switches of Q2.244 hold**: nothing is named where this machine's or this
+  conversation's messaging is off, and another machine's sessions only while this
+  one is not isolated — the listing `list_agents` would give, and no wider.
+- **Not in a slash command**, since agents parse one at index 0 and a second block
+  beside it is unmeasured.
+- **Not in a peer's envelope or a plugin's prompt**: `defuse` breaks a forged
+  `<session-mentions>` tag inside a message body.
+- It rides the turn the way attachments do — the steer's extra blocks, a queued
+  entry's `note`, `pump` — and the `prompt` event logs the names it resolved as
+  `mentions`, so the log says a note was added.
+
+**Why.** An agent reading `@mira` has to guess that it names a session at all, then
+list every machine to find which. The daemon already knows, and saying it once
+beside the message costs nothing the agent would not spend finding out.
+
+**Rejected.**
+- *Rewriting the text.* `text` is what the web client's echo is matched on, what a
+  title is derived from and what `/clear` is compared with.
+- *The client resolving names and sending references.* The listing is the daemon's;
+  a client's own rows include machines the agent cannot reach.
+- *Awaiting the listings.* Up to three seconds on every message a person sends, for
+  a word that may be `@Override`.
+- *A status in the note.* A queued message is delivered minutes after it was
+  accepted, and *idle* would be stale by then.
+
+**Measured.** Not against a live agent. That a second text block reaches the model
+as part of the same message is read off claude-agent-acp 0.73.0 and codex-acp 1.8.0,
+each of which keeps separate text blocks separate; kimi, opencode and grok are
+unmeasured.
+
+**Status.** Current.
+
 ## The web client
 
 ### What the client is
@@ -8986,10 +9163,11 @@ whose entire job is "this one, not the other forty" was drawing itself as two of
 the forty. Reported from a phone, where the rail is the whole screen and the
 duplication is at its most obvious.
 
-**What the copy was protecting is answered instead by `showPath`.** The second
-copy said where the session works, and that is a real thing to lose — so the
-pinned row draws its own path now, which it did not while a copy under the folder
-was saying it. One row, both facts.
+**What the copy was protecting was answered instead by the pinned row's own path.**
+The second copy said where the session works, and that is a real thing to lose — so
+the pinned row drew its own path, which it did not while a copy under the folder
+was saying it. One row, both facts. (No row draws a path since Q3.681; the prop that
+switched it is gone, and the conversation's header is where the path is read.)
 
 **And nothing is hidden.** `waitingFloor` counts by **subtraction** — everything
 blocked, minus everything this view draws — and it draws `pinnedFor`, so a blocked
@@ -11474,7 +11652,8 @@ problem it looked like it prevented. The daemon's `auto` already does the right
 thing either way. "A worktree branches from a commit, so your uncommitted work is
 not in this session" is not a line to find by scrolling.
 
-**Status.** Reversed an earlier decision
+**Status.** Reversed an earlier decision. Amended by Q3.677: four things now, the
+nickname between agent and folder, arriving filled in.
 
 #### Q3.87 — Why was the first-prompt box removed from the create form?
 
@@ -23484,7 +23663,7 @@ repair is loosening the pattern. A control asserts it does not match that line.
 the hand from every user-agent stylesheet, and reclaiming it would mean this app
 setting a cursor on the only elements whose shape is universally understood.
 
-**Status.** Current. Amended by Q3.665: the header's session name shows the text caret, the second named exception.
+**Status.** Current. Amended by Q3.665: the header's session name shows the text caret, the second named exception. Amended again by Q3.682: the pointer over a clickable `@name`, the third.
 
 
 #### Q3.628 — the menu drawer loses its weight and its ✕, and the build line becomes a stamp
@@ -27035,7 +27214,7 @@ is Q7.151.
 before the PUT* — the control plane would still hold a live row, and another device
 would push it again.
 
-**Status.** Current.
+**Status.** Reversed by Q3.676: the screen and the routes only it read are gone.
 
 #### Q3.673 — When does the app re-mint a machine's links?
 
@@ -27082,6 +27261,222 @@ still said without moving anything.
 a waiting session. A machine tab scrolled off the end of the bar hides its count.
 
 **Status.** Reversed an earlier decision — Q3.200.
+
+#### Q3.675 — Where is agent messaging switched off, and why is it a switch?
+
+**Decision.** Three places, one per level of Q2.244.
+
+- **Settings → Permissions**, a section of its own after Machines, holding one row,
+  *Agent messaging*.
+- **The machine's screen**, a row for its owner, absent for anybody else. It shows
+  the machine's own choice, drawn off and locked while the account's switch is off
+  or the machine's own configuration is. Under it sits *Isolate sessions on this
+  machine*, drawn locked while messaging is not on there. The owner asked for it to
+  unlock below the first, and unlike an owner-only block it is a state its reader can
+  change.
+- **No line explains a switch.** The account's switch outranks the machine's, and
+  the machine's outranks the conversation's; the lock says that. Lines for "not yet
+  applied" and "a daemon too old" were built, one of them doubled when the first read
+  as done, and removed on the owner's call on 2026-09-26: a switch that needs a
+  sentence to be believed is a switch that should just work. A machine whose daemon
+  predates the switch is the case that makes it not work, and it is fixed by
+  updating the daemon, not by describing it.
+- **The session's menu**, a `menuitemcheckbox` after Pin, present only where the
+  machine allows messaging at all.
+
+**Why a switch, when Q3.220 retired one.** Q3.220 confirms the act that widens
+authority. Switching messaging on widens it too, but only back to the default and
+only across the owner's own machines, and the owner asked for a switch at every
+level. What Q3.220 keeps is the other half: nothing is drawn flipped before the
+server answers (`SwitchRow`), and the drawer's theme row shares its `SwitchKnob`.
+
+**Status.** Current. Narrows Q3.220 to acts that widen beyond the owner's own.
+
+#### Q3.676 — Why is there no Agent links screen?
+
+**Decision.** Removed on the owner's call on 2026-09-26, with everything only it
+read: the leaf under the machine, `GET /v1/machines/:id/links`, `DELETE
+/v1/links/:id` and the daemon's `GET /peers/links`. Link sync still runs, unseen.
+What the screen offered has a switch now:
+- **Replace** answered a token that got out. Switching the machine off, or isolating
+  it, revokes every link it is either end of in one write, and switching it back
+  mints them again under new ids (Q1.654).
+- **Its failures** are read nowhere. A sync that fails is retried (Q3.673), and
+  nothing on a settings screen describes a switch (Q3.675).
+- A link's `lastError` has no reader left, so the daemon no longer writes it. The
+  column stays, since a migration may only add.
+
+**Why.** The screen answered a question nobody asks — which token each pair of
+machines holds. The one that is asked, whether a machine's agents may reach the
+others, has its own switch.
+
+**Status.** Current. Reverses Q3.672.
+#### Q3.677 — What names a session in the list, and where does its nickname go?
+
+**Decision.** The title, as before, and the nickname under it. `sessionLabel` still
+answers the title and then the folder, and Rename still edits the title. The
+nickname (Q2.245) is drawn as `@mira` by `nicknameLine`, at the head of the row's
+subline — `@mira · claude · subpath`, sans like the rest of the row — and at the head
+of the conversation header's subtitle, before the machine. A row from an older
+daemon carries no nickname and draws exactly what it drew before.
+
+New session asks four things: machine, agent, nickname and folder. The nickname
+field arrives filled in with a free name from `NICKNAMES` — free of every nickname
+this client can see on any machine — and the dice beside it deals another; a person
+may type their own. The field is narrow, since a nickname is a word, with an `@`
+mark before it. So it is never the optional empty field Q3.87 removed: Start
+works in one press, as it did. A draft outlives a trip to the agent builder or to
+settings, Start is refused while the value is not a nickname, and `409
+nickname_taken` lands on the screen's own error line. A daemon too old to keep a
+nickname answers with a snapshot that has none, and a toast says so.
+
+**Why.** The owner asked on 2026-09-28 for nicknames *instead of* titles, then
+corrected it the same day: the list is read by what each session is about, and the
+nickname belongs underneath. The nickname is what you type after `@`; the title is
+how you find the session in the first place.
+
+**Not built.** A control that changes a nickname — the daemon takes one on `/meta`,
+and `pnpm client nickname` sends it. Q7.153.
+
+**Status.** Current. Amends Q3.86.
+
+#### Q3.678 — What does `@` open in the composer?
+
+**Decision.** A list of every session this session's agent can reach, drawn the way
+Telegram draws its mentions: the harness's glyph, the title, then a faint `@mira`,
+and the machine for a session on another one. Choosing a row inserts `@mira `.
+- **Its source is the daemon**: `GET /sessions/:id/mentions` answers the same listing
+  `list_agents` gives that session's agent, on every linked machine, without the
+  session itself. It is `session:write`, since it names the owner's other machines,
+  and a writer could already get those by asking the agent. A name that is not
+  nickname-shaped — a slug from an older daemon elsewhere — is not offered, because
+  the daemon would not resolve it (Q2.246).
+- **Where it opens**: `mentionQuery` finds an `@` at the start of the message or
+  after whitespace, with the caret inside the token, and never in a draft that
+  starts with `/`, so it and the command menu can never both be open.
+  `mentionCompletion` keeps everything before the token and replaces the whole
+  token, where the command menu's completion owns index 0.
+- **One cache per session**, fifteen seconds, shared by every keystroke. An older
+  daemon's bare 404 is remembered against its instance id, so nothing opens there
+  until that daemon is replaced — and then it is asked again, with no reload.
+  Remembered for good, it was the first bug the owner hit: `@` asked of a daemon
+  minutes before its update, and offered nothing after it. Keyed by session rather
+  than held as the composer's state, so a switch of conversation owes it no reset.
+- **A bare `@` that offers nobody says so**, in the panel the rows would take: nobody
+  can be reached from here, or the listing failed. A menu that does not open reads as
+  a key that does nothing. A typed name that matches nobody closes it.
+- It is `MentionMenu`: the command menu's panel, keys and pointer handling, under
+  its own ids, which the message box's `aria-controls` follows.
+
+**Why.** The owner's reference was Telegram's `@` list. A session is found by what
+it is about, so the title leads the row as it leads the list (Q3.677), and the
+handle is what gets inserted.
+
+**Status.** Current. Amends Q7.20.
+
+#### Q3.679 — What does the line under a session's title carry?
+
+**Decision.** The nickname, then the harness's mark, then what is left of the path —
+`@rune`, a mark, `reemoat…`; the nickname leads, on the owner's word, since it is what
+gets typed after `@`. Two things came off it on the owner's call on 2026-09-28,
+reading the list as overloaded:
+- **The machine's name**, on rows under All chats and Pinned. The machine tabs and
+  the rail already say which machine is selected, and the conversation's header still
+  names it. A row under *No longer granted* keeps it, since there the machine is why
+  the row is there at all.
+- **The harness spelled out.** `AgentMark` draws the glyph New session and the `@`
+  menu already use, at the text's size, in the line's own colour, and names the
+  harness on hover and to a screen reader. A message from another agent names its
+  sender's harness the same way.
+
+**Why.** A row is the tightest slot in the app (web-typography.md): at 390px the
+line shares its width with the age and the kebab. The machine was the third of four
+fields, and the harness a word as wide as the nickname.
+
+**What this gives up, stated.** Under All, two sessions with one title on two
+machines read the same until one is opened. And a mark is recognised where a word is
+read, which is why the marks are the vendors' own (Q3.680).
+
+**Status.** Amended by Q3.681 the same day: the machine is back on every row, with
+its mark, and the path is off.
+
+#### Q3.680 — Whose marks draw the five harnesses?
+
+**Decision.** Their vendors': Claude's spark, Codex's, Kimi's, opencode's and Grok's,
+each in the one-colour form its vendor publishes, inked with `currentColor` so it
+takes the line's own colour and follows the palette. The paths are the ones
+`@lobehub/icons-static-svg` 1.95.1 draws (MIT), credited in `THIRD-PARTY.md`. A
+plugin's harness keeps its monogram. `AgentGlyph` still switches inside
+`isBuiltinAgentId`, so a sixth built-in without a mark is a compile error.
+
+**Why.** The owner, on 2026-09-28, of the shapes this replaced: *not schematic, the
+official logos.* A row now names its harness by the mark alone (Q3.679), and a mark
+nobody has seen before names nothing until somebody hovers it.
+
+**Chosen, and not.** Claude Code's own pixel mascot was the other candidate for
+`claude`; at the row's twelve pixels it is a blob, and the spark is the mark people
+know. No mark is drawn in its brand colour: the dark palette's check allows no colour
+outside the palette, and every other glyph in a row is monochrome.
+
+**Status.** Current. Replaces the shapes of our own that `AgentIcons.tsx` drew.
+
+#### Q3.681 — Does a row name its folder or its machine?
+
+**Decision.** Its machine, on every row, and no path at all: the line under a title is
+the nickname, the harness's mark and the machine, one even gap apart — twelve pixels,
+the owner's measure from the nickname to the mark, repeated from the mark to the
+machine. A machine is drawn as `MachineLabel` wherever a session line names one — the
+row, the conversation header, the `@` menu, New session's *on …* — a server mark
+before its name, as Paseo draws one. `machineDisplayName` still names it, so this
+computer is still `local`.
+
+**Why.** The owner, 2026-09-28: take the folders out of a session's line and put the
+machines there. A row already sits under its folder's header, which says where it
+works; which machine it runs on was the one fact the line could not otherwise give,
+and Q3.679 had just taken it away under All.
+
+**What this gives up, stated.** A row no longer says which subdirectory of its folder
+it works in (`rowSubpath`, Q3.581) — the header still does. Under a machine's own
+tab every row now names that machine, which is the repetition Q3.679 removed; the
+owner chose the same line everywhere over a line that changes with the tab.
+
+**Status.** Current. Amends Q3.679 and Q3.581.
+
+#### Q3.682 — What does an `@name` do where it is drawn?
+
+**Decision.** It is a link to that session, wherever this client can open it, and every
+nickname the app draws wears its `@`. The owner, 2026-09-28: *all nicknames with @,
+and every @ clickable, leading to the agent named after it.*
+- **In a person's message**, `UserBubble` draws `MentionText`: the words as typed, with
+  each `@name` a `MentionLink`. The daemon's own resolution for that message
+  (`prompt.mentions`, Q2.246) is what the link follows first.
+- **In an agent's reply or another agent's message**, `remarkMentions` turns each
+  `@name` in prose into a `mention` element — never inside a link or code — which the
+  Markdown component draws as the same link. An agent's text can only produce one by
+  writing `@name`: there is no raw HTML to forge the element with.
+- **In a peer message's headline**, *Message from @olga*, the name leads to the
+  sender's own ref rather than to whoever holds the name. The harness's mark came off
+  that line on the owner's word.
+- **What it leads to** is `mentionTarget`: the daemon's resolution, then a nickname on
+  this conversation's machine (`MentionScope`), then a name exactly one session holds
+  anywhere. Two elsewhere and none here is plain text, not a guess, and so is a name
+  no session this client can open answers to.
+
+**How it looks.** The name at the text's weight and no underline; under the pointer
+the whole `@name` sits in a pill and the pointer changes, on the owner's word — the
+third named exception to Q3.627, beside the separators and the header's name. The
+pill is `edge`, not `raised`, since `raised` is the person's own bubble and a pill of
+it would vanish there.
+
+**How.** A `<button>`, not an anchor, which Q3.646 keeps out of the bubble because it
+turns a drag into a link drag. It reads the store through a string key, so a streamed
+event re-renders no link whose target stayed put, and it loads the router only on a
+tap: the router parses the address bar as it loads, and the transcript is imported
+where there is none. `hug.ts` now joins the rects of one line (`lineSpans`), since a
+link cuts a line into three text nodes and the widest of them is not the line.
+
+**Status.** Current. Amends Q3.646: the bubble is still never parsed as Markdown, and
+is no longer one text node.
 
 ## Deployment, packaging and code layout
 
@@ -30258,7 +30653,9 @@ upsert's `DO UPDATE` clause.
 identity, and an upsert that can rewrite them can corrupt a row it was only
 meant to touch.
 
-**Status.** Current
+**Status.** Current as a property, not as a list: the clause carries every mutable
+preference — `ultracode`, `rank`, and `nickname` since Q2.245 — and still never
+the identity. `files-paths-git.md` states it that way.
 
 #### Q5.29 — Why is there no synchronous filesystem call on a path the daemon did not create?
 
@@ -31363,6 +31760,8 @@ a clock.
 | Downloads | 100 MiB, which **equals the upload cap by coincidence rather than by coupling** — this row said "deliberately not the upload number" and that was true at 25 MiB. Neither may be set by reading the other: that one bounds what a client may push onto disk against budgets outliving the request, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
 | Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — a **refusal**, not a clip. Far below the per-event cap because all of it rides the snapshot, which `GET /sessions` returns for every session at once. **24 options**, `optionId` 256, both refusals. The two 200-character clips on `title` and an option `name` are gone: they cut a model-written answer on the one channel where kimi asks a question, breaking `askedQuestion`'s identity match against `rawInput` — Q2.214, Q7.82 |
 | Session title | 120 characters accepted from a rename, 60 for the one derived from the first prompt. Bounded for the same reason as the row above: it rides the snapshot, which `GET /sessions` returns for sixty sessions every four seconds |
+| Session nickname | 2–32 characters, one per machine; `NICKNAMES` holds 113, and past them a name takes the first free `-2`, `-3`. Q2.245 |
+| Mentions in a message | 8 distinct names resolved into the daemon's note; the rest stay text. Q2.246 |
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
 | Passwords | scrypt N=2^15 r=8 p=1 — ~51ms on the machine this was measured on (Node 26, 2026-08-07), against ~25ms at 2^14 and ~103ms at 2^16 — holding `128·N·r` = 32 MiB for the duration of each. `maxmem` is passed explicitly at **128 MiB**, because Node's default ceiling is 32 MiB and OpenSSL refuses *at* the boundary: measured, N=2^15 r=8 throws `memory limit exceeded` while N=2^14 succeeds, and a KDF that throws for some parameter sets looks like a wrong password on one deployment rather than a configuration error. 12–256 characters, NFKC and never trimmed; the maximum is not about KDF cost (scrypt passes the input through one PBKDF2 iteration, so bcrypt's folklore does not apply) but about not storing a string somebody else sized. **4 concurrent hashes, at most 2 of them public** (Q1.39); wait lists per lane, 32 authenticated and 16 public, then `503 overloaded` with `Retry-After: 1` |
 | Sessions | 30 days absolute, 14 idle, `last_seen_at` written at most once per 15 minutes — the guard that makes idle expiry affordable at all, since the alternative is an fsync per request on a `synchronous = FULL` database in the process carrying every tunnel. 10 per user, the **oldest revoked** rather than the newest refused, evicted inside the mint's own transaction. Each records what it said about itself, clamped at ingest: 256 characters of `User-Agent`, 64 of address. A revoked row is kept **7 days** and swept at startup with its origin — short because no reader surfaces it (`listSessions` and the admin count both filter `revoked_at IS NULL`), non-zero because deleting on revoke would make the day something does read it unanswerable |
@@ -34407,7 +34806,10 @@ one, and ACP's `resource_link` content blocks in the prompt body.
 **What it would take.** Three separate pieces of work, sharing only the popup's
 chrome.
 
-**Status.** Not built.
+**Status.** Not built. `@` now opens a list of *sessions* (Q3.678), a different
+feature again: a session's nickname is one word, completed from one listing per
+conversation rather than per keystroke, and the popup stays anchored to the
+composer. `@file` would share that popup's chrome and its token rule, nothing else.
 
 ### Q7.21 — Are image attachments previewed inline?
 
@@ -39169,6 +39571,7 @@ you work from is where it is called anything.
   the drag's announcement follow with no call of their own; New session reads
   `machinesAsDrawn`, which is the rail's order, names and therefore its default; the
   two `machine · path` lines, on a row under All and on a session's header, call it
+  (a row now names only its machine, on every row, Q3.681)
   directly. **Settings → Machines keeps the real label** and the badge, since that is
   where a label is renamed and told apart from a collision; **a sentence keeps it
   too**, because one is what gets pasted to somebody at another client.
@@ -40299,12 +40702,13 @@ bytes it holds no key for, as for an app.
 ### Q7.151 — Can two of your own machines be kept apart, or another person's machine be linked?
 
 **Position.** Neither, yet. The app links every eligible pair of one owner's
-machines on one server, and the Agent links screen's Replace re-mints rather than
-parts them (Q3.672). What keeps a machine's agents from being reached today is its
-daemon's `REEMOAT_PEER_MESSAGES=off`, which refuses every message and listing.
+machines on one server, and nothing parts one pair: a machine switched off or
+isolated is parted from all of them at once (Q2.244). What keeps a machine's agents from being reached is its
+switch, the account's or a conversation's (Q2.244); none of them parts two machines
+that both allow it.
 
 **What it would take.** Parting a pair: a stored opt-out that `POST
-/v1/machines/:id/links` respects, and a control that sets it. Another person's
+/v1/machines/:id/links` respects, beside Q1.654's tables, and a control that sets it. Another person's
 machine: an invitation, shaped like an enrollment code, redeemed by the other
 owner's app, after which the receiving Authority mints for the foreign key as it
 does for one of the owner's own. A machine on another server: the same capability,
@@ -40316,5 +40720,45 @@ a daemon.
 **Why not yet.** Each is a decision about who may ask whose agents to act, which is
 the permission design this feature deliberately did not include: a link lets one
 machine's agents ask another's to do anything those can do, as their owner.
+
+**Status.** Not built. The switches that decide whether a machine takes part at all
+are Q2.244's.
+
+### Q7.152 — What else could a permission for agent messaging decide?
+
+**Position.** Four things, none built.
+
+- **Ask before delivery**: a third state in which a message waits as a card until
+  somebody approves it.
+- **Pairs of machines**: the per-pair opt-out Q7.151 describes, beside Q1.654's
+  tables.
+- **A switch for the whole server**, for its admin.
+- **A boundary between harnesses**: a sandboxed agent may not wake an unconfined
+  one.
+
+**Why not yet.** Q2.244's switches answer whether a conversation takes part. Each of
+these decides *who may ask whom*, the question Q7.151 left open, and the first turns
+a switch into three positions.
+
+**Status.** Not built.
+
+### Q7.153 — What is not built around nicknames?
+
+**Position.** Five things, each left out on purpose.
+- **A control that changes a nickname.** The daemon takes one on
+  `POST /sessions/:id/meta`, `pnpm client nickname` sends it, and a plugin's
+  `setMeta` may; the app's Rename is the title's (Q3.677). A second in-place field
+  in the header would have to share Q3.665's pinned box with the title.
+- **Mentions from another agent or a plugin.** Only a person's message gets the note
+  (Q2.246). An agent already has `list_agents`, and a note inside an envelope would
+  be the daemon writing into another agent's words.
+- **A mention drawn as a mention.** The bubble shows `@mira` as the text it is. The
+  `prompt` event logs which names resolved (`mentions`), so a chip is a client
+  change when somebody wants one.
+- **One nickname per account.** Uniqueness is per machine (Q2.245); an ambiguous
+  name is answered with every match.
+- **A plugin API version for the field.** `nickname` is optional on
+  `sessions.create` and `setMeta`, and the snapshot returned says whether it held,
+  so a plugin that needs it can tell without a rung.
 
 **Status.** Not built.

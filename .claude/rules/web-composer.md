@@ -45,8 +45,8 @@ in two rows on a 390px screen. Three rules keep it one box. ⚠ **The box is the
 `<form>`, so every hand-rolled `<button>` under it must name its `type`** — the
 default inside a form is `submit`, and `Select`, `Absent`, `Toggle` and the choice
 rows are all hand-rolled, so a typeless one sends the draft when a chip is tapped.
-`webcheck` scans every `<button` in both files, comment-stripped, and **that is the
-only guard**. **It may never take `overflow-hidden`** — `CommandMenu`, all three
+`webcheck` scans every `<button` in all three files, comment-stripped, and **that is the
+only guard**. **It may never take `overflow-hidden`** — `CommandMenu`, `MentionMenu`, all three
 chip menus, `Absent`'s panel and the `…` popover are `bottom-full` children of it.
 And it takes **no** `focus-within` treatment: Q3.414 is about this box now, and the
 caret is the indicator.

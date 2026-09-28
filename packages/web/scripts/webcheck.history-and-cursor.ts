@@ -769,8 +769,8 @@ process.stdout.write("\na person's message, exactly as they sent it\n");
 {
   // Drawn, never parsed: `1)` stays text rather than a list marker nobody can select, `**x**` stays asterisks (Q3.646).
   const bubble = stripComments(srcFile("ui/Bubble.tsx"));
-  const drawn = /<div className="([^"]*)">\{text\}<\/div>/.exec(bubble)?.[1] ?? "";
-  check("the bubble draws the text itself, as one node", drawn !== "", true);
+  const drawn = /<div className="([^"]*)">\s*<MentionText text=\{text\} mentions=\{mentions\} \/>\s*<\/div>/.exec(bubble)?.[1] ?? "";
+  check("the bubble draws the text itself, with only its @names made links (Q3.682)", drawn !== "", true);
   check(
     "keeping every space and line break, and wrapping a long token",
     ["select-text", "whitespace-pre-wrap", "wrap-anywhere"].filter((name) => !drawn.split(" ").includes(name)),

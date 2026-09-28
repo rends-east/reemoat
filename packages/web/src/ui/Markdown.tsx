@@ -7,6 +7,8 @@ import { Icon, LINK } from "./bits";
 import { copyText } from "./clipboard";
 import { useFileAccess } from "./files";
 import { openableHref } from "./links";
+import { remarkMentions } from "../mentionLinks";
+import { MentionLink } from "./MentionLink";
 import { PAREN_LIST, remarkListDelimiter, remarkListItemBlocks } from "./mdlist";
 
 /** No rehype-raw: agent output is untrusted, and react-markdown's HTML escaping is the security boundary. */
@@ -100,6 +102,7 @@ const REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
   remarkGfm,
   remarkListDelimiter,
   remarkListItemBlocks,
+  remarkMentions,
 ];
 
 /** Module scope is load-bearing: a fresh object per render would defeat MarkdownBody's memo. */
@@ -163,6 +166,8 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
   },
   // The default pre would nest around the one CodeBlock renders.
   pre: ({ children }) => <>{children}</>,
+  // Not an HTML element: `remarkMentions` names it, so an agent's text can only produce one by writing `@name` (Q3.682).
+  ...({ mention: ({ name }: { name?: unknown }) => (typeof name === "string" ? <MentionLink name={name} /> : null) } as object),
 };
 
 /** The parse, memoised on the settled text below the throttle, which is the entire saving. */

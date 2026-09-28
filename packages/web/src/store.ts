@@ -492,15 +492,17 @@ class AppStore implements StreamSink {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly links = new LinkSync({
     link: (id) => cp.linkMachine(id),
-    push: async (id, links) => {
+    push: async (id, links, policy) => {
       const daemon = this.daemons.get(machineId(id));
       if (daemon === undefined) throw new Error("that machine is no longer in the list");
-      await daemon.putPeerLinks(links);
+      return daemon.putPeerLinks(links, policy);
     },
     now: () => Date.now(),
   });
   private resumeInFlight: Promise<void> | null = null;
   private resumeQueued = false;
+  /** Taken by the next resume to start, so a resume already listing machines never spends it on the listing before the change. */
+  private linksForced = false;
   private epoch = 0;
 
   subscribe = (listener: () => void): (() => void) => {
@@ -979,6 +981,8 @@ class AppStore implements StreamSink {
 
   private async runResume(reason: string): Promise<void> {
     const epoch = ++this.epoch;
+    const forceLinks = this.linksForced;
+    this.linksForced = false;
     this.patch({ resuming: true });
 
     await this.refreshLocalMachine();
@@ -1024,7 +1028,8 @@ class AppStore implements StreamSink {
       this.patch({ resuming: false, lastResumeAt: Date.now() });
       // After the listing and the probes, so each machine's reach and daemon are this wake's answer.
       const scope = this.linkScope();
-      if (scope !== null) void this.links.syncAll(scope, this.linkCandidates());
+      if (scope !== null) void this.links.syncAll(scope, this.linkCandidates(), forceLinks);
+      else if (forceLinks) this.linksForced = true;
     }
   }
 
@@ -1037,16 +1042,30 @@ class AppStore implements StreamSink {
     return [...this.connections.values()].map((connection) => linkCandidate(connection.state()));
   }
 
-  /** A person's act: past the timing rules, never past a machine that cannot be reached. */
-  async resyncLinks(id: MachineId): Promise<void> {
-    const scope = this.linkScope();
-    if (scope === null) return;
-    await this.links.syncOne(scope, this.linkCandidates(), id, true);
-  }
-
   linkStatus(id: MachineId): LinkSyncStatus | null {
     const connection = this.connections.get(id);
     return connection === undefined ? null : this.links.status(linkCandidate(connection.state()));
+  }
+
+  /** The answer is the account's flag, so `me` takes it at once; what it adds up to per machine waits for the listing. Q2.244. */
+  async saveAccountMessaging(on: boolean): Promise<void> {
+    const answer = await cp.saveAccountPermissions(on);
+    const me = this.snapshot.me;
+    if (me !== null) this.patch({ me: { ...me, permissions: { agentMessaging: answer.agentMessaging } } });
+    void this.permissionsChanged();
+  }
+
+  /** Only the switches named; the answer is the machine's own pair, drawn on the 200 and never before. */
+  async saveMachinePermissions(id: MachineId, patch: { agentMessaging?: boolean; isolated?: boolean }): Promise<void> {
+    const answer = await cp.saveMachinePermissions(id, patch);
+    this.connections.get(id)?.noteOwnMessaging(answer);
+    void this.permissionsChanged();
+  }
+
+  /** Every machine is handed the new policy past its backoff, since a switch left unapplied for fifteen minutes is a lie. */
+  private async permissionsChanged(): Promise<void> {
+    this.linksForced = true;
+    await this.machinesChanged("permissions-changed");
   }
 
   private async resumeMachine(connection: MachineConnection, epoch: number): Promise<void> {
@@ -1555,7 +1574,7 @@ class AppStore implements StreamSink {
   /** Drawn now, errors through `report`; returns whether the write was issued. */
   setSessionMeta(
     ref: SessionRef,
-    patch: { title?: string | null; pinned?: boolean; rank?: number | null },
+    patch: { title?: string | null; pinned?: boolean; rank?: number | null; peerMessages?: boolean },
     report: (message: string) => void,
   ): boolean {
     const daemon = this.daemonFor(ref.machineId);

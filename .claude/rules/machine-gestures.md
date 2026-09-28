@@ -85,7 +85,8 @@ every grantee read that row and to them `local` is somewhere else (Q7.139).
 `sessionGroups` fills `MachineGroup.name` from it, so the strip, the rail (label,
 `title`, the monogram's letter) and the drag's announcement inherit it with no call
 of their own; New session reads `machinesAsDrawn` for the rail's order, names and
-default; the two `machine · path` lines (a row under All, `WorkspaceLine`) call it
+default; every row's machine (`MachineLabel`, Q3.681) and `WorkspaceLine`'s
+`machine · path` call it
 directly.
 
 ⚠ **`local` means this computer and nothing else, on this client.** A machine

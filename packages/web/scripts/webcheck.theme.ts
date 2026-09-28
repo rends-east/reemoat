@@ -237,11 +237,16 @@ process.stdout.write("\nthe switch is the drawer's last row, and it is a switch\
     [true, true],
   );
   check("parted from a plugin's screens when there are any", /\{launchable\.length > 0 && <div className="my-1\.5 border-t border-edge" \/>\}\s*<DarkThemeRow \/>/.test(drawer), true);
+  check("the row draws the one shared knob, with the theme as its state", /<SwitchKnob on=\{dark\} \/>/.test(row), true);
   // Q3.209: bg-fg is a mark under a stated size, so it is the knob's and never the track's.
-  const knob = /<span\s+data-keeps-motion=""\s+className=\{`([^`]*)`\}/.exec(row)?.[1] ?? "";
+  const bits = stripComments(srcFile("ui/bits.tsx"));
+  const knobFn = between(bits, "export function SwitchKnob(", "\n}\n");
+  report("the shared knob was found", knobFn.length > 200, `${knobFn.length} chars`);
+  const knob = /<span\s+data-keeps-motion=""\s+className=\{`([^`]*)`\}/.exec(knobFn)?.[1] ?? "";
   check(
     "the knob is the glyph-sized mark and keeps its motion; the track only takes the state tone",
-    [/\bsize-3\.5\b/.test(knob), /\bbg-fg\b/.test(knob), /\btransition-transform\b/.test(knob), (row.match(/\bbg-fg\b/g) ?? []).length, /border-edge-strong \$\{dark \? "bg-raised" : ""\}/.test(row)],
+    [/\bsize-3\.5\b/.test(knob), /\bbg-fg\b/.test(knob), /\btransition-transform\b/.test(knob), (knobFn.match(/\bbg-fg\b/g) ?? []).length, /border-edge-strong \$\{on \? "bg-raised" : ""\}/.test(knobFn)],
     [true, true, true, 1, true],
   );
+  check("and nothing a reader presses: the row around it is the switch", [/aria-hidden/.test(knobFn), /role=|onClick/.test(knobFn)], [true, false]);
 }

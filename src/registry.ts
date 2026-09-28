@@ -37,6 +37,7 @@ import {
   type ExitReason,
   type PermissionOptionSummary,
   type PersistedSession,
+  type PromptMention,
   type ResumeGiveUp,
   type SessionEvent,
   type SessionExit,
@@ -46,6 +47,7 @@ import {
   type StoredEvent,
   type StoredFileRef,
 } from "./events.js";
+import { isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, normalizeNickname, pickNickname } from "./nickname.js";
 import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
 import type { SessionRuntime } from "./runtime/types.js";
@@ -121,6 +123,30 @@ export class SessionLimitError extends Error {
     super(message);
     this.name = "SessionLimitError";
   }
+}
+
+export type NicknameRefusal = "nickname_taken" | "invalid_nickname";
+
+/** nickname_taken is a 409 and invalid_nickname a 400; both are thrown before anything is created or changed (Q2.245). */
+export class NicknameError extends Error {
+  constructor(
+    readonly code: NicknameRefusal,
+    message: string,
+  ) {
+    super(message);
+    this.name = "NicknameError";
+  }
+}
+
+export function invalidNickname(): NicknameError {
+  return new NicknameError(
+    "invalid_nickname",
+    `a nickname is ${MIN_NICKNAME_CHARS} to ${MAX_NICKNAME_CHARS} lowercase latin letters, digits and single hyphens, starting with a letter`,
+  );
+}
+
+function nicknameTaken(nickname: string): NicknameError {
+  return new NicknameError("nickname_taken", `another session on this machine is already called ${nickname}`);
 }
 
 const CANCELLED: acp.RequestPermissionResponse = { outcome: { outcome: "cancelled" } };
@@ -529,7 +555,11 @@ export interface SessionSnapshot {
   /** The list itself is served by GET /sessions/:id/commands; clients refetch on any change, since a restart resets this to 0. */
   commandsRevision: number;
   title: string | null;
+  /** The session's address, unique on this machine; an older daemon's snapshot has none (Q2.245). */
+  nickname: string;
   pinned: boolean;
+  /** This conversation's own switch; the machine's is on GET /peers/links (Q2.244). */
+  peerMessages: boolean;
   /** A position clock in milliseconds; null means createdAt. */
   rank: number | null;
   /** null means cannot tell, never 0%. */
@@ -656,9 +686,17 @@ export interface QueuedPrompt {
   at: number;
 }
 
+/** What a person's `@name`s resolved to: the block sent after the message, and the sessions it names (Q2.246). */
+export interface MentionNote {
+  text: string;
+  mentions: PromptMention[];
+}
+
 interface QueuedEntry extends QueuedPrompt {
   text: string;
   attachments: readonly UploadRow[];
+  /** The mention note's text, sent as its own block when this entry is delivered. */
+  note: string | null;
   peer: boolean;
   /** Acceptance order, taken before the first await of sendMidTurn; never the log seq, which is 0 for a refused append and would sort first. */
   order: number;
@@ -686,6 +724,13 @@ export function stoppedBeforeDelivery(count: number): string {
   return count === 1
     ? "the session stopped before this message reached the agent"
     : `the session stopped before ${count} messages reached the agent`;
+}
+
+export function peerMessagesOffBeforeDelivery(count: number, where: "machine" | "conversation"): string {
+  const place = where === "machine" ? "on this machine" : "for this conversation";
+  return count === 1
+    ? `agent messaging was switched off ${place} before a message from another agent reached the agent`
+    : `agent messaging was switched off ${place} before ${count} messages from other agents reached the agent`;
 }
 
 export function clearedWithBackgroundWork(count: number): string {
@@ -776,6 +821,14 @@ interface ElicitationResolutionRecord {
 
 export type SessionWatcher = (snapshot: SessionSnapshot) => void;
 
+export interface SessionMetaChange {
+  title?: string | null;
+  pinned?: boolean;
+  rank?: number | null;
+  nickname?: string;
+  peerMessages?: boolean;
+}
+
 export interface ManagedSessionInit {
   createdAt?: number;
   agentSessionId?: string | null;
@@ -789,12 +842,15 @@ export interface ManagedSessionInit {
   title?: string | null;
   pinned?: boolean;
   rank?: number | null;
+  peerMessagesOff?: boolean;
   agentState?: AgentStateMemory | null;
   /** null means nobody chose and follows REEMOAT_CLAUDE_ULTRACODE; false outranks it. */
   ultracode?: boolean | null;
 }
 
 export interface ManagedSessionOptions {
+  /** Already reserved or backfilled by the registry, which alone keeps it unique. */
+  nickname: string;
   sessionStore?: SessionStore | null;
   makeRoomForWake?: () => Promise<void>;
   restore?: ManagedSessionInit;
@@ -810,6 +866,8 @@ export interface ManagedSessionOptions {
   onWarning?: (detail: string) => void;
   /** Asked at every launch, after initialize; absent injects nothing. */
   peerMcpServers?: (sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[];
+  /** Told when this conversation's own switch goes off, after its queue is dropped. */
+  onPeerMessagesOff?: (sessionId: string) => void;
 }
 
 export interface UploadsPort {
@@ -857,6 +915,7 @@ export class ManagedSession {
   private readonly peerMcpServers:
     | ((sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[])
     | null;
+  private readonly onPeerMessagesOff: ((sessionId: string) => void) | null;
   private lastEventAt: number | null = null;
   // Only agent events move this: wedged must not be reset by the person's own messages, which move lastEventAt.
   private lastAgentEventAt: number | null = null;
@@ -909,7 +968,9 @@ export class ManagedSession {
   private unsubscribeCommands: (() => void) | null = null;
 
   private titleValue: string | null;
+  private nicknameValue: string;
   private pinnedValue: boolean;
+  private peerMessagesOffValue: boolean;
   private rankValue: number | null;
 
   private ultracodeChoice: boolean | null;
@@ -959,7 +1020,7 @@ export class ManagedSession {
     readonly agent: AgentId,
     readonly workspace: SessionWorkspace,
     store: EventStore,
-    options: ManagedSessionOptions = {},
+    options: ManagedSessionOptions,
   ) {
     this.customAgent = options.customAgent ?? null;
     this.resolveCustomAgent = options.resolveCustomAgent ?? (() => null);
@@ -980,6 +1041,7 @@ export class ManagedSession {
     this.uploads = options.uploads ?? null;
     this.elicitationAllowed = options.elicitationAllowed ?? (() => true);
     this.peerMcpServers = options.peerMcpServers ?? null;
+    this.onPeerMessagesOff = options.onPeerMessagesOff ?? null;
 
     const init = options.restore ?? {};
     this.createdAt = init.createdAt ?? Date.now();
@@ -991,10 +1053,12 @@ export class ManagedSession {
     this.askSeq = init.askSeq ?? 0;
     this.askSalt = init.askSalt ?? randomBytes(2).toString("hex").slice(0, 3);
     this.resumeGivenUp = init.resumeGaveUp ?? null;
-    // Before the touchSafe below, or a restored session's first row would drop its name and pin.
+    // Before the touchSafe below, or a restored session's first row would drop its name and pin, and a backfilled nickname go unwritten.
     this.titleValue = init.title ?? null;
+    this.nicknameValue = options.nickname;
     this.pinnedValue = init.pinned ?? false;
     this.rankValue = init.rank ?? null;
+    this.peerMessagesOffValue = init.peerMessagesOff ?? false;
     // The one live-agent state restored from disk; the revision moves with it, since a client skips the fetch at revision 0.
     if (init.agentState != null) {
       this.agentConfigState = init.agentState.config;
@@ -1029,7 +1093,7 @@ export class ManagedSession {
   static restore(
     row: PersistedSession,
     store: EventStore,
-    options: Omit<ManagedSessionOptions, "restore"> = {},
+    options: Omit<ManagedSessionOptions, "restore">,
   ): ManagedSession {
     return new ManagedSession(row.id, row.agent, row.workspace, store, {
       ...options,
@@ -1048,6 +1112,7 @@ export class ManagedSession {
         title: row.title,
         pinned: row.pinned,
         rank: row.rank,
+        peerMessagesOff: row.peerMessagesOff,
         agentState:
           row.exit !== null && revivableByPrompt(row.exit.reason, row.agentSessionId)
             ? row.agentState
@@ -1061,8 +1126,16 @@ export class ManagedSession {
     return this.titleValue;
   }
 
+  get nickname(): string {
+    return this.nicknameValue;
+  }
+
   get pinned(): boolean {
     return this.pinnedValue;
+  }
+
+  get peerMessages(): boolean {
+    return !this.peerMessagesOffValue;
   }
 
   get rank(): number | null {
@@ -1254,7 +1327,9 @@ export class ManagedSession {
       lastEventAt: this.lastEventAt,
       createdAt: this.createdAt,
       title: this.titleValue,
+      nickname: this.nicknameValue,
       pinned: this.pinnedValue,
+      peerMessages: !this.peerMessagesOffValue,
       // Always emitted, null included: a client reads an absent rank as a daemon that cannot store an order.
       rank: this.rankValue,
       contextUsage:
@@ -1668,13 +1743,22 @@ export class ManagedSession {
     this.touchSafe();
   }
 
-  /** Allowed on a terminal session: naming a finished session is the point. */
-  setMeta(change: { title?: string | null; pinned?: boolean; rank?: number | null }): SessionSnapshot {
+  /** Allowed on a terminal session: naming a finished session is the point. A nickname only through SessionRegistry.setMeta, which checks it is free. */
+  setMeta(change: SessionMetaChange): SessionSnapshot {
     if (change.title !== undefined) {
       this.titleValue = change.title === null ? null : normalizeTitle(change.title);
     }
+    if (change.nickname !== undefined) this.nicknameValue = change.nickname;
     if (change.pinned !== undefined) this.pinnedValue = change.pinned;
     if (change.rank !== undefined) this.rankValue = change.rank;
+    if (change.peerMessages !== undefined) {
+      const switchedOff = !change.peerMessages && !this.peerMessagesOffValue;
+      this.peerMessagesOffValue = !change.peerMessages;
+      if (switchedOff) {
+        this.dropQueuedPeer("conversation");
+        this.onPeerMessagesOff?.(this.id);
+      }
+    }
     this.touchSafe();
     return this.snapshot();
   }
@@ -2015,7 +2099,12 @@ export class ManagedSession {
   }
 
   /** Synchronous: answers the 202 with turn and seq; attachment bytes are read later in pump. "plugin" is logged as null. */
-  prompt(text: string, attachments: readonly UploadRow[] = [], from: PeerOrigin | "plugin" | null = null): PromptResult {
+  prompt(
+    text: string,
+    attachments: readonly UploadRow[] = [],
+    from: PeerOrigin | "plugin" | null = null,
+    note: MentionNote | null = null,
+  ): PromptResult {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
@@ -2025,8 +2114,8 @@ export class ManagedSession {
     if (this.turn !== null) return { kind: "turn_in_flight", status: this.status };
 
     const turn = this.armTurn();
-    const seq = this.recordPrompt(session, text, attachments, from);
-    this.runTurn(session, text, attachments, turn);
+    const seq = this.recordPrompt(session, text, attachments, from, note);
+    this.runTurn(session, text, attachments, turn, note?.text ?? null);
     return { kind: "accepted", turn, seq };
   }
 
@@ -2047,6 +2136,30 @@ export class ManagedSession {
     this.touchSafe();
   }
 
+  /** Queued messages from other agents only; one already steered in, or a turn one started, is not taken back (Q2.244). */
+  dropQueuedPeer(where: "machine" | "conversation"): number {
+    const dropped = this.queuedPrompts.filter((entry) => entry.peer).length;
+    if (dropped === 0) return 0;
+    this.queuedPrompts = this.queuedPrompts.filter((entry) => !entry.peer);
+    this.safeAppend({ type: "error", message: peerMessagesOffBeforeDelivery(dropped, where), data: null });
+    this.touchSafe();
+    return dropped;
+  }
+
+  /** For messages this session had waiting for a machine that was off; nobody is woken to be told. */
+  notePeerMessagesOff(unsent: number, why: "off" | "isolated" = "off"): void {
+    const reason = why === "off" ? "agent messaging was switched off" : "this machine's sessions were isolated";
+    this.safeAppend({
+      type: "error",
+      message:
+        unsent === 1
+          ? `a message to an agent on another machine was not sent: ${reason}`
+          : `${unsent} messages to agents on other machines were not sent: ${reason}`,
+      data: null,
+    });
+    this.touchSafe();
+  }
+
   get peerTurnsSinceHuman(): number {
     return this.peerTurns;
   }
@@ -2060,6 +2173,7 @@ export class ManagedSession {
     text: string,
     attachments: readonly UploadRow[] = [],
     from: PeerOrigin | null = null,
+    note: MentionNote | null = null,
   ): Promise<MidTurnResult> {
     if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
@@ -2069,7 +2183,7 @@ export class ManagedSession {
 
     // The turn ended after the route's first try; the ordinary path re-guards everything.
     const turn = this.turn;
-    if (turn === null) return this.asMidTurn(this.prompt(text, attachments, from));
+    if (turn === null) return this.asMidTurn(this.prompt(text, attachments, from, note));
 
     // Counts sends still in flight too, or concurrent sends overshoot before any push. See MAX_QUEUED_PROMPTS.
     if (this.queuedPrompts.length + this.midTurnAccepted >= MAX_QUEUED_PROMPTS) {
@@ -2087,13 +2201,14 @@ export class ManagedSession {
     this.midTurnAccepted += 1;
     // Taken before the first await: the queue is ordered by acceptance. See QueuedEntry.order.
     const order = ++this.acceptOrder;
+    const noteText = note?.text ?? null;
     try {
-      const seq = this.recordPrompt(session, text, attachments, from);
+      const seq = this.recordPrompt(session, text, attachments, from, note);
 
       let promptRequired = false;
       // No steer once a cancel is pending: that turn is being torn down and nothing would answer; the queue survives a cancel.
       if (session.supportsSteering && this.cancelRequestedAt === null) {
-        const extra = await this.attachmentBlocks(session, attachments);
+        const extra = [...(await this.attachmentBlocks(session, attachments)), ...noteBlocks(noteText)];
         // Re-checked: a cancel may land during the attachment read.
         if (this.cancelRequestedAt === null) {
           const outcome = await session.steer(text, extra);
@@ -2124,7 +2239,7 @@ export class ManagedSession {
         const live = this.session;
         if (live !== null) {
           const started = this.armTurn();
-          this.runTurn(live, text, attachments, started);
+          this.runTurn(live, text, attachments, started, noteText);
           return { kind: "accepted", turn: started, seq };
         }
       }
@@ -2146,6 +2261,7 @@ export class ManagedSession {
         at: Date.now(),
         text,
         attachments,
+        note: noteText,
         peer,
         order,
       };
@@ -2188,6 +2304,7 @@ export class ManagedSession {
     text: string,
     attachments: readonly UploadRow[],
     from: PeerOrigin | "plugin" | null,
+    note: MentionNote | null,
   ): number {
     if (from === null || from === "plugin") {
       // Only a person's (or a plugin's) first prompt names the session; an envelope would make a poor title.
@@ -2215,7 +2332,8 @@ export class ManagedSession {
           }));
 
     const logged = from === "plugin" ? null : from;
-    const seq = this.safeAppend({ type: "prompt", text, attachments: refs, from: logged })?.seq ?? 0;
+    const mentions = from === null && note !== null && note.mentions.length > 0 ? { mentions: note.mentions } : {};
+    const seq = this.safeAppend({ type: "prompt", text, attachments: refs, from: logged, ...mentions })?.seq ?? 0;
 
     // Marked even if the append failed; a queued message spends at accept so the 24-hour sweep cannot collect its files.
     if (attachments.length > 0) {
@@ -2248,8 +2366,9 @@ export class ManagedSession {
     text: string,
     attachments: readonly UploadRow[],
     turn: number,
+    note: string | null = null,
   ): void {
-    void this.pump(session, text, attachments, turn).catch(() => {
+    void this.pump(session, text, attachments, turn, note).catch(() => {
       // pump() already recorded whatever went wrong.
     });
     this.touchSafe();
@@ -2274,14 +2393,14 @@ export class ManagedSession {
 
     const entry = this.queuedPrompts.shift();
     if (entry === undefined) return;
-    // Consecutive peer messages go as one turn: each already has its own prompt event, and none carries files.
+    // Consecutive peer messages go as one turn: each already has its own prompt event, and none carries files or a note.
     let text = entry.text;
     while (entry.peer && this.queuedPrompts[0]?.peer === true) {
       text += `\n\n${this.queuedPrompts.shift()!.text}`;
     }
     const turn = this.armTurn();
     // No recordPrompt: logged, and its uploads spent, at acceptance.
-    this.runTurn(session, text, entry.attachments, turn);
+    this.runTurn(session, text, entry.attachments, turn, entry.note);
   }
 
   /** Cancels the turn but keeps the agent; sends, then sweeps pending permissions, which ACP requires be answered cancelled. */
@@ -2357,10 +2476,11 @@ export class ManagedSession {
     text: string,
     attachments: readonly UploadRow[],
     turn: number,
+    note: string | null,
   ): Promise<void> {
     let failed = false;
     try {
-      const extra = await this.attachmentBlocks(session, attachments);
+      const extra = [...(await this.attachmentBlocks(session, attachments)), ...noteBlocks(note)];
       // A cancel can land during the attachment read, before the agent holds a prompt; end the turn here instead.
       if (this.turn === turn && this.cancelRequestedAt !== null) {
         this.record({ type: "turn_end", stopReason: "cancelled", usage: null });
@@ -2823,8 +2943,10 @@ export class ManagedSession {
       lastSeq: snapshot.lastSeq,
       dropped: snapshot.dropped,
       title: snapshot.title,
+      nickname: snapshot.nickname,
       pinned: snapshot.pinned,
       rank: snapshot.rank,
+      peerMessagesOff: !snapshot.peerMessages,
       // The choice, never ultracodeWanted, or the machine default would be pinned into the row.
       ultracode: this.ultracodeChoice,
       // Only for a session a prompt would revive, the gate doStop clears on; null while live.
@@ -2850,6 +2972,8 @@ export interface CreateSessionOptions {
   origin?: string | null;
   /** Overrides the daemon-wide worktree root; the offline drivers use it. */
   worktreeRoot?: string;
+  /** Absent or null picks a free one from NICKNAMES. */
+  nickname?: string | null;
 }
 
 export type WorktreePolicy = "auto" | "require" | "never";
@@ -2928,8 +3052,11 @@ export type SessionObserver = (
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, ManagedSession>();
+  // Names claimed by a create still in flight, so a concurrent create cannot take one before the session is registered.
+  private readonly reservedNicknames = new Set<string>();
   // Re-read at every launch through the thunk handed to each session, so setting it after restore still reaches them.
   private peerMcpServersBy: ((sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[]) | null = null;
+  private peerMessagesOffBy: ((sessionId: string) => void) | null = null;
   private readonly observers = new Set<SessionObserver>();
   private shuttingDown = false;
   /** One switch for the boot pass and the prompt-path resume; injected because this file reads no env. */
@@ -3210,6 +3337,15 @@ export class SessionRegistry {
     this.peerMcpServersBy = provide;
   }
 
+  setPeerMessagesOff(notify: ((sessionId: string) => void) | null): void {
+    this.peerMessagesOffBy = notify;
+  }
+
+  /** Every session's queued messages from other agents, when this machine's messaging is switched off (Q2.244). */
+  dropQueuedPeer(): void {
+    for (const managed of this.list()) managed.dropQueuedPeer("machine");
+  }
+
   /** Whether wakeForPrompt would put an agent back on this ended session; never once shutdown has begun. */
   wakesOnPrompt(managed: ManagedSession, waker: Waker): boolean {
     const reason = managed.exit?.reason;
@@ -3239,7 +3375,48 @@ export class SessionRegistry {
     await managed.whenResumed();
   }
 
+  /** Every nickname a session here holds, ended ones included, plus those reserved by a create in flight. */
+  private takenNicknames(except: ManagedSession | null = null): Set<string> {
+    const taken = new Set(this.reservedNicknames);
+    for (const session of this.sessions.values()) if (session !== except) taken.add(session.nickname);
+    return taken;
+  }
+
+  private reserveNickname(requested: string | null | undefined): string {
+    const taken = this.takenNicknames();
+    let nickname: string;
+    if (requested == null) {
+      nickname = pickNickname(taken);
+    } else {
+      const normalized = normalizeNickname(requested);
+      if (normalized === null) throw invalidNickname();
+      if (taken.has(normalized)) throw nicknameTaken(normalized);
+      nickname = normalized;
+    }
+    this.reservedNicknames.add(nickname);
+    return nickname;
+  }
+
+  /** The only door a nickname changes through. */
+  setMeta(managed: ManagedSession, change: SessionMetaChange): SessionSnapshot {
+    if (change.nickname === undefined) return managed.setMeta(change);
+    const nickname = normalizeNickname(change.nickname);
+    if (nickname === null) throw invalidNickname();
+    if (this.takenNicknames(managed).has(nickname)) throw nicknameTaken(nickname);
+    return managed.setMeta({ ...change, nickname });
+  }
+
+  /** The nickname is reserved before the first await, so the loser of two creates asking for one name makes no worktree (Q2.245). */
   async create(options: CreateSessionOptions): Promise<ManagedSession> {
+    const nickname = this.reserveNickname(options.nickname);
+    try {
+      return await this.createReserved(options, nickname);
+    } finally {
+      this.reservedNicknames.delete(nickname);
+    }
+  }
+
+  private async createReserved(options: CreateSessionOptions, nickname: string): Promise<ManagedSession> {
     // Capacity is weighed before touching the filesystem, and the ceiling before the rate, so the refusals never mask each other.
     // Make room before refusing: releasing an idle agent is lossless (Q2.223).
     if (!this.canReleaseOneSlot()) {
@@ -3309,6 +3486,7 @@ export class SessionRegistry {
     });
 
     const managed = new ManagedSession(id, options.agent, workspace, this.store, {
+      nickname,
       customAgent: options.customAgent ?? null,
       // Re-read through `this` at every call, never captured — see the field.
       resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
@@ -3321,6 +3499,7 @@ export class SessionRegistry {
       ultracodeDefault: () => this.ultracodeByDefault,
       onWarning: this.onWarning,
       peerMcpServers: (sessionId, capabilities) => this.peerMcpServersBy?.(sessionId, capabilities) ?? [],
+      onPeerMessagesOff: (sessionId) => this.peerMessagesOffBy?.(sessionId),
     });
     this.sessions.set(id, managed);
     // Before start, so an attach from zero sees the workspace before the agent's output.
@@ -3338,10 +3517,16 @@ export class SessionRegistry {
     if (!this.sessionStore) return { restored: 0, interrupted: 0, reaped: 0 };
     let interrupted = 0;
     let reaped = 0;
+    const taken = this.takenNicknames();
 
-    for (const row of this.sessionStore.list()) {
+    // Oldest first, so of two rows holding one nickname the older keeps it (Q2.245).
+    for (const row of [...this.sessionStore.list()].sort((a, b) => a.createdAt - b.createdAt)) {
       if (this.sessions.has(row.id)) continue;
+      const nickname =
+        row.nickname !== null && isNickname(row.nickname) && !taken.has(row.nickname) ? row.nickname : pickNickname(taken);
+      taken.add(nickname);
       const managed = ManagedSession.restore(row, this.store, {
+        nickname,
         sessionStore: this.sessionStore,
         makeRoomForWake: () => this.makeRoomForWake(),
         runtime: this.runtime,
@@ -3350,9 +3535,10 @@ export class SessionRegistry {
         elicitationAllowed: () => this.elicitationAllowed,
         ultracodeDefault: () => this.ultracodeByDefault,
         resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
-      machineCatalogue: () => this.machine,
+        machineCatalogue: () => this.machine,
         onWarning: this.onWarning,
         peerMcpServers: (sessionId, capabilities) => this.peerMcpServersBy?.(sessionId, capabilities) ?? [],
+        onPeerMessagesOff: (sessionId) => this.peerMessagesOffBy?.(sessionId),
       });
       this.sessions.set(row.id, managed);
       // Every restored row is announced, with no origin: a restart is nobody's act.
@@ -3759,4 +3945,9 @@ function renderAnswers(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** After the attachments, so the person's own words stay the first block an agent reads. */
+function noteBlocks(note: string | null): acp.ContentBlock[] {
+  return note === null ? [] : [{ type: "text", text: note }];
 }

@@ -1,7 +1,9 @@
-import { useState, type ReactNode } from "react";
-import { peerBody, peerHeadline } from "../peer";
+import { useContext, useState, type ReactNode } from "react";
+import { refTarget } from "../mentionLinks";
+import { peerBody, peerHeadlineParts } from "../peer";
 import type { PeerOrigin } from "../wire";
 import { Markdown } from "./Markdown";
+import { MentionLink, MentionScope } from "./MentionLink";
 
 const PREVIEW_LINES = 6;
 
@@ -21,15 +23,19 @@ export function PeerMessageRow({
   const lines = body.split("\n");
   const long = lines.length > PREVIEW_LINES;
   const [open, setOpen] = useState(false);
+  const here = useContext(MentionScope).here;
+  const { lead, name, where } = peerHeadlineParts(from);
+  // The daemon's own record of the sender, so the link is to that session and never to another holding the name.
+  const sender = here === null ? null : refTarget(from.ref, from.machineId ?? here);
 
   if (from.kind === "notice") {
     return <p className="my-3 px-1 text-2xs text-faint">{body}</p>;
   }
   return (
     <div className="my-4 rounded-lg border border-edge bg-surface/60 px-3.5 py-2.5">
-      <p className="flex flex-wrap items-center gap-x-1.5 text-2xs text-faint">
-        <span className="font-medium text-muted">{peerHeadline(from)}</span>
-        <span>· {from.harness}</span>
+      <p className="text-2xs font-medium text-muted">
+        {lead} <MentionLink name={name} exact={sender} />
+        {where}
       </p>
       <div className="mt-1.5 min-w-0 select-text">
         {/* Keyed so a toggle mounts a fresh Markdown: a changed text waits out the stream throttle, and the label would move first. */}

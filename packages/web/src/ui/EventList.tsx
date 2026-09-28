@@ -533,6 +533,7 @@ function PromptRow({
         text={event.text}
         attachments={event.attachments ?? []}
         files={files}
+        mentions={event.mentions}
       />
       {waiting && (
         <p className="-mt-3 mb-4 flex items-center justify-end gap-2 text-2xs text-faint">

@@ -60,7 +60,7 @@ import { CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, CORS_MAX_AGE_SECONDS } from "./
 import { RELAY_PROTOCOL_VERSION } from "./relay/protocol.js";
 import { DAEMON_VERSION } from "./version.js";
 import type { PeerHub } from "./peers/hub.js";
-import { linksFromBody } from "./peers/links.js";
+import { linksFromBody, policyFromBody } from "./peers/links.js";
 import type { SqlitePeerLinkStore } from "./store/sqlite.js";
 import {
   DEFAULT_MAX_CHANGED_FILES,
@@ -89,18 +89,22 @@ import {
   jsonError,
   readJsonObject,
 } from "./http.js";
+import { MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS } from "./nickname.js";
 import { containedInResolved } from "./paths.js";
 import { inspectWorkspace, listWorktrees, removeWorkspace, WorktreeError, type RemoveRefusal } from "./worktree.js";
 import {
   awaitingHuman,
   describeResumeFailure,
+  invalidNickname,
   MAX_TITLE_CHARS,
+  NicknameError,
   SessionLimitError,
   StartTimeoutError,
   type ElicitationAnswerBody,
   type ElicitationContentValue,
   type ManagedSession,
   type PermissionAnswer,
+  type SessionMetaChange,
   type SessionRegistry,
   type SessionSnapshot,
   type WorktreePolicy,
@@ -307,6 +311,11 @@ export function createApp(options: ServerOptions): AppBundle {
 
   const requireJson = async (c: Context<AppEnv>): Promise<Record<string, unknown> | Response> =>
     (await readJsonObject(c)) ?? jsonError(c, 400, "bad_request", "expected a JSON object body");
+
+  const nicknameRefused = (c: Context<AppEnv>, error: NicknameError): Response =>
+    error.code === "nickname_taken"
+      ? jsonError(c, 409, error.code, error.message)
+      : jsonError(c, 400, error.code, error.message, { min: MIN_NICKNAME_CHARS, max: MAX_NICKNAME_CHARS });
 
   const requestedPath = async (
     c: Context<AppEnv>,
@@ -1217,10 +1226,18 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const branch = typeof branchRaw === "string" ? branchRaw : null;
 
+    // Absent or null picks a free one here, where /meta refuses null: a session always has one.
+    const nicknameRaw = body["nickname"];
+    if (nicknameRaw !== undefined && nicknameRaw !== null && typeof nicknameRaw !== "string") {
+      return nicknameRefused(c, invalidNickname());
+    }
+    const nickname = typeof nicknameRaw === "string" ? nicknameRaw : null;
+
     try {
-      const managed = await registry.create({ agent, customAgent, cwd, worktree, branch });
+      const managed = await registry.create({ agent, customAgent, cwd, worktree, branch, nickname });
       return c.json({ session: managed.snapshot() }, 201);
     } catch (error) {
+      if (error instanceof NicknameError) return nicknameRefused(c, error);
       if (error instanceof PathError) {
         return jsonError(c, pathErrorStatus(error, 400), error.code, error.message);
       }
@@ -1258,7 +1275,8 @@ export function createApp(options: ServerOptions): AppBundle {
   app.get("/peer/agents", message, (c) => {
     if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
     if (linkOf(c) === null) return jsonError(c, 403, "not_a_link", "only another machine's link may ask this");
-    if (!peers.hub.enabled) return jsonError(c, 403, "messaging_off", "messages between agents are switched off on this machine");
+    if (!peers.hub.allowed) return jsonError(c, 403, "messaging_off", "messages between agents are switched off on this machine");
+    if (!peers.hub.reachesOthers) return jsonError(c, 403, "messaging_isolated", "this machine's sessions message only each other");
     return c.json({ agents: peers.hub.localRows() });
   });
 
@@ -1275,30 +1293,25 @@ export function createApp(options: ServerOptions): AppBundle {
     if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
     const link = linkOf(c);
     if (link === null) return jsonError(c, 403, "not_a_link", "only another machine's link may send this");
+    if (!peers.hub.allowed) return jsonError(c, 403, "messaging_off", "messages between agents are switched off on this machine");
+    if (!peers.hub.reachesOthers) return jsonError(c, 403, "messaging_isolated", "this machine's sessions message only each other");
     const taken = await peers.hub.receiveNotice(link, await readJsonObject(c));
     return taken ? c.body(null, 202) : jsonError(c, 409, "unexpected_notice", "nothing here asked to be told that");
   });
 
-  app.get("/peers/links", admin, (c) => {
-    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
-    return c.json({
-      links: peers.links.list().map((link) => ({
-        id: link.id,
-        target: { id: link.targetMachineId, name: link.targetName, relayUrl: link.relayUrl },
-        expiresAt: link.expiresAt,
-        lastError: link.lastError,
-        lastErrorAt: link.lastErrorAt,
-      })),
-    });
-  });
-
   app.put("/peers/links", admin, async (c) => {
     if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
-    const links = linksFromBody(await readJsonObject(c));
+    const body = await readJsonObject(c);
+    const links = linksFromBody(body);
     if (typeof links === "string") return jsonError(c, 400, "bad_request", links);
+    const policy = policyFromBody(body);
+    if (typeof policy === "string") return jsonError(c, 400, "bad_request", policy);
+    // Before the links and with no await between: switched off, nothing may go out over the old set (Q1.654).
+    if (policy !== null) peers.hub.setPolicy(policy);
     peers.links.replaceAll(links);
     return c.json({
       links: links.map((link) => ({ id: link.id, target: { id: link.targetMachineId, name: link.targetName }, expiresAt: link.expiresAt })),
+      messaging: peers.hub.messagingState(),
     });
   });
 
@@ -1433,13 +1446,15 @@ export function createApp(options: ServerOptions): AppBundle {
       }
     }
 
-    const result = managed.prompt(text, staged);
+    // Resolved from what this daemon already holds, so a machine that is slow to list never delays a message (Q2.246).
+    const note = peers?.hub.mentionNote(managed.id, text) ?? null;
+    const result = managed.prompt(text, staged, null, note);
     switch (result.kind) {
       case "accepted":
         return c.json({ accepted: true, turn: result.turn, seq: result.seq, session: managed.snapshot() }, 202);
       // A running turn is not a refusal: sendMidTurn steers or queues, both a 202 carrying the seq.
       case "turn_in_flight": {
-        const mid = await managed.sendMidTurn(text, staged);
+        const mid = await managed.sendMidTurn(text, staged, null, note);
         switch (mid.kind) {
           case "steered":
             return c.json(
@@ -1723,7 +1738,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    const change: { title?: string | null; pinned?: boolean; rank?: number | null } = {};
+    const change: SessionMetaChange = {};
 
     if ("title" in body) {
       const title = body["title"];
@@ -1742,6 +1757,12 @@ export function createApp(options: ServerOptions): AppBundle {
       change.pinned = pinned;
     }
 
+    if ("peerMessages" in body) {
+      const peerMessages = body["peerMessages"];
+      if (typeof peerMessages !== "boolean") return jsonError(c, 400, "bad_request", "peerMessages must be a boolean");
+      change.peerMessages = peerMessages;
+    }
+
     // Finite only: Infinity or NaN would break the list's sort order.
     if ("rank" in body) {
       const rank = body["rank"];
@@ -1751,11 +1772,34 @@ export function createApp(options: ServerOptions): AppBundle {
       change.rank = rank;
     }
 
-    if (change.title === undefined && change.pinned === undefined && change.rank === undefined) {
-      return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"}, {"pinned"} or {"rank"}');
+    // Never null: a session always has one (Q2.245).
+    if ("nickname" in body) {
+      const nickname = body["nickname"];
+      if (typeof nickname !== "string") return nicknameRefused(c, invalidNickname());
+      change.nickname = nickname;
     }
 
-    return c.json({ session: managed.setMeta(change) });
+    if (
+      change.title === undefined &&
+      change.pinned === undefined &&
+      change.rank === undefined &&
+      change.nickname === undefined &&
+      change.peerMessages === undefined
+    ) {
+      return jsonError(
+        c,
+        400,
+        "bad_request",
+        'body must carry at least one of {"title"}, {"pinned"}, {"rank"}, {"nickname"} or {"peerMessages"}',
+      );
+    }
+
+    try {
+      return c.json({ session: registry.setMeta(managed, change) });
+    } catch (error) {
+      if (error instanceof NicknameError) return nicknameRefused(c, error);
+      throw error;
+    }
   }));
 
   app.post("/sessions/:id/permissions/:permissionId", write, withSession(async (c, managed) => {
@@ -1895,6 +1939,12 @@ export function createApp(options: ServerOptions): AppBundle {
   app.get("/sessions/:id/commands", read, withSession((c, managed) => {
     const { commands, dropped } = managed.agentCommands;
     return c.json({ revision: managed.commandsRevision, commands, dropped });
+  }));
+
+  // write, not read: it names the owner's other machines, which a write grantee could already have the agent list.
+  app.get("/sessions/:id/mentions", write, withSession(async (c, managed) => {
+    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
+    return c.json(await peers.hub.mentionListing(managed.id));
   }));
 
   app.get("/sessions/:id/changes", read, withSession(async (c, managed) => {

@@ -254,10 +254,11 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
       .map((stored) => stored.event)
       .filter((event): event is PromptEvent => event.type === "prompt");
 
-  const lead = await studio.sessions.create({ agent: "kimi", cwd: "/tmp" });
-  lead.setMeta({ title: "Lead" });
-  const worker = await laptop.sessions.create({ agent: "kimi", cwd: "/tmp" });
-  worker.setMeta({ title: "Worker" });
+  // Titles that no longer name anybody: the nickname is the address, on the machine that has it and on the one that lists it.
+  const lead = await studio.sessions.create({ agent: "kimi", cwd: "/tmp", nickname: "lead" });
+  lead.setMeta({ title: "Plan the release" });
+  const worker = await laptop.sessions.create({ agent: "kimi", cwd: "/tmp", nickname: "worker" });
+  worker.setMeta({ title: "Run the suites" });
   const workerAddress = `worker [${laptop.id}/${worker.id}]`;
 
   const listed = await studio.hub.list(lead.id);
@@ -301,20 +302,43 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
   stubOf(lead).finish();
   await settle();
 
-  process.stdout.write("  a revoked link, and a machine that is off\n");
-  const rows = (await (await cp.request(`/v1/machines/${studio.id}/links`, { headers: asOwner })).json()) as {
-    links: { id: string; source: { id: string } }[];
-  };
-  const outgoing = rows.links.find((link) => link.source.id === studio.id);
-  await cp.request(`/v1/links/${outgoing?.id}`, { method: "DELETE", headers: asOwner });
+  process.stdout.write("  an isolated machine, and a machine that is off\n");
+  const isolateStudio = (isolated: boolean) =>
+    cp.request(`/v1/machines/${studio.id}/permissions`, {
+      method: "PUT",
+      headers: asOwner,
+      body: JSON.stringify({ isolated }),
+    });
+  await isolateStudio(true);
   clock += 10_000;
   const refused = await studio.hub.send(lead.id, { to: workerAddress, message: "are you there", notify: false });
-  check("a revoked link is refused at the relay on its next use", refused.ok ? null : refused.code, "link_refused");
+  check("an isolated machine's link is refused at the relay on its next use", refused.ok ? null : refused.code, "link_refused");
+  await isolateStudio(false);
   await studio.syncLinks();
   clock += 10_000;
   const renewed = await studio.hub.send(lead.id, { to: workerAddress, message: "and now", notify: false });
-  check("and the owner's app hands over a new one", renewed.ok ? renewed.delivery : renewed.code, "started_turn");
+  check("and let out again, the owner's app hands over a new one", renewed.ok ? renewed.delivery : renewed.code, "started_turn");
   await until(() => stubOf(worker).prompts.length === 3);
+  stubOf(worker).finish();
+  await settle();
+
+  process.stdout.write("  a machine its owner switched off\n");
+  const switchLaptop = (on: boolean) =>
+    cp.request(`/v1/machines/${laptop.id}/permissions`, {
+      method: "PUT",
+      headers: asOwner,
+      body: JSON.stringify({ agentMessaging: on }),
+    });
+  await switchLaptop(false);
+  clock += 10_000;
+  const cut = await studio.hub.send(lead.id, { to: workerAddress, message: "still there", notify: false });
+  check("is cut off at the relay before either daemon has heard", cut.ok ? null : cut.code, "link_refused");
+  await switchLaptop(true);
+  await studio.syncLinks();
+  clock += 10_000;
+  const back = await studio.hub.send(lead.id, { to: workerAddress, message: "back on", notify: false });
+  check("and switched back on, the owner's app links it again", back.ok ? back.delivery : back.code, "started_turn");
+  await until(() => stubOf(worker).prompts.length === 4);
   stubOf(worker).finish();
   await settle();
 

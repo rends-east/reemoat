@@ -9,7 +9,16 @@ export function peerBody(text: string): string {
   return (end === -1 ? rest : rest.slice(0, end)).replace(/^\n/, "").replace(/\n$/, "");
 }
 
+/** The headline in three pieces, so the name between them can be drawn as a link to its session; every nickname wears its `@`. */
+export function peerHeadlineParts(from: PeerOrigin): { lead: string; name: string; where: string } {
+  return {
+    lead: from.kind === "notice" ? "From" : "Message from",
+    name: from.name,
+    where: from.machineLabel === null ? "" : ` on ${from.machineLabel}`,
+  };
+}
+
 export function peerHeadline(from: PeerOrigin): string {
-  const who = from.machineLabel === null ? from.name : `${from.name} on ${from.machineLabel}`;
-  return from.kind === "notice" ? `From ${who}` : `Message from ${who}`;
+  const { lead, name, where } = peerHeadlineParts(from);
+  return `${lead} @${name}${where}`;
 }

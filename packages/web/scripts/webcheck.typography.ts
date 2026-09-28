@@ -223,14 +223,11 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
   // The session row's subline is sans at `text-2xs` by design; size, no mono and the subpath are one check so no half goes quiet alone.
   {
     const browser = read("ui/SessionBrowser.tsx");
-    const subline = /<div className="mt-0\.5 truncate text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser);
+    const subline = /<div className="mt-0\.5 flex min-w-0 items-center gap-3 text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser);
     check("the session row's subline was found", subline !== null, true);
     check(
-      "and it is sans, at one size, with the path still on it",
-      [
-        subline !== null && /\bfont-mono\b/.test(subline[1] ?? ""),
-        subline !== null && /`? · \$\{subpath\}`?/.test(subline[1] ?? ""),
-      ],
+      "and it is sans, at one size, naming the machine where the path was",
+      [subline !== null && /\bfont-mono\b/.test(subline[1] ?? ""), subline !== null && /<MachineLabel name=\{machine\} \/>/.test(subline[1] ?? "")],
       [false, true],
     );
   }

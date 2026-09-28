@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1076 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1090 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -484,6 +484,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `daemon-bounds.md` | the same globs | Every number the daemon holds and what moves each · what the log is bounded by and what it is not · what a ceiling releases rather than refuses · why this is a file of its own |
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
 | `agent-messaging.md` | `src/peers/`, `packages/web/src/peer.ts`, `ui/PeerMessage.tsx` | How one session's agent reaches another's · why every message is acted on, and what the idle notice stands in for · why delivery is the prompt route's and not a copy · what the envelope may carry · what stops a loop · which ended sessions another agent may wake |
+| `session-nicknames.md` | `src/nickname.ts`, `src/registry.ts`, `src/peers/hub.ts`, `envelope.ts`, `packages/web/src/nickname.ts`, `mentions.ts`, `mentionLinks.ts`, `ui/MentionMenu.tsx`, `MentionLink.tsx`, `Composer.tsx`, `NewSession.tsx`, `SessionBrowser.tsx` | Why a session has a title and a nickname, and which one leads · what makes a nickname one session's, and why that is a reservation · what the agent gets for a person's `@name`, and why it never waits on a listing · where `@` opens and whose rows it shows · where a drawn `@name` leads, and why it is a button |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
 | `acp-extensions.md` | `src/acp/xai.ts`, `src/acp/client.ts` | The three requests grok sends that ACP has no method for, measured · which door each is routed onto and how each is answered · how grok withdraws one, and why a handler's position decides it · its own question timeout, and the tool withdrawn when questions are off |
 | `agent-login.md` | `src/agentauth.ts`, `src/runtime/`, `packages/web/src/ui/login.ts` | How a credential reaches the host with no terminal · the pty and the two `script`s · what each CLI's status probe prints and on which stream |

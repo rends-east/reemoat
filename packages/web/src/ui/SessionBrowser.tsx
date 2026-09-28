@@ -15,7 +15,7 @@ import type { MachineId, SessionKey } from "../ids";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
-import { folderLabel } from "../paths";
+import { AgentMark } from "./AgentIcons";
 import { ConnectionPill } from "./ConnectionPill";
 import { useMachineDrag } from "./machineDrag";
 import { useMachineSwipe, type MachineSwipe } from "./machineSwipe";
@@ -38,8 +38,10 @@ import {
   Button,
   Icon,
   IconButton,
+  MachineLabel,
   menuRow,
   Menu,
+  nicknameLine,
   Skeleton,
   StatusDot,
   resumeFailureText,
@@ -61,7 +63,6 @@ import {
   matching,
   orphansFor,
   pinnedFor,
-  rowSubpath,
   selectMachine,
   setFilter,
   setQuery,
@@ -297,7 +298,6 @@ function ListBody({
             row={row}
             state={state}
             selected={row.key === activeKey}
-            showMachine={view.all}
             indented
             drag={drag.bind(row, PINNED_FOLDER)}
             lifted={drag.dragging === row.key}
@@ -322,7 +322,6 @@ function ListBody({
             row={row}
             state={state}
             selected={row.key === activeKey}
-            showMachine
             indented
           />
         ))}
@@ -348,7 +347,6 @@ function ListBody({
             row={row}
             state={state}
             selected={row.key === activeKey}
-            showMachine
             indented
           />
         ))}
@@ -821,10 +819,8 @@ function SessionLine({
   row,
   state,
   selected,
-  showMachine = false,
   folderPath = null,
   indented = false,
-  showPath = true,
   drag,
   lifted = false,
   pressed = false,
@@ -834,10 +830,8 @@ function SessionLine({
   row: SessionRow;
   state: AppState;
   selected: boolean;
-  showMachine?: boolean;
   folderPath?: string | null;
   indented?: boolean;
-  showPath?: boolean;
   drag?: Record<string, unknown>;
   lifted?: boolean;
   pressed?: boolean;
@@ -850,14 +844,8 @@ function SessionLine({
   const pending = requests[0];
   const roots = state.rootsByMachine.get(row.ref.machineId) ?? [];
   const label = sessionLabel(row, roots);
-  // Only where the row is not already saying it; a folderless row draws `folderLabel`, since cutting a pin against its own folder blanked it. Q3.581.
-  const located =
-    !showPath
-      ? null
-      : folderPath === null
-        ? folderLabel(row.snapshot.workspace.requestedCwd, roots)
-        : rowSubpath(row, folderPath);
-  const subpath = located === label ? null : located;
+  const machine = machineDisplayName({ id: row.ref.machineId, name: row.machineName }, state.localMachineId);
+  const nickname = nicknameLine(row.snapshot);
   // Only when the daemon gave up; a session still resuming is an ordinary row.
   const stalled = resumeStalled(row.snapshot)
     ? resumeFailureText(
@@ -919,11 +907,11 @@ function SessionLine({
           ) : stalled !== null ? (
             <div className="mt-0.5 truncate text-xs text-danger">{stalled}</div>
           ) : (
-            // Sans at `text-2xs`: in a row a path is a name (web-typography.md).
-            <div className="mt-0.5 truncate text-2xs text-muted">
-              {row.snapshot.agent}
-              {showMachine && ` · ${machineDisplayName({ id: row.ref.machineId, name: row.machineName }, state.localMachineId)}`}
-              {subpath !== null && ` · ${subpath}`}
+            // Sans at `text-2xs` (web-typography.md): the nickname, the harness's mark and the machine, one gap apart; no path (Q3.681).
+            <div className="mt-0.5 flex min-w-0 items-center gap-3 text-2xs text-muted">
+              {nickname !== null && <span className="shrink-0">{nickname}</span>}
+              <AgentMark agent={row.snapshot.agent} />
+              <MachineLabel name={machine} />
             </div>
           )}
         </div>
