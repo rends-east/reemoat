@@ -1490,11 +1490,17 @@ process.stdout.write("\nwhose order the rail is in\n");
   });
   check("every menu takes its direction from the one helper", homegrown, []);
 
-  for (const file of ["ui/SessionMenu.tsx", "ui/settings/UsersSection.tsx"]) {
-    check(`${file} asks where there is room`, /menuPlacement\(/.test(stripComments(srcFile(file))), true);
-  }
+  check("ui/SessionMenu.tsx asks where there is room", /menuPlacement\(/.test(stripComments(srcFile("ui/SessionMenu.tsx"))), true);
 
   const bits = stripComments(srcFile("ui/bits.tsx"));
+  // A settings row's kebab is RowMenu, which measures at the tap itself, so the screen holds no direction of its own.
+  const rowMenu = bits.slice(bits.indexOf("export function RowMenu("), bits.indexOf("export interface DropdownItem"));
+  const users = stripComments(srcFile("ui/settings/UsersSection.tsx"));
+  check(
+    "ui/settings/UsersSection.tsx takes its kebab from RowMenu, which asks where there is room",
+    [/setPlacement\(menuPlacement\(triggerRef\.current\)\)/.test(rowMenu), /<RowMenu\b/.test(users), /menuPlacement\(|setPlacement\(/.test(users)],
+    [true, true, false],
+  );
   const cap = /export const MENU_MAX_PX = (\d+);/.exec(bits)?.[1] ?? "";
   const cls = /max-h-(\d+)/.exec(bits)?.[1] ?? "";
   check("the room a menu needs is the height its own class caps it at", cap, String(Number(cls) * 4));

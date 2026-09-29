@@ -20,21 +20,20 @@ import type { Me, SessionRecord } from "../../wire";
 import {
   Badge,
   Button,
-  DangerButton,
   Empty,
   FIELD,
-  LINK,
-  SETTINGS_HEADING,
-  SETTINGS_SECTION,
+  Monogram,
   SkeletonRow,
   Spinner,
   TwoStep,
+  personEmoji,
   shortDuration,
 } from "../bits";
 import { toast } from "../Toast";
-import { FIELD_LABEL } from "./SettingField";
+import { Field } from "../kit/Field";
+import { ActionRow, EmptyRow, Group, LinkRow, TABLE, TD, TWO_STEP_ROW, ValueRow } from "../kit/List";
 
-/** Your own account as rows; each form is its own leaf route that walks back here by replace (Q3.549). */
+/** Your own account as grouped rows; each form is its own leaf route that walks back here by replace (Q3.549). */
 export function AccountSection({
   me,
   config,
@@ -58,103 +57,59 @@ export function AccountSection({
         </Empty>
       ) : (
         <>
-          <p className="flex items-center gap-2 text-sm">
-            <span className="min-w-0 truncate font-medium">{me.name}</span>
-            {me.isAdmin && (
-              <span className="shrink-0">
-                <Badge tone="strong">admin</Badge>
-              </span>
-            )}
-          </p>
-
-          <PasswordRow me={me} />
-          <EmailRow me={me} config={config} />
+          <Profile me={me} />
+          <Group>
+            <EmailRow me={me} config={config} />
+            <PasswordRow me={me} />
+            <ServerRow />
+          </Group>
           <SignIns />
         </>
       )}
 
       {/* Outside the me === null branch: Sign out must stay drawn while the control plane is down. */}
-      <ServerRow />
-
-      <section className={SETTINGS_SECTION}>
-        <h2 className={SETTINGS_HEADING}>Sign out</h2>
-        <p className="mt-1 text-xs text-muted">
-          {nativeBoot() !== null
-            ? "Ends this sign-in on the server too, and takes this account off this computer."
-            : "Ends this sign-in on the server too."}
-        </p>
-        <DangerButton icon={LogOut} className="mt-3" onClick={() => void store.signOut()}>
-          Sign out
-        </DangerButton>
-      </section>
+      <Group footer={nativeBoot() !== null ? "Removes this account from this computer." : undefined}>
+        <ActionRow title="Sign out" glyph={LogOut} tone="danger" onClick={() => void store.signOut()} />
+      </Group>
     </div>
   );
 }
 
-const fieldLabel = `mt-3 block ${FIELD_LABEL}`;
-
-/** block is load-bearing: an inline-block input leaves room for the submit button to float up beside it. */
-const field = `mt-1.5 block w-full max-w-sm ${FIELD}`;
-
-function FactRow({
-  value,
-  subline,
-  action,
-}: {
-  value: ReactNode;
-  subline: string | null;
-  action: ReactNode;
-}): ReactNode {
+/** Who this is: the drawer's own face and name, so the account reads the same in both places. */
+function Profile({ me }: { me: Me }): ReactNode {
   return (
-    <div className="mt-2 flex min-h-11 items-center gap-3">
-      <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-center gap-2 text-sm">{value}</span>
-        {subline !== null && <span className="block text-xs text-muted">{subline}</span>}
+    <div className="mb-6 flex items-center gap-3 px-4">
+      <Monogram name={me.name} glyph={personEmoji(me.name)} size="md" className="bg-raised" />
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 truncate text-base font-semibold">{me.name}</span>
+        {me.isAdmin && (
+          <span className="shrink-0">
+            <Badge tone="strong">admin</Badge>
+          </span>
+        )}
       </span>
-      <span className="shrink-0">{action}</span>
     </div>
   );
 }
+
+const fieldCol = "flex max-w-sm flex-col gap-4";
 
 /** States the server and never changes it: another server is another account, added from the menu (Q3.643, Q5.120). */
 function ServerRow(): ReactNode {
   const server = nativeBoot()?.server ?? null;
   if (server === null) return null;
-  return (
-    <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Server address</h2>
-      <FactRow
-        value={<span className="truncate font-mono">{server}</span>}
-        subline="Another server is another account, from the menu."
-        action={null}
-      />
-    </section>
-  );
+  return <ValueRow title="Server address" value={server} mono />;
 }
 
+/** `Set` for an account whose password predates the change date, `Not set` for one whose API key signs it in. */
 function PasswordRow({ me }: { me: Me }): ReactNode {
-  const firstTime = me.hasPassword === false;
-
-  const value = firstTime
-    ? "Not set"
-    : typeof me.passwordChangedAt === "number"
-      ? `Changed ${ageText(Date.now() - me.passwordChangedAt)} ago`
-      : "Set";
-
-  return (
-    <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Password</h2>
-      <FactRow
-        value={value}
-        subline={firstTime ? "Your API key is what signs you in." : "Changing it signs out other devices."}
-        action={
-          <Button size="sm" onClick={() => navigate(settingsLeafPath("password"))}>
-            {firstTime ? "Set" : "Change"}
-          </Button>
-        }
-      />
-    </section>
-  );
+  const value =
+    me.hasPassword === false
+      ? "Not set"
+      : typeof me.passwordChangedAt === "number"
+        ? `Changed ${ageText(Date.now() - me.passwordChangedAt)} ago`
+        : "Set";
+  return <LinkRow title="Password" value={value} onClick={() => navigate(settingsLeafPath("password"))} />;
 }
 
 function PasswordForm({ me, onDone }: { me: Me; onDone: () => void }): ReactNode {
@@ -187,7 +142,7 @@ function PasswordForm({ me, onDone }: { me: Me; onDone: () => void }): ReactNode
   };
 
   return (
-    <form onSubmit={submit}>
+    <form onSubmit={submit} className={fieldCol}>
       {/* A hidden username field, so a password manager updates the right saved entry. */}
       <input
         type="text"
@@ -200,53 +155,57 @@ function PasswordForm({ me, onDone }: { me: Me; onDone: () => void }): ReactNode
       />
 
       {!firstTime && (
-        <>
-          <label htmlFor="pw-current" className={fieldLabel}>
-            Current password
-          </label>
-          <input
-            id="pw-current"
-            type="password"
-            autoComplete="current-password"
-            value={current}
-            onChange={(event) => setCurrent(event.target.value)}
-            autoFocus
-            className={field}
-          />
-        </>
+        <Field label="Current password">
+          {({ id }) => (
+            <input
+              id={id}
+              type="password"
+              autoComplete="current-password"
+              value={current}
+              onChange={(event) => setCurrent(event.target.value)}
+              autoFocus
+              className={FIELD}
+            />
+          )}
+        </Field>
       )}
 
-      <label htmlFor="pw-new" className={fieldLabel}>
-        New password
-      </label>
-      <input
-        id="pw-new"
-        type="password"
-        autoComplete="new-password"
-        value={next}
-        onChange={(event) => setNext(event.target.value)}
-        autoFocus={firstTime}
-        className={field}
-      />
-      <p className="mt-1 text-xs text-muted">{`At least ${PASSWORD_MIN} characters.`}</p>
+      {/* The rule is said once: as the hint until it is broken, then as the problem under the fields. */}
+      <Field label="New password" hint={problem === null ? `At least ${PASSWORD_MIN} characters.` : undefined}>
+        {({ id, describedBy }) => (
+          <input
+            id={id}
+            aria-describedby={describedBy}
+            type="password"
+            autoComplete="new-password"
+            value={next}
+            onChange={(event) => setNext(event.target.value)}
+            autoFocus={firstTime}
+            className={FIELD}
+          />
+        )}
+      </Field>
 
-      <label htmlFor="pw-confirm" className={fieldLabel}>
-        New password again
-      </label>
-      <input
-        id="pw-confirm"
-        type="password"
-        autoComplete="new-password"
-        value={confirm}
-        onChange={(event) => setConfirm(event.target.value)}
-        className={field}
-      />
+      <Field label="New password again">
+        {({ id }) => (
+          <input
+            id={id}
+            type="password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(event) => setConfirm(event.target.value)}
+            className={FIELD}
+          />
+        )}
+      </Field>
 
-      {problem !== null && <p className="mt-2 text-sm font-medium text-fg">{passwordProblemText(problem)}</p>}
-      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
+      {problem !== null && <p className="text-sm font-medium text-fg">{passwordProblemText(problem)}</p>}
+      {error !== null && <p className="text-sm text-danger">{error}</p>}
+      {/* Said where the change is made, not at rest on the Account row. */}
+      {!firstTime && <p className="text-xs text-muted">Changing it signs out other devices.</p>}
 
       {/* Cancel last — Q3.218's ordering, on a form as on a row. */}
-      <div className="mt-4 flex items-center gap-2">
+      <div className="flex items-center gap-2">
         <Button type="submit" tone="primary" disabled={!ready}>
           {busy ? <Spinner /> : firstTime ? "Set password" : "Change password"}
         </Button>
@@ -258,62 +217,34 @@ function PasswordForm({ me, onDone }: { me: Me; onDone: () => void }): ReactNode
   );
 }
 
-/** Unconfirmed is said aloud because it cannot receive a reset; with mail unusable the row has no controls. */
+/** Unconfirmed is said aloud because it cannot receive a reset; with mail unusable the row goes to Email settings or nowhere. */
 function EmailRow({ me, config }: { me: Me; config: InstanceConfig | null }): ReactNode {
-  const has = typeof me.email === "string" && me.email.length > 0;
-
-  const address = has ? (
-    <>
-      <span className="min-w-0 truncate">{me.email}</span>
-      {me.emailVerified !== true && (
-        <span className="shrink-0">
-          <Badge tone="strong">unconfirmed</Badge>
-        </span>
-      )}
-    </>
-  ) : null;
+  const address = typeof me.email === "string" && me.email.length > 0 ? me.email : null;
+  const unconfirmed = address !== null && me.emailVerified !== true ? <Badge tone="strong">unconfirmed</Badge> : undefined;
 
   if (!mailUsable(config)) {
-    // Said, not hidden: the heading and any held address stay, and only the controls go.
-    return (
-      <section className={SETTINGS_SECTION}>
-        <h2 className={SETTINGS_HEADING}>Email</h2>
-        {address !== null && <p className="mt-2 flex min-w-0 items-center gap-2 text-sm">{address}</p>}
-        <p className="mt-1 text-xs text-muted">
-          This server cannot send mail.{" "}
-          {me.isAdmin && (
-            <button type="button" className={LINK} onClick={() => navigate(settingsPath("email"))}>
-              Email settings
-            </button>
-          )}
-        </p>
-      </section>
+    // Said, not hidden: the held address stays, and only the way to change it goes.
+    return me.isAdmin ? (
+      <LinkRow
+        title="Email"
+        value={address}
+        badge={unconfirmed}
+        subline="This server cannot send mail."
+        onClick={() => navigate(settingsPath("email"))}
+      />
+    ) : (
+      <ValueRow title="Email" value={address} badge={unconfirmed} subline="This server cannot send mail." />
     );
   }
 
   return (
-    <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Email</h2>
-
-      {has ? (
-        <FactRow
-          value={address}
-          subline={me.emailVerified === true ? null : "Open the link we sent to confirm."}
-          action={
-            <Button size="sm" onClick={() => navigate(settingsLeafPath("email"))}>
-              Change
-            </Button>
-          }
-        />
-      ) : (
-        <>
-          <p className="mt-1 text-xs text-muted">Needed to reset your own password.</p>
-          <Button size="sm" tone="primary" className="mt-2" onClick={() => navigate(settingsLeafPath("email"))}>
-            Add an address
-          </Button>
-        </>
-      )}
-    </section>
+    <LinkRow
+      title="Email"
+      value={address ?? "Add"}
+      badge={unconfirmed}
+      subline={address === null ? "Needed to reset your own password." : unconfirmed === undefined ? undefined : "Open the link we sent to confirm."}
+      onClick={() => navigate(settingsLeafPath("email"))}
+    />
   );
 }
 
@@ -339,25 +270,26 @@ function EmailForm({ onDone }: { onDone: () => void }): ReactNode {
   };
 
   return (
-    <form onSubmit={submit}>
-      <label htmlFor="account-email" className={fieldLabel}>
-        Address
-      </label>
-      <input
-        id="account-email"
-        type="email"
-        value={address}
-        onChange={(event) => setAddress(event.target.value)}
-        autoComplete="email"
-        autoCapitalize="off"
-        autoCorrect="off"
-        spellCheck={false}
-        autoFocus
-        className={field}
-      />
+    <form onSubmit={submit} className={fieldCol}>
       {/* No password asked: the session is the proof (Q1.630). */}
-      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
-      <div className="mt-3 flex items-center gap-2">
+      <Field label="Address" error={error}>
+        {({ id, describedBy }) => (
+          <input
+            id={id}
+            aria-describedby={describedBy}
+            type="email"
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            autoComplete="email"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            autoFocus
+            className={FIELD}
+          />
+        )}
+      </Field>
+      <div className="flex items-center gap-2">
         <Button
           type="submit"
           tone="primary"
@@ -403,8 +335,7 @@ function SignIns(): ReactNode {
     });
 
   return (
-    <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Signed in</h2>
+    <Group title="Signed in" count={rows === null || rows.length === 0 ? undefined : String(rows.length)}>
       {rows === null && !failed && <SkeletonRow />}
       {failed && (
         <Empty
@@ -420,35 +351,35 @@ function SignIns(): ReactNode {
       )}
       {!failed && rows !== null && rows.length === 0 && (
         // An API key has no session row, so say so rather than draw an empty list.
-        <p className="mt-1.5 text-xs text-muted">Signed in with an API key — nothing to end.</p>
+        <EmptyRow>Signed in with an API key — nothing to end.</EmptyRow>
       )}
       {!failed && rows !== null && rows.length > 0 && (
-        <>
-          <div className="mt-2">
+        <table className={TABLE}>
+          <tbody>
             {rows.map((row) => (
               <SignInRow key={row.id} row={row} onChanged={refresh} />
             ))}
-          </div>
-
-          {/* One act over N rows, so it confirms in place (Q3.218); the per-row Sign out stays one tap. */}
-          {others > 0 && (
-            <TwoStep
-              armed={confirming}
-              onArm={setConfirming}
-              className="mt-3"
-              question={`Sign out ${others} other device${others === 1 ? "" : "s"}?`}
-              act={{ label: "Sign out", danger: true, icon: LogOut }}
-              onAct={signOutOthers}
-              rest={
-                <Button size="sm" onClick={() => setConfirming(true)}>
-                  {`Sign out ${others} other${others === 1 ? "" : "s"}`}
-                </Button>
-              }
-            />
-          )}
-        </>
+          </tbody>
+        </table>
       )}
-    </section>
+      {/* One act over N rows, so it confirms in place (Q3.218); the per-row Sign out stays one tap. */}
+      {!failed && others > 0 && (
+        <TwoStep
+          armed={confirming}
+          onArm={setConfirming}
+          align="end"
+          className={TWO_STEP_ROW}
+          question={`Sign out ${others} other device${others === 1 ? "" : "s"}?`}
+          act={{ label: "Sign out", danger: true, icon: LogOut }}
+          onAct={signOutOthers}
+          rest={
+            <Button size="sm" onClick={() => setConfirming(true)} className="ml-auto">
+              {`Sign out ${others} other${others === 1 ? "" : "s"}`}
+            </Button>
+          }
+        />
+      )}
+    </Group>
   );
 }
 
@@ -458,11 +389,12 @@ function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
   const ip = row.ip !== null && row.ip !== undefined && row.ip !== "unknown" ? row.ip : null;
 
   return (
-    <div className="flex min-h-11 items-center gap-3 border-b border-edge/60 py-2 last:border-b-0">
-      <span className="min-w-0 flex-1">
+    <tr className="border-t border-edge first:border-t-0">
+      {/* `max-w-0 w-full` lets the name truncate in an auto-layout table instead of widening its column. */}
+      <td className={`${TD} w-full max-w-0`}>
         <span className="flex min-w-0 items-center gap-2">
           <span
-            className="min-w-0 truncate text-sm font-medium"
+            className="min-w-0 truncate font-medium"
             title={agentWasRecorded(row.userAgent) && describeAgent(row.userAgent) === null ? (row.userAgent ?? undefined) : undefined}
           >
             {/* A device name was chosen by the person, the fallback is a User-Agent guess; neither is evidence. */}
@@ -474,18 +406,17 @@ function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
             </span>
           )}
         </span>
-        <span className="mt-0.5 block text-2xs text-muted">
+        <span className="block truncate text-2xs text-faint">
           {ip !== null && <span className="font-mono">{ip}</span>}
           {ip !== null && " · "}
           {row.current ? "in use" : `last used ${shortDuration(Math.max(0, now - row.lastSeenAt))} ago`}
         </span>
-      </span>
+      </td>
 
-      {/* Absent on your own row: the Sign out at the bottom is the one way to end this session. */}
-      {!row.current && (
-        <span className="shrink-0">
-          <DangerButton
-            icon={LogOut}
+      {/* Absent on your own row: Sign out at the bottom is the one way to end this session. Plain, since one danger control per view. */}
+      <td className={`${TD} w-px text-right whitespace-nowrap`}>
+        {!row.current && (
+          <Button
             size="sm"
             disabled={busy}
             onClick={() => {
@@ -498,10 +429,10 @@ function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
             }}
           >
             {busy ? <Spinner /> : "Sign out"}
-          </DangerButton>
-        </span>
-      )}
-    </div>
+          </Button>
+        )}
+      </td>
+    </tr>
   );
 }
 

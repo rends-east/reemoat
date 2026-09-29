@@ -668,7 +668,7 @@ process.stdout.write("\nyour own API keys\n");
   }
   check("and the consequence is drawn at text-xs", /<span className="text-xs text-muted">revoking it signs you out<\/span>/.test(keyRow), true);
   // Row height is h-12 on the row with no vertical cell padding, so contents cannot change it; the header keeps its own (Q3.554).
-  const rowStart = keyRow.indexOf("<tr className={`h-12 border-t border-edge/60 align-middle ");
+  const rowStart = keyRow.indexOf("<tr className={`h-12 border-t border-edge align-middle ");
   const rowEnd = keyRow.indexOf("</tr>", rowStart);
   check("a key row is a fixed 48px", rowStart >= 0 && rowEnd > rowStart, true);
   check("and no cell of it pads vertically", /\b(py|pt|pb)-/.test(keyRow.slice(rowStart, rowEnd)), false);
@@ -685,13 +685,14 @@ process.stdout.write("\nyour own API keys\n");
   check("where waiting is the list being unread", /newKeyWaits = keys === null;/.test(keys), true);
   check("and a failed read is not a reason to wait", /newKeyWaits = [^;]*"failed"/.test(keys), false);
   const ceiling = /^const MAX_KEYS = (\d+);$/m.exec(keys)?.[1] ?? null;
-  const ceilingLine = /\{atCeiling && <p className="mt-1 text-xs text-muted">(\{`[^`]*`\})<\/p>\}/.exec(keys)?.[1] ?? null;
+  // The ceiling is the keys group's footer, the one consequence it says at rest; otherwise the footer says keys never expire.
+  const ceilingLine = /footer=\{atCeiling \? (`[^`]*`) : "Keys never expire\."\}/.exec(keys)?.[1] ?? null;
   check("the ceiling is a readable constant", ceiling !== null, true);
   check("the ceiling line is drawn under the guard", ceilingLine !== null, true);
   const lineAt = ceilingLine === null ? -1 : keys.indexOf(ceilingLine);
   const tableAt = keys.indexOf("<KeyTable>");
-  check("before the table", lineAt >= 0 && tableAt >= 0 && lineAt < tableAt, true);
-  const ceilingText = (ceilingLine ?? "").replaceAll("${MAX_KEYS}", ceiling ?? "").replace(/^\{`|`\}$/g, "");
+  check("as the group's footer, which is written before the table it sits under", lineAt >= 0 && tableAt >= 0 && lineAt < tableAt, true);
+  const ceilingText = (ceilingLine ?? "").replaceAll("${MAX_KEYS}", ceiling ?? "").replace(/^`|`$/g, "");
   check("and reads N of N", ceilingText, `${ceiling} of ${ceiling}; revoke one first.`);
   check("in six words", ceilingText.split(/\s+/).length, 6);
   check("a failed key read says so with Try again wired to load", /<Empty failed action=\{<Button size="sm" onClick=\{load\}>Try again<\/Button>\}>\s*Could not read your keys\.\s*<\/Empty>/.test(keys), true);
@@ -752,7 +753,7 @@ process.stdout.write("\nyour own API keys\n");
   const othersBox = othersQuestion >= 0 ? account.lastIndexOf("<TwoStep", othersQuestion) : -1;
   // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
   const others = othersBox >= 0 ? account.slice(othersBox, othersQuestion + account.slice(othersQuestion).search(/^\s*\/>/m)) : "";
-  check("inside one box, the primitive's, with the resting button as its rest", othersBox >= 0 && /rest=\{\s*<Button size="sm" onClick=\{\(\) => setConfirming\(true\)\}>/.test(others), true);
+  check("inside one box, the primitive's, with the resting button as its rest", othersBox >= 0 && /rest=\{\s*<Button size="sm" onClick=\{\(\) => setConfirming\(true\)\}[^>]*>/.test(others), true);
   check(
     "with the DangerButton acting on the request itself, and Cancel last the primitive's",
     [/act=\{\{ label: "Sign out", danger: true, icon: LogOut \}\}/.test(others), /onAct=\{signOutOthers\}/.test(others), /setConfirming\(false\)/.test(account)],

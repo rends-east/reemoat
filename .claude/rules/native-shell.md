@@ -504,8 +504,8 @@ names, which is the `pnpm-lock.yaml` hazard that driver already refuses. Q4.117.
   `settleAnswer` alone. Loopback is enforced in `local.rs` rather than in the page;
   the `aud` check on one authenticated `GET /fs/roots` establishes the machine, and
   ⚠ any status but 401 is proof, since a 403 about a scope and a bare 404 both come
-  from below the auth gate; the ~360 s gap is the sentence beside the switch in
-  Settings → Machines → *This device*; `meansWrongMachine` is the 401 rule, guarded
+  from below the auth gate; the ~360 s gap is the footer under the *Direct
+  connection* switch in the machine's settings; `meansWrongMachine` is the 401 rule, guarded
   on `route.kind` so the relay candidate cannot reach it; and the switch is per
   machine. `.claude/rules/relay.md` is the area and Q7.137 is the argument.
 

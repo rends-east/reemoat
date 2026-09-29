@@ -77,8 +77,8 @@ a way the old direct path went wrong:
 buried here.** The relay reads live user, machine and grant rows before each
 request; loopback does not. So on this one path a revoked grant, a disabled owner
 or a machine switched off keeps working for the token's remaining life — 300s plus
-60s of leeway either way. Settings → Machines → *This device* says so in the
-sentence beside the switch. What makes the trade defensible rather than merely
+60s of leeway either way. The machine's settings say so in the footer under the
+*Direct connection* switch (Q3.686). What makes the trade defensible rather than merely
 disclosed is *who* can take it: only a process running as the uid that owns
 `~/.reemoat`, which already holds the database, the signing keys and every
 transcript.

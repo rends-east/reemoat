@@ -13,6 +13,7 @@ import { echoFor, echoVersion, subscribeEchoes } from "../echo";
 import { hiddenFinished, hiddenFinishedVersion, hideFinished, subscribeHiddenFinished } from "../finishedTasks";
 import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
+import { ApiError } from "../http";
 import { describe, missingRowReason } from "../machine";
 import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths";
 import { navigate } from "../router";
@@ -444,7 +445,9 @@ function Transcript({
         try {
           saveBlob(await daemon.downloadUpload(sessionRef.sessionId, uploadId), name);
         } catch (error) {
-          toast("error", describe(error));
+          // A session keeps its newest files only (Q2.247); an older one is gone rather than broken.
+          const gone = ApiError.isApiError(error) && error.code === "upload_not_found";
+          toast("error", gone ? `${name} is no longer kept.` : describe(error));
         }
       },
     };

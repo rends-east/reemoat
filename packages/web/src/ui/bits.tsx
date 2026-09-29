@@ -9,7 +9,7 @@ import {
   type Ref,
   type RefObject,
 } from "react";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Server, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ChevronsUpDown, MoreHorizontal, Server, X } from "lucide-react";
 import { errorText } from "../http";
 import { listNavKey, nextOptionIndex } from "../keys";
 import { folderLabel, shortPath } from "../paths";
@@ -42,6 +42,9 @@ export const FIELD =
   "min-h-9 rounded-md border border-edge-strong bg-surface px-3 text-sm leading-5 outline-none [@media(pointer:coarse)]:min-h-11";
 
 // Never compose FIELD with a vertical padding: equal-specificity utilities race by stylesheet order, so state a min height instead.
+
+/** FIELD's height, shared by every dropdown trigger and popover row: 36px under a mouse, 44px under a finger. */
+export const CONTROL = "min-h-9 [@media(pointer:coarse)]:min-h-11";
 
 export const LINK = "text-fg underline decoration-edge-strong decoration-1 underline-offset-2 hover:decoration-fg";
 
@@ -188,7 +191,7 @@ export function Badge({
 }): ReactNode {
   const style = tone === "strong" ? "bg-raised text-fg font-semibold" : "bg-raised text-muted";
   return (
-    <span className={`rounded-sm px-1.5 py-0.5 text-2xs leading-tight font-medium ${style}`}>
+    <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-2xs leading-tight font-medium whitespace-nowrap ${style}`}>
       {children}
     </span>
   );
@@ -439,7 +442,7 @@ export function Skeleton({ rows = 3 }: { rows?: number }): ReactNode {
 /** Exactly one row and no count, since these lists usually hold zero or one item (Q3.548). */
 export function SkeletonRow({ tall = false }: { tall?: boolean } = {}): ReactNode {
   return (
-    <div aria-busy="true" className={`flex ${tall ? "min-h-14" : "min-h-11"} items-center`}>
+    <div aria-busy="true" className={`flex ${tall ? "min-h-14" : "min-h-11"} items-center px-4`}>
       <div aria-hidden="true" className="h-3 w-1/3 animate-pulse rounded-sm bg-raised/50" />
     </div>
   );
@@ -676,7 +679,6 @@ export const SHEET_FOOT =
 export const SHEET_SCREEN = "flex min-h-0 flex-1 flex-col";
 export const SHEET_SCROLL =
   "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-5";
-export const POPOVER = "rounded-lg border border-edge bg-surface p-1.5 shadow-lg";
 
 // sm, chip and nav grow to 44px only under a coarse pointer; lg is a 44px box everywhere.
 const ICON_BUTTON_SIZE = {
@@ -817,7 +819,10 @@ export function Disclosure({
   );
 }
 
-export const MENU_PANEL = `${LAYER.menu} max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
+/** A popover's box with no height of its own, for a caller that states one; everything else takes MENU_PANEL's cap. */
+export const MENU_BOX = `${LAYER.menu} overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
+
+export const MENU_PANEL = `${MENU_BOX} max-h-72`;
 
 /** Must match MENU_PANEL's 18rem height cap. */
 export const MENU_MAX_PX = 288;
@@ -842,7 +847,7 @@ export function menuPlacement(trigger: Element | null, needed: number = MENU_MAX
 export function menuRow(align: "start" | "center"): string {
   // Both class names written out: Tailwind never generates an interpolated utility.
   const cross = align === "center" ? "items-center" : "items-start";
-  return `tap flex min-h-11 w-full ${cross} gap-2 rounded-md px-2.5 py-3 text-left text-xs`;
+  return `tap flex ${CONTROL} w-full ${cross} gap-2 rounded-md px-2.5 py-2 text-left text-sm`;
 }
 /** The caps idiom (uppercase, tracking-wider, font-semibold) belongs to these constants and FIELD_LABEL; webcheck's census lists every hand-written copy (Q5.115). */
 export const MENU_HEADING =
@@ -852,40 +857,44 @@ export const MENU_HEADING =
 export const SETTINGS_HEADING = "text-2xs font-semibold tracking-wider text-muted uppercase";
 export const SETTINGS_SECTION = "mt-8 border-t border-edge pt-5";
 
+/**
+ * A row inside a Group's edge-strong box (`kit/List.tsx`): no border of its own, so its glyph is what owes 3:1. The corner
+ * rows round their own fill because the box may not clip a menu or dropdown opened from a row.
+ */
+export const GROUP_ROW = "flex min-h-11 w-full items-center gap-3 px-4 py-2 text-left first:rounded-t-lg last:rounded-b-lg";
+
 export function tabPill(selected: boolean): string {
   return `tap flex min-h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs whitespace-nowrap ${
     selected ? "bg-raised font-medium text-fg" : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
   }`;
 }
 
+/** The sm rail's row: a pane beside it changes, so there is no chevron, which would promise a deeper screen. */
 export function RailRow({
   title,
-  blurb,
+  icon,
   active,
   onClick,
 }: {
   title: string;
-  blurb?: string;
+  icon?: ComponentType<{ size?: number | string; className?: string; "aria-hidden"?: boolean }>;
   active: boolean;
   onClick: () => void;
 }): ReactNode {
   return (
     <button
       onClick={onClick}
-      className={`tap press flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-3 text-left ${
+      className={`tap press flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 py-3 text-left ${
         active ? "bg-raised" : "hover:bg-raised/50"
       }`}
     >
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium">{title}</span>
-        {blurb !== undefined && <span className="block truncate text-xs text-muted">{blurb}</span>}
-      </span>
-      <Icon as={ChevronRight} size={14} className="shrink-0 text-faint" />
+      {icon !== undefined && <Icon as={icon} size={16} className="text-muted" />}
+      <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
     </button>
   );
 }
 
-/** A disabled row hands back the strong border and dims its title and glyph, never the subline, which carries the refusal. */
+/** Pick one inside a Group: no border in either state; a disabled row dims its title and glyph, never the subline, which carries the refusal. */
 export function ChoiceRow({
   glyph,
   title,
@@ -912,12 +921,8 @@ export function ChoiceRow({
       disabled={disabled}
       onClick={onClick}
       aria-pressed={selected}
-      // Hover is granted by state, since hover still matches a disabled button; border sits in both arms because webcheck matches each literal.
-      className={`tap press flex min-h-14 w-full items-center gap-2.5 rounded-lg ${
-        disabled ? "border border-edge" : "border border-edge-strong"
-      } px-3 text-left ${
-        selected === true ? "bg-raised" : `bg-surface ${disabled ? "" : "hover:bg-raised"}`
-      }`}
+      // Hover is granted by state, since hover still matches a disabled button.
+      className={`tap ${GROUP_ROW} ${selected === true ? "bg-raised" : disabled ? "" : "hover:bg-raised"}`}
     >
       {glyph !== undefined && (
         <span className={`shrink-0 ${disabled ? "text-faint" : "text-muted"}`}>{glyph}</span>
@@ -931,7 +936,7 @@ export function ChoiceRow({
           {title}
         </span>
         {subline !== null && subline.length > 0 && (
-          <span className="block truncate text-2xs text-faint">{subline}</span>
+          <span className="block text-2xs text-faint">{subline}</span>
         )}
       </span>
       {trailing}
@@ -965,8 +970,8 @@ export function SwitchKnob({ on }: { on: boolean }): ReactNode {
 }
 
 /**
- * A settings row that is a switch. It draws what the server last answered and never the press: `busy` holds it while
- * the write is out, so a switch waiting on a server reads as waiting rather than as flipped (Q3.220, Q3.675).
+ * A settings row that is a switch, inside a Group. It draws what the server last answered and never the press: `busy` holds
+ * it while the write is out, so a switch waiting on a server reads as waiting rather than as flipped (Q3.220, Q3.675).
  */
 export function SwitchRow({
   title,
@@ -992,14 +997,12 @@ export function SwitchRow({
       aria-busy={busy || undefined}
       disabled={still}
       onClick={onToggle}
-      className={`tap press flex min-h-14 w-full items-center gap-2.5 rounded-lg ${
-        disabled ? "border border-edge" : "border border-edge-strong"
-      } bg-surface px-3 text-left ${still ? "" : "hover:bg-raised"}`}
+      className={`tap ${GROUP_ROW} ${still ? "" : "hover:bg-raised"}`}
     >
       <span className="min-w-0 flex-1">
         <span className={`block truncate text-sm ${disabled ? "text-muted" : ""}`}>{title}</span>
         {subline !== null && subline.length > 0 && (
-          <span className="block truncate text-2xs text-faint">{subline}</span>
+          <span className="block text-2xs text-faint">{subline}</span>
         )}
       </span>
       {busy && <Spinner />}
@@ -1026,7 +1029,7 @@ export function RowAction({
       onClick={onClick}
       disabled={disabled}
       className={`${menuRow("center")} disabled:text-muted ${
-        danger ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
+        danger ? "text-danger hover:bg-danger/10" : "text-fg hover:bg-raised"
       }`}
     >
       {label}
@@ -1046,8 +1049,17 @@ function revealWithin(panel: HTMLElement, row: HTMLElement): void {
   else if (rowBox.bottom > panelBox.bottom) panel.scrollTop += rowBox.bottom - panelBox.bottom;
 }
 
+/** The first button in the box outside its panel: the trigger, whoever drew it. */
+function triggerIn(box: HTMLElement | null, panel: HTMLElement): HTMLElement | null {
+  const buttons = box === null ? [] : Array.from(box.querySelectorAll<HTMLElement>("button"));
+  return buttons.find((button) => !panel.contains(button)) ?? null;
+}
+
 /** Arrow keys on the panel element, never on window; Escape belongs to overlay.ts, and focus returns to the trigger on close. */
-function useListKeys(open: boolean): {
+export function useListKeys(
+  open: boolean,
+  box: RefObject<HTMLElement | null>,
+): {
   panelRef: RefObject<HTMLDivElement | null>;
   onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
 } {
@@ -1058,7 +1070,8 @@ function useListKeys(open: boolean): {
     if (!open) return;
     const panel = panelRef.current;
     if (panel === null) return;
-    returnRef.current = document.activeElement as HTMLElement | null;
+    // The trigger rather than activeElement: WebKit does not focus a clicked button, so after a click that is the body.
+    returnRef.current = triggerIn(box.current, panel) ?? (document.activeElement as HTMLElement | null);
     const rows = focusableRows(panel);
     const selected = rows.findIndex((row) => row.getAttribute("aria-selected") === "true");
     const target = rows[selected < 0 ? 0 : selected] ?? panel;
@@ -1073,7 +1086,7 @@ function useListKeys(open: boolean): {
       if (back.isConnected) back.focus({ preventScroll: true });
       else document.body.focus();
     };
-  }, [open]);
+  }, [open, box]);
 
   return {
     panelRef,
@@ -1120,7 +1133,7 @@ export function Menu({
 }): ReactNode {
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const { panelRef, onKeyDown } = useListKeys(open);
+  const { panelRef, onKeyDown } = useListKeys(open, boxRef);
 
   useDismissible("menu", () => setOpen(false), open);
 
@@ -1144,7 +1157,7 @@ export function Menu({
           onKeyDown={onKeyDown}
           tabIndex={-1}
           role="menu"
-          className={`absolute ${LAYER.menu} ${POPOVER} ${
+          className={`absolute ${MENU_PANEL} max-w-[calc(100vw-2rem)] ${
             placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${panelClassName}`}
         >
@@ -1152,6 +1165,42 @@ export function Menu({
         </div>
       )}
     </div>
+  );
+}
+
+/** The one kebab a settings row carries: 44px, named for its subject, its direction measured at the tap. */
+export function RowMenu({
+  label,
+  children,
+}: {
+  label: string;
+  children: (close: () => void) => ReactNode;
+}): ReactNode {
+  const [placement, setPlacement] = useState<"up" | "down">("down");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  return (
+    <Menu
+      align="right"
+      placement={placement}
+      panelClassName="w-56"
+      className="shrink-0"
+      trigger={(open, toggle) => (
+        <IconButton
+          ref={triggerRef}
+          icon={MoreHorizontal}
+          label={label}
+          size="lg"
+          expanded={open}
+          haspopup="menu"
+          onClick={() => {
+            if (!open) setPlacement(menuPlacement(triggerRef.current));
+            toggle();
+          }}
+        />
+      )}
+    >
+      {children}
+    </Menu>
   );
 }
 
@@ -1166,35 +1215,55 @@ export interface DropdownItem<T> {
   adornment?: ReactNode;
 }
 
-/** The one popover picker, for any control whose option count can exceed about five; placement is the caller's, read at the tap. */
-export function Dropdown<T extends string>({
-  items,
-  value,
-  onChange,
-  trigger,
-  heading,
-  placement = "down",
-  disabled = false,
-  busy = false,
-  title,
-  align = "left",
-  className = "",
-}: {
-  items: readonly DropdownItem<T>[];
-  value: T | null;
-  onChange: (value: T) => void;
-  trigger: ReactNode;
-  heading?: string;
-  placement?: "up" | "down";
-  disabled?: boolean;
-  busy?: boolean;
-  title?: string;
-  align?: "left" | "right";
-  className?: string;
-}): ReactNode {
+/** FIELD's box at CONTROL's height with a chevron; disabled dims the label and keeps the border, the only mark of a control. */
+const FIELD_TRIGGER = `tap press flex ${CONTROL} w-full items-center gap-2 rounded-md border border-edge-strong bg-surface px-3 text-left text-sm text-fg hover:bg-raised disabled:text-faint`;
+
+type DropdownTrigger =
+  | {
+      /** A form field. Its name is the Field's label, never a heading inside the panel, and the panel is exactly as wide. */
+      variant?: "field";
+      trigger: ReactNode;
+      id?: string;
+      labelledBy?: string;
+      describedBy?: string;
+      heading?: never;
+    }
+  | {
+      /** A toolbar icon. `label` names it, `heading` may head the panel, and `lit` fills it while a choice narrows something. */
+      variant: "icon";
+      icon: ComponentType<{ size?: number | string; className?: string; "aria-hidden"?: boolean }>;
+      label: string;
+      lit?: boolean;
+      heading?: string;
+    }
+  | {
+      /** A whole row in a Group: its title on the left, the value and a chevron on the right, the panel from the row's end. */
+      variant: "row";
+      title: string;
+      subline?: string | null;
+      trigger: ReactNode;
+    };
+
+/** The one popover picker, for any control whose option count can exceed about five; placement is measured at the tap. */
+export function Dropdown<T extends string>(
+  props: {
+    items: readonly DropdownItem<T>[];
+    value: T | null;
+    onChange: (value: T) => void;
+    disabled?: boolean;
+    busy?: boolean;
+    title?: string;
+    align?: "left" | "right";
+    className?: string;
+  } & DropdownTrigger,
+): ReactNode {
+  const { items, value, onChange, disabled = false, busy = false, title, align = "left", className = "" } = props;
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<"up" | "down">("down");
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const { panelRef, onKeyDown } = useListKeys(open);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const ownId = useId();
+  const { panelRef, onKeyDown } = useListKeys(open, boxRef);
 
   // Escape goes through overlay.ts; only the outside press is handled here.
   useDismissible("menu", () => setOpen(false), open);
@@ -1208,21 +1277,76 @@ export function Dropdown<T extends string>({
     return () => window.removeEventListener("pointerdown", close);
   }, [open]);
 
+  const toggle = (): void => {
+    if (!open) setPlacement(menuPlacement(triggerRef.current));
+    setOpen(!open);
+  };
+  const triggerId = props.variant === "field" || props.variant === undefined ? (props.id ?? ownId) : ownId;
+  const labelledBy = props.variant === "field" || props.variant === undefined ? props.labelledBy : undefined;
+  const heading = props.variant === "icon" ? props.heading : undefined;
+  // A field's panel is its trigger's width; an icon's or a row's grows to its longest row from 10rem, from the trigger's end.
+  const width =
+    props.variant === "icon"
+      ? `w-max min-w-40 max-w-[min(20rem,calc(100vw-2rem))] ${align === "right" ? "right-0" : "left-0"}`
+      : props.variant === "row"
+        ? "right-2 w-max min-w-40 max-w-[min(20rem,calc(100vw-2rem))]"
+        : "inset-x-0";
+
+  // A row's wrapper is the Group's child, so the corner rounding its own button would take is handed down to it.
+  const box = props.variant === "row" ? "first:[&>button]:rounded-t-lg last:[&>button]:rounded-b-lg" : "";
   return (
-    <div ref={boxRef} className={`relative ${className}`}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        disabled={disabled}
-        title={title}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        // The disabled trigger dims its label only: its border is all that marks it as a control.
-        className="tap press inline-flex min-h-8 w-full items-center gap-1.5 rounded-md border border-edge-strong bg-surface px-2.5 text-xs text-fg hover:bg-raised disabled:text-faint [@media(pointer:coarse)]:min-h-11"
-      >
-        {trigger}
-        {busy ? <Spinner /> : <Icon as={ChevronDown} size={12} className="ml-auto text-faint" />}
-      </button>
+    <div ref={boxRef} className={`relative ${box} ${className}`}>
+      {props.variant === "row" ? (
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={toggle}
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={`tap ${GROUP_ROW} ${disabled ? "" : "hover:bg-raised"}`}
+        >
+          <span className="min-w-0 flex-1">
+            <span className={`block truncate text-sm ${disabled ? "text-muted" : ""}`}>{props.title}</span>
+            {props.subline !== undefined && props.subline !== null && (
+              <span className="block text-2xs text-faint">{props.subline}</span>
+            )}
+          </span>
+          <span className="flex min-w-0 max-w-[55%] items-center gap-1.5 truncate text-sm text-muted">{props.trigger}</span>
+          {busy ? <Spinner /> : <Icon as={ChevronsUpDown} size={16} className="text-faint" />}
+        </button>
+      ) : props.variant === "icon" ? (
+        <IconButton
+          ref={triggerRef}
+          icon={props.icon}
+          label={props.label}
+          size="chip"
+          expanded={open}
+          haspopup="listbox"
+          disabled={disabled}
+          onClick={toggle}
+          // The fill is the whole lit state: an appended text-fg loses to the tone's colour in Tailwind's emission order.
+          className={props.lit === true || open ? "bg-raised" : ""}
+        />
+      ) : (
+        <button
+          ref={triggerRef}
+          type="button"
+          id={triggerId}
+          // The label, then the trigger itself, so the name carries the value as well.
+          aria-labelledby={labelledBy === undefined ? undefined : `${labelledBy} ${triggerId}`}
+          aria-describedby={props.describedBy}
+          onClick={toggle}
+          disabled={disabled}
+          title={title}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={FIELD_TRIGGER}
+        >
+          <span className="flex min-w-0 flex-1 items-center gap-2">{props.trigger}</span>
+          {busy ? <Spinner /> : <Icon as={ChevronDown} size={14} className="text-faint" />}
+        </button>
+      )}
 
       {open && (
         <div
@@ -1230,9 +1354,9 @@ export function Dropdown<T extends string>({
           onKeyDown={onKeyDown}
           tabIndex={-1}
           role="listbox"
-          className={`absolute w-60 max-w-[min(20rem,calc(100vw-2rem))] ${MENU_PANEL} ${
-            placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
-          } ${align === "right" ? "right-0" : "left-0"}`}
+          aria-labelledby={labelledBy}
+          aria-label={props.variant === "icon" ? props.label : props.variant === "row" ? props.title : undefined}
+          className={`absolute ${width} ${MENU_PANEL} ${placement === "up" ? "bottom-full mb-1" : "top-full mt-1"}`}
         >
           {heading !== undefined && <p className={MENU_HEADING}>{heading}</p>}
           {items.map((item, index) => {
@@ -1242,7 +1366,7 @@ export function Dropdown<T extends string>({
             const unavailable = item.disabled === true;
             return (
               <div key={`${item.group ?? ""}:${item.value}`}>
-                {showGroup && <p className="mt-1 px-2 py-0.5 text-2xs text-faint">{item.group}</p>}
+                {showGroup && <p className="mt-1 px-2.5 py-0.5 text-2xs text-faint">{item.group}</p>}
                 <button
                   type="button"
                   role="option"
@@ -1253,11 +1377,9 @@ export function Dropdown<T extends string>({
                     if (!selected) onChange(item.value);
                   }}
                   // No opacity when disabled: the description is the refusal and must stay legible, and hover is granted by state.
-                  className={`${menuRow("start")} text-fg ${unavailable ? "" : "hover:bg-raised"} ${
-                    selected ? "font-medium" : ""
-                  }`}
+                  // The check alone marks the choice: a weight change rewraps a row's description (Q3.421).
+                  className={`${menuRow("start")} text-fg ${unavailable ? "" : "hover:bg-raised"}`}
                 >
-                  <span className="mt-0.5 w-3 shrink-0">{selected && <Icon as={Check} size={11} />}</span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       {item.adornment}
@@ -1268,6 +1390,10 @@ export function Dropdown<T extends string>({
                     {item.description !== null && item.description !== undefined && (
                       <span className="block text-2xs text-faint">{item.description}</span>
                     )}
+                  </span>
+                  {/* The check sits on the label's first line, whose height is the scale's and grows under a finger. */}
+                  <span className="inline-flex h-[var(--text-sm--line-height)] w-4 shrink-0 items-center justify-center">
+                    {selected && <Icon as={Check} size={14} />}
                   </span>
                 </button>
               </div>

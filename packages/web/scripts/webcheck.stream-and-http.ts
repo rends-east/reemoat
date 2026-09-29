@@ -315,6 +315,8 @@ process.stdout.write("\nwhat content type a body gets\n");
 
   check("a string is json", contentTypeFor(JSON.stringify({ text: "hi" })), "application/json");
   check("a blob is bytes", contentTypeFor(new Blob([new Uint8Array([1, 2])])), "application/octet-stream");
+  // The relay used to send a pasted screenshot as bare bytes, so the agent was handed a file where it takes an image.
+  check("unless it carries a type of its own", contentTypeFor(new Blob([new Uint8Array([1])], { type: "image/png" })), "image/png");
   check("so is an array buffer", contentTypeFor(new ArrayBuffer(4)), "application/octet-stream");
   check("and a typed array", contentTypeFor(new Uint8Array([1])), "application/octet-stream");
   check("no body means no header", contentTypeFor(undefined), null);

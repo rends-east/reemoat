@@ -4,7 +4,7 @@ import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
 import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
-import { Icon, IconButton, MENU_PANEL, menuPlacement } from "./bits";
+import { Icon, IconButton, MENU_PANEL, menuPlacement, menuRow, useListKeys } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
 import { pluginFailure, sessionActions } from "../plugins";
@@ -42,6 +42,7 @@ export function SessionMenu({
   const [placement, setPlacement] = useState<"up" | "down">("down");
   const [busy, setBusy] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  const { panelRef, onKeyDown } = useListKeys(open, boxRef);
   const row = state.rowsByKey.get(keyOf(sessionRef));
   const session = row?.snapshot;
   // A parked session gets no Resume, since a message is the way back, unless an older daemon parked it (Q2.224, Q7.103).
@@ -127,7 +128,8 @@ export function SessionMenu({
         label="Session actions"
         size={size}
         disabled={busy}
-        active={open}
+        expanded={open}
+        haspopup="menu"
         // Measured at the tap so the panel never grows the rail's scroller; see menuPlacement.
         onClick={() => {
           if (!open) setPlacement(menuPlacement(boxRef.current));
@@ -136,6 +138,9 @@ export function SessionMenu({
       />
       {open && (
         <div
+          ref={panelRef}
+          onKeyDown={onKeyDown}
+          tabIndex={-1}
           role="menu"
           className={`absolute right-0 w-52 max-w-[calc(100vw-2rem)] ${
             placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
@@ -254,8 +259,8 @@ function MenuItem({
       onClick={onClick}
       disabled={disabled}
       title={note === undefined ? label : `${label} · ${note}`}
-      className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm disabled:pointer-events-none disabled:text-faint ${
-        tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
+      className={`${menuRow("center")} disabled:pointer-events-none disabled:text-faint ${
+        tone === "danger" ? "text-danger hover:bg-danger/10" : "text-fg hover:bg-raised"
       }`}
     >
       <Icon as={icon} size={13} className="shrink-0" />
@@ -285,7 +290,7 @@ function MenuCheckItem({
       aria-checked={checked}
       onClick={onClick}
       title={label}
-      className="tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-fg hover:bg-raised"
+      className={`${menuRow("center")} text-fg hover:bg-raised`}
     >
       <Icon as={icon} size={13} className="shrink-0" />
       <span className="min-w-0 flex-1 truncate">{label}</span>

@@ -51,6 +51,7 @@ await import("./webcheck.model-list.js");
 await import("./webcheck.local-route.js");
 await import("./webcheck.e2ee.js");
 await import("./webcheck.typography.js");
+await import("./webcheck.kit.js");
 await import("./webcheck.theme.js");
 
 finish();

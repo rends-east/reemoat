@@ -906,8 +906,6 @@ export class SqliteSessionStore implements SessionStore {
 export class SqliteUploadStore implements UploadIndex {
   private readonly insertStmt: StatementSync;
   private readonly getStmt: StatementSync;
-  private readonly sumStmt: StatementSync;
-  private readonly countStmt: StatementSync;
   private readonly consumeStmt: StatementSync;
   private readonly listForStmt: StatementSync;
   private readonly sessionsStmt: StatementSync;
@@ -922,8 +920,6 @@ export class SqliteUploadStore implements UploadIndex {
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     this.getStmt = db.prepare("SELECT * FROM uploads WHERE session_id = ? AND upload_id = ?");
-    this.sumStmt = db.prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM uploads WHERE session_id = ?");
-    this.countStmt = db.prepare("SELECT COUNT(*) AS n FROM uploads WHERE session_id = ?");
     this.consumeStmt = db.prepare(
       "UPDATE uploads SET consumed_at = ? WHERE session_id = ? AND upload_id = ? AND consumed_at IS NULL",
     );
@@ -950,14 +946,6 @@ export class SqliteUploadStore implements UploadIndex {
   get(sessionId: string, uploadId: string): UploadRow | null {
     const row = this.getStmt.get(sessionId, uploadId);
     return row === undefined ? null : toUploadRow(row);
-  }
-
-  bytesFor(sessionId: string): number {
-    return Number(this.sumStmt.get(sessionId)?.["total"] ?? 0);
-  }
-
-  countFor(sessionId: string): number {
-    return Number(this.countStmt.get(sessionId)?.["n"] ?? 0);
   }
 
   /** Idempotent: an id named by a second prompt keeps the first timestamp. */

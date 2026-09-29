@@ -86,9 +86,9 @@ process.stdout.write("\nevery size from the scale, and the one that is not\n");
   check("in the theme layer, so a utility still wins over it", /@layer theme \{\s*@media \(pointer: coarse\)/.test(css), true);
 }
 
-process.stdout.write("\nthe three caps constants, and the colour that may not be appended\n");
+process.stdout.write("\nthe two caps constants and the field label, and the colour that may not be appended\n");
 {
-  // Each heading constant already carries a colour, so an appended one is a silent no-op; comments are stripped because docblocks quote it.
+  // Each constant already carries a colour, so an appended one is a silent no-op; FIELD_LABEL is sentence case now and still carries text-fg.
   const CAPS = ["SETTINGS_HEADING", "MENU_HEADING", "FIELD_LABEL"];
   const COLOUR = /(?<![\w:-])text-(?:fg|muted|faint|danger|ink|accent|warn|ok)\b/;
 
@@ -130,14 +130,6 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
 
   const SITES: Site[] = [
     { file: "ui/bits.tsx", hits: 2, constant: true, anchor: "", why: "MENU_HEADING and SETTINGS_HEADING" },
-    { file: "ui/settings/SettingField.tsx", hits: 1, constant: true, anchor: "", why: "FIELD_LABEL, the third constant" },
-    {
-      file: "ui/settings/MachineSection.tsx",
-      hits: 1,
-      constant: false,
-      anchor: "const RETIRE_HEADING =",
-      why: "text-danger, written out rather than composed onto SETTINGS_HEADING",
-    },
     {
       file: "ui/AgentBuilder.tsx",
       hits: 1,
@@ -203,6 +195,13 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
     );
     check(`${site.file}: a comment closes immediately above it`, closes >= 0 && before.length - closes <= 80, true);
   }
+
+  // RETIRE_HEADING was the idiom's one danger-coloured copy; retiring a machine is a DangerRow in its screen's last group now.
+  check(
+    "no heading is spelled out in danger any more, so retiring draws no caps of its own",
+    [/RETIRE_HEADING/.test(srcFile("ui/settings/MachineSection.tsx")), /tracking-wider[^"`]*text-danger|text-danger[^"`]*tracking-wider/.test(srcFile("ui/settings/MachineSection.tsx"))],
+    [false, false],
+  );
 }
 
 process.stdout.write("\nevery path this app draws, at the one size a path is drawn at\n");
@@ -260,7 +259,8 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
       /<span className="font-mono">permissions\.defaultMode<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
       /<span className="font-mono">\{settingsMode\.value\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
       /<span className="font-mono">\{shortPath\(settingsMode\.file\)\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
-      /className="mt-2 text-2xs text-muted wrap-anywhere" title=\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      // A Group footer is text-xs, so the line states text-2xs itself.
+      /<span className="text-2xs wrap-anywhere" title=\{settingsMode\.file\}>/.test(read("ui/settings/MachineAgentsSection.tsx")),
     ],
     [true, true, true, true],
   );

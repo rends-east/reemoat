@@ -1,60 +1,110 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { Send } from "lucide-react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
 import { errorText } from "../../http";
 import {
-  canResetField,
   draftAfterClear,
-  fieldOrigin,
   mailTrouble,
-  originText,
   secretFieldText,
+  secretPresent,
   seedPublicUrl,
   senderMismatch,
   smtpProblem,
+  type ConfigField,
   type SmtpDraft,
 } from "../../instance";
-import { store } from "../../store";
 import { controlPlaneOrigin } from "../../native";
-import { Button, Empty, FIELD, SETTINGS_HEADING, Spinner, TwoStep } from "../bits";
+import { navigate } from "../../router";
+import { settingsLeafPath, settingsPath } from "../../settings";
+import { Button, Dropdown, FIELD, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
-import { FIELD_LABEL, SettingField, settingValue } from "./SettingField";
+import { Field } from "../kit/Field";
+import { ActionRow, Group, LinkRow } from "../kit/List";
+import { Notice } from "../kit/Status";
+import {
+  SettingField,
+  SettingReset,
+  WithAdminSettings,
+  fieldNotes,
+  provenanceBadge,
+  settingField,
+  settingValue,
+} from "./SettingField";
 
-/** One draft and one Save for every SMTP key; each answer also refreshes the store's config, which reports mail state. */
+const SECURITY_CHOICES: readonly { value: string; label: string }[] = [
+  { value: "starttls", label: "STARTTLS (port 587)" },
+  { value: "implicit_tls", label: "TLS (port 465)" },
+  { value: "plaintext", label: "None (local relay only)" },
+];
+
+const securityLabel = (value: string): string =>
+  SECURITY_CHOICES.find((choice) => choice.value === value)?.label ?? value;
+
+const back = (): void => navigate(settingsPath("email"), true);
+
+/** Delivery trouble, the SMTP settings as rows onto one form, and a test send. */
 export function EmailSection(): ReactNode {
-  const [answer, setAnswer] = useState<cp.SettingsAnswer | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = (): void => {
-    setError(null);
-    void cp
-      .adminSettings()
-      .then(setAnswer)
-      .catch((cause: unknown) => setError(errorText(cause)));
-  };
-  useEffect(load, []);
-
-  const adopt = (next: cp.SettingsAnswer): void => {
-    setAnswer(next);
-    void store.refreshConfig();
-  };
-
-  if (error !== null) {
-    return (
-      <Empty failed action={<Button size="sm" onClick={load}>Try again</Button>}>
-        {error}
-      </Empty>
-    );
-  }
-  if (answer === null) {
-    return (
-      <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-        <Spinner /> Loading…
-      </div>
-    );
-  }
-  return <SmtpForm answer={answer} onChanged={adopt} />;
+  return <WithAdminSettings>{(answer) => <EmailRows answer={answer} />}</WithAdminSettings>;
 }
 
+function EmailRows({ answer }: { answer: cp.SettingsAnswer }): ReactNode {
+  const field = (key: string): ConfigField | undefined => settingField(answer, key);
+  const value = (key: string): string => settingValue(answer, key).trim();
+  const host = value("smtp.host");
+  const port = value("smtp.port");
+  const unset = "Not set";
+  // Every row opens the one form: the keys are saved together, so they are edited together.
+  const smtp = (): void => navigate(settingsLeafPath("smtp"));
+
+  return (
+    <div>
+      <MailTroubleNotice delivery={answer.mail.delivery} />
+      <Group title="SMTP">
+        <LinkRow
+          title="Server"
+          value={host.length === 0 ? unset : port.length === 0 ? host : `${host}:${port}`}
+          badge={provenanceBadge(field("smtp.host"), field("smtp.port"))}
+          onClick={smtp}
+        />
+        <LinkRow
+          title="Security"
+          value={securityLabel(value("smtp.security") || "starttls")}
+          badge={provenanceBadge(field("smtp.security"))}
+          onClick={smtp}
+        />
+        <LinkRow
+          title="Username"
+          value={value("smtp.username") || unset}
+          badge={provenanceBadge(field("smtp.username"))}
+          onClick={smtp}
+        />
+        <LinkRow
+          title="Password"
+          value={secretPresent(field("smtp.password")) ? "Set" : unset}
+          badge={provenanceBadge(field("smtp.password"))}
+          onClick={smtp}
+        />
+        <LinkRow
+          title="From"
+          value={value("mail.from") || unset}
+          badge={provenanceBadge(field("mail.from"))}
+          onClick={smtp}
+        />
+        <LinkRow
+          title="Public URL"
+          value={value("mail.public_url") || unset}
+          badge={provenanceBadge(field("mail.public_url"))}
+          onClick={smtp}
+        />
+      </Group>
+      <Group>
+        <ActionRow title="Send a test" glyph={Send} onClick={() => navigate(settingsLeafPath("test-mail"))} />
+      </Group>
+    </div>
+  );
+}
+
+/** One draft and one Save for every SMTP key. */
 function SmtpForm({
   answer,
   onChanged,
@@ -71,8 +121,7 @@ function SmtpForm({
     publicUrl: settingValue(source, "mail.public_url"),
   });
 
-  const field = (key: string): cp.SettingsAnswer["settings"][number] | undefined =>
-    answer.settings.find((entry) => entry.key === key);
+  const field = (key: string): ConfigField | undefined => settingField(answer, key);
 
   // The public URL seed is load-only; seeded keeps the server's problems visible while the seed is the only edit.
   const [seed] = useState(() => seedPublicUrl(fromAnswer(answer), field("mail.public_url"), controlPlaneOrigin()));
@@ -82,11 +131,6 @@ function SmtpForm({
   const [dirty, setDirty] = useState(seed.dirty);
   const [seeded, setSeeded] = useState(seed.dirty);
   const [removing, setRemoving] = useState(false);
-  const [testTo, setTestTo] = useState("");
-  const [testResult, setTestResult] = useState<string | null>(null);
-  const securityId = useId();
-  const passwordId = useId();
-  const testId = useId();
 
   // Follow the server's answer only while the form has no unsaved edits.
   useEffect(() => {
@@ -105,8 +149,9 @@ function SmtpForm({
     setSeeded(false);
   };
 
-  const save = (): void => {
-    if (problem !== null) return;
+  const save = (event: FormEvent): void => {
+    event.preventDefault();
+    if (busy || problem !== null || !dirty) return;
     setBusy(true);
     const wanted: Record<string, string> = {
       "smtp.host": draft.host.trim(),
@@ -136,6 +181,7 @@ function SmtpForm({
         onChanged(updated);
         setPassword("");
         toast("ok", "Saved.");
+        back();
       })
       .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
@@ -157,23 +203,8 @@ function SmtpForm({
     void clear(key).catch((cause: unknown) => toast("error", errorText(cause)));
   };
 
-  const sendTest = (): void => {
-    setBusy(true);
-    setTestResult(null);
-    void cp
-      .adminTestMail(testTo.trim().length > 0 ? testTo.trim() : undefined)
-      .then((queued) => setTestResult(`Queued to ${queued.to}.`))
-      .catch((cause: unknown) => setTestResult(errorText(cause)))
-      .finally(() => setBusy(false));
-  };
-
-  // A test sends with the stored configuration, so it needs a saved and configured form.
-  const sendBlocked = dirty ? "Save first." : !answer.mail.configured ? "Configure the server first." : null;
-
   return (
-    <div>
-      <p className="text-xs text-muted">Needed for sign-up confirmation and password resets.</p>
-
+    <form onSubmit={save} className="flex max-w-sm flex-col gap-4">
       <SettingField
         label="Host"
         value={draft.host}
@@ -191,30 +222,25 @@ function SmtpForm({
         onReset={() => clearKey("smtp.port")}
         busy={busy}
         placeholder="587"
-        hint="Not 25 — usually blocked."
       />
 
-      <div className="mt-3 max-w-sm">
-        <div className="flex items-center justify-between gap-2">
-          <label htmlFor={securityId} className={`block ${FIELD_LABEL}`}>
-            Security
-          </label>
-          <SecurityReset field={field("smtp.security")} disabled={busy} onReset={() => clearKey("smtp.security")} />
-        </div>
-        <select
-          id={securityId}
-          value={draft.security}
-          onChange={(event) => edit({ security: event.target.value })}
-          className={`mt-1 w-full ${FIELD}`}
-        >
-          <option value="starttls">STARTTLS (port 587)</option>
-          <option value="implicit_tls">TLS (port 465)</option>
-          <option value="plaintext">None (local relay only)</option>
-        </select>
-        <p className="mt-1 text-2xs text-faint">
-          <ProvenanceText field={field("smtp.security")} />
-        </p>
-      </div>
+      <Field label="Security" hint={fieldNotes(field("smtp.security"))}>
+        {({ id, labelledBy, describedBy }) => (
+          <div className="flex items-center gap-2">
+            <Dropdown
+              id={id}
+              labelledBy={labelledBy}
+              describedBy={describedBy}
+              className="min-w-0 flex-1"
+              items={SECURITY_CHOICES}
+              value={draft.security}
+              onChange={(next) => edit({ security: next })}
+              trigger={<span className="truncate">{securityLabel(draft.security)}</span>}
+            />
+            <SettingReset field={field("smtp.security")} busy={busy} onReset={() => clearKey("smtp.security")} />
+          </div>
+        )}
+      </Field>
 
       <SettingField
         label="Username"
@@ -227,42 +253,40 @@ function SmtpForm({
       />
 
       {/* Write-only: never pre-filled, and no dots that would claim a value. */}
-      <div className="mt-3 max-w-sm">
-        <div className="flex items-center justify-between gap-2">
-          <label htmlFor={passwordId} className={`block ${FIELD_LABEL}`}>
-            Password
-          </label>
-          {passwordStored && (
-            <TwoStep
-              armed={removing}
-              onArm={setRemoving}
-              className="justify-end"
-              question="Remove the stored password?"
-              act={{ label: "Remove" }}
-              onAct={() => clear("smtp.password")}
-              disabled={busy}
-              rest={
-                <Button size="sm" tone="ghost" disabled={busy} onClick={() => setRemoving(true)}>
-                  Remove
-                </Button>
-              }
-            />
-          )}
-        </div>
-        <input
-          id={passwordId}
-          type="password"
-          value={password}
-          onChange={(event) => {
-            setPassword(event.target.value);
-            setDirty(true);
-          }}
-          autoComplete="off"
-          placeholder={passwordStored ? "leave empty to keep the stored one" : "app password"}
-          className={`mt-1 w-full ${FIELD}`}
+      <Field label="Password" hint={secretFieldText(passwordField) ?? undefined}>
+        {({ id, describedBy }) => (
+          <input
+            id={id}
+            aria-describedby={describedBy}
+            type="password"
+            value={password}
+            onChange={(event) => {
+              setPassword(event.target.value);
+              setDirty(true);
+            }}
+            autoComplete="off"
+            placeholder={passwordStored ? "leave empty to keep the stored one" : "app password"}
+            className={FIELD}
+          />
+        )}
+      </Field>
+      {/* Under the hint that says a password is stored, right-aligned in both arms, so Cancel lands where Remove was (Q3.218). */}
+      {passwordStored && (
+        <TwoStep
+          armed={removing}
+          onArm={setRemoving}
+          className="-mt-2 justify-end"
+          question="Remove the stored password?"
+          act={{ label: "Remove" }}
+          onAct={() => clear("smtp.password")}
+          disabled={busy}
+          rest={
+            <Button size="sm" tone="ghost" disabled={busy} onClick={() => setRemoving(true)}>
+              Remove
+            </Button>
+          }
         />
-        <p className="mt-1 text-2xs text-faint">{secretFieldText(passwordField)}</p>
-      </div>
+      )}
 
       <SettingField
         label="From address"
@@ -286,67 +310,80 @@ function SmtpForm({
       />
 
       {senderMismatch(draft) && (
-        <p className="mt-3 max-w-sm text-xs text-muted">
-          From address differs from the username; many providers refuse that.
-        </p>
+        <p className="text-xs text-muted">From address differs from the username; many providers refuse that.</p>
       )}
-      {problem !== null && <p className="mt-3 text-sm text-danger">{problem}</p>}
+      {problem !== null && <p className="text-sm text-danger">{problem}</p>}
+      {(!dirty || seeded) &&
+        !answer.mail.configured &&
+        answer.mail.problems.map((sentence) => (
+          <p key={sentence} className="text-xs text-muted">
+            {sentence}
+          </p>
+        ))}
 
-      <Button tone="primary" className="mt-4" disabled={busy || problem !== null || !dirty} onClick={save}>
-        {busy ? <Spinner /> : "Save"}
-      </Button>
-
-      <div className="mt-6">
-        <h3 className={SETTINGS_HEADING}>Send a test</h3>
-        <label htmlFor={testId} className={`mt-2 block ${FIELD_LABEL}`}>
-          Test recipient
-        </label>
-        <div className="mt-1 flex max-w-sm gap-2">
-          <input
-            id={testId}
-            value={testTo}
-            onChange={(event) => setTestTo(event.target.value)}
-            placeholder="you@example.com"
-            type="email"
-            className={`min-w-0 flex-1 ${FIELD}`}
-          />
-          <Button disabled={busy || sendBlocked !== null} onClick={sendTest}>
-            Send
-          </Button>
-        </div>
-        {sendBlocked !== null && <p className="mt-2 text-xs text-muted">{sendBlocked}</p>}
-        {testResult !== null && <p className="mt-2 max-w-sm text-sm">{testResult}</p>}
-        {(!dirty || seeded) &&
-          !answer.mail.configured &&
-          answer.mail.problems.map((sentence) => (
-            <p key={sentence} className="mt-1 max-w-sm text-xs text-muted">
-              {sentence}
-            </p>
-          ))}
-        <MailTroubleNotice delivery={answer.mail.delivery} />
+      <div className="flex items-center gap-2">
+        <Button
+          tone="primary"
+          type="submit"
+          disabled={busy || problem !== null || !dirty}
+        >
+          {busy ? <Spinner /> : "Save"}
+        </Button>
+        <Button disabled={busy} onClick={back}>
+          Cancel
+        </Button>
       </div>
-    </div>
+    </form>
   );
 }
 
-function ProvenanceText({ field }: { field: cp.SettingsAnswer["settings"][number] | undefined }): ReactNode {
-  return field === undefined ? "not set" : originText(fieldOrigin(field));
-}
+function TestMail({ answer }: { answer: cp.SettingsAnswer }): ReactNode {
+  const [testTo, setTestTo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
-function SecurityReset({
-  field,
-  disabled,
-  onReset,
-}: {
-  field: cp.SettingsAnswer["settings"][number] | undefined;
-  disabled: boolean;
-  onReset: () => void;
-}): ReactNode {
-  if (field === undefined || !canResetField(field)) return null;
+  // A test sends with the stored configuration, and nothing on this screen is a draft of it.
+  const sendBlocked = !answer.mail.configured ? "Configure the server first." : null;
+
+  const sendTest = (event: FormEvent): void => {
+    event.preventDefault();
+    if (busy || sendBlocked !== null) return;
+    setBusy(true);
+    setTestResult(null);
+    void cp
+      .adminTestMail(testTo.trim().length > 0 ? testTo.trim() : undefined)
+      .then((queued) => setTestResult({ ok: true, text: `Queued to ${queued.to}.` }))
+      .catch((cause: unknown) => setTestResult({ ok: false, text: errorText(cause) }))
+      .finally(() => setBusy(false));
+  };
+
   return (
-    <Button size="sm" tone="ghost" disabled={disabled} onClick={onReset}>
-      Reset
-    </Button>
+    <form onSubmit={sendTest} className="flex max-w-sm flex-col gap-4">
+      <Field label="Recipient" hint="Empty sends to your own address.">
+        {({ id, describedBy }) => (
+          <input
+            id={id}
+            aria-describedby={describedBy}
+            type="email"
+            value={testTo}
+            onChange={(event) => setTestTo(event.target.value)}
+            placeholder="you@example.com"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            autoFocus
+            className={FIELD}
+          />
+        )}
+      </Field>
+      <div className="flex items-center gap-2">
+        <Button tone="primary" type="submit" disabled={busy || sendBlocked !== null}>
+          {busy ? <Spinner /> : "Send"}
+        </Button>
+      </div>
+      {sendBlocked !== null && <p className="text-xs text-muted">{sendBlocked}</p>}
+      {testResult !== null && <p className={`text-sm ${testResult.ok ? "" : "text-danger"}`}>{testResult.text}</p>}
+    </form>
   );
 }
 
@@ -355,12 +392,20 @@ function MailTroubleNotice({ delivery }: { delivery: cp.MailDelivery | undefined
   const trouble = mailTrouble(delivery);
   if (trouble === null) return null;
   return (
-    <div className="mt-3 max-w-sm rounded-md border border-edge-strong p-3">
-      <p className="text-sm">{trouble.text}</p>
+    <Notice tone="warn">
+      {trouble.text}
       {/* Remote text, already truncated and CR/LF-stripped where it is recorded. */}
       {delivery?.lastError != null && trouble.kind !== "backlog" && (
-        <p className="mt-1 break-words font-mono text-xs text-muted">{delivery.lastError}</p>
+        <span className="mt-1 block font-mono text-xs break-words text-muted">{delivery.lastError}</span>
       )}
-    </div>
+    </Notice>
   );
+}
+
+export function SmtpScreen(): ReactNode {
+  return <WithAdminSettings>{(answer, adopt) => <SmtpForm answer={answer} onChanged={adopt} />}</WithAdminSettings>;
+}
+
+export function TestMailScreen(): ReactNode {
+  return <WithAdminSettings>{(answer) => <TestMail answer={answer} />}</WithAdminSettings>;
 }

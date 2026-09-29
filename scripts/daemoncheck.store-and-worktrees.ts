@@ -373,7 +373,11 @@ const badState: [string, string][] = [
     second.uploads.expired(now + 1).map((r) => r.uploadId),
     ["u_keepme"],
   );
-  check("and so does what it spends of the session's budget", second.uploads.bytesFor("s_named"), 4096);
+  check(
+    "and so does what it spends of the session's budget",
+    second.uploads.listFor("s_named").reduce((sum, row) => sum + row.bytes, 0),
+    4096,
+  );
   // Keyed on the pair: another session's id reads as missing, so the routes need not choose between a 403 and a leak.
   check("but not under another session's id", second.uploads.get("s_plain", "u_keepme"), null);
 

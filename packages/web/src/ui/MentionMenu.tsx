@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { PeerRow } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
-import { MachineLabel, MENU_PANEL, menuRow } from "./bits";
+import { MachineLabel, MENU_BOX, menuRow } from "./bits";
 
 /** `CommandMenu`'s chrome for `@`: never takes focus, the caller moves the active index. A row reads "what it is about @name". Q3.678. */
 export function MentionMenu({
@@ -43,9 +43,9 @@ export function MentionMenu({
   }, [active, rows]);
 
   return (
-    <div ref={boxRef} className={`absolute inset-x-0 bottom-full mb-1 ${MENU_PANEL} max-h-[min(18rem,50dvh)]`}>
+    <div ref={boxRef} className={`absolute inset-x-0 bottom-full mb-1 ${MENU_BOX} max-h-[min(18rem,50dvh)]`}>
       {notice !== null && rows.length === 0 && (
-        <p role="status" className="px-2 py-1 text-xs text-muted">
+        <p role="status" className="px-2.5 py-1 text-xs text-muted">
           {notice}
         </p>
       )}
@@ -84,7 +84,7 @@ export function MentionMenu({
         })}
       </div>
       {unreachable.length > 0 && (
-        <p className="px-2 py-1 text-2xs text-faint">{unreachable.join(", ")} did not answer</p>
+        <p className="px-2.5 py-1 text-2xs text-faint">{unreachable.join(", ")} did not answer</p>
       )}
     </div>
   );

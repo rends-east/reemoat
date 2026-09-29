@@ -342,7 +342,7 @@ process.stdout.write("\ninstalling a harness, from this side\n");
   const section = stripComments(
     readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
   );
-  const menuAt = section.indexOf("<Menu");
+  const menuAt = section.indexOf("<RowMenu");
   check(
     "the list starts no run of its own, and its way to the card is inside the row's one menu",
     [

@@ -122,7 +122,8 @@ have to enter. These are the rules a change here must not break:
   under a stated size** — Send and the reversible approval; below that, only things
   the size of a glyph: the bell dot, a blocked count, a selected
   machine's 28px chip. A pill-sized fill is still the loudest object on screen.
-  `raised` means **state**: a tab you are on, a toggle on, a chosen menu row.
+  `raised` means **state**: a tab you are on, a toggle on, the highlighted row in a
+  popover — whose *chosen* row carries the trailing check instead (Q3.684).
   Q3.209, Q3.624.
 - **One search control, and it is the live one.** The header is a single row —
   menu, field, filter, bell — so the *disabled* fleet-wide magnifier is gone:
@@ -279,9 +280,11 @@ refuse; `enrolledByText` is that one string, `null` where there is nothing to
 say. Q1.637.
 
 **Systems live inside a machine, and there is no top-level section for them.**
-`/settings/machines/:machineId/systems[/:systemId]`: the machine rides the URL for
-`/new/:machineId`'s reasons, the **◀** walks one level up rather than to the index,
-and the segments are `parseSettingsRoute`'s so `webcheck` can assert them. A stale
+`/settings/machines/:machineId/systems` is the machine's Sign-ins list and
+`…/systems/:systemId` one system's card (Q3.686): the machine rides the URL for
+`/new/:machineId`'s reasons, the **◀** walks one level up — card to list, list to
+machine — rather than to the index, and the segments are `parseSettingsRoute`'s so
+`webcheck` can assert them. A stale
 address falls to the index and is not redirected, since a redirect would guess which
 machine. **Configuring one sits outside the ownership gate**: rename and retire are
 acts on the registry (404 for anybody but the owner) while signing in is an act on
@@ -307,13 +310,13 @@ per machine and holds a socket only for the three most recently viewed sessions.
 
 **The two-step confirmation is the only modal-shaped control on a settings
 *row*, and every one of them is `TwoStep`** (Q3.552): `grep -c '<TwoStep'` over
-`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **fourteen** (thirteen sites,
+`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **fifteen** (fourteen sites,
 two in `MachineLimitPanel`), a table `webcheck` holds by file. Revoking an API
 key is a bare `Revoke` on one tap — the only list is your own, `KeysSection`,
 its one consequence at rest the `this browser` row's, decided by
 `thisBrowsersKey`, never under a session credential (Q3.219, Q3.545, Q3.546).
-Registration in `ServerSection` is a `Badge` and a verb rather than a
-`role="switch"` — **only the act that widens authority is confirmed**, Q3.220.
+Registration in `ServerSection` is a `SwitchRow` resting in a `TwoStep` — **only the
+act that widens authority is confirmed**, Q3.220, Q3.686.
 Removing an assembled agent wears no `danger` (`agent-strip.md`). **Every
 confirmation names its subject**, and a two-step control is a bare button at
 rest: its cost is the confirmation's text.
@@ -326,8 +329,7 @@ pixels, `setConfirming(true)` is synchronous, and `.tap` removes the double-tap
 delay — so a second tap aimed at a button that looked inert lands on the undo.
 State is **per row**, because these lists re-render on a poll. Q3.218. `TwoStep`
 holds all of that, Cancel `plain` never `primary`, and the wait (`twoStepAct`):
-closing only on the 200, standing on a failure. Two drifted sites keep
-`justify-center` as `align="center"`. The site keeps the arming flag
+closing only on the 200, standing on a failure. The site keeps the arming flag
 (`armed`/`onArm`, controlled), the subject (`question`) and the resting control
 (`rest`). Q3.552.
 
@@ -338,7 +340,7 @@ confirmation would be a second dismissable layer over the sheet, for one tap.
 **"API keys" is gone from that menu**, panel and all: Q1.631 supersedes Q3.217,
 which kept it as the only caller of `adminRevokeKey`. The holder's own `DELETE
 /v1/me/keys/:keyId` writes `revoked_at` now, an admin neither sees nor
-touches anybody's keys, and the row's one panel is the machine limit. Q3.216.
+touches anybody's keys, and the menu's machine limit opens a leaf (Q3.686). Q3.216.
 
 **This app has modals, and there is a single arbiter for them.** `ui/overlay.ts`
 holds a LIFO stack of dismissible layers and one capture-phase listener;
@@ -368,8 +370,9 @@ the DOM half is `useListKeys`. Three rules: **the listener is on the panel, neve
 on `window`** (focus moves into it on open, and this app has two global keydown
 listeners on purpose); **`listNavKey` returns `null` for Escape**, so the key
 travels to `overlay.ts`, the only arbiter; and **focus goes to the
-`aria-selected` row rather than the first**, then back to whatever opened the
-panel. `AgentConfigBar`'s hand-rolled panels are **not** covered.
+`aria-selected` row rather than the first**, then back to the trigger that opened
+the panel (`triggerIn`, Q3.684). `AgentConfigBar`'s hand-rolled panels are **not**
+covered.
 
 **Nothing a person taps to answer an agent is under 44px, and that is asserted on
 three files rather than on the UI.** A blanket rule would be false: most `tap`/
@@ -402,7 +405,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/SessionBrowser.tsx` | The list column: one header row (menu · search · filter · bell, the `<h1>` `sr-only`), the waiting floor, the machine tabs **below `lg` only**, Pinned above the selected machine's folders, orphans, and a footer that is one button. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, agent messaging, stop, resume — plus `Background tasks` in the header's copy, the panel's second door. `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, Devices, **API keys**, Machines, **Permissions**, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the ring of the daemon *this app started for this server*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, Devices, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly`, and Logs listed only where the shell can run a daemon (Q3.543, Q3.687). Each screen is a stack of `Group`s (`design-system.md`). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the ring of the daemon *this app started for this server*, and a sentence for a `foreign` daemon; a browser does not list it (Q3.687). Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: every form and one-time secret is a leaf screen (`SettingsLeaf`, Q3.549, Q3.686); keys are a `KeyTable`. Systems is **not** a section: a machine's Sign-ins and Plugins are screens under it, and each system's card hangs off Sign-ins |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds

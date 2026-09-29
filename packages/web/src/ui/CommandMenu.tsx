@@ -3,7 +3,7 @@ import { Fragment, useEffect, useRef, type ReactNode, type RefObject } from "rea
 import type { AgentConfigOption } from "../wire";
 import { labelFor } from "./agentConfig";
 import { choiceRuns, type ChoiceRow, type CommandEntry } from "./commands";
-import { Icon, MENU_HEADING, MENU_PANEL, menuRow, Spinner } from "./bits";
+import { Icon, MENU_BOX, MENU_HEADING, menuRow, Spinner } from "./bits";
 
 /** Never takes focus and always opens above the composer's box; the caller computes the rows and moves the active index. */
 export function CommandMenu({
@@ -56,7 +56,7 @@ export function CommandMenu({
     // The heading sits outside the listbox, which may hold only options and groups.
     <div
       ref={boxRef}
-      className={`absolute inset-x-0 bottom-full mb-1 ${MENU_PANEL} max-h-[min(18rem,50dvh)]`}
+      className={`absolute inset-x-0 bottom-full mb-1 ${MENU_BOX} max-h-[min(18rem,50dvh)]`}
     >
       {stage !== null && <p className={MENU_HEADING}>{labelFor(stage)}</p>}
       <div id="composer-command-menu" role="listbox" aria-label={stage === null ? "Commands" : labelFor(stage)}>
@@ -102,7 +102,7 @@ export function CommandMenu({
               <Fragment key={`run:${run.items[0]?.index ?? 0}`}>{rows}</Fragment>
             ) : (
               <div key={`run:${run.items[0]?.index ?? 0}`} role="group" aria-label={run.group}>
-                <p aria-hidden className="mt-1 px-2 py-0.5 text-2xs text-faint">
+                <p aria-hidden className="mt-1 px-2.5 py-0.5 text-2xs text-faint">
                   {run.group}
                 </p>
                 {rows}
@@ -150,7 +150,7 @@ export function CommandMenu({
       )}
       </div>
       {stage === null && dropped > 0 && (
-        <p className="px-2 py-1 text-2xs text-faint">
+        <p className="px-2.5 py-1 text-2xs text-faint">
           {dropped} more the agent published are not shown
         </p>
       )}

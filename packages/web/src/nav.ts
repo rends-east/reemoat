@@ -29,12 +29,16 @@ export function depthOf(route: Route): number {
       return 1;
     case "agent":
       return route.step === null ? 2 : 3;
-    case "settings":
+    case "settings": {
+      // `typeof` for the two keys the drivers' hand-built routes leave out; a leaf is one step past the screen it opens from.
+      const leaf = typeof route.leaf === "string" ? 1 : 0;
       if (route.agents) return typeof route.signin === "string" ? 5 : 4;
-      if (route.system !== null) return 4;
-      if (route.signin !== null) return 4;
-      if (route.machineId !== null) return 3;
-      return route.section !== null ? 2 : 1;
+      if (route.system !== null || route.signin !== null) return 5;
+      if (typeof route.list === "string") return 4;
+      if (route.leaf === "plugin-install") return 5;
+      if (route.machineId !== null) return 3 + leaf;
+      return route.section !== null ? 2 + leaf : 1;
+    }
     case "plugins":
       if (route.settings.length > 0) return 3;
       return route.entry !== null ? 2 : 1;

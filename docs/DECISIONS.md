@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 104 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 429 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 105 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 434 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 74 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 153 | `###` |
-| | | **1090** | |
+| | | **1096** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1090 rather than the 545
+dividers. So the count is over **both** depths, and it says 1096 rather than the 546
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3280,13 +3280,14 @@ read: a revoke needs an id, and the only way to an id was the read. Leaving
 the routes and hiding the menu item: a route no client can reach is the shape
 Q7.74's `withKey` was deleted for.
 
-**Status.** Applied. `relaycheck` asserts both routes answer 404 to the admin
-that used to reach them, that a fleet-list row carries no `keys` field, and
-that the holder's own list and revoke still work — the revoked row still
-listed, a second revoke a 404 — and, by reading `app.ts`, that no route
-mounted under `/v1/admin/users/:id/` reads or updates `api_keys`. `webcheck`
-asserts `UsersSection` imports nothing from `KeyRow`, that `cp.ts` exports
-neither function, and that the row's one panel is the machine limit.
+**Status.** Applied. `relaycheck` asserts both routes answer 404 to the admin that used
+to reach them, that a fleet-list row carries no `keys` field, and that the holder's own
+list and revoke still work — the revoked row still listed, a second revoke a 404 — and,
+by reading `app.ts`, that no route mounted under `/v1/admin/users/:id/` reads or updates
+`api_keys`. `webcheck` asserts `UsersSection` imports nothing from `KeyRow`, that
+`cp.ts` exports neither function, and that the row's one panel is the machine limit.
+Amended by Q3.686: the machine limit is a leaf screen opened from the row's menu, not a
+panel under the row.
 
 ### Q1.632 — Where does an instance point somebody who has no machine?
 
@@ -5209,7 +5210,7 @@ compares `=== true` rather than `!= null` because `sessionCapabilities.resume`
 beside it is an empty-object *marker* while this is a declared boolean — two
 capability shapes in one payload, read two ways on purpose.
 
-**Status.** Current
+**Status.** Current, amended by Q2.247: a file dropped from its session's budget can no longer be re-read.
 
 ### Q2.32 — Is a text fallback needed to make an agent read an attachment?
 
@@ -5813,7 +5814,8 @@ were describing different paths through the same binary.
 the key from `provider.env`, a TOML table in `~/.kimi-code/config.toml`, and
 never looks at the process environment.
 
-**Status.** Current
+**Status.** Current. The sign-in card no longer says so (Q3.686); the measurement
+stands.
 
 ### Q2.202 — Is "can this agent be logged in" a question about the host?
 
@@ -7571,7 +7573,9 @@ and a store-less daemon answering `GET` and refusing `PATCH`. `webcheck`: the
 sentence, the prohibition over the whole screen, and that no heading on it names
 the mechanism either.
 
-**Status.** Current
+**Status.** Current, amended by Q3.686: the sentence is the idle row's subline, "Shut
+down, then resumed where you left off.", and the setting is a pick of nine presets
+rather than a typed number.
 
 ### Q2.226 — Can somebody correct the agent without stopping it?
 
@@ -8988,6 +8992,62 @@ unmeasured.
 
 **Status.** Current.
 
+### Q2.247 — What does a session keep of its files, and what happens when it is full?
+
+**Decision.** Two budgets, and both roll.
+- **Files somebody sent**: 100 files and 1 GiB a session (`MAX_UPLOADS_PER_SESSION`,
+  `MAX_SESSION_UPLOAD_BYTES`). Past either bound the oldest file **already sent** is
+  dropped, row first and bytes after, to make room (`roomFor`). A file not yet sent is
+  never dropped, since a draft names it, so the only refusals left are a hundred files
+  or a gibibyte all waiting to be sent, and they say so.
+- **Images an agent returned**: kept for the transcript on a budget of their own, 200
+  images and 256 MiB (`MAX_AGENT_IMAGES_PER_SESSION`, `MAX_SESSION_AGENT_IMAGE_BYTES`),
+  oldest first out, and never counted against a person's files. An id's prefix is its
+  kind — `u_` or `a_` — and `isAgentImage` is the one place that reads it.
+- **A dropped file answers 404 `upload_not_found`**, and the transcript says
+  *"… is no longer kept."* where its preview was, as a download of it does.
+- **An upload's type is read off its first bytes** when it declared none or only
+  `application/octet-stream` (`sniffImageMime`: PNG, JPEG, GIF, WebP), and the web
+  client sends a file's own type over the relay too (`contentTypeFor`).
+- **A failed chip offers Retry only where a retry can succeed** (`uploadRetryable`): a
+  dropped connection, a 408, a 429 or a 5xx, never a 400, 409 or 413.
+
+**Why.** Measured 2026-09-29 on the owner's machine: a landing-page session refused a
+pasted screenshot with *"this session already holds too many staged files"*. It held
+100 rows, and 96 of them were images the agent had returned while taking screenshots
+of its own work — 66 JPEG and 30 PNG across three days — against the owner's 4. One
+count covered both kinds and every file ever sent, and a sent row had no way out but
+the session's deletion, so the agent's working screenshots locked the person out of
+attaching anything, for good, in a session that looked healthy. The inode argument
+behind the count (Q5.101) still holds, since each file is a directory, so the answer
+is a rolling bound rather than none: a transcript's media is a display cache, and a
+cache evicts rather than refuses. The person's input keeps a hard edge only where
+dropping would lose something nobody has sent yet. The agent's numbers are twice what
+that session produced in three days, and room for ten images at the 25 MiB one may be.
+
+**The type, found on the way.** All four of the owner's screenshots were stored as
+`application/octet-stream`. Over the relay the header came from `contentTypeFor`,
+which answered bytes for any `Blob`, and `inlinesImage` hands the agent an image only
+under `image/*` — so a screenshot pasted in a browser, or in the app off loopback,
+reached the agent as a path rather than a picture. Reading the type off the content is
+the upload advice OWASP gives; here it only fills a gap and never overrides a type the
+client declared.
+
+**Cost.** A dropped file can no longer be re-read by the path its prompt carried
+(Q2.31); with a hundred newer files in the session, one that old is rarely the one a
+conversation turns back to.
+
+**Rejected.**
+- *Not counting an agent's images at all.* Each is a directory on the daemon's disk,
+  and an agent looping on screenshots would write without bound.
+- *Dropping a file not yet sent.* The draft holding its id would send a prompt naming
+  nothing, which `resolve` refuses as `missing`.
+- *Refusing an agent's image at the bound, as before.* Every image past it was drawn
+  as the text `[image]`, silently.
+
+**Status.** Current. Amends Q5.101's upload bounds, and Q2.31 on what the agent can
+re-read.
+
 ## The web client
 
 ### What the client is
@@ -9929,7 +9989,8 @@ shifts sideways. Those are the same defect at a lower cost — a menu you are al
 looking at, rather than the card that answers the agent — and they are listed here
 so the next reader knows the sweep happened and stopped on purpose.
 
-**Status.** Reversed an earlier decision
+**Status.** Reversed an earlier decision. Amended by Q3.684: the `Dropdown`'s chosen option
+carries the trailing check and no weight, so it no longer rewraps.
 
 #### Q3.43 — Does the conversation have a measure on a wide screen?
 
@@ -11688,7 +11749,8 @@ could not carry what the row wants to say: `disabled` on an `<option>` is grey
 text and nothing more, so "not installed" was glued onto the label as a string,
 and the reachability dot had nowhere to go.
 
-**Status.** Current
+**Status.** Current, amended by Q3.684: a field's panel is its trigger's width and
+carries no heading.
 
 #### Q3.89 — Was the workspace warning really "promoted out of the transcript"?
 
@@ -11779,7 +11841,8 @@ the one thing a grantee can do on that row.
 from "not signed in" to the screen that fixes it — now goes straight to that agent
 on that machine, instead of to a screen that re-asked for both.
 
-**Status.** Current
+**Status.** Current, amended by Q3.686: a system's card goes up to the machine's
+Sign-ins list rather than to the machine.
 
 #### Q3.416 — Is a login transcript the interface?
 
@@ -13955,7 +14018,8 @@ permanently, for a selection and a navigation; both are `raised`/`plain` now, wi
 weight and a leading glyph carrying them — the same substitution a blocked row's
 title makes.
 
-**Status.** Current
+**Status.** Current, amended by Q3.684: a popover's highlighted row is `raised`, and its
+chosen row carries the trailing check instead.
 
 #### Q3.210 — Does the rail keep its `border-r`?
 
@@ -14154,7 +14218,9 @@ while and is not now: a switch that waits behind a confirmation reads as broken,
 and one drawn flipped before the server answers is the optimistic paint this app
 forbids elsewhere.
 
-**Status.** Current
+**Status.** Current, amended by Q3.686: the control is a `SwitchRow` resting in a
+`TwoStep`. Tapping it to open puts the question in the row's place, so the switch never
+waits behind a confirmation; it flips on the 200, and closing is still one tap.
 
 #### Q3.221 — Which half of a shared composer flag is the rule?
 
@@ -15491,7 +15557,8 @@ and does not import `PLUGIN_SCOPE_TEXT`; and both the parse and `depthOf`/`upFro
 are driven through `parseSettingsRoute` rather than through a hand-written literal,
 since a literal is what keeps agreeing with a shape that no longer exists.
 
-**Status.** Decided
+**Status.** Decided; amended by Q3.686: a stale `…/plugins/:id` falls to the machine's
+Plugins list.
 
 #### Q3.460 — "Strictly limit the kinds of setting." What is a setting allowed to be?
 
@@ -15706,7 +15773,8 @@ stripped because the file now argues about the element it must not contain, so a
 lock its own docblock satisfies would pass over the code it was written to
 protect.
 
-**Status.** Decided
+**Status.** Decided; amended by Q3.684: the field draws no heading in its panel, and no
+`<select>` is left anywhere in `src/`.
 
 #### Q3.464 — "Where is K2.6, where is haiku?" Why did a plugin's picker offer agents instead of models?
 
@@ -19418,10 +19486,11 @@ the first band, which is `Dropdown`'s grouped-list idiom refused for the same
 reason it was refused before. Renaming the `SettingsGroup` id to match its title,
 which moves every pin for a label.
 
-**Status.** Applied. `webcheck` pins the six ids in order, that the table has
-exactly six entries, that `GROUP_TITLES.server` is "Admin" and that no row under it
-shares a word with its heading, and that each section is drawn from exactly one
-place in `Settings.tsx`.
+**Status.** Applied. `webcheck` pins the six ids in order, that the table has exactly
+six entries, that `GROUP_TITLES.server` is "Admin" and that no row under it shares a
+word with its heading, and that each section is drawn from exactly one place in
+`Settings.tsx`. Amended by Q3.687: the table holds eight sections — Permissions is gone,
+and Logs is listed only where the shell can run a daemon.
 
 #### Q3.544 — How short is a settings string allowed to be, and who enforces it?
 
@@ -19501,9 +19570,11 @@ a screen, which is a screen apologising before it has been used.
 **Alternatives taken out.** Confirming every revoke, which Q3.219 refuses.
 Consequences in tooltips, which a phone has no hover for.
 
-**Status.** Applied. `webcheck` pins the `this browser` badge and its subline as
-drawn only under an `api_key` credential, and the plugin and machine confirmations
-as naming their subject with Cancel last.
+**Status.** Applied. `webcheck` pins the `this browser` badge and its subline as drawn
+only under an `api_key` credential, and the plugin and machine confirmations as naming
+their subject with Cancel last. Amended by Q3.686: the Kimi note went with the
+per-vendor account lines, under the owner's rule against caveats; codex's is the one
+caveat left on the card.
 
 #### Q3.546 — Which key is "this browser", and what happens when you revoke it?
 
@@ -19613,10 +19684,10 @@ button — and the leaf screen only shows what came back, once, from a
 module-level handoff it reads and clears; arriving there with nothing in hand
 walks back to the table without minting.
 
-**Status.** Applied. `webcheck` pins the three leaves parsing, their way up,
-their titles, that Account holds no `editing` toggle above Devices, that the
-keys screen is a table whose New key navigates, and that no `CommandLine` is
-drawn there.
+**Status.** Applied. `webcheck` pins the three leaves parsing, their way up, their
+titles, that Account holds no `editing` toggle above Devices, that the keys screen is a
+table whose New key navigates, and that no `CommandLine` is drawn there. Amended by
+Q3.686: every form and one-time secret in settings is a leaf now, thirteen in all.
 
 #### Q3.550 — Is the Pinned section fleet-wide or per machine?
 
@@ -19743,15 +19814,17 @@ fixed-height question box and `2.5` margins sit on the `question` node it
 passes, and `align="end"` is what puts the answers in the kebab's slot, so the
 drag-measurement pin over that row still reads the classes it read before.
 
-**Status.** Applied. `webcheck` renders both arms under `react-dom/server` and
-asserts the order, the tones and the shared container on markup, drives
-`twoStepAct` with a promise it resolves and one it rejects, counts every `Cancel`
-token on every screen under `ui/settings/` plus `AgentBuilder` and
-`PluginConsent` against a named table (a `Cancel</Button>` count walked past a
-braced `{"Cancel"}` child and a raw `<button>`), holds the fifteen by file, pins
-the box string and the accessible name across the primitive, and re-points each
-site's own pin to what that site still decides — including, at the four sites
-with a shared flag, that the flag is held from the promise handed over.
+**Status.** Applied. `webcheck` renders both arms under `react-dom/server` and asserts
+the order, the tones and the shared container on markup, drives `twoStepAct` with a
+promise it resolves and one it rejects, counts every `Cancel` token on every screen
+under `ui/settings/` plus `AgentBuilder` and `PluginConsent` against a named table (a
+`Cancel</Button>` count walked past a braced `{"Cancel"}` child and a raw `<button>`),
+holds the fifteen by file, pins the box string and the accessible name across the
+primitive, and re-points each site's own pin to what that site still decides —
+including, at the four sites with a shared flag, that the flag is held from the promise
+handed over. Amended by Q3.686: `UserRow` swaps its cells for one cell spanning the
+table while confirming, `Registration`'s line is the primitive's own `consequence`, and
+`MachineLimitPanel` is a leaf screen whose buttons still share `TWO_STEP_BOX`.
 
 #### Q3.553 — Why does a sheet's body never scroll, and why has the settings pop-up no scrollbar at all?
 
@@ -27290,7 +27363,9 @@ only across the owner's own machines, and the owner asked for a switch at every
 level. What Q3.220 keeps is the other half: nothing is drawn flipped before the
 server answers (`SwitchRow`), and the drawer's theme row shares its `SwitchKnob`.
 
-**Status.** Current. Narrows Q3.220 to acts that widen beyond the owner's own.
+**Status.** Current. Narrows Q3.220 to acts that widen beyond the owner's own. Amended
+by Q3.687: the account's switch heads Machines as "All machines", and the Permissions
+section is gone.
 
 #### Q3.676 — Why is there no Agent links screen?
 
@@ -27477,6 +27552,189 @@ link cuts a line into three text nodes and the widest of them is not the line.
 
 **Status.** Current. Amends Q3.646: the bubble is still never parsed as Markdown, and
 is no longer one text node.
+
+#### Q3.683 — Is there a design system, and where does a new control go?
+
+**Decision.** Yes, and it is two files of primitives rather than a library. `ui/bits.tsx`
+keeps what it had — `Button`, `IconButton`, `TwoStep`, `Dropdown`, `Menu` and the class
+constants — because the drivers read them there and the gate bundle imports it. New
+families go in `ui/kit/`, which may import from `bits.tsx` and never the reverse. One
+height, `CONTROL` — `FIELD`'s own, 36px under a mouse and 44px under a finger — is shared
+by every field, dropdown trigger and popover row. A control that needs a shape the kit
+does not have gets a kit entry, not a local component. The owner, 2026-09-28: *many
+elements are unique; standardise them into one format and work out a design system.*
+
+**Why.** Three inventories counted what the one-off habit had produced: eight minimum
+heights, six radii and eight panel widths across the choosers alone, check marks at
+four sizes on either side, and three menu implementations, two of them without arrow
+keys. Each was argued for where it stood and none was wrong where it stood; together
+they read as an app nobody had designed.
+
+**Why the dependency runs one way.** `bits.tsx` already sits in a cycle with
+`Toast.tsx` that is benign only because each side reads the other inside function
+bodies. A module-level `${FIELD}` composed across a `bits`↔`kit` cycle would throw at
+load and blank the gate page. `webcheck.kit.ts` walks every kit module's value imports
+against the transport modules and asserts that `bits.tsx` imports nothing from `kit/`.
+
+**Rejected — a component library** (Radix, Headless UI, shadcn). Nothing here had
+considered one, and the reasons this repository refused a drag-and-drop dependency
+(Q3.533) and a validation library (Q7.75) apply unchanged: a library's correctness is
+asserted by having imported it, and the drivers read source text.
+
+**Status.** Current.
+
+#### Q3.684 — What does a dropdown draw, and how wide does it open?
+
+**Decision.** Three variants.
+- **A field** is `FIELD`'s box at `CONTROL`'s height with a chevron (`FIELD_TRIGGER`).
+  Its name is the `Field` label beside it: `aria-labelledby` names the label and then
+  the trigger, so the value is part of the name. Its panel is `inset-x-0`, exactly the
+  trigger's width, and it has no heading — `heading?: never` on that member.
+- **An icon** — the session filter and the model picker's provider filter — is an
+  `IconButton` whose `label` names it, lit while a choice narrows the list. Its panel
+  grows to its longest row, from 10rem up to 20rem, from the icon's edge. Only here may a
+  `heading` head the panel, because here the heading *is* the label.
+- **A row** is a whole settings row (Q3.686): its title on the left, the value and a
+  chevron on the right, the panel from the row's end.
+
+Options draw the label, then a `text-2xs text-faint` description under it, and the
+check on the **trailing** edge at 14px, so an option's text starts where the trigger's
+does. Rows are `menuRow` at `CONTROL` and `text-sm`. The direction is measured at the
+tap (`menuPlacement`) rather than handed in by the caller.
+
+**Why.** The owner's screenshot, 2026-09-28: New session's machine field read MACHINE
+above the trigger and MACHINE again inside a 240px panel under a full-width field —
+*it duplicates the heading and does not drop down across the width of the field*. Both
+call sites of the old `heading` prop spent it on that repetition, and the prop had no
+other use. The trigger was also 32px and `text-xs` beside a 36px `text-sm` text box, so
+a picker and a field in one form did not line up.
+
+**Why the filters became listboxes.** They were `Menu`s whose rows were `menuitem`s
+drawing a check with no `aria-checked` — a choice drawn as a set of actions. As a
+`Dropdown` they get `aria-selected`, the arrow keys and the one check for free. The
+native `<select>` on the Email screen went for Q3.463's reason, and `webcheck.kit.ts`
+now asserts that `<select` is absent across `src/`, not only in `PluginView`.
+
+**Also fixed.** `useListKeys` recorded `document.activeElement` at open so it could give
+focus back on close. WebKit does not focus a clicked button, so after a click that
+element was the body and focus never came back; it now finds the trigger
+(`triggerIn`). `Menu`'s panel is `MENU_PANEL`, which caps its height and clamps its
+width.
+
+**Status.** Current. Amends Q3.88 and Q3.463 on the panel's width and its heading, and
+the 240px panel Q3.421 names.
+
+#### Q3.685 — How is a form field labelled?
+
+**Decision.** In sentence case. `FIELD_LABEL` is `text-xs font-medium text-fg` and moved
+to `ui/kit/Field.tsx` beside `Field`, which draws it as a **sibling** `<label>` bound by
+`htmlFor`, then the control, then its hint or error, both attached by
+`aria-describedby`. Caps are left to the two heading constants. The owner chose this
+from two previews on 2026-09-28.
+
+**Why.** A caps label is the section heading's idiom one step larger, and on New
+session it *was* a section heading: `FieldLabel` drew `SETTINGS_HEADING` in an `<h2>`,
+so the form read as a stack of headings and the machine trigger had no accessible name
+at all. The label is a sibling rather than a wrapper because a `<label>` activates its
+first labelable descendant, and a `Dropdown` trigger is one — the help paragraph inside
+the plugin form's label opened the picker (plugin-ui.md).
+
+**Status.** Current. Amends Q5.115: the caps idiom has two constants, and `FIELD_LABEL`
+is no longer one of them.
+
+#### Q3.686 — What is a settings screen made of, and what may it say?
+
+**Decision.** A stack of `Group`s, as grouped cards. The owner chose them on 2026-09-28
+from three previews of one Machine screen: grouped cards, flat rows, and a label-left form.
+- A group is an optional caps title (with a count and one action), one `edge-strong` box of
+  rows split by hairlines, and an optional footer.
+- A row is exactly one of `LinkRow`, `ValueRow`, `ActionRow`, `SwitchRow`, `ChoiceRow`, a
+  `Dropdown` row, a record table, `EmptyRow`, or a `TwoStep` row (`TWO_STEP_ROW`) whose rest
+  is a `DangerRow` or a `Button`.
+- Inside the box a row carries no border: its glyph identifies it. A record row may carry
+  one `Button` at its end.
+- Every form and every one-time secret is a leaf screen: the machine's name and setup code,
+  plugin install, the server's domains, machine limit and provisioning key, SMTP, a test
+  mail, a new person, and a person's machine limit (`SettingsLeaf`). A secret is minted on
+  the row's tap and handed over as the new key is (Q3.549).
+
+**Why.** The brief was *a lot of filler text, and every settings field with its own UI*.
+The inventory backed both halves:
+- six row styles, five ways to draw a toggle, seven label styles, four copy buttons and
+  five "Check again" styles;
+- every single fact with its own caps heading and ruled band (`SETTINGS_SECTION`), so a
+  screen of five facts carried five headings and five sentences;
+- `OneTimeSecret` still drawn in place on three screens, and two panels that expanded under
+  their rows — the pop-ups the owner had already refused for API keys.
+
+**What the copy may say** is Q3.544's table, applied again:
+- A row's title is a noun, and its value sits at the trailing edge.
+- A subline appears only on a switch or choice row.
+- A footer carries only a consequence at rest, six words at most. An act's consequence
+  lives in its confirmation or on its leaf.
+
+What that removed:
+- Devices' "What this covers";
+- Machine's three paragraphs about this device;
+- "Another server is another account, from the menu.";
+- "Your API key is what signs you in.";
+- the admin nav blurbs;
+- the SMTP form's lead and its port hint.
+
+What it moved:
+- "Changing it signs out other devices." now sits on the password leaf, where the change is
+  made.
+- `cp-devices.md`'s second honest limit — open work stops only within minutes — is now said
+  in Retire's confirmation, where it is true, rather than at rest.
+
+**Registration is a switch again, and Q3.220's objection does not reach it.** That entry
+took the switch out because *a switch that waits behind a confirmation reads as broken*.
+Here the switch is the resting arm of a `TwoStep`: tapping it to open replaces the row with
+the question at once, so there is never a switch visibly waiting, and it still flips only on
+the 200. Closing is one tap on the same knob, and Cancel lands on its pixels (Q3.218).
+
+**Rejected — flat rows.** Hairlines with no boxes separate one group from the next too
+weakly on a phone.
+**Rejected — a label-left form.** It spends half a 390px width on labels, and its inline
+field-plus-Save is the in-place form the owner refused.
+
+**Status.** Current. Amends:
+- Q3.543 (the sections — see Q3.687);
+- Q3.549 (every form and secret, not three);
+- Q3.415 (a system's card goes up to the Sign-ins list);
+- Q3.459 (`…/plugins/:id` falls to the machine's Plugins list);
+- Q3.675 (the account's switch heads Machines);
+- Q3.220 (registration is a switch resting in a `TwoStep`);
+- Q3.552 (the users table's armed row and the machine limit's leaf);
+- Q1.631 (the machine limit is a leaf, not a panel);
+- Q3.545 and Q2.201 (the Kimi note is gone);
+- Q2.225 (the idle sentence is a row's subline over nine presets);
+- Q7.137 (the loopback cost is the Connection group's footer).
+
+#### Q3.687 — Which sections does the settings nav hold, and how is a row drawn there?
+
+**Decision.** Account, Devices, API keys, Machines, Logs, then under Admin: Server, Email and
+Users. It is a light regroup, the second of three the owner was shown on 2026-09-28.
+- **Permissions is gone.** Its one switch now heads Machines ("All machines"), above the
+  per-machine switches it already locks (`AccountMessaging`). It draws nothing at all where
+  the control plane cannot store it, instead of a sentence saying so.
+- **Logs is listed only where the shell can run a daemon.** It is `hostOnly`, read from
+  `state.host?.canHostDaemon` through one pure `visibleSections`, so the nav and the URL
+  guard cannot disagree. A typed `/settings/logs` in a browser falls to the index without
+  the admin sentence.
+- **A machine's Sign-ins and Plugins are screens of their own** under it.
+- **Rows carry a glyph and no blurb.** The rail draws no chevron: a rail row changes the
+  pane beside it rather than going deeper.
+
+**Why.**
+- A section holding one switch sent people away from the machines that switch governs, to a
+  screen with nothing else on it.
+- Logs in a browser or on a phone was a screen whose only possible content was a sentence
+  saying it had none.
+- Blurbs existed on the three admin rows only, so the nav contradicted itself about what a
+  row carries.
+
+**Status.** Current. Amends Q3.543.
 
 ## Deployment, packaging and code layout
 
@@ -31756,7 +32014,7 @@ a clock.
 | Relay streams | **1 MiB** h2 window per stream (`STREAM_WINDOW_BYTES` — raised from 256 KiB as the coupled half of `EVENTS_PAGE_BYTES`, Q6.104; three comments went on saying 256 and were corrected in Q5.101), 256 concurrent streams per tunnel, 64 per caller, 8 MiB connection window (`CONNECTION_WINDOW_BYTES`, its own constant — same number as the socket valve, different fact). The per-stream window **is** the flow control — granted on consumption, so a stalled client stops its sender there and nowhere else |
 | Tunnel | 8 MiB socket-buffer valve (`MAX_TUNNEL_BUFFERED_BYTES`, should be unreachable; the windows exist to make it so), 20s ping / 2 misses, reconnect 1s→30s with **full** jitter — a relay restart reconnects a whole fleet at once, and ±20% would keep the herd synchronised. Backoff resets only after a tunnel has been up 60s (`TUNNEL_STABLE_AFTER_MS`) |
 | Grants listing | 500 per page, 2000 max, with a `total` — the one admin list that grows as users × machines |
-| Uploads | **100 MiB per file**, 10 per message, **1 GiB** *and* 100 files per session — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory — plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; consumed ones have no TTL and die with their session row. Q5.101 |
+| Uploads | **100 MiB per file**, 10 per message, and a session keeps **1 GiB** *and* 100 of the files sent to it — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory. Past either, the oldest file already sent is dropped; files still waiting to be sent are never dropped and are all that can refuse (Q2.247). An agent's returned images roll on their own **200 / 256 MiB**. Plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; a sent one stays until its session goes or its budget needs the room. Q5.101 |
 | Downloads | 100 MiB, which **equals the upload cap by coincidence rather than by coupling** — this row said "deliberately not the upload number" and that was true at 25 MiB. Neither may be set by reading the other: that one bounds what a client may push onto disk against budgets outliving the request, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
 | Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — a **refusal**, not a clip. Far below the per-event cap because all of it rides the snapshot, which `GET /sessions` returns for every session at once. **24 options**, `optionId` 256, both refusals. The two 200-character clips on `title` and an option `name` are gone: they cut a model-written answer on the one channel where kimi asks a question, breaking `askedQuestion`'s identity match against `rawInput` — Q2.214, Q7.82 |
 | Session title | 120 characters accepted from a rename, 60 for the one derived from the first prompt. Bounded for the same reason as the row above: it rides the snapshot, which `GET /sessions` returns for sixty sessions every four seconds |
@@ -31883,7 +32141,7 @@ the window is asserted at the real numbers without writing 300 MiB to a temp
 directory, which is the only alternative and enough of a cost that it would have
 gone unasserted instead.
 
-**Status.** Current
+**Status.** Current, amended by Q2.247: both upload budgets roll, and an agent's images have their own.
 
 
 #### Q5.102 — Two callers unpack somebody else's archive. Why is there one unpacker?
@@ -32390,7 +32648,8 @@ The rename would break this file's own citation of the symbol, which `docscheck`
 asserts, and buy nothing the widened docblock does not. `MENU_HEADING` had no
 docblock at all and has one now.
 
-**Status.** Current
+**Status.** Current, amended by Q3.685: the idiom has two constants, and `FIELD_LABEL`
+is sentence case outside it.
 
 
 #### Q5.116 — The page gives up its credential before the host's origin moves
@@ -39440,9 +39699,11 @@ Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
 (WebKitGTK) are open, and `docs/NATIVE.md` carries them. A platform that refuses
 costs nothing visible: `proveLocal` fails and the relay answers.
 
-**Status.** Reversed an earlier decision. Q7.135 is superseded. Where the
-announcement lives — one per state root rather than one under `homedir()` — and
-which daemon may remove it is Q7.148.
+**Status.** Reversed an earlier decision. Q7.135 is superseded. Where the announcement
+lives — one per state root rather than one under `homedir()` — and which daemon may
+remove it is Q7.148. Amended by Q3.686: the switch is "Direct connection" in the
+machine's Connection group, and the ~360 s is that group's footer, "Revocation lags up
+to six minutes."
 
 ### Q7.138 — Why the payload shipped a coding-agent CLI it deliberately does not ship
 

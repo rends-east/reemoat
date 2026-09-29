@@ -315,7 +315,8 @@ function Absent({
         type="button"
         onClick={() => setOpen(!open)}
         title={`${labelFor(option)}: ${hint}`}
-        aria-haspopup="listbox"
+        // It opens an explanation, not a list: there is nothing to choose, which is what it says.
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`${labelFor(option)}: ${hint}`}
         className={`${CHIP} border-transparent px-2 text-muted hover:bg-raised active:bg-raised`}
@@ -326,6 +327,8 @@ function Absent({
 
       {open && (
         <div
+          role="dialog"
+          aria-label={labelFor(option)}
           className={`absolute bottom-full ${
             slotFor(option) === "left" ? "left-0" : "right-0"
           } mb-1 w-60 max-w-[calc(100vw-1.5rem)] ${MENU_PANEL}`}

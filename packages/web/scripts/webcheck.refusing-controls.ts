@@ -22,7 +22,7 @@ process.stdout.write("\nwhat a control still looks like when it refuses\n");
   const tile = between(newSession, "const bound = disabled", "</button>");
   const strip = between(newSession, "function AgentStrip(", "\nfunction MachineLine");
   const tones = between(bits, "const BUTTON_TONE", "\n};");
-  const trigger = between(bits, "tap press inline-flex min-h-8 w-full", '"');
+  const trigger = between(bits, "const FIELD_TRIGGER =", "`;");
   const option = between(bits, 'role="option"', "</button>");
   const iconButton = between(bits, "export function IconButton", "\n}\n");
   // An empty slice is a rename, and every negative assertion below would pass over it.
@@ -82,20 +82,15 @@ process.stdout.write("\nwhat a control still looks like when it refuses\n");
     [
       /disabled \? "text-faint" : "text-muted"/.test(choiceRow),
       /disabled \|\| placeholder \? "text-muted" : ""/.test(choiceRow),
-      /className="block truncate text-2xs text-faint">\{subline\}/.test(choiceRow),
+      /className="block text-2xs text-faint">\{subline\}/.test(choiceRow),
     ],
     [true, true, true],
   );
 
-  check("the row's boundary is a boundary", /border border-edge-strong/.test(choiceRow), true);
+  // Inside a Group's edge-strong box a row carries no boundary in either state; the box identifies it (web-shell.md).
+  check("the row carries no boundary of its own, in either state", /border-edge/.test(choiceRow), false);
   check("the tile's is too", /border-edge-strong/.test(tile), true);
   check("and the + beside it, dashed or not", /border-dashed border-edge-strong/.test(strip), true);
-  // A refused row hands back the hairline: WCAG 1.4.11 exempts inactive components, and edge-strong signals pressable.
-  check(
-    "and a refused row gives it back for the decorative hairline",
-    /disabled \? "border border-edge" : "border border-edge-strong"/.test(choiceRow),
-    true,
-  );
   // disabled is asked before picked, or a restored unpressable pick takes the strong border.
   check(
     "and the tile asks whether it is refused before it asks whether it is chosen",
@@ -213,16 +208,23 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
     const asking = start < 0 ? "" : systems.slice(start, asks + systems.slice(asks).search(/^\s*\/>/m));
     const keyOnly = systems.slice(systems.indexOf("export function KeyOnly("));
     check("the removal is the primitive's, and the question was found", [start >= 0, asks >= 0], [true, true]);
+    // A row in its own Group: the rest is sized to its label at the row's start, so the act lands right of the question (Q3.218).
     check(
-      "one box in both arms, centred rather than trailing, with the named button at rest",
+      "one box in both arms, a row of its Group, with the named row at rest",
       [
-        /align="center"/.test(asking),
+        /align="end"/.test(asking),
+        /className=\{TWO_STEP_ROW\}/.test(asking),
         /\bjustify-(?:center|end)\b/.test(keyOnly),
         /act=\{\{ label: "Remove", danger: true, icon: Trash2 \}\}/.test(asking),
-        /rest=\{[\s\S]*?<DangerButton icon=\{Trash2\} disabled=\{busy\} onClick=\{\(\) => setConfirmingRemove\(true\)\}>\s*Remove the \{keyName\}/.test(asking),
+        /rest=\{\s*<DangerRow label=\{`Remove the \$\{keyName\}`\} icon=\{Trash2\} disabled=\{busy\} onClick=\{\(\) => setConfirmingRemove\(true\)\} \/>/.test(asking),
         /setConfirmingRemove\(false\)/.test(keyOnly),
       ],
-      [true, false, true, true, false],
+      [true, true, false, true, true, false],
+    );
+    check(
+      "and the box says what it holds without the filler line under the name",
+      [/Key only —/.test(keyOnly), /<Field\s/.test(keyOnly), /<Group>\s*<TwoStep/.test(keyOnly)],
+      [false, true, true],
     );
     const removal = keyOnly.slice(keyOnly.indexOf("const remove = "), keyOnly.indexOf("const borrowed = "));
     check(
@@ -321,14 +323,35 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
     ],
     [2, true, true, false, false],
   );
+  // Reading is said in the model row's title alone: a subline repeating it is the filler the redesign cut.
   check(
     "the pair's refusal is drawn on the harness row, and the model row still names its provider",
     [
       /<Field label="Harness"[^<]*>.*?subline=\{conflict\}/.test(pair),
-      /subline=\{reading \? [^:]*: \(current\?\.system\.displayName \?\? null\)\}/.test(pair),
+      /subline=\{current\?\.system\.displayName \?\? null\}/.test(pair),
+      /Reading this machine/.test(pair),
     ],
-    [true, true],
+    [true, true, false],
   );
+  {
+    const field = builder.slice(builder.indexOf("function Field("), builder.indexOf("\n}\n", builder.indexOf("function Field(")));
+    check(
+      "each of the pair is named in sentence case beside its Clear, and its row sits in a Group's box",
+      [
+        field.length > 0,
+        /<h3 className=\{FIELD_LABEL\}>\{label\}<\/h3>/.test(field),
+        /SETTINGS_HEADING/.test(field),
+        /<Box>\{children\}<\/Box>/.test(field),
+        /function Box\(\{ children \}: \{ children: ReactNode \}\): ReactNode \{\s*return \(\s*<div>\s*<Group>\{children\}<\/Group>/.test(builder),
+      ],
+      [true, true, false, true, true],
+    );
+    check(
+      "and both pickers are Groups of ChoiceRows rather than lists of loose ones",
+      [/<ul className="flex flex-col gap-2">/.test(builder), /<li\b/.test(builder), (builder.match(/<Group>/g) ?? []).length >= 2, /<Box>\s*\{group\.choices\.map/.test(builder)],
+      [false, false, true, true],
+    );
+  }
   check(
     "and the model row is the only thing that waits for the expensive read",
     [

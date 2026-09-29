@@ -9,7 +9,7 @@ const between = (text: string, start: string, end: string): string => {
   return at < 0 ? "" : text.slice(at, text.indexOf(end, at + start.length));
 };
 
-process.stdout.write("\nthe Permissions section, and its one switch\n");
+process.stdout.write("\nthe account's switch, at the head of Machines\n");
 {
   const React = await import("react");
   // tsx compiles these with the classic JSX runtime (the root tsconfig names no jsx), so rendering needs a global React.
@@ -17,32 +17,28 @@ process.stdout.write("\nthe Permissions section, and its one switch\n");
   const { createElement: h } = React;
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { SwitchRow } = await import("../src/ui/bits.js");
-  const { PermissionsSection } = await import("../src/ui/settings/PermissionsSection.js");
-  const { parseSettingsRoute, settingsPaneTitle, settingsPath } = await import("../src/settings.js");
-  const { CONTROL_PLANE_UNREACHABLE } = await import("../src/account.js");
+  const { AccountMessaging } = await import("../src/ui/settings/AccountMessaging.js");
+  const { parseSettingsRoute, parseSettingsSection } = await import("../src/settings.js");
 
-  check("it has an address of its own", [settingsPath("permissions"), parseSettingsRoute(["permissions"]).section], [
-    "/settings/permissions",
-    "permissions",
-  ]);
-  check("and names its pane", settingsPaneTitle(parseSettingsRoute(["permissions"])), "Permissions");
+  // Permissions was one switch; it heads the list of the machines it governs, and its old address falls to the index.
+  check("it has no section of its own any more", [parseSettingsSection("permissions"), parseSettingsRoute(["permissions"]).section], [null, null]);
+  check("and it is drawn by Machines", /<AccountMessaging me=\{state\.me\} \/>/.test(stripComments(srcFile("ui/settings/MachinesSection.tsx"))), true);
 
   const me = (over: Record<string, unknown> = {}) => ({ id: "u_1", name: "ada", isAdmin: false, ...over }) as never;
-  const on = renderToStaticMarkup(h(PermissionsSection, { me: me({ permissions: { agentMessaging: true } }) }));
-  const off = renderToStaticMarkup(h(PermissionsSection, { me: me({ permissions: { agentMessaging: false } }) }));
+  const on = renderToStaticMarkup(h(AccountMessaging, { me: me({ permissions: { agentMessaging: true } }) }));
+  const off = renderToStaticMarkup(h(AccountMessaging, { me: me({ permissions: { agentMessaging: false } }) }));
   check(
     "one switch, announced with the account's own answer",
     [(on.match(/role="switch"/g) ?? []).length, /aria-checked="true"/.test(on), /aria-checked="false"/.test(off)],
     [1, true, true],
   );
   check("named for what it switches", [on.includes("Agent messaging"), on.includes("Agents in your sessions can message each other.")], [true, true]);
-  const older = renderToStaticMarkup(h(PermissionsSection, { me: me() }));
+  // No switch may claim a state the server cannot hold, and no line explains why it is missing (Q3.675, the owner's 2026-09-26 rule).
   check(
-    "a control plane that cannot store it gets a sentence, never a switch that would claim a state",
-    [older.includes("This server can’t store it yet."), /role="switch"/.test(older)],
-    [true, false],
+    "a control plane that cannot store it draws nothing at all, and neither does an account nobody could read",
+    [renderToStaticMarkup(h(AccountMessaging, { me: me() })), renderToStaticMarkup(h(AccountMessaging, { me: null }))],
+    ["", ""],
   );
-  check("and with no account read at all, the sentence every settings screen gives", renderToStaticMarkup(h(PermissionsSection, { me: null })).includes(CONTROL_PLANE_UNREACHABLE), true);
 
   const row = (over: Partial<Parameters<typeof SwitchRow>[0]> = {}): string =>
     renderToStaticMarkup(h(SwitchRow, { title: "Agent messaging", on: true, onToggle: () => {}, ...over }));
@@ -60,9 +56,9 @@ process.stdout.write("\nthe Permissions section, and its one switch\n");
   report("the switch row was found", fn.length > 300, `${fn.length} chars`);
   check("the press only asks: the row holds no state of its own to flip", [/useState/.test(fn), /onClick=\{onToggle\}/.test(fn)], [false, true]);
 
-  const section = stripComments(srcFile("ui/settings/PermissionsSection.tsx"));
+  const section = stripComments(srcFile("ui/settings/AccountMessaging.tsx"));
   check(
-    "the section draws the account's answer and sends its opposite, holding only the wait and the failure",
+    "the switch draws the account's answer and sends its opposite, holding only the wait and the failure",
     [
       /on=\{held\.agentMessaging\}/.test(section),
       /saveAccountMessaging\(!held\.agentMessaging\)/.test(section),
@@ -70,7 +66,7 @@ process.stdout.write("\nthe Permissions section, and its one switch\n");
     ],
     [true, true, 2],
   );
-  check("and says a failure where the switch is, never as a toast", [/toast\(/.test(section), /text-danger/.test(section)], [false, true]);
+  check("and says a failure under its group, never as a toast", [/toast\(/.test(section), /<Group title="All machines" error=\{error\}>/.test(section)], [false, true]);
 
   const store = stripComments(srcFile("store.ts"));
   const account = between(store, "async saveAccountMessaging(", "\n  }\n");
@@ -171,9 +167,9 @@ process.stdout.write("\nthe account's switch says nothing under it (Q3.675)\n");
   const React = await import("react");
   const { createElement: h } = React;
   const { renderToStaticMarkup } = await import("react-dom/server");
-  const { PermissionsSection } = await import("../src/ui/settings/PermissionsSection.js");
+  const { AccountMessaging } = await import("../src/ui/settings/AccountMessaging.js");
   const me = { id: "u_1", name: "ada", isAdmin: false, permissions: { agentMessaging: false } } as never;
-  const drawn = renderToStaticMarkup(h(PermissionsSection, { me }));
+  const drawn = renderToStaticMarkup(h(AccountMessaging, { me }));
   check("off, it is a switch drawn off and nothing more", [/role="switch"/.test(drawn), /aria-checked="false"/.test(drawn), (drawn.match(/<p[ >]/g) ?? []).length], [true, true, 0]);
 }
 

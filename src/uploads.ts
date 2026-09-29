@@ -27,8 +27,6 @@ export interface UploadRow {
 export interface UploadIndex {
   insert(row: UploadRow): void;
   get(sessionId: string, uploadId: string): UploadRow | null;
-  bytesFor(sessionId: string): number;
-  countFor(sessionId: string): number;
   markConsumed(sessionId: string, uploadIds: readonly string[], at: number): void;
   listFor(sessionId: string): UploadRow[];
   listSessions(): string[];
@@ -39,9 +37,63 @@ export interface UploadIndex {
 
 export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
+/** What a session keeps of the files sent to it; past either bound the oldest one already sent goes (Q2.247). */
 export const MAX_SESSION_UPLOAD_BYTES = 1024 * 1024 * 1024;
 
 export const MAX_UPLOADS_PER_SESSION = 100;
+
+/** The images an agent returned, kept for the transcript on a budget of their own, oldest first out (Q2.247). */
+export const MAX_AGENT_IMAGES_PER_SESSION = 200;
+
+export const MAX_SESSION_AGENT_IMAGE_BYTES = 256 * 1024 * 1024;
+
+const USER_BUDGET = { count: MAX_UPLOADS_PER_SESSION, bytes: MAX_SESSION_UPLOAD_BYTES } as const;
+
+const AGENT_BUDGET = { count: MAX_AGENT_IMAGES_PER_SESSION, bytes: MAX_SESSION_AGENT_IMAGE_BYTES } as const;
+
+/** The id's prefix is the row's kind: `u_` for a file somebody sent, `a_` for an image the agent returned. */
+const AGENT_IMAGE_PREFIX = "a_";
+
+export function isAgentImage(row: UploadRow): boolean {
+  return row.uploadId.startsWith(AGENT_IMAGE_PREFIX);
+}
+
+export type Room = { ok: true; evict: UploadRow[] } | { ok: false; full: "count" | "bytes" };
+
+/**
+ * What one more file of `bytes` costs a budget: the oldest rows already sent, dropped until it fits. A row nobody has
+ * sent yet is never dropped, since a draft names it, so a budget those alone fill refuses instead.
+ */
+export function roomFor(rows: readonly UploadRow[], bytes: number, budget: { count: number; bytes: number }): Room {
+  let count = rows.length;
+  let total = rows.reduce((sum, row) => sum + row.bytes, 0);
+  const fits = (): boolean => count + 1 <= budget.count && total + bytes <= budget.bytes;
+  const sent = rows
+    .filter((row) => row.consumedAt !== null)
+    .sort((a, b) => a.createdAt - b.createdAt || (a.uploadId < b.uploadId ? -1 : a.uploadId > b.uploadId ? 1 : 0));
+  const evict: UploadRow[] = [];
+  for (const row of sent) {
+    if (fits()) break;
+    evict.push(row);
+    count -= 1;
+    total -= row.bytes;
+  }
+  if (fits()) return { ok: true, evict };
+  return { ok: false, full: count + 1 > budget.count ? "count" : "bytes" };
+}
+
+const SNIFF_BYTES = 12;
+
+/** An image type read off a file's first bytes, for one that arrived declaring none or only bytes. */
+export function sniffImageMime(head: Uint8Array): string | null {
+  const at = (offset: number, signature: readonly number[]): boolean =>
+    signature.every((byte, i) => head[offset + i] === byte);
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (at(0, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (at(0, [0x47, 0x49, 0x46, 0x38])) return "image/gif";
+  if (at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return "image/webp";
+  return null;
+}
 
 export const MAX_PROMPT_ATTACHMENTS = 10;
 
@@ -77,7 +129,7 @@ export const MAX_UPLOAD_NAME_BYTES = 200;
 
 const MAX_MIME_CHARS = 128;
 
-// Only unconsumed uploads expire: a consumed one lives as long as its session row, since the log evicts a prefix.
+// Only an unsent upload expires by age; a sent one stays until its session goes or its budget needs the room (roomFor).
 const UNCONSUMED_TTL_MS = 24 * 60 * 60 * 1000;
 
 const SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -192,6 +244,7 @@ export interface ReceiveRequest {
 export type ReceiveResult =
   | { kind: "ok"; row: UploadRow; sessionBytes: number; sessionCount: number }
   | { kind: "too_large" }
+  /** `used` is what files not yet sent hold: nothing else can refuse, since a sent one is dropped to make room. */
   | { kind: "quota"; used: number }
   | { kind: "too_many" }
   | { kind: "rate"; retryAfterMs: number }
@@ -261,9 +314,10 @@ export class Uploads {
       return { kind: "write_failed", detail: "unusable session id" };
     }
 
-    if (this.index.countFor(sessionId) >= MAX_UPLOADS_PER_SESSION) {
+    const before = roomFor(this.sentFiles(sessionId), 0, USER_BUDGET);
+    if (!before.ok) {
       await cancelBody(request.body);
-      return { kind: "too_many" };
+      return before.full === "count" ? { kind: "too_many" } : { kind: "quota", used: this.unsentBytes(sessionId) };
     }
 
     // Before the body is read, so a refusal streams nothing.
@@ -273,7 +327,7 @@ export class Uploads {
       return { kind: "rate", retryAfterMs: wait };
     }
 
-    const priorBytes = this.index.bytesFor(sessionId);
+    const unsent = this.unsentBytes(sessionId);
 
     const uploadId = `u_${randomBytes(8).toString("hex")}`;
     const dir = join(this.root, sessionId, uploadId);
@@ -290,6 +344,7 @@ export class Uploads {
     }
 
     let written = 0;
+    const head = new Uint8Array(SNIFF_BYTES);
     let outcome: ReceiveResult | null = null;
     // `wx` is O_CREAT|O_EXCL: never follows a link, never truncates.
     let handle: Awaited<ReturnType<typeof open>>;
@@ -303,13 +358,15 @@ export class Uploads {
 
     try {
       for await (const chunk of request.body) {
+        if (written < SNIFF_BYTES) head.set(chunk.subarray(0, SNIFF_BYTES - written), written);
         written += chunk.byteLength;
         if (written > MAX_UPLOAD_BYTES) {
           outcome = { kind: "too_large" };
           break;
         }
-        if (priorBytes + written > MAX_SESSION_UPLOAD_BYTES) {
-          outcome = { kind: "quota", used: priorBytes };
+        // Only files not yet sent can hold the budget: every sent one can be dropped for this.
+        if (unsent + written > MAX_SESSION_UPLOAD_BYTES) {
+          outcome = { kind: "quota", used: unsent };
           break;
         }
         await handle.write(chunk);
@@ -331,24 +388,27 @@ export class Uploads {
       return outcome;
     }
 
-    // Re-checked: concurrent uploads all passed the first check.
-    const settledBytes = this.index.bytesFor(sessionId);
-    if (settledBytes + written > MAX_SESSION_UPLOAD_BYTES) {
+    // Planned again from the rows as they stand now: concurrent uploads all passed the first check.
+    const room = roomFor(this.sentFiles(sessionId), written, USER_BUDGET);
+    if (!room.ok) {
       await this.discard(dir);
-      return { kind: "quota", used: settledBytes };
-    }
-    if (this.index.countFor(sessionId) >= MAX_UPLOADS_PER_SESSION) {
-      await this.discard(dir);
-      return { kind: "too_many" };
+      return room.full === "count" ? { kind: "too_many" } : { kind: "quota", used: this.unsentBytes(sessionId) };
     }
 
-    // Last: the row is the commit point, and bytes without one are swept.
+    // A pasted file can arrive declaring only bytes; the agent is handed an image only under an image type.
+    const declared = request.mime;
+    const mime =
+      declared === null || declared === "application/octet-stream"
+        ? (sniffImageMime(head.subarray(0, Math.min(written, SNIFF_BYTES))) ?? declared)
+        : declared;
+
+    // The row is the commit point, and bytes without one are swept; what it displaces goes after it.
     const row: UploadRow = {
       sessionId,
       uploadId,
       name: request.name,
       origName: request.origName,
-      mime: request.mime,
+      mime,
       bytes: written,
       createdAt: Date.now(),
       consumedAt: null,
@@ -359,19 +419,46 @@ export class Uploads {
       await this.discard(dir);
       return { kind: "write_failed", detail: describeError(error) };
     }
+    for (const old of room.evict) await this.drop(old);
 
+    const kept = this.sentFiles(sessionId);
     return {
       kind: "ok",
       row,
-      sessionBytes: this.index.bytesFor(sessionId),
-      sessionCount: this.index.countFor(sessionId),
+      sessionBytes: kept.reduce((sum, one) => sum + one.bytes, 0),
+      sessionCount: kept.length,
     };
+  }
+
+  /** Every file somebody sent to this session, sent yet or not; an agent's images are budgeted apart. */
+  private sentFiles(sessionId: string): UploadRow[] {
+    return this.index.listFor(sessionId).filter((row) => !isAgentImage(row));
+  }
+
+  private unsentBytes(sessionId: string): number {
+    return this.sentFiles(sessionId)
+      .filter((row) => row.consumedAt === null)
+      .reduce((sum, row) => sum + row.bytes, 0);
+  }
+
+  /** The row first, so nothing can resolve a file that is being removed; a crash in between leaves bytes the next open sweeps. */
+  private forgetRow(row: UploadRow): boolean {
+    try {
+      this.index.remove(row.sessionId, row.uploadId);
+      return true;
+    } catch (error) {
+      this.onWarning(`could not drop an old upload row: ${describeError(error)}`);
+      return false;
+    }
+  }
+
+  private async drop(row: UploadRow): Promise<void> {
+    if (this.forgetRow(row)) await this.discard(join(this.root, row.sessionId, row.uploadId));
   }
 
   /** Runs on the agent's emit path, so the write is fire-and-forget; the row is inserted already consumed. */
   keepAgentImage(sessionId: string, mime: string, data: string): UploadRow | null {
     if (!safeSegment(sessionId)) return null;
-    if (this.index.countFor(sessionId) >= MAX_UPLOADS_PER_SESSION) return null;
 
     // Refused rather than clipped: a clipped mime is a wrong type.
     const declared = parseMime(mime);
@@ -383,9 +470,11 @@ export class Uploads {
     const bytes = Buffer.from(data, "base64");
     if (bytes.length === 0) return null;
     if (bytes.length > MAX_AGENT_IMAGE_BYTES) return null;
-    if (this.index.bytesFor(sessionId) + bytes.length > MAX_SESSION_UPLOAD_BYTES) return null;
+    // Its own budget, never the files somebody sent: what an agent returns may not refuse a person's attachment.
+    const room = roomFor(this.index.listFor(sessionId).filter(isAgentImage), bytes.length, AGENT_BUDGET);
+    if (!room.ok) return null;
 
-    const uploadId = `a_${randomBytes(8).toString("hex")}`;
+    const uploadId = `${AGENT_IMAGE_PREFIX}${randomBytes(8).toString("hex")}`;
     const name = `image-${uploadId.slice(2, 10)}${extensionForMime(declared)}`;
     const row: UploadRow = {
       sessionId,
@@ -406,6 +495,13 @@ export class Uploads {
     }
 
     void this.writeAgentImage(row, bytes);
+    // Rows now, so the next image in the same tool result plans against them; directories off the emit path, since discard lstats.
+    const gone = room.evict.filter((old) => this.forgetRow(old));
+    if (gone.length > 0) {
+      setImmediate(() => {
+        for (const old of gone) void this.discard(join(this.root, old.sessionId, old.uploadId));
+      });
+    }
     return row;
   }
 

@@ -139,32 +139,30 @@ export function stanceLine(
     : `${why} ${host} can't run sign-in; paste a key.`;
 }
 
-export const CREDENTIAL_LABELS: Record<string, { name: string; note: string }> = {
+/** A note only where it says something the name does not: where the key comes from, or that none is needed. */
+export const CREDENTIAL_LABELS: Record<string, { name: string; note: string | null }> = {
   CLAUDE_CODE_OAUTH_TOKEN: { name: "Claude subscription token", note: "From the machine, not a website." },
-  ANTHROPIC_API_KEY: { name: "Anthropic API key", note: "From your Anthropic account." },
-  KIMI_API_KEY: { name: "Kimi API key", note: "From your Kimi account." },
-  CODEX_API_KEY: { name: "OpenAI API key", note: "From your OpenAI account." },
-  OPENROUTER_API_KEY: { name: "OpenRouter API key", note: "From your OpenRouter account." },
+  ANTHROPIC_API_KEY: { name: "Anthropic API key", note: null },
+  KIMI_API_KEY: { name: "Kimi API key", note: null },
+  CODEX_API_KEY: { name: "OpenAI API key", note: null },
+  OPENROUTER_API_KEY: { name: "OpenRouter API key", note: null },
   OPENCODE_API_KEY: { name: "OpenCode Zen key", note: "Optional; the free models need none." },
-  XAI_API_KEY: { name: "xAI API key", note: "From your xAI account." },
+  XAI_API_KEY: { name: "xAI API key", note: null },
 };
 
-export function credentialLabel(envName: string): { name: string; note: string } {
+export function credentialLabel(envName: string): { name: string; note: string | null } {
   const known = CREDENTIAL_LABELS[envName];
   if (known !== undefined) return known;
   const words = envName.toLowerCase().replace(/_/g, " ");
-  return { name: words.charAt(0).toUpperCase() + words.slice(1), note: "A key this agent reads." };
+  return { name: words.charAt(0).toUpperCase() + words.slice(1), note: null };
 }
 
-/** Measured caveats only (Q2.200, Q2.201). */
+/** Measured caveats only (Q2.200). */
 export function credentialCaveat(id: string, canSignIn: boolean): string | null {
   if (id === "codex") {
     return canSignIn
       ? "A key won't sign Codex in; use Sign in above."
       : "A key won't sign Codex in; use the host's sign-in.";
-  }
-  if (id === "kimi") {
-    return "Kimi may prefer the key on the machine.";
   }
   return null;
 }

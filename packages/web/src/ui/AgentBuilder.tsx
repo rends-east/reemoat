@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronRight, ListFilter, Pencil, Search, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, ListFilter, Pencil, Search, Trash2 } from "lucide-react";
 import {
   useEffect,
   useMemo,
@@ -42,22 +42,22 @@ import {
   Button,
   ChoiceRow,
   DangerButton,
+  Dropdown,
   Empty,
   FIELD,
   Icon,
   IconButton,
-  Menu,
-  MENU_HEADING,
   NotReachable,
   SEARCH_FIELD,
   SETTINGS_HEADING,
   SHEET_FOOT,
   SHEET_SCREEN,
   SHEET_SCROLL,
-  Spinner,
   TwoStep,
-  menuRow,
 } from "./bits";
+import { FIELD_LABEL } from "./kit/Field";
+import { Group } from "./kit/List";
+import { Pending } from "./kit/Status";
 
 /**
  * Assembling or editing an agent; the draft lives here because each picker is a route that unmounts.
@@ -373,11 +373,11 @@ export function AgentBuilder({
     return (
       <div className={SHEET_SCREEN}>
         <div className="flex min-h-0 flex-1 items-center justify-center">
-          <Waiting>
+          <Pending>
             {preset !== null && stored === null
               ? "Opening this agent…"
               : "Reading this machine's providers…"}
-          </Waiting>
+          </Pending>
         </div>
       </div>
     );
@@ -391,7 +391,7 @@ export function AgentBuilder({
     return (
       <div className={SHEET_SCREEN}>
         <div className="flex min-h-0 flex-1 items-center justify-center">
-          <Waiting>Reading this machine&rsquo;s models…</Waiting>
+          <Pending>Reading this machine&rsquo;s models…</Pending>
         </div>
       </div>
     );
@@ -431,7 +431,7 @@ export function AgentBuilder({
     return (
       <div className={SHEET_SCREEN}>
         <div className="flex min-h-0 flex-1 items-center justify-center">
-          <Waiting>Reading this machine&rsquo;s models…</Waiting>
+          <Pending>Reading this machine&rsquo;s models…</Pending>
         </div>
       </div>
     );
@@ -543,7 +543,8 @@ export function AgentBuilder({
               // Not Choose while reading: on the edit path the stored model is not in the catalogue yet.
               title={reading ? "Reading models…" : (current?.modelName ?? "Choose")}
               placeholder={current === null}
-              subline={reading ? "Reading this machine's models…" : (current?.system.displayName ?? null)}
+              // Reading is said once, in the title.
+              subline={current?.system.displayName ?? null}
               trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
               disabled={busy || reading}
               onClick={() => navigate(agentPath(machineId, cwd, "llm", preset), true)}
@@ -629,16 +630,6 @@ const MAX_AGENT_NAME_CHARS = 80;
 /** The daemon's model id limit, MAX_MODEL_CHARS in src/server.ts; written out because web may not import src. */
 const MAX_MODEL_CHARS = 256;
 
-/** A wait with words: Spinner is aria-hidden, and a bare spinner reads as failure. */
-function Waiting({ children }: { children: ReactNode }): ReactNode {
-  return (
-    <p role="status" className="flex items-center gap-2 text-sm text-muted">
-      <Spinner />
-      <span>{children}</span>
-    </p>
-  );
-}
-
 function NameLine({ value, onChange }: { value: string; onChange: (next: string) => void }): ReactNode {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -715,19 +706,24 @@ function Field({
 }): ReactNode {
   return (
     <div>
-      <div className="flex min-h-6 items-center justify-between gap-2 pb-1.5">
-        <h3 className={SETTINGS_HEADING}>{label}</h3>
+      <div className="flex min-h-6 items-center justify-between gap-2 px-4 pb-1.5">
+        <h3 className={FIELD_LABEL}>{label}</h3>
         {clear !== null && (
-          <button
-            type="button"
-            onClick={clear}
-            className="tap press -my-1.5 inline-flex min-h-11 shrink-0 items-center rounded-sm px-2 text-2xs text-muted hover:bg-raised hover:text-fg"
-          >
+          <Button size="sm" tone="ghost" className="-my-1.5" onClick={clear}>
             Clear
-          </button>
+          </Button>
         )}
       </div>
-      {children}
+      <Box>{children}</Box>
+    </div>
+  );
+}
+
+/** One Group box under a heading this screen draws itself; its own wrapper keeps Group's gap between groups out of it. */
+function Box({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <div>
+      <Group>{children}</Group>
     </div>
   );
 }
@@ -847,49 +843,19 @@ function ModelPicker({
           label="Search models"
           status={countText(pickable, "model", "models")}
         />
-        <Menu
+        {/* "" stands for every provider: Dropdown values are strings, and no system id is empty. */}
+        <Dropdown
+          variant="icon"
+          icon={ListFilter}
+          label={`Showing ${narrowed?.displayName ?? "every provider"}`}
+          heading="Provider"
+          lit={system !== null}
           align="right"
-          panelClassName="w-48"
           className="shrink-0"
-          trigger={(open, toggle) => (
-            <IconButton
-              icon={ListFilter}
-              label={`Showing ${narrowed?.displayName ?? "every provider"}`}
-              size="chip"
-              expanded={open}
-              onClick={toggle}
-              className={system === null && !open ? "" : "bg-raised"}
-            />
-          )}
-        >
-          {(close) => (
-            <>
-              <p className={MENU_HEADING}>Provider</p>
-              {[null, ...systems.map((one) => one.id)].map((id) => {
-                const label = id === null ? "All" : (systems.find((one) => one.id === id)?.displayName ?? id);
-                return (
-                  <button
-                    key={id ?? "all"}
-                    role="menuitem"
-                    onClick={() => {
-                      setSystem(id);
-                      close();
-                    }}
-                    className={`${menuRow("center")} hover:bg-raised ${
-                      id === system ? "font-medium text-fg" : "text-muted"
-                    }`}
-                  >
-                    {/* A reserved slot, so choosing does not shift the labels. */}
-                    <span className="inline-flex w-3 shrink-0 justify-center">
-                      {id === system && <Icon as={Check} size={12} />}
-                    </span>
-                    {label}
-                  </button>
-                );
-              })}
-            </>
-          )}
-        </Menu>
+          items={[{ value: "", label: "All" }, ...systems.map((one) => ({ value: one.id, label: one.displayName }))]}
+          value={system ?? ""}
+          onChange={(id) => setSystem(id === "" ? null : id)}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-5 sm:px-5">
@@ -917,7 +883,7 @@ function ModelPicker({
             const wholeProvider = harness === null ? null : hostable(harness, group.system, routing, nameOf);
             if (wholeProvider !== null) {
               return (
-                <section key={group.system.id} className="mt-4 first:mt-2">
+                <section key={group.system.id} className="mt-6 px-4 first:mt-2">
                   {groups.length > 1 && (
                     <h2 className={`${HIDDEN_PROVIDER_HEADING} mb-1.5`}>{group.system.displayName}</h2>
                   )}
@@ -937,45 +903,46 @@ function ModelPicker({
                 ? first
                 : null;
             return (
-            <section key={group.system.id} className="mt-4 first:mt-2">
-              {groups.length > 1 && (
-                <h2 className={`${SETTINGS_HEADING} mb-1.5`}>{group.system.displayName}</h2>
+            <section key={group.system.id} className="mt-6 first:mt-2">
+              {(groups.length > 1 || shared !== null || build !== null) && (
+                <div className="mb-2 px-4">
+                  {groups.length > 1 && <h2 className={SETTINGS_HEADING}>{group.system.displayName}</h2>}
+                  {shared !== null && <p className="text-2xs text-faint">{shared}</p>}
+                  {build !== null && <p className="text-2xs text-faint">{build}</p>}
+                </div>
               )}
-              {shared !== null && <p className="mb-1.5 text-2xs text-faint">{shared}</p>}
-              {build !== null && <p className="mb-1.5 text-2xs text-faint">{build}</p>}
-              <ul className="flex flex-col gap-2">
+              <Box>
                 {group.choices.map((choice) => {
                   // Weighed against the system only: refusing on the harness here too would leave neither half of a bad pair changeable.
                   const why = choiceRefusal(null, choice, null);
                   return (
-                    <li key={`${choice.system.id}:${choice.modelId}`}>
-                      <ChoiceRow
-                        title={choice.modelName}
-                        trailing={
-                          <Supports
-                            choice={choice}
-                            capabilities={capabilities}
-                            harnesses={harnesses}
-                            nameOf={nameOf}
-                          />
-                        }
-                        subline={
-                          shared !== null
-                            ? null
-                            : (why ?? (groups.length > 1 ? null : group.system.displayName))
-                        }
-                        selected={
-                          value !== null &&
-                          value.system === choice.system.id &&
-                          value.model === choice.modelId
-                        }
-                        disabled={why !== null}
-                        onClick={() => onPick(choice)}
-                      />
-                    </li>
+                    <ChoiceRow
+                      key={`${choice.system.id}:${choice.modelId}`}
+                      title={choice.modelName}
+                      trailing={
+                        <Supports
+                          choice={choice}
+                          capabilities={capabilities}
+                          harnesses={harnesses}
+                          nameOf={nameOf}
+                        />
+                      }
+                      subline={
+                        shared !== null
+                          ? null
+                          : (why ?? (groups.length > 1 ? null : group.system.displayName))
+                      }
+                      selected={
+                        value !== null &&
+                        value.system === choice.system.id &&
+                        value.model === choice.modelId
+                      }
+                      disabled={why !== null}
+                      onClick={() => onPick(choice)}
+                    />
                   );
                 })}
-              </ul>
+              </Box>
               {group.system.routable === true && (
                 <TypedModel
                   system={group.system}
@@ -1049,7 +1016,7 @@ function HarnessPicker({
               : `Nothing here is called “${query.trim()}”.`}
           </Empty>
         ) : (
-          <ul className="flex flex-col gap-2">
+          <Group>
             {shown.map((one) => {
               const id = one.id;
               // A harness that could not be asked is not one that refuses, so its error is checked before routing.
@@ -1059,19 +1026,18 @@ function HarnessPicker({
                   ? COULD_NOT_ASK
                   : harnessRowRefusal(id, current, capabilities[id]?.routing ?? null);
               return (
-                <li key={id}>
-                  <ChoiceRow
-                    glyph={<AgentGlyph agent={id} size={18} />}
-                    title={harnessName(one)}
-                    subline={why}
-                    selected={id === value}
-                    disabled={why !== null}
-                    onClick={() => onPick(id)}
-                  />
-                </li>
+                <ChoiceRow
+                  key={id}
+                  glyph={<AgentGlyph agent={id} size={18} />}
+                  title={harnessName(one)}
+                  subline={why}
+                  selected={id === value}
+                  disabled={why !== null}
+                  onClick={() => onPick(id)}
+                />
               );
             })}
-          </ul>
+          </Group>
         )}
         {reported.length > 0 && <Reported entries={reported} nameOf={nameOf} />}
       </div>

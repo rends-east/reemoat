@@ -315,8 +315,20 @@ process.stdout.write("\nwhat one agent's card says\n");
       if (caveat !== null && wordCount(caveat) > 10) overCap.push(caveat);
     }
   }
-  for (const { note } of Object.values(CREDENTIAL_LABELS)) if (wordCount(note) > 6) overCap.push(note);
+  for (const { note } of Object.values(CREDENTIAL_LABELS)) if (note !== null && wordCount(note) > 6) overCap.push(note);
   check("every trimmed arm sits at or under its cap", overCap, []);
+  // A note is kept only where it tells somebody something the key's name does not.
+  check(
+    "only the two notes that carry information survive, and no key is told it comes from an account",
+    [
+      Object.entries(CREDENTIAL_LABELS)
+        .filter(([, one]) => one.note !== null)
+        .map(([envName]) => envName),
+      Object.values(CREDENTIAL_LABELS).some((one) => /From your/.test(one.note ?? "")),
+      credentialLabel("SOME_NEW_API_KEY").note,
+    ],
+    [["CLAUDE_CODE_OAUTH_TOKEN", "OPENCODE_API_KEY"], false, null],
+  );
   check(
     "and a host that cannot run the sign-in is told to paste a key instead of to start a chat",
     stanceLine({ id: "claude" }, "unchecked", false, "darwin"),
@@ -365,6 +377,11 @@ process.stdout.write("\nwhat one agent's card says\n");
     [credentialCaveat("opencode", false), credentialCaveat("claude", true), credentialCaveat("codex", true) !== null],
     [null, null, true],
   );
+  check(
+    "and codex is the only agent with a caveat under its key: kimi's preference is not a sentence on the card",
+    AGENT_IDS.filter((id) => credentialCaveat(id, true) !== null || credentialCaveat(id, false) !== null),
+    ["codex"],
+  );
 }
 
 process.stdout.write("\nthe sign-in screens, cut\n");
@@ -396,7 +413,10 @@ process.stdout.write("\nthe sign-in screens, cut\n");
   const { STALE_READ } = await import("../src/ui/agentCard.js");
   check("STALE_READ is defined exactly once, in agentCard", (card.match(/export const STALE_READ\b/g) ?? []).length, 1);
   check("and neither panel spells its own", [/const STALE_READ\b/.test(systemsPanel), /const STALE_READ\b/.test(agentsPanel)], [false, false]);
-  check("and both draw the shared one", [/\{STALE_READ\}/.test(systemsPanel), /\{STALE_READ\}/.test(agentsPanel)], [true, true]);
+  // Filler by the owner's plan (2026-09-28): the wizard and the install say a failed re-read, and Check again is the remedy elsewhere.
+  const systemCard = systemsPanel.slice(systemsPanel.indexOf("export function SystemDetail("), systemsPanel.indexOf("export function KeyOnly("));
+  check("a system's card was found", systemCard.length > 0, true);
+  check("and neither card draws the stale-read caveat", [/STALE_READ/.test(agentsPanel), /STALE_READ/.test(systemCard)], [false, false]);
   check("which is seven words and names the subject", [STALE_READ.split(/\s+/).length, /^Machine status/.test(STALE_READ)], [7, true]);
 
   const keyForm = systemsPanel.slice(systemsPanel.indexOf("export function KeyOnly("));
@@ -420,6 +440,23 @@ process.stdout.write("\nthe sign-in screens, cut\n");
   check("the removal question names the key and its cost", /Remove the \{keyName\}\? New sessions pointed at/.test(keyForm), true);
   check("and no paragraph at rest restates it", /Sessions pointed at \{system\.displayName\} sign with this key/.test(keyForm), false);
 
+  // The owner's cut of 2026-09-28: each of these repeated something already on the card, or reassured.
+  check(
+    "the card carries none of the lines the redesign cut",
+    [
+      /You can leave this page/.test(agentsPanel),
+      /function StaleNotice/.test(agentsPanel),
+      /function RecheckButton/.test(agentsPanel),
+      /import \{[^}]*\bRecheckButton\b[^}]*\} from "\.\.\/kit\/Status"/.test(agentsPanel),
+      /import \{[^}]*\bRecheckButton\b[^}]*\} from "\.\.\/kit\/Status"/.test(systemsPanel),
+    ],
+    [false, false, false, true, true],
+  );
+  check(
+    "and the word that divided the sign-in from the keys is the keys' own heading",
+    [/<Group title=\{divider \?\? "Keys"\}/.test(agentsPanel), /<Group title=\{divider \?\? "Saved keys"\}>/.test(agentsPanel), /h-px flex-1 bg-edge/.test(agentsPanel)],
+    [true, true, false],
+  );
   check("MachineSystemsSection takes no lede", /\blede\b/.test(machineSystems), false);
   check("and says nothing about where credentials are stored", /Stored on/.test(machineSystems), false);
   check("while the unreachable arm keeps its sentence, mounted rather than copied", /<NotReachable machine=\{machine\} \/>/.test(machineSystems), true);

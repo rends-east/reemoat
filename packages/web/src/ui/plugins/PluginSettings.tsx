@@ -9,6 +9,7 @@ import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
 import { ambiguousNames } from "../../wire";
 import { Button, Empty, LINK, Spinner } from "../bits";
+import { Notice } from "../kit/Status";
 import { PluginBlockView } from "../PluginView";
 
 // Settings for the machines named in the URL, per machine because plugin data lives in each daemon's database.
@@ -208,10 +209,12 @@ function Pane({
         <>
           {agreement.form.kind === "mixed" && (
             // The client's own line, never a synthesized notice, which is the plugin's own channel.
-            <p className="mb-4 rounded-md border border-edge-strong px-3 py-2 text-sm text-fg">
-              These machines had different settings for {agreement.form.differing.join(", ")}, so nothing is filled in.
-              Set them again and save to make them the same everywhere.
-            </p>
+            <div className="mb-4">
+              <Notice tone="warn">
+                These machines had different settings for {agreement.form.differing.join(", ")}, so nothing is filled in.
+                Set them again and save to make them the same everywhere.
+              </Notice>
+            </div>
           )}
           {/* Mixed forms are seeded blank; keyed on the round and the agreement so a save re-seeds. */}
           <PluginBlockView

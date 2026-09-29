@@ -672,6 +672,37 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
     /Install without reading it/.test(panelSrc),
     "the unreadable path is a separate control",
   );
+  {
+    // The consent no longer opens under the list: the file goes to a leaf of its own through a module handoff (Q3.549).
+    const panel = stripComments(panelSrc);
+    const listSide = panel.slice(0, panel.indexOf("export function PluginInstall("));
+    const leaf = panel.slice(panel.indexOf("export function PluginInstall("), panel.indexOf("function InstallPlugin("));
+    const install = panel.slice(panel.indexOf("function InstallPlugin("));
+    check(
+      "the picker hands its file to the install screen and reads nothing on the list",
+      [/handoff = \{ machineId, file \};\s*navigate\(machineLeafPath\(machineId, "plugin-install"\)\);/.test(listSide), /peekPluginArchive\(|<PluginConsent\b/.test(listSide)],
+      [true, false],
+    );
+    check(
+      "which takes it only for its own machine, clears it first, and walks back with nothing in hand",
+      [
+        /held !== null && held\.machineId === machineId \? held\.file : null/.test(leaf),
+        /useEffect\(\(\) => \{\s*clearHandoff\(\);\s*if \(file === null\) back\(\);/.test(leaf),
+      ],
+      [true, true],
+    );
+    // Linkage rather than presence: the Cancel drawn mid-upload must reach the signal the upload was handed (plugin-ui.md).
+    check(
+      "and reads the manifest before any send, with a Cancel that calls a running upload off",
+      [
+        /peekPluginArchive\(file\)/.test(install),
+        /\.installPlugin\(file, \(fraction\) => setPhase\(\{ kind: "sending", fraction \}\), controller\.signal\)/.test(install),
+        /stop\.current = controller;/.test(install),
+        /stop\.current\?\.abort\(\);\s*onDone\(\);/.test(install),
+      ],
+      [true, true, true, true],
+    );
+  }
 
   {
     const { MACHINE_GONE } = await import("../src/plugins.js");

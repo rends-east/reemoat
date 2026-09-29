@@ -23,6 +23,7 @@ import {
   sendableAttachments,
   subscribeAttachments,
   updateAttachment,
+  uploadRetryable,
   type PendingAttachment,
 } from "../attach";
 import type { DaemonClient } from "../daemon";
@@ -94,7 +95,7 @@ function stalled(list: readonly PendingAttachment[]): boolean {
   return list.some((item) => item.state === "failed");
 }
 
-// A failed attachment holds Send too: sending would drop the file, and the chip's Retry is the way out.
+// A failed attachment holds Send too: sending would drop the file, and the chip's Retry or Remove is the way out.
 function sendable(text: string, list: readonly PendingAttachment[], refused: boolean): boolean {
   return canSend(text, list, refused) && !stalled(list);
 }
@@ -164,6 +165,7 @@ export function Composer({
       updateAttachment(key, item.localId, {
         state: "failed",
         error: errorText(cause),
+        retryable: uploadRetryable(cause),
         cancel: null,
       });
     }
@@ -216,6 +218,7 @@ export function Composer({
         progress: 0,
         uploadId: null,
         error: null,
+        retryable: false,
         cancel: () => controller.abort(),
         controller,
       };
@@ -631,10 +634,10 @@ export function Composer({
                 item.state === "failed" ? "border-danger/50 bg-danger/5" : "border-transparent bg-raised"
               }`}
             >
-              {/* Retry leads the chip, away from Remove, so their grown targets cannot overlap. */}
+              {/* Retry leads the chip, away from Remove, so their grown targets cannot overlap; only where a retry can succeed. */}
               {item.state === "uploading" ? (
                 <Spinner />
-              ) : item.state === "failed" ? (
+              ) : item.state === "failed" && item.retryable ? (
                 <IconButton
                   icon={RefreshCw}
                   label={`Upload ${item.name} again`}

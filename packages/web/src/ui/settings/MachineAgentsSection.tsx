@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
-import { GripVertical, MoreHorizontal, Plus } from "lucide-react";
+import { GripVertical, Plus } from "lucide-react";
 import {
   defaultRow,
   dropIndex,
@@ -25,7 +25,8 @@ import type { AgentId, AgentAvailability, AgentStripEntry, CustomAgent, SystemIn
 import { agentBadge, agentStance, harnessName, startsBare } from "../agentCard";
 import { installElapsed, installFailure } from "../agentInstall";
 import { AgentGlyph } from "../AgentIcons";
-import { Badge, Button, Empty, Icon, IconButton, Menu, NotReachable, RowAction, Spinner, TwoStep } from "../bits";
+import { Badge, Button, Empty, Icon, NotReachable, RowAction, RowMenu, SkeletonRow, Spinner, TwoStep } from "../bits";
+import { ActionRow, EmptyRow, Group } from "../kit/List";
 import { AgentDetail } from "./AgentsPanel";
 
 // Stored per machine on the daemon, and lists every harness that can ever have a tile, wider than the strip draws (Q3.640).
@@ -105,16 +106,7 @@ export function MachineAgentsSection({
     return <AgentDetail key={`${machineId}:${harness}`} machineId={machineId} agentId={harness} />;
   }
 
-  return (
-    <div>
-      <p className="text-xs text-muted">
-        New session's agents on {machine.name} (
-        <code className="text-muted/80">{machine.id}</code>). The first that can start is the{" "}
-        <em>default</em>.
-      </p>
-      <StripEditor key={machineId} machineId={machineId} />
-    </div>
-  );
+  return <StripEditor key={machineId} machineId={machineId} />;
 }
 
 /** Split from the guards because hooks may not sit under an early return; keyed so a drag or write never lands on another machine's list. */
@@ -374,7 +366,13 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
     statusLine.current?.scrollIntoView({ block: "nearest" });
   }, [failure]);
 
-  if (listing === null) return <Spinner />;
+  if (listing === null) {
+    return (
+      <Group>
+        <SkeletonRow />
+      </Group>
+    );
+  }
 
   const shiftFor = (index: number): number => {
     if (drag === null || index === drag.from) return 0;
@@ -388,82 +386,82 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
   const opensOn = defaultRow(previewed, (row) => startableHere(row, listing.agents, listing.presets));
   const opensOnKey = opensOn === null ? null : stripKey(opensOn.kind, opensOn.id);
 
+  // Mono renders a step above sans, so this line stays text-2xs inside the footer's text-xs, as every path does.
+  const provenance =
+    settingsMode === null ? undefined : (
+      <span className="text-2xs wrap-anywhere" title={settingsMode.file}>
+        New claude sessions follow <span className="font-mono">permissions.defaultMode</span> —{" "}
+        <span className="font-mono">{settingsMode.value}</span> — from{" "}
+        <span className="font-mono">{shortPath(settingsMode.file)}</span>.
+      </span>
+    );
+
   return (
     <div>
-      {/* Said only when the read succeeded: a failed read is not an empty machine. */}
-      {rows.length === 0 && failure === null && supported ? (
-        <Empty>
-          {listing.agents.length === 0
-            ? "This machine reports no agents."
-            : "Every agent on this machine needs a model. Add an agent to pick one."}
-        </Empty>
-      ) : rows.length === 0 ? null : (
-        <ul className="mt-1 border-y border-edge">
-          {rows.map((row, index) => (
-            <StripRowView
-              key={stripKey(row.kind, row.id)}
-              row={row}
-              index={index}
-              count={rows.length}
-              listing={listing}
-              machineId={machineId}
-              opensOn={opensOnKey === stripKey(row.kind, row.id)}
-              pending={pending === stripKey(row.kind, row.id)}
-              frozen={!supported}
-              removing={removing === row.id}
-              lifted={drag?.from === index}
-              sliding={drag !== null}
-              shift={shiftFor(index)}
-              onDrag={setDrag}
-              onMove={(from, to) => write(moveRow(rows, from, to), stripKey(row.kind, row.id))}
-              onToggle={() =>
-                write(
-                  rows.map((one, at) => (at === index ? { ...one, hidden: !one.hidden } : one)),
-                  stripKey(row.kind, row.id),
-                )
-              }
-              onAnnounce={setMoved}
-              onRecheck={(agent) => recheck(agent)}
-              installing={installing}
-              now={now}
-              onRemove={() => remove(row.id)}
-            />
-          ))}
-        </ul>
-      )}
+      {/* The frame is the Group's; the rows keep their own borders, since a drag measures one row for every neighbour. */}
+      <Group footer={provenance}>
+        {/* Said only when the read succeeded: a failed read is not an empty machine. */}
+        {rows.length === 0 && failure === null && supported ? (
+          <EmptyRow>
+            {listing.agents.length === 0
+              ? "This machine reports no agents."
+              : "Every agent on this machine needs a model."}
+          </EmptyRow>
+        ) : rows.length === 0 ? null : (
+          <ul>
+            {rows.map((row, index) => (
+              <StripRowView
+                key={stripKey(row.kind, row.id)}
+                row={row}
+                index={index}
+                count={rows.length}
+                listing={listing}
+                machineId={machineId}
+                opensOn={opensOnKey === stripKey(row.kind, row.id)}
+                pending={pending === stripKey(row.kind, row.id)}
+                frozen={!supported}
+                removing={removing === row.id}
+                lifted={drag?.from === index}
+                sliding={drag !== null}
+                shift={shiftFor(index)}
+                onDrag={setDrag}
+                onMove={(from, to) => write(moveRow(rows, from, to), stripKey(row.kind, row.id))}
+                onToggle={() =>
+                  write(
+                    rows.map((one, at) => (at === index ? { ...one, hidden: !one.hidden } : one)),
+                    stripKey(row.kind, row.id),
+                  )
+                }
+                onAnnounce={setMoved}
+                onRecheck={(agent) => recheck(agent)}
+                installing={installing}
+                now={now}
+                onRemove={() => remove(row.id)}
+              />
+            ))}
+          </ul>
+        )}
+        <ActionRow title="Add an agent" glyph={Plus} disabled={!supported} onClick={() => navigate(agentPath(machineId))} />
+      </Group>
 
       <p
         ref={statusLine}
         role="status"
         aria-live="polite"
-        className={`text-2xs wrap-anywhere ${statusText === "" ? "" : "mt-2"} ${
+        className={`px-4 text-2xs wrap-anywhere ${statusText === "" ? "" : "mt-2"} ${
           failure === null ? "text-muted" : "text-danger"
         }`}
       >
         {statusText}
       </p>
-      {settingsMode !== null && (
-        <p className="mt-2 text-2xs text-muted wrap-anywhere" title={settingsMode.file}>
-          New claude sessions follow <span className="font-mono">permissions.defaultMode</span> —{" "}
-          <span className="font-mono">{settingsMode.value}</span> — from{" "}
-          <span className="font-mono">{shortPath(settingsMode.file)}</span>.
-        </p>
-      )}
       {writeFailure === null && readFailure !== null && (
-        <Button size="sm" className="mt-1" onClick={retryReads}>
+        <Button size="sm" className="mt-2" onClick={retryReads}>
           Try again
         </Button>
       )}
       <p role="status" aria-live="polite" className="sr-only">
         {moved}
       </p>
-
-      <div className="mt-4">
-        <Button disabled={!supported} onClick={() => navigate(agentPath(machineId))}>
-          <Icon as={Plus} size={14} />
-          Add an agent
-        </Button>
-      </div>
     </div>
   );
 }
@@ -661,7 +659,7 @@ function StripRowView({
       ref={node}
       style={shift === 0 ? undefined : { transform: `translateY(${shift}px)` }}
       // Only neighbours transition, and only during a drag: the lifted row must track the pointer, and dropping the class at the drop avoids an overshoot.
-      className={`border-b border-edge last:border-b-0 ${sliding ? "select-none" : ""} ${
+      className={`border-b border-edge last:border-b-0 first:rounded-t-lg ${sliding ? "select-none" : ""} ${
         sliding && !lifted ? "transition-transform" : ""
       } ${
         lifted
@@ -753,19 +751,7 @@ function StripRowView({
         </span>
 
         {/* One kebab holds every act and is never disabled; frozen disables only the item that writes the strip. */}
-        <Menu
-          align="right"
-          panelClassName="w-56"
-          trigger={(open, toggle) => (
-            <IconButton
-              icon={MoreHorizontal}
-              label={`More for ${name}`}
-              size="lg"
-              active={open}
-              onClick={toggle}
-            />
-          )}
-        >
+        <RowMenu label={`More for ${name}`}>
           {(close) => (
             <>
               <RowAction
@@ -809,7 +795,7 @@ function StripRowView({
               />
             </>
           )}
-        </Menu>
+        </RowMenu>
         </>
         )}
       </div>

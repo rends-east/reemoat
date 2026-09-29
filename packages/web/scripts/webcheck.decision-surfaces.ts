@@ -99,12 +99,11 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   }
 
   const bitsSrc = readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8");
-  // Only the leading literal run: the template's second interpolation nests another template.
-  const choiceRowClasses = /className=\{`(tap press flex[^`$]*)\$\{/.exec(
-    bitsSrc.slice(bitsSrc.indexOf("export function ChoiceRow")),
-  )?.[1] ?? "";
-  check("the primitive's own class string was found", choiceRowClasses.length > 0, true);
-  check("and the row a model is chosen on clears the tap minimum", REACHES_44.test(choiceRowClasses), true);
+  // A group row's box is GROUP_ROW, so its height is read off the constant the row spends rather than a literal of its own.
+  const choiceRowSpends = /className=\{`tap \$\{GROUP_ROW\} /.test(bitsSrc.slice(bitsSrc.indexOf("export function ChoiceRow")));
+  const groupRow = /export const GROUP_ROW = "([^"]*)";/.exec(bitsSrc)?.[1] ?? "";
+  check("the primitive's own class string was found", [choiceRowSpends, groupRow.length > 0], [true, true]);
+  check("and the row a model is chosen on clears the tap minimum", REACHES_44.test(groupRow), true);
 
   const startSrc = readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8");
   const shortStart: string[] = [];
@@ -122,7 +121,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   {
     // Comments stripped so a docblock quoting a removed row cannot satisfy or fail these checks.
     const panel = stripComments(readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8"));
-    const wanted = ['label="Open"', 'label="Remove"', "danger", "<Menu", "IconButton"];
+    const wanted = ['label="Open"', 'label="Remove"', "danger", "<RowMenu"];
     // Comments stripped: the docblock over the note quotes the cut sentence.
     const consent = readFileSync(new URL("../src/ui/PluginConsent.tsx", import.meta.url), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -134,6 +133,8 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
       wanted.filter((needle) => !panel.includes(needle)),
       [],
     );
+    // The kebab is the settings row's one primitive, so no hand-built square of its own sits beside it.
+    check("and that kebab is RowMenu's, with none drawn by hand", [/MoreHorizontal/.test(panel), /<Menu\b/.test(panel), /IconButton/.test(panel)], [false, false, false]);
     check("and offers no settings of its own", panel.includes('label="Settings"'), false);
     check("Open stays in the menu while the plugin is off, disabled", /label="Open"\s*disabled=\{!plugin\.enabled\}/.test(panel), true);
     // The remove pair is TwoStep's (Q3.552); its Cancel order and tone are pinned in webcheck.settings-routing.ts.
@@ -145,7 +146,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     check("and the pair is the primitive's, with the act destructive", /act=\{\{ label: "Remove", danger: true, icon: Trash2 \}\}/.test(confirmGroup), true);
     check("and the row draws no Cancel of its own beside it", /setConfirming\(false\)/.test(panel), false);
     check("and Cancel wears the default tone", /tone="primary"[^>]*>\s*Cancel|<Button[^>]*tone="primary"[\s\S]{0,120}Cancel/.test(panel), false);
-    check("and the confirmation stands in for the row's controls rather than under them", /\{confirming \? \(\s*<TwoStep\b/.test(panel), true);
+    check("and the confirmation stands in for the row's controls rather than under them", /return confirming \? \(\s*<TwoStep\b/.test(panel), true);
     check("and the row itself opens the plugin", /marketEntryPath\(plugin\.id\)/.test(panel), true);
     check("and does not restate every permission on it", panel.includes("PLUGIN_SCOPE_TEXT"), false);
     check(
@@ -234,6 +235,11 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
         /className="sticky top-0 z-10 border-b border-edge bg-surface px-4 py-2 text-xs sm:px-5"/.test(pluginSettings) &&
         pluginSettings.includes(`const PANE_PAD = "${scroller[3]}";`),
       true,
+    );
+    check(
+      "and mixed values are the kit's notice rather than a box of the pane's own",
+      [/<Notice tone="warn">\s*These machines had different settings for/.test(pluginSettings), /rounded-md border/.test(pluginSettings)],
+      [true, false],
     );
     check(
       "and no file here cancels a padding the box outside it no longer has",
@@ -341,6 +347,13 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
       .replace(/^\s*\/\/.*$/gm, "");
     check("no plugin field is a native select", /<select[\s>]/.test(view), false);
     check("and the picker it uses is the app's own", /<Dropdown/.test(view), true);
+    // plugin-ui.md: a field is a box, a switch or a dropdown; the help is the Group's footer, outside the switch it explains.
+    check(
+      "and a toggle is a switch row in a Group, with its help outside the switch",
+      [/type="checkbox"/.test(view), /<Group footer=\{field\.help \?\? undefined\}>\s*<SwitchRow/.test(view)],
+      [false, true],
+    );
+    check("and a row's Cancel is never filled", /tone="primary"[\s\S]{0,160}?>\s*Cancel\s*</.test(view), false);
   }
   {
     const menu = readFileSync(new URL("../src/ui/SessionMenu.tsx", import.meta.url), "utf8");
@@ -362,17 +375,35 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     // The screen must never say "park": the word names a mechanism the reader cannot see.
     const section = readFileSync(new URL("../src/ui/settings/MachineSection.tsx", import.meta.url), "utf8");
     const drawn = stripComments(section);
-    const sentence = /A conversation left untouched this long[^<]*/.exec(drawn)?.[0]?.trim() ?? "";
+    // The sentence is the idle row's own subline now, read off the one row that is titled for the setting.
+    const titleAt = drawn.indexOf('title="Idle agents released"');
+    const row = titleAt < 0 ? "" : drawn.slice(titleAt, drawn.indexOf("/>", titleAt));
+    const sentence = /subline="([^"]*)"/.exec(row)?.[1]?.trim() ?? "";
     check("the idle setting explains itself in one sentence", sentence.length > 0 && sentence.split(".").filter((part) => part.trim().length > 0).length === 1, true);
+    check("inside a row subline's eight words (Q3.544)", sentence.split(/\s+/).length <= 8, true);
     // Asserted over the whole stripped screen, not the extracted sentence, which would pass vacuously once reworded.
     check("without naming the mechanism, anywhere a reader could see it", /park/i.test(drawn), false);
     check("saying what happens and that nothing is lost", [
       /shut down/i.test(sentence),
       /where you left off/i.test(sentence),
     ], [true, true]);
-    const headings = [...drawn.matchAll(/SETTINGS_HEADING\}>([^<]*)</g)].map((match) => match[1] ?? "");
-    check("the screen has a heading for it", headings.includes("Idle sessions"), true);
-    check("and no heading on it names the mechanism", headings.filter((heading) => /park/i.test(heading)), []);
+    const titles = [...drawn.matchAll(/title="([^"]*)"/g)].map((match) => match[1] ?? "");
+    check("the screen has a row for it, named for what it sets", titles.includes("Idle agents released"), true);
+    check("and no title on it names the mechanism", titles.filter((title) => /park/i.test(title)), []);
+    // Whole minutes as the daemon takes them, 0 to a week with 0 meaning never (Q2.225), handed over as strings.
+    const choices = [...drawn.matchAll(/\{ value: "(\d+)", label: "([^"]+)"(?:, description: "([^"]*)")? \}/g)];
+    check(
+      "it is a pick of the nine presets, from never to a week",
+      choices.map((choice) => choice[1]),
+      ["0", "15", "30", "60", "120", "240", "480", "1440", "10080"],
+    );
+    const never = choices.find((choice) => choice[1] === "0");
+    check(
+      "and never says what it costs, in a description's eight words",
+      [never?.[2], (never?.[3] ?? "").split(/\s+/).filter((word) => word.length > 0).length <= 8, /refused/.test(never?.[3] ?? "")],
+      ["Never", true, true],
+    );
+    check("drawn in a row's own picker rather than typed", [/<Dropdown\s+variant="row"\s+title="Idle agents released"/.test(drawn), /inputMode="numeric"/.test(drawn)], [true, false]);
   }
 
   // IconButton's `size` is required and typed against ICON_BUTTON_SIZE, so tsc covers call sites.

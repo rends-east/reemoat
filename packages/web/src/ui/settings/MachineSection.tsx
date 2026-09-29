@@ -1,4 +1,4 @@
-import { ChevronRight, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
 import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
@@ -9,31 +9,43 @@ import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
 import { inNativeShell } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
-import { agentStripPath, settingsPath } from "../../settings";
+import { agentStripPath, machineLeafPath, machineListPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import { enrolledByText, type MachineSettingsView } from "../../wire";
 import {
-  Badge,
   Button,
-  ChoiceRow,
-  DangerButton,
+  Dropdown,
   Empty,
   FIELD,
-  Icon,
   NotReachable,
-  SETTINGS_HEADING,
-  SETTINGS_SECTION,
   Spinner,
   SwitchRow,
   TwoStep,
+  type DropdownItem,
 } from "../bits";
 import { toast } from "../Toast";
-import { MachineSystemsSection } from "./MachineSystemsSection";
-import { MachinePluginsSection } from "./MachinePluginsSection";
+import { Field } from "../kit/Field";
+import { DangerRow, Group, LinkRow, TWO_STEP_ROW } from "../kit/List";
 import { OneTimeSecret } from "./OneTimeSecret";
 
-/** Written out, not appended to SETTINGS_HEADING: Tailwind emits text-danger before text-muted, so appending loses. */
-const RETIRE_HEADING = "text-2xs font-semibold tracking-wider text-danger uppercase";
+interface SetupCode {
+  machineId: MachineId;
+  name: string;
+  url: string;
+  code: string;
+  expiresAt: number;
+}
+
+// The minted code, handed over in module state rather than the URL; peeked in state, cleared on mount.
+let handoff: SetupCode | null = null;
+
+function peekHandoff(): SetupCode | null {
+  return handoff;
+}
+
+function clearHandoff(): void {
+  handoff = null;
+}
 
 /** Owner-only blocks are absent, never disabled: the control plane answers 404 rather than 403 for a machine not yours. */
 export function MachineSection({
@@ -46,8 +58,8 @@ export function MachineSection({
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
   // Minting holds its own flag and the retire's wait is TwoStep's, so the two never share a lock.
   const [minting, setMinting] = useState(false);
-  const [code, setCode] = useState<{ url: string; code: string; expiresAt: number } | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [idleError, setIdleError] = useState<string | null>(null);
 
   if (machine === null) {
     return <Empty>{MACHINE_GONE}</Empty>;
@@ -64,9 +76,16 @@ export function MachineSection({
     setMinting(true);
     void cp
       .mintEnrollment(machine.id)
-      .then((minted) =>
-        setCode({ url: minted.controlPlaneUrl, code: minted.code, expiresAt: minted.expiresAt }),
-      )
+      .then((minted) => {
+        handoff = {
+          machineId: machine.id,
+          name: machine.name,
+          url: minted.controlPlaneUrl,
+          code: minted.code,
+          expiresAt: minted.expiresAt,
+        };
+        navigate(machineLeafPath(machine.id, "setup-code"));
+      })
       .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setMinting(false));
   };
@@ -90,73 +109,39 @@ export function MachineSection({
         <p className="text-xs text-muted">This machine is not yours to rename or retire.</p>
       )}
 
-      <p className="text-xs text-muted">
-        Belongs to <code className="text-muted/80">{machine.id}</code> only. Plugins run there as you.
-      </p>
-
       {provenance !== null && <p className="mt-1 text-xs text-muted">{provenance}.</p>}
 
-      {owned && (
-        <section className={SETTINGS_SECTION}>
-          <h2 className={SETTINGS_HEADING}>Name</h2>
-          <RenameMachine machine={machine} />
-        </section>
-      )}
-
-      {/* Offered only before enrollment, and never minted on mount: minting burns the previous code (Q3.428). */}
-      {setupOffered && (
-        <section className={SETTINGS_SECTION}>
-          <h2 className={SETTINGS_HEADING}>Setup code</h2>
-          <Button className="mt-3" disabled={minting} onClick={mint}>
-            {minting ? <Spinner /> : "Generate"}
-          </Button>
-          {code !== null && (
-            <div className="mt-2">
-              <OneTimeSecret
-                label={`Start the daemon on ${machine.name} with`}
-                value={enrollmentLines(code.url, code.code)}
-                note={`Single-use, ${enrollmentExpiryText(code.expiresAt, Date.now())}. Shown once. Replaces any earlier code.`}
-                onDone={() => setCode(null)}
-              />
-            </div>
+      {(owned || listable) && (
+        <Group title="General" error={listable ? idleError : null}>
+          {owned && (
+            <LinkRow
+              title="Name"
+              value={machine.name}
+              onClick={() => navigate(machineLeafPath(machine.id, "machine-name"))}
+            />
           )}
-        </section>
+          {/* Offered only before enrollment, and minted on the tap, never on mount: minting burns the previous code (Q3.428). */}
+          {setupOffered && (
+            <LinkRow
+              title="New setup code"
+              value={minting ? <Spinner /> : undefined}
+              disabled={minting}
+              onClick={mint}
+            />
+          )}
+          {listable && <IdleRelease machineId={machineId} onError={setIdleError} />}
+        </Group>
       )}
 
       {listable ? (
-        <>
-          {/* Outside the ownership gate: configuring an agent acts on the daemon, reached with a grant (Q3.415). */}
-          <section className={SETTINGS_SECTION}>
-            <h2 className={SETTINGS_HEADING}>Sign-ins</h2>
-            <MachineSystemsSection
-              state={state}
-              machineId={machineId}
-              system={null}
-              signin={null}
-            />
-          </section>
-
-          <section className={SETTINGS_SECTION}>
-            <ChoiceRow
-              title="Agents"
-              subline="Reorder, hide, add."
-              trailing={<Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />}
-              onClick={() => navigate(agentStripPath(machineId))}
-            />
-          </section>
-
-          <section className={SETTINGS_SECTION}>
-            <h2 className={SETTINGS_HEADING}>Plugins</h2>
-            <MachinePluginsSection state={state} machineId={machineId} />
-          </section>
-
-          <section className={SETTINGS_SECTION}>
-            <h2 className={SETTINGS_HEADING}>Idle sessions</h2>
-            <IdleRelease machineId={machineId} />
-          </section>
-        </>
+        // Outside the ownership gate: configuring an agent acts on the daemon, reached with a grant (Q3.415).
+        <Group title="Agents">
+          <LinkRow title="Agents" onClick={() => navigate(agentStripPath(machineId))} />
+          <LinkRow title="Sign-ins" onClick={() => navigate(machineListPath(machineId, "systems"))} />
+          <LinkRow title="Plugins" onClick={() => navigate(machineListPath(machineId, "plugins"))} />
+        </Group>
       ) : (
-        <section className={SETTINGS_SECTION}>
+        <Group still>
           {!machine.enrolled ? (
             <Empty>
               Not enrolled yet.
@@ -173,41 +158,31 @@ export function MachineSection({
               <NotReachable machine={machine} />
             </Empty>
           )}
-        </section>
+        </Group>
       )}
 
       {/* Outside the listable gate: the switch is the control plane's, and turning it off reaches the relay at once (Q1.654). */}
       {owned && machine.enrolled && machine.agentMessagingMachine !== undefined && (
-        <section className={SETTINGS_SECTION}>
-          <MachineMessaging machine={machine} accountOn={state.me?.permissions?.agentMessaging} />
-        </section>
+        <MachineMessaging machine={machine} accountOn={state.me?.permissions?.agentMessaging} />
       )}
 
       {/* Outside the listable and owner gates: loopback can reach a machine the relay reports offline. */}
-      <section className={SETTINGS_SECTION}>
-        <h2 className={SETTINGS_HEADING}>This device</h2>
-        <LocalPath machineId={machineId} name={machine.name} />
-      </section>
+      <LocalPath machineId={machineId} />
 
       {owned && (
-        <section className="mt-12 border-t border-edge pt-5">
-          <h2 className={RETIRE_HEADING}>Retire this machine</h2>
+        <Group>
           <TwoStep
             armed={confirming}
             onArm={setConfirming}
-            className="mt-3"
-            size="md"
+            align="end"
+            className={TWO_STEP_ROW}
             question={<>Retire {machine.name}?</>}
-            consequence="Frees the name and a slot. Re-adding gives a new id; shares are lost."
+            consequence="Frees the name and a slot."
             act={{ label: "Retire", danger: true, icon: Trash2 }}
             onAct={revoke}
-            rest={
-              <DangerButton icon={Trash2} onClick={() => setConfirming(true)}>
-                Retire {machine.name}
-              </DangerButton>
-            }
+            rest={<DangerRow label={`Retire ${machine.name}`} icon={Trash2} onClick={() => setConfirming(true)} />}
           />
-        </section>
+        </Group>
       )}
     </div>
   );
@@ -240,7 +215,7 @@ function MachineMessaging({
   };
 
   return (
-    <>
+    <Group title="Messaging" error={error}>
       <SwitchRow
         title="Agent messaging"
         subline="Its agents can message your other sessions."
@@ -251,66 +226,79 @@ function MachineMessaging({
       />
       {/* Drawn locked rather than absent: the owner asked for it to unlock under the switch above (Q3.675). */}
       {machine.agentMessagingIsolated !== undefined && (
-        <div className="mt-2">
-          <SwitchRow
-            title="Isolate sessions on this machine"
-            subline="Its sessions message only each other."
-            on={messagingOn && isolated}
-            busy={busy === "isolated"}
-            disabled={!messagingOn || busy === "messaging"}
-            onToggle={() => save("isolated", { isolated: !isolated })}
-          />
-        </div>
+        <SwitchRow
+          title="Isolate sessions on this machine"
+          subline="Its sessions message only each other."
+          on={messagingOn && isolated}
+          busy={busy === "isolated"}
+          disabled={!messagingOn || busy === "messaging"}
+          onToggle={() => save("isolated", { isolated: !isolated })}
+        />
       )}
-      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
-    </>
+    </Group>
   );
 }
 
-function RenameMachine({ machine }: { machine: AppState["machines"][number] }): ReactNode {
+function RenameMachine({ machine, onDone }: { machine: AppState["machines"][number]; onDone: () => void }): ReactNode {
   const [value, setValue] = useState(machine.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const next = value.trim();
+  const unchanged = next.length === 0 || next === machine.name;
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();
-    if (busy || next.length === 0 || next === machine.name) return;
+    if (busy || unchanged) return;
     setBusy(true);
     setError(null);
     void cp
       .renameMachine(machine.id, next)
       // Awaited so busy holds until the registry answers; resume rather than machinesChanged, since a rename moves no count.
       .then(() => store.resume("machine-renamed"))
-      .then(() => toast("ok", `${machine.name} is now ${next}.`))
+      .then(() => {
+        toast("ok", `${machine.name} is now ${next}.`);
+        onDone();
+      })
       .catch((cause: unknown) => setError(errorText(cause)))
       .finally(() => setBusy(false));
   };
 
   return (
-    <form onSubmit={submit} className="mt-3">
-      <div className="flex max-w-sm gap-2">
-        <input
-          value={value}
-          onFocus={(event) => event.currentTarget.select()}
-          onChange={(event) => setValue(event.target.value)}
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          aria-label={`Rename ${machine.name}`}
-          className={`min-w-0 flex-1 ${FIELD}`}
-        />
-        <Button type="submit" tone="primary" disabled={busy || next.length === 0 || next === machine.name}>
+    <form onSubmit={submit} className="flex max-w-sm flex-col gap-4">
+      <Field label="Machine name" error={error}>
+        {({ id, describedBy }) => (
+          <input
+            id={id}
+            aria-describedby={describedBy}
+            value={value}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setValue(event.target.value)}
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            autoFocus
+            className={FIELD}
+          />
+        )}
+      </Field>
+      <div className="flex items-center gap-2">
+        <Button
+          tone="primary"
+          type="submit"
+          disabled={busy || unchanged}
+        >
           {busy ? <Spinner /> : "Save"}
         </Button>
+        <Button disabled={busy} onClick={onDone}>
+          Cancel
+        </Button>
       </div>
-      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
     </form>
   );
 }
 
 /** A routing preference held in this client: drawn in a browser too, where it only refuses, and never gated on reachability. */
-function LocalPath({ machineId, name }: { machineId: MachineId; name: string }): ReactNode {
+function LocalPath({ machineId }: { machineId: MachineId }): ReactNode {
   const native = inNativeShell();
   const [announced, setAnnounced] = useState<string | null>(null);
   const [reading, setReading] = useState(native);
@@ -332,138 +320,153 @@ function LocalPath({ machineId, name }: { machineId: MachineId; name: string }):
     };
   }, [machineId, native]);
 
-  if (!native) {
-    return (
-      <p className="mt-3 text-sm text-muted">
-        The Reemoat app can reach a daemon running on the same computer without going out to the
-        relay and back. A browser cannot, so there is nothing to set here.
-      </p>
-    );
-  }
+  const here = native && !reading && announced !== null;
+  const subline = !native
+    ? "Needs the Reemoat app on this computer."
+    : reading
+      ? null
+      : announced === null
+        ? "Not found on this computer."
+        : "Reaches it on this computer, skipping the relay.";
 
-  if (reading) return <Empty>Looking for a daemon on this computer…</Empty>;
-
-  if (announced === null) {
-    return (
-      <p className="mt-3 text-sm text-muted">
-        No daemon on this computer has announced itself as {name}, so this app reaches it through
-        the relay. A daemon announces itself when it starts, and only once it has been enrolled.
-      </p>
-    );
-  }
-
-  const on = !off;
   return (
-    <>
-      <div className="mt-2 flex min-h-11 flex-wrap items-center gap-2">
-        <Badge tone="strong">{on ? "Direct" : "Through the relay"}</Badge>
-        <Button
-          size="sm"
-          onClick={() => {
-            const next = on;
-            setLocalOff(machineId, next);
-            setOff(next);
-            // Dropping the route memo applies the switch on the next request; an open socket runs until it rotates.
-            store.forgetMachineRoute(machineId);
-          }}
-        >
-          {on ? "Use the relay" : "Connect directly"}
-        </Button>
-      </div>
-      {/* The second sentence is the cost this switch exists to disclose (Q7.137). */}
-      <p className="mt-2 text-sm text-muted">
-        {name} is running on this computer, so this app can reach it over a loopback connection
-        instead of out to the relay and back.
-      </p>
-      <p className="mt-2 text-sm text-muted">
-        While it does, the relay is not checking each request — so if the owner takes your access
-        away, or switches the machine off, this app can keep reaching it from here for up to about
-        six minutes. Retiring this device has the same delay, here and everywhere else.
-      </p>
-    </>
+    // The footer is the cost this switch exists to disclose (Q7.137).
+    <Group title="Connection" footer={here ? "Revocation lags up to six minutes." : undefined}>
+      <SwitchRow
+        title="Direct connection"
+        subline={subline}
+        on={here && !off}
+        busy={reading}
+        disabled={!here}
+        onToggle={() => {
+          const next = !off;
+          setLocalOff(machineId, next);
+          setOff(next);
+          // Dropping the route memo applies the switch on the next request; an open socket runs until it rotates.
+          store.forgetMachineRoute(machineId);
+        }}
+      />
+    </Group>
   );
 }
 
-function IdleRelease({ machineId }: { machineId: MachineId }): ReactNode {
+/** Whole minutes, as the daemon takes them: 0 to a week, 0 meaning never (Q2.225). */
+const IDLE_CHOICES: readonly DropdownItem<string>[] = [
+  { value: "0", label: "Never", description: "At 64 agents, new sessions are refused." },
+  { value: "15", label: "15 minutes" },
+  { value: "30", label: "30 minutes" },
+  { value: "60", label: "1 hour" },
+  { value: "120", label: "2 hours" },
+  { value: "240", label: "4 hours" },
+  { value: "480", label: "8 hours" },
+  { value: "1440", label: "1 day" },
+  { value: "10080", label: "1 week" },
+];
+
+/** A value set elsewhere, in the environment or by an older client, is drawn as itself rather than as the nearest choice. */
+function idleText(minutes: number): string {
+  const choice = IDLE_CHOICES.find((one) => one.value === String(minutes));
+  if (choice !== undefined) return choice.label;
+  if (minutes % 1440 === 0) return minutes === 1440 ? "1 day" : `${minutes / 1440} days`;
+  if (minutes % 60 === 0) return minutes === 60 ? "1 hour" : `${minutes / 60} hours`;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/** Draws the daemon's answer and never the pick: a choice holds the row until the write comes back. */
+function IdleRelease({ machineId, onError }: { machineId: MachineId; onError: (error: string | null) => void }): ReactNode {
   const [settings, setSettings] = useState<MachineSettingsView | null>(null);
-  const [value, setValue] = useState("");
+  const [reading, setReading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [unreachable, setUnreachable] = useState(false);
 
   useEffect(() => {
+    onError(null);
+    setReading(true);
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
-      setUnreachable(true);
+      setReading(false);
       return;
     }
     let cancelled = false;
     void daemon
       .machineSettings()
       .then((answer) => {
-        if (cancelled) return;
-        setSettings(answer.settings);
-        setValue(String(answer.settings.idleReleaseMinutes));
+        if (!cancelled) setSettings(answer.settings);
       })
-      .catch(() => {
-        if (!cancelled) setUnreachable(true);
+      .catch((cause: unknown) => {
+        if (!cancelled) onError(errorText(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setReading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [machineId]);
 
-  const save = (next: number): void => {
+  const save = (next: string): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) return;
     setBusy(true);
-    setError(null);
+    onError(null);
     void daemon
-      .saveMachineSettings({ idleReleaseMinutes: next })
-      .then((answer) => {
-        setSettings(answer.settings);
-        setValue(String(answer.settings.idleReleaseMinutes));
-      })
-      .catch((cause: unknown) => setError(errorText(cause)))
+      .saveMachineSettings({ idleReleaseMinutes: Number(next) })
+      .then((answer) => setSettings(answer.settings))
+      .catch((cause: unknown) => onError(errorText(cause)))
       .finally(() => setBusy(false));
   };
 
-  if (unreachable) return <Empty>That machine is not reachable right now.</Empty>;
-  if (settings === null) return <Empty>Reading this machine’s settings…</Empty>;
-
-  const typed = Number.parseInt(value, 10);
-  const valid = Number.isInteger(typed) && typed >= 0;
-  const changed = valid && typed !== settings.idleReleaseMinutes;
-
   return (
-    <>
-      <form
-        className="mt-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (changed) save(typed);
-        }}
-      >
-        <div className="flex max-w-sm items-center gap-2">
-          <input
-            value={value}
-            inputMode="numeric"
-            onFocus={(event) => event.currentTarget.select()}
-            onChange={(event) => setValue(event.target.value)}
-            aria-label="Minutes of quiet before an agent is shut down"
-            className={`w-24 shrink-0 ${FIELD}`}
-          />
-          <span className="shrink-0 text-sm text-muted">minutes</span>
-          <Button type="submit" tone="primary" disabled={busy || !changed}>
-            {busy ? <Spinner /> : "Save"}
-          </Button>
-        </div>
-      </form>
-      <p className="mt-2 text-sm text-muted">
-        A conversation left untouched this long has its agent shut down to free memory, and your next
-        message starts it again exactly where you left off.
-      </p>
-      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
-    </>
+    <Dropdown
+      variant="row"
+      title="Idle agents released"
+      subline="Shut down, then resumed where you left off."
+      trigger={settings === null ? null : idleText(settings.idleReleaseMinutes)}
+      items={IDLE_CHOICES}
+      value={settings === null ? null : String(settings.idleReleaseMinutes)}
+      onChange={save}
+      busy={busy || reading}
+      disabled={settings === null || busy}
+    />
+  );
+}
+
+/** The rename form, a screen of its own (Q3.549): done or cancelled, it walks back to the machine by replace. */
+export function MachineNameScreen({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
+  const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
+  const gone = machine === null;
+  const mine = machine?.owned === true;
+  const back = (): void => navigate(settingsPath("machines", machineId), true);
+
+  // The machine's own screen already says it is not yours, so a typed address walks back there rather than saying it twice.
+  useEffect(() => {
+    if (!gone && !mine) back();
+  }, [gone, mine]);
+
+  if (machine === null) return <Empty>{MACHINE_GONE}</Empty>;
+  if (!mine) return null;
+  return <RenameMachine key={machine.id} machine={machine} onDone={back} />;
+}
+
+/** Shows the handed-off code once and never mints; with nothing in hand for this machine it walks back. */
+export function SetupCodeScreen({ machineId }: { machineId: MachineId }): ReactNode {
+  const [minted] = useState<SetupCode | null>(() => {
+    const held = peekHandoff();
+    return held !== null && held.machineId === machineId ? held : null;
+  });
+  const back = (): void => navigate(settingsPath("machines", machineId), true);
+
+  useEffect(() => {
+    clearHandoff();
+    if (minted === null) back();
+  }, [minted]);
+
+  if (minted === null) return null;
+  return (
+    <OneTimeSecret
+      label={`Start the daemon on ${minted.name} with`}
+      value={enrollmentLines(minted.url, minted.code)}
+      note={`Single-use, ${enrollmentExpiryText(minted.expiresAt, Date.now())}. Shown once. Replaces any earlier code.`}
+      onDone={back}
+    />
   );
 }

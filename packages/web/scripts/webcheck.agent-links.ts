@@ -756,10 +756,10 @@ process.stdout.write("\nnothing is said under a switch: the account's outranks t
 {
   const machinePage = stripComments(srcFile("ui/settings/MachineSection.tsx"));
   const fn = machinePage.slice(machinePage.indexOf("function MachineMessaging("), machinePage.indexOf("function RenameMachine("));
-  const permissions = stripComments(srcFile("ui/settings/PermissionsSection.tsx"));
+  const permissions = stripComments(srcFile("ui/settings/AccountMessaging.tsx"));
   const agentLinks = stripComments(srcFile("agentLinks.ts"));
   check(
-    "no line explains a switch, on the machine page or on Permissions",
+    "no line explains a switch, on the machine page or on the account's",
     [/<p className="[^"]*text-muted/.test(fn), /Not in force|not in force/.test(permissions), /MESSAGING_NOTE_TEXT|messagingNotes|notInForce/.test(agentLinks)],
     [false, false, false],
   );

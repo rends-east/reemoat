@@ -110,6 +110,8 @@ export function contentTypeFor(body: BodyInit | null | undefined): string | null
   if (body === undefined || body === null) return null;
   // A string body is always JSON: every daemon.ts caller stringifies.
   if (typeof body === "string") return "application/json";
+  // A file keeps its own type: the daemon hands the agent an image only under an image type (Q2.247).
+  if (body instanceof Blob && body.type.length > 0) return body.type;
   return "application/octet-stream";
 }
 

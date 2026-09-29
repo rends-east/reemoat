@@ -3,7 +3,8 @@ import { changePasswordError, passwordProblem, passwordProblemText } from "../ac
 import * as cp from "../cp";
 import { store } from "../store";
 import type { Me } from "../wire";
-import { Button, FIELD, SETTINGS_HEADING } from "./bits";
+import { Button, FIELD } from "./bits";
+import { FIELD_LABEL } from "./kit/Field";
 import { GateCard } from "./gate/GateCard";
 import { UseAnotherAccount } from "./UseAnotherAccount";
 
@@ -37,7 +38,7 @@ export function ForcedPasswordChange({ me }: { me: Me }): ReactNode {
   };
 
   const field = `mt-1 w-full ${FIELD}`;
-  const label = `mt-3 block ${SETTINGS_HEADING}`;
+  const label = `mt-3 block ${FIELD_LABEL}`;
 
   return (
     <GateCard

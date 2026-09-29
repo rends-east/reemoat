@@ -1,6 +1,5 @@
 import {
   Bell,
-  Check,
   ChevronRight,
   Folder as FolderIcon,
   Layers,
@@ -36,11 +35,10 @@ import { machineDisplayName } from "../machineOrder";
 import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
   Button,
+  Dropdown,
   Icon,
   IconButton,
   MachineLabel,
-  menuRow,
-  Menu,
   nicknameLine,
   Skeleton,
   StatusDot,
@@ -637,48 +635,18 @@ function ChatSearch({ value }: { value: string }): ReactNode {
           className="w-full rounded-md border border-edge-strong bg-ink py-2 pr-2.5 pl-8 text-sm outline-none"
         />
       </span>
-      {/* Solid only when the filter is off its default, since the default already withholds ended rows. */}
-      <Menu
+      {/* Lit only when the filter is off its default, since the default already withholds ended rows. */}
+      <Dropdown
+        variant="icon"
+        icon={ListFilter}
+        label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
+        lit={filter !== "active"}
         align="right"
-        panelClassName="w-40"
         className="shrink-0"
-        trigger={(open, toggle) => (
-          <IconButton
-            icon={ListFilter}
-            label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
-            title={`Showing: ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
-            size="chip"
-            expanded={open}
-            haspopup="menu"
-            onClick={toggle}
-            // The fill is the whole lit state: an appended `text-fg` loses to the tone's colour in Tailwind's emission order.
-            className={filter === "active" && !open ? "" : "bg-raised"}
-          />
-        )}
-      >
-        {(close) => (
-          <>
-            {FILTERS.map((item) => (
-              <button
-                key={item.value}
-                role="menuitem"
-                onClick={() => {
-                  setFilter(item.value);
-                  close();
-                }}
-                className={`${menuRow("center")} hover:bg-raised ${
-                  item.value === filter ? "font-medium text-fg" : "text-muted"
-                }`}
-              >
-                <span className="inline-flex w-3 shrink-0 justify-center">
-                  {item.value === filter && <Icon as={Check} size={12} />}
-                </span>
-                {item.label}
-              </button>
-            ))}
-          </>
-        )}
-      </Menu>
+        items={FILTERS}
+        value={filter}
+        onChange={setFilter}
+      />
     </>
   );
 }

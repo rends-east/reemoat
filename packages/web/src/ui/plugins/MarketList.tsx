@@ -1,11 +1,12 @@
-import { ChevronRight, Puzzle, Search } from "lucide-react";
+import { Puzzle, Search } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { CATALOGUE_PATHS, catalogueNotice, fetchCatalogue, readCatalogue, type CatalogueEntry, type CatalogueRead } from "../../catalogue";
 import { installedSummary } from "../../install";
 import { navigate } from "../../router";
 import { groupCatalogue, marketEntryPath } from "../../market";
 import type { AppState } from "../../store";
-import { Badge, Button, Empty, Icon, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
+import { Badge, Button, Empty, Icon, SEARCH_FIELD, Spinner } from "../bits";
+import { Group, LinkRow } from "../kit/List";
 
 /** Nothing is drawn until the catalogue answers, and never partially: readCatalogue fails closed. */
 export function MarketList({ state, base }: { state: AppState; base: string }): ReactNode {
@@ -61,22 +62,19 @@ function Found({ entries, state }: { entries: readonly CatalogueEntry[]; state: 
         // Real quotation marks, never JSON.stringify, which escapes quotes in the query.
         <Empty>{`Nothing here is called \u201c${query.trim()}\u201d.`}</Empty>
       ) : (
-        groups.map((group) => (
-          <section key={group.name} className="mt-4 first:mt-3">
-            {groups.length > 1 && (
-              <h2 className={`${SETTINGS_HEADING} mb-1.5`}>
-                {group.name} <span className="font-normal normal-case">· {group.entries.length}</span>
-              </h2>
-            )}
-            <ul className="flex flex-col gap-2">
+        <div className="mt-3">
+          {groups.map((group) => (
+            <Group
+              key={group.name}
+              title={groups.length > 1 ? group.name : undefined}
+              count={groups.length > 1 ? String(group.entries.length) : undefined}
+            >
               {group.entries.map((entry) => (
-                <li key={entry.id}>
-                  <MarketRow entry={entry} state={state} />
-                </li>
+                <MarketRow key={entry.id} entry={entry} state={state} />
               ))}
-            </ul>
-          </section>
-        ))
+            </Group>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -88,23 +86,14 @@ function MarketRow({ entry, state }: { entry: CatalogueEntry; state: AppState })
   );
 
   return (
-    <button
+    <LinkRow
+      glyph={<MarketIcon icon={entry.source.icon} />}
+      title={entry.name}
+      value={entry.version}
+      badge={on.length > 0 ? <Badge>{installedSummary(state.machines.length, on.map((one) => one.name))}</Badge> : undefined}
+      subline={entry.description ?? undefined}
       onClick={() => navigate(marketEntryPath(entry.id))}
-      className="tap press flex w-full min-h-14 items-center gap-3 rounded-lg border border-edge bg-surface px-3 py-2.5 text-left hover:border-edge-strong"
-    >
-      <MarketIcon icon={entry.source.icon} />
-      <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          <span className="min-w-0 truncate text-sm font-medium">{entry.name}</span>
-          <span className="shrink-0 text-xs text-muted">{entry.version}</span>
-          {on.length > 0 && <Badge>{installedSummary(state.machines.length, on.map((one) => one.name))}</Badge>}
-        </span>
-        {entry.description !== null && (
-          <span className="block truncate text-2xs text-muted">{entry.description}</span>
-        )}
-      </span>
-      <Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />
-    </button>
+    />
   );
 }
 

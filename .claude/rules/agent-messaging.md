@@ -8,7 +8,7 @@ paths:
   - packages/web/scripts/webcheck.peer-messages.ts
   - packages/web/src/agentLinks.ts
   - packages/web/scripts/webcheck.agent-links.ts
-  - packages/web/src/ui/settings/PermissionsSection.tsx
+  - packages/web/src/ui/settings/AccountMessaging.tsx
   - packages/web/scripts/webcheck.permissions.ts
   - packages/control-plane/src/permissions.ts
 ---

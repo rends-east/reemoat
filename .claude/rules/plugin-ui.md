@@ -66,11 +66,12 @@ downstream of that.
   page already knows which machines it is on, so it asks over *those*, and does not
   ask where there is one. What sat inside the machine was six taps behind a kebab
   and nobody found it. What stays per-machine is what cannot be anywhere else —
-  what is installed, the switch, a failure, a file handed to this daemon — and
-  every row there is a **link to the plugin's page**, carrying no scope prose: that
-  wall was identical on every machine and its own permissions are one tap away.
-  There is no `…/plugins/:pluginId` leaf any more; the address still parses, to the
-  machine. Its **screen** is at `/p/:machineId/:pluginId`: a board is opened
+  what is installed, the switch, a failure, a file handed to this daemon — on the
+  machine's own Plugins screen (Q3.687), where every row is a **link to the plugin's
+  page**, carrying no scope prose: that wall was identical on every machine and its
+  own permissions are one tap away. Installing from a file is a leaf screen holding
+  the consent (Q3.686). There is no `…/plugins/:pluginId` leaf any more; the address
+  still parses, to the machine's Plugins list. Its **screen** is at `/p/:machineId/:pluginId`: a board is opened
   several times a day, and four taps into a settings sheet is not where that goes.
   Q3.447, Q3.459.
 - **And they are a screen of their own, one push deep, ◀ back to the plugin.** The
@@ -110,7 +111,7 @@ downstream of that.
   `pane.ts`, its own module because everything in `plugins.ts` fails *open* and this
   refuses to draw. Same shape and same values → seed it; same shape, different values
   → **blank, with a red line naming the keys that differed**, because a blanked
-  toggle is *off* rather than empty and a checkbox has no third state; different
+  toggle is *off* rather than empty and a switch has no third state; different
   shape → **draw no form at all** and group the machines, each group a link to its
   own scope, since submitting one machine's keys to another writes fields it does
   not have and omits ones it does, silently both ways. Values are compared **after
@@ -137,7 +138,9 @@ downstream of that.
   It read as a stylesheet that had failed to load. `Dropdown` also draws a value
   **outside** the offered options as itself: a native select shows the first option
   instead, which is fail-open in the one direction that lies. `webcheck` asserts
-  the *absence* of the element, comments stripped. Q3.463.
+  the *absence* of the element, comments stripped — across `src/` now. It is the
+  **field** variant: named by a `Field` label beside it, never a heading repeated
+  inside its panel, which opens at the field's own width (Q3.684). Q3.463.
 - **A settings pane is a narrower view than a screen** — `text`/`notice`/`form`,
   and a field is a box, a switch or a dropdown. The narrowing is applied on **both**
   sides and the browser's half is not redundant: the daemon clamps the view it

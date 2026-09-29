@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { ApiError } from "../http";
 
 // A blob URL inherits this origin: draw it only in an img, never via window.open, a link without download, or an iframe.
 
@@ -12,7 +13,11 @@ interface Entry {
 
 // An LRU that revokes on eviction, since the revoke is what frees the bytes.
 const cache = new Map<string, Entry>();
-const inFlight = new Map<string, Promise<string | null>>();
+const inFlight = new Map<string, Promise<string | Gone | null>>();
+
+/** A session keeps its newest files only (Q2.247), so an older one is answered 404 and said so rather than left blank. */
+const GONE = Symbol("gone");
+type Gone = typeof GONE;
 
 function evictIfNeeded(): void {
   let total = 0;
@@ -29,7 +34,7 @@ function evictIfNeeded(): void {
   }
 }
 
-async function load(cacheKey: string, fetcher: () => Promise<Blob>): Promise<string | null> {
+async function load(cacheKey: string, fetcher: () => Promise<Blob>): Promise<string | Gone | null> {
   const hit = cache.get(cacheKey);
   if (hit !== undefined) {
     cache.delete(cacheKey);
@@ -47,8 +52,8 @@ async function load(cacheKey: string, fetcher: () => Promise<Blob>): Promise<str
       cache.set(cacheKey, { url, bytes: blob.size });
       evictIfNeeded();
       return url;
-    } catch {
-      return null;
+    } catch (error) {
+      return ApiError.isApiError(error) && error.code === "upload_not_found" ? GONE : null;
     } finally {
       inFlight.delete(cacheKey);
     }
@@ -68,13 +73,16 @@ export function ImagePreview({
 }): ReactNode {
   const [url, setUrl] = useState<string | null>(() => cache.get(cacheKey)?.url ?? null);
   const [failed, setFailed] = useState(false);
+  const [gone, setGone] = useState(false);
 
   useEffect(() => {
     let live = true;
     setFailed(false);
+    setGone(false);
     void load(cacheKey, fetcher).then((next) => {
       if (!live) return;
-      if (next === null) setFailed(true);
+      if (next === GONE) setGone(true);
+      else if (next === null) setFailed(true);
       else setUrl(next);
     });
     return () => {
@@ -83,6 +91,7 @@ export function ImagePreview({
     };
   }, [cacheKey, fetcher]);
 
+  if (gone) return <p className="mt-1.5 text-2xs text-faint">{alt} is no longer kept.</p>;
   if (failed || url === null) return null;
   return (
     <img

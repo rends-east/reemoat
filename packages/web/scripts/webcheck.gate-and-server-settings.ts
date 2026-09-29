@@ -1,47 +1,7 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
+import { closure } from "./webcheck.source.js";
 
-// Every module under `packages/web/src` an entry reaches, dynamic imports included: a lazy chunk is as much in the bundle as the entry.
-function closure(entry: string, valuesOnly = false): Set<string> {
-  const root = new URL("../src/", import.meta.url);
-  const resolve = (from: string, spec: string): string | null => {
-    if (!spec.startsWith(".")) return null;
-    const parts = `${from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : ""}/${spec}`.split("/");
-    const stack: string[] = [];
-    for (const part of parts) {
-      if (part === "" || part === ".") continue;
-      if (part === "..") stack.pop();
-      else stack.push(part);
-    }
-    const base = stack.join("/");
-    for (const candidate of [`${base}.tsx`, `${base}.ts`, `${base}/index.tsx`, `${base}/index.ts`]) {
-      if (existsSync(new URL(candidate, root))) return candidate;
-    }
-    return null;
-  };
-
-  const seen = new Set<string>();
-  const queue = [entry];
-  while (queue.length > 0) {
-    const file = queue.pop()!;
-    if (seen.has(file)) continue;
-    seen.add(file);
-    const code = readFileSync(new URL(file, root), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "");
-    for (const match of code.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
-      // `valuesOnly` skips type-only imports: TypeScript erases them, so they put no byte in a bundle.
-      if (valuesOnly) {
-        const upto = code.slice(0, match.index);
-        const line = code.slice(upto.lastIndexOf("\n") + 1);
-        if (/^\s*(?:import|export)\s+type\b/.test(line)) continue;
-      }
-      const next = resolve(file, match[1] ?? "");
-      if (next !== null) queue.push(next);
-    }
-  }
-  return seen;
-}
 
 process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
 {
@@ -474,13 +434,14 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const accountCode = accountSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
   check(
     "Settings shows the server and offers no way to change it",
-    [/Server address/.test(accountCode), /store\.pickServer\(\)/.test(accountCode), /action=\{null\}/.test(accountCode)],
+    [/Server address/.test(accountCode), /store\.pickServer\(\)/.test(accountCode), /<ValueRow title="Server address" value=\{server\} mono \/>/.test(accountCode)],
     [true, false, true],
   );
-  check("and says where the other door is", /Another server is another account, from the menu\./.test(accountCode), true);
+  // The menu's Add account is the other door and says so itself; a line under the row explaining it went with the copy sweep.
+  check("and no longer explains where the other door is", /Another server is another account/.test(accountCode), false);
   check(
     "and Sign out says, in the shell, that it takes the account off this computer",
-    /nativeBoot\(\) !== null\s*\?\s*"Ends this sign-in on the server too, and takes this account off this computer\."/.test(accountCode),
+    /nativeBoot\(\) !== null \? "Removes this account from this computer\." : undefined/.test(accountCode),
     true,
   );
   // The field opens on the build's suggestion when there is no server and on the server when there is; nothing is written until Continue.
@@ -631,8 +592,10 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     fieldOrigin,
     MAIL_BACKLOG_WARN_MS,
     mailTrouble,
+    originBadge,
     originText,
     secretFieldText,
+    secretPresent,
     seedPublicUrl,
     senderMismatch,
     smtpProblem,
@@ -665,6 +628,26 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     new Set((["env", "overrides_env", "stored", "unset"] as const).map(originText)).size,
     4,
   );
+  // A row's badge is for the environment's part in its value; set here or set nowhere is the ordinary case and wears none.
+  check(
+    "a row's badge names the environment, or a row here over it, and nothing else",
+    [
+      originBadge(field({})),
+      originBadge(field({ source: "database", value: "x" })),
+      originBadge(field({ source: "environment", envSet: true })),
+      originBadge(field({ source: "database", value: "x", envSet: true })),
+      originBadge(undefined),
+    ],
+    [null, null, "env", "overrides env", null],
+  );
+  check(
+    "and a row standing for two keys wears the stronger of theirs",
+    [
+      originBadge(field({ source: "environment", envSet: true }), field({ source: "database", value: "x", envSet: true })),
+      originBadge(field({}), field({ source: "environment", envSet: true })),
+    ],
+    ["overrides env", "env"],
+  );
 
   // `set` means a database row, not that a password exists: an environment password arrives with set false and envSet true.
   const secret = (over: Record<string, unknown>) =>
@@ -689,8 +672,10 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
       const source = set ? "database" : envSet ? "environment" : "unset";
       const text = secretFieldText(secret({ set, envSet, source })) ?? "";
       check(`presence is set||envSet (set=${set}, envSet=${envSet})`, !text.startsWith("No password"), set || envSet);
+      check(`and the row's yes or no agrees (set=${set}, envSet=${envSet})`, secretPresent(secret({ set, envSet, source })), set || envSet);
     }
   }
+  check("and an absent secret field is not one", secretPresent(undefined), false);
 
   const draft = { host: "", port: "", security: "", username: "", from: "", publicUrl: "" };
   // An empty form means mail is off, which is legal: refusing it would make mail impossible to turn off.
@@ -811,15 +796,16 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
-  const own = ["account", "devices", "keys", "machines", "permissions", "logs"];
-  check("a non-admin sees six rows", navRows(plain).map((row) => row.spec.id), own);
-  check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
+  const own = ["account", "devices", "keys", "machines"];
+  check("a non-admin sees four rows", navRows(plain).map((row) => row.spec.id), own);
+  check("and Logs after them only where this app can run a daemon", navRows(plain, true).map((row) => row.spec.id), [...own, "logs"]);
+  check("and no heading floats over nothing", navRows(plain, true).every((row) => row.heading === null), true);
   check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), own);
-  check("an admin sees nine", navRows(admin).map((row) => row.spec.id), [...own, "server", "email", "users"]);
+  check("an admin sees seven", navRows(admin).map((row) => row.spec.id), [...own, "server", "email", "users"]);
   check(
     "with the heading on the first row of its group only",
-    navRows(admin).map((row) => row.heading),
-    [null, null, null, null, null, null, "server", null, null],
+    navRows(admin, true).map((row) => row.heading),
+    [null, null, null, null, null, "server", null, null],
   );
   const adminIndex = (id: string): number => navRows(admin).findIndex((row) => row.spec.id === id);
   check("and Server sits above Users", adminIndex("server") < adminIndex("users"), true);
@@ -880,22 +866,54 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
     ],
     [true, true, true, true],
   );
-  // Registration is a badge and a verb, not a switch; only opening, the widening act, is confirmed (Q3.220).
+  // Registration is a switch that the question replaces; only opening, the widening act, is confirmed (Q3.220).
   const serverCode = serverSection.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  // The badge is read off the server's answer on every render, so it flips only after the server.
-  const registration = serverCode.slice(serverCode.indexOf("function Registration("), serverCode.indexOf("function Domains("));
-  check("the registration badge reads the answer", /const open = answer\.registration\.enabled;/.test(registration), true);
-  check("and is drawn from it", /<Badge tone="strong">\{open \? "Open" : "Closed"\}<\/Badge>/.test(registration), true);
+  // The switch is read off the server's answer on every render, so it flips only after the server.
+  const registration = serverCode.slice(serverCode.indexOf("function Registration("), serverCode.indexOf("function Limits("));
+  check("the registration switch reads the answer", /const open = answer\.registration\.enabled;/.test(registration), true);
+  check(
+    "and is drawn from it, as the resting control the question replaces",
+    /rest=\{<SwitchRow title="Open registration" on=\{open\} busy=\{busy\} onToggle=\{\(\) => \(open \? close\(\) : setConfirming\(true\)\)\} \/>\}/.test(registration),
+    true,
+  );
   check("with no state holding a copy", /useState\([^)]*registration|useState<boolean>\(open/.test(registration), false);
   check("flipping only inside .then, through onChanged", /\.then\(\(updated\) => onChanged\(updated\)\)/.test(registration), true);
   // The question closes through the primitive alone, on that promise (Q3.552).
   check("and the question closes on that promise, through the primitive", [/onAct=\{\(\) => save\(true\)\}/.test(registration), /setConfirming\(false\)/.test(registration)], [true, false]);
-  check("registration is not drawn as a switch", /role="switch"/.test(serverCode), false);
+  // Cancel lands on the knob's pixels; the armed box takes the row's padding only while the switch, which has its own, is gone (Q3.218).
+  check(
+    "the answers sit at the row's end, in a box that is a row only while armed",
+    [/align="end"/.test(registration), /className=\{confirming \? TWO_STEP_ROW : ""\}/.test(registration)],
+    [true, true],
+  );
+  check("the switch is the kit's, so the screen writes no role of its own", [/<SwitchRow\b/.test(registration), /role="switch"/.test(serverCode)], [true, false]);
+  check(
+    "and the missing-mail line is the question's consequence, drawn only where it is true",
+    /consequence=\{answer\.mail\.configured \? undefined : "Without email nobody is verified\."\}/.test(registration),
+    true,
+  );
   check("opening registration asks first", (serverCode.match(/Open registration to anyone\?/g) ?? []).length, 1);
   check("and closing does not", /open \? close\(\) : setConfirming\(true\)/.test(serverCode), true);
   // Remint is two-step and the first mint one tap: a remint's cost lands on somebody else's provisioning script (Q3.219).
   check("reminting the provisioning key asks first", /Replace the provisioning key\?/.test(serverCode), true);
   check("and the first mint does not", /minted \? \(\) => setConfirming\(true\) : mintNow\}/.test(serverCode), true);
+  // Minted on the tap and shown by a leaf that reads a module handoff, never on the leaf's mount (Q3.549).
+  check(
+    "a minted key is handed to its own screen",
+    /handoff = answer\.key;\s*navigate\(settingsLeafPath\("provisioning-key"\)\);/.test(serverCode),
+    true,
+  );
+  const keyScreen = serverCode.slice(serverCode.indexOf("export function ProvisioningKeyScreen("));
+  check(
+    "which peeks it in its state initialiser, clears it first, walks back with none, and mints nothing",
+    [
+      /useState<string \| null>\(peekHandoff\)/.test(keyScreen),
+      /useEffect\(\(\) => \{\s*clearHandoff\(\);\s*if \(minted === null\) back\(\);/.test(keyScreen),
+      /adminMintProvisioningKey\(/.test(keyScreen),
+    ],
+    [true, true, false],
+  );
+  check("the key is still named on that screen as never for a daemon host", /Never store it on a daemon host\./.test(keyScreen), true);
   // Save is always drawn and disabled until dirty: appearing on the first keystroke is a layout shift under the finger.
   check("Save is never gated on dirtiness in the JSX", /dirty && \(?\s*<Button/.test(serverCode + emailCode), false);
   check("and is disabled until dirty instead", ((serverCode + emailCode).match(/disabled=\{busy \|\| !dirty/g) ?? []).length, 2);
@@ -1003,10 +1021,33 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   check("seeded starts as the seed's own dirtiness", /const \[seeded, setSeeded\] = useState\(seed\.dirty\);/.test(emailCode), true);
   check("the first edit clears it", /setDraft\(\(current\) => \(\{ \.\.\.current, \.\.\.patch \}\)\);\s*setDirty\(true\);\s*setSeeded\(false\);/.test(emailCode), true);
   check("and so does a save", /setDirty\(false\);\s*setSeeded\(false\);/.test(emailCode), true);
-  check("the two reasons a test cannot send", /const sendBlocked = dirty \? "Save first\." : !answer\.mail\.configured \? "Configure the server first\." : null;/.test(emailCode), true);
-  check("disable Send", /<Button disabled=\{busy \|\| sendBlocked !== null\} onClick=\{sendTest\}>/.test(emailCode), true);
-  check("and are drawn under it", /\{sendBlocked !== null && <p className="mt-2 text-xs text-muted">\{sendBlocked\}<\/p>\}/.test(emailCode), true);
+  // The test is a screen of its own, so no unsaved form shares it and "Save first." has nothing left to be true of.
+  const smtpForm = emailCode.slice(emailCode.indexOf("function SmtpForm("), emailCode.indexOf("function TestMail("));
+  check("the test send is not on the SMTP form", [smtpForm.length > 0, /adminTestMail\(/.test(smtpForm)], [true, false]);
+  check(
+    "so one reason is left that a test cannot send",
+    [/const sendBlocked = !answer\.mail\.configured \? "Configure the server first\." : null;/.test(emailCode), /Save first\./.test(emailCode)],
+    [true, false],
+  );
+  check(
+    "it disables Send, and the form's own submit honours it",
+    [
+      /<Button tone="primary" type="submit" disabled=\{busy \|\| sendBlocked !== null\}>/.test(emailCode),
+      /<form onSubmit=\{sendTest\}/.test(emailCode),
+      /if \(busy \|\| sendBlocked !== null\) return;/.test(emailCode),
+    ],
+    [true, true, true],
+  );
+  const blockedLine = emailCode.indexOf("{sendBlocked !== null && <p className=\"text-xs text-muted\">{sendBlocked}</p>}");
+  check("and it is drawn under Send", blockedLine >= 0 && blockedLine > emailCode.indexOf("disabled={busy || sendBlocked !== null}"), true);
   check("and that draft lives on the Email screen, not the Server one", /SmtpDraft/.test(serverSection), false);
+  // The keys are saved together, so every row that shows one opens the same form.
+  check(
+    "the six SMTP rows open one form",
+    [(emailCode.match(/onClick=\{smtp\}/g) ?? []).length, /const smtp = \(\): void => navigate\(settingsLeafPath\("smtp"\)\);/.test(emailCode)],
+    [6, true],
+  );
+  check("and delivery trouble is the kit's warning notice", /<Notice tone="warn">\s*\{trouble\.text\}/.test(emailCode), true);
 
   // The property rather than the rows, so a third group cannot arrive wrong.
   for (const me of [null, plain, admin]) {

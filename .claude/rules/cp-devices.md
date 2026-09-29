@@ -161,7 +161,11 @@ argument is about a session list whose only verb is sign-out, while a device
 survives a sign-out and carries retired rows and a limit. Settings → Devices is
 the new section.
 
-## Two honest limits, stated on the screen
+## Two honest limits, and where each is said
+
+The screen states neither at rest any more (Q3.686). The second is said in Retire's
+confirmation, where it is true at the moment it matters; the first is the API keys
+screen's to answer, and a sentence here explaining another screen was meta text.
 
 1. **An API-key caller has no device.** A key is not a sign-in, so nothing holding
    one appears in the list and nothing in the list revokes one. The remedy is the
@@ -186,7 +190,7 @@ the new section.
 | `packages/control-plane/src/devices.ts` | The entity and every rule about it: `adoptDevice`'s ignore-rather-than-refuse, the owner clause, the cap that refuses, `deviceRevoked` and why it is a second statement |
 | `packages/control-plane/src/sessions.ts` | `mintSession`'s required `deviceId`, the device check placed *first*, and the docblock refusing the join |
 | `packages/web/src/cp.ts` | `currentDevice`/`rememberDevice`/`forgetDevice`, and the rule that `clearSession` keeps the device while `device_revoked` gives it up |
-| `packages/web/src/ui/settings/DevicesSection.tsx` | The list, the retired rows, and the two limits as sentences. The one `TwoStep` in this app offered on your **own** row |
+| `packages/web/src/ui/settings/DevicesSection.tsx` | The list, the retired rows, and the open-work delay in Retire's confirmation. The one `TwoStep` in this app offered on your **own** row |
 | `packages/native/src-tauri/src/config.rs` | Where the id lives, the argument for it not being in the keyring, and why it is per account |
 
 ## Bounds

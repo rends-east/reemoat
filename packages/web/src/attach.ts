@@ -1,3 +1,4 @@
+import { ApiError } from "./http";
 import type { SessionKey } from "./ids";
 import { MAX_PROMPT_ATTACHMENTS, MAX_UPLOAD_BYTES, type PromptAttachmentRef } from "./wire";
 
@@ -20,7 +21,15 @@ export interface PendingAttachment {
   uploadId: string | null;
   /** The daemon's own message, in `failed`. */
   error: string | null;
+  /** Whether sending it again could succeed, in `failed`; the chip offers Retry only then. */
+  retryable: boolean;
   cancel: (() => void) | null;
+}
+
+/** A dropped connection, a busy daemon or a rate window passes; a refusal about the file or the session's room does not. */
+export function uploadRetryable(cause: unknown): boolean {
+  if (!ApiError.isApiError(cause)) return true;
+  return cause.status === 408 || cause.status === 429 || cause.status >= 500;
 }
 
 const pending = new Map<SessionKey, PendingAttachment[]>();

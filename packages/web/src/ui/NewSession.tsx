@@ -36,11 +36,11 @@ import {
   IconButton,
   MachineLabel,
   SHEET_FOOT,
-  SETTINGS_HEADING,
   SHEET_SCREEN,
   Spinner,
   reachText,
 } from "./bits";
+import { Field, FIELD_LABEL } from "./kit/Field";
 import { toast } from "./Toast";
 import { VERBATIM_FIELD } from "./composing";
 import type { MachineState } from "../machine";
@@ -67,31 +67,35 @@ function MachinePicker({
   const reason = current === undefined ? null : unusableReason(current.machine);
 
   return (
-    <div className="space-y-1">
-      <Dropdown
-        items={machines.map(({ machine, name }) => {
-          const why = unusableReason(machine);
-          return {
-            value: machine.id,
-            label: name,
-            description: why,
-            disabled: why !== null,
-            adornment: <Dot tone={why === null ? "on" : "off"} />,
-          };
-        })}
-        value={value}
-        onChange={onChange}
-        heading="Machine"
-        trigger={
-          <span className="flex min-w-0 items-center gap-1.5">
-            <Dot tone={current !== undefined && reason === null ? "on" : "off"} />
-            <span className="truncate">{current?.name ?? "Choose a machine"}</span>
-          </span>
-        }
-        className="w-full"
-      />
-      {reason !== null && <p className="text-2xs text-muted">{reason}</p>}
-    </div>
+    <Field label="Machine" hint={reason ?? undefined}>
+      {({ id, labelledBy, describedBy }) => (
+        <Dropdown
+          id={id}
+          labelledBy={labelledBy}
+          describedBy={describedBy}
+          items={machines.map(({ machine, name }) => {
+            const why = unusableReason(machine);
+            return {
+              value: machine.id,
+              label: name,
+              description: why,
+              disabled: why !== null,
+              adornment: <Dot tone={why === null ? "on" : "off"} />,
+            };
+          })}
+          value={value}
+          onChange={onChange}
+          trigger={
+            <>
+              <Dot tone={current !== undefined && reason === null ? "on" : "off"} />
+              <span className={`truncate ${current === undefined ? "text-muted" : ""}`}>
+                {current?.name ?? "Choose a machine"}
+              </span>
+            </>
+          }
+        />
+      )}
+    </Field>
   );
 }
 
@@ -898,17 +902,12 @@ function MachineLine({
     );
   }
 
-  return (
-    <div>
-      <FieldLabel>Machine</FieldLabel>
-      <MachinePicker machines={machines} value={value} onChange={onChange} />
-    </div>
-  );
+  return <MachinePicker machines={machines} value={value} onChange={onChange} />;
 }
 
 function FieldLabel({ children }: { children: ReactNode }): ReactNode {
   return (
-    <h2 className={`pb-1.5 ${SETTINGS_HEADING}`}>{children}</h2>
+    <h2 className={`pb-1.5 ${FIELD_LABEL}`}>{children}</h2>
   );
 }
 

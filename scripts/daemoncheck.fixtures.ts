@@ -17,9 +17,6 @@ export function memoryUploadIndex(): UploadIndex {
   return {
     insert: (row) => void rows.set(key(row.sessionId, row.uploadId), row),
     get: (sessionId, uploadId) => rows.get(key(sessionId, uploadId)) ?? null,
-    bytesFor: (sessionId) =>
-      [...rows.values()].filter((row) => row.sessionId === sessionId).reduce((total, row) => total + row.bytes, 0),
-    countFor: (sessionId) => [...rows.values()].filter((row) => row.sessionId === sessionId).length,
     markConsumed: (sessionId, ids, at) => {
       for (const id of ids) {
         const row = rows.get(key(sessionId, id));

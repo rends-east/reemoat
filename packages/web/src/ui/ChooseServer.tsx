@@ -7,7 +7,8 @@ import { parseInstanceConfig } from "../instance";
 import { nativeBoot, probeServer, setNativeServer } from "../native";
 import { store } from "../store";
 import { useBackAccount } from "./backAccount";
-import { Button, FIELD, Icon, IconButton, SETTINGS_HEADING } from "./bits";
+import { Button, FIELD, Icon, IconButton } from "./bits";
+import { FIELD_LABEL } from "./kit/Field";
 
 /** The host is the only normalizer of the address, since two spellings are two credential keys; a candidate is probed before it is adopted. */
 
@@ -122,7 +123,7 @@ export function ChooseServer(): ReactNode {
         </p>
 
         <form onSubmit={submit}>
-          <label htmlFor="server-address" className={`mt-4 block ${SETTINGS_HEADING}`}>
+          <label htmlFor="server-address" className={`mt-4 block ${FIELD_LABEL}`}>
             Server address
           </label>
           <div className="mt-1 flex items-center gap-2">

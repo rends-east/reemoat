@@ -403,7 +403,7 @@ comparing, with a loud skip where this side is absent. Q4.105.
   open its own socket.
 - **A settings route has no `plugin` field, and the fixtures that had one were the
   cost of removing it.** A plugin's settings left the sheet for the plugin's own
-  page; `…/plugins/:pluginId` now parses to the machine. Every hand-written route
+  page; `…/plugins/:pluginId` now falls to the machine's Plugins list (Q3.686). Every hand-written route
   literal in `webcheck` kept its `plugin:` key and kept *passing* — `as never`
   swallows an extra property — while `depthOf` and `upFrom` had quietly started
   answering about the machine. The fixtures are driven through `parseSettingsRoute`

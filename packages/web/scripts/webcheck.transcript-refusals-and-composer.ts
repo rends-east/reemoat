@@ -964,6 +964,50 @@ process.stdout.write("\nwhich files the composer will take\n");
   check("an uploading one does", admitFiles(Array.from({ length: 10 }, () => chip("uploading")), [file("a", 1)]).accepted.length, 0);
 }
 
+process.stdout.write("\na failed chip offers a retry only where one can succeed\n");
+{
+  const { uploadRetryable } = await import("../src/attach.js");
+  const { ApiError } = await import("../src/http.js");
+  const refusal = (status: number, code: string): InstanceType<typeof ApiError> => new ApiError(status, code, code);
+  check(
+    "a refusal about the file or the session's room is final",
+    [
+      uploadRetryable(refusal(409, "upload_limit")),
+      uploadRetryable(refusal(413, "upload_quota_exceeded")),
+      uploadRetryable(refusal(413, "upload_too_large")),
+      uploadRetryable(refusal(400, "invalid_mime")),
+    ],
+    [false, false, false, false],
+  );
+  check(
+    "while a dropped connection, a rate window and a busy daemon pass",
+    [
+      uploadRetryable(new TypeError("Failed to fetch")),
+      uploadRetryable(refusal(429, "upload_rate_limited")),
+      uploadRetryable(refusal(503, "upload_write_failed")),
+      uploadRetryable(refusal(408, "timeout")),
+    ],
+    [true, true, true, true],
+  );
+  const composer = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
+  check("the chip draws Retry on that answer alone", /item\.state === "failed" && item\.retryable \? \(/.test(composer), true);
+  check("and records it with the failure", /error: errorText\(cause\),\s*retryable: uploadRetryable\(cause\),/.test(composer), true);
+}
+
+process.stdout.write("\nan image the session no longer keeps says so\n");
+{
+  // A session keeps its newest files only, so an old one answers 404 and the transcript must not go blank where it was.
+  const preview = readFileSync(new URL("../src/ui/ImagePreview.tsx", import.meta.url), "utf8");
+  check(
+    "a 404 for the upload is its own outcome, not a failure",
+    /error\.code === "upload_not_found" \? GONE : null/.test(preview),
+    true,
+  );
+  check("and draws a line naming the file", /if \(gone\) return <p className="[^"]*">\{alt\} is no longer kept\.<\/p>;/.test(preview), true);
+  const view = readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8");
+  check("and a download of one says the same", /gone \? `\$\{name\} is no longer kept\.`/.test(view), true);
+}
+
 // restoreAttachments must merge, not assign: a chip attached during the in-flight send would lose its upload and cancel.
 
 process.stdout.write("\na file attached while the send was in flight\n");

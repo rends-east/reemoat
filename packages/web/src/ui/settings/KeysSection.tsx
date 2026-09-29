@@ -9,6 +9,7 @@ import type { Me } from "../../wire";
 import { errorText } from "../../http";
 import { Button, Empty, SkeletonRow, Spinner } from "../bits";
 import { toast } from "../Toast";
+import { EmptyRow, Group } from "../kit/List";
 import { KeyRow, KeyTable } from "./KeyRow";
 import { OneTimeSecret } from "./OneTimeSecret";
 
@@ -90,13 +91,12 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
   );
 
   return (
-    <div>
-      <div className="flex items-center gap-3">
-        <p className="min-w-0 flex-1 text-xs text-muted">For cpctl and scripts. Never expire.</p>
-        <span className="shrink-0">{newKey}</span>
-      </div>
-      {atCeiling && <p className="mt-1 text-xs text-muted">{`${MAX_KEYS} of ${MAX_KEYS}; revoke one first.`}</p>}
-
+    // No title: "Keys" under a screen named API keys would say the screen's name twice.
+    <Group
+      count={keys === null || keys === "failed" ? undefined : `${String(live)} of ${String(MAX_KEYS)}`}
+      action={newKey}
+      footer={atCeiling ? `${MAX_KEYS} of ${MAX_KEYS}; revoke one first.` : "Keys never expire."}
+    >
       {keys === null ? (
         <SkeletonRow />
       ) : keys === "failed" ? (
@@ -104,7 +104,7 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
           Could not read your keys.
         </Empty>
       ) : keys.length === 0 ? (
-        <Empty>No keys yet.</Empty>
+        <EmptyRow>No keys yet.</EmptyRow>
       ) : (
         <KeyTable>
           {keys.map((record) => (
@@ -118,7 +118,7 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
           ))}
         </KeyTable>
       )}
-    </div>
+    </Group>
   );
 }
 

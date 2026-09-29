@@ -1,7 +1,9 @@
 import { memo, useState, type ReactNode } from "react";
 import { seedForm } from "../plugins";
 import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as PluginViewShape } from "../wire";
-import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, SETTINGS_HEADING, Spinner } from "./bits";
+import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, SETTINGS_HEADING, Spinner, SwitchRow } from "./bits";
+import { Field } from "./kit/Field";
+import { Group } from "./kit/List";
 import { Trash2 } from "lucide-react";
 
 /** A plugin's view drawn with this app's components: no plugin code ever runs in this origin, which holds the credential. */
@@ -159,7 +161,7 @@ const Row = memo(function Row({
               >
                 {pending.label}
               </Button>
-              <Button tone="primary" size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(null)}>
+              <Button size="sm" className="[@media(pointer:coarse)]:min-h-11" onClick={() => setConfirming(null)}>
                 Cancel
               </Button>
             </>
@@ -218,7 +220,7 @@ function Form({
       }}
     >
       {block.fields.map((field) => (
-        <Field
+        <FormField
           key={field.key}
           field={field}
           // Object.hasOwn: a field keyed __proto__ would otherwise read back Object.prototype.
@@ -235,7 +237,7 @@ function Form({
   );
 }
 
-function Field({
+function FormField({
   field,
   value,
   onChange,
@@ -244,22 +246,18 @@ function Field({
   value: string;
   onChange: (value: string) => void;
 }): ReactNode {
-  const help = field.help === null ? null : <p className="text-xs text-muted">{field.help}</p>;
-
   if (field.kind === "toggle") {
+    // The help is the group's footer, outside the switch, so a tap on its words never flips it; the wrapper keeps Group's gap out of the form's.
     return (
-      <label className="flex items-start gap-3 [@media(pointer:coarse)]:min-h-11">
-        <input
-          type="checkbox"
-          className="mt-0.5 size-4 shrink-0 accent-fg"
-          checked={value === "true"}
-          onChange={(event) => onChange(event.target.checked ? "true" : "false")}
-        />
-        <span className="min-w-0">
-          <span className="block text-sm">{field.label}</span>
-          {help}
-        </span>
-      </label>
+      <div>
+        <Group footer={field.help ?? undefined}>
+          <SwitchRow
+            title={field.label}
+            on={value === "true"}
+            onToggle={() => onChange(value === "true" ? "false" : "true")}
+          />
+        </Group>
+      </div>
     );
   }
 
@@ -267,43 +265,40 @@ function Field({
     // Dropdown, never a native select; a value outside the options is drawn as itself.
     const chosen = field.options.find((option) => option.value === value) ?? null;
     return (
-      // help sits outside the label: inside it, every word of the help opened the picker.
-      <div className="flex flex-col gap-1">
-      <label className="flex flex-col gap-1">
-        <span className="text-sm">{field.label}</span>
-        <Dropdown
-          items={field.options.map((option) => ({ value: option.value, label: option.label || option.value }))}
-          value={value}
-          onChange={onChange}
-          heading={field.label || undefined}
-          trigger={
-            <span className={`min-w-0 truncate ${chosen === null && value.length === 0 ? "text-muted" : ""}`}>
-              {chosen?.label || chosen?.value || value || field.placeholder || "Choose"}
-            </span>
-          }
-        />
-      </label>
-      {help}
-      </div>
+      <Field label={field.label} hint={field.help ?? undefined}>
+        {({ id, labelledBy, describedBy }) => (
+          <Dropdown
+            id={id}
+            labelledBy={labelledBy}
+            describedBy={describedBy}
+            items={field.options.map((option) => ({ value: option.value, label: option.label || option.value }))}
+            value={value}
+            onChange={onChange}
+            trigger={
+              <span className={`min-w-0 truncate ${chosen === null && value.length === 0 ? "text-muted" : ""}`}>
+                {chosen?.label || chosen?.value || value || field.placeholder || "Choose"}
+              </span>
+            }
+          />
+        )}
+      </Field>
     );
   }
 
   return (
-    /* Same split as the `select` arm above, for its reason: inside the label, the
-       help text focuses the input from wherever it is clicked. */
-    <div className="flex flex-col gap-1">
-    <label className="flex flex-col gap-1">
-      <span className="text-sm">{field.label}</span>
-      <input
-        type={field.kind === "password" ? "password" : field.kind === "number" ? "number" : "text"}
-        className={FIELD}
-        value={value}
-        placeholder={field.placeholder ?? undefined}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
-    {help}
-    </div>
+    <Field label={field.label} hint={field.help ?? undefined}>
+      {({ id, describedBy }) => (
+        <input
+          id={id}
+          aria-describedby={describedBy}
+          type={field.kind === "password" ? "password" : field.kind === "number" ? "number" : "text"}
+          className={FIELD}
+          value={value}
+          placeholder={field.placeholder ?? undefined}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+    </Field>
   );
 }
 

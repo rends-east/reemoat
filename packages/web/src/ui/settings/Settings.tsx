@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   DEFAULT_SECTION,
   refusedSectionText,
+  sectionAllowed,
   settingsPaneTitle,
   settingsUp,
   settingsUpLabel,
@@ -13,24 +14,24 @@ import { ChevronLeft } from "lucide-react";
 import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
 import { AccountSection, EmailScreen, PasswordScreen } from "./AccountSection";
-import { EmailSection } from "./EmailSection";
+import { EmailSection, SmtpScreen, TestMailScreen } from "./EmailSection";
 import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
 import { LogsSection } from "./LogsSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
-import { MachineSystemsSection } from "./MachineSystemsSection";
-import { MachineSection } from "./MachineSection";
+import { MachinePluginsList, PluginInstallScreen } from "./MachinePluginsSection";
+import { MachineSystemsList, MachineSystemsSection } from "./MachineSystemsSection";
+import { MachineNameScreen, MachineSection, SetupCodeScreen } from "./MachineSection";
 import { MachinesSection } from "./MachinesSection";
-import { PermissionsSection } from "./PermissionsSection";
 import { SettingsNav } from "./SettingsNav";
-import { ServerSection } from "./ServerSection";
-import { UsersSection } from "./UsersSection";
+import { DomainsScreen, MachineLimitScreen, ProvisioningKeyScreen, ServerSection } from "./ServerSection";
+import { NewUserScreen, UserLimitScreen, UsersSection } from "./UsersSection";
 
 export function Settings({ state, route }: { state: AppState; route: SettingsRoute }): ReactNode {
   const section = route.section;
-  // A refused section falls back to the index, and the sentence saying so is derived from the same value.
+  // A refused or hidden section falls back to the index; only a refused admin section says so.
   const refusal = refusedSectionText(section, state.me);
-  const active = refusal === null ? section : null;
+  const active = section !== null && sectionAllowed(section, state.me, state.host?.canHostDaemon === true) ? section : null;
 
   const drilled = active === "machines" && route.machineId !== null;
   const here = { ...route, section: active };
@@ -84,17 +85,15 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
                 <SectionBody state={state} section={DEFAULT_SECTION} />
               </div>
             </>
-          ) : route.leaf !== null ? (
-            route.leaf === "password" ? (
-              <PasswordScreen me={state.me} />
-            ) : route.leaf === "email" ? (
-              <EmailScreen me={state.me} config={state.config} />
-            ) : (
-              <NewKeyScreen />
-            )
+          ) : here.leaf !== null ? (
+            <LeafScreen state={state} route={here} />
           ) : drilled && route.machineId !== null ? (
             route.agents ? (
               <MachineAgentsSection state={state} machineId={route.machineId} harness={route.signin} />
+            ) : route.list === "systems" ? (
+              <MachineSystemsList state={state} machineId={route.machineId} />
+            ) : route.list === "plugins" ? (
+              <MachinePluginsList state={state} machineId={route.machineId} />
             ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (
@@ -114,6 +113,43 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
   );
 }
 
+/** Every form and one-time secret is a screen of its own (Q3.549); a new leaf is a compile error until it is drawn here. */
+function LeafScreen({ state, route }: { state: AppState; route: SettingsRoute }): ReactNode {
+  const machine = route.machineId;
+  switch (route.leaf) {
+    case null:
+      return null;
+    case "password":
+      return <PasswordScreen me={state.me} />;
+    case "email":
+      return <EmailScreen me={state.me} config={state.config} />;
+    case "new-key":
+      return <NewKeyScreen />;
+    case "machine-name":
+      return machine === null ? null : <MachineNameScreen state={state} machineId={machine} />;
+    case "setup-code":
+      return machine === null ? null : <SetupCodeScreen machineId={machine} />;
+    case "plugin-install":
+      return machine === null ? null : <PluginInstallScreen state={state} machineId={machine} />;
+    case "domains":
+      return <DomainsScreen />;
+    case "machine-limit":
+      return <MachineLimitScreen />;
+    case "provisioning-key":
+      return <ProvisioningKeyScreen />;
+    case "smtp":
+      return <SmtpScreen />;
+    case "test-mail":
+      return <TestMailScreen />;
+    case "new-user":
+      return <NewUserScreen config={state.config} />;
+    case "user-limit":
+      return typeof route.userId === "string" ? <UserLimitScreen userId={route.userId} /> : null;
+    default:
+      return unsectioned(route.leaf);
+  }
+}
+
 function SectionBody({ state, section }: { state: AppState; section: SettingsSection }): ReactNode {
   switch (section) {
     case "machines":
@@ -124,10 +160,6 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <KeysSection me={state.me} />;
     case "devices":
       return <DevicesSection />;
-    case "permissions":
-      return (
-        <PermissionsSection me={state.me} />
-      );
     case "logs":
       return <LogsSection />;
     case "server":
@@ -141,7 +173,7 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
   }
 }
 
-/** The never parameter is what makes a new SettingsSection member a compile error. */
+/** The never parameter is what makes a new SettingsSection or SettingsLeaf member a compile error. */
 function unsectioned(section: never): ReactNode {
   void section;
   return null;

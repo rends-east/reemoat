@@ -1638,13 +1638,14 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 413, "upload_too_large", `a file may not exceed ${MAX_UPLOAD_BYTES} bytes`, {
           limit: MAX_UPLOAD_BYTES,
         });
+      // Both refusals are about files not yet sent: a sent one is dropped to make room (Q2.247).
       case "quota":
-        return jsonError(c, 413, "upload_quota_exceeded", "this session has no room for that file", {
+        return jsonError(c, 413, "upload_quota_exceeded", "files not yet sent already fill this session's space", {
           limit: MAX_SESSION_UPLOAD_BYTES,
           used: result.used,
         });
       case "too_many":
-        return jsonError(c, 409, "upload_limit", "this session already holds too many staged files", {
+        return jsonError(c, 409, "upload_limit", `${MAX_UPLOADS_PER_SESSION} files are already waiting to be sent`, {
           limit: MAX_UPLOADS_PER_SESSION,
         });
       case "rate": {
