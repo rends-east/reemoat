@@ -44,6 +44,12 @@
   Build, each signed in with the account you already have or pointed at a provider
   such as OpenRouter. A plugin can add any other agent that speaks
   [ACP](https://agentclientprotocol.com).
+- **Agents talk to each other.** A session can message another one, on the same
+  machine or on another of yours and whatever harness each runs, so Codex can hand
+  a task to Claude Code and get the answer back. A message wakes an idle session or
+  reaches a busy one mid-turn, so nothing waits or polls, and `@nickname` in the
+  message box points your agent at another session. Between machines the messages
+  are end-to-end encrypted.
 - **From anywhere.** Start a session from bed, approve a command from a train, read
   what it did over breakfast. Close the lid or drop to LTE: the daemon is the source
   of truth, and the agent never notices you left.
@@ -131,7 +137,10 @@ Three pieces, and you can run all of them yourself.
   `opencode` or `grok` over [ACP](https://agentclientprotocol.com), normalizes all
   five into one event stream, and exposes them over HTTP and WebSocket. It runs on
   your machine, as you. A plugin can add more — any ACP program, and any inference
-  endpoint to point one at — and it lands in the same lists.
+  endpoint to point one at — and it lands in the same lists. Every agent that takes
+  MCP over HTTP is also handed a `reemoat` server with two tools, `list_agents` and
+  `send_message`, which is how agents reach each other, on one machine or across
+  the relay.
 - **The control plane** issues identity and relays requests. It holds the accounts,
   the machines and the grants, and it signs the short-lived capabilities the app
   spends. It runs in a container, on a box of its own.
