@@ -126,10 +126,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_fs::{FsExt, OpenOptions};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::accounts::{self, Binding, Decision, Slot, Token};
@@ -2461,11 +2463,12 @@ pub fn host_open_external(
 
 /// Hand a file to the person who asked for it, through the platform's own panel.
 ///
-/// **Raw bytes, never JSON.** The client's download bound is 100 MiB
-/// (`MAX_DOWNLOAD_BYTES`), and 100 MiB as a JSON array of numbers is roughly
-/// 600 MB of string — so this takes `tauri::ipc::Request`, whose body arrives as
-/// bytes over Tauri's own IPC protocol, and the filename rides in a header because
-/// a header is the only other field a raw request has.
+/// **Base64 in JSON, never a raw body.** A raw body exists only over Tauri's
+/// `ipc://` protocol, which Android never uses and a desktop page abandons for good
+/// after any one call over it fails; `postMessage` then carries the bytes as a JSON
+/// array of numbers, which the raw-only arm refused, so a press saved nothing and
+/// said nothing (Q3.690). Base64 rides both channels at 1.33 times the bytes, where
+/// a number array would be six at the 100 MiB bound (`MAX_DOWNLOAD_BYTES`).
 ///
 /// Answers `false` where the panel was dismissed, which is not a failure and must
 /// not be drawn as one.
@@ -2485,39 +2488,41 @@ pub fn host_open_external(
 ///
 /// ⚠ **From the webview on screen only**: a panel opened by a hidden account's
 /// page would sit over the account somebody is looking at.
+///
+/// ⚠ **Written through `tauri-plugin-fs`, never `std::fs`.** Android's panel is
+/// `ACTION_CREATE_DOCUMENT` and answers a `content://` URI, which names no path:
+/// `into_path` refused every one, and the page dropped the refusal, so a save on
+/// a phone did nothing at all (Q3.690). The plugin opens that URI through the
+/// ContentResolver and a desktop path through `std::fs`, one call for both.
 #[tauri::command(async)]
 pub fn host_save_file(
     app: AppHandle,
     webview: tauri::Webview,
     host: State<'_, Host>,
-    request: tauri::ipc::Request<'_>,
+    filename: String,
+    data: String,
 ) -> Result<bool, String> {
     host.require_shown(webview.label())?;
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("expected the file as bytes".into());
-    };
-    let encoded = request
-        .headers()
-        .get("x-reemoat-filename")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("download");
-    let name = percent_encoding::percent_decode_str(encoded)
-        .decode_utf8()
-        .map_err(|_| "that filename is not text".to_string())?
-        .to_string();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|_| "the file did not arrive whole".to_string())?;
 
     let chosen = app
         .dialog()
         .file()
-        .set_file_name(&name)
+        .set_file_name(&filename)
         .blocking_save_file();
-    let Some(path) = chosen else {
+    let Some(chosen) = chosen else {
         return Ok(false);
     };
-    let path = path
-        .into_path()
+    let mut options = OpenOptions::new();
+    options.read(false).write(true).create(true).truncate(true);
+    let mut file = app
+        .fs()
+        .open(chosen, options)
         .map_err(|e| format!("could not use that location: {e}"))?;
-    std::fs::write(&path, bytes).map_err(|e| format!("could not write the file: {e}"))?;
+    std::io::Write::write_all(&mut file, &bytes)
+        .map_err(|e| format!("could not write the file: {e}"))?;
     Ok(true)
 }
 

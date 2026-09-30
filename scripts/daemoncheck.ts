@@ -18,6 +18,8 @@ await import("./daemoncheck.after-the-turn-and-config.js");
 await import("./daemoncheck.mid-turn-messages.js");
 await import("./daemoncheck.peer-messages.js");
 await import("./daemoncheck.grok-extensions.js");
+await import("./daemoncheck.cursor-extensions.js");
+await import("./daemoncheck.posed-questions.js");
 await import("./daemoncheck.plugin-manifest-and-store.js");
 await import("./daemoncheck.plugin-surfaces.js");
 await import("./daemoncheck.plugin-install-and-rollback.js");

@@ -196,6 +196,8 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     stallPrompt?: boolean;
     // Publishes one `select` option and accepts `session/set_config_option` on it.
     config?: boolean;
+    // Adds an effort select beside it that follows the model, as cursor's does: a model set answers it at its default.
+    effort?: boolean;
     // `true` and `false` are ordinary answers (false: already finished); "error" is the third. Default `true`.
     stopAnswer?: boolean | "error";
     // The AIR `_meta` on `initialize`: `true` is claude-agent-acp's shape, absent/false is none, "old" a lower version, "unnamed" lacks `asyncTasks`.
@@ -232,6 +234,21 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       ],
     };
     const withValue = (value: unknown) => ({ ...modelOption, currentValue: value });
+    const effortOption = {
+      id: "effort",
+      name: "Effort",
+      description: null,
+      category: "thought_level",
+      type: "select",
+      currentValue: "medium",
+      options: [
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ],
+    };
+    let currentModel: unknown = modelOption.currentValue;
+    const published = (effort: unknown = effortOption.currentValue) =>
+      options.effort === true ? [withValue(currentModel), { ...effortOption, currentValue: effort }] : [withValue(currentModel)];
 
     class ResumeRig extends LocalRuntime {
       override describe(agent: AgentId): AgentLaunchConfig {
@@ -294,7 +311,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                   id,
                   result: {
                     sessionId: `conv_${opened}`,
-                    ...(options.config === true ? { configOptions: [modelOption] } : {}),
+                    ...(options.config === true ? { configOptions: published() } : {}),
                   },
                 });
                 break;
@@ -302,10 +319,12 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                 const params = message["params"] as Record<string, any>;
                 configSets.push({ id: String(params["configId"]), value: params["value"] });
                 options.onConfigSet?.();
+                const isEffort = params["configId"] === "effort";
+                if (!isEffort) currentModel = params["value"];
                 send({
                   jsonrpc: "2.0",
                   id,
-                  result: { configOptions: [withValue(params["value"])] },
+                  result: { configOptions: isEffort ? published(params["value"]) : published() },
                 });
                 break;
               }
@@ -338,7 +357,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                     send({
                       jsonrpc: "2.0",
                       id,
-                      result: options.config === true ? { configOptions: [modelOption] } : {},
+                      result: options.config === true ? { configOptions: published() } : {},
                     });
                   }
                 }, options.stallMs ?? 15);
@@ -2052,6 +2071,65 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       ["busy", "busy"],
     );
     check("and the wake put back what it captured", cfg?.snapshot().agentConfig?.options[0]?.value, "sonnet");
+
+    await own.shutdown();
+  }
+
+  // cursor's controls other than its mode are its model's, published only by a live agent: a model chosen while parked wakes it (Q2.249).
+  {
+    const rig = rigWith({ resume: true, config: true, effort: true });
+    const store = storeOf([
+      { ...interruptedRow("s_cur", "daemon_restarted", "a_cur"), agent: "cursor" },
+      { ...interruptedRow("s_cur_off", "daemon_restarted", "a_cur_off"), agent: "cursor" },
+      interruptedRow("s_kimi_fx", "daemon_restarted", "a_kimi_fx"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const cur = own.get("s_cur");
+    const off = own.get("s_cur_off");
+    const kimi = own.get("s_kimi_fx");
+    const shown = (one: typeof cur) =>
+      (one?.snapshot().agentConfig?.options ?? []).map((o) => `${o.id}=${String(o.value)}`);
+    check(
+      "each offers a model and an effort",
+      [shown(cur), shown(off), shown(kimi)],
+      [["model=opus", "effort=medium"], ["model=opus", "effort=medium"], ["model=opus", "effort=medium"]],
+    );
+    // Set live, so a replay of it onto the next model would be visible on the wire.
+    for (const one of [cur, off, kimi]) await one?.setConfigOption("effort", "high");
+    await off?.stop("stopped");
+    await own.parkIdleSessions(now + 31 * 60_000);
+    check("two released and one stopped", [cur?.status, kimi?.status, off?.status], ["parked", "parked", "exited"]);
+
+    const launched = rig.launches();
+    const sent = rig.configSets().length;
+    const set = await cur?.setConfigOption("model", "sonnet");
+    check("a model chosen on a parked cursor session is accepted", set?.kind, "ok");
+    check("and wakes it", [rig.launches() - launched, cur?.status], [1, "idle"]);
+    check(
+      "the fresh agent is sent the model and not the old model's effort",
+      rig.configSets().slice(sent),
+      [{ id: "model", value: "sonnet" }],
+    );
+    check(
+      "so the new model's effort is on the session when the tap answers",
+      (set?.kind === "ok" ? set.config?.options ?? [] : []).map((o) => `${o.id}=${String(o.value)}`),
+      ["model=sonnet", "effort=medium"],
+    );
+
+    const offLaunched = rig.launches();
+    const offSet = await off?.setConfigOption("model", "sonnet");
+    check("a stopped cursor session records the model and starts nothing", [offSet?.kind, rig.launches() - offLaunched, off?.status], ["ok", 0, "exited"]);
+    check("and drops the old model's effort rather than keep it for the next run", shown(off), ["model=sonnet"]);
+
+    const kimiLaunched = rig.launches();
+    await kimi?.setConfigOption("model", "sonnet");
+    check(
+      "a harness whose controls are not its model's defers as before, keeping them",
+      [rig.launches() - kimiLaunched, kimi?.status, ...shown(kimi)],
+      [0, "parked", "model=sonnet", "effort=high"],
+    );
 
     await own.shutdown();
   }

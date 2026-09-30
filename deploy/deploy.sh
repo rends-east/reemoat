@@ -393,7 +393,7 @@ for svc in $TARGETS; do
             PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"; export PATH
             [ -z "$_agent_claude" ] || { CLAUDE_CODE_EXECUTABLE=$_agent_claude; export CLAUDE_CODE_EXECUTABLE; }
             [ -z "$_agent_codex" ] || { CODEX_PATH=$_agent_codex; export CODEX_PATH; }
-            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --refresh-only --skip claude --skip codex --skip opencode --skip kimi --skip grok
+            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --refresh-only --skip claude --skip codex --skip opencode --skip kimi --skip grok --skip cursor
           ) || echo "  agents: the script did not finish; the daemon retries daily" >&2
           ;;
       esac

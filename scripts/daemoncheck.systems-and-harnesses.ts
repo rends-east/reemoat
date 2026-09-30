@@ -82,6 +82,8 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     opencode: null,
     // grok advertises `loadSession` and the rest but no `providers` marker, so it reaches xAI only as its native harness.
     grok: null,
+    // cursor 2026.09.28 has no `providers` marker either; it reaches Cursor's own backend and nothing else (Q6.115).
+    cursor: null,
   } as const;
 
   const nativeMisses = SYSTEM_IDS.flatMap((system) => {
@@ -100,6 +102,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "claude x anthropic: yes",
     "claude x openai: no",
     "claude x openrouter: yes",
+    "claude x cursor: no",
     "claude x xai: no",
     "claude x moonshot: yes",
     "claude x zhipu: yes",
@@ -108,6 +111,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "kimi x anthropic: no",
     "kimi x openai: no",
     "kimi x openrouter: no",
+    "kimi x cursor: no",
     "kimi x xai: no",
     "kimi x moonshot: yes",
     "kimi x zhipu: no",
@@ -116,6 +120,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "codex x anthropic: no",
     "codex x openai: yes",
     "codex x openrouter: no",
+    "codex x cursor: no",
     "codex x xai: no",
     "codex x moonshot: no",
     "codex x zhipu: no",
@@ -124,6 +129,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "opencode x anthropic: no",
     "opencode x openai: no",
     "opencode x openrouter: yes",
+    "opencode x cursor: no",
     "opencode x xai: no",
     "opencode x moonshot: no",
     "opencode x zhipu: no",
@@ -132,11 +138,21 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "grok x anthropic: no",
     "grok x openai: no",
     "grok x openrouter: no",
+    "grok x cursor: no",
     "grok x xai: yes",
     "grok x moonshot: no",
     "grok x zhipu: no",
     "grok x minimax: no",
     "grok x zen: no",
+    "cursor x anthropic: no",
+    "cursor x openai: no",
+    "cursor x openrouter: no",
+    "cursor x cursor: yes",
+    "cursor x xai: no",
+    "cursor x moonshot: no",
+    "cursor x zhipu: no",
+    "cursor x minimax: no",
+    "cursor x zen: no",
   ]);
 
   // Routable but un-pinnable must refuse, or the session silently runs the endpoint's default model.
@@ -254,6 +270,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     SYSTEM_IDS.filter((id) => SYSTEMS[id].keyEnv !== null).map((id) => `${id}: ${SYSTEMS[id].keyEnv ?? ""}`),
     [
       "openrouter: OPENROUTER_API_KEY",
+      "cursor: CURSOR_API_KEY",
       "xai: XAI_API_KEY",
       "zen: OPENCODE_API_KEY",
     ],

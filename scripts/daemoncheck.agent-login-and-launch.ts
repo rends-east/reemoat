@@ -449,7 +449,7 @@ process.stdout.write("\nthe login pty, on both platforms\n");
   check(
     "which agents that leaves without an input box, per platform",
     AGENT_IDS.filter((id) => loginStdio("darwin", AGENT_LOGIN[id].interactiveStdin) === "ignore"),
-    ["kimi", "codex", "opencode", "grok"],
+    ["kimi", "codex", "opencode", "grok", "cursor"],
   );
   check(
     "claude is the one it cannot rescue, because its flow reads a code back",
@@ -469,6 +469,8 @@ process.stdout.write("\nthe login pty, on both platforms\n");
       ["codex", ["logout"]],
       // grok's no-auto-update flag leads every argv: status runs on the probe TTL, and its updater could replace a live session's binary.
       ["grok", ["--no-auto-update", "logout"]],
+      // Measured with nobody signed in: "Logout successful", exit 0, no prompt.
+      ["cursor", ["--disable-auto-update", "logout"]],
     ],
   );
   // kimi has no such verb; opencode's would remove a key this daemon never put there.
@@ -493,6 +495,8 @@ process.stdout.write("\nthe login pty, on both platforms\n");
       "opencode: no command / .local/share/opencode/auth.json",
       // grok's file is grok login's and its command also covers a pasted key: two credentials, not one twice.
       "grok: --no-auto-update models on stdout / .grok/auth.json",
+      // Not status, which reads a stored login only; models asks the backend and answers on both streams (Q6.116).
+      "cursor: --disable-auto-update models on both / .config/cursor/auth.json",
     ],
   );
   // grok's text probe must stay a partition: one command answers three ways.
@@ -520,6 +524,33 @@ process.stdout.write("\nthe login pty, on both platforms\n");
       ["in", "in", "out", "cannot tell"],
     );
   }
+  // cursor's answers are measured strings from 2026.09.28, one per stream; the pair must stay a partition too.
+  {
+    const probe = AGENT_LOGIN.cursor.status;
+    const reads = probe !== null && probe.reads === "text" ? probe : null;
+    const against = (text: string): string =>
+      reads === null
+        ? "no text probe"
+        : reads.signedIn.test(text)
+          ? reads.signedOut.test(text)
+            ? "BOTH"
+            : "in"
+          : reads.signedOut.test(text)
+            ? "out"
+            : "cannot tell";
+    check(
+      "cursor's status strings are a partition, and a network failure or a locked keychain is neither",
+      [
+        against("Available models\n\nclaude-opus-4-8 - Claude Opus 4.8 (current, default)\n"),
+        against("No models available for this account.\n"),
+        against("\nError: Authentication required. Run 'agent login', pass --api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN."),
+        against("\nAuthentication failed: your Cursor credentials or API key are invalid or expired.\nIf you set CURSOR_API_KEY, check that it is correct."),
+        against("\nFailed to load models: fetch failed"),
+        against("\nError: Your macOS login keychain is locked.\nRun security unlock-keychain and try again."),
+      ],
+      ["in", "in", "out", "out", "cannot tell", "cannot tell"],
+    );
+  }
   // admit refuses on false, so an agent that runs without credentials must never be able to produce one.
   check(
     "and the one that runs without credentials cannot report itself signed out",
@@ -538,7 +569,7 @@ process.stdout.write("\neach agent's login, as it is written down\n");
   check(
     "which agents have a sign-in to run at all",
     AGENT_IDS.filter(hasLoginFlow),
-    ["claude", "kimi", "codex", "grok"],
+    ["claude", "kimi", "codex", "grok", "cursor"],
   );
   check(
     "and the one that does not is refused before anything is spawned",
@@ -680,6 +711,25 @@ process.stdout.write("\nhow each agent is launched\n");
         false,
       );
       check("and the binary a session runs is the one a login drives", config.command, findOnPath("grok"));
+      continue;
+    }
+    if (id === "cursor") {
+      if (config === null) {
+        process.stdout.write("  skip  cursor is not installed here, so its launch shape is unasserted\n");
+        continue;
+      }
+      check("cursor is launched as an ACP subcommand of the CLI itself, with its updater off", config.args, [
+        "--disable-auto-update",
+        "acp",
+      ]);
+      // -f is the one ACP reads; --yolo is ignored there but is still the same wish, and neither may ever be sent.
+      check(
+        "and never with a flag that stops permission requests",
+        config.args.some((arg) => ["-f", "--force", "--yolo", "--auto-review", "--approve-mcps"].includes(arg) || arg.startsWith("--sandbox")),
+        false,
+      );
+      check("and in the session's own directory, where it reads its rules and commands", config.inSessionCwd, true);
+      check("and the binary a session runs is the one a login drives", config.command, findOnPath("cursor-agent"));
       continue;
     }
     check(`${id}'s adapter is resolvable and takes no arguments`, config?.args, []);

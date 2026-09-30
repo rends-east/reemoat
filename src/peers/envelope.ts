@@ -1,5 +1,7 @@
 import type { PeerOrigin } from "../events.js";
 
+/** The name every injected agent knows this daemon's MCP server by. */
+export const PEER_SERVER_NAME = "reemoat";
 export const MAX_PEER_NAME_CHARS = 32;
 /** A contributed harness id, `<pluginId>:<localId>`, is 32 characters a side. */
 export const MAX_PEER_HARNESS_CHARS = 65;

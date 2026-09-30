@@ -4,6 +4,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import type { PeerOrigin, PeerPolicyKey, PromptMention } from "../events.js";
 import type { ManagedSession, MentionNote, MidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
 import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore } from "../store/sqlite.js";
+import { parseAskArguments, type PoseResult } from "./ask.js";
 import type { PeerAnswer } from "./channel.js";
 import {
   address,
@@ -14,9 +15,9 @@ import {
   parseAddress,
   peerMessage,
   peerNotice,
+  PEER_SERVER_NAME,
 } from "./envelope.js";
 
-export const PEER_SERVER_NAME = "reemoat";
 export const MAX_PEER_MESSAGE_CHARS = 32_000;
 /** Turns other agents may cause in a session with no message from its person in between. */
 export const PEER_TURN_BUDGET = 20;
@@ -321,8 +322,11 @@ export class PeerHub {
       this.sessionByToken.delete(previous);
       this.tokenBySession.delete(sessionId);
     }
-    if (!this.allowed || this.endpoint === null || capabilities.http !== true) return [];
-    if (this.registry.get(sessionId)?.peerMessages === false) return [];
+    if (this.endpoint === null || capabilities.http !== true) return [];
+    const session = this.registry.get(sessionId);
+    const messaging = this.allowed && session?.peerMessages !== false;
+    // Also served with messaging off: ask_question is a question to its own person, which no messaging switch is about (Q2.250).
+    if (!messaging && session?.takesPosedQuestions !== true) return [];
     const token = randomBytes(32).toString("base64url");
     this.tokenBySession.set(sessionId, token);
     this.sessionByToken.set(token, sessionId);
@@ -342,6 +346,24 @@ export class PeerHub {
     const sessionId = this.sessionByToken.get(authorization.slice("Bearer ".length)) ?? null;
     if (sessionId === null || this.registry.get(sessionId) === undefined) return null;
     return sessionId;
+  }
+
+  /** Read when the caller's agent connects, which is the moment its server was injected for. */
+  listsMessaging(callerId: string): boolean {
+    return this.callRefusal(callerId) === null;
+  }
+
+  listsQuestions(callerId: string): boolean {
+    return this.registry.get(callerId)?.takesPosedQuestions === true;
+  }
+
+  /** ask_question: shown to the caller's own person as a card, answered later as that person's message (Q2.250). */
+  pose(callerId: string, args: Record<string, unknown>): PoseResult {
+    const session = this.registry.get(callerId);
+    if (session === undefined) return { ok: false, message: "this session no longer exists" };
+    const posed = parseAskArguments(args);
+    if (typeof posed === "string") return { ok: false, message: posed };
+    return session.poseQuestion(posed);
   }
 
   /** Why a caller holding a valid bearer may not use the tools now; a tool error, never a 401, which an MCP client reads as a sign-in. */

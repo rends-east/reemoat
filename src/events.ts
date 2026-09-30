@@ -519,6 +519,16 @@ export interface PersistedSession {
   rank: number | null;
   peerMessagesOff: boolean;
   agentState: AgentStateMemory | null;
+  /** Absent on a row an older build wrote, and on a test's hand-made one. */
+  openQuestion?: OpenQuestionRow | null;
+}
+
+/** An ask_question still waiting for its person, kept on the row so a restart draws the card again (Q2.250). */
+export interface OpenQuestionRow {
+  elicitationId: string;
+  title: string | null;
+  questions: { id: string; prompt: string; options: { id: string; label: string }[]; allowMultiple: boolean }[];
+  raisedAt: number;
 }
 
 export interface AgentStateMemory {

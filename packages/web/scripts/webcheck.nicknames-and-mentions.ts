@@ -160,11 +160,15 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
   );
   check("the harness is never its name spelled out there", />\s*\{row\.snapshot\.agent\}/.test(subline), false);
   const icons = stripComments(srcFile("ui/AgentIcons.tsx"));
-  const marks = ["ClaudeGlyph", "CodexGlyph", "KimiGlyph", "OpencodeGlyph", "GrokGlyph"].map((name) => {
-    const body = icons.slice(icons.indexOf(`function ${name}(`), icons.indexOf("\n}\n", icons.indexOf(`function ${name}(`)));
+  // Named off AGENT_IDS, so a harness added with no mark of its own fails here rather than going unchecked.
+  const glyphOf = (id: string): string => `${id.charAt(0).toUpperCase()}${id.slice(1)}Glyph`;
+  const marks = AGENT_IDS.map((id) => {
+    const name = glyphOf(id);
+    const at = icons.indexOf(`function ${name}(`);
+    const body = at === -1 ? "" : icons.slice(at, icons.indexOf("\n}\n", at));
     return /<Mark size=\{size\}>/.test(body) && /<path\b/.test(body);
   });
-  check("each shipped harness is its vendor's mark, filled, rather than a stroke of ours (Q3.680)", marks, [true, true, true, true, true]);
+  check("each shipped harness is its vendor's mark, filled, rather than a stroke of ours (Q3.680)", marks, AGENT_IDS.map(() => true));
   check(
     "in one colour, the text's: currentColor and no fixed fill or stroke",
     [/fill="currentColor"/.test(icons), /(?:fill|stroke)="#/.test(icons)],

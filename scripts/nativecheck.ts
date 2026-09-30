@@ -566,6 +566,13 @@ check("and every command lives in commands.rs", strayCommands, []);
     /\baccount: Option<String>/.test(paramsOf("host_account_switch")),
     true,
   );
+  // A raw body rides only ipc://, which Android never uses and a page abandons for good after one failed call (Q3.690).
+  check(
+    "no command reads a raw IPC body, which only one of Tauri's two channels carries",
+    declared.filter((name) => /InvokeBody::Raw/.test(bodyOf(name))),
+    [],
+  );
+  check("and a save takes its file as named JSON arguments", /filename: String,\s*data: String/.test(paramsOf("host_save_file")), true);
   check(
     "only the boot and a confirm read a sign-in out of the keyring",
     // `credential::read` as a name rather than a call: `host_boot` passes it as a function.
@@ -2621,7 +2628,8 @@ check(
   const pruning = staged.split(",").map((name) => name.trim().replace(/^"|"$/g, "")).filter(Boolean).sort();
   const agentsTs = read("src/acp/agents.ts");
   const login = /export const AGENT_LOGIN[\s\S]*?\n\};/.exec(agentsTs)?.[0] ?? "";
-  const commands = [...login.matchAll(/^    command: "([a-z]+)",$/gm)].map((m) => m[1]).sort();
+  // A hyphen is part of a command: cursor's is cursor-agent, and [a-z]+ matched nothing on its line.
+  const commands = [...login.matchAll(/^    command: "([a-z][a-z-]*)",$/gm)].map((m) => m[1]).sort();
   check("both lists were found", pruning.length > 0 && commands.length > 0, true);
   check("and the payload prunes exactly the CLIs this daemon drives", pruning, commands);
   // `.bin` stays first on the daemon's PATH so the adapters and runtime resolve with no profile.

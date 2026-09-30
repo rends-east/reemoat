@@ -249,5 +249,6 @@ export function stubAgentConfig(agent: AgentId): AgentLaunchConfig {
     args: [],
     env: {},
     authHint: "",
+    inSessionCwd: false,
   };
 }

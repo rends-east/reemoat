@@ -46,9 +46,14 @@ listener at all. Hand-written Streamable HTTP, JSON answers only, no SDK (zod).
   adapter's own model settings — and each tool carries `anthropic/alwaysLoad`, or
   claude defers it behind its tool search and reaches for its own first. Its
   `SendMessage` stays: it is how claude continues its own subagents (Q2.242).
-- `REEMOAT_PEER_MESSAGES=off` injects nothing, refuses every send, takes no notice and
-  pumps no outbox: what was held before the switch stays in `peer_outbox`, unsent.
-  No switch below can lift it.
+- `REEMOAT_PEER_MESSAGES=off` injects no messaging tools, refuses every send, takes no
+  notice and pumps no outbox: what was held before the switch stays in `peer_outbox`,
+  unsent. No switch below can lift it.
+- ⚠ **The same server carries one tool that is not messaging**: `ask_question`, for the
+  harnesses in `QUESTION_TOOL_HARNESSES`, whose model gets no question tool over ACP.
+  So the endpoint always listens, a cursor session is injected the server with
+  messaging off (holding that tool alone), and `callTool` answers it *before*
+  `callRefusal`. `tools/list` and the instructions are per caller. Q2.250.
 
 ## One verb, and every message is acted on (Q2.243)
 

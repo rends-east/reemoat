@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { DAEMON_VERSION } from "../version.js";
-import { PEER_SERVER_NAME, type PeerHub, type PeerListing, type SendResult } from "./hub.js";
+import type { PeerHub, PeerListing, SendResult } from "./hub.js";
+import { ASK_INSTRUCTIONS, ASK_RESULT, ASK_TOOL, ASK_TOOL_NAME, type PoseResult } from "./ask.js";
+import { PEER_SERVER_NAME } from "./envelope.js";
 
 export const PEER_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 256 * 1024;
@@ -27,7 +29,7 @@ const TOOLS = [
     name: "list_agents",
     description:
       "List the other agent sessions Reemoat runs that you can message, on this machine and on its owner's other machines. They are separate sessions, " +
-      "often other harnesses (claude, codex, kimi, opencode, grok), not your own subagents. Each row starts with the address to pass as `to`.",
+      "often other harnesses (claude, codex, kimi, opencode, grok, cursor), not your own subagents. Each row starts with the address to pass as `to`.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     _meta: ALWAYS_LOAD,
@@ -148,7 +150,9 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
           protocolVersion: typeof asked === "string" && PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: PEER_SERVER_NAME, version: DAEMON_VERSION },
-          instructions: INSTRUCTIONS,
+          instructions: [hub.listsMessaging(caller) ? INSTRUCTIONS : null, hub.listsQuestions(caller) ? ASK_INSTRUCTIONS : null]
+            .filter((part): part is string => part !== null)
+            .join(" "),
         },
       });
       return;
@@ -157,7 +161,9 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
       reply(res, id, { result: {} });
       return;
     case "tools/list":
-      reply(res, id, { result: { tools: TOOLS } });
+      reply(res, id, {
+        result: { tools: [...(hub.listsMessaging(caller) ? TOOLS : []), ...(hub.listsQuestions(caller) ? [ASK_TOOL] : [])] },
+      });
       return;
     case "tools/call":
       reply(res, id, { result: await callTool(hub, caller, params) });
@@ -169,10 +175,12 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
 }
 
 async function callTool(hub: PeerHub, caller: string, params: Record<string, unknown>): Promise<unknown> {
+  const args = isRecord(params["arguments"]) ? params["arguments"] : {};
+  // Before the messaging refusal: a question is not a message, and no messaging switch withdraws it (Q2.250).
+  if (params["name"] === ASK_TOOL_NAME) return poseResult(hub.pose(caller, args));
   // An agent launched before a switch went off still holds the tools; every call is refused in words (Q2.244).
   const refusal = hub.callRefusal(caller);
   if (refusal !== null) return toolError(refusal, { code: "messaging_off" });
-  const args = isRecord(params["arguments"]) ? params["arguments"] : {};
   switch (params["name"]) {
     case "list_agents":
       return listResult(await hub.list(caller));
@@ -238,6 +246,11 @@ function sendResult(result: SendResult): unknown {
     content: [{ type: "text", text }],
     structuredContent: { id: result.id, status: result.delivery, position: result.position, to: result.to },
   };
+}
+
+function poseResult(result: PoseResult): unknown {
+  if (!result.ok) return toolError(result.message);
+  return { content: [{ type: "text", text: ASK_RESULT }], structuredContent: { status: "shown" } };
 }
 
 function toolError(message: string, structured: Record<string, unknown> = {}): unknown {

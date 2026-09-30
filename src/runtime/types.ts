@@ -87,8 +87,8 @@ export interface SessionRuntime {
 
   forgetStartRefusal(agent?: AgentId): void;
 
-  /** extra is daemon-table routing, never a secret; routed omits the harness's own credentials. */
-  launch(agent: AgentId, extra?: NodeJS.ProcessEnv, routed?: boolean): Promise<AgentProcess>;
+  /** extra is daemon-table routing, never a secret; routed omits the harness's own credentials; cwd is used only where the harness asks for it. */
+  launch(agent: AgentId, extra?: NodeJS.ProcessEnv, routed?: boolean, cwd?: string): Promise<AgentProcess>;
 
   /** Null when no key is present: an id selects API-key auth and breaks a CLI login (Q6.110). */
   authMethod(agent: AgentId, routed?: boolean): string | null;

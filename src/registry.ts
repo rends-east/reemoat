@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
-import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
+import { AgentUnavailableError, QUESTION_TOOL_HARNESSES, type AgentId } from "./acp/agents.js";
 import {
   isTerminalAsyncTaskState,
   keptOnDisk,
@@ -9,6 +9,7 @@ import {
   type AsyncTaskUsage,
   type BackgroundTask,
 } from "./acp/asynctasks.js";
+import { modelScopesControls, questionElicitation } from "./acp/cursor.js";
 import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "./acp/systems.js";
 import { resolveCwd } from "./browse.js";
 import {
@@ -25,6 +26,7 @@ import {
   type AgentConfig,
   type AgentStateMemory,
   type AgentConfigOption,
+  type OpenQuestionRow,
   type AgentHandle,
   type AgentModes,
   type PeerOrigin,
@@ -51,12 +53,17 @@ import { isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, normalizeNickname, 
 import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
 import type { SessionRuntime } from "./runtime/types.js";
+import { answerText, ASK_TOOL_NAME, parseAskArguments, type PosedQuestion, type PoseResult } from "./peers/ask.js";
 import {
+  clipElicitationMessage,
+  ElicitationRefusedError,
   isAuthRequiredMessage,
   isSessionClosed,
+  MAX_ELICITATION_MESSAGE_CHARS,
   ResumeUnsupportedError,
   Session,
   SessionForgottenError,
+  toElicitationForm,
   type PendingElicitation,
   type PendingPermission,
   type SessionOptions,
@@ -811,6 +818,8 @@ interface PendingElicitationRecord {
   info: PendingElicitationSnapshot;
   form: ElicitationForm;
   resolve: (response: acp.CreateElicitationResponse) => void;
+  /** Set for an ask_question: no request waits on it, and resolve delivers the answer as a message (Q2.250). */
+  posed?: PosedQuestion;
 }
 
 interface ElicitationResolutionRecord {
@@ -846,6 +855,7 @@ export interface ManagedSessionInit {
   agentState?: AgentStateMemory | null;
   /** null means nobody chose and follows REEMOAT_CLAUDE_ULTRACODE; false outranks it. */
   ultracode?: boolean | null;
+  openQuestion?: OpenQuestionRow | null;
 }
 
 export interface ManagedSessionOptions {
@@ -868,6 +878,8 @@ export interface ManagedSessionOptions {
   peerMcpServers?: (sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[];
   /** Told when this conversation's own switch goes off, after its queue is dropped. */
   onPeerMessagesOff?: (sessionId: string) => void;
+  /** Sends an ask_question answer as its person's message; absent, the answer reaches nobody. */
+  deliverAnswer?: (managed: ManagedSession, text: string) => Promise<void>;
 }
 
 export interface UploadsPort {
@@ -916,6 +928,7 @@ export class ManagedSession {
     | ((sessionId: string, capabilities: acp.McpCapabilities) => acp.McpServer[])
     | null;
   private readonly onPeerMessagesOff: ((sessionId: string) => void) | null;
+  private readonly deliverAnswer: ((managed: ManagedSession, text: string) => Promise<void>) | null;
   private lastEventAt: number | null = null;
   // Only agent events move this: wedged must not be reset by the person's own messages, which move lastEventAt.
   private lastAgentEventAt: number | null = null;
@@ -1042,6 +1055,7 @@ export class ManagedSession {
     this.elicitationAllowed = options.elicitationAllowed ?? (() => true);
     this.peerMcpServers = options.peerMcpServers ?? null;
     this.onPeerMessagesOff = options.onPeerMessagesOff ?? null;
+    this.deliverAnswer = options.deliverAnswer ?? null;
 
     const init = options.restore ?? {};
     this.createdAt = init.createdAt ?? Date.now();
@@ -1071,6 +1085,8 @@ export class ManagedSession {
     }
     this.ultracodeChoice = init.ultracode ?? null;
     this.ultracodeDefault = options.ultracodeDefault ?? (() => false);
+    // After askSeq and askSalt, so the restored id is one answerElicitation still recognises; not logged again.
+    if (init.openQuestion != null) this.restorePosed(init.openQuestion);
 
     // Write the row before anything can be appended to it: start does not touch before its long await.
     this.touchSafe();
@@ -1118,6 +1134,7 @@ export class ManagedSession {
             ? row.agentState
             : null,
         ultracode: row.ultracode,
+        openQuestion: row.openQuestion ?? null,
       },
     });
   }
@@ -1795,12 +1812,20 @@ export class ManagedSession {
       if (option.kind === "select" && (typeof value !== "string" || !option.choices.some((c) => c.value === value))) {
         return { kind: "invalid_value", option };
       }
-      return this.recordDeferredConfig({
+      const chosen = this.agentConfigState.options.map((candidate) =>
+        candidate.id === configId ? { ...candidate, value } : candidate,
+      );
+      if (option.category !== "model" || !modelScopesControls(this.agent)) {
+        return this.recordDeferredConfig({ modes: this.agentConfigState.modes, options: chosen });
+      }
+      // The rest were the old model's, or the wake would replay them onto the new one; only a live agent can say the new one's.
+      this.recordDeferredConfig({
         modes: this.agentConfigState.modes,
-        options: this.agentConfigState.options.map((candidate) =>
-          candidate.id === configId ? { ...candidate, value } : candidate,
-        ),
+        options: chosen.filter((candidate) => candidate.id === configId || candidate.category === "mode"),
       });
+      // Parked only: a stopped, crashed or signed-out agent is not started by a tap (Q2.249).
+      if (this.exitRecord?.reason === "parked") await this.resume();
+      return { kind: "ok", config: this.snapshot().agentConfig };
     }
     if (this.terminal || this.stopRequested) return { kind: "terminal", status: this.status };
     if (!this.session) return { kind: "not_ready", status: this.status };
@@ -1998,7 +2023,8 @@ export class ManagedSession {
 
     // Before dispose, not after: a permission parked here keeps the turn alive,
     // which burns the whole cancel grace and pushes teardown onto the kill path.
-    this.sweepPending("session_stopped");
+    // An ask_question outlives every stop its answer could revive, bar the person's own (Q2.250).
+    this.sweepPending("session_stopped", reason !== "stopped" && revivableByPrompt(reason, this.agentSessionId));
 
     // A dropped queue must say so: each message is already a prompt event with no turn after it (Q2.218).
     // Not for the daemon's own stops, which bring the agent and the queue back.
@@ -2700,12 +2726,13 @@ export class ManagedSession {
     return { outcome, optionId, seq };
   }
 
-  /** Both maps. Only a stop and a cancel sweep: a turn ending is not an answer (Q2.232). */
-  private sweepPending(by: AnswerResolvedBy): void {
+  /** Both maps. Only a stop and a cancel sweep: a turn ending is not an answer (Q2.232). keepPosed spares an ask_question (Q2.250). */
+  private sweepPending(by: AnswerResolvedBy, keepPosed = false): void {
     for (const permissionId of [...this.pending.keys()]) {
       this.settle(permissionId, CANCELLED, by);
     }
-    for (const elicitationId of [...this.pendingElicitations.keys()]) {
+    for (const [elicitationId, record] of [...this.pendingElicitations]) {
+      if (keepPosed && record.posed !== undefined) continue;
       this.settleElicitation(elicitationId, ELICITATION_CANCELLED, by);
     }
   }
@@ -2780,6 +2807,78 @@ export class ManagedSession {
     return ELICITATION_CANCELLED;
   }
 
+  /** Whether this session's agent is served ask_question: its harness has no question tool of its own, and questions are on. */
+  get takesPosedQuestions(): boolean {
+    return QUESTION_TOOL_HARNESSES.includes(this.agent) && this.elicitationAllowed();
+  }
+
+  /** ask_question's card: an elicitation no request waits on, answered by a message rather than a reply (Q2.250). */
+  poseQuestion(posed: PosedQuestion): PoseResult {
+    if (!this.takesPosedQuestions) return { ok: false, message: "questions to the user are switched off on this machine" };
+    if (this.terminal || this.stopRequested) return { ok: false, message: "this session is not running" };
+    // One at a time: a second card would stack answers the agent cannot tell apart.
+    if (this.openQuestionRow() !== null) return { ok: false, message: "your previous question is still waiting for an answer" };
+    const built = posedForm(posed);
+    if (typeof built === "string") return { ok: false, message: built };
+    const elicitationId = this.mintElicitationId();
+    this.openPosed(elicitationId, posed, built, Date.now());
+    this.safeAppend({ type: "elicitation_request", elicitationId, toolCallId: null, message: built.message });
+    this.touchSafe();
+    return { ok: true };
+  }
+
+  private restorePosed(row: OpenQuestionRow): void {
+    // Re-read as a fresh call would be: a row this build cannot draw is dropped rather than half-shown.
+    const posed = parseAskArguments({ title: row.title ?? undefined, questions: row.questions });
+    if (typeof posed === "string") return;
+    const built = posedForm(posed);
+    if (typeof built === "string") return;
+    this.openPosed(row.elicitationId, posed, built, row.raisedAt);
+  }
+
+  private openPosed(
+    elicitationId: string,
+    posed: PosedQuestion,
+    built: { form: ElicitationForm; message: string },
+    raisedAt: number,
+  ): void {
+    this.pendingElicitations.set(elicitationId, {
+      info: { elicitationId, toolCallId: null, message: built.message, fieldCount: built.form.fields.length, raisedAt },
+      form: built.form,
+      posed,
+      resolve: (response) => this.sendPosedAnswer(posed, response),
+    });
+  }
+
+  private sendPosedAnswer(posed: PosedQuestion, response: acp.CreateElicitationResponse): void {
+    const text = answerText(posed, response);
+    if (text === null || this.deliverAnswer === null) return;
+    void this.deliverAnswer(this, text).catch((error: unknown) => this.noteAnswerUndelivered(describeError(error)));
+  }
+
+  /** The card was answered and the agent never got it, so the person is told to say it again. */
+  noteAnswerUndelivered(why: string): void {
+    this.safeAppend({
+      type: "error",
+      message: `your answer to the agent's question was not delivered (${why}); send it as a message`,
+      data: null,
+    });
+    this.touchSafe();
+  }
+
+  private openQuestionRow(): OpenQuestionRow | null {
+    for (const record of this.pendingElicitations.values()) {
+      if (record.posed === undefined) continue;
+      return {
+        elicitationId: record.info.elicitationId,
+        title: record.posed.title,
+        questions: record.posed.questions,
+        raisedAt: record.info.raisedAt,
+      };
+    }
+    return null;
+  }
+
   /** The form a client is being asked to fill in, or `null` once it is settled. */
   elicitationForm(elicitationId: string): ElicitationForm | null {
     return this.pendingElicitations.get(elicitationId)?.form ?? null;
@@ -2818,7 +2917,8 @@ export class ManagedSession {
       elicitationId,
       action: settled.action,
       seq: settled.seq,
-      delivered: this.session !== null && !this.terminal ? "sent" : "agent_gone",
+      // A posed question's answer is a message, which wakes an ended session like any other.
+      delivered: record.posed !== undefined || (this.session !== null && !this.terminal) ? "sent" : "agent_gone",
     };
   }
 
@@ -2955,7 +3055,22 @@ export class ManagedSession {
         revivableByPrompt(snapshot.exit.reason, snapshot.agentSessionId)
           ? reduceAgentState(this.agentConfigState, this.agentCommandsState, this.backgroundTasksState)
           : null,
+      openQuestion: this.openQuestionRow(),
     };
+  }
+}
+
+/** cursor's question builder and the card's own form reader, so a posed question is refused where cursor's would be. */
+function posedForm(posed: PosedQuestion): { form: ElicitationForm; message: string } | string {
+  if (posed.questions.some((one) => one.prompt.length > MAX_ELICITATION_MESSAGE_CHARS)) {
+    return `a question may be at most ${MAX_ELICITATION_MESSAGE_CHARS} characters`;
+  }
+  const request = questionElicitation({ toolCallId: ASK_TOOL_NAME, ...posed }, "");
+  try {
+    return { form: toElicitationForm(request.requestedSchema), message: clipElicitationMessage(request.message) };
+  } catch (error) {
+    if (error instanceof ElicitationRefusedError) return error.message;
+    throw error;
   }
 }
 
@@ -3318,6 +3433,33 @@ export class SessionRegistry {
     return 0;
   }
 
+  /** An ask_question answer, sent as its person's message: it wakes the session as one would, and queues behind a turn (Q2.250). */
+  private async deliverAnswer(managed: ManagedSession, text: string): Promise<void> {
+    const ready = await this.readyForMessage(managed, "person");
+    if (ready !== "ready") {
+      managed.noteAnswerUndelivered(ready === "workspace_missing" ? "its folder is gone" : "its folder is not answering");
+      return;
+    }
+    const first = managed.prompt(text, [], null);
+    const result = first.kind === "turn_in_flight" ? await managed.sendMidTurn(text, [], null) : first;
+    switch (result.kind) {
+      case "accepted":
+      case "steered":
+      case "queued":
+        return;
+      case "queue_full":
+        managed.noteAnswerUndelivered(`${result.limit} messages are already waiting`);
+        return;
+      case "busy":
+        managed.noteAnswerUndelivered("the session was being cleared or restarted");
+        return;
+      case "not_ready":
+      case "terminal":
+        managed.noteAnswerUndelivered("the agent is not running");
+        return;
+    }
+  }
+
   /** Everything a message waits for before it is sent, in the prompt route's order; the route, the plugin API and the hub all call it. */
   async readyForMessage(
     managed: ManagedSession,
@@ -3500,6 +3642,7 @@ export class SessionRegistry {
       onWarning: this.onWarning,
       peerMcpServers: (sessionId, capabilities) => this.peerMcpServersBy?.(sessionId, capabilities) ?? [],
       onPeerMessagesOff: (sessionId) => this.peerMessagesOffBy?.(sessionId),
+      deliverAnswer: (managed, text) => this.deliverAnswer(managed, text),
     });
     this.sessions.set(id, managed);
     // Before start, so an attach from zero sees the workspace before the agent's output.
@@ -3539,6 +3682,7 @@ export class SessionRegistry {
         onWarning: this.onWarning,
         peerMcpServers: (sessionId, capabilities) => this.peerMcpServersBy?.(sessionId, capabilities) ?? [],
         onPeerMessagesOff: (sessionId) => this.peerMessagesOffBy?.(sessionId),
+        deliverAnswer: (managed, text) => this.deliverAnswer(managed, text),
       });
       this.sessions.set(row.id, managed);
       // Every restored row is announced, with no origin: a restart is nobody's act.

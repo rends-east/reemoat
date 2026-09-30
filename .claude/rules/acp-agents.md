@@ -238,13 +238,14 @@ handed the tool. Q2.28.
 
 ## Sending into a turn that is already running
 
-**`_session/steering` is an ACP extension two of the four serve, and it is read
+**`_session/steering` is an ACP extension two of the six serve, and it is read
 from `initialize`'s top-level `_meta` — a sibling of `agentCapabilities`, not a
 member of it.** Measured 2026-09-11 on the installed binaries: claude-agent-acp
 0.73.0 and codex-acp 1.8.0 both send `_meta.steering.supported: true`; kimi 0.29.2
-sends no `_meta` at all and declares no `_session/*` method; opencode is
-unmeasured. ⚠ claude also sends `agentCapabilities._meta.claudeCode.promptQueueing`
-one key away, so reading the wrong bag is silent.
+sends no `_meta` at all and declares no `_session/*` method, nor does cursor
+2026.09.28; opencode is unmeasured. ⚠ claude also sends
+`agentCapabilities._meta.claudeCode.promptQueueing` one key away, so reading the
+wrong bag is silent.
 
 **Injected, the original `session/prompt` resolves exactly once.** Driving a real
 turn and steering into it: `{outcome: "injected"}` in single-digit milliseconds on
@@ -447,6 +448,9 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   OpenCode Zen models; with an `OPENROUTER_API_KEY` in its environment, 362, of
   which 356 are `openrouter/…`. A *bogus* key is enough, because the catalogue is
   enumerated before it is authenticated. Q6.105.
+- **cursor is `acp-extensions.md`'s**: five requests of its own, subagents on their
+  own session ids, `session/load` for a resume (Q2.248), a process cwd it reads its
+  rules from, and a model pin written to the person's config (Q6.115).
 - **`/undo` and `/redo` are unsupported over opencode's ACP**, by its own
   documentation, while working in its terminal. Nothing here drives them.
 - **`claude-agent-acp` never consults PATH for its `claude`.** `claudeCliPath()` is
@@ -460,15 +464,8 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   `resolveAgent`, never by the adapter throwing.** `cliFor` asks the override, then
   PATH, then `MANAGED_CLI_DIRS`, and `describe()` fails with a sentence naming
   `deploy/agents.sh` (and `--source npm`, and the variable) — so `GET /agents`
-  draws it unavailable rather than a session dying at spawn. History, and why the
-  vendored copy went: it was exactly as old as the pin. Measured 2026-09-03, adapter
-  0.63.0 vendored **2.1.220** (built 2026-07-24), which publishes
-  `claude-fable-5[1m]` "Fable 5", while the *same* adapter pointed at a 2.1.259
-  publishes `claude-fable-5-1[1m]` "Fable 5.1". The SDK does not verify the CLI it
-  drives — it announces itself into its environment as `CLAUDE_AGENT_SDK_VERSION`,
-  so the compatibility burden runs SDK → CLI and a newer CLI under an older adapter
-  is the forgiving direction. Driven, not reasoned: every other control came back
-  identical, choice for choice (`mode`, `effort` including `xhigh`, `fast`).
+  draws it unavailable rather than a session dying at spawn. Why no copy is
+  vendored at all is Q4.114.
   `CODEX_PATH` is the same variable one adapter over — `codex-acp`'s
   `startAcpServer()` has the same two branches, and `@openai/codex`'s platform
   builds are excluded the same way; both are documented in `.env.example` and

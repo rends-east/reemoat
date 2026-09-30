@@ -97,7 +97,7 @@ is the app.
 
 | | |
 |---|---|
-| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the five this repository ships plus any a plugin added and has not been switched off. `installable` says which of the absent ones this daemon can fetch |
+| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the six this repository ships plus any a plugin added and has not been switched off. `installable` says which of the absent ones this daemon can fetch |
 | `GET /agent-auth` | Where each agent's credentials go |
 | `PUT /agent-auth/:agent` · `DELETE /agent-auth/:agent` | Set or clear a pasted credential |
 | `POST /agent-auth/:agent/login` | Start a device-code login on a pty |

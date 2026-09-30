@@ -22,6 +22,22 @@ import {
 } from "./acp/asynctasks.js";
 import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import {
+  mergeTodos,
+  planPermission as cursorPlanPermission,
+  planResponse as cursorPlanResponse,
+  questionElicitation as cursorQuestionElicitation,
+  questionResponse as cursorQuestionResponse,
+  readMcpToolCall,
+  todosAsPlan,
+  type CursorImageRequest,
+  type CursorPlanRequest,
+  type CursorPlanResponse,
+  type CursorQuestionRequest,
+  type CursorQuestionResponse,
+  type CursorTodo,
+  type CursorTodosRequest,
+} from "./acp/cursor.js";
+import {
   mcpElicitResponse,
   mcpElicitation,
   planPermission,
@@ -35,7 +51,9 @@ import {
   type XaiQuestionRequest,
   type XaiQuestionResponse,
 } from "./acp/xai.js";
-import { sessionMetaFor } from "./acp/agents.js";
+import { QUESTION_TOOL_HARNESSES, sessionMetaFor } from "./acp/agents.js";
+import { ASK_TOOL_NAME } from "./peers/ask.js";
+import { PEER_SERVER_NAME } from "./peers/envelope.js";
 import type { AgentRouting } from "./acp/systems.js";
 import {
   BUILTIN_CATALOGUE,
@@ -115,7 +133,7 @@ const MAX_ELICITATION_FORM_BYTES = 32 * 1024;
 const MAX_ELICITATION_VALUE_CHARS = 512;
 
 // `message` is outside the form's byte backstop, so it is clipped here or one preamble stalls the stream.
-const MAX_ELICITATION_MESSAGE_CHARS = 4 * 1024;
+export const MAX_ELICITATION_MESSAGE_CHARS = 4 * 1024;
 const MAX_BUFFERED_EVENTS = 2_000;
 const MAX_TOOL_OUTPUT_BYTES = 32 * 1024;
 
@@ -127,6 +145,10 @@ const MAX_PERMISSION_OPTION_ID_CHARS = 256;
 const MAX_PERMISSION_SNAPSHOT_BYTES = 8 * 1024;
 
 const MAX_TOOL_LOCATIONS = 64;
+
+/** Subagent calls remembered for the todo guard; cursor names the call its update is about just after completing it. */
+const MAX_DELEGATED_CALLS = 512;
+const MAX_POSED_CALLS = 64;
 const MAX_TOOL_LOCATION_CHARS = 1_024;
 
 export interface PendingPermission {
@@ -203,7 +225,7 @@ export class SystemRoutingError extends Error {
 export class ResumeUnsupportedError extends Error {
   constructor(displayName: string) {
     super(
-      `${displayName} does not support session/resume. The session's transcript is intact, ` +
+      `${displayName} supports neither session/resume nor session/load. The session's transcript is intact, ` +
         "but this agent cannot be reattached to it.",
     );
     this.name = "ResumeUnsupportedError";
@@ -236,6 +258,12 @@ export class Session {
   private readonly unpromptedListeners = new Set<(since: number | null) => void>();
   // grok's requests in flight, by the call id its interaction_resolved names (Q6.113).
   private readonly xaiInFlight = new Map<string, AbortController>();
+  /** cursor's list as its last update left it: a merge names only what changed. In memory, so a new agent starts it empty. */
+  private cursorTodos: CursorTodo[] = [];
+  /** Calls a subagent made, whose todo list is its own and must not replace this session's (Q6.6). */
+  private readonly delegatedCalls = new Set<string>();
+  /** Calls to this daemon's own ask_question: the card behind one is the consent its permission would ask for (Q2.250). */
+  private readonly posedCalls = new Set<string>();
 
   private cwd = "";
 
@@ -281,6 +309,8 @@ export class Session {
     this.announceAsyncTasks();
     // The old conversation's cycle end is unroutable now too.
     this.setUnprompted(null);
+    // A merge in the new conversation must not land on the old one's list.
+    this.cursorTodos = [];
 
     const wanted = this.config;
     this.config = {
@@ -429,7 +459,7 @@ export class Session {
     );
     const client = await AcpClient.launch(
       config,
-      await runtime.launch(options.agent, spawnEnvOf(options), pairing),
+      await runtime.launch(options.agent, spawnEnvOf(options), pairing, options.cwd),
       {
         fileIo: runtime.clientFileIo,
         elicitation: options.elicitations != null,
@@ -481,7 +511,7 @@ export class Session {
     return session;
   }
 
-  /** Uses session/resume, never session/load, which would replay history already in the log. */
+  /** session/resume where the agent has it; else session/load, whose replay reaches no registered session (Q2.248). */
   static async resume(options: ResumeOptions): Promise<Session> {
     const runtime = options.runtime ?? new LocalRuntime();
     try {
@@ -507,7 +537,7 @@ export class Session {
     );
     const client = await AcpClient.launch(
       config,
-      await runtime.launch(options.agent, spawnEnvOf(options), pairing),
+      await runtime.launch(options.agent, spawnEnvOf(options), pairing, options.cwd),
       {
         fileIo,
         elicitation: options.elicitations != null,
@@ -524,28 +554,34 @@ export class Session {
       throw error;
     }
 
-    if (!client.supportsSessionResume()) {
+    const verb = client.supportsSessionResume() ? "resume" : client.supportsSessionLoad() ? "load" : null;
+    if (verb === null) {
       await client.close();
       throw new ResumeUnsupportedError(config.displayName);
     }
 
     const mcpServers = mcpServersOf(options, client);
-    let response: acp.ResumeSessionResponse;
+    const reopen = {
+      sessionId: options.agentSessionId,
+      cwd: options.cwd,
+      mcpServers,
+      ...metaParam(sessionMetaOf(options)),
+    };
+    let response: acp.ResumeSessionResponse | acp.LoadSessionResponse;
     try {
+      // The load replays the whole conversation before it answers, and adopt registers the session only after
+      // the answer, so every replayed frame is dropped by the router as any unregistered id's is (Q2.248).
       response = await withDeadline(
-        client.agent.request(acp.methods.agent.session.resume, {
-          sessionId: options.agentSessionId,
-          cwd: options.cwd,
-          mcpServers,
-          ...metaParam(sessionMetaOf(options)),
-        }),
+        verb === "resume"
+          ? client.agent.request(acp.methods.agent.session.resume, reopen)
+          : client.agent.request(acp.methods.agent.session.load, reopen),
         LAUNCH_SESSION_TIMEOUT_MS,
-        "session/resume",
+        `session/${verb}`,
       );
     } catch (error) {
       await client.close();
       if (isAuthRequired(error)) {
-        const message = `${config.displayName} rejected session/resume: authentication required.\n${config.authHint}`;
+        const message = `${config.displayName} rejected session/${verb}: authentication required.\n${config.authHint}`;
         runtime.noteStartRefusal(options.agent, message, routed);
         throw new Error(message);
       }
@@ -1059,6 +1095,7 @@ export class Session {
   private handlers(): SessionHandlers {
     return {
       onUpdate: (notification) => this.onUpdate(notification),
+      onDelegatedUpdate: (notification, parentToolCallId) => this.onUpdate(notification, parentToolCallId),
       onPermission: (request, signal) => this.onPermission(request, signal),
       onReadTextFile: (request) => this.onReadTextFile(request),
       onWriteTextFile: (request) => this.onWriteTextFile(request),
@@ -1067,7 +1104,89 @@ export class Session {
       onXaiPlan: (request, signal) => this.onXaiPlan(request, signal),
       onXaiMcpElicit: (request, signal) => this.onXaiMcpElicit(request, signal),
       onXaiInteractionResolved: (toolCallId) => this.xaiInFlight.get(toolCallId)?.abort(),
+      onCursorQuestion: (request, signal) => this.onCursorQuestion(request, signal),
+      onCursorPlan: (request, signal) => this.onCursorPlan(request, signal),
+      onCursorTodos: (request) => this.onCursorTodos(request),
+      onCursorImage: (request) => this.onCursorImage(request),
     };
+  }
+
+  /** Through the doors every agent's requests use, as grok's do (Q6.117); cursor withdraws nothing, so the SDK's signal is all. */
+  private async onCursorQuestion(request: CursorQuestionRequest, signal: AbortSignal): Promise<CursorQuestionResponse> {
+    if (request.questions.some((one) => one.prompt.length > MAX_ELICITATION_MESSAGE_CHARS)) {
+      throw acp.RequestError.invalidParams(
+        {},
+        `this client draws a question of at most ${MAX_ELICITATION_MESSAGE_CHARS} characters`,
+      );
+    }
+    const answer = await this.onElicitation(cursorQuestionElicitation(request, this.sessionId), signal);
+    return cursorQuestionResponse(answer, request.questions);
+  }
+
+  private async onCursorPlan(request: CursorPlanRequest, signal: AbortSignal): Promise<CursorPlanResponse> {
+    // Written onto the call as grok's is: cursor may open the card with no arguments, and the snapshot clamps at 8 KiB.
+    this.flushToolDraft();
+    this.queue.push({
+      type: "tool_call_update",
+      toolCallId: boundToolCallId(request.toolCallId),
+      title: null,
+      status: null,
+      locations: [],
+      rawInput: { plan: request.plan },
+      content: null,
+      images: null,
+      parentToolCallId: null,
+      backgrounded: false,
+    });
+    const answer = await this.onPermission(cursorPlanPermission(request, this.sessionId), signal);
+    return cursorPlanResponse(answer);
+  }
+
+  /** Read off the update, never the permission: cursor names the MCP server and tool only in the rawInput it puts there first. */
+  private notePosedCall(toolCallId: string, rawInput: unknown): void {
+    if (!QUESTION_TOOL_HARNESSES.includes(this.agent)) return;
+    const call = readMcpToolCall(rawInput);
+    if (call === null || call.server !== PEER_SERVER_NAME || call.tool !== ASK_TOOL_NAME) return;
+    this.posedCalls.add(boundToolCallId(toolCallId));
+    if (this.posedCalls.size > MAX_POSED_CALLS) {
+      const oldest = this.posedCalls.values().next().value;
+      if (oldest !== undefined) this.posedCalls.delete(oldest);
+    }
+  }
+
+  private noteDelegatedCall(toolCallId: string): void {
+    this.delegatedCalls.add(boundToolCallId(toolCallId));
+    // Only the newest matter: a todo update arrives on the call that just completed.
+    if (this.delegatedCalls.size > MAX_DELEGATED_CALLS) {
+      const oldest = this.delegatedCalls.values().next().value;
+      if (oldest !== undefined) this.delegatedCalls.delete(oldest);
+    }
+  }
+
+  private onCursorTodos(request: CursorTodosRequest): void {
+    if (this.delegatedCalls.has(boundToolCallId(request.toolCallId))) return;
+    this.cursorTodos = mergeTodos(this.cursorTodos, request);
+    this.flushToolDraft();
+    this.noteAgentWork();
+    this.queue.push({ type: "plan", entries: todosAsPlan(this.cursorTodos) });
+  }
+
+  /** The path is the only thing cursor says about a generated image, and the card otherwise ends with nothing under it. */
+  private onCursorImage(request: CursorImageRequest): void {
+    if (request.filePath === null) return;
+    this.flushToolDraft();
+    this.queue.push({
+      type: "tool_call_update",
+      toolCallId: boundToolCallId(request.toolCallId),
+      title: null,
+      status: null,
+      locations: toLocations([{ path: request.filePath }]),
+      rawInput: null,
+      content: null,
+      images: null,
+      parentToolCallId: null,
+      backgrounded: false,
+    });
   }
 
   /** grok's three requests go through the two doors every agent's do, so parking, the log and the card are theirs (Q2.235). */
@@ -1198,8 +1317,11 @@ export class Session {
     return true;
   }
 
-  private onUpdate(notification: acp.SessionNotification): void {
+  /** delegatedBy is set for a frame a subagent sent on its own session id; the edge is the router's, not the frame's. */
+  private onUpdate(notification: acp.SessionNotification, delegatedBy: string | null = null): void {
     const update = notification.update;
+    // What a subagent did survives and what it said does not, as with claude's (Q6.4); its state is not this session's.
+    if (delegatedBy !== null && update.sessionUpdate !== "tool_call" && update.sessionUpdate !== "tool_call_update") return;
     // Any other update ends the run, so the held block cannot land after a later event.
     if (update.sessionUpdate !== "tool_call_update") this.flushToolDraft();
     // Before the switch: these extension updates are not in the SDK's union.
@@ -1225,7 +1347,12 @@ export class Session {
       case "tool_call": {
         // toolCallLineage reads the raw id for its self-parent test.
         const toolCallId = boundToolCallId(update.toolCallId);
-        const lineage = toolCallLineage(update);
+        const lineage =
+          delegatedBy === null
+            ? toolCallLineage(update)
+            : { parentToolCallId: delegatedBy === update.toolCallId ? null : delegatedBy, subagent: false };
+        if (delegatedBy !== null) this.noteDelegatedCall(update.toolCallId);
+        else this.notePosedCall(update.toolCallId, update.rawInput);
         // A subagent's steps are a delegation the foot already counts, not the agent's own cycle.
         if (lineage.parentToolCallId === null) this.noteAgentWork();
         this.queue.push({
@@ -1248,6 +1375,7 @@ export class Session {
         const content =
           toolOutput(update.content, this.keepImage, images) ?? rawToolOutput(update.rawOutput);
         const toolCallId = boundToolCallId(update.toolCallId);
+        if (delegatedBy === null) this.notePosedCall(update.toolCallId, update.rawInput);
         const event: Extract<SessionEvent, { type: "tool_call_update" }> = {
           type: "tool_call_update",
           toolCallId,
@@ -1258,7 +1386,10 @@ export class Session {
           content,
           images: images.length === 0 ? null : images,
           // Only the edge: claude drops `subagent` on a spawn's completing update.
-          parentToolCallId: toolCallLineage(update).parentToolCallId,
+          parentToolCallId:
+            delegatedBy !== null && delegatedBy !== update.toolCallId
+              ? delegatedBy
+              : toolCallLineage(update).parentToolCallId,
           backgrounded: readBackgroundedMarker(update._meta),
         };
         if (event.parentToolCallId === null) this.noteAgentWork();
@@ -1345,7 +1476,9 @@ export class Session {
       null;
 
     this.noteAgentWork();
-    if (this.permissions && choice) {
+    // Answered here and logged as decided, the path a machine with no resolver takes.
+    const posed = this.posedCalls.has(boundToolCallId(request.toolCall.toolCallId));
+    if (this.permissions && choice && !posed) {
       return this.permissions(
         {
           toolCallId: request.toolCall.toolCallId,

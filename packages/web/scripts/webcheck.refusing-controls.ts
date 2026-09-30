@@ -370,7 +370,7 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
   {
     const icons = readFileSync(new URL("../src/ui/AgentIcons.tsx", import.meta.url), "utf8");
     check(
-      "a harness a plugin added is drawn, and the never arm that makes a fifth built-in loud is still reachable",
+      "a harness a plugin added is drawn, and the never arm that makes a new built-in loud is still reachable",
       [
         /if \(!isBuiltinAgentId\(agent\)\) return <MonogramGlyph agent=\{agent\} size=\{size\} \/>;\s*switch \(agent\) \{/.test(icons),
         /function unglyphed\(agent: never\)/.test(icons),

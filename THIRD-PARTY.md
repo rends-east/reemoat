@@ -88,10 +88,10 @@ is, in `SOURCE_URL`'s shape.
 
 ## Marks drawn in the app
 
-The five harness icons (`packages/web/src/ui/AgentIcons.tsx`) are their vendors'
-marks — Anthropic's Claude, OpenAI's Codex, Moonshot AI's Kimi, opencode's and xAI's
-Grok — and belong to them. They are drawn only to name the program a session runs,
-never as this project's own. The SVG paths are as published in
+The six harness icons (`packages/web/src/ui/AgentIcons.tsx`) are their vendors'
+marks — Anthropic's Claude, OpenAI's Codex, Moonshot AI's Kimi, opencode's, xAI's
+Grok and Anysphere's Cursor — and belong to them. They are drawn only to name the
+program a session runs, never as this project's own. The SVG paths are as published in
 [`@lobehub/icons-static-svg`](https://github.com/lobehub/lobe-icons) 1.95.1, MIT,
 Copyright (c) 2023 LobeHub.
 

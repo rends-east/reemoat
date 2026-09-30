@@ -2,8 +2,8 @@
 // It can drift, so every narrowing fails open, and a field added after the first release is optional.
 
 /** Closed on purpose: AGENT_LABEL and AgentGlyph's exhaustive switch need a fixed list. */
-export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok"];
-export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok";
+export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok", "cursor"];
+export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok" | "cursor";
 
 export type AgentId = string;
 

@@ -388,11 +388,21 @@ export async function copyNative(text: string): Promise<boolean> {
   }
 }
 
-/** Raw bytes, never JSON: 100 MiB as a number array would be ~600 MB of string. */
+/** Base64, never a raw body: that exists only over ipc://, which Android never uses and a page abandons after one failure (Q3.690). */
 export async function saveNative(blob: Blob, filename: string): Promise<boolean> {
-  const bytes = await blob.arrayBuffer();
-  return await invoke<boolean>("host_save_file", bytes, {
-    headers: { "x-reemoat-filename": encodeURIComponent(filename) },
+  return await invoke<boolean>("host_save_file", { filename, data: await base64Of(blob) });
+}
+
+/** The platform's own encoder, where a string built byte by byte would hold the file twice over. */
+function base64Of(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result);
+      resolve(url.slice(url.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("could not read the file"));
+    reader.readAsDataURL(blob);
   });
 }
 

@@ -300,8 +300,8 @@ the sizers are **absent** as well as the cap present, a revert bringing the empt
 box back with them.
 
 **A control never leaves the strip, and the model gate is what breaks that.** All
-**five** agents build the effort list from the **currently selected model's** own
-levels; four publish the control and drop it when there are none, opencode never
+**six** agents build the effort list from the **currently selected model's** own
+levels; five publish the control and drop it when there are none, opencode never
 publishes one — see below. `holdConfig` merges by option id rather
 than replacing; `drawnControls` returns the live set **plus** the slots of anything
 missing, named in `unavailable`; and `Absent` draws that slot from **`chipParts`

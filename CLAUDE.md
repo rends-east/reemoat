@@ -29,8 +29,8 @@ server and run what it just wrote. Multi-user moved to the control plane: severa
 people, each with their own machine and a grant on it. The daemon accepts any
 token whose `aud` is its own machine id and stops asking who the subject is.
 
-It spawns `claude`, `kimi`, `codex`, `opencode` or `grok` over ACP (Agent Client
-Protocol), normalizes all five into one event union, and puts that behind a network layer built on the
+It spawns `claude`, `kimi`, `codex`, `opencode`, `grok` or `cursor` over ACP (Agent
+Client Protocol), normalizes all six into one event union, and puts that behind a network layer built on the
 assumption that **clients are unreliable**: a laptop lid closes, a phone drops to
 LTE, a tab is discarded. The daemon is the source of truth and the agent must
 never notice a client leaving.
@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1096 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1107 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -370,6 +370,15 @@ network** after a `Guardian Review` tool call of codex's own approved it, and no
 permission machinery may not be exercised at all, and "test it with kimi" below is
 the only reliable route — `acp-agents.md` records the shape.
 
+**Cursor asks about less than its cards suggest, and its rules are shared with the
+terminal.** Read off 2026.09.28's own ACP server: an edit inside the workspace never
+asks; a shell command asks unless `~/.cursor/cli-config.json` allowlists it, and
+**Allow always** on its card writes that allowlist — the same file the person's
+terminal `cursor-agent` reads, as is the model a session last chose (the owner's
+call: one config, as cursor keeps it). `-f` is the one flag that would answer every
+request and is never passed. It also reads `CLAUDE.md`, `.claude/skills` and Claude
+Code's `settings.json` hooks in the worktree it runs in. Q6.115.
+
 Three specifics, each a measurement before it was a policy, each of which reads
 as a bug if you find it without this section:
 
@@ -417,12 +426,14 @@ environment, an installer is downloaded whole before running, a build a live
 session may be on is kept, and a failure is a warning rather than a stop. Nothing
 is vendored under it any more (Q4.114): a harness with no CLI is refused with a
 sentence rather than started, and `AgentAvailability.installable` is what puts a
-button under that sentence; `REEMOAT_AGENT_SOURCE=npm`, all five from the npm
-registry into that toolchain, is a firewalled machine's choice, never a fallback,
+button under that sentence; `REEMOAT_AGENT_SOURCE=npm`, every harness with a package
+from the npm registry into that toolchain, is a firewalled machine's choice, never a fallback,
 and decides only how an absent CLI is installed — **two take that door under either
 value**, kimi because its own updater exits 0 having installed nothing without a
 TTY, and grok because its vendor installer edits shell profiles and this script
-edits none (Q4.125); `REEMOAT_AGENT_CHANNEL` is which
+edits none (Q4.125), and cursor takes its vendor's installer under either value,
+having no package — refusing when `~/.local/bin/agent` is somebody else's, since that
+installer replaces it (Q4.129); `REEMOAT_AGENT_CHANNEL` is which
 of claude's release channels the fleet follows, `latest` by default, and unlike the
 source it moves a copy that is already there: re-applied on every refresh (Q4.115).
 `REEMOAT_AGENT_UPDATES=off` (or `0`) switches off both the timer and the button.
@@ -431,9 +442,10 @@ What runs is
 then in the directories the script installs into — so a file an agent drops into
 `~/.local/bin` is the build the daemon runs within ten minutes, as the same uid
 (Q6.106). **Why it exists at all is a measurement, not a preference**: none of the
-five self-updates when a *daemon* drives it, every updater being gated on a
+six self-updates when a *daemon* drives it, every updater being gated on a
 terminal an ACP-spawned agent never has (Q4.113) — grok is the one that *would*,
-in the background, which is why it is spawned with `--no-auto-update`: when a
+in the background, which is why it is spawned with `--no-auto-update`, and cursor
+carries `--disable-auto-update` for the build after the one measured: when a
 build moves on this fleet is `src/agentupdate.ts`'s decision, not the agent's.
 
 **An agent can ask another session's agent to act, and only that agent's own harness
@@ -483,10 +495,10 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `daemon-sessions.md` | `src/registry.ts`, `src/session.ts`, `src/events.ts`, `src/store/` | What a restart brings back and what it does not · the two verbs for stopping · what the agent says after the turn ends · what ends a turn the agent never answers, and the three traps in doing it · the log's invariants |
 | `daemon-bounds.md` | the same globs | Every number the daemon holds and what moves each · what the log is bounded by and what it is not · what a ceiling releases rather than refuses · why this is a file of its own |
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
-| `agent-messaging.md` | `src/peers/`, `packages/web/src/peer.ts`, `ui/PeerMessage.tsx` | How one session's agent reaches another's · why every message is acted on, and what the idle notice stands in for · why delivery is the prompt route's and not a copy · what the envelope may carry · what stops a loop · which ended sessions another agent may wake |
+| `agent-messaging.md` | `src/peers/`, `packages/web/src/peer.ts`, `ui/PeerMessage.tsx` | How one session's agent reaches another's · why every message is acted on, and what the idle notice stands in for · why delivery is the prompt route's and not a copy · what the envelope may carry · what stops a loop · which ended sessions another agent may wake · the one tool on that server that is not messaging |
 | `session-nicknames.md` | `src/nickname.ts`, `src/registry.ts`, `src/peers/hub.ts`, `envelope.ts`, `packages/web/src/nickname.ts`, `mentions.ts`, `mentionLinks.ts`, `ui/MentionMenu.tsx`, `MentionLink.tsx`, `Composer.tsx`, `NewSession.tsx`, `SessionBrowser.tsx` | Why a session has a title and a nickname, and which one leads · what makes a nickname one session's, and why that is a reservation · what the agent gets for a person's `@name`, and why it never waits on a listing · where `@` opens and whose rows it shows · where a drawn `@name` leads, and why it is a button |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
-| `acp-extensions.md` | `src/acp/xai.ts`, `src/acp/client.ts` | The three requests grok sends that ACP has no method for, measured · which door each is routed onto and how each is answered · how grok withdraws one, and why a handler's position decides it · its own question timeout, and the tool withdrawn when questions are off |
+| `acp-extensions.md` | `src/acp/xai.ts`, `src/acp/cursor.ts`, `src/acp/client.ts` | The three requests grok sends that ACP has no method for, measured · which door each is routed onto and how each is answered · how grok withdraws one, and why a handler's position decides it · its own question timeout, and the tool withdrawn when questions are off · cursor's five, which carry no session, and why an error is the wrong answer to each · its subagents' own session ids |
 | `agent-login.md` | `src/agentauth.ts`, `src/runtime/`, `packages/web/src/ui/login.ts` | How a credential reaches the host with no terminal · the pty and the two `script`s · what each CLI's status probe prints and on which stream |
 | `agent-install.md` | `src/agentinstall.ts`, `agentscript.ts`, `transcript.ts`, `packages/web/src/ui/agentInstall.ts`, `settings/AgentsPanel.tsx`, `deploy/agents.sh` | Why nothing puts a CLI on a machine but a press · `installable` against `!available` · why the verdict is a measurement and never an exit status · one run daemon-wide, and the two phases a Stop may not signal into · the two lock layers, and which one is first come, first served |
 | `files-paths-git.md` | `src/changes.ts`, `src/worktree.ts`, `src/uploads.ts`, `src/stall.ts`, `src/paths.ts`, `src/git.ts` | Attachments in, files out · containment, symlinks and the one `rmSync` · why no synchronous filesystem call may touch a path this daemon did not create · how git is parsed |
@@ -581,7 +593,7 @@ declined a registry for and named as the only case that would justify one — an
 binary this repository does not vendor and cannot measure. It arrives as two
 declarative blocks in `plugin.json` rather than as `REEMOAT_AGENTS`, so it is chosen
 by a person, disclosed before it is sent, and switched off with one control;
-`AGENT_IDS` and `SYSTEMS` are still the five and the eight this repository *ships*,
+`AGENT_IDS` and `SYSTEMS` are still the six and the nine this repository *ships*,
 and what a machine *offers* is those merged with what is installed on it. And no plugin draws in the
 transcript or adds a slash command, both with their seams written down rather than
 half-built (Q7.105). **CD stops half-way on purpose**: nothing deploys on a push,
@@ -638,6 +650,21 @@ written down and `AcpClient.launch` is the one call site. Q6.109, Q6.110.
 Everything else — questions, permissions, commands, config, resume, context usage —
 arrived through capabilities already read by `category` and by shape rather than by
 name.
+
+**The sixth cost more than the fifth, and almost none of it was compile errors.**
+`cursor-agent acp` is cursor's own entry point, so again no adapter — but the
+compiler forced four places (`AGENT_LOGIN`, `resolveAgent`, `AgentGlyph`, the
+drivers' tables) and a census found about ninety. What was new: **five requests of
+its own**, none carrying a session, where an error is read as acceptance (Q6.117);
+**subagents on session ids nobody opened**, routed home by the client (Q6.117); **no
+`session/resume`**, so Q5.85's "never `session/load`" became "load where resume is
+missing", safe because the replay precedes the answer (Q2.248); **a process cwd it
+reads its rules from** (`inSessionCwd`); **a `status` that ignores a working key**, so
+the probe is `models` on both streams (Q6.116); **a model pin written to the person's
+config** (Q6.115); **no question tool from cursor's server over ACP**, so the
+`reemoat` MCP server serves one of this daemon's own (Q2.250); **no npm package** (Q4.129); and **a hyphen in its command**, which
+two drivers' `[a-z]+` had silently assumed away. The live half waits on an account
+(Q7.154).
 
 What each new agent *does* cost is the measuring, and opencode is the sharpest case
 yet (Q6.105): the upstream issue closing "per-session model selection" as **not

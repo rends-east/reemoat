@@ -25,6 +25,7 @@ import {
   truncateEvent,
   type AgentHandle,
   type AgentStateMemory,
+  type OpenQuestionRow,
   type ExitReason,
   type EventStore,
   type EventStoreStats,
@@ -260,6 +261,8 @@ function migrate(db: DatabaseSync): void {
   if (!hasSession("peer_messages_off")) {
     db.exec("ALTER TABLE sessions ADD COLUMN peer_messages_off INTEGER NOT NULL DEFAULT 0");
   }
+
+  if (!hasSession("open_question_json")) db.exec("ALTER TABLE sessions ADD COLUMN open_question_json TEXT");
 
 
   const identityColumns = db.prepare("PRAGMA table_info(identity)").all();
@@ -727,13 +730,13 @@ export class SqliteSessionStore implements SessionStore {
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
          turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, nickname, pinned, rank,
-         ultracode, custom_agent, agent_state_json, peer_messages_off,
+         ultracode, custom_agent, agent_state_json, peer_messages_off, open_question_json,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
          :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :nickname, :pinned, :rank,
-         :ultracode, :custom_agent, :agent_state_json, :peer_messages_off,
+         :ultracode, :custom_agent, :agent_state_json, :peer_messages_off, :open_question_json,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
        ON CONFLICT(id) DO UPDATE SET
@@ -743,6 +746,7 @@ export class SqliteSessionStore implements SessionStore {
          pinned           = excluded.pinned,
          rank             = excluded.rank,
          peer_messages_off = excluded.peer_messages_off,
+         open_question_json = excluded.open_question_json,
          ultracode        = excluded.ultracode,
          agent_state_json = excluded.agent_state_json,
          agent_session_id = excluded.agent_session_id,
@@ -1019,6 +1023,7 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     custom_agent: row.customAgent,
     agent_state_json: row.agentState === null ? null : JSON.stringify(row.agentState),
     peer_messages_off: row.peerMessagesOff ? 1 : 0,
+    open_question_json: row.openQuestion == null ? null : JSON.stringify(row.openQuestion),
     workspace_json: JSON.stringify(row.workspace),
     workspace_mode: row.workspace.mode,
     workspace_root: row.workspace.root,
@@ -1093,6 +1098,26 @@ function normalizeExit(value: unknown): SessionExit | null {
 }
 
 /** Its own try: an unreadable blob costs the remembered strip, never the session. */
+/** Shape only: the registry re-reads the questions through ask_question's own parser, and drops what it cannot draw. */
+function toOpenQuestion(value: unknown): OpenQuestionRow | null {
+  if (value == null) return null;
+  try {
+    const parsed: unknown = JSON.parse(String(value));
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { elicitationId, title, questions, raisedAt } = parsed as Record<string, unknown>;
+    if (typeof elicitationId !== "string" || typeof raisedAt !== "number" || !Array.isArray(questions)) return null;
+    return {
+      elicitationId,
+      title: typeof title === "string" ? title : null,
+      questions: questions as OpenQuestionRow["questions"],
+      raisedAt,
+    };
+  } catch {
+    // Unreadable JSON costs the card, never the session.
+    return null;
+  }
+}
+
 function toAgentState(value: unknown): AgentStateMemory | null {
   if (value == null) return null;
   try {
@@ -1197,6 +1222,7 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       customAgent: row["custom_agent"] == null ? null : String(row["custom_agent"]),
       agentState: toAgentState(row["agent_state_json"]),
       peerMessagesOff: Number(row["peer_messages_off"] ?? 0) !== 0,
+      openQuestion: toOpenQuestion(row["open_question_json"]),
     };
   } catch {
     return null;

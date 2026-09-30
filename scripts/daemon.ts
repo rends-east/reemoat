@@ -291,9 +291,9 @@ const peers = new PeerHub({
   policy: stores.machineSettings,
   onWarning: (detail: string) => console.error(`peers: ${detail}`),
 });
-// Whenever the env allows, whatever the policy: a switch turned back on needs no restart to be served.
-const peerEndpoint = peerMessages ? await PeerMcpEndpoint.listen(peers) : null;
-peers.setEndpoint(peerEndpoint?.url ?? null);
+// Always, whatever the env and the policy: a switch turned back on needs no restart, and ask_question needs neither (Q2.250).
+const peerEndpoint = await PeerMcpEndpoint.listen(peers);
+peers.setEndpoint(peerEndpoint.url);
 registry.setPeerMcpServers((sessionId, capabilities) => peers.mcpServersFor(sessionId, capabilities));
 registry.setPeerMessagesOff((sessionId) => peers.conversationSwitchedOff(sessionId));
 peers.startOutbox();
@@ -673,7 +673,7 @@ async function shutdown(signal: string): Promise<void> {
   await registry.shutdown();
   // After the agents: a tool call in flight during their stop still gets an answer.
   peers.close();
-  await peerEndpoint?.close();
+  await peerEndpoint.close();
   // After registry shutdown: stopping a session writes its exit record.
   stores.close();
   clearTimeout(hard);

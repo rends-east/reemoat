@@ -62,14 +62,12 @@ tauri = { version = "2.11.5", features = [] }
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-dialog = "2.7.3"
 tauri-plugin-clipboard-manager = "2.3.3"
+# host_save_file's writer: Android's save panel answers a content:// URI, which only
+# the platform's ContentResolver can open. Already in the tree under the dialog plugin.
+tauri-plugin-fs = "2.5.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 url = "2.5.8"
-# A filename rides to `host_save_file` in an IPC header beside the raw bytes, and
-# a header value is ASCII. One dependency rather than a hand-rolled decoder,
-# because a filename is the one field a person definitely did not type in ASCII.
-percent-encoding = "2.3.2"
-
 # `default-tls` means the **operating system's** trust store, and that is the
 # right default here rather than a bundled root set: a self-hosted control plane
 # behind a private CA is an ordinary deployment for this software, and with

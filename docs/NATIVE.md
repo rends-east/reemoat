@@ -726,8 +726,9 @@ Recorded here rather than discovered, in the column this repository keeps them i
   direct webview calls, not proxied. The failure would be a signed-in app whose
   machines are all unreachable, with the reason only in a console. One LAN fleet
   settles it.
-- **A 100 MiB save through raw IPC.** The download bound is 100 MiB and
-  `host_save_file` takes bytes; nobody has timed the round trip.
+- **A 100 MiB save through IPC.** The download bound is 100 MiB and
+  `host_save_file` takes it as base64 in JSON, 133 MiB of string; nobody has timed
+  the round trip. Q3.690 is why it is not a raw body.
 - **An intermediary in front of a real relay meeting `Origin: tauri://localhost`.**
   The relay itself answers `*` and never `Access-Control-Allow-Credentials`; a CDN
   in front of it may not.

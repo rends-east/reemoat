@@ -1255,6 +1255,16 @@ process.stdout.write("\na path inside the workspace, and one outside it\n");
   check("a bare word that is not is refused", downloadablePath("npm", "/w", touched), null);
   check("nor is an empty span", downloadablePath("", "/w", touched), null);
   check("and a climb out is refused", downloadablePath("/w/../etc/passwd", "/w", new Set(["/w/../etc/passwd"])), null);
+  // An agent names a file it made under a folder by the folder's own relative name (Q3.690).
+  check("a name relative to a folder it made finds the one touched file", downloadablePath("a.svg", "/w", touched), "sub/a.svg");
+  check(
+    "but two touched files it could mean offer neither",
+    downloadablePath("a.svg", "/w", new Set(["/w/sub/a.svg", "/w/other/a.svg"])),
+    null,
+  );
+  check("a partial name is not a match", downloadablePath("b/a.svg", "/w", new Set(["/w/sub/a.svg"])), null);
+  check("nor is a file outside the root that ends the same", downloadablePath("x.png", "/w", touched), null);
+  check("and an absolute span is never matched by its tail", downloadablePath("/sub/a.svg", "/w", touched), null);
 
   check("bytes read as bytes", formatBytes(512), "512 B");
   check("and scale", formatBytes(2048), "2.0 KB");

@@ -7,7 +7,7 @@
 <p align="center"><b>Your agents work. You sleep.</b></p>
 
 <p align="center">
-  Run Claude Code, Codex, OpenCode, Kimi Code and Grok Build on your own machines,<br>
+  Run Claude Code, Codex, OpenCode, Kimi Code, Grok Build and Cursor on your own machines,<br>
   and supervise them from your laptop or your phone. Self-hosted, end-to-end encrypted.
 </p>
 
@@ -40,8 +40,8 @@
 
 ## What it does
 
-- **Five agents in one app.** Claude Code, Codex, OpenCode, Kimi Code and Grok
-  Build, each signed in with the account you already have or pointed at a provider
+- **Six agents in one app.** Claude Code, Codex, OpenCode, Kimi Code, Grok Build
+  and Cursor, each signed in with the account you already have or pointed at a provider
   such as OpenRouter. A plugin can add any other agent that speaks
   [ACP](https://agentclientprotocol.com).
 - **Agents talk to each other.** A session can message another one, on the same
@@ -134,8 +134,8 @@ offer.
 Three pieces, and you can run all of them yourself.
 
 - **The daemon** owns the sessions. It spawns `claude`, `codex`, `kimi`,
-  `opencode` or `grok` over [ACP](https://agentclientprotocol.com), normalizes all
-  five into one event stream, and exposes them over HTTP and WebSocket. It runs on
+  `opencode`, `grok` or `cursor-agent` over [ACP](https://agentclientprotocol.com),
+  normalizes all six into one event stream, and exposes them over HTTP and WebSocket. It runs on
   your machine, as you. A plugin can add more — any ACP program, and any inference
   endpoint to point one at — and it lands in the same lists. Every agent that takes
   MCP over HTTP is also handed a `reemoat` server with two tools, `list_agents` and
@@ -191,7 +191,7 @@ has the prerequisites and what is not built.
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 1096 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 1107 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

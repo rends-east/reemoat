@@ -198,15 +198,15 @@ Set up a Reemoat daemon on this machine and add it to the app.
   --node <path>         use this node, install none
   --agent-source <src>  where the coding-agent CLIs come from: `vendor` (each
                         vendor's own installer, the default) or `npm` (the same
-                        four from the npm registry, for a machine that cannot
+                        programs from the npm registry, for a machine that cannot
                         reach claude.ai, chatgpt.com or opencode.ai — point npm at
-                        your mirror with npm_config_registry or ~/.npmrc). Written
+                        your mirror with npm_config_registry or ~/.npmrc; cursor
+                        has no package and takes its installer either way). Written
                         into the daemon's settings, so its daily refresh agrees
   --agent-channel <ch>  which of claude's release channels this machine follows:
                         `latest` (the default — the newest build) or `stable`,
                         which trails it by weeks and, on 2026-09-05, by a model.
-                        Claude only: codex's and opencode's installers have no
-                        channel. Written into the daemon's settings, and
+                        Claude only: the other installers have no channel. Written into the daemon's settings, and
                         re-applied by every daily refresh
   --install-agents <a,b> install these coding-agent CLIs on the way in. **Nothing
                         is installed by default**: a harness arrives on a machine

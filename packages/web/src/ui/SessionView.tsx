@@ -435,7 +435,7 @@ function Transcript({
       spanTarget: (span: string) => downloadablePath(span, root, touched.current),
       download: async (rel, name) => {
         try {
-          saveBlob(await daemon.downloadFile(sessionRef.sessionId, rel), name);
+          await saveBlob(await daemon.downloadFile(sessionRef.sessionId, rel), name);
         } catch (error) {
           toast("error", describe(error));
         }
@@ -443,7 +443,7 @@ function Transcript({
       fetchUpload: (uploadId) => daemon.downloadUpload(sessionRef.sessionId, uploadId),
       downloadUpload: async (uploadId, name) => {
         try {
-          saveBlob(await daemon.downloadUpload(sessionRef.sessionId, uploadId), name);
+          await saveBlob(await daemon.downloadUpload(sessionRef.sessionId, uploadId), name);
         } catch (error) {
           // A session keeps its newest files only (Q2.247); an older one is gone rather than broken.
           const gone = ApiError.isApiError(error) && error.code === "upload_not_found";

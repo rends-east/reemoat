@@ -381,13 +381,22 @@ check(
   ],
 );
 
-/** A literal on purpose: keyed on AGENT_IDS, so a new agent fails to compile until its npm package is named (Q4.114). */
-const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
+/** A literal on purpose: keyed on AGENT_IDS, so a new agent fails to compile until its npm package is named, or named as absent (Q4.114). */
+const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string | null> = {
   claude: "@anthropic-ai/claude-code",
   codex: "@openai/codex",
   opencode: "opencode-ai",
   kimi: "@moonshot-ai/kimi-code",
   grok: "@xai-official/grok",
+  // No package: the vendor's installer is the only door, under either --source (Q4.129).
+  cursor: null,
+};
+const NPM_IDS = AGENT_IDS.filter((id) => NPM_PACKAGES[id] !== null);
+const VENDOR_ONLY = AGENT_IDS.filter((id) => NPM_PACKAGES[id] === null);
+const npmPackage = (id: string): string => {
+  const pkg = NPM_PACKAGES[id as (typeof AGENT_IDS)[number]];
+  if (pkg == null) throw new Error(`${id} has no npm package`);
+  return pkg;
 };
 
 {
@@ -420,8 +429,13 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   );
   check("with npm named as the other value", /`npm`/.test(sourceBlock), true);
   check(
-    "and the four packages that value installs, for whoever has to mirror them",
-    AGENT_IDS.filter((id) => !sourceBlock.includes(NPM_PACKAGES[id])),
+    "and the packages that value installs, for whoever has to mirror them",
+    NPM_IDS.filter((id) => !sourceBlock.includes(npmPackage(id))),
+    [],
+  );
+  check(
+    "and which harness that value cannot move, since it has no package",
+    VENDOR_ONLY.filter((id) => !sourceBlock.includes(id) || !sourceBlock.includes("no npm package")),
     [],
   );
   check("and the installer flag that writes it", sourceBlock.includes("--agent-source npm"), true);
@@ -515,19 +529,20 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     overrides.filter((key) => !new RegExp(`\\$\\{${key}:-\\}`).test(agents)),
     [],
   );
-  check("the three vendor installers are fetched from here", [
+  check("the four vendor installers are fetched from here", [
     /download claude https:\/\/claude\.ai\//.test(agents),
     /download codex https:\/\/chatgpt\.com\//.test(agents),
     /download opencode https:\/\/opencode\.ai\//.test(agents),
-  ], [true, true, true]);
+    /download cursor https:\/\/cursor\.com\//.test(agents),
+  ], [true, true, true, true]);
 
   check("an npm-installed harness lands in a directory of its own rather than over the one that runs", /\$_agent-\$_ver/.test(agents) && /mv -f .*bin\/\$_agent/.test(agents), true);
   check("staged under the toolchain, so the move is one rename", /npm" i -g --prefix "\$_stage" "\$_pkg@latest"/.test(agents) && /mv "\$_stage" "\$_build"/.test(agents), true);
   const skipUses = agentLines.filter((line) => /\bskipped "/.test(line));
   check("and --skip guards the prune, for any harness rather than for kimi", skipUses, ['  if skipped "$_agent"; then']);
   check(
-    "each of the four is named to the registry, on the line that installs it",
-    AGENT_IDS.filter((id) => !agents.includes(`ensure_npm ${id} ${NPM_PACKAGES[id]} `)),
+    "each with a package is named to the registry, on the line that installs it",
+    NPM_IDS.filter((id) => !agents.includes(`ensure_npm ${id} ${npmPackage(id)} `)),
     [],
   );
 
@@ -570,7 +585,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     check(`${fn} asks where the copy came from`, [body.includes(`case "$(provenance ${id})" in`), esacAt !== -1], [true, true]);
     check(
       `and a toolchain copy goes back to the registry, whatever the flag says`,
-      [arm("toolchain").startsWith(`toolchain) ensure_npm ${id} ${NPM_PACKAGES[id]} "`), arm("toolchain").endsWith('"; return 0 ;;')],
+      [arm("toolchain").startsWith(`toolchain) ensure_npm ${id} ${npmPackage(id)} "`), arm("toolchain").endsWith('"; return 0 ;;')],
       [true, true],
     );
     check(`an outside copy is named and left`, new RegExp(`^outside\\) outside_note "[^"]*" ${id}; return 0 ;;$`).test(arm("outside")), true);
@@ -587,13 +602,40 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     check(
       `and only an absent ${id} reads the flag: npm behind it, the vendor's download otherwise`,
       [
-        new RegExp(`^  if \\[ "\\$SOURCE" = npm \\]; then ensure_npm ${id} ${NPM_PACKAGES[id]} "[^"]*"; return 0; fi$`, "m").test(afterCase),
+        new RegExp(`^  if \\[ "\\$SOURCE" = npm \\]; then ensure_npm ${id} ${npmPackage(id)} "[^"]*"; return 0; fi$`, "m").test(afterCase),
         new RegExp(`download ${id} https://`).test(afterCase),
         afterCase.includes("install failed; this machine has no copy of it until the next run"),
       ],
       [true, true, true],
     );
   }
+
+  const cursorBody = blockIn("agents.sh", agentLines, "ensure_cursor", "ensure_cursor() {", "}");
+  const cursorCode = cursorBody.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  check(
+    "ensure_cursor asks where cursor-agent came from, and never reads the source flag, having no package to take",
+    [cursorBody.includes('case "$(provenance cursor-agent)" in'), /\$SOURCE/.test(cursorCode), /\bensure_npm\b/.test(cursorCode)],
+    [true, false, false],
+  );
+  check(
+    "an absent one waits for a press, an outside one is named and left, and any other takes cursor's own verb",
+    [
+      /^\s*""\) if \[ "\$REFRESH_ONLY" = 1 \]; then not_installed "[^"]*"; return 0; fi ;;$/m.test(cursorBody),
+      /^\s*outside\) outside_note "[^"]*" cursor-agent; return 0 ;;$/m.test(cursorBody),
+      cursorCode.includes('attempt "cursor" cursor-agent --disable-auto-update update'),
+      /update failed; keeping \$\(/.test(cursorCode),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and an install refuses to replace an ~/.local/bin/agent that is not cursor's, before anything is fetched",
+    [
+      cursorCode.includes('_other=$HOME_DIR/.local/bin/agent'),
+      cursorCode.indexOf("_other=") < cursorCode.indexOf("download cursor"),
+      cursorCode.includes('"$HOME_DIR"/.local/share/cursor-agent/*) : ;;'),
+    ],
+    [true, true, true],
+  );
 
   const claudeBody = blockIn("agents.sh", agentLines, "ensure_claude", "ensure_claude() {", "}");
   const claudeCommands = claudeBody.split("\n").filter((line) => !/^\s*#/.test(line));
@@ -616,7 +658,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check(
     "every reach into the npm arm is a toolchain copy, an absent harness behind the flag, or one of the two that must take it",
     [npmCalls.filter((line) => !npmCallShapes.some((shape) => shape.test(line))), npmCalls.length],
-    [[], 2 * (AGENT_IDS.length - UNCONDITIONAL_NPM.length) + UNCONDITIONAL_NPM.length],
+    [[], 2 * (AGENT_IDS.length - UNCONDITIONAL_NPM.length - VENDOR_ONLY.length) + UNCONDITIONAL_NPM.length],
   );
 
   const ensureNpm = blockIn("agents.sh", agentLines, "ensure_npm", "ensure_npm() {", "}");
@@ -710,7 +752,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       '  [ "$pkg" != "${FAKE_FAIL:-}" ] || exit 1',
       '  [ "${FAKE_VIEW_FAIL:-}" != 1 ] || exit 1',
       '  case "$pkg" in',
-      ...AGENT_IDS.map((id) => `    ${NPM_PACKAGES[id]}) ;;`),
+      ...NPM_IDS.map((id) => `    ${npmPackage(id)}) ;;`),
       '    *) echo "fake npm: unknown package $pkg" >&2; exit 3 ;;',
       "  esac",
       '  echo "${FAKE_VER:-1.0.0}"',
@@ -722,7 +764,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       '[ "$pkg" != "$5" ] || { echo "fake npm: not @latest: $5" >&2; exit 3; }',
       '[ "$pkg" != "${FAKE_FAIL:-}" ] || exit 1',
       'case "$pkg" in',
-      ...AGENT_IDS.map((id) => `  ${NPM_PACKAGES[id]}) agent=${id} ;;`),
+      ...NPM_IDS.map((id) => `  ${npmPackage(id)}) agent=${id} ;;`),
       '  *) echo "fake npm: unknown package $pkg" >&2; exit 3 ;;',
       "esac",
       'mkdir -p "$prefix/bin" "$prefix/lib/node_modules/$pkg"',
@@ -734,10 +776,31 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   );
   chmodSync(join(agentsStubs, "npm"), 0o755);
   symlinkSync(process.execPath, join(agentsStubs, "node"));
+  // Fake cursor-agent, on PATH for every real run: an absent cursor downloads its vendor's installer, and this driver is offline.
+  // Only --check runs, which fetch nothing, leave it off.
+  const cursorStubs = join(sandbox, "agents-cursor-stubs");
+  mkdirSync(cursorStubs, { recursive: true });
+  const cursorStub = (at: string): void => {
+    writeFileSync(
+      at,
+      [
+        "#!/bin/sh",
+        '[ -z "${FAKE_CURSOR_LOG:-}" ] || printf \'cursor-agent %s\\n\' "$*" >> "$FAKE_CURSOR_LOG"',
+        'case "$*" in',
+        "  --version) echo 2026.09.28-stub ;;",
+        '  "--disable-auto-update update") [ -z "${FAKE_CURSOR_REFUSE:-}" ] || { echo "fake cursor: refusing update" >&2; exit 1; } ;;',
+        '  *) echo "fake cursor: unexpected argv: $*" >&2; exit 3 ;;',
+        "esac",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(at, 0o755);
+  };
+  cursorStub(join(cursorStubs, "cursor-agent"));
   const runAgents = (args: string[], env: Record<string, string> = {}): Run => {
     const run = spawnSync("sh", [agentsPath, ...args], {
       encoding: "utf8",
-      env: { HOME: agentsHome, PATH: `/usr/bin:/bin:${agentsStubs}`, TMPDIR: sandbox, ...env },
+      env: { HOME: agentsHome, PATH: `/usr/bin:/bin:${agentsStubs}:${cursorStubs}`, TMPDIR: sandbox, ...env },
       input: "",
       timeout: 60_000,
     });
@@ -766,7 +829,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("--channel with a value it does not know is refused by name", [badChannel.status, badChannel.err.includes("--channel takes stable or latest, not bogus")], [2, true]);
   const bareChannel = runAgents(["--check", "--channel"]);
   check("and so is --channel with no value", [bareChannel.status, bareChannel.err.includes("--channel needs stable or latest")], [2, true]);
-  const dry = runAgents(["--check", "--skip", "kimi"]);
+  const dry = runAgents(["--check", "--skip", "kimi"], { PATH: `/usr/bin:/bin:${agentsStubs}` });
   check("--check exits 0 and says nothing will be changed", [dry.status, dry.out.includes("nothing will be changed")], [0, true]);
   check("and which installer it would have used", dry.out.includes("with each vendor's own installer"), true);
   check(
@@ -786,6 +849,17 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     [0, true, true, false],
   );
   check("with kimi named as an install into its own directory", /kimi-<version>/.test(dry.out), true);
+  check(
+    "and an absent cursor as its vendor's installer, run whole after the download",
+    [/^  cursor: would download https:\/\/cursor\.com\/install$/m.test(dry.out), /^  cursor: would run: bash \S+\/cursor\.sh$/m.test(dry.out), /^  cursor\s+would install$/m.test(dry.out)],
+    [true, true, true],
+  );
+  const npmCursor = runAgents(["--check", "--source", "npm", "--only", "cursor"], { PATH: `/usr/bin:/bin:${agentsStubs}` });
+  check(
+    "which --source npm cannot move: it says so and names the same installer",
+    [npmCursor.status, npmCursor.out.includes("cursor        has no npm package, so --source npm installs it with the vendor's installer too"), /^  cursor: would download https:\/\/cursor\.com\/install$/m.test(npmCursor.out)],
+    [0, true, true],
+  );
   const ownKimi = join(sandbox, "own-kimi");
   mkdirSync(ownKimi, { recursive: true });
   writeFileSync(join(ownKimi, "kimi"), "#!/bin/sh\necho 0.29.2\n");
@@ -811,10 +885,10 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("and the default channel under npm says nothing about applying", /does not apply/.test(npmDry.out), false);
   check(
     "and says, per harness, which package into which directory",
-    AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(npmDry.out)),
+    NPM_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${npmPackage(id)}@latest, then repoint \\S*/bin/${id}$`, "m").test(npmDry.out)),
     [],
   );
-  check("and that each would be an install", AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would install$`, "m").test(npmDry.out)), []);
+  check("and that each would be an install", NPM_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would install$`, "m").test(npmDry.out)), []);
   check("with nothing fetched from a vendor", /would download|claude install|codex update|opencode upgrade/.test(npmDry.out), false);
   // Fake claude: --version, and install stable|latest logged to FAKE_LOG (refused under FAKE_CLAUDE_REFUSE); any other argv exits 3.
   const claudeStub = (at: string): void => {
@@ -872,21 +946,21 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     }
   };
   const buildOf = (h: string, id: string, ver: string): string => join(toolchainOf(h), `${id}-${ver}`, "bin", id);
-  const saysEach = (out: string, verb: string, ver: string, ids: readonly string[] = AGENT_IDS): string[] =>
+  const saysEach = (out: string, verb: string, ver: string, ids: readonly string[] = NPM_IDS): string[] =>
     ids.filter((id) => !new RegExp(`^  ${id}\\s+${verb} ${ver.replace(/\./g, "\\.")}$`, "m").test(out));
 
   const npmHome = join(sandbox, "agents-npm-home");
   mkdirSync(npmHome, { recursive: true });
   const first = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "1.0.0" });
   check("--source npm on a fresh home exits 0 with nothing on stderr", [first.status, first.err], [0, ""]);
-  check("and installs all four, each into a directory named by its build", AGENT_IDS.map((id) => buildsOf(npmHome, id)), AGENT_IDS.map((id) => [`${id}-1.0.0`]));
-  check("each reached through a symlink under bin", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "1.0.0")));
+  check("and installs all four, each into a directory named by its build", NPM_IDS.map((id) => buildsOf(npmHome, id)), NPM_IDS.map((id) => [`${id}-1.0.0`]));
+  check("each reached through a symlink under bin", NPM_IDS.map((id) => linkOf(npmHome, id)), NPM_IDS.map((id) => buildOf(npmHome, id, "1.0.0")));
   check("that runs", spawnSync(join(toolchainOf(npmHome), "bin", "claude"), ["--version"], { encoding: "utf8" }).stdout, "1.0.0\n");
   check("and each says it was an install, with the build it now runs", saysEach(first.out, "install", "1.0.0"), []);
 
   const second = runAgents(["--source", "npm", "--skip", "claude"], { HOME: npmHome, FAKE_VER: "2.0.0" });
   check("a newer build on the registry is a refresh of all four", [second.status, second.err, saysEach(second.out, "refresh", "2.0.0")], [0, "", []]);
-  check("that repoints every symlink", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
+  check("that repoints every symlink", NPM_IDS.map((id) => linkOf(npmHome, id)), NPM_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
   check(
     "keeps the build a live agent may be on, and says so",
     [buildsOf(npmHome, "claude"), /^  claude\s+previous build kept: an agent is using it$/m.test(second.out)],
@@ -905,18 +979,18 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check(
     "having asked the registry once per harness and staged nothing",
     readFileSync(thirdLog, "utf8").trim().split("\n").sort(),
-    AGENT_IDS.map((id) => `view ${NPM_PACKAGES[id]}@latest version`).sort(),
+    NPM_IDS.map((id) => `view ${npmPackage(id)}@latest version`).sort(),
   );
   check("leaving the directory that was already there", statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino, codexInode);
-  check("and exactly one build per harness, the kept one pruned now that nothing is on it", AGENT_IDS.map((id) => buildsOf(npmHome, id)), AGENT_IDS.map((id) => [`${id}-2.0.0`]));
-  check("with every symlink where it was", AGENT_IDS.map((id) => linkOf(npmHome, id)), AGENT_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
+  check("and exactly one build per harness, the kept one pruned now that nothing is on it", NPM_IDS.map((id) => buildsOf(npmHome, id)), NPM_IDS.map((id) => [`${id}-2.0.0`]));
+  check("with every symlink where it was", NPM_IDS.map((id) => linkOf(npmHome, id)), NPM_IDS.map((id) => buildOf(npmHome, id, "2.0.0")));
 
   const viewFailLog = join(sandbox, "agents-npm-viewfail.log");
   const viewFail = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0", FAKE_VIEW_FAIL: "1", FAKE_LOG: viewFailLog });
   check(
     "a view the registry refuses falls through to staging, and the same build is a refresh that moves nothing",
-    [viewFail.status, viewFail.err, saysEach(viewFail.out, "refresh", "2.0.0"), readFileSync(viewFailLog, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino, AGENT_IDS.map((id) => buildsOf(npmHome, id))],
-    [0, "", [], AGENT_IDS.length, codexInode, AGENT_IDS.map((id) => [`${id}-2.0.0`])],
+    [viewFail.status, viewFail.err, saysEach(viewFail.out, "refresh", "2.0.0"), readFileSync(viewFailLog, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, statSync(join(toolchainOf(npmHome), "codex-2.0.0")).ino, NPM_IDS.map((id) => buildsOf(npmHome, id))],
+    [0, "", [], NPM_IDS.length, codexInode, NPM_IDS.map((id) => [`${id}-2.0.0`])],
   );
 
   const prevHome = join(sandbox, "agents-prev-home");
@@ -925,27 +999,27 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const v2 = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "2.0.0" });
   check(
     "after v1 then v2 with no --skip, v1 is still on disk and v2 is linked",
-    [v1.status, v2.status, v2.err, AGENT_IDS.map((id) => buildsOf(prevHome, id)), AGENT_IDS.map((id) => linkOf(prevHome, id))],
-    [0, 0, "", AGENT_IDS.map((id) => [`${id}-1.0.0`, `${id}-2.0.0`]), AGENT_IDS.map((id) => buildOf(prevHome, id, "2.0.0"))],
+    [v1.status, v2.status, v2.err, NPM_IDS.map((id) => buildsOf(prevHome, id)), NPM_IDS.map((id) => linkOf(prevHome, id))],
+    [0, 0, "", NPM_IDS.map((id) => [`${id}-1.0.0`, `${id}-2.0.0`]), NPM_IDS.map((id) => buildOf(prevHome, id, "2.0.0"))],
   );
   const v3Log = join(sandbox, "agents-prev-v3.log");
   const v3 = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "3.0.0", FAKE_LOG: v3Log });
   check(
     "after v3, v1 is gone, v2 — the build the symlink named when the run began — remains, and v3 is linked",
-    [v3.status, v3.err, AGENT_IDS.map((id) => buildsOf(prevHome, id)), AGENT_IDS.map((id) => linkOf(prevHome, id))],
-    [0, "", AGENT_IDS.map((id) => [`${id}-2.0.0`, `${id}-3.0.0`]), AGENT_IDS.map((id) => buildOf(prevHome, id, "3.0.0"))],
+    [v3.status, v3.err, NPM_IDS.map((id) => buildsOf(prevHome, id)), NPM_IDS.map((id) => linkOf(prevHome, id))],
+    [0, "", NPM_IDS.map((id) => [`${id}-2.0.0`, `${id}-3.0.0`]), NPM_IDS.map((id) => buildOf(prevHome, id, "3.0.0"))],
   );
   check(
     "a newer version on the registry is asked about, then staged",
     [readFileSync(v3Log, "utf8").split("\n").filter((line) => line.startsWith("view ")).length, readFileSync(v3Log, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, saysEach(v3.out, "refresh", "3.0.0")],
-    [AGENT_IDS.length, AGENT_IDS.length, []],
+    [NPM_IDS.length, NPM_IDS.length, []],
   );
   const v3againLog = join(sandbox, "agents-prev-v3again.log");
   const v3again = runAgents(["--source", "npm"], { HOME: prevHome, FAKE_VER: "3.0.0", FAKE_LOG: v3againLog });
   check(
     "and the same build again is current, stages nothing, and prunes v2, since the symlink named v3 when it began",
-    [v3again.status, saysEach(v3again.out, "current", "3.0.0"), readFileSync(v3againLog, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, AGENT_IDS.map((id) => buildsOf(prevHome, id))],
-    [0, [], 0, AGENT_IDS.map((id) => [`${id}-3.0.0`])],
+    [v3again.status, saysEach(v3again.out, "current", "3.0.0"), readFileSync(v3againLog, "utf8").split("\n").filter((line) => line.startsWith("i -g ")).length, NPM_IDS.map((id) => buildsOf(prevHome, id))],
+    [0, [], 0, NPM_IDS.map((id) => [`${id}-3.0.0`])],
   );
 
   const pipeHome = join(sandbox, "agents-pipe-home");
@@ -954,7 +1028,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   mkdirSync(pipeTmp, { recursive: true });
   const piped = spawnSync("sh", ["-c", '{ sh "$1" --source npm; echo "rc=$?" >&2; } | head -n 1', "sh", agentsPath], {
     encoding: "utf8",
-    env: { HOME: pipeHome, PATH: `/usr/bin:/bin:${agentsStubs}`, TMPDIR: pipeTmp, FAKE_VER: "1.0.0" },
+    env: { HOME: pipeHome, PATH: `/usr/bin:/bin:${agentsStubs}:${cursorStubs}`, TMPDIR: pipeTmp, FAKE_VER: "1.0.0" },
     input: "",
     timeout: 60_000,
   });
@@ -962,12 +1036,12 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     "a run whose reader exits after one line still installs all four, exits 0 and cleans up",
     [
       piped.stderr,
-      AGENT_IDS.map((id) => buildsOf(pipeHome, id)),
-      AGENT_IDS.map((id) => linkOf(pipeHome, id)),
+      NPM_IDS.map((id) => buildsOf(pipeHome, id)),
+      NPM_IDS.map((id) => linkOf(pipeHome, id)),
       readdirSync(pipeTmp),
       existsSync(join(toolchainOf(pipeHome), ".agents.lock")),
     ],
-    ["rc=0\n", AGENT_IDS.map((id) => [`${id}-1.0.0`]), AGENT_IDS.map((id) => buildOf(pipeHome, id, "1.0.0")), [], false],
+    ["rc=0\n", NPM_IDS.map((id) => [`${id}-1.0.0`]), NPM_IDS.map((id) => buildOf(pipeHome, id, "1.0.0")), [], false],
   );
 
   const lockHome = join(sandbox, "agents-lock-home");
@@ -977,8 +1051,8 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const held = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "1.0.0" });
   check(
     "a lock held by a live pid is a sentence naming it, exit 0, nothing changed and the lock left alone",
-    [held.status, held.err, held.out, AGENT_IDS.map((id) => buildsOf(lockHome, id)), readFileSync(join(lockDir, "pid"), "utf8")],
-    [0, `another run of deploy/agents.sh (pid ${process.pid}) is in progress; nothing was changed\n`, "", AGENT_IDS.map(() => []), `${process.pid}\n`],
+    [held.status, held.err, held.out, NPM_IDS.map((id) => buildsOf(lockHome, id)), readFileSync(join(lockDir, "pid"), "utf8")],
+    [0, `another run of deploy/agents.sh (pid ${process.pid}) is in progress; nothing was changed\n`, "", NPM_IDS.map(() => []), `${process.pid}\n`],
   );
   const heldCheck = runAgents(["--source", "npm", "--check"], { HOME: lockHome });
   check("while --check needs no lock and previews past one", [heldCheck.status, heldCheck.err, heldCheck.out.includes("nothing will be changed")], [0, "", true]);
@@ -986,14 +1060,14 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const heldLoud = runAgents(["--source", "npm", "--fail-if-locked"], { HOME: lockHome, FAKE_VER: "1.0.0" });
   check(
     "a contended run exits 3 under --fail-if-locked, with the same sentence and nothing installed",
-    [heldLoud.status, heldLoud.err.includes("is in progress; nothing was changed"), heldLoud.out, AGENT_IDS.map((id) => buildsOf(lockHome, id))],
-    [3, true, "", AGENT_IDS.map(() => [])],
+    [heldLoud.status, heldLoud.err.includes("is in progress; nothing was changed"), heldLoud.out, NPM_IDS.map((id) => buildsOf(lockHome, id))],
+    [3, true, "", NPM_IDS.map(() => [])],
   );
   // --refresh-only is asserted as an absence over the whole transcript: only that catches a door somebody forgot.
   const bareHome = join(sandbox, "agents-bare-home");
   mkdirSync(bareHome, { recursive: true });
-  const refreshOnly = runAgents(["--refresh-only", "--check"], { HOME: bareHome });
-  const INSTALL_VERBS = /would download|npm i -g|claude install|codex update|opencode upgrade|would install/;
+  const refreshOnly = runAgents(["--refresh-only", "--check"], { HOME: bareHome, PATH: `/usr/bin:/bin:${agentsStubs}` });
+  const INSTALL_VERBS = /would download|npm i -g|claude install|codex update|opencode upgrade|cursor-agent --disable-auto-update update|would install/;
   check(
     "--refresh-only on a machine with no harness installs nothing, from any door",
     [
@@ -1074,14 +1148,14 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const stale = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "1.0.0" });
   check(
     "a lock whose pid is gone is taken over, and released at the end",
-    [stale.status, stale.err, AGENT_IDS.map((id) => buildsOf(lockHome, id)), existsSync(lockDir)],
-    [0, "", AGENT_IDS.map((id) => [`${id}-1.0.0`]), false],
+    [stale.status, stale.err, NPM_IDS.map((id) => buildsOf(lockHome, id)), existsSync(lockDir)],
+    [0, "", NPM_IDS.map((id) => [`${id}-1.0.0`]), false],
   );
   mkdirSync(lockDir, { recursive: true });
   const empty = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "2.0.0" });
   check("and so is one with no pid in it, after a second's grace", [empty.status, empty.err, saysEach(empty.out, "refresh", "2.0.0"), existsSync(lockDir)], [0, "", [], false]);
 
-  const refused = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0", FAKE_FAIL: NPM_PACKAGES.codex });
+  const refused = runAgents(["--source", "npm"], { HOME: npmHome, FAKE_VER: "2.0.0", FAKE_FAIL: npmPackage("codex") });
   check(
     "a refresh the registry refuses warns, naming the build kept, exit 0",
     [refused.status, /^  codex\s+refresh failed; keeping 2\.0\.0$/m.test(refused.err), refused.err.includes(`1 of ${AGENT_IDS.length} agents were not installed or refreshed`)],
@@ -1096,9 +1170,9 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     [
       backThroughNpm.status,
       backThroughNpm.out.includes("with each vendor's own installer"),
-      AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would ask the registry for ${NPM_PACKAGES[id].replace(/[@/.]/g, "\\$&")}@latest, and stage nothing if it is still 2\\.0\\.0$`, "m").test(backThroughNpm.out)),
-      AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(backThroughNpm.out)),
-      AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would refresh$`, "m").test(backThroughNpm.out)),
+      NPM_IDS.filter((id) => !new RegExp(`^  ${id}: would ask the registry for ${npmPackage(id).replace(/[@/.]/g, "\\$&")}@latest, and stage nothing if it is still 2\\.0\\.0$`, "m").test(backThroughNpm.out)),
+      NPM_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${npmPackage(id)}@latest, then repoint \\S*/bin/${id}$`, "m").test(backThroughNpm.out)),
+      NPM_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would refresh$`, "m").test(backThroughNpm.out)),
       /would download|claude install|codex update|opencode upgrade/.test(backThroughNpm.out),
     ],
     [0, true, [], [], [], false],
@@ -1160,7 +1234,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
 
   const outsideHome = join(sandbox, "agents-outside-home");
   mkdirSync(outsideHome, { recursive: true });
-  const outsideRun = runAgents(["--source", "npm"], { HOME: outsideHome, FAKE_VER: "1.0.0", PATH: `/usr/bin:/bin:${agentsStubs}:${ownClaude}` });
+  const outsideRun = runAgents(["--source", "npm"], { HOME: outsideHome, FAKE_VER: "1.0.0", PATH: `/usr/bin:/bin:${agentsStubs}:${cursorStubs}:${ownClaude}` });
   check(
     "a run under npm installs nothing beside an operator's own claude, and says whose it is",
     [outsideRun.status, outsideRun.err, /^  claude\s+2\.1\.259 \(Claude Code\) — installed outside reemoat, not updated from here$/m.test(outsideRun.out), buildsOf(outsideHome, "claude"), saysEach(outsideRun.out, "install", "1.0.0", ["codex", "opencode", "kimi"])],
@@ -1169,7 +1243,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
 
   const failHome = join(sandbox, "agents-fail-home");
   mkdirSync(failHome, { recursive: true });
-  const noCopy = runAgents(["--source", "npm"], { HOME: failHome, FAKE_VER: "1.0.0", FAKE_FAIL: NPM_PACKAGES.claude });
+  const noCopy = runAgents(["--source", "npm"], { HOME: failHome, FAKE_VER: "1.0.0", FAKE_FAIL: npmPackage("claude") });
   check(
     "an install the registry refuses says what that costs now, exit 0",
     [noCopy.status, /^  claude\s+install failed; this machine has no copy of it until the next run$/m.test(noCopy.err), noCopy.err.includes(`1 of ${AGENT_IDS.length} agents were not installed or refreshed`)],
@@ -1178,8 +1252,40 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("and leaves no half-made build, no symlink and no stage", [buildsOf(failHome, "claude"), linkOf(failHome, "claude"), existsSync(join(toolchainOf(failHome), "bin", "claude"))], [[], null, false]);
   check(
     "while the other three are installed",
-    AGENT_IDS.filter((id) => id !== "claude").map((id) => buildsOf(failHome, id)),
-    AGENT_IDS.filter((id) => id !== "claude").map((id) => [`${id}-1.0.0`]),
+    NPM_IDS.filter((id) => id !== "claude").map((id) => buildsOf(failHome, id)),
+    NPM_IDS.filter((id) => id !== "claude").map((id) => [`${id}-1.0.0`]),
+  );
+
+  const cursorHome = join(sandbox, "agents-cursor-home");
+  const cursorLog = join(sandbox, "agents-cursor.log");
+  mkdirSync(join(cursorHome, ".local", "bin"), { recursive: true });
+  cursorStub(join(cursorHome, ".local", "bin", "cursor-agent"));
+  const cursorRefresh = runAgents(["--only", "cursor"], { HOME: cursorHome, PATH: `/usr/bin:/bin:${agentsStubs}`, FAKE_CURSOR_LOG: cursorLog });
+  check(
+    "a cursor its installer put in ~/.local/bin is refreshed by its own verb, never downloaded again",
+    [cursorRefresh.status, cursorRefresh.err, /^  cursor\s+refresh 2026\.09\.28-stub$/m.test(cursorRefresh.out), readFileSync(cursorLog, "utf8").split("\n").filter((line) => !line.includes("--version") && line !== ""), /step: cursor download/.test(cursorRefresh.out)],
+    [0, "", true, ["cursor-agent --disable-auto-update update"], false],
+  );
+  const cursorRefused = runAgents(["--only", "cursor"], { HOME: cursorHome, PATH: `/usr/bin:/bin:${agentsStubs}`, FAKE_CURSOR_REFUSE: "1" });
+  check(
+    "and an update it refuses is a warning naming the build kept, counted, exit 0",
+    [cursorRefused.status, /^  cursor\s+update failed; keeping 2026\.09\.28-stub$/m.test(cursorRefused.err), cursorRefused.err.includes("1 of 1 agents were not installed or refreshed")],
+    [0, true, true],
+  );
+  const foreignHome = join(sandbox, "agents-foreign-agent-home");
+  mkdirSync(join(foreignHome, ".local", "bin"), { recursive: true });
+  writeFileSync(join(foreignHome, ".local", "bin", "agent"), "#!/bin/sh\necho somebody else's agent\n");
+  chmodSync(join(foreignHome, ".local", "bin", "agent"), 0o755);
+  const foreign = runAgents(["--only", "cursor"], { HOME: foreignHome, PATH: `/usr/bin:/bin:${agentsStubs}` });
+  check(
+    "an absent cursor is not installed over somebody else's ~/.local/bin/agent, and nothing is fetched",
+    [
+      foreign.status,
+      foreign.err.includes(`cursor        not installed: its installer would replace ${join(foreignHome, ".local", "bin", "agent")}, which is not cursor's`),
+      /step: cursor download/.test(foreign.out),
+      readFileSync(join(foreignHome, ".local", "bin", "agent"), "utf8"),
+    ],
+    [0, true, false, "#!/bin/sh\necho somebody else's agent\n"],
   );
 
   // A truncated download must define functions and do nothing, so main runs only from the last line.

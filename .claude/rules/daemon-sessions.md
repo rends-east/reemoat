@@ -34,7 +34,8 @@ left, and a fresh agent worked four minutes later. Q7.103.
 **A session reads as stopped only when somebody stopped it.** Everything else the
 daemon ended it brings back by itself, on the same conversation, at the next boot,
 over ACP's `session/resume` — which restores the agent's own context without
-replaying anything, and which all five agents advertise. Q2.1, Q2.106. opencode's
+replaying anything, and which five of the six agents advertise; cursor has only
+`session/load` (Q2.248). Q2.1, Q2.106. opencode's
 is read off `initialize` (Q6.105) rather than driven with a real login, which is
 the same standing this claim had for codex before it was exercised.
 
@@ -51,7 +52,7 @@ omission, `canResume` being satisfied by both its clauses. It draws as an ordina
 session and says nothing — explicitly, since the fallthrough says `ended` — but
 **Stop stays offered**: `stop()` memoises, so without an override a person
 pressing it got `200` and no change. Its **controls and its `/` menu stay live**, so
-a tap is *recorded* and applied by `doResume`, never a wake. ⚠ **And not only a
+a tap is *recorded* and applied by `doResume` — a wake only for cursor's model (Q2.249). ⚠ **And not only a
 parked one**: `revivableByPrompt` gates the keeping, the tap and
 `agent_state_json`, so every such stop keeps both across a restart — and the
 finished background rows with them. Q2.224, Q2.229, Q2.234.
@@ -395,7 +396,7 @@ carries none — so a crash loses them. Q2.234.
   agent going — never by a turn boundary, never by a timer.** claude asks between
   turns, and refusing that (`no_turn`) or sweeping at a turn's end (`turn_ended`)
   cancelled questions nobody had seen. Both stay in `AnswerResolvedBy` for the logs
-  that hold them and are written by nothing. Q2.232.
+  that hold them and are written by nothing. Q2.232. ⚠ An `ask_question` outlives its agent (Q2.250).
 - **`settle()` resolves the agent before it logs.** Order: `pending.delete` (the
   compare-and-swap) → record in `resolved` → **resolve the agent's promise** →
   append → fan out. Appending first means a throw leaves the permission recorded as
@@ -447,10 +448,10 @@ carries none — so a crash loses them. Q2.234.
   union rather than flattened to `number` because `toHandle` must answer **no handle
   at all**, which is different from "pid 0". The reaper reports a container handle as
   one it will not signal.
-- **Resume is `session/resume`, never `session/load`.** Load replays the whole
-  message history back as notifications and we already hold that transcript. The ACP
-  *reference* implementation offers only `loadSession`, i.e. only the verb this rule
-  forbids, so "any ACP agent" is much narrower than Zed's registry suggests. Q5.85.
+- **Resume is `session/resume` wherever it exists; `session/load` only where it does
+  not.** Load replays the history we already hold, and it is safe only because the
+  replay precedes its answer while `adopt` registers after it — so the router drops
+  it. An agent that sent a frame after answering would break that. Q5.85, Q2.248.
 
 ## Layout
 

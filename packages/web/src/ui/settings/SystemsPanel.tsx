@@ -6,7 +6,7 @@ import { MACHINE_GONE } from "../../plugins";
 import { store } from "../../store";
 import type { AgentAuthInfo, SystemInfo } from "../../wire";
 import { anyKeySet, unspokenFor } from "../../agents";
-import { boundedName, harnessName, STALE_READ } from "../agentCard";
+import { boundedName, harnessName, STALE_READ, systemBadge } from "../agentCard";
 import { Badge, Button, Empty, FIELD, SkeletonRow, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { Field } from "../kit/Field";
@@ -122,7 +122,7 @@ export function SystemChooser({
               : // Bounded: the daemon does not strip control characters from a plugin's name.
                 `from ${boundedName(system.contributedBy.pluginName, "a plugin")}`
           }
-          badge={<Badge tone={system.keySet ? "plain" : "strong"}>{stateText(system)}</Badge>}
+          badge={rowBadge(system, agents)}
           onClick={() => onPick(system.id)}
         />
       ))}
@@ -146,10 +146,9 @@ export function SystemChooser({
   );
 }
 
-/** keySet only knows about a pasted key; whether a CLI is signed in is AgentDetail's probe, so never claim it here. */
-function stateText(system: SystemInfo): string {
-  if (system.loginVia !== null) return system.keySet ? "key saved" : "sign in";
-  return system.keySet ? "key saved" : "no key";
+function rowBadge(system: SystemInfo, agents: AgentAuthInfo[] | null): ReactNode {
+  const badge = systemBadge(system, agents?.find((one) => one.id === system.loginVia));
+  return badge === null ? undefined : <Badge tone={badge.tone}>{badge.text}</Badge>;
 }
 
 export function SystemDetail({

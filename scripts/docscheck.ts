@@ -198,6 +198,17 @@ const FOREIGN = new Set([
   "backgroundTasksChanged",
   "finishLifecycle",
   "takeSnapshot", // WKWebView's own method, how Q3.645 read what WebKit painted
+  // cursor-agent's own, cited in Q2.248, Q2.250, Q6.115 and Q6.116: its replay, its model writer and the keys it writes, its config switches, a tool it lists.
+  "replayConversationHistory",
+  "setCurrentModelWithParameters",
+  "selectedModel",
+  "modelParameters",
+  "hasChangedDefaultModel",
+  "modelSelectionHistory",
+  "approvalMode",
+  "CURSOR_CONFIG_DIR",
+  "AGENT_CLI_CREDENTIAL_STORE",
+  "CreatePlan",
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.
@@ -205,7 +216,7 @@ const CITED_BUT_UNRESOLVED = [
   "PrefixPattern", "SPINNER_AFTER_MS", "checkAndFail", "completeCommandExecutionEvent",
   "detectSlashIntent", "elapsedTimeSeconds", "formatUserCode", "looksBinary", "nextStep",
   "remainingText", "scheduleAvailableCommandsUpdate", "sessionDir", "subagentRetry",
-  "subagentType", "supportsEffort", "toolDetail", "totalDurationMs", "workDir",
+  "supportsEffort", "toolDetail", "totalDurationMs", "workDir",
 ];
 
 /** camelCase, PascalCase or CONST_CASE, five characters or more. */

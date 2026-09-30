@@ -23,6 +23,7 @@ process.stdout.write("\nwhat one agent's card says\n");
     signOutSentence,
     dividerWord,
     multiSlotLine,
+    systemBadge,
   } = await import("../src/ui/agentCard.js");
   const { AGENT_IDS } = await import("../src/wire.js");
   const agentCardRaw = readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8");
@@ -30,7 +31,7 @@ process.stdout.write("\nwhat one agent's card says\n");
   check(
     "a harness is named as the program it is, not its package or its model",
     AGENT_IDS.map((id) => agentLabel(id)),
-    ["Claude Code", "Kimi Code", "Codex", "Opencode", "Grok"],
+    ["Claude Code", "Kimi Code", "Codex", "Opencode", "Grok", "Cursor"],
   );
   // Asks the table, not the output: a missing label falls back to the id and can still read right.
   check(
@@ -124,6 +125,74 @@ process.stdout.write("\nwhat one agent's card says\n");
     ),
     ["no_login"],
   );
+  // The Sign-ins row once said "sign in" for every CLI system with no key, which read as a state; now it is the card's.
+  {
+    const drawn = (
+      loginVia: string | null,
+      keySet: boolean,
+      agent: Parameters<typeof systemBadge>[1],
+    ): string => {
+      const badge = systemBadge({ loginVia, keySet }, agent);
+      return badge === null ? "none" : `${badge.tone}/${badge.text}`;
+    };
+    const probed = (available: boolean, loggedIn: boolean | null, blocked: "no_flow" | null = null, refused = false) => ({
+      available,
+      loggedIn,
+      login: { supported: blocked === null, blocked, needsInput: false },
+      lastStartRefusal: refused ? { at: 1, routed: false, message: "no" } : null,
+    });
+    check(
+      "a Sign-ins row with a CLI draws what that CLI's probe said, and only a key where there was no probe",
+      [
+        drawn("cursor", false, probed(true, false)),
+        drawn("cursor", false, probed(true, true)),
+        drawn("cursor", false, probed(true, null)),
+        drawn("cursor", false, probed(false, null)),
+        drawn("cursor", false, probed(true, true, null, true)),
+        drawn("cursor", false, undefined),
+        drawn("cursor", true, undefined),
+      ],
+      [
+        "strong/not signed in",
+        "plain/signed in",
+        "plain/cannot check",
+        "strong/not installed",
+        "strong/would not start",
+        "none",
+        "plain/key saved",
+      ],
+    );
+    check(
+      "a saved key stands for the row unless the CLI is absent, refused, or probed with that key and still signed out",
+      [
+        drawn("xai", true, probed(true, true)),
+        drawn("xai", true, probed(true, null)),
+        drawn("xai", true, probed(true, false)),
+        drawn("xai", true, probed(false, null)),
+        drawn("xai", true, probed(true, true, null, true)),
+      ],
+      ["plain/key saved", "plain/key saved", "strong/not signed in", "strong/not installed", "strong/would not start"],
+    );
+    check(
+      "a harness with no sign-in is a key question, and a system with no CLI never was anything else",
+      [
+        drawn("opencode", false, probed(true, true, "no_flow")),
+        drawn("opencode", true, probed(true, null, "no_flow")),
+        drawn(null, false, undefined),
+        drawn(null, true, probed(true, false)),
+      ],
+      ["strong/no key", "plain/key saved", "strong/no key", "plain/key saved"],
+    );
+    check(
+      "and no row says the call to action it used to, which is the word that read as signed in",
+      [false, true].flatMap((keySet) =>
+        [probed(true, false), probed(true, true), probed(true, null), probed(false, null), undefined].map(
+          (agent) => drawn("claude", keySet, agent),
+        ),
+      ).filter((one) => one.endsWith("/sign in")),
+      [],
+    );
+  }
   const noLoginLine = stanceLine({ id: "opencode" }, "no_login", false, "darwin");
   check(
     "and its sentence says nothing is missing, and what the box below is for",

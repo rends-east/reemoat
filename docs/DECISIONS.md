@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 105 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 434 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 108 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 437 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 74 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 153 | `###` |
-| | | **1096** | |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 77 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
+| | | **1107** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1096 rather than the 546
+dividers. So the count is over **both** depths, and it says 1107 rather than the 554
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9047,6 +9047,136 @@ conversation turns back to.
 
 **Status.** Current. Amends Q5.101's upload bounds, and Q2.31 on what the agent can
 re-read.
+
+### Q2.248 — Reattaching an agent that has `session/load` but no `session/resume`
+
+**Decision.** `Session.openResumed` sends `session/resume` where the agent declares
+it and `session/load` where it declares only `loadSession: true`. The load's replay
+is not suppressed by any code of its own: it arrives **before** the load's answer,
+and `adopt` registers the session with the client only **after** that answer, so the
+router drops every replayed frame exactly as it drops any frame for an unregistered
+id. `available_commands_update`, which cursor schedules after the answer, lands as
+state like it does after `session/new`.
+
+**Why.** cursor 2026.09.28 has no `session/resume` (`-32601`) and declares
+`loadSession: true`. Without a second verb every cursor session is stranded by a
+daemon restart and by the idle sweep (Q2.224) — its next message would answer
+`ResumeUnsupportedError` for ever. Q5.85's rule existed to stop a replayed history
+being written into a log that already holds it, and the ordering removes that cost
+rather than the rule being ignored.
+
+**Measured.** Read from cursor's ACP server, `loadSession` in
+`./src/acp/cursor-acp-agent.ts`: it `await`s `replayConversationHistory` and only
+then returns `{modes, models, configOptions}`; the replay is user text (with cursor's
+appended `Additional ACP context:` block), agent text and thought, and
+`tool_call`/`tool_call_update` pairs with ids `replay-<turn>-<step>`. `daemoncheck`
+drives a stub that replays four frames before answering and asserts none reaches the
+log, and that a command list sent after the answer does.
+
+**Rejected.** *Mapping cursor's unknown-session answer to `SessionForgottenError`.*
+It is `-32602` with a message, not `-32002`, and `-32602` is also what cursor answers
+to a malformed `mcpServers` of ours — persisting `resume_gave_up` on it would strand
+a session over this daemon's own bug. It costs retries instead.
+
+**Status.** Current. Reverses Q5.85 for an agent with no `session/resume`; where
+both exist resume is still the only verb sent.
+
+### Q2.249 — A model chosen on a parked Cursor session, and the effort that did not appear
+
+**Question.** A parked session's chips are live and a tap is recorded for the wake
+(Q3.618). On 2026-09-30 the owner picked Claude Opus 5.5 on a parked Cursor session
+and the effort chip stayed a dash. Why, and what should a tap do?
+
+**Why it was a dash.** Cursor's controls other than its mode belong to the model:
+`parameterizedModelPicker` makes each model bring its own — Claude Opus 5.5 an
+`effort`, Codex 5.3 a `reasoning`, Auto nothing (Q6.115) — and only cursor can say
+which, after `session/set_config_option` reaches it. The recorded choice reached
+nobody, so the strip kept the options the parked agent last published, which were
+Auto's. The log shows it: two `agent_config` rows at 17:11 carrying a new model and
+no `effort`, and no `status` row between them and the park.
+
+**Decision.** On a harness whose controls are its model's (`modelScopesControls`,
+true exactly where `clientMetaFor` declares the picker, so cursor alone), a model
+tapped on a **parked** session records the choice and then wakes the agent through
+`resume`, whose `restoreConfig` sends it; the tap answers with what the woken agent
+published. And in every deferred state the recorded model drops the old model's
+controls, keeping only the mode, since `restoreConfig` would otherwise replay the old
+model's `effort` onto the new one whenever the value happened to exist — overriding
+the level cursor remembers for that model in `modelParameters`.
+
+**Parked only.** A `stopped`, `agent_exited` or `agent_signed_out` session still
+records and waits for a message: a person ended the first, the other two ended on a
+failure a tap should not retry. A parked session is one this daemon let go for its
+own reasons, and choosing a model is somebody using it.
+
+**Cost.** A tap on a parked Cursor session spawns an agent and may evict another at
+the machine's ceiling (`makeRoomForWake`), as a message would; the route already
+budgets a start and a config call (`START_TIMEOUT_MS`, `SET_CONFIG_TIMEOUT_MS`), as
+ultracode's restart needed. A failed wake answers `agent_config_failed` with the
+choice kept, as that restart does.
+
+**Status.** Current.
+
+### Q2.250 — A question Cursor's model cannot ask, and the tool this daemon gives it
+
+**Question.** Asked to put a multiple-choice question in front of its person, a
+Cursor session answered in text: *"this harness has no tool for a UI with
+buttons"*. Its own reasoning, in the log, looked for `AskQuestion` and found it
+unavailable. `cursor/ask_question` is handled (Q6.117) — why did it never arrive?
+
+**Measured 2026-09-30, on the owner's account, which is served Auto only** —
+Composer 2.5, Codex 5.3 and Claude Opus 5.5 each answer *Upgrade your plan to
+continue*. The model listed its tools, four ways: over ACP in `agent` mode, over
+ACP in `plan` mode (`CreatePlan` joins), over ACP with `clientInfo` naming `zed`,
+and through the terminal's own `cursor-agent -p`. Twenty-odd tools each time and
+`AskQuestion` in none. The tool list is the server's, sent per request; the ACP
+path tells it only `x-cursor-client-type: acp` and the host app's name, and reads
+neither `--allowed-tools` nor a custom header. So nothing this client sends can ask
+for it, and whether the gate is the client type, the plan or Auto is unmeasured.
+
+**Decision. `ask_question`, served by the `reemoat` MCP server to the harnesses in
+`QUESTION_TOOL_HARNESSES` — cursor alone.** Its input is cursor's own AskQuestion
+shape, parsed by the same `parseQuestionRequest`, drawn by the same form builder,
+so it is the card cursor's request would have drawn. Q2.14's rule stands: an agent
+with a question tool of its own is never given a second.
+
+**It returns at once, and the answer is a message.** A blocking call cannot work:
+cursor calls MCP tools with no timeout option, so the SDK's default 60 s cuts any
+answer given later than a minute. So `poseQuestion` opens an elicitation no request
+waits on, the tool tells the model to end its turn, and settling the card sends
+`answerText` through `deliverAnswer` as the person's own message — waking, queueing
+and refusing exactly as a typed one would. Submit sends the labels picked, Skip
+says it was skipped, ✕ sends nothing.
+
+**What it outlives, and what ends it.** One open at a time, refused in words
+otherwise. Kept on the row in `open_question_json` and redrawn by a restarted
+daemon under the same id; kept through every stop a message could revive, bar the
+person's own Stop, and dismissed by Stop on the turn. This is the one pending
+request that survives its agent going, which `daemon-sessions.md`'s invariant
+otherwise forbids — nothing on the agent's side is waiting on it. While open the
+session reads `blocked`, so it is not parked.
+
+**The permission in front of it is answered by the daemon**, the owner's call:
+cursor asks before every MCP call not in its allowlist, and the card behind this
+one is the consent that permission would ask for. `Session` learns the call is
+this tool from the `rawInput` cursor puts on its `tool_call_update` first
+(`readMcpToolCall`), answers `allow-once`, and logs it as a decision, the path a
+session with no resolver takes. Nothing is written to `~/.cursor/cli-config.json`.
+
+**No messaging switch withdraws it.** A question to your own person is not a
+message to another agent, so the endpoint now always listens, the server is
+injected for a question-tool harness with messaging off, holding that tool alone,
+and `callTool` answers it before the messaging refusal. Questions off
+(`REEMOAT_ELICITATION=0`) withdraw it.
+
+**Measured live the same day**, this tool's own definition on a loopback server:
+asked for a choice, the model called `reemoat: ask_question` by itself with a title,
+one question and three options, then ended its turn with *"pick an option on the
+card above"*. The `rawInput` naming the tool arrived 6 ms before the permission, and
+`tools/call` 3 ms after it was answered.
+
+**Status.** Current. If cursor starts sending `cursor/ask_question`, the model has
+two ways to ask and both draw the same card.
 
 ## The web client
 
@@ -27736,6 +27866,99 @@ Users. It is a light regroup, the second of three the owner was shown on 2026-09
 
 **Status.** Current. Amends Q3.543.
 
+#### Q3.688 — Does Cursor get a tile on New session, when opencode does not?
+
+**Decision.** Yes: `startsBare` stays `true` for cursor, so tapping it starts a
+session on the model cursor's own config says is current. The owner's call,
+2026-09-29, asked with Q3.522 on the screen.
+
+**Why.** Q3.522 took opencode's tile away because its bare start ran
+`opencode/big-pickle`, a model nobody on the screen had chosen. Cursor also reaches
+several vendors, but its bare start runs `selectedModel` from
+`~/.cursor/cli-config.json` — a model the person picked, in the terminal or through
+this app's chip — and the chip names it from the first frame. Its builder row is
+unchanged: an assembled agent still pins a model.
+
+**Cost.** That default is shared with the terminal (Q6.115): the model a preset last
+pinned is what the next bare start runs. It is what cursor itself does between two
+terminal sessions.
+
+**Status.** Current.
+
+#### Q3.689 — What does a Sign-ins row say about a system a CLI signs in to?
+
+**Decision.** What that CLI's own probe said: `systemBadge`, over the same
+`agentStance` and `agentBadge` the card under the row draws, so *signed in*, *not
+signed in*, *not installed*, *would not start* or *cannot check* — and *key saved*
+where a stored key stands for the row. A listing that failed, or that lacks the
+harness, claims only the key, or nothing.
+
+**Why.** The row said *sign in* for every such system with no key saved, a call to
+action, because Q7.117 would not let `keySet` answer *signed in?*. Among badges it
+read as a state, and the wrong one: on 2026-09-30 the owner read six rows of *sign
+in* as six agents signed in, Cursor among them while it was not. The source Q7.117
+names was already on the screen — Q3.540 reads `GET /agent-auth` beside `GET
+/systems` for the harness rows — so the badge costs no request. And *sign in* was
+wrong outright for OpenCode Zen, whose CLI has no sign-in (`no_flow`).
+
+**Precedence.** An absent CLI, a refused start and a clean signed-out outrank a saved
+key: the probe runs with the key in its environment (`probe` in
+`src/runtime/local.ts`), so signed out beside a key is that key failing. Otherwise
+the key wins over *signed in* and *cannot check*, being the one fact the list holds
+for certain — and grok reads a bogus key as signed in (`AGENT_LOGIN`).
+
+**Cost.** Moonshot says *cannot check* until kimi has written its credentials file,
+which is what its card already said.
+
+**Status.** Current.
+
+#### Q3.690 — A file an agent hands over, and the three ways the download failed
+
+**Reported 2026-09-30** in a session that built a talk: *"give me the file in the
+chat"*, and after the agent answered, *"I can't download the file it gives me"*.
+
+**The name.** The agent wrote `slides.html` and `talk.md` for files it had made
+under `presentation/`, and `downloadablePath` joined a relative span to the root
+alone, so neither was offered. **Decision:** a relative span naming no touched file
+directly is matched against the tails of the touched set, and offered where exactly
+one ends in it. Never an absolute span, never two candidates, and still only files
+this session wrote or read.
+
+**The silence.** `saveBlob` sent the native save with `void`, so every refusal from
+the shell — not the account on screen, a location it could not use, a write that
+failed — was a press that did nothing, and `webcheck` pinned the `void`. It returns
+the promise now, and `SessionView`'s catch draws the refusal as a toast. A panel
+dismissed still answers `false` and draws nothing.
+
+**Android.** The save panel there is `ACTION_CREATE_DOCUMENT`, which answers a
+`content://` URI, and `into_path` refused every one — so Q7.145's *"`host_save_file`
+survives because a file panel has a mobile arm"* was true of compiling and false of
+saving. `host_save_file` writes through `tauri-plugin-fs`'s `open` now, which opens
+that URI through the ContentResolver and a desktop path through `std::fs`. The
+plugin was already in the tree under the dialog plugin; its page-facing commands
+stay unreachable, the capability set being empty.
+
+**The channel, which is what failed on the Mac.** `host_save_file` took the file as
+a raw IPC body, and a raw body exists only over Tauri's `ipc://` protocol. Tauri's
+own `ipc-protocol.js` uses `postMessage` instead on Android always, and on a desktop
+page for good once any one `ipc://` call has failed, and there the bytes arrive as a
+JSON array of numbers, which the raw-only arm refused as *"expected the file as
+bytes"*. That fits the report exactly: on the MacBook links opened and copying worked,
+both JSON commands behind the same on-screen check, while every save pressed spun
+briefly and wrote nothing anywhere. **Decision:** the file goes as base64 in JSON
+arguments, which both channels carry, at 1.33 times the bytes rather than a number
+array's six; `nativecheck` refuses `InvokeBody::Raw` in any command.
+
+**Not built.** A file made only by a shell command, and never read or written by a
+tool, is still no button; the agent in that session read its PDF to make it one. A
+way for an agent to hand a file over on purpose would be a tool of its own.
+
+**Measured.** `cargo check` for `aarch64-linux-android` and the host, `clippy -D
+warnings`, the 131 Rust tests. What first failed the `ipc://` call on that page is
+not known, and a save on a real phone is not measured.
+
+**Status.** Current.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -30431,6 +30654,36 @@ and themed icons on Android 13+ have not been seen on a device.
 **Status.** Current. Amends Q4.124, whose "the mark at 58% of its frame" and
 "writes nothing under either Android tree" no longer hold.
 `.claude/rules/native-packaging.md` is the area.
+
+### Q4.129 — Cursor installs through its vendor under either `--source`
+
+**Decision.** `ensure_cursor` fetches `https://cursor.com/install` whole and runs it
+with `bash`, under `--source vendor` and `--source npm` alike, and refreshes an
+installed copy with `cursor-agent --disable-auto-update update`. A copy outside
+`~/.local/bin` (Homebrew's cask) is named and left. It refuses to install at all when
+`~/.local/bin/agent` exists and is not a previous cursor's.
+
+**Why.** Cursor publishes no npm package, so the npm door Q4.125 gives grok does not
+exist here; a firewalled machine cannot install it either way, and the header says
+so. The installer, read 2026-09-29 at `2026.09.28-64d2043`, edits no shell profile,
+takes no root and writes only `~/.local/share/cursor-agent/versions/<build>/` plus two
+symlinks — `~/.local/bin/agent` and `~/.local/bin/cursor-agent` — after an
+unconditional `rm -f` of both. That `rm` is why the guard exists: `agent` is a name
+somebody else's program may hold.
+
+**Measured.** `cursor-agent update` with no TTY and no login: `Checking for
+updates...` / `Already up to date` on stderr, exit 0. Its own cleanup keeps any
+version a running agent marks in use (`install-in-use-marker`), which is why `--skip
+cursor` protects nothing and is passed only to keep the list whole. On a Mac reached
+over SSH every invocation, `--version` included, answers `Error: Your macOS login
+keychain is locked.` and exits 1, so a refresh from an SSH `deploy.sh` is a warning
+there; from the daemon's own launchd domain it is not.
+
+**How it is checked offline.** `deploycheck` puts a fake `cursor-agent` on every real
+run's PATH, since an absent cursor downloads its installer, and asserts the absent
+path only under `--check`, which fetches nothing.
+
+**Status.** Current.
 
 ## Invariants — rules that were defects first
 
@@ -34676,18 +34929,168 @@ then a `session/resume` with a fresh bearer:
 | codex 0.156.1 (codex-acp) | `http`; `sse` and `acp` false | `initialize` 2025-06-18 | `mcp.reemoat.<tool>`, `rawInput` `{server, tool, arguments}` | none reached the client: its own *Guardian Review* approved |
 | grok 1.0.40 | `http`, `sse` | `server/discover`, then `initialize` 2025-11-25 | through its `use_tool`, as `reemoat__<tool>`, found with `search_tool` | a request per call |
 | kimi 0.29.2 | `http`, `sse` | `initialize` 2025-11-25, a GET | not reached: kimi ended every turn empty on this machine, with or without the server | — |
+| cursor 2026.09.28-64d2043 | `http`, `sse` | not recorded | `reemoat: send_message`, drawn `MCP: tool` until its update; `rawInput` `{providerIdentifier, toolName, args}`; the call id carries a newline | a request per call until *Allow always*, which wrote `Mcp(reemoat:send_message)` to `permissions.allow` |
 
-All four carried the bearer on every request and none sent `Origin`. Every one
+All four carried the bearer on every request and none sent `Origin`. Cursor's row is
+2026-09-30, read off this daemon's log of a session the owner ran — a message sent
+to a claude session and delivered — rather than off the wire. Every one
 re-handshook on resume with the new bearer, which is why one is minted per launch.
 opencode is not installed here and is unmeasured.
 
 **What follows.** `server/discover` must be answered `-32601`: that is the answer
 both fall back from. claude and grok defer an MCP tool's schema until searched, so
 the three tools cost them their names until used; codex loads them whole. A
-permission card per send on claude and grok is the harness's policy, and is left
+permission card per send on claude, grok and cursor is the harness's policy, and is left
 alone until agent messaging has permissions of its own (Q7.150).
 
 **Status.** Current, for these versions.
+
+### Q6.115 — What Cursor's ACP server is, read and measured against 2026.09.28-64d2043
+
+**No adapter.** `cursor-agent acp` is a hidden subcommand of the CLI and the ACP
+registry's own entry (`cursor/agent.json`, `args: ["acp"]`). Global flags precede
+`acp`. `--disable-auto-update` is a real hidden flag — an unknown flag is refused —
+and the ACP path runs no background update in this build (the only `isAutoUpdate:
+true` call is the interactive agent's), so it is passed for the build after this one.
+
+**How this was taken.** The ACP server was read whole from the installed bundle
+(`3115.index.js`, pretty-printed), because the live half needs a Cursor account;
+what was driven live on 2026-09-29 is marked as such here and in Q6.116. The
+request and update shapes are Q6.117's.
+
+**`initialize`** answers `loadSession: true`, `sessionCapabilities: {list}` (plus
+`subagents` when the client declares it), `promptCapabilities: {image: true, audio:
+false, embeddedContext: false}`, `mcpCapabilities: {http, sse}`, one auth method
+`cursor_login`, **no `providers`** — so `hostable` refuses every foreign system with
+nothing written — and **no `_meta`**, so no steering: a message sent mid-turn is
+queued (Q2.226), which matters because a second `session/prompt` cancels the first.
+No `session/resume` (Q2.248), no `usage_update` ever, and `stopReason` is only
+`end_turn` or `cancelled`: a backend, plan or auth failure is agent text followed by
+`end_turn`.
+
+**The process's cwd is load-bearing.** Rules, skills, slash commands, config MCP
+servers, the `resource_link` root and every title's relative path come from
+`process.cwd()`, not the session's `cwd`. `AgentLaunchConfig.inSessionCwd` spawns
+cursor there, and only cursor.
+
+**Controls.** `configOptions` carries `mode` (`agent`, `plan`, `ask`, category
+`mode`) and `model`. Declaring `clientCapabilities._meta.parameterizedModelPicker`
+(`CURSOR_CLIENT_META`) makes `model` a list of bare ids and adds each model's
+parameters as their own selects — effort as `thought_level`, the rest as
+`model_config` — instead of one list of every variant. Both land on doors this
+daemon already drives. Measured 2026-09-30 on a signed-in account: `model` is 43
+bare ids led by `default`, named *Auto*, and a model's parameters arrive and leave
+with it — Claude Opus 5.5 brings `effort` (`low` to `max`) plus `context` and `fast`,
+Codex 5.3 calls its effort `reasoning`, Composer 2.5 has only `fast`, and Auto has
+none, so the effort chip comes and goes with the model.
+
+**A model choice is written to the person's global config.** Every model or
+parameter change, and `--model` itself, calls `setCurrentModelWithParameters`, which
+writes `selectedModel`, `modelParameters`, `hasChangedDefaultModel`,
+`modelSelectionHistory` and `model` into `~/.cursor/cli-config.json` — measured
+2026-09-30, the history in the order the chip chose them. The owner
+chose on 2026-09-29 to share that config with the terminal, as cursor does with
+itself, over giving this daemon a `CURSOR_CONFIG_DIR` of its own — which would have
+kept the terminal's default untouched and lost its permission rules and
+`approvalMode` with it. `allow-always` on a permission card writes
+`permissions.allow` in the same file.
+
+**Permissions are cursor's policy.** An edit inside the workspace never asks; a
+shell command asks unless `permissions.allow` names it (the default is `Shell(ls)`);
+a delete always asks; MCP asks unless allowlisted. `-f/--force` is the only flag the
+ACP path reads that answers every request itself, and `--yolo` is ignored there.
+Option ids are `allow-once`, `allow-always`, `reject-once`.
+
+**Tool calls are never `failed` and never closed.** Every one ends `completed`; a
+refusal or a non-zero exit is only in `rawOutput`. A call cursor abandons on a
+cancel or an error stays `in_progress`.
+
+**The keychain.** Every invocation reads the macOS login keychain, `--version`
+included. Measured 2026-09-29: from an SSH shell it answers `Error: Your macOS login
+keychain is locked.` and exits 1; from a job in the `gui/501` launchd domain, where
+this machine's daemon runs, it works. `ui/login.ts` names the first.
+
+**The environment.** Shells cursor starts get `CURSOR_AGENT=1`,
+`CURSOR_CONVERSATION_ID` and `CURSOR_REQUEST_ID`, and cursor reads the second
+itself; all three are in `SESSION_SCOPED_ENV`.
+
+**Status.** Current, for this build. What needs an account is Q7.154.
+
+### Q6.116 — Signing Cursor in: a key, a login, and the probe that can tell
+
+**A pasted `CURSOR_API_KEY` needs no `authenticate`.** cursor decides once at
+startup whether it is authenticated — a stored login, `--api-key` or
+`CURSOR_API_KEY` — and answers `session/new` accordingly. So `ACP_AUTH_METHOD` has
+no cursor row.
+
+**`authenticate` is never sent**, and the reason is Q6.111's arriving from the
+other side. `cursor_login`, the only method advertised, succeeds at once over a
+stored login and otherwise **opens a browser on the daemon's host** and blocks; with
+`NO_OPEN_BROWSER` or over SSH it answers `-32602` with the URL and no way to finish.
+
+**`status` is the wrong probe.** It reads stored tokens only, so it says `Not logged
+in` beside a key that works — and a clean `false` is what `admit` refuses on. The
+probe is `models`, which asks the backend with whatever credential is present and
+so proves it works rather than that it exists. Its two answers are on two streams,
+which is why `LoginStatusProbe.stream` gained `both`. Measured 2026-09-29 with
+nothing signed in: `Error: Authentication required. Run 'agent login', pass
+--api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.` on stderr, exit 1.
+Read from source: `Available models` or `No models available for this account.` on
+success, and `Authentication failed: your Cursor credentials or API key are invalid
+or expired.` for a rejected one; a network failure is `Failed to load models: …`,
+which reads as neither.
+
+**The wizard is a URL, not a code.** `login` under a pty with `NO_OPEN_BROWSER=1`
+(`LOGIN_SPAWN_ENV`) printed, 2026-09-29, `Open a browser and navigate to this link:
+https://cursor.com/loginDeepControl?challenge=…&uuid=…&mode=login&redirectTarget=cli…`
+and polls; `extractUrls` takes it and no code pattern matches in it. `logout` with
+nothing stored printed `Logout successful` and exited 0.
+
+**Where a login lives.** The macOS keychain, or `~/.config/cursor/auth.json` on Linux
+(`credentialPath`, whose absence proves nothing on a Mac). `AGENT_CLI_CREDENTIAL_STORE`
+is cursor's own switch and this daemon sets nothing.
+
+**Status.** Current. Finishing a login and the signed-in strings live are Q7.154.
+
+### Q6.117 — Cursor's own requests and its subagents
+
+**Five methods, all requests, none carrying a `sessionId`.** One agent process
+serves one session here, so `AcpClient` answers each on the only session registered
+and refuses otherwise. Each goes onto a door every agent already uses
+(`src/acp/cursor.ts`):
+
+| cursor sends | becomes | answered |
+|---|---|---|
+| `cursor/ask_question {toolCallId, title?, questions: [{id, prompt, options: [{id, label}], allowMultiple}]}` | an elicitation, one field per question valued by option id | `{outcome: {outcome: "answered", answers: [{questionId, selectedOptionIds}]}}`, Skip `skipped`, a cancel `cancelled` |
+| `cursor/create_plan {toolCallId, plan, …}` | a permission titled *Approve plan*, `rawInput: {plan}` | `accepted` / `rejected`, a cancel `cancelled` |
+| `cursor/update_todos {toolCallId, todos, merge}` | the session's `plan`, merged by id | `{}` |
+| `cursor/generate_image {toolCallId, filePath}` | the path on the image call's card | `{}` |
+| `cursor/task` | nothing | `{}` |
+
+⚠ **An error is not a refusal on this wire.** A `create_plan` answered with any
+JSON-RPC error makes cursor write the plan file itself and report success; an
+`ask_question` answered with one falls back to a permission per single-choice
+question and drops the multiple-choice ones. So a refusal is always cursor's own
+word. With questions switched off (`REEMOAT_ELICITATION=0`) the question is
+`-32601` all the same, and cursor asks through permissions by itself. No free text:
+cursor reads option ids and nothing else, so the card offers no own-answer box.
+
+**A cancelled todo is left off.** ACP's plan has no such status, and drawing it as
+`pending` would say it is still to do. The list is held in memory and emptied by a
+`/clear`, so after a restart a `merge` builds on nothing until cursor next sends
+the whole list.
+
+**Subagents.** Declared as `clientCapabilities._meta.subagents`; a top-level
+`subagents` is stripped by the SDK's schema before cursor reads it. cursor then
+announces each on the parent with `subagent_spawned {subagentSessionId, _meta:
+{cursor: {toolCallId}}}` — outside the SDK's closed union, so diverted below it as
+the async-task drafts are — and sends the child's own frames on the child's session
+id. The router maps that id to the session that spawned it, and `Session` stamps the
+spawning call as each call's parent: what the subagent did survives, what it said
+does not (Q6.4). Its todo updates are ignored, a permission it asks on its own id is
+routed home, and a frame on an id nobody announced is dropped as any unknown one is.
+
+**Status.** Current. Shapes read from source; the live capture is Q7.154's.
 
 ## Open questions and deliberate non-goals
 
@@ -40227,7 +40630,8 @@ Deleting the tree outright would have taken all four with it.
 `blocking_pick_folder` does not exist on mobile in `tauri-plugin-dialog` 2.7.3 —
 Android's own answer to "choose a folder" is `ACTION_OPEN_DOCUMENT_TREE`, a Storage
 Access Framework tree *URI* rather than a path, which the plugin does not wrap.
-`host_save_file` survives beside it only because a *file* panel has a mobile arm.
+`host_save_file` survives beside it only because a *file* panel has a mobile arm —
+which compiled and never saved, until Q3.690.
 The command was declared and registered unconditionally, so the APK failed to
 compile: `error[E0599]: no method named blocking_pick_folder`.
 
@@ -41023,3 +41427,23 @@ a switch into three positions.
   so a plugin that needs it can tell without a rung.
 
 **Status.** Not built.
+
+
+### Q7.154 — What about Cursor needs an account to measure?
+
+**Position.** Everything in Q6.115–Q6.117 that was read from the bundle rather than
+driven: the question, plan and todo requests as cursor actually sends them, a
+permission as it arrives for a shell command, the subagent frames, the replay a real
+`session/load` sends, and the `models` output signed in and with a bogus key. The
+model list, the pin and the MCP row were measured on 2026-09-30 and moved into
+Q6.115 and Q6.114. `cursor/ask_question` has never arrived at all: the server gave
+the model no `AskQuestion` on an Auto-only account (Q2.250), and whether a paid plan
+changes that is unmeasured. The
+drivers assert the shapes the source gives, so a difference measured later is a
+fixture to replace and never a silent pass.
+
+**What it would take.** A `CURSOR_API_KEY` in a raw ACP run against this build. A
+browser login has since been finished on this machine and carried a session under
+the launchd daemon; whether through the wizard is not recorded.
+
+**Status.** Known limitation.

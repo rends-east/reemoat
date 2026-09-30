@@ -7,6 +7,7 @@ import type { Readable, Writable } from "node:stream";
 import {
   ACP_AUTH_METHOD,
   AGENT_LOGIN,
+  LOGIN_SPAWN_ENV,
   AgentUnavailableError,
   agentEnv,
   findOnPath,
@@ -212,7 +213,7 @@ export interface LocalRuntimeOptions {
     command: string,
     args: readonly string[],
     env: NodeJS.ProcessEnv,
-    stream: "stdout" | "stderr",
+    stream: "stdout" | "stderr" | "both",
   ) => Promise<string | null>;
   // For the drivers only; null means could not tell.
   identify?: (path: string) => Promise<string | null>;
@@ -227,7 +228,7 @@ export class LocalRuntime implements SessionRuntime {
     command: string,
     args: readonly string[],
     env: NodeJS.ProcessEnv,
-    stream: "stdout" | "stderr",
+    stream: "stdout" | "stderr" | "both",
   ) => Promise<string | null>;
   private readonly identify: (path: string) => Promise<string | null>;
   private readonly machine: MachineCatalogue;
@@ -369,7 +370,7 @@ export class LocalRuntime implements SessionRuntime {
     const spec = hostLoginArgs(process.platform, command, flow, script);
     const stdin = loginStdio(process.platform, login.interactiveStdin);
     const child = spawn(spec.command, spec.args, {
-      env: { ...agentEnv(), ...this.secrets(agent) },
+      env: { ...agentEnv(), ...(isBuiltinAgentId(agent) ? LOGIN_SPAWN_ENV[agent] : undefined), ...this.secrets(agent) },
       stdio: [stdin, "pipe", "pipe"],
       detached: true,
     }) as MaybePipedChild;
@@ -419,7 +420,7 @@ export class LocalRuntime implements SessionRuntime {
     return this.systemSecretOf(system);
   }
 
-  async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}, routed = false): Promise<AgentProcess> {
+  async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}, routed = false, cwd?: string): Promise<AgentProcess> {
     const config = resolveAgent(agent, this.machine);
     const chosen = await this.agentCli(agent);
     const { command, env: cliEnv } = spawnPlan(config.command, chosen, this.builtinLogin(agent)?.executableEnv ?? null);
@@ -428,6 +429,7 @@ export class LocalRuntime implements SessionRuntime {
       // Secrets after the ambient env so a pasted token wins; extra last so a pinned model beats the host's.
       // A routed session gets no harness credentials: it is aimed at another vendor's endpoint.
       env: { ...config.env, ...cliEnv, ...(routed ? {} : this.secrets(agent)), ...extra },
+      ...(config.inSessionCwd && cwd !== undefined ? { cwd } : {}),
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     }) as PipedChild;
@@ -590,7 +592,7 @@ export class LocalRuntime implements SessionRuntime {
     command: string,
     args: readonly string[],
     agent: AgentId,
-    stream: "stdout" | "stderr",
+    stream: "stdout" | "stderr" | "both",
   ): Promise<string | null> {
     return this.exec(command, args, { ...agentEnv(), ...this.secrets(agent) }, stream);
   }
@@ -655,7 +657,7 @@ function runProbe(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-  stream: "stdout" | "stderr",
+  stream: "stdout" | "stderr" | "both",
 ): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
@@ -664,7 +666,9 @@ function runProbe(
       { timeout: LOGIN_PROBE_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env },
       (error, stdout, stderr) => {
         // Exit 1 is an answer for the status commands; the error only matters when there is no output at all.
-        const text = (stream === "stderr" ? stderr : stdout).toString().trim();
+        const text = (
+          stream === "both" ? `${stdout.toString()}\n${stderr.toString()}` : (stream === "stderr" ? stderr : stdout).toString()
+        ).trim();
         if (text.length > 0) return resolve(text);
         resolve(error === null ? "" : null);
       },

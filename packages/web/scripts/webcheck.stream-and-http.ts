@@ -401,7 +401,7 @@ process.stdout.write("\nhow long a slow route is given\n");
   const chains: [verb: string, path: string, budgets: Budget[]][] = [
     ["POST", "/sessions", [...availability, ["git.ts", "GIT_TIMEOUT_MUTATE_MS"], agentStart]],
     ["POST", "/sessions/s_1/resume", [agentStart]],
-    // A control that restarts the agent, then restores the rest of its config.
+    // A control that restarts or wakes the agent, then restores the rest of its config.
     ["POST", "/sessions/s_1/config", [agentStart, ["session.ts", "SET_CONFIG_TIMEOUT_MS"]]],
     // Waits out a restart already running, wakes an interrupted session, then may open a fresh conversation for a /clear.
     ["POST", "/sessions/s_1/prompt", [agentStart, ["session.ts", "SET_CONFIG_TIMEOUT_MS"], agentStart, ["session.ts", "NEW_SESSION_TIMEOUT_MS"]]],

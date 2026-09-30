@@ -212,8 +212,8 @@ round trip.
 
 ## The client's half
 
-- **`AgentId` is a string and `AGENT_IDS` is still the four.** The list of what
-  *exists* and the list of what is *built in* are two questions now, and three things
+- **`AgentId` is a string and `AGENT_IDS` is still the six this product ships.** The
+  list of what *exists* and the list of what is *built in* are two questions now, and three things
   on the client depend on the second staying closed: `AGENT_LABEL` is a hand-written
   table `webcheck` reads as source text, `AgentGlyph`'s `never` arm is the only
   mechanism in the fleet that makes adding a harness loud, and `startsBare`'s built-in
@@ -229,8 +229,8 @@ round trip.
   element at two props, which is what `webcheck`'s two pinned JSX call sites need.
 - ⚠ **A label is never the daemon's `displayName`.** That field is a log line and
   carries the program — `Claude (claude-agent-acp)`, `Kimi Code CLI`, `Grok Build
-  CLI` — and three of the five built-ins would fail this client's own rule against a
-  label naming a package or ending in `CLI`. `harnessName` is the pair: this
+  CLI`, `Cursor Agent CLI` — and four of the six built-ins would fail this client's
+  own rule against a label naming a package or ending in `CLI`. `harnessName` is the pair: this
   product's table, then the manifest's `label` **bounded**, then the id.
 - ⚠ **A failed listing leaves `null`, never `[]`.** `harnessRows` is
   `agents ?? AGENT_IDS`, so an empty array defeats the fallback rather than being it:
@@ -299,7 +299,7 @@ round trip.
   harnesses exist is a fact about the machine now, and a *shape* test — the only thing
   this side could answer alone — would seed the screen with a harness that is not
   there. ⚠ **The row it fills still does not wait**: `harnessRows` falls back to the
-  four this product ships while `GET /agents` is in flight, which is what keeps
+  six this product ships while `GET /agents` is in flight, which is what keeps
   Q3.528's *argument* true rather than only its assertion.
 - ⚠ **A contributed harness must reach stance `no_login`, never `unchecked`.** The
   daemon sends `login: {blocked: "no_flow", …}` for it; with no `login` object

@@ -129,7 +129,7 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
       return [{ id: "kimi", displayName: "kimi", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
-      return { id: agent, displayName: agent, command: `/nonexistent/relaycheck/${agent}`, args: [], env: {}, authHint: "" };
+      return { id: agent, displayName: agent, command: `/nonexistent/relaycheck/${agent}`, args: [], env: {}, authHint: "", inSessionCwd: false };
     }
     override async launch(): Promise<AgentProcess> {
       return spawn();

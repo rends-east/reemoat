@@ -300,7 +300,18 @@ const cliPackages = new Map<string, string>();
 for (const m of agentsSh.matchAll(/\bensure_npm ([a-z]+) (\S+) "/g)) {
   if (m[1] !== undefined && m[2] !== undefined) cliPackages.set(m[1], m[2]);
 }
-check("deploy/agents.sh names an npm package for each of the five", [...cliPackages.keys()].sort(), [...AGENT_IDS].sort());
+const vendorOnly = AGENT_IDS.filter((id) => !cliPackages.has(id));
+const ownInstaller = (id: string): boolean => {
+  const body = new RegExp(`^ensure_${id}\\(\\) \\{[\\s\\S]*?\\n\\}`, "m").exec(agentsSh)?.[0] ?? "";
+  const code = body.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  return code.includes(`download ${id} https://`) && !/\bensure_npm\b/.test(code);
+};
+check(
+  "deploy/agents.sh names an npm package for each harness that has one, and its vendor's download for the rest",
+  vendorOnly.filter((id) => !ownInstaller(id)),
+  [],
+);
+check("and the rest is cursor alone, which publishes no package (Q4.129)", vendorOnly, ["cursor"]);
 const manifest = JSON.parse(packageJson) as Record<string, Record<string, string> | undefined>;
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 check(
