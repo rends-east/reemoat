@@ -988,7 +988,8 @@ process.stdout.write("\nwhat is actually on screen\n");
   check("while All walks every pin, because All draws every pin", keys(siblingsOf(byKey("m_b/kept"), groups)), ["m_a/far", "m_b/kept"]);
   selectMachine("m_a" as never);
   check("a blocked row keeps the place its reader gave it", keys(foldersOf(groups, currentView(groups))[0]?.rows ?? []), ["m_a/live", "m_a/blocked"]);
-  check("which the folder header says even when shut", foldersOf(groups, currentView(groups))[0]?.blockedCount, 1);
+  // Q3.695: counted for the tab and the machine's chip; the folder's own header draws no count.
+  check("and the folder still counts it when shut", foldersOf(groups, currentView(groups))[0]?.blockedCount, 1);
 
   selectMachine("m_b" as never);
   check("selecting the other machine draws its folders", foldersOf(groups, currentView(groups)).map((f) => f.name), ["web"]);

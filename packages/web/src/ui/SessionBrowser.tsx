@@ -32,7 +32,7 @@ import {
   type SetupState,
 } from "../store";
 import { machineDisplayName } from "../machineOrder";
-import { humanRequests, needsHuman, resumeStalled } from "../wire";
+import { humanRequests, resumeStalled } from "../wire";
 import {
   Button,
   Dropdown,
@@ -286,7 +286,6 @@ function ListBody({
         icon={Pin}
         name="Pinned"
         id={PINNED_FOLDER}
-        blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
         space={drag.spaceFor(PINNED_FOLDER)}
         sliding={drag.sliding}
       >
@@ -312,15 +311,21 @@ function ListBody({
         icon={Layers}
         name="All chats"
         id={ALL_FOLDER}
-        blockedCount={everything.filter((row) => needsHuman(row.snapshot)).length}
+        space={drag.spaceFor(ALL_FOLDER)}
+        sliding={drag.sliding}
       >
-        {everything.map((row) => (
+        {everything.map((row, index) => (
           <SessionLine
             key={row.key}
             row={row}
             state={state}
             selected={row.key === activeKey}
             indented
+            drag={drag.bind(row, ALL_FOLDER)}
+            lifted={drag.dragging === row.key}
+            pressed={drag.pressing === row.key && drag.dragging !== row.key}
+            sliding={drag.sliding}
+            shift={drag.shiftFor(ALL_FOLDER, index, row.key)}
           />
         ))}
       </GroupSection>
@@ -425,7 +430,7 @@ function SidebarHeader({
           }}
         />
         {waiting.length > 0 && (
-          <span className="pointer-events-none absolute top-1 right-1 h-2 w-2 rounded-full bg-fg ring-2 ring-ink" />
+          <span className="pointer-events-none absolute top-1 right-1 h-2 w-2 rounded-full bg-brand ring-2 ring-ink" />
         )}
       </span>
     </div>
@@ -439,7 +444,7 @@ function TabLabel({ tab }: { tab: MachineTab }): ReactNode {
     <span data-tab-pill={tab.id} className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 ${tab.selected ? "bg-raised" : ""}`}>
       {tab.name}
       {tab.blockedCount > 0 && (
-        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
+        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-2xs font-semibold text-on-brand [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
           {tab.blockedCount}
         </span>
       )}
@@ -655,7 +660,6 @@ function GroupSection({
   icon,
   name,
   id,
-  blockedCount,
   children,
   space = 0,
   sliding = false,
@@ -663,7 +667,6 @@ function GroupSection({
   icon: typeof Pin;
   name: string;
   id: FolderId;
-  blockedCount: number;
   children: ReactNode;
   // The group joined takes a row's height and the one left gives it back; translating rows alone would overlap what follows.
   space?: number;
@@ -689,11 +692,6 @@ function GroupSection({
           <span className={`shrink-0 text-muted transition-transform ${collapsed ? "" : "rotate-90"}`}>
             <Icon as={ChevronRight} size={13} />
           </span>
-          {blockedCount > 0 && (
-            <span className="ml-auto shrink-0 pl-1.5 text-2xs font-semibold text-fg">
-              {blockedCount} waiting
-            </span>
-          )}
         </button>
       </h2>
       {!collapsed && children}
@@ -747,11 +745,6 @@ function FolderSection({
             >
               <Icon as={ChevronRight} size={13} />
             </span>
-            {folder.blockedCount > 0 && (
-              <span className="ml-auto shrink-0 pl-1.5 text-2xs font-semibold text-fg">
-                {folder.blockedCount} waiting
-              </span>
-            )}
           </button>
           {/* `chip` grows vertically only, so its 44px target stays off the collapse button beside it. */}
           <IconButton
@@ -807,9 +800,7 @@ function SessionLine({
   shift?: number;
 }): ReactNode {
   const at = row.snapshot.turnStartedAt ?? row.snapshot.lastEventAt ?? row.snapshot.createdAt;
-  const requests = humanRequests(row.snapshot);
-  const waiting = requests.length;
-  const pending = requests[0];
+  const waiting = humanRequests(row.snapshot).length;
   const roots = state.rootsByMachine.get(row.ref.machineId) ?? [];
   const label = sessionLabel(row, roots);
   const machine = machineDisplayName({ id: row.ref.machineId, name: row.machineName }, state.localMachineId);
@@ -870,13 +861,13 @@ function SessionLine({
               </span>
             )}
           </div>
-          {waiting > 0 && pending !== undefined ? (
-            <div className="mt-0.5 truncate text-xs font-medium text-fg">{pending.title}</div>
-          ) : stalled !== null ? (
+          {/* A waiting row says so with its weight and its dot and keeps this line: what it is asking is the card's (Q3.691). */}
+          {stalled !== null ? (
             <div className="mt-0.5 truncate text-xs text-danger">{stalled}</div>
           ) : (
-            // Sans at `text-2xs` (web-typography.md): the nickname, the harness's mark and the machine, one gap apart; no path (Q3.681).
-            <div className="mt-0.5 flex min-w-0 items-center gap-3 text-2xs text-muted">
+            // Sans at `text-2xs` (web-typography.md): the nickname, the harness's mark and the machine, one gap apart; no path.
+            // In em, so the gap grows with the step a finger gets (Q3.681, Q3.691).
+            <div className="mt-0.5 flex min-w-0 items-center gap-[2em] text-2xs text-muted">
               {nickname !== null && <span className="shrink-0">{nickname}</span>}
               <AgentMark agent={row.snapshot.agent} />
               <MachineLabel name={machine} />

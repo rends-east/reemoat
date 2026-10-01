@@ -9,11 +9,16 @@ export interface PosedQuestion {
   questions: CursorQuestion[];
 }
 
-export type PoseResult = { ok: true } | { ok: false; message: string };
+/** `answer` is the call's own result, or null when the card outlived the call and the answer will come as a message. */
+export type PoseResult = { ok: true; answer: string | null } | { ok: false; message: string };
+
+/** Under the 60 s cursor's MCP client allows any call, so an answer in time is the result, as every other harness's is (Q2.251). */
+export const ASK_WAIT_MS = 50_000;
 
 export const ASK_INSTRUCTIONS =
-  "ask_question puts multiple-choice questions in front of your user as a card with a button per option. " +
-  "It returns before anyone answers: end your turn after calling it, and the answer arrives as your user's next message.";
+  "ask_question puts multiple-choice questions in front of your user as a card with a button per option and returns their answer. " +
+  "If they have not answered within a minute it returns without one: then end your turn at once, writing nothing, and the " +
+  "answer arrives as your user's next message.";
 
 const OPTION = {
   type: "object",
@@ -29,9 +34,9 @@ export const ASK_TOOL = {
   name: ASK_TOOL_NAME,
   description:
     "Ask your user one or more multiple-choice questions, drawn as a card with a button per option. Use it whenever you want your " +
-    "user to choose; your own AskQuestion tool is not available in this client. It returns at once, before anyone answers: " +
-    "end your turn right after calling it and do not repeat the question as text. The answer arrives as your user's next " +
-    "message, and if they skip the card you are told so.",
+    "user to choose; your own AskQuestion tool is not available in this client. It waits for the answer and returns it. If " +
+    "your user has not answered within a minute it returns without one: then end your turn at once, writing nothing and not " +
+    "repeating the question, and the answer arrives as your user's next message. If they skip the card you are told so.",
   inputSchema: {
     type: "object",
     properties: {
@@ -57,9 +62,9 @@ export const ASK_TOOL = {
   },
 };
 
-export const ASK_RESULT =
-  "Shown to your user as a card. End your turn now, without repeating the question as text: their answer arrives as your " +
-  "user's next message.";
+export const ASK_PENDING =
+  "Your user has not answered yet, and the card stays open. End your turn now and write nothing: their answer arrives as " +
+  "your user's next message.";
 
 /** cursor's own parser, so the two doors accept the same questions; a string is the refusal, worded for the model. */
 export function parseAskArguments(args: Record<string, unknown>): PosedQuestion | string {
@@ -72,15 +77,26 @@ export function parseAskArguments(args: Record<string, unknown>): PosedQuestion 
   }
 }
 
-/** The message an answer is delivered as, or null for a card dismissed with nothing to say. */
+/** The call's result when the answer came while it waited. */
+export function answerResult(posed: PosedQuestion, response: acp.CreateElicitationResponse): string {
+  const outcome = questionResponse(response, posed.questions).outcome;
+  if (outcome.outcome === "cancelled") return "Your user closed the card without answering: carry on without an answer.";
+  if (outcome.outcome === "skipped") return "Your user skipped the question: carry on without an answer.";
+  return ["Your user answered:", ...answerLines(posed, outcome.answers)].join("\n");
+}
+
+/** The message an answer is delivered as once the call has returned, or null for a card dismissed with nothing to say. */
 export function answerText(posed: PosedQuestion, response: acp.CreateElicitationResponse): string | null {
   const outcome = questionResponse(response, posed.questions).outcome;
   if (outcome.outcome === "cancelled") return null;
   if (outcome.outcome === "skipped") return "Skipped your ask_question: carry on without an answer.";
-  const lines = posed.questions.map((question) => {
-    const picked = outcome.answers.find((answer) => answer.questionId === question.id)?.selectedOptionIds ?? [];
+  return ["Answer to your ask_question:", ...answerLines(posed, outcome.answers)].join("\n");
+}
+
+function answerLines(posed: PosedQuestion, answers: readonly { questionId: string; selectedOptionIds: string[] }[]): string[] {
+  return posed.questions.map((question) => {
+    const picked = answers.find((answer) => answer.questionId === question.id)?.selectedOptionIds ?? [];
     const labels = question.options.filter((option) => picked.includes(option.id)).map((option) => option.label);
     return `${question.prompt} — ${labels.length === 0 ? "(no answer)" : labels.join(", ")}`;
   });
-  return ["Answer to your ask_question:", ...lines].join("\n");
 }

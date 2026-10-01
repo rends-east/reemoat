@@ -38,7 +38,7 @@ const KEYS_ONLY = "pointer-coarse:hidden";
 const ROW = "border-edge-strong bg-surface text-fg hover:bg-raised";
 
 // Border, fill and an inset ring; a ring cannot reflow the row as a weight change did (Q3.421).
-const CHOSEN = "border-fg bg-raised text-fg ring-1 ring-fg ring-inset hover:bg-edge";
+const CHOSEN = "border-brand bg-raised text-fg ring-1 ring-brand ring-inset hover:bg-edge";
 
 export function AskCard({
   title,
@@ -59,6 +59,7 @@ export function AskCard({
   actions,
   size = "normal",
   onHeight,
+  typing = false,
 }: {
   title: string;
   detail?: ReactNode;
@@ -79,6 +80,8 @@ export function AskCard({
   size?: AskSize;
   /** Current height, so the transcript can pad past this out-of-flow card; 0 on unmount. */
   onHeight?: (px: number) => void;
+  /** Somebody is writing their own answer: under a finger the rows recede, so the box and its words are what they read (Q3.695). */
+  typing?: boolean;
 }): ReactNode {
   const headingId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -244,10 +247,16 @@ export function AskCard({
 
           {((layout === "rows" && options.length > 0) || (extra !== undefined && extra !== null)) && (
             <div className="max-h-[45vh] min-h-0 space-y-1.5 overflow-y-auto border-t border-edge/60 px-3 py-2.5">
-              {layout === "rows" &&
-                options.map((option, index) => (
-                  <OptionRow key={option.id} option={option} index={index} disabled={busy} />
-                ))}
+              {layout === "rows" && options.length > 0 && (
+                // Faded, never hidden or disabled: every answer stays visible and a tap on one still picks it.
+                <div
+                  className={`space-y-1.5 transition-opacity duration-150 ${typing ? "[@media(pointer:coarse)]:opacity-35" : ""}`}
+                >
+                  {options.map((option, index) => (
+                    <OptionRow key={option.id} option={option} index={index} disabled={busy} />
+                  ))}
+                </div>
+              )}
               {extra}
             </div>
           )}
@@ -318,8 +327,8 @@ function OptionRow({
       aria-checked={option.mark === "many" ? option.chosen === true : undefined}
       aria-pressed={option.mark === "one" ? option.chosen === true : undefined}
       // primary applies to rows too, so a decision drawn as rows keeps its one filled control.
-      className={`tap press relative flex min-h-11 w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left disabled:opacity-40 ${
-        option.primary === true ? "border-fg bg-fg text-ink hover:bg-fg/90" : askRowTone(option.chosen === true)
+      className={`tap relative flex min-h-11 w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left disabled:opacity-40 ${
+        option.primary === true ? "border-brand bg-brand text-on-brand hover:bg-brand/90" : askRowTone(option.chosen === true)
       }`}
     >
       {option.busy === true && (
@@ -331,7 +340,7 @@ function OptionRow({
         <span className="block text-xs font-medium wrap-anywhere">{option.label}</span>
         {option.description !== null && option.description !== undefined && (
           <span
-            className={`mt-0.5 block text-2xs wrap-anywhere ${option.primary === true ? "text-ink/70" : "text-muted"}`}
+            className={`mt-0.5 block text-2xs wrap-anywhere ${option.primary === true ? "text-on-brand" : "text-muted"}`}
           >
             {option.description}
           </span>
@@ -340,7 +349,7 @@ function OptionRow({
       {index < 9 && (
         <span
           className={`mt-0.5 shrink-0 text-2xs tabular-nums ${KEYS_ONLY} ${
-            option.primary === true ? "text-ink/70" : "text-faint"
+            option.primary === true ? "text-on-brand" : "text-faint"
           }`}
         >
           {index + 1}
@@ -372,13 +381,13 @@ export function ChoiceMark({
       aria-hidden={true}
       className={`flex h-4 w-4 shrink-0 items-center justify-center ${
         mark === "many" ? "rounded-none" : "rounded-full"
-      } ring-1 ring-inset ${chosen ? "bg-fg ring-fg" : "ring-edge-strong"} ${className}`.trimEnd()}
+      } ring-1 ring-inset ${chosen ? "bg-brand ring-brand" : "ring-edge-strong"} ${className}`.trimEnd()}
     >
       {chosen &&
         (mark === "many" ? (
-          <Icon as={Check} size={11} className="text-ink" />
+          <Icon as={Check} size={11} className="text-on-brand" />
         ) : (
-          <span className="block h-1.5 w-1.5 rounded-full bg-ink" />
+          <span className="block h-1.5 w-1.5 rounded-full bg-on-brand" />
         ))}
     </span>
   );
@@ -398,9 +407,9 @@ function OptionButton({
       onClick={option.onPick}
       disabled={disabled}
       title={option.hint !== undefined && option.hint !== null && option.hint !== option.label ? option.hint : undefined}
-      className={`tap press relative flex min-h-11 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-40 ${
+      className={`tap relative flex min-h-11 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-40 ${
         option.primary === true
-          ? "bg-fg text-ink hover:bg-fg/90"
+          ? "bg-brand text-on-brand hover:bg-brand/90"
           :
             "border border-edge-strong bg-surface text-fg hover:bg-raised"
       }`}
@@ -412,7 +421,7 @@ function OptionButton({
       )}
       {option.label}
       {index < 9 && (
-        <span className={`tabular-nums ${KEYS_ONLY} ${option.primary === true ? "text-ink/70" : "text-faint"}`}>
+        <span className={`tabular-nums ${KEYS_ONLY} ${option.primary === true ? "text-on-brand" : "text-faint"}`}>
           {index + 1}
         </span>
       )}
@@ -439,7 +448,7 @@ export function AskAction({
   const look =
     tone === "primary"
       ?
-        "bg-fg text-ink hover:bg-fg/90"
+        "bg-brand text-on-brand hover:bg-brand/90"
       : tone === "quiet"
         ? "text-muted hover:bg-raised hover:text-fg"
         :

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { DAEMON_VERSION } from "../version.js";
 import type { PeerHub, PeerListing, SendResult } from "./hub.js";
-import { ASK_INSTRUCTIONS, ASK_RESULT, ASK_TOOL, ASK_TOOL_NAME, type PoseResult } from "./ask.js";
+import { ASK_INSTRUCTIONS, ASK_PENDING, ASK_TOOL, ASK_TOOL_NAME, type PoseResult } from "./ask.js";
 import { PEER_SERVER_NAME } from "./envelope.js";
 
 export const PEER_MCP_PATH = "/mcp";
@@ -165,19 +165,28 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
         result: { tools: [...(hub.listsMessaging(caller) ? TOOLS : []), ...(hub.listsQuestions(caller) ? [ASK_TOOL] : [])] },
       });
       return;
-    case "tools/call":
-      reply(res, id, { result: await callTool(hub, caller, params) });
+    case "tools/call": {
+      // ask_question holds its POST open for the answer; a client that gives up on it leaves the card to a message.
+      const gone = new AbortController();
+      res.once("close", () => gone.abort());
+      reply(res, id, { result: await callTool(hub, caller, params, gone.signal) });
       return;
+    }
     // Includes 2026-07-28's server/discover, which claude and grok try first and fall back from on -32601 (measured).
     default:
       reply(res, id, { error: { code: -32601, message: "method not found" } });
   }
 }
 
-async function callTool(hub: PeerHub, caller: string, params: Record<string, unknown>): Promise<unknown> {
+async function callTool(
+  hub: PeerHub,
+  caller: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<unknown> {
   const args = isRecord(params["arguments"]) ? params["arguments"] : {};
   // Before the messaging refusal: a question is not a message, and no messaging switch withdraws it (Q2.250).
-  if (params["name"] === ASK_TOOL_NAME) return poseResult(hub.pose(caller, args));
+  if (params["name"] === ASK_TOOL_NAME) return poseResult(await hub.pose(caller, args, signal));
   // An agent launched before a switch went off still holds the tools; every call is refused in words (Q2.244).
   const refusal = hub.callRefusal(caller);
   if (refusal !== null) return toolError(refusal, { code: "messaging_off" });
@@ -250,7 +259,8 @@ function sendResult(result: SendResult): unknown {
 
 function poseResult(result: PoseResult): unknown {
   if (!result.ok) return toolError(result.message);
-  return { content: [{ type: "text", text: ASK_RESULT }], structuredContent: { status: "shown" } };
+  if (result.answer !== null) return { content: [{ type: "text", text: result.answer }], structuredContent: { status: "answered" } };
+  return { content: [{ type: "text", text: ASK_PENDING }], structuredContent: { status: "shown" } };
 }
 
 function toolError(message: string, structured: Record<string, unknown> = {}): unknown {

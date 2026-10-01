@@ -264,6 +264,8 @@ export class Session {
   private readonly delegatedCalls = new Set<string>();
   /** Calls to this daemon's own ask_question: the card behind one is the consent its permission would ask for (Q2.250). */
   private readonly posedCalls = new Set<string>();
+  /** The newest of them whose card is not drawn yet; the card takes its id, so the transcript folds the call into it. */
+  private unclaimedPosedCall: string | null = null;
 
   private cwd = "";
 
@@ -1142,12 +1144,21 @@ export class Session {
     return cursorPlanResponse(answer);
   }
 
+  /** The ask_question call now reaching this daemon's server, once: it is the one whose permission was just answered. */
+  claimPosedCall(): string | null {
+    const claimed = this.unclaimedPosedCall;
+    this.unclaimedPosedCall = null;
+    return claimed;
+  }
+
   /** Read off the update, never the permission: cursor names the MCP server and tool only in the rawInput it puts there first. */
   private notePosedCall(toolCallId: string, rawInput: unknown): void {
     if (!QUESTION_TOOL_HARNESSES.includes(this.agent)) return;
     const call = readMcpToolCall(rawInput);
     if (call === null || call.server !== PEER_SERVER_NAME || call.tool !== ASK_TOOL_NAME) return;
-    this.posedCalls.add(boundToolCallId(toolCallId));
+    const bound = boundToolCallId(toolCallId);
+    this.unclaimedPosedCall = bound;
+    this.posedCalls.add(bound);
     if (this.posedCalls.size > MAX_POSED_CALLS) {
       const oldest = this.posedCalls.values().next().value;
       if (oldest !== undefined) this.posedCalls.delete(oldest);
@@ -1376,6 +1387,10 @@ export class Session {
           toolOutput(update.content, this.keepImage, images) ?? rawToolOutput(update.rawOutput);
         const toolCallId = boundToolCallId(update.toolCallId);
         if (delegatedBy === null) this.notePosedCall(update.toolCallId, update.rawInput);
+        // A call that ended without reaching this daemon's server must not lend its id to the next card.
+        if ((update.status === "completed" || update.status === "failed") && toolCallId === this.unclaimedPosedCall) {
+          this.unclaimedPosedCall = null;
+        }
         const event: Extract<SessionEvent, { type: "tool_call_update" }> = {
           type: "tool_call_update",
           toolCallId,

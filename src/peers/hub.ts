@@ -4,7 +4,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import type { PeerOrigin, PeerPolicyKey, PromptMention } from "../events.js";
 import type { ManagedSession, MentionNote, MidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
 import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore } from "../store/sqlite.js";
-import { parseAskArguments, type PoseResult } from "./ask.js";
+import { ASK_WAIT_MS, parseAskArguments, type PoseResult } from "./ask.js";
 import type { PeerAnswer } from "./channel.js";
 import {
   address,
@@ -204,6 +204,8 @@ export interface PeerHubOptions {
   policy?: PeerPolicyStore | null;
   now?: () => number;
   onWarning?: (detail: string) => void;
+  /** How long ask_question holds its call open for the answer; ASK_WAIT_MS unless a driver shortens it. */
+  askWaitMs?: number;
 }
 
 /** Everything a machine's sessions may say to each other and to linked machines' sessions; the one door every peer message passes through. */
@@ -220,6 +222,7 @@ export class PeerHub {
   private pumping: Promise<void> | null = null;
   private readonly now: () => number;
   private readonly warn: ((detail: string) => void) | null;
+  private readonly askWaitMs: number;
   private endpoint: string | null = null;
   // Minted at every launch: an older process's bearer stops naming the session the moment a new one is handed out.
   private readonly tokenBySession = new Map<string, string>();
@@ -246,6 +249,7 @@ export class PeerHub {
     this.policy = storedPolicy(this.policyStore?.readPolicy(POLICY_KEY) ?? null);
     this.now = options.now ?? Date.now;
     this.warn = options.onWarning ?? null;
+    this.askWaitMs = options.askWaitMs ?? ASK_WAIT_MS;
   }
 
   /** Read at every gate, never captured: the policy moves at runtime (Q2.244). */
@@ -357,13 +361,13 @@ export class PeerHub {
     return this.registry.get(callerId)?.takesPosedQuestions === true;
   }
 
-  /** ask_question: shown to the caller's own person as a card, answered later as that person's message (Q2.250). */
-  pose(callerId: string, args: Record<string, unknown>): PoseResult {
+  /** ask_question: shown to the caller's own person as a card, answered in the call or later as their message (Q2.250, Q2.251). */
+  async pose(callerId: string, args: Record<string, unknown>, signal: AbortSignal | null = null): Promise<PoseResult> {
     const session = this.registry.get(callerId);
     if (session === undefined) return { ok: false, message: "this session no longer exists" };
     const posed = parseAskArguments(args);
     if (typeof posed === "string") return { ok: false, message: posed };
-    return session.poseQuestion(posed);
+    return await session.poseQuestion(posed, this.askWaitMs, signal);
   }
 
   /** Why a caller holding a valid bearer may not use the tools now; a tool error, never a 401, which an MCP client reads as a sign-in. */

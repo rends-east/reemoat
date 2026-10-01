@@ -74,7 +74,7 @@ export function Handoff({
           <a
             href={download}
             rel="noreferrer"
-            className="tap press mt-4 inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-md bg-fg px-3 text-sm font-medium text-ink hover:bg-fg/85"
+            className="tap press mt-4 inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-md bg-brand px-3 text-sm font-medium text-on-brand hover:bg-brand/90"
           >
             Download Reemoat
           </a>

@@ -369,13 +369,12 @@ and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
 - **`login_shell_path` is Unix by decision rather than by accident.** It answered
   `None` on Windows because `SHELL` is unset — luck that breaks under Git Bash and
   MSYS2, which set it to a POSIX shell that knows nothing of the Windows `PATH`.
-- **Closing the last window quits, on every platform including macOS.** Measured
-  in `tauri-runtime-wry`: destroying the last window emits `ExitRequested` and,
-  with nothing calling `prevent_exit()`, sets `ControlFlow::Exit`. ⚠ `lib.rs` said
-  *"closing the window on macOS is not quitting"* for four releases — a fact about
-  **AppKit**, which Tauri does not implement. The code was right and the reason
-  was not. The macOS convention (stay running, return from the dock) is a
-  deliberate non-goal beside "no menu bar, no tray".
+- **The close button puts the app away on macOS and Windows; only a Quit quits.**
+  `away.rs`: the window hides and the app, with every daemon it started, runs on,
+  back from the Dock (`Reopen`) or, on Windows, the tray icon or a second launch
+  (single-instance, the first plugin). ⌘Q, the menus and the tray's Quit reach
+  `RunEvent::Exit`. Linux still quits on close: destroying the last window emits
+  `ExitRequested` and sets `ControlFlow::Exit` on every platform (Q6.108). Q3.697.
 - **The origin is not the same string on every platform.** `tauri://localhost` on
   macOS and Linux, `http://tauri.localhost` on Windows and Android. Anything
   comparing an origin, or building a URL out of `location.origin`, is
@@ -522,9 +521,9 @@ names, which is the `pnpm-lock.yaml` hazard that driver already refuses. Q4.117.
 - **No updater.** Configured absent rather than half-wired. The step that must
   happen *before* a first public build is generating the keypair: a shipped build
   with no public key can never be updated in place by a later one that has it.
-- **No menu bar, no tray, no notifications.** `packages/web` has never had a
-  `Notification` call, and adding one is new product behaviour with its own
-  settings rather than part of a client migration.
+- **No menu bar, no notifications, a tray on Windows alone** (Q3.697).
+  `packages/web` has never had a `Notification` call, and adding one is new
+  product behaviour with its own settings rather than part of a client migration.
 
 ## Known gotchas
 

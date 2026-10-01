@@ -52,6 +52,22 @@
 
   --color-caution: #5f4a1e;
 
+  /* The transcript's inks: inline code on a chip lighter than raised, as Claude's is, and a link in plain link blue (Q3.691). */
+  --color-code: #a8481e;
+  --color-chip: #f3f1ed;
+  --color-link: #1d5bc6;
+
+  /* The one brand colour: lake teal off the landing's painting, on what asks for a press or says something waits on you (Q3.694). */
+  --color-brand: #1d6b67;
+  --color-on-brand: #ffffff;
+
+  /* A code block's inks, one per kind highlight.js names; each is a text tone on raised, where a block is drawn. Comments stay faint (Q3.693). */
+  --color-syn-keyword: #a3213e;
+  --color-syn-title: #6a3fb0;
+  --color-syn-string: #2b6b37;
+  --color-syn-number: #1d52a3;
+  --color-syn-type: #8a4a0c;
+
   /* Behind every sheet and the drawer; fg at a quarter here, never fg itself, since fg turns light in the dark palette. */
   --color-scrim: rgb(28 26 22 / 0.25);
 
@@ -234,6 +250,16 @@
   --color-del: #38221e;
   --color-del-ink: #e59c8f;
   --color-caution: #d5ba86;
+  --color-code: #e8956a;
+  --color-chip: #211f1c;
+  --color-link: #8ab4f8;
+  --color-brand: #5fc2b5;
+  --color-on-brand: #11100e;
+  --color-syn-keyword: #ff8f8f;
+  --color-syn-title: #c8a8ff;
+  --color-syn-string: #8fd19e;
+  --color-syn-number: #86b8ff;
+  --color-syn-type: #f2b46c;
   --color-scrim: rgb(0 0 0 / 0.55);
   /* A shadow on a dark ground has to be black and heavier to read at all; the edge still carries most of it. */
   --shade: 0 0 0;
@@ -368,34 +394,48 @@ kbd {
 }
 
 .hljs-comment,
-.hljs-quote,
-.hljs-meta {
+.hljs-quote {
   color: var(--color-faint);
   font-style: italic;
 }
 .hljs-keyword,
 .hljs-selector-tag,
-.hljs-literal,
 .hljs-doctag,
-.hljs-meta .hljs-keyword,
+.hljs-meta .hljs-keyword {
+  color: var(--color-syn-keyword);
+}
 .hljs-title,
 .hljs-section,
 .hljs-name,
 .hljs-selector-id,
 .hljs-selector-class {
-  color: var(--color-fg);
-  font-weight: 600;
+  color: var(--color-syn-title);
 }
 .hljs-string,
 .hljs-regexp,
-.hljs-addition,
-.hljs-attribute,
+.hljs-char {
+  color: var(--color-syn-string);
+}
 .hljs-number,
+.hljs-literal,
 .hljs-symbol,
 .hljs-bullet,
-.hljs-link,
+.hljs-link {
+  color: var(--color-syn-number);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-type,
+.hljs-built_in,
+.hljs-variable.language_,
+.hljs-meta {
+  color: var(--color-syn-type);
+}
+.hljs-addition {
+  color: var(--color-add-ink);
+}
 .hljs-deletion {
-  color: var(--color-muted);
+  color: var(--color-del-ink);
 }
 .hljs-emphasis {
   font-style: italic;

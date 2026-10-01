@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type MouseEvent,
   type ReactNode,
 } from "react";
 import { backgroundReporting } from "../tasks";
@@ -329,27 +330,45 @@ function WorkspaceLine({
   const where = workspace.requestedCwd;
   const branch = workspace.git?.branch ?? null;
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
+    <span onMouseDown={selectUnit} className="flex min-w-0 items-center gap-1.5">
       {nickname !== null && (
         <>
-          <span className="shrink-0">{nickname}</span>
+          <span data-unit="" className="shrink-0">{nickname}</span>
           <span className="shrink-0 text-faint">·</span>
         </>
       )}
-      <MachineLabel name={machineName} className="shrink-0" />
+      <span data-unit="" className="flex shrink-0">
+        <MachineLabel name={machineName} />
+      </span>
       <span className="shrink-0 text-faint">·</span>
-      <span className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
+      <span data-unit="" className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
       {workspace.mode === "worktree" && branch !== null && (
         <>
           <span className="text-faint">·</span>
           <span className="flex min-w-0 items-center gap-1 text-muted">
             <Icon as={GitBranch} size={10} />
-            <span className="truncate">{branch}</span>
+            <span data-unit="" className="truncate">{branch}</span>
           </span>
         </>
       )}
     </span>
   );
+}
+
+/**
+ * From the third click on, the header line selects the one item under the pointer — the folder, the branch — and nothing on a
+ * separator, where WebKit's paragraph took the title too and painted the header's whole width (Q3.696).
+ */
+function selectUnit(event: MouseEvent<HTMLElement>): void {
+  if (event.detail < 3 || event.button !== 0) return;
+  event.preventDefault();
+  const unit = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-unit]") : null;
+  const selection = window.getSelection();
+  if (unit === null || selection === null || !event.currentTarget.contains(unit)) return;
+  const range = document.createRange();
+  range.selectNodeContents(unit);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 function Transcript({

@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 108 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 437 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 109 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 444 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 77 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1107** | |
+| | | **1115** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1107 rather than the 554
+dividers. So the count is over **both** depths, and it says 1115 rather than the 555
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9175,8 +9175,50 @@ one question and three options, then ended its turn with *"pick an option on the
 card above"*. The `rawInput` naming the tool arrived 6 ms before the permission, and
 `tools/call` 3 ms after it was answered.
 
-**Status.** Current. If cursor starts sending `cursor/ask_question`, the model has
-two ways to ask and both draw the same card.
+**Status.** Current, and **amended by Q2.251**: the call now waits for the answer,
+and the message is only what an answer later than that becomes. If cursor starts
+sending `cursor/ask_question`, the model has two ways to ask and both draw the same
+card.
+
+### Q2.251 — A Cursor question answered as every other harness's is
+
+**Question.** The owner, on a cursor session, 2026-10-01: the answer appeared as their
+own message — a bubble reading *"Answer to your ask_question: … — …"* — under the
+answered card, *"if this is how asking is done, it must be done as for the other
+agents, with no difference at all"*. Read off that session's log, the difference was
+four rows, not one: the `reemoat: ask_question` tool row, a `permission_request` the
+daemon had answered itself (drawn *asked: … (answered)*), the model's *"the card is
+on screen — pick an option"* and its turn ending, then the bubble and a new turn.
+
+**Why it returned at once.** Q2.250's measurement stands and was read again, this time
+off cursor 2026.09.28's own bundle: `McpSdkClient.callTool` calls the SDK's
+`client.callTool({name, arguments})` with no options, so the request gets the SDK's
+`timeout ?? 6e4` and `resetTimeoutOnProgress ?? false` — 60 s, and no progress
+notification moves it. So a call cannot wait for a person who takes longer.
+
+**Decision. It waits as long as it may.** `poseQuestion` holds the call open for
+`ASK_WAIT_MS` (50 s, ten under cursor's cut, the permission in front having already
+been answered); an answer in that time settles `posedWaiter` and is the call's own
+result (`answerResult`), so the turn goes on and nothing is sent — what claude's
+question does. Past it, or when the client drops the POST (`res` closing aborts the
+wait), the call returns `ASK_PENDING`, which tells the model to end its turn writing
+nothing, and the answer goes as Q2.250's message. Skip and ✕ are results too, since
+a call has to return something.
+
+**And the transcript draws it as claude's.** The card takes the call's id —
+`Session.claimPosedCall`, the newest call whose `rawInput` named the tool, cleared
+when that call ends — and keeps it on `open_question_json` across a restart, so
+`askedThrough` folds the call away and `askedInput` reads the questions off cursor's
+MCP wrapper. A `permission_request` the daemon answered (`permissionId: null`) on a
+call that asked is not drawn. A late answer's prompt carries `answers` (the
+elicitation id) and is not drawn either: the card above already shows it.
+
+**What is still different, past 50 s.** The model ends its turn and a new one starts
+with the answer; it is told to write nothing, which it may not honour. Held longer
+would need a client that passes a timeout, or a loop of calls each under 60 s, which
+spends a model request a minute on nobody answering — not built.
+
+**Status.** Current.
 
 ## The web client
 
@@ -14148,7 +14190,7 @@ permanently, for a selection and a navigation; both are `raised`/`plain` now, wi
 weight and a leading glyph carrying them — the same substitution a blocked row's
 title makes.
 
-**Status.** Current, amended by Q3.684: a popover's highlighted row is `raised`, and its
+**Status.** Current, amended by Q3.684: a popover's highlighted row is `raised`, and its. Amended by Q3.694: the affirmative fill and the marks are `bg-brand`.
 chosen row carries the trailing check instead.
 
 #### Q3.210 — Does the rail keep its `border-r`?
@@ -21175,7 +21217,7 @@ and defining one against same-machine neighbours only would land the row somewhe
 other than where the finger pointed — "the list resisting", which Q3.533 already
 names. `Pin` and the two `Move` items stay in the kebab on every tab.
 
-**Status.** Built.
+**Status.** Built. Amended by Q3.696: the All tab's rows drag; a rank is one clock across machines.
 
 #### Q3.571 — The way out of every pop-up was 24px of ink. What changed?
 
@@ -23680,7 +23722,7 @@ unlayered `transition` shorthand swallows it.
 overlap by two pixels at the corner, so on the one machine that most needs reading —
 selected, with work blocked on it — they grew as a single shape.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.694: the filled mark is `bg-brand`.
 
 
 #### Q3.625 — the background panel collapses rather than vanishing, and every width it can be drawn at owes an exit
@@ -27463,7 +27505,7 @@ still said without moving anything.
 **What this gives up, stated.** Q3.200's closure. A filter or a search can now hide
 a waiting session. A machine tab scrolled off the end of the bar hides its count.
 
-**Status.** Reversed an earlier decision — Q3.200.
+**Status.** Reversed an earlier decision — Q3.200. Amended by Q3.695: a folder's header no longer counts what waits in it.
 
 #### Q3.675 — Where is agent messaging switched off, and why is it a switch?
 
@@ -27645,7 +27687,7 @@ it works in (`rowSubpath`, Q3.581) — the header still does. Under a machine's 
 tab every row now names that machine, which is the repetition Q3.679 removed; the
 owner chose the same line everywhere over a line that changes with the tab.
 
-**Status.** Current. Amends Q3.679 and Q3.581.
+**Status.** Amended by Q3.691: the gap is `2.25em`. Amends Q3.679 and Q3.581.
 
 #### Q3.682 — What does an `@name` do where it is drawn?
 
@@ -27958,6 +28000,280 @@ warnings`, the 131 Rust tests. What first failed the `ipc://` call on that page 
 not known, and a save on a real phone is not measured.
 
 **Status.** Current.
+
+#### Q3.691 — Code and links in colour, a wider row line, a waiting row that keeps it, and a double-click on code
+
+**Asked 2026-09-30 and 2026-10-01 by the owner, with screenshots of Claude's own
+client beside this one.** These are the first colours in the app that are not a
+text tone, a diff band or a scrim, and they are spent in what an agent writes and
+asserted absent from everything else.
+
+- **Inline code is orange on a light chip and a link is blue, in what an agent
+  wrote** (`--color-code`, `--color-chip`, `--color-link`, `TRANSCRIPT_LINK`). The
+  owner: code *as Claude Code marks it*, links *classic blue*, and the chip lighter
+  and then softer, with Claude's as the reference — `#f0f0ef` on a `#fcfcfb` page,
+  1.11:1, read off the screenshot, and no rim. Ours is `#f3f1ed` on white, 1.13,
+  between `surface` and `raised` rather than on `raised`, and its `edge-strong`
+  border is gone: the step alone draws it, as Claude's does. Both inks are text tones, so they owe 4.5:1 on every
+  paper, and they do; code reads on its chip at 5.16 (dark 7.0). The download span
+  wears the ink and the chip too, since it is the same span. **The app's
+  own links keep `LINK`** — the gate, the legal pages and plugin settings — because
+  the request was about the conversation; a blue there is a second change nobody
+  asked for.
+- **The row line is `2.25em` apart**, from the nickname to the mark and from the
+  mark to the machine: the owner's twelve pixels, plus five, plus ten, which is 27
+  at the desk's `text-2xs`. In `em` on the owner's word — *scale it with the screen*
+  — so under a finger, where the whole scale is two pixels up (Q3.662), it is about
+  31 rather than staying 27 beside larger text. Amends Q3.681's measure and nothing
+  else about it.
+- **A waiting row keeps its line.** It used to replace the nickname, the mark and
+  the machine with the pending request's title — *Агенты*, a question's header —
+  so the one row somebody had to act on was the one that stopped saying which
+  agent on which machine. The owner: bold and the dot, and never wipe the
+  parameters. The title and the dot were already there (`statusTone`'s `blocked`,
+  `font-semibold`); the replacement is deleted and the request's own title stays
+  on the card that answers it.
+- **A triple-click on inline code selects the whole span**, `origin/dev`, where it
+  would select the paragraph; two clicks stay the engine's word. That is Claude's
+  client, as the owner put it on 2026-10-01 — *on two clicks a word, only on three
+  the whole code section*, and nothing more on a fourth. `selectWholeSpan` takes
+  every `mousedown` from the third on, prevents the paragraph and selects the
+  `<code>`'s contents. **Measured in a `WKWebView` with real `NSEvent` clicks** on
+  the bundled component: two clicks give `origin`, `dev`, `agent`; three give
+  `origin/dev` and `cursor-agent` whole; on plain text three give the paragraph.
+  WebKit's own fourth click took the paragraph back from a code span, which is why
+  the handler covers every click past two; on plain text the fourth and fifth
+  already kept the paragraph, measured, so nothing else is handled. ⚠ **The first version took the span on
+  the second click** — read off a screenshot of a selected `origin/dev` — and was
+  taken back the next morning. The download span is a button and keeps its click.
+
+**Neither colour carries a state, which is what Q7.70 guards.** Code is still told
+by its face and its chip and a link by its underline; the hue is redundant on both,
+so nothing here is read by hue alone.
+
+**The rest of what was tried alongside is on the `ui-experiments` branch** and not
+here: the landing's painting behind the session list, frosted glass, and the machine
+column in the painting's colour. The owner kept the conversation's changes and the
+row's.
+
+**Status.** Current. Amends Q3.681 and Q7.70. Amended by Q3.695: the row line is `2em`.
+
+#### Q3.692 — "local is unreachable" for the first quarter-minute after every launch
+
+**Reported 2026-10-01** with a screenshot of the pill reading *local is
+unreachable* on the owner's MacBook. Read-only on that machine: both servers and
+both relays answered, no second daemon held a root or a port, nothing crashed, and
+on the next launch of build 0951 both daemons announced and answered `/health`
+within five seconds, steadily for the next forty.
+
+**Cause.** The host starts every set-up daemon at launch on a thread of its own
+(`start_configured_at_launch`), and the page asks for this computer's machine at
+the same moment. With no announcement yet and no tunnel dialled, both legs fail,
+the machine is `offline` with `no_route`, and the pill names it after its one-second
+grace. Nothing asks again for `OFFLINE_RETRY_MS`, fifteen seconds, on a four-second
+poll — so for ten to nineteen seconds after each launch the app said a daemon was
+unreachable that had answered after five. The host had said so all along:
+`host_daemon_state` answers `starting` for a child it owns that has not announced,
+and `setUpThisComputer` returned on it, acting only on `absent` and `exited`.
+
+**Decision.**
+- **`starting` is waited out, beside the other machines.** `setUpThisComputer`
+  hands it to `awaitLaunchStart` without awaiting it — the bootstrap's resume of
+  every other machine is not held behind this one — and that runs the setup flow's
+  own `settleDaemon`, so a slow start still says so after thirty seconds and an
+  exit still says where to look.
+- **The pill is told while it lasts** (`AppState.localDaemonStarting`):
+  `connectionTrouble` does not name this computer's machine for a transport reason
+  while its daemon is starting, and reads it as *Connecting…*. A refusal on it is
+  still nobody's connection trouble, and another machine down is still named.
+- **The machine is probed the moment it answers**, inside `awaitLaunchStart` and
+  before the flag drops, because settle's own resume can be queued behind the
+  launch's and would leave the pill a beat of *unreachable*.
+
+**Status.** Current.
+
+#### Q3.693 — A code block is highlighted in colour again
+
+**The owner, 2026-10-01**, asked what colour could do for an app people call
+black and white, saw six accents tried on the real components, and took this one
+first. Q7.70 had named it as the plainest cost of the monochrome palette: *a string
+no longer differs from a number, and a function name no longer differs from a
+keyword*.
+
+**Decision.** Five inks, one for each kind of thing highlight.js names, in the
+stylesheet's `.hljs-*` rules and nowhere else: `--color-syn-keyword` (crimson),
+`-title` (violet, a function or class being named), `-string` (green), `-number`
+(blue, literals too) and `-type` (amber: attributes, types, built-ins, `meta`).
+Comments stay `faint` and italic; a diff's `+` and `-` lines take `add-ink` and
+`del-ink`. Keywords and titles lose the weight they carried as the only cue.
+
+**Every one is a text tone on every paper**, in both palettes, so `webcheck`
+weighs them with the others. The ground that matters is `raised`, where a block is
+drawn, and the light inks clear it at 5.26 (string) to 6.16 (number); the dark ones
+at 6.79 to 8.36.
+
+**Not taken from anybody's theme.** The set sits beside this palette's own warm
+neutrals rather than copying a vendor's, on the owner's word that the app should
+not look like Claude.
+
+**Status.** Current. Amends Q7.70.
+
+#### Q3.694 — One colour of its own: lake teal, on what asks for a press or says something waits
+
+**The owner, 2026-10-01.** Told that people call the app black and white, they saw
+six accents tried on the real components and asked whether the colour had to be
+Claude's terracotta. It did not: Reemoat's mark is ink on paper and names no hue. Five
+were rendered on the same screen — terracotta, lake teal, plum, indigo, graphite —
+and the owner took the second, *the green one*.
+
+**Decision.** `--color-brand`, lake teal off the landing's painting (`#1d6b67`; dark
+`#5fc2b5`), with `--color-on-brand` for what is drawn on it (white; dark `ink`). It
+takes exactly the places Q3.209 gave `bg-fg` as the affirmative action or a mark:
+- **Send** and every **primary** button and ask-card answer — the reversible
+  approval among them — with their hover;
+- the **chosen answer's** ring and mark on the ask card;
+- **what waits on you**: the bell's dot, the blocked status dot, the waiting counts
+  on a folder header and on a machine's tab or chip;
+- the **selected machine's** chip, and a switch's knob when on; the gate's *Open
+  the app* and the native checkbox's `accent-color`.
+
+Everything else keeps the palette's neutrals, and the other statuses — running,
+starting, ended — keep theirs; colouring them is a separate decision.
+
+**Named `brand`, not `accent`.** `accent` is one of the names Q7.70 retired, and
+`webcheck` refuses it in any utility, so a stale class from that era cannot come back
+to life looking like this one. The new name is the job: the one colour that is ours.
+
+**Contrast, computed in both palettes.** The label on the fill clears 4.5:1 at rest
+and at every hover the code writes, on every paper — 6.27 at rest in the light, 5.01
+at its weakest hover (`/90` over white). That is why the hovers went from `/85` to
+`/90`, and why an ask card's hint on the primary row is the label's own colour rather
+than three-quarters of it: at 70% over the hovered fill it measured 3.34. `brand`
+is a text tone too, for the waiting counts.
+
+**Status.** Current. Amends Q3.209, Q3.624 and Q7.70.
+
+#### Q3.695 — No count on a folder, a tighter row line, and the answer you are writing in front
+
+**The owner, 2026-10-01, on build 1136**, three items with screenshots, the last of
+them Claude's own mobile client mid-answer.
+
+- **A folder's header draws no waiting count.** *1 waiting* beside a folder's name
+  is gone from `GroupSection` and `FolderSection`, with the prop that fed it. The
+  row's dot and weight, the machine's tab and chip, and the bell still say it, so
+  what is lost is the one case Q3.674 kept it for — a *collapsed* folder. The count
+  itself stays in `groups.ts`, which the tabs read.
+- **The row line is `2em` apart**, three pixels less than Q3.691's `2.25em`: 24 at
+  the desk's `text-2xs`, about 28 under a finger.
+- **Writing your own answer brings it to the front, on a phone.** Once the caret is
+  in a typed box and there are words in it, `AskCard`'s answer rows fade to 35%
+  (`typing`) — Claude's client does exactly this, read off the screenshot: the rows
+  dim at the first letter, not at the tap, while the question and the box stay at
+  full strength. Under a finger only, `[@media(pointer:coarse)]`, as the owner
+  asked; at the desk nothing moves. The rows stay **drawn and live** — a tap on one
+  still picks it and moves the caret out, which restores them — so *every option is
+  visible at once* holds, and only *de-emphasis never in text* gives way, for this
+  one state. It is not a scrim: nothing outside the card dims, which Q3.39 refused
+  for the reason it still has.
+  `ElicitationCard` keeps which typed field holds the caret (`typingIn`) through the
+  box's own focus and blur, and a permission card, having no box, never types. The
+  keyboard does not need code here: `interactive-widget=resizes-content` already
+  shrinks the page under it, so the card, anchored to the composer, rises with it.
+
+**Measured** in a `WKWebView` on the bundled card, with the coarse query rewritten
+to match a mouse so the desk could draw it: four options and an empty box, then a
+letter typed — the rows faded, the question and the box did not. Not yet seen on a
+phone.
+
+**Status.** Current. Amends Q3.674 and Q3.691.
+
+#### Q3.696 — A tap answers, All reorders, and three clicks on the header take one thing
+
+**The owner, 2026-10-01**, four items, the second with a screenshot of a whole
+conversation header painted blue.
+
+- **One answer of one is sent as it is tapped.** A single-select row goes through
+  `pickOne`: it writes the pick, switches off your own words for that question
+  (`setExcluded` — they stay in their box, so *nothing typed is ever erased* holds),
+  then reads the answer **fresh from the store** — the render's `draft` is a tap
+  behind — and goes to the next question, or on the last one sends it. It does so
+  only where the step holds nothing to fill but the choice and its typed
+  alternative (`pickAnswersStep`); a step with a field of its own still waits. The
+  owner's two exceptions keep Next and Submit: **several answers**, since nothing
+  says when the last one was picked, and **your own words**, typed and then sent. A
+  chosen row tapped again now answers rather than clearing itself; Back reaches it.
+- **No answer shrinks under the finger.** `press` — `scale(0.97)` while held — is
+  off every answer row and answer button; Next, Submit and Skip keep it.
+- **The All tab's rows drag**, which Q3.570 had refused: *a rank is a per-machine
+  order, and a cross-machine drop would mean nothing.* It meant something all
+  along — `allRows` is `orderSessions` over every machine's rows, one rank clock,
+  and Pinned under All already dragged across machines through the same `respace`
+  that tolerates a daemon storing no rank. So the All group is a zone like a
+  folder's (`ALL_FOLDER` in `measure`'s wanted set), a drop lands between the two
+  rows it shows, and the rank is written to the dragged row's own machine.
+- **Three clicks on the header's line take the item under the pointer.** The line is
+  flex, every item a block of its own, and WebKit's third click took the item *with*
+  its line break — `reemoat/s_078b731c\n`, measured — so the range ran into the next
+  block and the gap fill painted the header's whole width, title included.
+  `selectUnit` takes the third click on: the nickname, the machine, the folder or the
+  branch (`data-unit`), and on a separator nothing new. Measured in a `WKWebView`:
+  the same clicks now give `reemoat/s_078b731c`, `~/reemoat-prod` and `@rune`, with
+  no line break.
+
+**Status.** Current. Amends Q3.570 and Q3.588.
+
+#### Q3.697 — The close button puts the app away on macOS and Windows
+
+**Question.** The owner, 2026-10-01: pressing the window's cross on the Mac must put
+the app away rather than close it, *"as Claude Code and Codex do; to end it you quit
+it explicitly — it is protection against an accidental click"*, and on Windows,
+*"study how it is done there and repeat it"*. Q6.108 had left the macOS half a
+non-goal, with one product question open: whether the daemons outlive the window.
+
+**They do, because the app does.** A hidden window is not a closed one, so the
+process runs on and with it every account's daemon (Q7.149) and every turn in
+flight. Quitting stays the one place they stop: `RunEvent::Exit` and `stop_all`.
+
+**macOS.** `away::on_close_requested` refuses the close and hides the window; the
+red button, ⌘W and the Window menu's Close all arrive as `CloseRequested`. The Dock
+icon brings it back (`RunEvent::Reopen` with no visible window, `bring_back`). ⌘Q,
+the app menu's Quit and the Dock's Quit send `terminate:`, which tao turns straight
+into `RunEvent::Exit` with no request to prevent, so the stop is where it was.
+Nothing is destroyed, so no `prevent_exit()` is needed. A full-screen window is
+hidden as ⌘H hides it, by hiding the app: hidden on its own it leaves its space black.
+
+**Windows, as the apps it is compared with do it**, read 2026-10-01: Telegram
+(`tray.cpp`), Slack (help article 201355156) and Discord keep running in the
+notification area when the window closes; Codex for Windows hides its window and
+keeps its processes (openai/codex#17205); Claude's Windows app offers "keep running
+in the system tray". Each has a tray icon whose click opens the window and whose
+menu quits, and none shows a "still running" notice. So `away::tray`: the close
+hides the window, a left click or *Open Reemoat* brings it back, *Quit Reemoat* is
+`AppHandle::exit`. A hidden window also takes its taskbar button, so launching the
+app again would start a second copy — the Codex bug above — and
+`tauri-plugin-single-instance`, registered first as it asks, shows the running one
+instead. Pinned `~2.4`: 2.5 asks for tauri 2.12, past the pair `nativecheck` holds.
+
+**Linux and the mobile shells are unchanged**: nobody asked, and Tauri delivers no
+tray click on Linux. Closing the last window still quits there (Q6.108).
+
+**What is checked.** macOS builds and `cargo test` passes. The Windows code —
+`away.rs` and `lib.rs`'s wiring — type-checks for `x86_64-pc-windows-msvc` in a
+scratch crate holding tauri with `tray-icon` and the plugin; the whole crate cannot
+be cross-checked here, since `aws-lc-sys` wants the Windows SDK's headers. There is
+no Windows build (no CI leg, no asset), so the tray has never been seen running.
+`nativecheck` holds the wiring.
+
+**A trap the first build sprang.** Mid-build, `Cargo.toml`'s Windows line gained
+`unstable`, which nobody had written. `tauri build` rewrites tauri's features: its
+`rewrite_manifest` (tauri-cli 2.11.4, `interface/rust/manifest.rs`) takes the first
+dependency table it meets, and when that is `target` it walks every target table
+with **one** feature set, so macOS's `unstable` was carried into Windows' line — the
+untested window-child arm `Cargo.toml` warns of. Reproduced with a port of that code.
+Every target table now sits below `[dependencies]`, where the rewrite stops at the
+plain line and leaves them alone, and `nativecheck` asserts the order.
+
+**Status.** Current. Amends Q6.108.
 
 ## Deployment, packaging and code layout
 
@@ -34518,6 +34834,9 @@ decided. Reversing it is not one line: it needs `prevent_exit()`, a `Reopen`
 handler, and an answer to whether the daemon survives a windowless app, which is a
 product question rather than a platform one.
 
+**Status.** Amended by Q3.697: on macOS and Windows the close button now puts the
+app away and only a Quit ends it. The measurement stands, and Linux still quits.
+
 ### Q6.109 — What Grok Build actually sends, measured against 1.0.40
 
 **The whole of why grok is the cheapest harness this repository has added.** Driven
@@ -36950,7 +37269,7 @@ comments — the opposite of the `groups.orphans` ban one section over, and
 deliberately: this one is about a class the browser will try to apply, and the
 docblocks explaining the hazard name the tokens in the course of explaining it.
 
-**Status.** Current
+**Status.** Current. Amended by Q3.691: two hues are back, and neither carries a state. Amended by Q3.693: code blocks are highlighted in colour again. Amended by Q3.694: one brand colour, on the affirmative fill and what waits on you.
 
 ### Q7.71 — remoslop → reemoat, including the protocol. What had to move by hand?
 

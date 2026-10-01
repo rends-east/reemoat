@@ -6,7 +6,7 @@ import { MemoryEventStore, type PersistedSession, type PromptEvent, type Session
 import { SessionRegistry, type ManagedSession } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
-import { ASK_RESULT, ASK_TOOL_NAME, answerText, parseAskArguments } from "../src/peers/ask.js";
+import { ASK_PENDING, ASK_TOOL_NAME, answerResult, answerText, parseAskArguments } from "../src/peers/ask.js";
 import { PeerHub } from "../src/peers/hub.js";
 import { PeerMcpEndpoint } from "../src/peers/mcp.js";
 import { openStores } from "../src/store/sqlite.js";
@@ -37,6 +37,19 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   check("an answer is delivered as the labels it picked", answerText(posed!, { action: "accept", content: { question_0: "b" } }), "Answer to your ask_question:\nPick one — Beta");
   check("a skip still reaches the agent, so it carries on", answerText(posed!, { action: "decline" }), "Skipped your ask_question: carry on without an answer.");
   check("and a dismissed card says nothing at all", answerText(posed!, { action: "cancel" }), null);
+  check(
+    "inside the call the same answers are its result, a dismissal included, since the call has to return something",
+    [
+      answerResult(posed!, { action: "accept", content: { question_0: "b" } }),
+      answerResult(posed!, { action: "decline" }),
+      answerResult(posed!, { action: "cancel" }),
+    ],
+    [
+      "Your user answered:\nPick one — Beta",
+      "Your user skipped the question: carry on without an answer.",
+      "Your user closed the card without answering: carry on without an answer.",
+    ],
+  );
   const two = parseAskArguments({
     title: "Two",
     questions: [
@@ -65,7 +78,12 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     mcpServers: any[];
     /** What the client answered to each permission this stub asked, by tool name. */
     readonly permissionAnswers: Map<string, unknown>;
+    /** What each MCP call returned, by tool name, once it did. */
+    readonly toolResults: Map<string, string>;
   }
+  // Short, so the driver can outlast it; the daemon's own is ASK_WAIT_MS.
+  const ASK_WAIT = 300;
+  const outlast = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, ASK_WAIT + 150));
   const agents = new Map<string, Agent>();
   let launched = 0;
 
@@ -106,7 +124,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
           case acp.methods.agent.session.new:
           case acp.methods.agent.session.resume: {
             sessionId = message["params"]?.["sessionId"] ?? `c_ask_${++launched}`;
-            const state: Agent = agents.get(sessionId) ?? { prompts: [], mcpServers: [], permissionAnswers: new Map() };
+            const state: Agent = agents.get(sessionId) ?? { prompts: [], mcpServers: [], permissionAnswers: new Map(), toolResults: new Map() };
             state.mcpServers = message["params"]?.["mcpServers"] ?? [];
             agents.set(sessionId, state);
             current = state;
@@ -137,10 +155,30 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
               rawInput: { providerIdentifier: "reemoat", toolName: tool, args: {} },
             });
             const ask = ++outbound;
+            const caller = current;
             awaiting.set(ask, (result) => {
-              current?.permissionAnswers.set(tool, result);
-              update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
-              send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+              caller?.permissionAnswers.set(tool, result);
+              const finish = () => {
+                update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
+                send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+              };
+              // Allowed, it then calls the tool on the server it was handed, as cursor does, and the turn waits on the call.
+              const server = caller?.mcpServers[0];
+              if (tool !== ASK_TOOL_NAME || (result as any)?.outcome?.optionId !== "allow-once" || server === undefined) {
+                finish();
+                return;
+              }
+              void fetch(server.url, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  ...Object.fromEntries(server.headers.map((h: any) => [h.name.toLowerCase(), h.value])),
+                },
+                body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: one } }),
+              })
+                .then((response) => response.json())
+                .then((reply: any) => caller?.toolResults.set(tool, reply?.result?.content?.[0]?.text ?? ""))
+                .finally(finish);
             });
             send({
               jsonrpc: "2.0",
@@ -223,7 +261,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
 
   const open = async (enabled: boolean) => {
     const registry = new SessionRegistry(new MemoryEventStore(), store, undefined, new AskRuntime(), null);
-    const hub = new PeerHub({ registry, enabled });
+    const hub = new PeerHub({ registry, enabled, askWaitMs: ASK_WAIT });
     const endpoint = await PeerMcpEndpoint.listen(hub);
     hub.setEndpoint(endpoint.url);
     registry.setPeerMcpServers((id, caps) => hub.mcpServersFor(id, caps));
@@ -269,15 +307,15 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   );
   check("and a claude session gets nothing at all", agentOf(claQuiet).mcpServers, []);
   const refusedQuiet = await quiet.ask(curQuiet, one);
-  check("no messaging switch refuses a question", [refusedQuiet?.isError ?? false, refusedQuiet?.content[0]?.text], [false, ASK_RESULT]);
+  check("no messaging switch refuses a question", [refusedQuiet?.isError ?? false, refusedQuiet?.content[0]?.text], [false, ASK_PENDING]);
   await quiet.registry.shutdown();
   await quiet.endpoint.close();
 
-  process.stdout.write("  a question, and what its answers do\n");
-  const shown = await first.ask(cur, { ...one, title: "Choose" });
-  check("the call answers at once, telling the agent to end its turn", [shown.isError ?? false, shown.content[0]?.text], [false, ASK_RESULT]);
+  process.stdout.write("  a question answered while its call waits, as every other harness's is\n");
+  const quick = first.ask(cur, { ...one, title: "Choose" });
+  await settle();
   const pending = cur.snapshot().pendingElicitations;
-  check("the session holds one question, tied to no tool call", pending.map((one) => [one.toolCallId, one.message, one.fieldCount]), [[null, "Choose", 1]]);
+  check("the session holds one question, tied to no tool call when none was seen", pending.map((one) => [one.toolCallId, one.message, one.fieldCount]), [[null, "Choose", 1]]);
   check("so it reads as waiting on its person", cur.status, "blocked");
   check("and the transcript records it being asked", eventsOf(cur, "elicitation_request").map((event) => event.toolCallId), [null]);
   const again = await first.ask(cur, one);
@@ -285,14 +323,40 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   const bad = await first.ask(cur, { questions: [{ id: "q", prompt: "x", options: [] }] });
   check("and so is a malformed one, with the parser's reason", [bad.isError, bad.content[0]?.text], [true, "a question must offer at least one option"]);
   check("the card is served the form, as cursor's own is", cur.elicitationForm(pending[0]!.elicitationId)?.fields.length, 1);
-
+  const quiet0 = agentOf(cur).prompts.length;
   const answered = cur.answerElicitation(pending[0]!.elicitationId, { content: { question_0: "a" } });
   check("an answer is accepted and reported sent", answered.kind === "ok" ? [answered.action, answered.delivered] : answered.kind, ["accept", "sent"]);
+  const quickResult = await quick;
+  check("and is the call's own result", [quickResult.isError ?? false, quickResult.content[0]?.text], [false, "Your user answered:\nPick one — Alpha"]);
   await settle();
-  check("and reaches the agent as its person's next message", agentOf(cur).prompts.at(-1), "Answer to your ask_question:\nPick one — Alpha");
-  check("logged as that person's prompt", promptsOf(cur).at(-1), "Answer to your ask_question:\nPick one — Alpha");
+  check("so no message is sent and none is logged", [agentOf(cur).prompts.length, promptsOf(cur).length], [quiet0, 0]);
   check("and the session is no longer waiting", cur.snapshot().pendingElicitations.length, 0);
+  const skipping = first.ask(cur, one);
+  await settle();
+  cur.answerElicitation(cur.snapshot().pendingElicitations[0]!.elicitationId, { decline: true });
+  const closing = (await skipping).content[0]?.text;
+  const dismissing = first.ask(cur, one);
+  await settle();
+  cur.answerElicitation(cur.snapshot().pendingElicitations[0]!.elicitationId, { cancel: true });
+  check(
+    "a skip and a dismissal are results too, and wake nobody",
+    [closing, (await dismissing).content[0]?.text, agentOf(cur).prompts.length],
+    ["Your user skipped the question: carry on without an answer.", "Your user closed the card without answering: carry on without an answer.", quiet0],
+  );
 
+  process.stdout.write("  a question that outlasts its call\n");
+  const shown = await first.ask(cur, one);
+  check("unanswered in time, the call returns and tells the agent to end its turn", [shown.isError ?? false, shown.content[0]?.text], [false, ASK_PENDING]);
+  const late0 = cur.snapshot().pendingElicitations[0]!.elicitationId;
+  check("while the card stays", cur.status, "blocked");
+  cur.answerElicitation(late0, { content: { question_0: "a" } });
+  await settle();
+  check("its answer then reaches the agent as its person's next message", agentOf(cur).prompts.at(-1), "Answer to your ask_question:\nPick one — Alpha");
+  check(
+    "logged as a prompt naming the question it answers, which the card already draws",
+    eventsOf(cur, "prompt").map((event) => [event.text, event.answers]).at(-1),
+    ["Answer to your ask_question:\nPick one — Alpha", late0],
+  );
   await first.ask(cur, one);
   cur.answerElicitation(cur.snapshot().pendingElicitations[0]!.elicitationId, { decline: true });
   await settle();
@@ -305,9 +369,26 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   await first.ask(cur, one);
   await cur.cancelTurn();
   check("Stop with only a question open dismisses it", [cur.snapshot().pendingElicitations.length, agentOf(cur).prompts.length], [0, before]);
+  {
+    const gaveUp = new AbortController();
+    const abandoned = fetch(first.endpoint.url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: bearerOf(cur) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: ASK_TOOL_NAME, arguments: one } }),
+      signal: gaveUp.signal,
+    }).catch(() => null);
+    await settle();
+    gaveUp.abort();
+    await abandoned;
+    await settle();
+    const left = cur.snapshot().pendingElicitations[0]?.elicitationId ?? "";
+    cur.answerElicitation(left, { content: { question_0: "b" } });
+    await settle();
+    check("a client that gives up on the call leaves the card, answered by a message", agentOf(cur).prompts.at(-1), "Answer to your ask_question:\nPick one — Beta");
+  }
 
-  process.stdout.write("  the permission in front of it\n");
-  await cur.prompt("CALL ask_question");
+  process.stdout.write("  the call in front of it\n");
+  cur.prompt("CALL ask_question");
   await settle();
   check(
     "cursor's permission for ask_question is answered by the daemon, never drawn",
@@ -318,6 +399,21 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     "and logged as a decision rather than hidden",
     eventsOf(cur, "permission_request").filter((event) => event.toolCallId === "call-ask_question").map((event) => event.decision),
     ["allow-once"],
+  );
+  const inCall = cur.snapshot().pendingElicitations;
+  check(
+    "the card names the call that asked, so the transcript folds that call into it as it does claude's",
+    [inCall.map((one) => one.toolCallId), eventsOf(cur, "elicitation_request").at(-1)?.toolCallId, rows.get(cur.id)?.openQuestion?.toolCallId],
+    [["call-ask_question"], "call-ask_question", "call-ask_question"],
+  );
+  check("and the turn waits on it", cur.snapshot().turn !== null, true);
+  const promptsInCall = agentOf(cur).prompts.length;
+  cur.answerElicitation(inCall[0]!.elicitationId, { content: { question_0: "b" } });
+  await settle();
+  check(
+    "answered, the call returns the answer and the turn goes on, with no message",
+    [agentOf(cur).toolResults.get(ASK_TOOL_NAME), agentOf(cur).prompts.length, cur.snapshot().turn],
+    ["Your user answered:\nPick one — Beta", promptsInCall, null],
   );
   await cur.prompt("CALL send_message");
   await settle();
@@ -332,9 +428,11 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   await settle();
 
   process.stdout.write("  what a question outlives\n");
-  await first.ask(cur, one);
+  cur.prompt("CALL ask_question");
+  await outlast();
   const keptId = cur.snapshot().pendingElicitations[0]!.elicitationId;
-  check("an open question is on the session's row", rows.get(cur.id)?.openQuestion?.elicitationId, keptId);
+  check("past the wait the agent is told to end its turn", [agentOf(cur).toolResults.get(ASK_TOOL_NAME), cur.snapshot().turn], [ASK_PENDING, null]);
+  check("and the open question is on the session's row, with its call", [rows.get(cur.id)?.openQuestion?.elicitationId, rows.get(cur.id)?.openQuestion?.toolCallId], [keptId, "call-ask_question"]);
   await first.registry.shutdown();
   await first.endpoint.close();
   check("a daemon shutdown keeps it there", rows.get(cur.id)?.openQuestion?.elicitationId, keptId);
@@ -342,7 +440,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   const second = await open(true);
   second.registry.restore({ reapOrphans: false });
   const back = second.registry.get(cur.id)!;
-  check("a restarted daemon draws the same card again", back.snapshot().pendingElicitations.map((one) => one.elicitationId), [keptId]);
+  check("a restarted daemon draws the same card again, on the same call", back.snapshot().pendingElicitations.map((one) => [one.elicitationId, one.toolCallId]), [[keptId, "call-ask_question"]]);
   check("with its form", back.elicitationForm(keptId)?.fields.length, 1);
   const late = back.answerElicitation(keptId, { content: { question_0: "b" } });
   check("answered after the restart, it is still sent", late.kind === "ok" ? late.delivered : late.kind, "sent");

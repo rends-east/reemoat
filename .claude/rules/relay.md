@@ -160,6 +160,9 @@ transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
   conversation's machine and its stream. Under All a probe counts and a machine
   that is off does not — it would hold the pill for as long as it stays off. The
   server outranks a machine, and a machine its own stream.
+- **A daemon the host is still starting is *Connecting…*, not unreachable.**
+  `localDaemonStarting` holds this computer's machine out of the names while
+  `awaitLaunchStart` waits, and it is probed before the flag drops. Q3.692.
 - **A spell, then a second.** `troubleSince` keeps one spell across a change of
   kind; `troubleShown` waits `TROUBLE_GRACE_MS`, so a reconnect under a second never
   draws it. The live region is mounted for good and changes only with the words:

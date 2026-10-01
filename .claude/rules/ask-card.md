@@ -32,7 +32,9 @@ what *bounds* it — a card anchored to the bottom grows upwards and would paint
 over the session header. The frame is `pointer-events-none` and the card
 `pointer-events-auto`. **Every option is visible at once** — hiding a reject
 behind a disclosure is a safety regression. 44px rows. The spinner is overlaid
-rather than replacing the label. De-emphasis in fill and border, never in text.
+rather than replacing the label. De-emphasis in fill and border, never in text —
+with one exception: while somebody types their own answer, under a finger, the
+rows fade (`typing`), as Claude's client does; drawn and live, never hidden. Q3.695.
 `essentialContext` and `detailContext` are a **partition**, so nothing is drawn
 twice and the disclosure sits *between* them. There is **no scrim** — Q3.39.
 
@@ -113,6 +115,13 @@ form to its end on blank cards. Two rules, apart because they answer different
 questions — `canSubmit` is *no problems* **and** a non-empty body, `stepAnswered` is
 per step and reads the **whole** step. Neither invents `required`. The exemption in
 both is a form with **no fields**, where accepting *is* the answer. Q3.588, Q3.590.
+
+**One answer of one goes as it is tapped** (`pickOne`): to the next question, or to
+the agent on the last, read fresh from the store rather than from the render. Only
+where the step holds nothing else to fill — the choice and your own words, which it
+switches off rather than erases. Several answers and your own words still wait for
+Next or Submit, since nothing else says they are finished. Answer rows and buttons
+carry no `press` scale. Q3.696.
 
 **A plan is the one payload on that card that is *rendered*, and the gate above it
 is what makes that safe.** `context.plan` is read from a `plan` field in the tool's

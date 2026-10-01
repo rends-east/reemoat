@@ -1104,10 +1104,11 @@ function toOpenQuestion(value: unknown): OpenQuestionRow | null {
   try {
     const parsed: unknown = JSON.parse(String(value));
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { elicitationId, title, questions, raisedAt } = parsed as Record<string, unknown>;
+    const { elicitationId, toolCallId, title, questions, raisedAt } = parsed as Record<string, unknown>;
     if (typeof elicitationId !== "string" || typeof raisedAt !== "number" || !Array.isArray(questions)) return null;
     return {
       elicitationId,
+      ...(typeof toolCallId === "string" ? { toolCallId } : {}),
       title: typeof title === "string" ? title : null,
       questions: questions as OpenQuestionRow["questions"],
       raisedAt,

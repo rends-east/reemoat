@@ -277,6 +277,8 @@ export interface PromptEvent {
   from: PeerOrigin | null;
   /** Present only on a person's message whose note named somebody. */
   mentions?: PromptMention[];
+  /** Present only on an ask_question answer sent as a message: the elicitation whose resolution already draws it (Q2.251). */
+  answers?: string;
 }
 
 export interface WorkspaceEvent {
@@ -526,6 +528,8 @@ export interface PersistedSession {
 /** An ask_question still waiting for its person, kept on the row so a restart draws the card again (Q2.250). */
 export interface OpenQuestionRow {
   elicitationId: string;
+  /** The agent's ask_question call, which the transcript folds into the card; absent when none was seen. */
+  toolCallId?: string;
   title: string | null;
   questions: { id: string; prompt: string; options: { id: string; label: string }[]; allowMultiple: boolean }[];
   raisedAt: number;

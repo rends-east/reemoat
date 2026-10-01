@@ -222,7 +222,7 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
   // The session row's subline is sans at `text-2xs` by design; size, no mono and the subpath are one check so no half goes quiet alone.
   {
     const browser = read("ui/SessionBrowser.tsx");
-    const subline = /<div className="mt-0\.5 flex min-w-0 items-center gap-3 text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser);
+    const subline = /<div className="mt-0\.5 flex min-w-0 items-center gap-\[2em\] text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser);
     check("the session row's subline was found", subline !== null, true);
     check(
       "and it is sans, at one size, naming the machine where the path was",
@@ -239,7 +239,7 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
   check(
     "the session header's path is mono, on a subtitle line that is already text-2xs",
     [
-      /<span className="truncate font-mono" title=\{where\}>/.test(read("ui/SessionView.tsx")),
+      /<span data-unit="" className="truncate font-mono" title=\{where\}>/.test(read("ui/SessionView.tsx")),
       /justify-center text-2xs text-muted/.test(read("ui/Header.tsx")),
     ],
     [true, true],

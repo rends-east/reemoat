@@ -1108,7 +1108,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   check(
     "the selected machine is a filled mark rather than a band beside the session rows",
     [
-      /tab\.selected\s*\n?\s*\? "bg-fg text-ink/.test(column),
+      /tab\.selected\s*\n?\s*\? "bg-brand text-on-brand/.test(column),
       /tab\.selected \? "bg-raised"/.test(column),
       /tab\.selected \? "font-medium text-fg"/.test(column),
     ],
@@ -1117,7 +1117,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   check("and the fill it moved onto carries a transition of its own", /transition-colors/.test(column), true);
   check(
     "and the count on top of it keeps a ring, or the two fills merge",
-    /bg-fg px-1 text-2xs font-semibold text-ink ring-2 ring-ink/.test(column),
+    /bg-brand px-1 text-2xs font-semibold text-on-brand ring-2 ring-ink/.test(column),
     true,
   );
   const machineDrag = stripComments(readFileSync(new URL("../src/ui/machineDrag.ts", import.meta.url), "utf8"));
@@ -1414,6 +1414,31 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/label="Search everything/.test(browser), /aria-label="Search sessions"/.test(browser)],
     [false, true],
   );
+  // Q3.696: All is one group across machines whose ranks share one clock, so its rows drag as a folder's do.
+  {
+    const rowDrag = stripComments(readFileSync(new URL("../src/ui/rowDrag.ts", import.meta.url), "utf8"));
+    const allGroup = browser.slice(browser.indexOf('name="All chats"'), browser.indexOf("</GroupSection>", browser.indexOf('name="All chats"')));
+    check(
+      "the All tab's rows carry the drag, and the drag measures their group",
+      [
+        /drag=\{drag\.bind\(row, ALL_FOLDER\)\}/.test(allGroup),
+        /shift=\{drag\.shiftFor\(ALL_FOLDER, index, row\.key\)\}/.test(allGroup),
+        /space=\{drag\.spaceFor\(ALL_FOLDER\)\}/.test(allGroup),
+        /new Set<string>\(\[PINNED_FOLDER, ALL_FOLDER, folderId\(/.test(rowDrag),
+      ],
+      [true, true, true, true],
+    );
+  }
+  // Q3.696: three clicks on the conversation header's line take one item, never both header lines across the pane.
+  {
+    const view = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+    const unit = view.slice(view.indexOf("function selectUnit("), view.indexOf("\n}\n", view.indexOf("function selectUnit(")));
+    check(
+      "the header line selects the unit under the pointer from the third click on",
+      [/<span onMouseDown=\{selectUnit\} className="flex min-w-0 items-center gap-1\.5">/.test(view), /event\.detail < 3/.test(unit), /event\.preventDefault\(\)/.test(unit), /closest<HTMLElement>\("\[data-unit\]"\)/.test(unit), (view.match(/data-unit=""/g) ?? []).length],
+      [true, true, true, true, 4],
+    );
+  }
   check("the list column still names the app for a screen reader, exactly once", (browser.match(/<h1\b/g) ?? []).length, 1);
   const footAt = browser.indexOf("function SidebarFoot");
   const footEnd = browser.indexOf("\n}\n", footAt);

@@ -65,10 +65,15 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
 
   check("the ratio is the published one", ratio("#000000", "#ffffff").toFixed(0), "21");
   const PAPERS = ["ink", "surface", "raised"];
+  // Q3.693: a code block's inks are text on raised, where a block is drawn, and on the other papers as well.
+  const SYNTAX = ["syn-keyword", "syn-title", "syn-string", "syn-number", "syn-type"];
   // Read off the card, so the weights measured are the ones drawn.
   const card = stripComments(srcFile("ui/AskCard.tsx"));
-  const hintAlphas = [...card.matchAll(/option\.primary === true \? "text-ink\/(\d+)"/g)].map((m) => Number(m[1]) / 100);
-  const hoverAlphas = [...card.matchAll(/bg-fg text-ink hover:bg-fg\/(\d+)/g)].map((m) => Number(m[1]) / 100);
+  // Q3.694: the affirmative fill is the brand colour now, and a hint on it that colour's own label, at whatever strength the card writes.
+  const hintAlphas = [...card.matchAll(/option\.primary === true \? "text-on-brand(?:\/(\d+))?"/g)].map((m) => (m[1] === undefined ? 1 : Number(m[1]) / 100));
+  const hoverAlphas = [...card.matchAll(/bg-brand text-on-brand hover:bg-brand\/(\d+)/g)].map((m) => Number(m[1]) / 100);
+  const bits = stripComments(srcFile("ui/bits.tsx"));
+  const buttonHovers = [...bits.matchAll(/primary: "bg-brand text-on-brand hover:bg-brand\/(\d+)/g)].map((m) => Number(m[1]) / 100);
   report("the primary fill's hints and hover were read off the card", hintAlphas.length > 0 && hoverAlphas.length > 0, `${hintAlphas.length} hints, ${hoverAlphas.length} hovers`);
   for (const [name, palette] of [["light", light], ["dark", dark]] as const) {
     const unread: string[] = [];
@@ -82,7 +87,17 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
       fronts.flatMap((front) =>
         backs.filter((back) => ratio(hex(front), hex(back)) < floor).map((back) => `${front} on ${back}`),
       );
-    check(`${name}: every text tone clears 4.5:1 on every paper`, short(4.5, ["fg", "muted", "faint", "danger", "caution"], PAPERS), []);
+    check(`${name}: every text tone clears 4.5:1 on every paper`, short(4.5, ["fg", "muted", "faint", "danger", "caution", "code", "link", "brand", ...SYNTAX], PAPERS), []);
+    // Q3.691: inline code sits on its own chip, lighter than raised as Claude's is, and still a step off the page.
+    check(
+      `${name}: the code chip is a step between surface and raised, and code and body text read on it`,
+      [
+        ratio(hex("chip"), hex("surface")) > 1.05,
+        ratio(hex("chip"), hex("surface")) < ratio(hex("raised"), hex("surface")),
+        ...short(4.5, ["code", "fg"], ["chip"]),
+      ],
+      [true, true],
+    );
     check(`${name}: a control's only boundary clears 3:1 on every paper`, short(3, ["edge-strong"], PAPERS), []);
     check(
       `${name}: a diff's ink reads on its own band, and body text on both bands`,
@@ -91,13 +106,22 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
     );
     check(`${name}: the affirmative fill carries its own label`, short(4.5, ["ink"], ["fg"]), []);
     check(
+      `${name}: and so does the brand colour, Send's and an approval's fill, at rest and hovered, on every paper`,
+      PAPERS.flatMap((paper) =>
+        [1, ...buttonHovers, ...hoverAlphas]
+          .filter((alpha) => ratio(hex("on-brand"), over(hex("brand"), hex(paper), alpha)) < 4.5)
+          .map((alpha) => `on-brand on brand/${String(alpha)} over ${paper}`),
+      ),
+      [],
+    );
+    check(
       `${name}: the key hint on that fill is still text, hovered too`,
       PAPERS.flatMap((paper) =>
         [1, ...hoverAlphas].flatMap((fillAlpha) => {
-          const fill = over(hex("fg"), hex(paper), fillAlpha);
+          const fill = over(hex("brand"), hex(paper), fillAlpha);
           return hintAlphas
-            .filter((hintAlpha) => ratio(over(hex("ink"), fill, hintAlpha), fill) < 4.5)
-            .map((hintAlpha) => `ink/${String(hintAlpha)} on fg/${String(fillAlpha)} over ${paper}`);
+            .filter((hintAlpha) => ratio(over(hex("on-brand"), fill, hintAlpha), fill) < 4.5)
+            .map((hintAlpha) => `on-brand/${String(hintAlpha)} on brand/${String(fillAlpha)} over ${paper}`);
         }),
       ),
       [],
@@ -122,6 +146,44 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
     "dark: neither end is the pure one, which halates and crushes",
     [dark.get("fg") !== "#ffffff", dark.get("ink") !== "#000000", lum(dark.get("fg") ?? "#ffffff") < 0.85],
     [true, true, true],
+  );
+}
+
+process.stdout.write("\nthe transcript's inks are spent where the owner asked, and nowhere else\n");
+{
+  // Q3.691: inline code and a link in what an agent wrote; the app's own links stay LINK.
+  const markdown = stripComments(srcFile("ui/Markdown.tsx"));
+  const bits = stripComments(srcFile("ui/bits.tsx"));
+  const inline = markdown.slice(markdown.indexOf("function InlineCode"), markdown.indexOf("function CodeBlock"));
+  report("the inline code component was found", inline.length > 200, `${inline.length} chars`);
+  check("inline code is in the code ink on its chip, as a span and as a download", [(inline.match(/\btext-code\b/g) ?? []).length, (inline.match(/\bbg-chip\b/g) ?? []).length], [2, 2]);
+  check("and neither of them is fg any more", /\btext-fg\b/.test(inline), false);
+  const transcriptLink = /export const TRANSCRIPT_LINK = "([^"]*)"/.exec(bits)?.[1] ?? "";
+  const appLink = /export const LINK = "([^"]*)"/.exec(bits)?.[1] ?? "";
+  check("a link an agent wrote is blue and still underlined", [/\btext-link\b/.test(transcriptLink), /\bunderline\b/.test(transcriptLink)], [true, true]);
+  check("and the markdown anchor is the one that wears it", /className=\{TRANSCRIPT_LINK\}/.test(markdown), true);
+  check("while the app's own links keep fg", [/\btext-fg\b/.test(appLink), /\btext-link\b/.test(appLink)], [true, false]);
+  const spenders = (pattern: RegExp): string[] =>
+    srcFiles().filter((file) => !file.startsWith("legal/") && pattern.test(stripComments(srcFile(file)))).sort();
+  check("the code ink and its chip are spent in the markdown alone", spenders(/\b(?:text|decoration|bg)-(?:code|chip)\b/), ["ui/Markdown.tsx"]);
+  check("the link ink in the one constant", spenders(/\b(?:text|decoration|bg)-link\b/), ["ui/bits.tsx"]);
+  // Q3.693: highlight.js writes class names, so its inks live in the stylesheet's rules and no component names one.
+  check("a code block's inks are spent by no component", spenders(/-syn-/), []);
+  const rule = (selector: string): string => {
+    const at = css.indexOf(`${selector} {`) >= 0 ? css.indexOf(`${selector} {`) : css.indexOf(`${selector},`);
+    return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+  };
+  check(
+    "and each kind highlight.js names takes its own ink, with a comment still faint",
+    [
+      /var\(--color-syn-keyword\)/.test(rule(".hljs-keyword")),
+      /var\(--color-syn-title\)/.test(rule(".hljs-title")),
+      /var\(--color-syn-string\)/.test(rule(".hljs-string")),
+      /var\(--color-syn-number\)/.test(rule(".hljs-number")),
+      /var\(--color-syn-type\)/.test(rule(".hljs-attr")),
+      /var\(--color-faint\)[\s\S]*italic/.test(rule(".hljs-comment")),
+    ],
+    [true, true, true, true, true, true],
   );
 }
 
@@ -238,14 +300,14 @@ process.stdout.write("\nthe switch is the drawer's last row, and it is a switch\
   );
   check("parted from a plugin's screens when there are any", /\{launchable\.length > 0 && <div className="my-1\.5 border-t border-edge" \/>\}\s*<DarkThemeRow \/>/.test(drawer), true);
   check("the row draws the one shared knob, with the theme as its state", /<SwitchKnob on=\{dark\} \/>/.test(row), true);
-  // Q3.209: bg-fg is a mark under a stated size, so it is the knob's and never the track's.
+  // Q3.209, Q3.694: the brand fill is a mark under a stated size, so it is the knob's and never the track's.
   const bits = stripComments(srcFile("ui/bits.tsx"));
   const knobFn = between(bits, "export function SwitchKnob(", "\n}\n");
   report("the shared knob was found", knobFn.length > 200, `${knobFn.length} chars`);
   const knob = /<span\s+data-keeps-motion=""\s+className=\{`([^`]*)`\}/.exec(knobFn)?.[1] ?? "";
   check(
     "the knob is the glyph-sized mark and keeps its motion; the track only takes the state tone",
-    [/\bsize-3\.5\b/.test(knob), /\bbg-fg\b/.test(knob), /\btransition-transform\b/.test(knob), (knobFn.match(/\bbg-fg\b/g) ?? []).length, /border-edge-strong \$\{on \? "bg-raised" : ""\}/.test(knobFn)],
+    [/\bsize-3\.5\b/.test(knob), /\bbg-brand\b/.test(knob), /\btransition-transform\b/.test(knob), (knobFn.match(/\bbg-brand\b/g) ?? []).length, /border-edge-strong \$\{on \? "bg-raised" : ""\}/.test(knobFn)],
     [true, true, true, 1, true],
   );
   check("and nothing a reader presses: the row around it is the switch", [/aria-hidden/.test(knobFn), /role=|onClick/.test(knobFn)], [true, false]);

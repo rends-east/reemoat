@@ -48,6 +48,9 @@ export const CONTROL = "min-h-9 [@media(pointer:coarse)]:min-h-11";
 
 export const LINK = "text-fg underline decoration-edge-strong decoration-1 underline-offset-2 hover:decoration-fg";
 
+/** A link in what an agent wrote: blue, as a link is everywhere else, and only there; the app's own links stay LINK (Q3.691). */
+export const TRANSCRIPT_LINK = "text-link underline decoration-link/40 decoration-1 underline-offset-2 hover:decoration-link";
+
 export function shortDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) return "<1m";
@@ -125,7 +128,7 @@ export function statusTone(
 
 // Nine tones on four non-colour axes (fill, ring, motion, shape); blocked stays static so reduced motion cannot erase it.
 const TONE_DOT: Record<StatusTone, string> = {
-  blocked: "bg-fg ring-[3px] ring-fg/25",
+  blocked: "bg-brand ring-[3px] ring-brand/25",
   // `text-*` beside `bg-*` because the keyframe's ring is `currentColor` — one
   // animation, inked by whoever uses it.
   running: "bg-fg text-fg animate-blink",
@@ -477,7 +480,7 @@ export type ButtonTone = "primary" | "plain" | "destructive" | "ghost";
  * so the outlined tones keep edge-strong when disabled and only primary and ghost use opacity.
  */
 const BUTTON_TONE: Record<ButtonTone, string> = {
-  primary: "bg-fg text-ink hover:bg-fg/85 disabled:opacity-40",
+  primary: "bg-brand text-on-brand hover:bg-brand/90 disabled:opacity-40",
   plain: "border border-edge-strong bg-surface text-fg hover:bg-raised disabled:bg-surface disabled:text-faint",
   destructive:
     "border border-danger/45 bg-surface text-danger font-medium hover:bg-danger/10 disabled:border-edge-strong disabled:bg-surface disabled:text-faint",
@@ -701,7 +704,7 @@ const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
 
 const ICON_BUTTON_TONE: Record<ButtonTone, string> = {
   ghost: "text-muted hover:bg-raised hover:text-fg",
-  primary: "bg-fg text-ink hover:bg-fg/85",
+  primary: "bg-brand text-on-brand hover:bg-brand/90",
   plain: "border border-edge-strong bg-surface text-fg hover:bg-raised",
   destructive: "text-danger hover:bg-danger/10",
 };
@@ -951,7 +954,7 @@ export function ChoiceRow({
 
 /**
  * A switch's track and knob, and nothing a reader can press: the row around it carries `role="switch"`. On, the knob is
- * `bg-fg`, a glyph-sized mark, and the track takes `raised`, the tone this app gives state (Q3.209, Q3.670).
+ * `bg-brand`, a glyph-sized mark, and the track takes `raised`, the tone this app gives state (Q3.209, Q3.670, Q3.694).
  */
 export function SwitchKnob({ on }: { on: boolean }): ReactNode {
   return (
@@ -962,7 +965,7 @@ export function SwitchKnob({ on }: { on: boolean }): ReactNode {
       <span
         data-keeps-motion=""
         className={`size-3.5 rounded-full transition-transform duration-200 ease-out ${
-          on ? "translate-x-4.5 bg-fg" : "translate-x-0.5 bg-edge-strong"
+          on ? "translate-x-4.5 bg-brand" : "translate-x-0.5 bg-edge-strong"
         }`}
       />
     </span>

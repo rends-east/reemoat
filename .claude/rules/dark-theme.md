@@ -15,7 +15,7 @@ paths:
 # Two palettes, one set of names
 
 The app has a light palette and a dark one, and **no component knows which is on.**
-Both are the same fifteen `--color-*` tokens: the light values in `index.css`'s
+Both are the same twenty-five `--color-*` tokens: the light values in `index.css`'s
 `@theme` block, the dark ones in the unlayered `:root[data-theme="dark"]` block
 after it. A component writes `bg-surface`; what that paints is the stylesheet's
 business. Q3.669 is the argument, Q3.670 the switch.
@@ -26,13 +26,18 @@ A dark value is not an inversion of the light one. It keeps its twin's **job** a
 its **ratio to `surface`**, and `webcheck.theme.ts` computes all of it in both
 palettes from one table:
 
-- every text tone — `fg`, `muted`, `faint`, `danger`, `caution` — clears 4.5:1 on
-  every paper (`ink`, `surface`, `raised`);
+- every text tone — `fg`, `muted`, `faint`, `danger`, `caution`, the
+  transcript's `code` and `link`, and a code block's five `syn-*` inks (Q3.693) —
+  clears 4.5:1 on every paper (`ink`, `surface`, `raised`);
+- `chip`, inline code's ground, sits between `surface` and `raised`, and `code`
+  and `fg` read on it. The three are spent in one file each, which the driver
+  holds (Q3.691);
 - `edge-strong`, a control's only boundary, clears 3:1 on every paper;
 - `raised` stays 1.22:1 from `surface` (the message you wrote, Q3.205), `edge` sits
   beyond it, and `ink` stays the rail's 1.06:1 hint (Q3.210);
 - the diff's inks read on their own bands, and `fg` on both;
-- `ink` reads on `fg`, since that pair is Send and the reversible approval.
+- `on-brand` reads on `brand`, at rest and hovered, since that pair is Send and the
+  reversible approval now (Q3.694), and `ink` still reads on `fg`.
 
 In the dark palette **elevation reads lighter** — `ink` < `surface` < `raised` <
 `edge` — and neither end is pure black or white. Both are asserted.
@@ -105,5 +110,5 @@ not a destination (Q3.670 amends Q3.612's test).
 - **The choice is the device's.** Every account's webview shares one store, so the
   choice is shared, and signing out keeps it — which is why nothing in `src/` may
   call `localStorage.clear()`.
-- **The knob is the only `bg-fg` in the row**, a glyph-sized mark (Q3.209); the track
+- **The knob is the only `bg-brand` in the row**, a glyph-sized mark (Q3.209); the track
   takes `raised` when on, the tone this app gives state.

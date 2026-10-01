@@ -992,7 +992,7 @@ export function buildTail(
     if (event.type !== "elicitation_resolved" || event.toolCallId === null) continue;
     const answers = event.answers ?? [];
     if (answers.length === 0) continue;
-    node.asked = answeredQuestions(answers, inputByCall.get(event.toolCallId));
+    node.asked = answeredQuestions(answers, askedInput(inputByCall.get(event.toolCallId)));
   }
 
   const rows = placeNodes(collected.reverse());
@@ -1077,6 +1077,23 @@ export function stopReasonText(stopReason: string): string {
 
 /** Matched by option label, never field key; a label shared by two questions matches neither. */
 const AMBIGUOUS = Symbol("two questions offer this answer");
+
+/** ask_question's arguments as cursor wraps an MCP call, in AskUserQuestion's words, so its answers read as every other card's. */
+function askedInput(input: unknown): unknown {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  const wrapped = input as Record<string, unknown>;
+  const args = wrapped["args"];
+  if (wrapped["toolName"] !== "ask_question" || typeof args !== "object" || args === null) return input;
+  const questions = (args as Record<string, unknown>)["questions"];
+  if (!Array.isArray(questions)) return input;
+  return {
+    questions: questions.map((entry: unknown) =>
+      typeof entry === "object" && entry !== null
+        ? { question: (entry as Record<string, unknown>)["prompt"], options: (entry as Record<string, unknown>)["options"] }
+        : entry,
+    ),
+  };
+}
 
 export function answeredQuestions(
   answers: readonly ElicitationAnswerSummary[],
@@ -1183,6 +1200,19 @@ function nodeFor(
   }
 
   if (!showsInTranscript(event)) return null;
+
+  // An ask_question answer the card already draws, sent as a message only because the call could not wait (Q2.251).
+  if (event.type === "prompt" && event.answers !== undefined) return null;
+
+  // The daemon's own yes to a call that asked a question: the card is the consent it stood for (Q2.250).
+  if (
+    event.type === "permission_request" &&
+    event.permissionId === null &&
+    event.toolCallId !== null &&
+    askedThrough.has(event.toolCallId)
+  ) {
+    return null;
+  }
 
   // Keyed on `resolvedPermissions`, not `decision` (null for a parked request); an unanswered request keeps its row.
   if (

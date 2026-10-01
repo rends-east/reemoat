@@ -73,8 +73,10 @@ the switch, and switches it off per machine. What makes that trade defensible is
 already holds the daemon's database, its signing keys and every transcript.
 `docs/DECISIONS.md` Q7.137.
 
-Not built, on purpose: no device identity, no updater, no menu bar, no tray, no
-notifications, and no badge for an account that is not on screen (Q7.149).
+Not built, on purpose: no device identity, no updater, no menu bar, no
+notifications, and no badge for an account that is not on screen (Q7.149). The one
+tray is Windows': there the close button hides the window to it, as it hides to the
+Dock on macOS, and only a Quit ends the app (Q3.697).
 
 ## Developing
 
@@ -569,7 +571,9 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     `ps -o pid,ppid,command -ax | grep scripts/daemon.ts` shows the second server's
     child with the same pid. Switch back: the turn was not interrupted, and neither
     switch asked for a sign-in — each account kept its own.
-24. Quit with ⌘Q, and separately with ⌘W: every child the app started is gone
+24. Close the window with ⌘W and with its red button: the app stays in the Dock,
+    every child keeps running, and a click on the Dock icon brings the window
+    back. Then quit with ⌘Q: every child the app started is gone
     within seconds, and launchd's daemon is still running.
 25. `kill -9` the app while both children run, relaunch, and check `ps`: the
     orphans are adopted silently as `foreign`, and no third daemon starts.

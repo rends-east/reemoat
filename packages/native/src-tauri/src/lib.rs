@@ -18,6 +18,7 @@
 //! `accounts.rs`). Q1.651, Q7.149.
 
 mod accounts;
+mod away;
 mod commands;
 mod config;
 mod credential;
@@ -131,7 +132,11 @@ fn leave_typing_alone() {
 pub fn run() {
     #[cfg(target_os = "macos")]
     leave_typing_alone();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First of the plugins, as it asks: a second launch shows the running app rather than starting another (Q3.697).
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| away::bring_back(app)));
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -175,6 +180,11 @@ pub fn run() {
          * load may not be seen here. That is safe: a label that has never loaded
          * has never been issued a generation or handed a credential.
          */
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                away::on_close_requested(window, api);
+            }
+        })
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                 if let Some(host) = webview.try_state::<Host>() {
@@ -216,6 +226,8 @@ pub fn run() {
                 .map(|config| seats::themed(&config, theme))
                 .ok_or("tauri.conf.json declares no window labelled main")?;
             seats::open_at_launch(app, &config, &roster, server)?;
+            #[cfg(target_os = "windows")]
+            away::tray(app)?;
 
             /*
              * ⚠ **Every account's daemon, from launch, whether or not its page is
@@ -268,23 +280,11 @@ pub fn run() {
              * plugin, agent and upload paths lazily, so the first one needed is an
              * `ENOENT` inside a daemon that goes on answering 200.
              *
-             * `RunEvent::Exit` rather than a window-close handler, and the
-             * reason written here for four releases was wrong.
-             *
-             * ⚠ It said *"closing the window on macOS is not quitting"*. That is
-             * a fact about **AppKit**, which Tauri does not implement: measured
-             * in `tauri-runtime-wry`, destroying the last window emits
-             * `ExitRequested` and, with nothing calling `prevent_exit()`, sets
-             * `ControlFlow::Exit` — on every platform, macOS included. So ⌘W
-             * quits this app and takes its daemons with it, which is what
-             * Windows and Linux users expect and what a Mac user does not.
-             *
-             * The code is right either way and the event is still the one to
-             * hang this on: it is the single point every quit passes through,
-             * whether it came from a window close, the menu, or `AppHandle::exit`.
-             * What changes is that the macOS convention — stay running, come back
-             * from the dock — is a **deliberate non-goal** beside "no menu bar, no
-             * tray" rather than something this comment claimed was already true.
+             * `RunEvent::Exit` rather than a window-close handler: it is the
+             * single point every quit passes through, whether it came from the
+             * menu, the Dock, the tray, `AppHandle::exit`, or a window close on
+             * Linux, where destroying the last window still quits (Q6.108). On
+             * macOS and Windows the close button only puts the app away (Q3.697).
              *
              * ⚠ **Every daemon it started, signalled together and waited on once.**
              * There is one per account (D2, Q7.149), every one runs from launch, and
@@ -295,6 +295,12 @@ pub fn run() {
              * is skipped rather than blocking the rest; its child is orphaned, which
              * is the failure this block exists to prevent, for that one only.
              */
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                if !has_visible_windows {
+                    away::bring_back(handle);
+                }
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(host) = handle.try_state::<commands::Host>() {
                     if let Ok(supervisors) = host.supervisors.lock() {

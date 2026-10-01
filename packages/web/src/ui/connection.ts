@@ -23,22 +23,30 @@ export interface ConnectionScope {
 
 type Watched = Pick<MachineState, "id" | "name" | "reach" | "offlineReason" | "route">;
 
+interface Watching {
+  cpError: string | null;
+  machines: readonly Watched[];
+  /** This computer's machine, and whether the host is still bringing its daemon up; optional for a caller with no host. */
+  localMachineId?: MachineId | null;
+  localDaemonStarting?: boolean;
+}
+
 /**
  * The server first, since nothing else can be asked without it; then a machine that cannot be reached, by name; then the open
  * conversation's stream reconnecting, which is end-to-end encrypted only over the relay (e2ee.md); then a first probe.
  */
-export function connectionTrouble(
-  state: { cpError: string | null; machines: readonly Watched[] },
-  scope: ConnectionScope,
-): Trouble | null {
+export function connectionTrouble(state: Watching, scope: ConnectionScope): Trouble | null {
   if (state.cpError !== null) return { kind: "connecting", e2ee: false };
+  // A daemon the host is still starting has not failed to answer; it has not been asked yet (Q3.692).
+  const starting = state.localDaemonStarting === true ? (state.localMachineId ?? null) : null;
   const watched = state.machines.filter(
     (machine) => scope.machines === "all" || scope.machines.includes(machine.id) || scope.open?.machine === machine.id,
   );
   // Under All a machine that is simply switched off would hold the pill for as long as it stays off.
   const named = (machine: Watched) => scope.machines !== "all" || scope.open?.machine === machine.id;
   const down = watched.filter(
-    (machine) => machine.reach === "offline" && TRANSPORT_REASONS.has(machine.offlineReason) && named(machine),
+    (machine) =>
+      machine.reach === "offline" && TRANSPORT_REASONS.has(machine.offlineReason) && named(machine) && machine.id !== starting,
   );
   if (down.length > 0) return { kind: "unreachable", names: down.map((machine) => machine.name) };
   const phase = scope.open?.stream?.phase;
@@ -46,7 +54,14 @@ export function connectionTrouble(
     const machine = watched.find((candidate) => candidate.id === scope.open?.machine);
     return { kind: "connecting", e2ee: machine?.route?.kind === "relay" };
   }
-  if (watched.some((machine) => machine.reach === "unknown" || machine.reach === "probing")) {
+  if (
+    watched.some(
+      (machine) =>
+        machine.reach === "unknown" ||
+        machine.reach === "probing" ||
+        (machine.id === starting && machine.reach === "offline" && TRANSPORT_REASONS.has(machine.offlineReason)),
+    )
+  ) {
     return { kind: "connecting", e2ee: false };
   }
   return null;

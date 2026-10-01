@@ -1,9 +1,9 @@
 import { Check, Copy, Download, Loader } from "lucide-react";
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { filenameFor } from "../paths";
-import { Icon, LINK } from "./bits";
+import { Icon, TRANSCRIPT_LINK } from "./bits";
 import { copyText } from "./clipboard";
 import { useFileAccess } from "./files";
 import { openableHref } from "./links";
@@ -132,7 +132,7 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
             const target = openableHref(href);
             if (target === null) return <>{children}</>;
             return (
-              <a href={target} target="_blank" rel="noreferrer" className={LINK}>
+              <a href={target} target="_blank" rel="noreferrer" className={TRANSCRIPT_LINK}>
                 {children}
               </a>
             );
@@ -194,6 +194,18 @@ export const Markdown = memo(function Markdown({
   return <MarkdownBody text={useSettledText(text)} body={body} />;
 });
 
+/** Two clicks are the engine's word; a third and every one after take the whole span, where WebKit would take the paragraph (Q3.691). */
+function selectWholeSpan(event: MouseEvent<HTMLElement>): void {
+  if (event.detail < 3 || event.button !== 0) return;
+  const selection = window.getSelection();
+  if (selection === null) return;
+  event.preventDefault();
+  const range = document.createRange();
+  range.selectNodeContents(event.currentTarget);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 // Offers a download, never a preview, for a span naming a file this session touched.
 function InlineCode({ text, children }: { text: string; children: ReactNode }): ReactNode {
   const files = useFileAccess();
@@ -201,7 +213,10 @@ function InlineCode({ text, children }: { text: string; children: ReactNode }): 
   const rel = files?.spanTarget(text) ?? null;
 
   const span = (
-    <code className="rounded-sm border border-edge-strong/25 bg-raised px-1.5 py-0.5 font-mono text-xs">
+    <code
+      onMouseDown={selectWholeSpan}
+      className="rounded-sm bg-chip px-1.5 py-0.5 font-mono text-xs text-code"
+    >
       {children}
     </code>
   );
@@ -218,7 +233,7 @@ function InlineCode({ text, children }: { text: string; children: ReactNode }): 
         setBusy(true);
         void files.download(rel, name).finally(() => setBusy(false));
       }}
-      className="tap inline-flex items-baseline gap-1 rounded-sm bg-raised px-1 py-0.5 font-mono text-xs text-fg underline decoration-dotted underline-offset-2 hover:bg-edge disabled:opacity-50"
+      className="tap inline-flex items-baseline gap-1 rounded-sm bg-chip px-1 py-0.5 font-mono text-xs text-code underline decoration-dotted underline-offset-2 hover:bg-raised disabled:opacity-50"
     >
       {children}
       <Icon as={busy ? Loader : Download} size={10} className={busy ? "animate-spin" : "opacity-60"} />

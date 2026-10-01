@@ -256,6 +256,23 @@ process.stdout.write("\nthe machine limit\n");
     // Released, never latched: a latched guard would make Retry a no-op for setup until the app restarts.
     check("and it is released when the run settles", /\.finally\(\(\) => \{\s*this\.settingUp = null;/.test(store), true);
     check("the setup flow settles rather than assuming a spawn worked", /settleDaemon\(/.test(setUp), true);
+    // Q3.692: the host starts a set-up daemon at launch itself, so the page meets "starting" and must neither ignore it nor wait on it.
+    check(
+      "a daemon the host is already starting is waited out beside the other machines, not ahead of them",
+      [/if \(state\.status === "starting"\) \{\s*void this\.awaitLaunchStart\(state\.claimed\);\s*return;/.test(setUp), setUp.indexOf('state.status === "starting"') < setUp.indexOf('state.status !== "absent"')],
+      [true, true],
+    );
+    const launch = /private async awaitLaunchStart\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check(
+      "and the pill is told for exactly as long, with this computer's machine probed before it is untold",
+      [
+        /this\.patch\(\{ localDaemonStarting: true \}\)/.test(launch),
+        /await this\.settleDaemon\(claim\)/.test(launch),
+        launch.indexOf("this.resumeMachine(") > 0 && launch.indexOf("this.resumeMachine(") < launch.indexOf("localDaemonStarting: false"),
+        /finally \{\s*this\.patch\(\{ localDaemonStarting: false \}\);/.test(launch),
+      ],
+      [true, true, true, true],
+    );
     const settle = /private async settleDaemon\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     check("and the settle loop exists to be checked", settle.length > 0, true);

@@ -68,6 +68,8 @@ export function ElicitationCard({
   const [fields, setFields] = useState<ElicitationField[] | null>(null);
   const [busy, setBusy] = useState<"accept" | "decline" | "cancel" | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // The typed field that holds the caret, so the card can let the rows recede once there are words in it (Q3.695).
+  const [typingIn, setTypingIn] = useState<string | null>(null);
 
   const sessionKey = keyOf(sessionRef);
   useSyncExternalStore(subscribeAsks, asksVersion);
@@ -103,7 +105,7 @@ export function ElicitationCard({
   const excluded = excludedFor(sessionKey, pending.elicitationId);
   const answer = useMemo(() => elicitationAnswer(form, draft, excluded), [form, draft, excluded]);
 
-  const respond = (action: "accept" | "decline" | "cancel"): void => {
+  const respond = (action: "accept" | "decline" | "cancel", content = answer.content): void => {
     if (busy !== null) return;
     setBusy(action);
     const daemon = store.daemonFor(sessionRef.machineId);
@@ -117,7 +119,7 @@ export function ElicitationCard({
         sessionRef.sessionId,
         pending.elicitationId,
         action === "accept"
-          ? { content: answer.content }
+          ? { content }
           : action === "decline"
             ? { decline: true }
             : { cancel: true },
@@ -185,6 +187,22 @@ export function ElicitationCard({
 
   const title = askTitle(form, index);
 
+  // A pick answers the step when nothing else in it waits to be filled — only your own words, which are its alternative (Q3.696).
+  const pickAnswersStep = choice !== null && rest.every((field) => displacedBy(form, field.key).includes(choice.field.key));
+  // One answer of one: it goes at once, to the next question or to the agent. Your own words stay in their box, switched off.
+  const pickOne = (key: string, value: string): void => {
+    if (busy !== null || fields === null) return;
+    write(key, value);
+    for (const field of rest) {
+      if (displacedBy(form, field.key).includes(key)) setExcluded(sessionKey, pending.elicitationId, field.key, true);
+    }
+    if (!pickAnswersStep) return;
+    const fresh = elicitationAnswer(form, draftFor(sessionKey, pending.elicitationId), excludedFor(sessionKey, pending.elicitationId));
+    if (fresh.problems.some((problem) => stepKeys.has(problem.key)) || !stepAnswered(form, index, fresh.content)) return;
+    if (!last) setStep(sessionKey, pending.elicitationId, index + 1);
+    else if (fresh.canSubmit) respond("accept", fresh.content);
+  };
+
   const chosenValue = choice === null ? undefined : fieldValue(choice.field, draft);
   const multi = choice?.kind.k === "multiselect";
   const options: AskOption[] =
@@ -199,7 +217,7 @@ export function ElicitationCard({
             description: option.description,
             chosen,
             mark: multi ? "many" : "one",
-            // Tapping the chosen row clears it with an empty string, never a delete, which would fall back to the agent's default.
+            // Several are toggled and sent with Next; one is sent as it is tapped, the chosen row too.
             onPick: () =>
               multi
                 ? write(
@@ -208,17 +226,21 @@ export function ElicitationCard({
                       ? current.filter((entry) => entry !== option.value)
                       : [...current, option.value],
                   )
-                : write(choice.field.key, chosen ? "" : option.value),
+                : pickOne(choice.field.key, option.value),
           } satisfies AskOption;
         });
 
   const problemOf = (key: string): string | null =>
     answer.problems.find((entry) => entry.key === key)?.reason ?? null;
   const choiceProblem = choice === null ? null : problemOf(choice.field.key);
+  const typedField = typingIn === null ? undefined : rest.find((field) => field.key === typingIn);
+  const typedValue = typedField === undefined ? "" : fieldValue(typedField, draft);
+  const typing = typeof typedValue === "string" && typedValue.trim().length > 0;
 
   return (
     <AskCard
       onHeight={onHeight}
+      typing={typing}
       title={title}
       detail={
         stepCount > 1 ? (
@@ -261,6 +283,7 @@ export function ElicitationCard({
                 problem={problemOf(field.key)}
                 onChange={(value) => write(field.key, value)}
                 onAdvance={advance}
+                onFocusChange={(on) => setTypingIn(on ? field.key : null)}
               />
             ))}
           </div>
@@ -303,6 +326,7 @@ function Field({
   onToggle,
   onChange,
   onAdvance,
+  onFocusChange,
 }: {
   field: RenderField;
   heading: string | null;
@@ -315,6 +339,7 @@ function Field({
   onToggle: (on: boolean) => void;
   onChange: (value: string | boolean | string[]) => void;
   onAdvance: () => void;
+  onFocusChange: (on: boolean) => void;
 }): ReactNode {
   // Named through aria-labelledby, not a label element, which would forward a tap on the question to its control.
   const id = useId();
@@ -355,6 +380,7 @@ function Field({
               onAdvance={onAdvance}
               labelledBy={nameId}
               describedBy={describedBy}
+              onFocusChange={onFocusChange}
               // py-3 makes one line the mark's 44px, so the mark stays level with the first line as the box grows.
               className="min-w-0 flex-1 border-none bg-transparent px-3 py-3 text-xs"
             />
@@ -380,6 +406,7 @@ function Field({
               onAdvance={onAdvance}
               labelledBy={nameId}
               describedBy={describedBy}
+              onFocusChange={onFocusChange}
               className="min-w-0 flex-1 border-none bg-transparent px-2.5 py-2.5 text-xs"
             />
           </div>
@@ -407,7 +434,7 @@ function Field({
           // Named by the question and its own text, so it announces the question and then Yes.
           aria-labelledby={`${nameId} ${boolId}`}
           aria-describedby={describedBy}
-          className={`tap press flex min-h-11 w-full items-center rounded-md border px-2.5 text-left text-xs ${
+          className={`tap flex min-h-11 w-full items-center rounded-md border px-2.5 text-left text-xs ${
             value === true
               ? "border-edge-strong bg-raised font-medium text-fg hover:bg-edge"
               : "border-edge bg-raised hover:border-edge-strong hover:bg-edge/50"
@@ -439,7 +466,7 @@ function Field({
                 aria-checked={multi ? chosen : undefined}
                 aria-pressed={multi ? undefined : chosen}
                 // Picked is a ring, not a heavier face, so a wrapping label never reflows the list (Q3.421).
-                className={`tap press flex min-h-11 w-full items-start rounded-md border px-2.5 py-2 text-left text-xs ${
+                className={`tap flex min-h-11 w-full items-start rounded-md border px-2.5 py-2 text-left text-xs ${
                   chosen
                     ? "border-edge-strong bg-raised text-fg ring-1 ring-edge-strong ring-inset hover:bg-edge"
                     : "border-edge bg-raised hover:border-edge-strong hover:bg-edge/50"
@@ -482,6 +509,7 @@ function TypedAnswer({
   onAdvance,
   labelledBy,
   describedBy,
+  onFocusChange,
   className,
 }: {
   multiline: boolean;
@@ -491,6 +519,7 @@ function TypedAnswer({
   onAdvance: () => void;
   labelledBy: string;
   describedBy: string | undefined;
+  onFocusChange: (on: boolean) => void;
   /** Borderless: fitToContent writes scrollHeight, which leaves a border out, so the box around it draws the edge. */
   className: string;
 }): ReactNode {
@@ -521,6 +550,8 @@ function TypedAnswer({
       value={value}
       onChange={(event) => onChange(event.target.value)}
       onKeyDown={(event) => advanceOnEnter(event, onAdvance)}
+      onFocus={() => onFocusChange(true)}
+      onBlur={() => onFocusChange(false)}
       rows={rows}
       placeholder="Type your own answer here"
       aria-labelledby={labelledBy}
@@ -534,6 +565,8 @@ function TypedAnswer({
       value={value}
       onChange={(event) => onChange(event.target.value)}
       onKeyDown={(event) => advanceOnEnter(event, onAdvance)}
+      onFocus={() => onFocusChange(true)}
+      onBlur={() => onFocusChange(false)}
       placeholder="Type your own answer here"
       aria-labelledby={labelledBy}
       aria-describedby={describedBy}

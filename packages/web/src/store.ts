@@ -431,6 +431,8 @@ export interface AppState {
   commands: ReadonlyMap<SessionKey, AgentCommandList>;
   /** Never written to `cpError`, which would take over the whole app. */
   setup: SetupState | null;
+  /** The host is bringing this computer's daemon up, so `localMachineId` is a few seconds from answering, not down (Q3.692). */
+  localDaemonStarting: boolean;
   cpError: string | null;
   config: InstanceConfig | null;
   authError: string | null;
@@ -455,6 +457,7 @@ class AppStore implements StreamSink {
     // The keyring answer is async, so a native launch starts loading instead of flashing sign-in.
     phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
     setup: null,
+    localDaemonStarting: false,
     host: null,
     pickingServer: false,
     localMachineId: null,
@@ -691,6 +694,12 @@ class AppStore implements StreamSink {
         this.patch({ setup: { step: "failed", said: FOREIGN_DAEMON_DETAIL } });
         return;
       }
+      // The host starts every set-up daemon at launch on a thread of its own, so the page usually meets it here; waited out
+      // beside the other machines, never ahead of them, and re-probed the moment it answers rather than on the offline retry.
+      if (state.status === "starting") {
+        void this.awaitLaunchStart(state.claimed);
+        return;
+      }
       if (state.status !== "absent" && state.status !== "exited") return;
 
       if (state.config === DAEMON_CONFIG.elsewhere) {
@@ -726,6 +735,23 @@ class AppStore implements StreamSink {
       await this.settleDaemon(created.machine.id);
     } catch (error) {
       this.patch({ setup: { step: "failed", said: describe(error) } });
+    }
+  }
+
+  private async awaitLaunchStart(claim: string | null): Promise<void> {
+    this.patch({ localDaemonStarting: true });
+    try {
+      await this.settleDaemon(claim);
+      // Probed here, before the flag drops: settle's resume may only be queued behind the launch's own.
+      await this.refreshLocalMachine();
+      const id = this.snapshot.localMachineId;
+      const connection = id === null ? undefined : this.connections.get(id);
+      if (id !== null && connection !== undefined) {
+        this.nextProbeAt.delete(id);
+        await this.resumeMachine(connection, this.epoch);
+      }
+    } finally {
+      this.patch({ localDaemonStarting: false });
     }
   }
 

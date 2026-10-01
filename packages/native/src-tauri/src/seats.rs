@@ -30,10 +30,11 @@
 //! `initialization_script` anywhere: the credential crosses by `host_boot`.
 //!
 //! **What a window close means, stated because nothing else here says it.**
-//! Closing the window destroys every child; the last window's destruction is
-//! `RunEvent::Exit`, where `lib.rs` stops every account's daemon. Closing one
-//! child webview never quits — and the last account's webview is never closed:
-//! forgetting the last account rebinds it to a sign-in instead.
+//! On macOS and Windows the close button hides the window and the app runs on
+//! (`away.rs`, Q3.697). On Linux, closing it destroys every child, and the last
+//! window's destruction is `RunEvent::Exit`, where `lib.rs` stops every account's
+//! daemon. Closing one child webview never quits — and the last account's webview
+//! is never closed: forgetting the last account rebinds it to a sign-in instead.
 //!
 //! ⚠ **What a hidden page is, as Q7.149 measured it.** It runs — its sockets stay
 //! open and its bootstrap completes — but `store.ts` skips its poll while
@@ -69,7 +70,7 @@ pub const MULTI_WEBVIEW: bool = true;
 
 /// The label of the one `WebviewWindow` the single arm builds, which is also the
 /// window label in both arms.
-const MAIN: &str = "main";
+pub const MAIN: &str = "main";
 
 /// `main`'s configuration, as `tauri.conf.json` declares it with `create: false`.
 pub fn main_config(app: &AppHandle) -> Option<WindowConfig> {

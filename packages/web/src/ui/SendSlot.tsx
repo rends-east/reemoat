@@ -63,7 +63,7 @@ export function SendSlot({
     switch (one) {
       case "sending":
         return (
-          <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-fg text-ink">
+          <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-brand text-on-brand">
             <Spinner />
           </span>
         );

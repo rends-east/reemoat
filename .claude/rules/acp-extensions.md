@@ -105,8 +105,13 @@ throws away.
 
 ⚠ **`cursor/ask_question` has never arrived.** Cursor's server gave its model no
 `AskQuestion` in any of four measured client modes, so the `reemoat` MCP server hands
-cursor `ask_question` instead: the same shape and card, answered as the person's next
-message, its permission answered by the daemon off `readMcpToolCall`. Q2.250.
+cursor `ask_question` instead: the same shape and card, its permission answered by
+the daemon off `readMcpToolCall`. **The call waits for the answer** and returns it, as
+every other harness's question does; cursor's MCP client cuts any call at 60 s, so
+past `ASK_WAIT_MS` (50 s) it returns telling the model to end its turn, and the answer
+goes as the person's next message, marked `answers` so it is not drawn twice. The card
+takes the call's id (`claimPosedCall`), so the transcript folds the call into it.
+Q2.250, Q2.251.
 
 **A todo update is the session's plan**, merged by id when cursor says `merge`, with
 a `cancelled` item left off: ACP's plan has no such status and `pending` would be a

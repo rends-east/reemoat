@@ -81,8 +81,9 @@ have to enter. These are the rules a change here must not break:
 
 - **A waiting session says so where it is, and never moves.** The status dot every
   row already carries — a filled dot with a permanent ring — plus a **semibold row
-  title**, a count on its folder's header (so a *collapsed* folder still says so)
-  and one on its machine's tab. Nothing lifts it: not inside a folder (Q3.569) and
+  title** and a count on its machine's tab; its line under the title stays (Q3.691),
+  and its folder's header counts nothing (Q3.695). Nothing
+  lifts it: not inside a folder (Q3.569) and
   not across machines, since there is no waiting section any more, and `webcheck`
   sweeps every filter × tab × query to assert a waiting row is drawn exactly where
   the same row not waiting would be. Q3.674, reversing Q3.200.
@@ -118,10 +119,11 @@ have to enter. These are the rules a change here must not break:
   is the transcript's only nesting idiom** — a subagent's steps, a folded run's
   children, an expanded tool call's own detail. A failure keeps neither a border
   nor any weight.
-- **`bg-fg` is the affirmative action inside a decision, and otherwise a *mark*
-  under a stated size** — Send and the reversible approval; below that, only things
-  the size of a glyph: the bell dot, a blocked count, a selected
-  machine's 28px chip. A pill-sized fill is still the loudest object on screen.
+- **`bg-brand`, the one colour, is the affirmative action inside a decision, and
+  otherwise a *mark* under a stated size** — Send and the reversible approval;
+  below that, glyph-sized things: the bell dot, a blocked count and dot, a selected
+  machine's 28px chip, a switch's knob (Q3.694). A pill-sized fill is still the
+  loudest object on screen.
   `raised` means **state**: a tab you are on, a toggle on, the highlighted row in a
   popover — whose *chosen* row carries the trailing check instead (Q3.684).
   Q3.209, Q3.624.

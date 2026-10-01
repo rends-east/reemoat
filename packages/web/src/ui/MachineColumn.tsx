@@ -95,11 +95,11 @@ function MachineEntry({
   index?: number;
   drag?: MachineDrag;
 }): ReactNode {
-  // Selection fills the mark, never the tile, so it cannot misalign with the session list's selected row (bg-fg on a mark narrows Q3.209).
+  // Selection fills the mark, never the tile, so it cannot misalign with the session list's selected row (Q3.209, Q3.694).
   // The colour transition sits on the chip because .tap's transition is not inherited by it.
   const tile = tab.selected ? "" : "hover:bg-raised/60";
   const chip = tab.selected
-    ? "bg-fg text-ink transition-colors"
+    ? "bg-brand text-on-brand transition-colors"
     : "bg-raised text-muted transition-colors";
   const movable = drag !== undefined && index !== undefined;
   const shift = movable ? drag.shiftFor(index) : 0;
@@ -135,8 +135,8 @@ function MachineEntry({
         {tab.name}
       </span>
       {tab.blockedCount > 0 && (
-        // The ring separates the badge from the selected chip, which is also bg-fg.
-        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink ring-2 ring-ink [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
+        // The ring separates the badge from the selected chip, which is also bg-brand.
+        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-2xs font-semibold text-on-brand ring-2 ring-ink [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
           {tab.blockedCount}
         </span>
       )}

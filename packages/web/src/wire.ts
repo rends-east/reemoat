@@ -207,6 +207,8 @@ export interface PromptEvent {
   from?: PeerOrigin | null;
   /** The `@name`s the daemon resolved in a person's message; absent when there were none. */
   mentions?: PromptMention[];
+  /** On an ask_question answer sent as a message: the elicitation whose resolution already draws it (Q2.251). */
+  answers?: string;
 }
 
 export interface PromptMention {

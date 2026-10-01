@@ -150,7 +150,7 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
   );
 
   const browser = stripComments(srcFile("ui/SessionBrowser.tsx"));
-  const subline = /<div className="mt-0\.5 flex min-w-0 items-center gap-3 text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser)?.[1] ?? "";
+  const subline = /<div className="mt-0\.5 flex min-w-0 items-center gap-\[2em\] text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser)?.[1] ?? "";
   report("the rail row's subline was found", subline.length > 0, `${subline.length} chars`);
   check("the row derives the nickname from the snapshot", /const nickname = nicknameLine\(row\.snapshot\);/.test(browser), true);
   check(
@@ -159,6 +159,14 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
     true,
   );
   check("the harness is never its name spelled out there", />\s*\{row\.snapshot\.agent\}/.test(subline), false);
+  // Q3.691: a question used to take this line over with its own title, and the row lost who, which agent and where.
+  const sessionLine = browser.slice(browser.indexOf("function SessionLine"), browser.indexOf("function SidebarFoot"));
+  check(
+    "a waiting row keeps that line: it is drawn unless the resume stalled, and no request's title stands in for it",
+    [/\{stalled !== null \? \(/.test(sessionLine), /waiting > 0 &&/.test(sessionLine), /\.title\}<\/div>/.test(sessionLine)],
+    [true, false, false],
+  );
+  check("and says it is waiting with its weight", /waiting > 0 \? "font-semibold" : ""/.test(sessionLine), true);
   const icons = stripComments(srcFile("ui/AgentIcons.tsx"));
   // Named off AGENT_IDS, so a harness added with no mark of its own fails here rather than going unchecked.
   const glyphOf = (id: string): string => `${id.charAt(0).toUpperCase()}${id.slice(1)}Glyph`;
@@ -181,7 +189,7 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
     "and a machine is drawn with the server mark wherever a session line names one",
     [
       /export function MachineLabel\([\s\S]*?<Icon as=\{Server\} size=\{12\} \/>/.test(stripComments(srcFile("ui/bits.tsx"))),
-      /<MachineLabel name=\{machineName\} className="shrink-0" \/>/.test(stripComments(srcFile("ui/SessionView.tsx"))),
+      /<MachineLabel name=\{machineName\} \/>/.test(stripComments(srcFile("ui/SessionView.tsx"))),
       /<MachineLabel name=\{row\.machine\.label \?\? "another machine"\}/.test(stripComments(srcFile("ui/MentionMenu.tsx"))),
       /on <MachineLabel name=\{current\.name\}/.test(stripComments(srcFile("ui/NewSession.tsx"))),
     ],
@@ -198,11 +206,11 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
   const view = stripComments(srcFile("ui/SessionView.tsx"));
   check("the header hands its line the nickname", /<WorkspaceLine\s+nickname=\{nicknameLine\(session\)\}/.test(view), true);
   const line = view.slice(view.indexOf("function WorkspaceLine("), view.indexOf("\nfunction ", view.indexOf("function WorkspaceLine(") + 1));
-  const own = line.indexOf('<span className="shrink-0">{nickname}</span>');
+  const own = line.indexOf('<span data-unit="" className="shrink-0">{nickname}</span>');
   report("the header's line was isolated", line.length > 0, `${line.length} chars`);
   check(
     "which leads with it, in the machine name's own style, before the machine",
-    own >= 0 && own < line.indexOf('<MachineLabel name={machineName} className="shrink-0" />'),
+    own >= 0 && own < line.indexOf('<MachineLabel name={machineName} />'),
     true,
   );
   check("and draws nothing without one", /\{nickname !== null && \(/.test(line), true);
