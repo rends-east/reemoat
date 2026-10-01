@@ -100,7 +100,7 @@ process.stdout.write("\nwhat a navigation moves\n");
   {
     const { parseSettingsRoute } = await import("../src/settings.js");
     const stale = { name: "settings", ...parseSettingsRoute(["machines", "m", "plugins", "board"]) } as never;
-    check("a stale plugin address is the machine's depth", navMove(oneMachine, stale), null);
+    check("a stale plugin address falls to the Plugins list, one step past its machine", navMove(oneMachine, stale), "section-push");
     check("and walking to it from Machines is one push, like the machine itself", navMove(machines, stale), "section-push");
     const list = { name: "settings", ...parseSettingsRoute(["machines", "m", "agents"]) } as never;
     const card = { name: "settings", ...parseSettingsRoute(["machines", "m", "agents", "claude"]) } as never;
@@ -124,14 +124,15 @@ process.stdout.write("\nwhat a navigation moves\n");
 
   check("a sheet is a sheet whatever its depth", [isSheet(index), isSheet(oneSystem)], [true, true]);
   check("and a screen is not", [isSheet(home), isSheet(session)], [false, false]);
-  check("the four sheet depths are the four screens", [depthOf(index), depthOf(account), depthOf(oneMachine), depthOf(oneSystem)], [1, 2, 3, 4]);
+  // A system's card hangs off the Sign-ins list, so it is a fifth depth and the list a fourth.
+  check("the sheet's depths: index, section, machine, and a card past a machine's list", [depthOf(index), depthOf(account), depthOf(oneMachine), depthOf(oneSystem)], [1, 2, 3, 5]);
   {
     const { parseSettingsRoute } = await import("../src/settings.js");
     const parsed = (segments: readonly string[]) => ({ name: "settings", ...parseSettingsRoute(segments) }) as never;
     check(
-      "and the same four read off real URLs rather than hand-written objects",
-      [parsed([]), parsed(["account"]), parsed(["machines", "m"]), parsed(["machines", "m", "systems", "moonshot"])].map(depthOf),
-      [1, 2, 3, 4],
+      "and the same depths read off real URLs rather than hand-written objects",
+      [parsed([]), parsed(["account"]), parsed(["machines", "m"]), parsed(["machines", "m", "systems"]), parsed(["machines", "m", "systems", "moonshot"])].map(depthOf),
+      [1, 2, 3, 4, 5],
     );
   }
   check("and a picker has one", depthOf({ name: "new", machineId: null, cwd: null } as never), 1);
@@ -437,7 +438,7 @@ process.stdout.write("\nwhere a row says it works\n");
   check("and with no roots it is what it always was", sessionLabel(row(null, "/Users/rends/api")), "…/rends/api");
 
   const browser = readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8");
-  check("the row compares its location against its own label", /const subpath = located === label \? null : located;/.test(browser), true);
+  check("the row draws no location under its label, since the machine took that place (Q3.681)", /const (?:subpath|located) =/.test(browser), false);
   check("and the label is built from the same roots", /sessionLabel\(row, roots\)/.test(browser), true);
 }
 
@@ -462,11 +463,11 @@ process.stdout.write("\nthe way up, out of a pop-up\n");
   check("from a deep link too, not into history", upFrom(session, "/m/m_1/s/s_1"), "/");
 
   check("a section goes up to the section list", upFrom(account, "/m/m_1/s/s_1"), "/settings");
-  check("a system goes up to its machine", upFrom(oneSystem, "/"), "/settings/machines/m");
+  check("a system goes up to the Sign-ins list", upFrom(oneSystem, "/"), "/settings/machines/m/systems");
   {
     const { parseSettingsRoute } = await import("../src/settings.js");
     const stale = { name: "settings", ...parseSettingsRoute(["machines", "m", "plugins", "board"]) } as never;
-    check("a stale plugin address goes up wherever its machine does", upFrom(stale, "/"), "/settings/machines");
+    check("a stale plugin address falls to the list, which goes up to its machine", upFrom(stale, "/"), "/settings/machines/m");
   }
   check("a machine goes up to Machines", upFrom(oneMachine, "/"), "/settings/machines");
   check("and Machines goes up to the list", upFrom(machines, "/"), "/settings");

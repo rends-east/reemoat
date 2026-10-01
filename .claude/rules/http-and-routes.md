@@ -18,7 +18,7 @@ pnpm client agentauth [<agent>]      # where each agent's credentials go
 pnpm client agentauth <agent> --set <env> [token] | --clear <env>
 pnpm client dirs [path]              # browse the server's filesystem
 pnpm client mkdir <parent> <name>
-pnpm client new --agent kimi         # no --cwd → interactive directory picker
+pnpm client new --agent kimi         # no --cwd → interactive directory picker; --nickname <name>
 pnpm client attach <id> [--since N] [--json]
 pnpm client prompt <id> "text"
 pnpm client config <id> [<optionId> <value>] [--mode <id>]   # the agent's own controls
@@ -28,6 +28,7 @@ pnpm client elicit <id> <qId> --decline | --cancel
 pnpm client resume <id>              # reattach an agent to a session that ended
 pnpm client cancel <id>              # stop the turn; the agent and the conversation stay
 pnpm client title <id> [text]        # name a session; no text clears it
+pnpm client nickname <id> <name>     # its handle, the one @ and other agents use
 pnpm client pin <id> | unpin <id>    # keep it at the top of the list
 pnpm client stop <id>
 

@@ -1,6 +1,8 @@
 import {
+  AtSign,
   ChevronRight,
   CornerLeftUp,
+  Dices,
   FileArchive,
   Folder,
   FolderPlus,
@@ -12,6 +14,7 @@ import { ApiError, errorText } from "../http";
 import { forgetPick, heldPick, keepPick, takePick, takeRemoval } from "../agentPick";
 import { refOf, sessionId, type MachineId } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
+import { nicknameProblem, nicknamesIn, randomNickname, typedNickname } from "../nickname";
 import { displayCwd, pathCrumbs } from "../paths";
 import { nativeBoot, pickFolderNative } from "../native";
 import { agentStripPath, settingsPath } from "../settings";
@@ -28,14 +31,18 @@ import {
   Dot,
   Dropdown,
   Empty,
+  FIELD,
   Icon,
+  IconButton,
+  MachineLabel,
   SHEET_FOOT,
-  SETTINGS_HEADING,
   SHEET_SCREEN,
   Spinner,
   reachText,
 } from "./bits";
+import { Field, FIELD_LABEL } from "./kit/Field";
 import { toast } from "./Toast";
+import { VERBATIM_FIELD } from "./composing";
 import type { MachineState } from "../machine";
 
 function canStartOn(machine: MachineState): boolean {
@@ -60,31 +67,35 @@ function MachinePicker({
   const reason = current === undefined ? null : unusableReason(current.machine);
 
   return (
-    <div className="space-y-1">
-      <Dropdown
-        items={machines.map(({ machine, name }) => {
-          const why = unusableReason(machine);
-          return {
-            value: machine.id,
-            label: name,
-            description: why,
-            disabled: why !== null,
-            adornment: <Dot tone={why === null ? "on" : "off"} />,
-          };
-        })}
-        value={value}
-        onChange={onChange}
-        heading="Machine"
-        trigger={
-          <span className="flex min-w-0 items-center gap-1.5">
-            <Dot tone={current !== undefined && reason === null ? "on" : "off"} />
-            <span className="truncate">{current?.name ?? "Choose a machine"}</span>
-          </span>
-        }
-        className="w-full"
-      />
-      {reason !== null && <p className="text-2xs text-muted">{reason}</p>}
-    </div>
+    <Field label="Machine" hint={reason ?? undefined}>
+      {({ id, labelledBy, describedBy }) => (
+        <Dropdown
+          id={id}
+          labelledBy={labelledBy}
+          describedBy={describedBy}
+          items={machines.map(({ machine, name }) => {
+            const why = unusableReason(machine);
+            return {
+              value: machine.id,
+              label: name,
+              description: why,
+              disabled: why !== null,
+              adornment: <Dot tone={why === null ? "on" : "off"} />,
+            };
+          })}
+          value={value}
+          onChange={onChange}
+          trigger={
+            <>
+              <Dot tone={current !== undefined && reason === null ? "on" : "off"} />
+              <span className={`truncate ${current === undefined ? "text-muted" : ""}`}>
+                {current?.name ?? "Choose a machine"}
+              </span>
+            </>
+          }
+        />
+      )}
+    </Field>
   );
 }
 
@@ -157,6 +168,23 @@ const AgentBuilder = lazy(async () => ({
   default: (await import("./AgentBuilder")).AgentBuilder,
 }));
 
+// Module state: the builder and the settings pop-up unmount this screen, and the name must outlive both. Q3.677.
+let nicknameDraft: { text: string; rolled: boolean } | null = null;
+
+/** Every name this client can see on any machine, so a roll avoids them all; ended sessions keep theirs. */
+function seenNicknames(state: AppState): Set<string> {
+  return nicknamesIn(state.rowsByKey.values());
+}
+
+/** The standing draft, or a fresh roll where there is none or the one rolled has since been taken. */
+function seedNickname(state: AppState): string {
+  const seen = seenNicknames(state);
+  if (nicknameDraft === null || (nicknameDraft.rolled && seen.has(nicknameDraft.text))) {
+    nicknameDraft = { text: randomNickname(seen), rolled: true };
+  }
+  return nicknameDraft.text;
+}
+
 function NewSession({
   state,
   machineId: fromRoute = null,
@@ -203,6 +231,19 @@ function NewSession({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [agentsEpoch, setAgentsEpoch] = useState(0);
+  const [nicknameText, setNicknameText] = useState(() => seedNickname(state));
+  const nickname = typedNickname(nicknameText);
+  const nicknameRefusal = nicknameProblem(nicknameText);
+  const editNickname = (text: string, rolled: boolean): void => {
+    nicknameDraft = { text, rolled };
+    setNicknameText(text);
+  };
+  // A rolled name another session has since taken is rolled again; one somebody typed is theirs to keep.
+  useEffect(() => {
+    if (nicknameDraft?.rolled !== true) return;
+    const seen = seenNicknames(state);
+    if (seen.has(nicknameDraft.text)) editNickname(randomNickname(seen), true);
+  }, [state.rowsByKey]);
 
   const selected = machine ?? reachable[0]?.id ?? null;
   const hiddenHere = new Set(
@@ -322,6 +363,10 @@ function NewSession({
       setError("Choose an agent first.");
       return;
     }
+    if (nickname === null) {
+      setError(nicknameRefusal ?? "Choose a nickname first.");
+      return;
+    }
     if (daemon === undefined) {
       setError("That machine is not connected right now.");
       return;
@@ -333,10 +378,15 @@ function NewSession({
       .createSession(
         picked.kind === "custom"
           ?
-            { agent: "", customAgent: picked.id, cwd }
-          : { agent: picked.id, cwd },
+            { agent: "", customAgent: picked.id, cwd, nickname }
+          : { agent: picked.id, cwd, nickname },
       )
       .then((result) => {
+        nicknameDraft = null;
+        // An older daemon ignores the field and answers a snapshot without one.
+        if (typeof result.session.nickname !== "string") {
+          toast("error", "This machine's daemon is too old to keep a nickname, so the session started without one.");
+        }
         const ref = refOf(selected, sessionId(result.session.id));
         store.applySnapshot(ref, result.session);
         navigate(sessionPath(ref), true);
@@ -346,6 +396,7 @@ function NewSession({
         if (ApiError.isApiError(cause) && cause.code === "agent_start_timeout") {
           const detail = cause.detail as { sessionId?: string } | null;
           if (typeof detail?.sessionId === "string") {
+            nicknameDraft = null;
             navigate(sessionPath(refOf(selected, sessionId(detail.sessionId))), true);
             return;
           }
@@ -402,6 +453,37 @@ function NewSession({
           )}
         </div>
 
+        <Field label="Nickname" error={nicknameRefusal} className="shrink-0">
+          {({ id, describedBy }) => (
+            // Narrow, since a nickname is a word; the mark says what it becomes. Q3.677.
+            <div className="flex items-center gap-2">
+              <Icon as={AtSign} size={16} className="text-muted" />
+              <input
+                {...VERBATIM_FIELD}
+                id={id}
+                aria-describedby={describedBy}
+                value={nicknameText}
+                onChange={(event) => editNickname(event.target.value, false)}
+                aria-invalid={nicknameRefusal !== null}
+                autoCapitalize="off"
+                autoComplete="off"
+                placeholder="mira"
+                className={`w-40 min-w-0 ${FIELD}`}
+              />
+              <IconButton
+                icon={Dices}
+                label="Random nickname"
+                size="nav"
+                onClick={() => {
+                  const seen = seenNicknames(state);
+                  if (nickname !== null) seen.add(nickname);
+                  editNickname(randomNickname(seen), true);
+                }}
+              />
+            </div>
+          )}
+        </Field>
+
         <div className="flex min-h-0 flex-1 flex-col">
           <FieldLabel>Directory</FieldLabel>
           {selected === null ? (
@@ -442,7 +524,7 @@ function NewSession({
         <Button
           tone="primary"
           onClick={create}
-          disabled={busy || selected === null || cwd === null || picked === null}
+          disabled={busy || selected === null || cwd === null || picked === null || nickname === null}
         >
           {busy ? "Starting the agent…" : "Start"}
         </Button>
@@ -805,8 +887,8 @@ function MachineLine({
     return (
       <div className="flex min-h-8 items-center gap-2 text-sm">
         <Dot tone={current.machine.reach === "online" ? "on" : "off"} />
-        <span className="min-w-0 truncate">
-          on <span className="font-medium">{current.name}</span>
+        <span className="flex min-w-0 items-center gap-1">
+          on <MachineLabel name={current.name} className="font-medium" />
         </span>
         {reachable.length > 1 && (
           <button
@@ -821,17 +903,12 @@ function MachineLine({
     );
   }
 
-  return (
-    <div>
-      <FieldLabel>Machine</FieldLabel>
-      <MachinePicker machines={machines} value={value} onChange={onChange} />
-    </div>
-  );
+  return <MachinePicker machines={machines} value={value} onChange={onChange} />;
 }
 
 function FieldLabel({ children }: { children: ReactNode }): ReactNode {
   return (
-    <h2 className={`pb-1.5 ${SETTINGS_HEADING}`}>{children}</h2>
+    <h2 className={`pb-1.5 ${FIELD_LABEL}`}>{children}</h2>
   );
 }
 

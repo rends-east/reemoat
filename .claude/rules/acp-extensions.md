@@ -1,8 +1,10 @@
 ---
 paths:
   - src/acp/xai.ts
+  - src/acp/cursor.ts
   - src/acp/client.ts
   - scripts/daemoncheck.grok-extensions.ts
+  - scripts/daemoncheck.cursor-extensions.ts
 ---
 
 # An agent's own requests
@@ -16,6 +18,7 @@ reach the client for user question"*, *"Plan approval could not be completed
 because the client disconnected"* (and the turn ended), and a silent `cancel` to
 the MCP server. `src/acp/xai.ts` is the one place their shapes are known, parsed
 and answered as measured on grok 1.0.40 over a raw ACP client. Q6.113, Q2.235.
+cursor sends five of its own with no underscore at all — the section below.
 
 **Each is routed onto a door every agent already uses**, so parking, the log, the
 card, Stop and the four ways a request ends (Q2.232) are the existing ones:
@@ -78,11 +81,70 @@ mode is refused as Q2.20 refuses it; every other `_` method —
 `_x.ai/folder_trust/request` included — is still the SDK's `-32601`. Unknown must
 stay a failure the agent reports (`compatibility.md`).
 
+## Cursor's
+
+**cursor sends five, and none of them carries a `sessionId`.** `cursor/ask_question`,
+`cursor/create_plan`, `cursor/update_todos`, `cursor/task` and
+`cursor/generate_image` are all JSON-RPC *requests* — the last three are
+"notifications" in cursor's own vocabulary and still carry an id, so an unanswered
+one sits in cursor's pending map for the life of the process. One process serves one
+session here, so `AcpClient`'s `sole` answers on the only session registered and
+refuses otherwise. `src/acp/cursor.ts` holds the shapes; Q6.117 has the table.
+
+⚠ **On this wire an error is an answer, and the wrong one.** A `create_plan`
+answered with any JSON-RPC error makes cursor write the plan file itself and report
+success; an `ask_question` answered with one falls back to a permission per
+single-choice question and silently drops the multiple-choice ones. So every refusal
+a person makes goes back in cursor's own word — `rejected`, `skipped`, `cancelled` —
+and the one error this client sends is `-32601` for a question with questions
+switched off, where cursor's fallback is the behaviour wanted. `create_plan` sends
+none at all: `answerCursorPlan` parses inside the handler, so unreadable params are
+`rejected`, no single session (a load still replaying) `cancelled`, a throw
+`rejected`; `sole` still answers `-32602` for the others.
+
+**No free text.** cursor reads option ids and nothing else, so its question has no
+own-answer box — the field kimi's and claude's cards carry would take text cursor
+throws away.
+
+⚠ **`cursor/ask_question` has never arrived.** Cursor's server gave its model no
+`AskQuestion` in any of four measured client modes, so the `reemoat` MCP server hands
+cursor `ask_question` instead: the same shape and card, its permission answered by
+the daemon off `readMcpToolCall`. **The call waits for the answer** and returns it, as
+every other harness's question does; cursor's MCP client cuts any call at 60 s, so
+past `ASK_WAIT_MS` (50 s) it returns telling the model to end its turn, and the answer
+goes as the person's next message, marked `answers` so it is not drawn twice. The card
+takes the call's id (`claimPosedCall`), so the transcript folds the call into it.
+Q2.250, Q2.251.
+
+**A todo update is the session's plan**, merged by id when cursor says `merge`, with
+a `cancelled` item left off: ACP's plan has no such status and `pending` would be a
+lie. A subagent's todo update is ignored, for Q6.6's reason.
+
+**Its subagents are the one place a frame arrives on a session id nobody opened.**
+Declared as `_meta.subagents` in `clientCapabilities` (a top-level key is stripped by
+the SDK's schema before cursor reads it), each is announced on its parent with
+`subagent_spawned` — diverted below the SDK beside the async-task drafts, since the
+union is closed — and then speaks on its own id. `Router.delegations` maps that id
+to the session that spawned it, and `Session.onUpdate` takes the spawning call as the
+parent of every call the subagent makes, dropping what it says (Q6.4). A permission
+it asks on its own id — its web fetches — is routed home the same way. Bounded at
+`MAX_DELEGATED_SESSIONS`; a frame on an id nobody announced is dropped.
+
+**`parameterizedModelPicker`** is the other `_meta` key, and it is declared to cursor
+alone (`clientMetaFor`): it turns one list of every model variant into a bare-id
+`model` control plus effort as `thought_level`. ⚠ **So every control but the mode is
+the model's**, arriving and leaving with it, and only a live agent can publish a
+model's: a model tapped on a *parked* cursor session wakes it, and a deferred model
+choice drops the old model's controls rather than replay them onto the new one
+(`modelScopesControls`, Q2.249).
+
 ## Layout
 
 | File | Holds |
 |---|---|
 | `src/acp/xai.ts` | The method names, the three parsers, the request-to-door and answer-to-grok mappings, the notification reader. Pure: `daemoncheck` drives it as tables |
-| `src/acp/client.ts` | The four registrations, and the order that makes the withdrawal safe |
-| `src/session.ts` | `onXaiQuestion`/`onXaiPlan`/`onXaiMcpElicit` onto `onElicitation`/`onPermission`, and `withdrawable` |
+| `src/acp/cursor.ts` | cursor's five methods, their parsers and answers, the todo merge, the subagent announcement reader and the client `_meta` only cursor is sent. Pure |
+| `src/acp/client.ts` | The registrations, the order that makes grok's withdrawal safe, `sole`, and the delegation map |
+| `src/session.ts` | `onXaiQuestion`/`onXaiPlan`/`onXaiMcpElicit` and `onCursorQuestion`/`onCursorPlan`/`onCursorTodos`/`onCursorImage` onto `onElicitation`/`onPermission`, and `withdrawable` |
 | `scripts/daemoncheck.grok-extensions.ts` | The measured requests verbatim, the tables, and all three through the real client with a stub grok |
+| `scripts/daemoncheck.cursor-extensions.ts` | cursor's five as tables and through the real client, a subagent's frames and permission routed home, and a `session/load` whose replay reaches nothing |

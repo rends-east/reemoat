@@ -1,10 +1,10 @@
-import { ListTodo, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
+import { Check, ListTodo, MessagesSquare, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
 import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
-import { Icon, IconButton, MENU_PANEL, menuPlacement } from "./bits";
+import { Icon, IconButton, MENU_PANEL, menuPlacement, menuRow, useListKeys } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
 import { pluginFailure, sessionActions } from "../plugins";
@@ -42,6 +42,7 @@ export function SessionMenu({
   const [placement, setPlacement] = useState<"up" | "down">("down");
   const [busy, setBusy] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  const { panelRef, onKeyDown } = useListKeys(open, boxRef);
   const row = state.rowsByKey.get(keyOf(sessionRef));
   const session = row?.snapshot;
   // A parked session gets no Resume, since a message is the way back, unless an older daemon parked it (Q2.224, Q7.103).
@@ -51,6 +52,9 @@ export function SessionMenu({
     isResumable(session) &&
     (!isParked(session) || parkedByOlderDaemon(session));
   const pinned = session?.pinned === true;
+  // Only where the daemon can turn it off and the machine allows it at all: under an off machine it would switch nothing (Q2.244).
+  const machineAllows = state.machines.find((one) => one.id === sessionRef.machineId)?.agentMessaging === true;
+  const peerMessages = machineAllows ? session?.peerMessages : undefined;
 
   // Pointerdown rather than blur, which fires before a menu button's click lands; Escape belongs to overlay.ts.
   useDismissible("menu", () => setOpen(false), open);
@@ -84,7 +88,10 @@ export function SessionMenu({
       .finally(() => setBusy(false));
   };
 
-  const setMeta = (patch: { pinned?: boolean; rank?: number | null }, whatDidNotHappen: string): void => {
+  const setMeta = (
+    patch: { pinned?: boolean; rank?: number | null; peerMessages?: boolean },
+    whatDidNotHappen: string,
+  ): void => {
     const issued = store.setSessionMeta(sessionRef, patch, (message) => toast("error", message));
     if (!issued) toast("error", `That machine is not reachable right now, ${whatDidNotHappen}`);
   };
@@ -121,7 +128,8 @@ export function SessionMenu({
         label="Session actions"
         size={size}
         disabled={busy}
-        active={open}
+        expanded={open}
+        haspopup="menu"
         // Measured at the tap so the panel never grows the rail's scroller; see menuPlacement.
         onClick={() => {
           if (!open) setPlacement(menuPlacement(boxRef.current));
@@ -130,6 +138,9 @@ export function SessionMenu({
       />
       {open && (
         <div
+          ref={panelRef}
+          onKeyDown={onKeyDown}
+          tabIndex={-1}
           role="menu"
           className={`absolute right-0 w-52 max-w-[calc(100vw-2rem)] ${
             placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
@@ -163,6 +174,18 @@ export function SessionMenu({
               setMeta({ pinned: !pinned }, "so the pin was not changed.");
             }}
           />
+          {/* The mark follows the daemon's snapshot, never the press: the store draws only a pin or a position early. */}
+          {peerMessages !== undefined && (
+            <MenuCheckItem
+              icon={MessagesSquare}
+              label="Agent messaging"
+              checked={peerMessages}
+              onClick={() => {
+                setOpen(false);
+                setMeta({ peerMessages: !peerMessages }, "so agent messaging was not changed.");
+              }}
+            />
+          )}
 
           {/* Plugins sit above the separator so Stop stays the last row whatever is installed. */}
           {offers.length > 0 && <div className="my-1 border-t border-edge/60" />}
@@ -236,8 +259,8 @@ function MenuItem({
       onClick={onClick}
       disabled={disabled}
       title={note === undefined ? label : `${label} · ${note}`}
-      className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm disabled:pointer-events-none disabled:text-faint ${
-        tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
+      className={`${menuRow("center")} disabled:pointer-events-none disabled:text-faint ${
+        tone === "danger" ? "text-danger hover:bg-danger/10" : "text-fg hover:bg-raised"
       }`}
     >
       <Icon as={icon} size={13} className="shrink-0" />
@@ -245,6 +268,33 @@ function MenuItem({
       {note !== undefined && (
         <span className="min-w-0 max-w-[45%] shrink-0 truncate text-2xs text-muted">{note}</span>
       )}
+    </button>
+  );
+}
+
+/** A setting of this session rather than an act on it; `checked` is what the daemon last said. Q3.675. */
+function MenuCheckItem({
+  icon,
+  label,
+  checked,
+  onClick,
+}: {
+  icon: ComponentType<{ size?: number | string; className?: string }>;
+  label: string;
+  checked: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      onClick={onClick}
+      title={label}
+      className={`${menuRow("center")} text-fg hover:bg-raised`}
+    >
+      <Icon as={icon} size={13} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="inline-flex w-4 shrink-0 justify-center">{checked && <Icon as={Check} size={13} />}</span>
     </button>
   );
 }

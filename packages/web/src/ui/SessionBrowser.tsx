@@ -1,6 +1,5 @@
 import {
   Bell,
-  Check,
   ChevronRight,
   Folder as FolderIcon,
   Layers,
@@ -15,7 +14,7 @@ import type { MachineId, SessionKey } from "../ids";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
-import { folderLabel } from "../paths";
+import { AgentMark } from "./AgentIcons";
 import { ConnectionPill } from "./ConnectionPill";
 import { useMachineDrag } from "./machineDrag";
 import { useMachineSwipe, type MachineSwipe } from "./machineSwipe";
@@ -33,13 +32,14 @@ import {
   type SetupState,
 } from "../store";
 import { machineDisplayName } from "../machineOrder";
-import { humanRequests, needsHuman, resumeStalled } from "../wire";
+import { humanRequests, resumeStalled } from "../wire";
 import {
   Button,
+  Dropdown,
   Icon,
   IconButton,
-  menuRow,
-  Menu,
+  MachineLabel,
+  nicknameLine,
   Skeleton,
   StatusDot,
   resumeFailureText,
@@ -61,7 +61,6 @@ import {
   matching,
   orphansFor,
   pinnedFor,
-  rowSubpath,
   selectMachine,
   setFilter,
   setQuery,
@@ -69,7 +68,6 @@ import {
   takeRows,
   toggleFolder,
   isFolderCollapsed,
-  waitingFloor,
   type Filter,
   type Folder,
   type FolderId,
@@ -119,17 +117,11 @@ export function SessionBrowser({
     },
     [drag.scrollerRef, swipe.scrollerRef],
   );
-  const floor = waitingFloor(groups, view);
   const needle = currentQuery();
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
       <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} />
-
-      {/* First: `visibleRows` walks floor, pinned, folders, orphans, and the draw order must match. */}
-      {floor.length > 0 && (
-        <WaitingElsewhere rows={floor} state={state} activeKey={activeKey} />
-      )}
 
       {/* Below lg only; above it `MachineColumn` draws the machines as a column. */}
       {state.machines.length > 0 && (
@@ -294,7 +286,6 @@ function ListBody({
         icon={Pin}
         name="Pinned"
         id={PINNED_FOLDER}
-        blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
         space={drag.spaceFor(PINNED_FOLDER)}
         sliding={drag.sliding}
       >
@@ -304,7 +295,6 @@ function ListBody({
             row={row}
             state={state}
             selected={row.key === activeKey}
-            showMachine={view.all}
             indented
             drag={drag.bind(row, PINNED_FOLDER)}
             lifted={drag.dragging === row.key}
@@ -321,16 +311,21 @@ function ListBody({
         icon={Layers}
         name="All chats"
         id={ALL_FOLDER}
-        blockedCount={everything.filter((row) => needsHuman(row.snapshot)).length}
+        space={drag.spaceFor(ALL_FOLDER)}
+        sliding={drag.sliding}
       >
-        {everything.map((row) => (
+        {everything.map((row, index) => (
           <SessionLine
             key={row.key}
             row={row}
             state={state}
             selected={row.key === activeKey}
-            showMachine
             indented
+            drag={drag.bind(row, ALL_FOLDER)}
+            lifted={drag.dragging === row.key}
+            pressed={drag.pressing === row.key && drag.dragging !== row.key}
+            sliding={drag.sliding}
+            shift={drag.shiftFor(ALL_FOLDER, index, row.key)}
           />
         ))}
       </GroupSection>
@@ -355,7 +350,6 @@ function ListBody({
             row={row}
             state={state}
             selected={row.key === activeKey}
-            showMachine
             indented
           />
         ))}
@@ -436,21 +430,20 @@ function SidebarHeader({
           }}
         />
         {waiting.length > 0 && (
-          <span className="pointer-events-none absolute top-1 right-1 h-2 w-2 rounded-full bg-fg ring-2 ring-ink" />
+          <span className="pointer-events-none absolute top-1 right-1 h-2 w-2 rounded-full bg-brand ring-2 ring-ink" />
         )}
       </span>
     </div>
   );
 }
 
-// `inset-x-4` must equal the tab's `px-4`; `-bottom-px` puts the mark on the bar's hairline.
 /** The selected tab's own pill is this span's ground, so it rides a scroll, a reorder or a resize with its tab (Q3.656). */
 function TabLabel({ tab }: { tab: MachineTab }): ReactNode {
   return (
     <span data-tab-pill={tab.id} className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 ${tab.selected ? "bg-raised" : ""}`}>
       {tab.name}
       {tab.blockedCount > 0 && (
-        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
+        <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-2xs font-semibold text-on-brand [@media(pointer:coarse)]:h-5 [@media(pointer:coarse)]:min-w-5">
           {tab.blockedCount}
         </span>
       )}
@@ -616,34 +609,6 @@ function MachineTabs({
   );
 }
 
-function WaitingElsewhere({
-  rows,
-  state,
-  activeKey,
-}: {
-  rows: SessionRow[];
-  state: AppState;
-  activeKey: SessionKey | null;
-}): ReactNode {
-  return (
-    <div className="shrink-0 border-y border-edge bg-raised">
-      {/* Not `SETTINGS_HEADING`: the same tracking-wider caps at text-fg, the one band louder than the rows under it. */}
-      <p className="px-3 pt-2 pb-1 text-2xs font-semibold tracking-wider text-fg uppercase">
-        Waiting elsewhere · {rows.length}
-      </p>
-      {rows.map((row) => (
-        <SessionLine
-          key={row.key}
-          row={row}
-          state={state}
-          selected={row.key === activeKey}
-          showMachine
-        />
-      ))}
-    </div>
-  );
-}
-
 const FILTERS: readonly { value: Filter; label: string }[] = [
   { value: "active", label: "Active" },
   { value: "ended", label: "Ended" },
@@ -674,48 +639,18 @@ function ChatSearch({ value }: { value: string }): ReactNode {
           className="w-full rounded-md border border-edge-strong bg-ink py-2 pr-2.5 pl-8 text-sm outline-none"
         />
       </span>
-      {/* Solid only when the filter is off its default, since the default already withholds ended rows. */}
-      <Menu
+      {/* Lit only when the filter is off its default, since the default already withholds ended rows. */}
+      <Dropdown
+        variant="icon"
+        icon={ListFilter}
+        label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
+        lit={filter !== "active"}
         align="right"
-        panelClassName="w-40"
         className="shrink-0"
-        trigger={(open, toggle) => (
-          <IconButton
-            icon={ListFilter}
-            label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
-            title={`Showing: ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
-            size="chip"
-            expanded={open}
-            haspopup="menu"
-            onClick={toggle}
-            // The fill is the whole lit state: an appended `text-fg` loses to the tone's colour in Tailwind's emission order.
-            className={filter === "active" && !open ? "" : "bg-raised"}
-          />
-        )}
-      >
-        {(close) => (
-          <>
-            {FILTERS.map((item) => (
-              <button
-                key={item.value}
-                role="menuitem"
-                onClick={() => {
-                  setFilter(item.value);
-                  close();
-                }}
-                className={`${menuRow("center")} hover:bg-raised ${
-                  item.value === filter ? "font-medium text-fg" : "text-muted"
-                }`}
-              >
-                <span className="inline-flex w-3 shrink-0 justify-center">
-                  {item.value === filter && <Icon as={Check} size={12} />}
-                </span>
-                {item.label}
-              </button>
-            ))}
-          </>
-        )}
-      </Menu>
+        items={FILTERS}
+        value={filter}
+        onChange={setFilter}
+      />
     </>
   );
 }
@@ -724,7 +659,6 @@ function GroupSection({
   icon,
   name,
   id,
-  blockedCount,
   children,
   space = 0,
   sliding = false,
@@ -732,7 +666,6 @@ function GroupSection({
   icon: typeof Pin;
   name: string;
   id: FolderId;
-  blockedCount: number;
   children: ReactNode;
   // The group joined takes a row's height and the one left gives it back; translating rows alone would overlap what follows.
   space?: number;
@@ -758,11 +691,6 @@ function GroupSection({
           <span className={`shrink-0 text-muted transition-transform ${collapsed ? "" : "rotate-90"}`}>
             <Icon as={ChevronRight} size={13} />
           </span>
-          {blockedCount > 0 && (
-            <span className="ml-auto shrink-0 pl-1.5 text-2xs font-semibold text-fg">
-              {blockedCount} waiting
-            </span>
-          )}
         </button>
       </h2>
       {!collapsed && children}
@@ -816,11 +744,6 @@ function FolderSection({
             >
               <Icon as={ChevronRight} size={13} />
             </span>
-            {folder.blockedCount > 0 && (
-              <span className="ml-auto shrink-0 pl-1.5 text-2xs font-semibold text-fg">
-                {folder.blockedCount} waiting
-              </span>
-            )}
           </button>
           {/* `chip` grows vertically only, so its 44px target stays off the collapse button beside it. */}
           <IconButton
@@ -856,10 +779,8 @@ function SessionLine({
   row,
   state,
   selected,
-  showMachine = false,
   folderPath = null,
   indented = false,
-  showPath = true,
   drag,
   lifted = false,
   pressed = false,
@@ -869,10 +790,8 @@ function SessionLine({
   row: SessionRow;
   state: AppState;
   selected: boolean;
-  showMachine?: boolean;
   folderPath?: string | null;
   indented?: boolean;
-  showPath?: boolean;
   drag?: Record<string, unknown>;
   lifted?: boolean;
   pressed?: boolean;
@@ -880,19 +799,11 @@ function SessionLine({
   shift?: number;
 }): ReactNode {
   const at = row.snapshot.turnStartedAt ?? row.snapshot.lastEventAt ?? row.snapshot.createdAt;
-  const requests = humanRequests(row.snapshot);
-  const waiting = requests.length;
-  const pending = requests[0];
+  const waiting = humanRequests(row.snapshot).length;
   const roots = state.rootsByMachine.get(row.ref.machineId) ?? [];
   const label = sessionLabel(row, roots);
-  // Only where the row is not already saying it; a folderless row draws `folderLabel`, since cutting a pin against its own folder blanked it. Q3.581.
-  const located =
-    !showPath
-      ? null
-      : folderPath === null
-        ? folderLabel(row.snapshot.workspace.requestedCwd, roots)
-        : rowSubpath(row, folderPath);
-  const subpath = located === label ? null : located;
+  const machine = machineDisplayName({ id: row.ref.machineId, name: row.machineName }, state.localMachineId);
+  const nickname = nicknameLine(row.snapshot);
   // Only when the daemon gave up; a session still resuming is an ordinary row.
   const stalled = resumeStalled(row.snapshot)
     ? resumeFailureText(
@@ -949,16 +860,16 @@ function SessionLine({
               </span>
             )}
           </div>
-          {waiting > 0 && pending !== undefined ? (
-            <div className="mt-0.5 truncate text-xs font-medium text-fg">{pending.title}</div>
-          ) : stalled !== null ? (
+          {/* A waiting row says so with its weight and its dot and keeps this line: what it is asking is the card's (Q3.691). */}
+          {stalled !== null ? (
             <div className="mt-0.5 truncate text-xs text-danger">{stalled}</div>
           ) : (
-            // Sans at `text-2xs`: in a row a path is a name (web-typography.md).
-            <div className="mt-0.5 truncate text-2xs text-muted">
-              {row.snapshot.agent}
-              {showMachine && ` · ${machineDisplayName({ id: row.ref.machineId, name: row.machineName }, state.localMachineId)}`}
-              {subpath !== null && ` · ${subpath}`}
+            // Sans at `text-2xs` (web-typography.md): the nickname, the harness's mark and the machine, one gap apart; no path.
+            // In em, so the gap grows with the step a finger gets (Q3.681, Q3.691).
+            <div className="mt-0.5 flex min-w-0 items-center gap-[2em] text-2xs text-muted">
+              {nickname !== null && <span className="shrink-0">{nickname}</span>}
+              <AgentMark agent={row.snapshot.agent} />
+              <MachineLabel name={machine} />
             </div>
           )}
         </div>
@@ -991,7 +902,7 @@ function SidebarFoot({ machine }: { machine: MachineId | null }): ReactNode {
           New session
         </Button>
       </div>
-      {/* No plugin rows in the rail: `waitingFloor` is computed by subtraction. */}
+      {/* No plugin rows in the rail: where a row sits is its reader's, and nothing else may move one (Q3.674). */}
     </div>
   );
 }

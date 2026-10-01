@@ -41,7 +41,6 @@ import {
   siblingsOf,
   toggleFolder,
   visibleRows,
-  waitingFloor,
 } from "./webcheck.modules.js";
 
 // Tailwind v4 emits utilities alphabetically, so a utility appended to a shared class string (MENU_ROW, menuRow) never overrides one it already sets.
@@ -691,14 +690,9 @@ process.stdout.write("\nmachine groups\n");
 
   setQuery("zzz-matches-nothing");
   check(
-    "a needle that hides a pinned blocked row does not hide the approval",
+    "a needle hides a pinned blocked row as it hides any other: the search is its reader's (Q3.674)",
     visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
-    ["m_a/pb"],
-  );
-  check(
-    "and it is the floor that is holding it up",
-    waitingFloor(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
-    ["m_a/pb"],
+    [],
   );
   setQuery("");
 }
@@ -886,8 +880,8 @@ process.stdout.write("\nwhat is actually on screen\n");
 
     const read = (file: string) => stripComments(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
     check(
-      "a row under All names its machine through the one rule",
-      /showMachine && ` · \$\{machineDisplayName\(\{ id: row\.ref\.machineId, name: row\.machineName \}, state\.localMachineId\)\}`/.test(read("ui/SessionBrowser.tsx")),
+      "every row names its machine, through the one rule",
+      /const machine = machineDisplayName\(\{ id: row\.ref\.machineId, name: row\.machineName \}, state\.localMachineId\);/.test(read("ui/SessionBrowser.tsx")),
       true,
     );
     check(
@@ -951,9 +945,9 @@ process.stdout.write("\nwhat is actually on screen\n");
   {
     const rail = stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8"));
     check(
-      "the rail draws a folderless row with folderLabel, and no longer with displayCwd",
+      "the rail draws no path under a row, by folderLabel or by displayCwd (Q3.681)",
       [/folderLabel\(row\.snapshot\.workspace\.requestedCwd, roots\)/.test(rail), /displayCwd\(/.test(rail)],
-      [true, false],
+      [false, false],
     );
     // Sliced per element: a distance-bounded negative regex would pass once the forbidden prop moved further away.
     const rows = rail.match(/<SessionLine[\s\S]*?\/>/g) ?? [];
@@ -983,7 +977,7 @@ process.stdout.write("\nwhat is actually on screen\n");
     "m_a/blocked",
   ]);
   selectMachine("m_b" as never);
-  check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_a/blocked", "m_b/kept", "m_b/other"]);
+  check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_b/kept", "m_b/other"]);
   selectMachine("all" as never);
   check("and under All every pin is drawn", keys(visibleRows(groups, currentView(groups))).slice(0, 2), ["m_a/far", "m_b/kept"]);
   selectMachine("m_b" as never);
@@ -994,18 +988,24 @@ process.stdout.write("\nwhat is actually on screen\n");
   check("while All walks every pin, because All draws every pin", keys(siblingsOf(byKey("m_b/kept"), groups)), ["m_a/far", "m_b/kept"]);
   selectMachine("m_a" as never);
   check("a blocked row keeps the place its reader gave it", keys(foldersOf(groups, currentView(groups))[0]?.rows ?? []), ["m_a/live", "m_a/blocked"]);
-  check("which the folder header says even when shut", foldersOf(groups, currentView(groups))[0]?.blockedCount, 1);
+  // Q3.695: counted for the tab and the machine's chip; the folder's own header draws no count.
+  check("and the folder still counts it when shut", foldersOf(groups, currentView(groups))[0]?.blockedCount, 1);
 
   selectMachine("m_b" as never);
   check("selecting the other machine draws its folders", foldersOf(groups, currentView(groups)).map((f) => f.name), ["web"]);
-  check("and the session waiting on the machine you left is lifted to the top", keys(visibleRows(groups, currentView(groups))), [
-    "m_a/blocked",
+  check("and nothing from the machine you left, however long it has been waiting", keys(visibleRows(groups, currentView(groups))), [
     "m_b/kept",
     "m_b/other",
   ]);
-  check("the floor holds exactly that row", keys(waitingFloor(groups, currentView(groups))), ["m_a/blocked"]);
+  check(
+    "which that machine's tab still counts, so the wait is said without moving anything",
+    machineTabs(groups, currentView(groups)).map((t) => [t.id, t.blockedCount]),
+    [
+      ["m_a", 1],
+      ["m_b", 0],
+    ],
+  );
   selectMachine("m_a" as never);
-  check("and nothing is lifted while its own machine is selected", keys(waitingFloor(groups, currentView(groups))), []);
 
   const folder = foldersOf(groups, currentView(groups))[0]!;
   toggleFolder(folder.id);
@@ -1030,31 +1030,40 @@ process.stdout.write("\nwhat is actually on screen\n");
   const view = currentView(groups);
   check("the default is the chats that are still going", view.filter, "active");
   selectMachine("m_b" as never);
-  check("the ended filter shows terminal rows, and still anything waiting", keys(visibleRows(groups, { ...currentView(groups), filter: "ended" })), ["m_a/blocked", "m_b/done"]);
-  check("and active shows the live ones", keys(visibleRows(groups, { ...currentView(groups), filter: "active" })), ["m_a/blocked", "m_b/kept", "m_b/other"]);
+  check("the ended filter shows terminal rows and nothing else", keys(visibleRows(groups, { ...currentView(groups), filter: "ended" })), ["m_b/done"]);
+  check("and active shows the live ones", keys(visibleRows(groups, { ...currentView(groups), filter: "active" })), ["m_b/kept", "m_b/other"]);
 
-  // Asserted as a superset over every filter, tab and needle, `all` included, so a new section cannot open a gap.
-  const everyBlocked = rows
-    .filter((r) => ((r.snapshot as { pendingPermissions?: unknown[] }).pendingPermissions?.length ?? 0) > 0)
-    .map((r) => r.key);
+  // Swept, because "waiting moves nothing" is a claim about every view: the same list with nobody waiting draws the same.
+  const calm = sessionGroups({
+    sessions: rows.map((r) =>
+      r.key === "m_a/blocked"
+        ? row("blocked", "m_a", { createdAt: 1, status: "idle", pendingPermissions: [], workspace: workspaceAt("/home/u/api") })
+        : r,
+    ),
+    machines: [machineOf("m_a", "alpha"), machineOf("m_b", "beta")],
+  } as never);
   const filters = ["active", "ended", "all"] as const;
   const machines = ["m_a", "m_b", "all"] as const;
   const needles = ["", "web", "zzz-matches-nothing"];
-  let holes: string[] = [];
+  const moved: string[] = [];
   for (const f of filters) {
     for (const m of machines) {
       selectMachine(m as never);
       for (const q of needles) {
         setQuery(q);
-        const shown = new Set(keys(visibleRows(groups, { ...currentView(groups), filter: f })));
-        for (const key of everyBlocked) {
-          if (!shown.has(key)) holes.push(`${f}/${m}/"${q}" hides ${key}`);
-        }
+        const waiting = keys(visibleRows(groups, { ...currentView(groups), filter: f }));
+        const quiet = keys(visibleRows(calm, { ...currentView(calm), filter: f }));
+        if (JSON.stringify(waiting) !== JSON.stringify(quiet)) moved.push(`${f}/${m}/"${q}": ${waiting.join(",")} vs ${quiet.join(",")}`);
       }
     }
   }
   setQuery("");
-  check("no filter, tab or search can hide a session waiting on you", holes, []);
+  check("waiting on somebody never moves a row, adds one or takes one away, in any filter, tab or search", moved, []);
+  check(
+    "and no section lifts waiting sessions out of their place",
+    [stripComments(srcFile("ui/SessionBrowser.tsx")).includes("Waiting elsewhere"), srcFile("ui/groups.ts").includes("waitingFloor")],
+    [false, false],
+  );
 
   selectMachine("all" as never);
   {
@@ -1069,7 +1078,6 @@ process.stdout.write("\nwhat is actually on screen\n");
       "m_b/other",
       "m_a/blocked",
     ]);
-    check("and nothing has to be lifted, because nothing is elsewhere", waitingFloor(groups, view).length, 0);
   }
   selectMachine("m_a" as never);
   setQuery("");
@@ -1483,11 +1491,17 @@ process.stdout.write("\nwhose order the rail is in\n");
   });
   check("every menu takes its direction from the one helper", homegrown, []);
 
-  for (const file of ["ui/SessionMenu.tsx", "ui/settings/UsersSection.tsx"]) {
-    check(`${file} asks where there is room`, /menuPlacement\(/.test(stripComments(srcFile(file))), true);
-  }
+  check("ui/SessionMenu.tsx asks where there is room", /menuPlacement\(/.test(stripComments(srcFile("ui/SessionMenu.tsx"))), true);
 
   const bits = stripComments(srcFile("ui/bits.tsx"));
+  // A settings row's kebab is RowMenu, which measures at the tap itself, so the screen holds no direction of its own.
+  const rowMenu = bits.slice(bits.indexOf("export function RowMenu("), bits.indexOf("export interface DropdownItem"));
+  const users = stripComments(srcFile("ui/settings/UsersSection.tsx"));
+  check(
+    "ui/settings/UsersSection.tsx takes its kebab from RowMenu, which asks where there is room",
+    [/setPlacement\(menuPlacement\(triggerRef\.current\)\)/.test(rowMenu), /<RowMenu\b/.test(users), /menuPlacement\(|setPlacement\(/.test(users)],
+    [true, true, false],
+  );
   const cap = /export const MENU_MAX_PX = (\d+);/.exec(bits)?.[1] ?? "";
   const cls = /max-h-(\d+)/.exec(bits)?.[1] ?? "";
   check("the room a menu needs is the height its own class caps it at", cap, String(Number(cls) * 4));

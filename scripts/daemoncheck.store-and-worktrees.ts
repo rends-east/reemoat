@@ -90,7 +90,10 @@ const badState: [string, string][] = [
 
   {
     const first = openStores({ path: dbPath, instanceId: "i_writer" });
-    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", pinned: true, rank: 1_700_000_000_123.5 });
+    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: false });
+    // A second put of the same row: only a DO UPDATE that carries the column moves it from the first value.
+    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", nickname: "mira", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: true });
+    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", nickname: "nora", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: true });
     first.sessions.put(persisted("s_plain"));
     first.credentials.save("claude", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01");
     first.credentials.save("kimi", "KIMI_API_KEY", "kimi-key");
@@ -301,7 +304,9 @@ const badState: [string, string][] = [
   );
   const named = rows.find((r) => r.id === "s_named");
   check("a title survives the restart", named?.title, "Fix the reconnect");
+  check("and so does a nickname, as the last put wrote it rather than the first", named?.nickname, "nora");
   check("and so does a pin", named?.pinned, true);
+  check("and a conversation switched out of agent messaging stays out (Q2.244)", named?.peerMessagesOff, true);
   {
     const remembered = rows.find((row) => row.id === "s_remembered");
     check("the agent's controls survive the restart", remembered?.agentState?.config.options[0]?.value, "opus");
@@ -340,9 +345,11 @@ const badState: [string, string][] = [
   // `null` and `false`, never `"null"` and `true`: the columns are NULL for every
   // row written before v5, and `String(null)` would name a session "null".
   check("a session written without them reads back unnamed", plain?.title, null);
+  check("with no nickname either, which restore backfills rather than the store inventing one", plain?.nickname, null);
   // null, never 0: Number of null is 0, the oldest position, which would sink every row that predates the column.
   check("and one nobody positioned follows its age rather than leading the list", plain?.rank, null);
   check("and unpinned", plain?.pinned, false);
+  check("and taking messages from agents, as every session did before the switch existed", plain?.peerMessagesOff, false);
 
   check("the file is stamped with the version it now matches", Number(second.db.prepare("PRAGMA user_version").get()?.["user_version"]), SCHEMA_VERSION);
 
@@ -366,7 +373,11 @@ const badState: [string, string][] = [
     second.uploads.expired(now + 1).map((r) => r.uploadId),
     ["u_keepme"],
   );
-  check("and so does what it spends of the session's budget", second.uploads.bytesFor("s_named"), 4096);
+  check(
+    "and so does what it spends of the session's budget",
+    second.uploads.listFor("s_named").reduce((sum, row) => sum + row.bytes, 0),
+    4096,
+  );
   // Keyed on the pair: another session's id reads as missing, so the routes need not choose between a 403 and a leak.
   check("but not under another session's id", second.uploads.get("s_plain", "u_keepme"), null);
 
@@ -2066,6 +2077,36 @@ process.stdout.write("\nthe v6 migration\n");
   const again = openStores({ path: v5Path, instanceId: "i_v6b" });
   check("a second open changes nothing", again.credentials.list().length, 2);
   again.close();
+
+  // A sessions table from before the nickname: schema.sql never alters an existing table, so only migrate() can add the column.
+  {
+    const oldPath = join(sandbox, "pre-nickname", "reemoat.db");
+    mkdirSync(join(sandbox, "pre-nickname"), { recursive: true });
+    const schema = readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8");
+    const raw = new DatabaseSync(oldPath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec(schema.replace(/^[ \t]*--[^\n]*\n(?=[ \t]*nickname\b)/m, "").replace(/^[ \t]*nickname[ \t]+TEXT,\n/m, ""));
+    const columnsOf = (db: DatabaseSync): string[] =>
+      db.prepare("PRAGMA table_info(sessions)").all().map((column) => String(column["name"]));
+    const before = columnsOf(raw);
+    raw
+      .prepare(
+        "INSERT INTO sessions (id, agent, created_at, updated_at, status, title, workspace_json, workspace_mode, workspace_root) " +
+          "VALUES (?, 'kimi', ?, ?, 'exited', 'From before', ?, 'plain', ?)",
+      )
+      .run("s_pre_nickname", now, now, JSON.stringify(rowFor("s_pre_nickname", join(sandbox, "pre-nickname", "work")).workspace), join(sandbox, "pre-nickname", "work"));
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    raw.close();
+    check("the table under test really has no nickname column", before.includes("nickname"), false);
+
+    const opened = openStores({ path: oldPath, instanceId: "i_pre_nickname" });
+    check("opening it adds one", columnsOf(opened.db).includes("nickname"), true);
+    const kept = opened.sessions.list().find((row) => row.id === "s_pre_nickname");
+    check("and the row already there reads back with none, the rest of it intact", [kept?.nickname, kept?.title], [null, "From before"]);
+    opened.sessions.put({ ...kept!, nickname: "otto" });
+    check("and takes one on its next write", opened.sessions.list().find((row) => row.id === "s_pre_nickname")?.nickname, "otto");
+    opened.close();
+  }
 
   // The tiebreak on owner_subject only decides same-millisecond updates, so it needs a forced tie.
   const tiePath = join(sandbox, "v5-tie", "reemoat.db");

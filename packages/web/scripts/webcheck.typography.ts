@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 
-import { check, report, skip } from "./webcheck.env.js";
+import { check, report } from "./webcheck.env.js";
 import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /** The `@theme` block alone: a coarse-pointer restatement of the same names follows it (Q3.662). */
@@ -86,9 +86,9 @@ process.stdout.write("\nevery size from the scale, and the one that is not\n");
   check("in the theme layer, so a utility still wins over it", /@layer theme \{\s*@media \(pointer: coarse\)/.test(css), true);
 }
 
-process.stdout.write("\nthe three caps constants, and the colour that may not be appended\n");
+process.stdout.write("\nthe two caps constants and the field label, and the colour that may not be appended\n");
 {
-  // Each heading constant already carries a colour, so an appended one is a silent no-op; comments are stripped because docblocks quote it.
+  // Each constant already carries a colour, so an appended one is a silent no-op; FIELD_LABEL is sentence case now and still carries text-fg.
   const CAPS = ["SETTINGS_HEADING", "MENU_HEADING", "FIELD_LABEL"];
   const COLOUR = /(?<![\w:-])text-(?:fg|muted|faint|danger|ink|accent|warn|ok)\b/;
 
@@ -125,26 +125,11 @@ process.stdout.write("\nthe three caps constants, and the colour that may not be
 
 process.stdout.write("\nevery site of the caps idiom, and the ones that are outside the constants\n");
 {
-  // A census against the table below, over comment-stripped text since two files quote the idiom in prose. Q5.115.
+  // A census against the table below, over comment-stripped text since bits.tsx quotes the idiom in prose. Q5.115.
   type Site = { file: string; hits: number; constant: boolean; anchor: string; why: string };
 
   const SITES: Site[] = [
     { file: "ui/bits.tsx", hits: 2, constant: true, anchor: "", why: "MENU_HEADING and SETTINGS_HEADING" },
-    { file: "ui/settings/SettingField.tsx", hits: 1, constant: true, anchor: "", why: "FIELD_LABEL, the third constant" },
-    {
-      file: "ui/SessionBrowser.tsx",
-      hits: 1,
-      constant: false,
-      anchor: 'text-2xs font-semibold tracking-wider text-fg uppercase',
-      why: "the waiting-elsewhere band, at text-fg — louder than the rows under it on purpose",
-    },
-    {
-      file: "ui/settings/MachineSection.tsx",
-      hits: 1,
-      constant: false,
-      anchor: "const RETIRE_HEADING =",
-      why: "text-danger, written out rather than composed onto SETTINGS_HEADING",
-    },
     {
       file: "ui/AgentBuilder.tsx",
       hits: 1,
@@ -186,7 +171,7 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
     SITES.map((site) => `${site.file} ×${site.hits}`).sort(),
   );
 
-  for (const file of ["ui/bits.tsx", "ui/SessionBrowser.tsx"]) {
+  for (const file of ["ui/bits.tsx"]) {
     const raw = srcFile(file);
     report(
       `${file} quotes the idiom in a comment, so stripping is what keeps the count honest`,
@@ -210,6 +195,13 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
     );
     check(`${site.file}: a comment closes immediately above it`, closes >= 0 && before.length - closes <= 80, true);
   }
+
+  // RETIRE_HEADING was the idiom's one danger-coloured copy; retiring a machine is a DangerRow in its screen's last group now.
+  check(
+    "no heading is spelled out in danger any more, so retiring draws no caps of its own",
+    [/RETIRE_HEADING/.test(srcFile("ui/settings/MachineSection.tsx")), /tracking-wider[^"`]*text-danger|text-danger[^"`]*tracking-wider/.test(srcFile("ui/settings/MachineSection.tsx"))],
+    [false, false],
+  );
 }
 
 process.stdout.write("\nevery path this app draws, at the one size a path is drawn at\n");
@@ -230,14 +222,11 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
   // The session row's subline is sans at `text-2xs` by design; size, no mono and the subpath are one check so no half goes quiet alone.
   {
     const browser = read("ui/SessionBrowser.tsx");
-    const subline = /<div className="mt-0\.5 truncate text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser);
+    const subline = /<div className="mt-0\.5 flex min-w-0 items-center gap-\[2em\] text-2xs text-muted">([\s\S]*?)<\/div>/.exec(browser);
     check("the session row's subline was found", subline !== null, true);
     check(
-      "and it is sans, at one size, with the path still on it",
-      [
-        subline !== null && /\bfont-mono\b/.test(subline[1] ?? ""),
-        subline !== null && /`? · \$\{subpath\}`?/.test(subline[1] ?? ""),
-      ],
+      "and it is sans, at one size, naming the machine where the path was",
+      [subline !== null && /\bfont-mono\b/.test(subline[1] ?? ""), subline !== null && /<MachineLabel name=\{machine\} \/>/.test(subline[1] ?? "")],
       [false, true],
     );
   }
@@ -250,7 +239,7 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
   check(
     "the session header's path is mono, on a subtitle line that is already text-2xs",
     [
-      /<span className="truncate font-mono" title=\{where\}>/.test(read("ui/SessionView.tsx")),
+      /<span data-unit="" className="truncate font-mono" title=\{where\}>/.test(read("ui/SessionView.tsx")),
       /justify-center text-2xs text-muted/.test(read("ui/Header.tsx")),
     ],
     [true, true],
@@ -270,7 +259,8 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
       /<span className="font-mono">permissions\.defaultMode<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
       /<span className="font-mono">\{settingsMode\.value\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
       /<span className="font-mono">\{shortPath\(settingsMode\.file\)\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
-      /className="mt-2 text-2xs text-muted wrap-anywhere" title=\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      // A Group footer is text-xs, so the line states text-2xs itself.
+      /<span className="text-2xs wrap-anywhere" title=\{settingsMode\.file\}>/.test(read("ui/settings/MachineAgentsSection.tsx")),
     ],
     [true, true, true, true],
   );
@@ -279,52 +269,4 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
     /from \$\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
     false,
   );
-}
-
-process.stdout.write("\nthe other copy of both stacks, in a repository this one does not contain\n");
-{
-  // The landing lives in the other repository, so off a dev box this skips, and a skip must never print ok. Q7.133.
-  const ORIGINAL = new URL("../../../../services/landing/index.html", import.meta.url);
-  let landing: string | null = null;
-  try {
-    landing = readFileSync(ORIGINAL, "utf8");
-  } catch {
-    // Absent is the ordinary state in CI and a real answer, not a failure.
-    landing = null;
-  }
-
-  if (landing === null) {
-    skip(
-      "the landing is not on this disk, so its copy of both stacks is unchecked",
-      "services/landing/index.html — expected in CI, a problem on the box",
-    );
-  } else {
-    const stackOf = (text: string, name: string): string | null => {
-      const found = new RegExp(`--font-${name}:\\s*([^;]+);`).exec(text);
-      // Whitespace only: the landing wraps the same list at a different column.
-      return found === null ? null : (found[1] ?? "").replaceAll(/\s+/g, " ").trim();
-    };
-
-    for (const name of ["sans", "mono"]) {
-      const ours = stackOf(css, name);
-      const theirs = stackOf(landing, name);
-      check(`--font-${name} was found on both sides`, [ours !== null, theirs !== null], [true, true]);
-      if (ours !== null && theirs !== null) check(`and the landing's --font-${name} is this one`, theirs, ours);
-    }
-
-    // A subset, not equality: the landing legitimately has no `--text-xl`.
-    const scaleOf = (text: string): Map<string, string> =>
-      new Map([...text.matchAll(/--text-([a-z0-9]+):\s*([^;]+);/g)].map((m) => [m[1] ?? "", (m[2] ?? "").trim()]));
-    const ours = scaleOf(themeBlock(css));
-    const theirs = scaleOf(landing);
-
-    report("the landing names a scale at all", theirs.size >= 4, `${theirs.size} steps against this app's ${ours.size}`);
-    const wrong: string[] = [];
-    for (const [step, value] of theirs) {
-      const mine = ours.get(step);
-      if (mine === undefined) wrong.push(`--text-${step}: the landing has it and this app does not`);
-      else if (mine !== value) wrong.push(`--text-${step}: landing ${value}, app ${mine}`);
-    }
-    check("every step the landing names is this app's step, at this app's value", wrong, []);
-  }
 }

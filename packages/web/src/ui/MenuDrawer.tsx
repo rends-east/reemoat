@@ -11,7 +11,7 @@ import { serverLabel } from "../slot";
 import { sessionGroups, store, type AppState } from "../store";
 import { currentTheme, setTheme, subscribeTheme } from "../theme";
 import { APP_VERSION } from "../version";
-import { Icon, Monogram, personEmoji } from "./bits";
+import { Icon, Monogram, personEmoji, SwitchKnob } from "./bits";
 import { isPulled, subscribePull, yieldPull } from "./drawerPull";
 import { currentView, groupsVersion, subscribeGroups } from "./groups";
 import { useLeaving } from "./leaving";
@@ -169,7 +169,7 @@ export function MenuDrawer({
 
 /**
  * The drawer's one row that is not a destination, as Telegram's night mode is: a switch that stays put while the app
- * repaints behind it (Q3.670). On, the knob is fg, a glyph-sized mark; the track is raised, the tone this app gives state.
+ * repaints behind it (Q3.670).
  */
 function DarkThemeRow(): ReactNode {
   const dark = useSyncExternalStore(subscribeTheme, currentTheme) === "dark";
@@ -183,17 +183,7 @@ function DarkThemeRow(): ReactNode {
     >
       <Icon as={Moon} size={18} />
       <span className="min-w-0 flex-1 truncate">Dark theme</span>
-      <span
-        aria-hidden
-        className={`flex h-5 w-9 shrink-0 items-center rounded-full border border-edge-strong ${dark ? "bg-raised" : ""}`}
-      >
-        <span
-          data-keeps-motion=""
-          className={`size-3.5 rounded-full transition-transform duration-200 ease-out ${
-            dark ? "translate-x-4.5 bg-fg" : "translate-x-0.5 bg-edge-strong"
-          }`}
-        />
-      </span>
+      <SwitchKnob on={dark} />
     </button>
   );
 }

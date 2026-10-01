@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 144 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 93 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 418 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 67 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 115 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 73 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 149 | `###` |
-| | | **1059** | |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 109 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 444 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 77 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
+| | | **1115** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1059 rather than the 526
+dividers. So the count is over **both** depths, and it says 1115 rather than the 555
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3280,13 +3280,14 @@ read: a revoke needs an id, and the only way to an id was the read. Leaving
 the routes and hiding the menu item: a route no client can reach is the shape
 Q7.74's `withKey` was deleted for.
 
-**Status.** Applied. `relaycheck` asserts both routes answer 404 to the admin
-that used to reach them, that a fleet-list row carries no `keys` field, and
-that the holder's own list and revoke still work — the revoked row still
-listed, a second revoke a 404 — and, by reading `app.ts`, that no route
-mounted under `/v1/admin/users/:id/` reads or updates `api_keys`. `webcheck`
-asserts `UsersSection` imports nothing from `KeyRow`, that `cp.ts` exports
-neither function, and that the row's one panel is the machine limit.
+**Status.** Applied. `relaycheck` asserts both routes answer 404 to the admin that used
+to reach them, that a fleet-list row carries no `keys` field, and that the holder's own
+list and revoke still work — the revoked row still listed, a second revoke a 404 — and,
+by reading `app.ts`, that no route mounted under `/v1/admin/users/:id/` reads or updates
+`api_keys`. `webcheck` asserts `UsersSection` imports nothing from `KeyRow`, that
+`cp.ts` exports neither function, and that the row's one panel is the machine limit.
+Amended by Q3.686: the machine limit is a leaf screen opened from the row's menu, not a
+panel under the row.
 
 ### Q1.632 — Where does an instance point somebody who has no machine?
 
@@ -4435,6 +4436,115 @@ one page.
 **Status.** Reversed an earlier decision — Q1.643's device id per server, which is
 per account now; Q1.640's keyring key is extended rather than reversed.
 
+### Q1.652 — How does one of somebody's machines get a capability for another, when a daemon may ask the control plane nothing?
+
+**Decision.** The owner's app asks for it, per source machine, with `POST
+/v1/machines/:id/links`: owner-only, it answers one `lk_` link per other machine
+the owner has that is enrolled, keyed, live, granted and within the limit, finding
+the row or writing one and minting a capability fresh on every call. It carries
+`aud` the target, `sub` the owner, `scp` exactly `LINK_SCOPE`, `cnf.jkt` the source
+machine's key from this service's own pin, and `lnk`, `src` and `srcl` naming the
+link, the source and the owner's label for it; it lives `LINK_TOKEN_TTL_SECONDS`, 90
+days. The app hands the answer to the source's daemon unread (`PUT /peers/links`).
+Nothing removes one link by hand any more: a machine switched off or isolated has
+every link it is either end of revoked (Q1.654, Q3.676).
+
+**Why the long life is safe.** `cnf` binds the capability to a private key that
+never leaves the source machine, so a copy opens nothing anywhere else; and
+revocation does not wait for expiry, because the relay reads the row at every
+channel (Q5.121). A short life would need the owner's app awake to re-mint, and the
+links would die with the owner's phone. The row is the authority, which is why a
+repeat keeps the link id and why the relay can key a budget on it. The scope is
+stored nowhere, since a grant is full access, and a daemon older than it drops the
+scope and refuses every route — it fails closed.
+
+**Rejected.**
+- *The sender's Authority minting for the receiver* — two control planes would then
+  have to trust each other; with the receiver's own Authority minting, they need no
+  trust at all (Q7.150).
+- *The source key taken from the request* — `cnf` would bind to whatever the caller
+  claimed.
+- *Revoking links in the three machine-revoke paths* — the relay already refuses a
+  revoked end, and the listing hides it.
+- *404 on a second DELETE* — a DELETE is the write a client may replay (Q5.18).
+
+**Known limitation.** The source's `owner_disabled` and `machine_revoked` refusals
+are answered but unreachable through the routes: sign-in refuses a disabled caller
+first, and revoking a machine releases its ownership.
+
+**Status.** Current.
+
+### Q1.653 — What does a relay tell a daemon that dialled the wrong one?
+
+**Decision.** `421 wrong_relay` carrying `RELAY_URL_HEADER`, from `relay_tunnels`
+and `REEMOAT_CP_RELAY_URLS`, which `relay/main.ts` now reads too — only after
+authorize, and only where the presence row names another slot the map names.
+Everything else stays `503 no_tunnel`. The daemon follows one, never two.
+
+**Why.** A browser is routed by the `relayUrl` a fresh token carries (Q7.92); a
+daemon holding a 90-day link cannot re-ask, and dialling the shared name lands on
+the right relay one time in N. A redirect costs one round trip and no trust between
+relays, where a forward would put one relay on another's data path (Q4.35).
+Answering after authorize keeps where a machine is from becoming an oracle, and a
+row naming this relay is a tunnel it has just lost, which bounds a bounce at one.
+
+**Rejected.** *Exiting on a malformed map, as the API does* — the relay holds every
+tunnel, so it warns and answers 503.
+
+**Status.** Current.
+
+### Q1.654 — Where is the permission to message between agents kept, and how does a daemon learn it?
+
+**Decision.** On the Authority, as two tables where no row means on —
+`account_permissions` for the account's switch and `machine_permissions` for each
+machine's — written by `PUT /v1/me/permissions` and `PUT /v1/machines/:id/permissions`,
+both owner-only. It reaches a daemon **with its links**: the mint answer carries
+`messaging`, the value in force for its source, and `policyAt`, and the app forwards
+both in `PUT /peers/links` beside the links they govern (`policyFromBody`).
+
+- **Switching off, or isolating a machine, revokes the affected `machine_links`
+  rows in the same transaction.** A link token lives ninety days, and `linkIsLive` reads the row at
+  every channel, so the relay refuses the next message between two machines before
+  either daemon has heard anything — including one that is off.
+- **A machine with no key still hears its switch.** Off is answered before the key
+  is asked about, as `200 {links: [], messaging: false}`. On is refused
+  `machine_key_missing` as before, and the refusal's `detail` carries `messaging` and
+  `policyAt`: the app hands that to the daemon with an empty set, since a keyless
+  machine holds no link. `no_signing_key` carries nothing, because a machine
+  refused for that may still hold good links.
+- **`policyAt` only grows** (`nextPolicyAt`), and a daemon keeps the newer of what it
+  holds and what it is handed. Two devices, or a sync already in flight when the
+  switch moves, would otherwise put back what somebody just turned off. The links in
+  a stale push are still taken, since the relay already refuses the revoked ones, and
+  the app that sees an echo newer than its answer mints again, once.
+- **A switch that has not landed retries after 30 s, not the links' 15 minutes**
+  (`POLICY_RETRY_AFTER_MS`). Until then that machine's own agents are still messaging.
+  A person's press also passes the relay check for a machine this app reaches
+  over loopback.
+- **A push without `messaging` leaves the stored value alone.** That is an app that
+  predates this, and it must not switch a machine back on by saying nothing.
+- **Isolation is a column of `machine_permissions`**, added by `migrate()` for a
+  database that already had the table. An isolated source is answered
+  `{links: [], messaging: true, isolated: true}` and an isolated target is left out,
+  so the relay refuses both directions before the daemon hears.
+- **The listing carries the value in force, and link sync reads only the listing.**
+  Compared against a `me` refreshed only on promote, a stale account flag would read
+  as a change on every wake and mint again each time — the trap Q3.673 already names
+  for the target count.
+
+**Why the Authority.** It is the one place every device reads, and the one place
+reachable while a machine is not. "Which machines may open a channel to which" is
+already one of its facts (`authority.md`). The alternative was a fan-out to every
+daemon, and that is a snapshot: a machine offline at the time misses it, one enrolled
+later arrives on, and switching back on erases every machine somebody had turned off
+by hand.
+
+**What the daemon's copy is not.** A fence. A grantee holding `machine:admin` can
+push its own, and a grantee with `session:write` runs agents as the owner. The relay
+reading the revoked row is the one boundary, and it covers only traffic between
+machines.
+
+**Status.** Current.
 
 ## Session lifecycle, questions and attachments
 
@@ -5100,7 +5210,7 @@ compares `=== true` rather than `!= null` because `sessionCapabilities.resume`
 beside it is an empty-object *marker* while this is a declared boolean — two
 capability shapes in one payload, read two ways on purpose.
 
-**Status.** Current
+**Status.** Current, amended by Q2.247: a file dropped from its session's budget can no longer be re-read.
 
 ### Q2.32 — Is a text fallback needed to make an agent read an attachment?
 
@@ -5704,7 +5814,8 @@ were describing different paths through the same binary.
 the key from `provider.env`, a TOML table in `~/.kimi-code/config.toml`, and
 never looks at the process environment.
 
-**Status.** Current
+**Status.** Current. The sign-in card no longer says so (Q3.686); the measurement
+stands.
 
 ### Q2.202 — Is "can this agent be logged in" a question about the host?
 
@@ -7462,7 +7573,9 @@ and a store-less daemon answering `GET` and refusing `PATCH`. `webcheck`: the
 sentence, the prohibition over the whole screen, and that no heading on it names
 the mechanism either.
 
-**Status.** Current
+**Status.** Current, amended by Q3.686: the sentence is the idle row's subline, "Shut
+down, then resumed where you left off.", and the setting is a pick of nine presets
+rather than a typed number.
 
 ### Q2.226 — Can somebody correct the agent without stopping it?
 
@@ -8539,6 +8652,609 @@ SDK's `-32601`: an unknown request must stay a failure the agent reports.
 
 **Status.** Current.
 
+### Q2.236 — How does one session's agent reach another session's?
+
+**Decision.** Through an MCP server this daemon injects into every agent that
+declares an http MCP client, named `reemoat`, with two tools: `list_agents` and
+`send_message` (three until Q2.243). `SessionOptions.mcpServers` is a callback called
+after `initialize`, because `mcpCapabilities` is only known then, and `launchOptions`
+hands it to `session/new`, `session/resume` and the `/clear` path alike.
+`PeerMcpEndpoint` is its own listener on `127.0.0.1` with a port the OS picks, and
+`PeerHub` is the one place every peer message passes through.
+
+**Why MCP.** ACP has no notion of another session, and an agent can only be handed
+a tool it calls through MCP; Claude Code's own cross-session SendMessage and
+Codex's `send_message` are built-in tools for the same reason, and the one ACP host
+that already does this (Paseo) injects an http MCP server exactly so. What an agent
+sends arrives as a `prompt`, through the prompt route's own machinery (Q2.243).
+
+**Why its own listener.** The daemon's HTTP server binds `REEMOAT_HOST`, which may
+not be loopback, and `REEMOAT_PORT=0` means it has no listener at all.
+
+**A bearer per launch.** `mcpServersFor` mints one each time an agent is handed the
+server and retires the one before, so a replaced process stops naming the session;
+since the 0.12.0 review it is also retired, by token, when its process ends. It
+identifies the caller; it does not confine it, since every agent runs as the same
+user and can read another's — the same position as `agentEnv()`.
+
+**claude's bearer is not on a command line.** Measured 2026-10-01: claude-agent-acp
+0.73.0 hands an http server's headers to the SDK, which starts the CLI with
+`--mcp-config <json>`, so the bearer sat in argv, readable by **every** local
+account (`ps`, `/proc/<pid>/cmdline`) — the premise above held only for the same
+user. Claude Code 2.1.286 expands `${VAR}` in those headers (a probe server received
+the value), and the adapter builds the CLI's environment from its own. So for claude
+the bearer is minted before the spawn into `REEMOAT_MCP_BEARER`
+(`AgentLaunchConfig.mcpBearerEnv`) and the header names the variable; through the
+real adapter the CLI's argv carried only `${REEMOAT_MCP_BEARER}` and the server got
+the value. The other five take MCP servers over stdio and get the literal header.
+Rejected: a table keyed by agent id (a stub would get a header it cannot expand),
+and minting in the hub before the spawn (a second callback before `initialize`).
+
+**Rejected.**
+- *A stdio shim per session* — one more process per agent, for the one transport
+  every measured harness already has in http (Q6.114). Kept for a harness that
+  needs it; none does yet.
+- *MCP over ACP* (`type: "acp"`, an RFD) — it would remove the listener, but
+  `codex-acp` advertises `acp: false` and kimi drops such entries.
+- *The MCP SDK* — it brings zod, which this repository does not use.
+
+**Status.** Current. Between machines, see Q7.150.
+
+### Q2.237 — Why two verbs, and why does a report arrive with the notice?
+
+**Decision.** Codex's pair, not Claude Code's single verb. `assign_task` is work:
+it starts a turn on an idle session, steers into a running one, and queues behind a
+turn that cannot be steered — `submit`, the prompt route's two steps. `send_message`
+is context: logged at once and never starting a turn, and put ahead of the next
+turn's text, whoever starts it.
+`assign_task` subscribes its sender to the recipient going idle by default; the
+notice is delivered through `submit`, so a report the recipient left as context
+reaches the sender **in the same turn as the notice**.
+
+**Why.** A message that must not interrupt should cost nothing until something
+else wakes the reader, and a reply to a task is exactly that. Codex splits the two
+for the same reason (`send_message` does not trigger a turn; `followup_task` does).
+Its `wait_agent` is not copied: in one reported run 89 waits, 88 timed out, cost
+6.5% of the tokens — the push is the notice.
+
+**Where it differs from Codex.** There, context enters the history at once and the
+model sees it on its next step. ACP cannot add to a history without a prompt, and
+a steer on claude pre-empts the running turn (`mid-turn-messages.md`), so context
+here always waits for the next turn; what is urgent goes as `assign_task`.
+
+**Measured** 2026-09-25, claude 2.1.281 assigning codex 0.156.1: `list_agents`,
+then `assign_task`; codex woke, read the file, reported with `send_message`; the
+idle notice woke claude with the report ahead of it and claude answered in that
+turn — 25 s end to end, no polling.
+
+**Status.** Reversed by Q2.243 the same day: every message is acted on, and there is
+no context verb.
+
+### Q2.238 — What stops two agents talking to each other for ever?
+
+**Decision.** This daemon, never the model's good sense: `PEER_TURN_BUDGET` turns
+caused by agents in a session with no message from its person, after which work
+from agents is refused and the person is told once; `MAX_PEER_HOPS`, from
+`peerDepth`, the deepest hop delivered since the person last wrote; a token bucket
+per sending session; the same words to the same session inside a minute; and a
+size cap. A person's message resets both counters.
+
+**Why a budget and not only hops.** A hop count survives only while every agent
+passes it on, and a cycle of two never grows deep; counting at the receiver stops
+both. Notices count, or two agents assigning each other work would never stop.
+Since Q2.243 every message wakes its reader, so the budget is also what stops two
+agents thanking each other. Claude Code reaches the same place with a 50-message
+queue per session.
+
+**And the queue.** Peer entries hold at most `MAX_QUEUED_PEER_PROMPTS` of
+`MAX_QUEUED_PROMPTS`, so other agents can never make a person's own message answer
+429; consecutive ones go as one turn.
+
+**Status.** Current. The numbers are first guesses, not measurements.
+
+### Q2.239 — Which ended sessions may another agent reach?
+
+**Decision.** Those that ended for a reason in `PEER_WAKE_REASONS`: parked, a config
+restart, an agent that exited, the daemon going away. A person's Stop is not among
+them: that session is neither listed nor woken.
+
+**Why.** `revivableByPrompt` answers whether a *person's* message may bring a
+session back, and says yes to `stopped`. An agent doing it would undo a person's
+decision without asking them.
+
+**Status.** Current.
+
+### Q2.240 — Where does a message for a machine that is off wait?
+
+**Decision.** On the sending daemon, in `peer_outbox`. A send whose answer is the
+relay's `503` — or no answer — is held and reported `pending`, then retried by
+`pumpOutbox` from 30 s to 10 min apart for 24 h, **byte-identical**, so the
+receiving daemon's per-machine message-id check (Q2.241) delivers it once however
+many tries it took — and since the 0.12.0 review however many restarts too: the ids
+are kept in `peer_seen` for a day, because the sender gives up after 10 s while a
+wake may take 45, so a retry is the common case and an in-memory set forgot it at
+every restart. A delivery a shutdown cuts off answers `503 shutting_down`, which
+every sender holds, rather than `ended`. A refusal on a later try, or the day
+running out, wakes the sender with a notice saying so, within the budget any notice
+is (Q2.243) — another machine's words only ever as a quotation in it. At most
+`MAX_OUTBOX_PER_SESSION` per session and `MAX_OUTBOX` on the machine.
+
+**Why here.** A tunnel with no daemon is a 503, never a queue (Q5.21), and the
+Authority may hold none of an agent's work (`authority.md`). Claude Code holds a
+message for an offline session on its own servers; the only process here that may
+hold it is the one whose agent wrote it.
+
+**Status.** Current.
+
+### Q2.241 — What does a daemon take on a linked machine's word?
+
+**Decision.** Which *session* on that machine sent a message, and nothing else.
+Which *machine* is the capability's (`principal.link`, all three link claims or
+the token is malformed). Every link has its own token bucket here, whatever the
+other daemon says it enforces; a message id is delivered once per sending machine for a
+day, since re-minted links hand the same sender a new link id, and kept in
+`peer_seen` so a restart forgets none; a refusal is re-read too — its code kept only
+if `PeerRefusal` has it, its words one line of `MAX_REMOTE_REFUSAL_CHARS`; a
+notice is taken only when this machine asked for it, once (`expectedNotices`), so a
+link cannot wake a session by claiming to answer it; a listing row is re-read field
+by field (`remoteRowOf`), and one whose ref names a machine is dropped, while one
+whose status this build does not know is kept and shown as idle (`compatibility.md`
+rule 2) — dropped, it let a bare name resolve to a same-named session here. A link
+reaches `/peer/*` only: `session:message` opens no other route, and a person's
+capability never carries it.
+
+**Why.** A linked machine is another computer running as the same person, which is
+not the same as being right: a looping agent or a compromised host there must cost
+this machine a bounded amount of work, never its owner's attention.
+
+**Status.** Current.
+
+### Q2.242 — Why does no claude session have its own ListAgents, and why are this daemon's tools loaded up front?
+
+**Symptom.** Reported by the owner on 2026-09-25: a claude session driven over ACP,
+asked about other agents, called Claude Code's own `ListAgents` rather than
+`list_agents`. Claude Code 2.1.28x ships cross-session messaging, and the tool is in
+an SDK session too. It lists Claude sessions on the machine and nothing this daemon
+runs, so it answers a different question and sounds right doing it. And `list_agents`
+was one step further away: claude defers an MCP tool's schema behind its tool search
+(Q6.114).
+
+**Decision.** Two changes, each where it belongs:
+- `sessionMetaFor` sends `disallowedTools` naming `CLAUDE_WITHDRAWN_PEER_TOOLS` to
+  every claude session, whether or not it was handed the `reemoat` server.
+  claude-agent-acp appends it to its own list, and a disallowed tool is not in the
+  model's context at all. `session/new`, `session/resume` and `/clear` all carry it.
+- Each of this daemon's tools carries `_meta["anthropic/alwaysLoad"]: true`, which
+  claude reads per tool and which keeps it out of the tool search. It costs their
+  schemas in every claude session's prompt. Every other harness ignores the key.
+
+**Widened the same day.** It was first withdrawn only where the tools were handed,
+so that a daemon with `REEMOAT_PEER_MESSAGES=off` took nothing of claude's away.
+The owner's call: it is never wanted here, because what it lists is never what this
+daemon runs, with the tools or without them.
+
+**Measured** 2026-09-25, claude 2.1.282 under claude-agent-acp 0.73.0. Asked to name
+every tool it had for other agents, it gave the three `mcp__reemoat__*` and
+`SendMessage`, and no `ListAgents`. Asked which sessions it could message, it called
+`mcp__reemoat__list_agents` first, with no ToolSearch before it.
+
+**Why SendMessage stays.** It is also how claude continues a named subagent it
+started, a background one included. Withdrawing it would cost claude its own
+orchestration to save a tool that no longer has a listing to feed it. The server's
+instructions say that a harness's own messaging tools do not reach these sessions.
+
+**Rejected.**
+- *Passing it as settings* (a deny rule, or Claude Code's crossSessionInbound). The adapter
+  drops the settings it builds from `CLAUDE_MODEL_CONFIG` whenever any are passed, so
+  a model override would vanish from every session.
+
+**Status.** Current. Claude Code's inbound cross-session messages are not refused, for
+the same settings reason.
+
+### Q2.243 — Why does every message between agents start or join a turn?
+
+**Symptom.** The owner, 2026-09-25, on a transcript row *Note from …· read with its
+next turn* holding grok's count to a hundred: only messages the other session reacts
+to. A note is logged at once and then does nothing until something else wakes its
+reader, which on screen is a message that went nowhere.
+
+**Decision.** One verb. `send_message` is what `assign_task` was: it starts a turn on
+an idle session, steers into a running one, and queues behind a turn that cannot be
+steered. Nothing is held for somebody else's turn, so there is no buffer and no
+refusal for a full one, and an answer is a message like any other: it wakes
+whoever it is for. `notify_when_idle` is off unless asked for, and the notice it
+asks for **stands in for an answer**: writing back to the subscriber cancels it
+(`answered`), and on the subscriber's machine the answer's arrival forgets the
+notice it was expecting. A subscription that runs out lapses silently, and a message
+the outbox gives up on wakes its sender with a notice.
+
+**Why the notice is off by default.** A reply goes by the same verb as a task. On by
+default, every reply would subscribe its writer to its reader going idle, and the
+end of every exchange would wake the one who answered for nothing.
+
+**What it costs.** An answer is a turn of its own for its reader, where Q2.237's
+report rode the idle notice's turn; an assignment that is answered still costs its
+sender one wake, not two, since the notice is not sent. A reply to a reply is a turn
+too, and nothing but the tool's wording and `PEER_TURN_BUDGET` stops two agents
+thanking each other.
+
+**Rejected.**
+- *Keeping `assign_task` as the one name.* An answer would have gone as a task.
+- *Steering context into a running turn and buffering it only for an idle one.* The
+  idle session is the case that read as lost.
+
+**Measured** 2026-09-25, claude 2.1.282 asking codex 0.157.0 on one machine, no
+notice asked for: `list_agents`, then `send_message`; codex read the file and
+answered with `send_message`; the answer woke claude, which summarised it and sent
+nothing back. Two turns for claude, one for codex, no notice, and nothing more in the
+minute after — 36 s end to end.
+
+**Status.** Current. Reverses Q2.237.
+
+### Q2.244 — Who may switch off messages between agents, and at which levels?
+
+**Decision.** Three switches, each only narrowing the one above: the account's, a
+machine's and a conversation's. `REEMOAT_PEER_MESSAGES=off` is still a ceiling none
+of them can lift. A conversation takes part only when all four allow it. The first
+two are Q1.654's, applied by `setPolicy`. The third is `peer_messages_off` on the
+session row, set by `POST /sessions/:id/meta` with the same `session:write` a rename
+needs, because it narrows and a grantee who can prompt the session already has more.
+
+- **Off is checked where it is used, on the live value.** The flag stopped being
+  read once at boot, and every path that bypassed it is gated: the local rows of
+  `list_agents` behind an already-handed bearer, `/peer/notices`, the outbox pump,
+  and the idle notices.
+- **A running agent keeps the tool names.** Its tool list was fixed at launch, so
+  a call is answered with a sentence rather than a missing tool. The bearer stays
+  valid, because a `401` from an http MCP server reads to claude as a sign-in to
+  start. Switching back on reaches conversations that start or resume afterwards.
+- **Switching off drops what was waiting.** Queued peer prompts not yet delivered
+  (`dropQueuedPeer`), idle-notice subscriptions, and the outbox, with one quiet line
+  in each sender's transcript (`notePeerMessagesOff`) and no wake. What cannot be
+  taken back:
+  - a message already steered into a running turn;
+  - a turn another agent already started;
+  - an outbox request already on the wire.
+  A send inside `sendMidTurn` is dropped too since the 0.12.0 review: a steer that
+  fails after the switch fell through to the queue and was delivered, so
+  `dropQueuedPeer` bumps a counter the steer re-reads after its await.
+- **A conversation that is off neither sends nor receives.** Other agents do not
+  see it, and it is refused both ways with `conversation_messaging_off`. A parked
+  one is refused without being woken first.
+- **A machine may instead be isolated.** Its sessions still message each other,
+  but nothing reaches them from another machine and they reach none
+  (`reachesOthers`, `messaging_isolated`). Going isolated empties the outbox with the
+  same quiet line and forgets what was owed abroad; nothing local is touched. The
+  flag is kept while the machine is off.
+
+**Rejected.**
+- *A per-conversation switch that only stops the conversation being woken.* A
+  sender that is never answered.
+- *Revoking bearers on off.* See the second point.
+
+**Status.** Current. Q2.238 bounds how much agents may say to each other; this
+decides whether they may.
+### Q2.245 — What is a session's nickname, and what keeps it one session's?
+
+**Decision.** Every session has a nickname — `mira`, `otto` — and it is the name
+other agents address it by: `nameOf` answers it, so `list_agents` prints it,
+`send_message to="mira"` resolves it and a peer message reads *Message from mira*.
+- **Shape**: `NICKNAME`, lowercase latin, digits and single hyphens, starting with
+  a letter, 2–32 characters. It passes every daemon's `isPeerName`, the older ones
+  included, so a listing row is never dropped on another machine. It holds no `_`,
+  which `PeerHub.resolve` reads as a session id.
+- **One per machine**, case-insensitive, over every session the registry holds,
+  ended ones included, and over the names being created right now.
+  `reserveNickname` takes the name synchronously at the top of `create`, before the
+  capacity check, the create token and `createWorkspace`, so the loser of two
+  concurrent creates gets `409 nickname_taken` and has made nothing.
+- **Always present.** A create that names none gets `pickNickname`: a free name
+  from `NICKNAMES`, then one of them with the first free `-2`, `-3`. `restore()`
+  gives one to every row written before the column, walking rows oldest first so
+  the older of two duplicates keeps its name. A nickname cannot be cleared.
+
+The title is unchanged: still derived from the first message, still renamed by a
+person, still printed by `list_agents` as what the session is about. It stopped
+being the address.
+
+**Why.** A title is what a session is about, and that makes it a poor address. It
+is long, it moves with every rename, and two sessions share one as soon as two
+people ask for the same fix — which is why a bare name had to answer
+`ambiguous_recipient` even among one machine's sessions. A handle a person chose,
+or accepted, stays put.
+
+**Rejected.**
+- *A UNIQUE index.* `put` swallows its errors, and a rolled-back build writes NULL
+  into the column; a reservation in memory is the one check both creates pass
+  through.
+- *One per account, across machines.* No daemon sees another's rows without the
+  network, and the Authority holds no sessions. The app's dice avoids every name it
+  can see instead (Q3.677), and an ambiguous name is answered by listing each match.
+
+**A bare name never resolves by elimination.** Found in the 0.12.0 review: a linked
+machine whose listing failed was skipped, so `mira` here and a `mira` on a machine
+that did not answer resolved to this one. With any listing unchecked — no answer, a
+transport failure, an unexpected status — one match is refused `ambiguous_recipient`
+naming the machine and the match's full address, and none `unknown_recipient` naming
+what could not be checked. A machine that answered off, isolated or too old does
+not block, or one old daemon would refuse every bare name for good; a full address
+waits on no listing.
+
+**Status.** Current.
+
+### Q2.246 — What does the agent get when a person writes `@mira`?
+
+**Decision.** The text exactly as typed, then a second text block the daemon writes:
+`<session-mentions>`, saying it is Reemoat's note and not the person's, one line per
+session named — its address, title, harness, folder and machine — and
+`send_message to="…"` only where this session's agent was handed the tools.
+`mentionNote` builds it on the person's prompt route and nowhere else.
+- **It never waits on the network.** Local rows are read in place; another
+  machine's are its last successful listing, `remoteSettled`, which a failed
+  listing clears so the note never names what `list_agents` would call unreachable.
+  Opening the `@` menu warms it (Q3.678).
+- **At most eight names** a message, and a name two machines share lists both.
+- **The switches of Q2.244 hold**: nothing is named where this machine's or this
+  conversation's messaging is off, and another machine's sessions only while this
+  one is not isolated — the listing `list_agents` would give, and no wider.
+- **Not in a slash command**, since agents parse one at index 0 and a second block
+  beside it is unmeasured.
+- **Not in a peer's envelope or a plugin's prompt**: `defuse` breaks a forged
+  `<session-mentions>` tag inside a message body.
+- It rides the turn the way attachments do — the steer's extra blocks, a queued
+  entry's `note`, `pump` — and the `prompt` event logs the names it resolved as
+  `mentions`, so the log says a note was added.
+
+**Why.** An agent reading `@mira` has to guess that it names a session at all, then
+list every machine to find which. The daemon already knows, and saying it once
+beside the message costs nothing the agent would not spend finding out.
+
+**Rejected.**
+- *Rewriting the text.* `text` is what the web client's echo is matched on, what a
+  title is derived from and what `/clear` is compared with.
+- *The client resolving names and sending references.* The listing is the daemon's;
+  a client's own rows include machines the agent cannot reach.
+- *Awaiting the listings.* Up to three seconds on every message a person sends, for
+  a word that may be `@Override`.
+- *A status in the note.* A queued message is delivered minutes after it was
+  accepted, and *idle* would be stale by then.
+
+**Measured.** Not against a live agent. That a second text block reaches the model
+as part of the same message is read off claude-agent-acp 0.73.0 and codex-acp 1.8.0,
+each of which keeps separate text blocks separate; kimi, opencode and grok are
+unmeasured.
+
+**Status.** Current.
+
+### Q2.247 — What does a session keep of its files, and what happens when it is full?
+
+**Decision.** Two budgets, and both roll.
+- **Files somebody sent**: 100 files and 1 GiB a session (`MAX_UPLOADS_PER_SESSION`,
+  `MAX_SESSION_UPLOAD_BYTES`). Past either bound the oldest file **already sent** is
+  dropped, row first and bytes after, to make room (`roomFor`). A file not yet sent is
+  never dropped, since a draft names it, so the only refusals left are a hundred files
+  or a gibibyte all waiting to be sent, and they say so.
+- **Images an agent returned**: kept for the transcript on a budget of their own, 200
+  images and 256 MiB (`MAX_AGENT_IMAGES_PER_SESSION`, `MAX_SESSION_AGENT_IMAGE_BYTES`),
+  oldest first out, and never counted against a person's files. An id's prefix is its
+  kind — `u_` or `a_` — and `isAgentImage` is the one place that reads it.
+- **A dropped file answers 404 `upload_not_found`**, and the transcript says
+  *"… is no longer kept."* where its preview was, as a download of it does.
+- **An upload's type is read off its first bytes** when it declared none or only
+  `application/octet-stream` (`sniffImageMime`: PNG, JPEG, GIF, WebP), and the web
+  client sends a file's own type over the relay too (`contentTypeFor`).
+- **A failed chip offers Retry only where a retry can succeed** (`uploadRetryable`): a
+  dropped connection, a 408, a 429 or a 5xx, never a 400, 409 or 413.
+
+**Why.** Measured 2026-09-29 on the owner's machine: a landing-page session refused a
+pasted screenshot with *"this session already holds too many staged files"*. It held
+100 rows, and 96 of them were images the agent had returned while taking screenshots
+of its own work — 66 JPEG and 30 PNG across three days — against the owner's 4. One
+count covered both kinds and every file ever sent, and a sent row had no way out but
+the session's deletion, so the agent's working screenshots locked the person out of
+attaching anything, for good, in a session that looked healthy. The inode argument
+behind the count (Q5.101) still holds, since each file is a directory, so the answer
+is a rolling bound rather than none: a transcript's media is a display cache, and a
+cache evicts rather than refuses. The person's input keeps a hard edge only where
+dropping would lose something nobody has sent yet. The agent's numbers are twice what
+that session produced in three days, and room for ten images at the 25 MiB one may be.
+
+**The type, found on the way.** All four of the owner's screenshots were stored as
+`application/octet-stream`. Over the relay the header came from `contentTypeFor`,
+which answered bytes for any `Blob`, and `inlinesImage` hands the agent an image only
+under `image/*` — so a screenshot pasted in a browser, or in the app off loopback,
+reached the agent as a path rather than a picture. Reading the type off the content is
+the upload advice OWASP gives; here it only fills a gap and never overrides a type the
+client declared.
+
+**Cost.** A dropped file can no longer be re-read by the path its prompt carried
+(Q2.31); with a hundred newer files in the session, one that old is rarely the one a
+conversation turns back to.
+
+**Rejected.**
+- *Not counting an agent's images at all.* Each is a directory on the daemon's disk,
+  and an agent looping on screenshots would write without bound.
+- *Dropping a file not yet sent.* The draft holding its id would send a prompt naming
+  nothing, which `resolve` refuses as `missing`.
+- *Refusing an agent's image at the bound, as before.* Every image past it was drawn
+  as the text `[image]`, silently.
+
+**Status.** Current. Amends Q5.101's upload bounds, and Q2.31 on what the agent can
+re-read.
+
+### Q2.248 — Reattaching an agent that has `session/load` but no `session/resume`
+
+**Decision.** `Session.openResumed` sends `session/resume` where the agent declares
+it and `session/load` where it declares only `loadSession: true`. The load's replay
+is not suppressed by any code of its own: it arrives **before** the load's answer,
+and `adopt` registers the session with the client only **after** that answer, so the
+router drops every replayed frame exactly as it drops any frame for an unregistered
+id. `available_commands_update`, which cursor schedules after the answer, lands as
+state like it does after `session/new`.
+
+**Why.** cursor 2026.09.28 has no `session/resume` (`-32601`) and declares
+`loadSession: true`. Without a second verb every cursor session is stranded by a
+daemon restart and by the idle sweep (Q2.224) — its next message would answer
+`ResumeUnsupportedError` for ever. Q5.85's rule existed to stop a replayed history
+being written into a log that already holds it, and the ordering removes that cost
+rather than the rule being ignored.
+
+**Measured.** Read from cursor's ACP server, `loadSession` in
+`./src/acp/cursor-acp-agent.ts`: it `await`s `replayConversationHistory` and only
+then returns `{modes, models, configOptions}`; the replay is user text (with cursor's
+appended `Additional ACP context:` block), agent text and thought, and
+`tool_call`/`tool_call_update` pairs with ids `replay-<turn>-<step>`. `daemoncheck`
+drives a stub that replays four frames before answering and asserts none reaches the
+log, and that a command list sent after the answer does.
+
+**Rejected.** *Mapping cursor's unknown-session answer to `SessionForgottenError`.*
+It is `-32602` with a message, not `-32002`, and `-32602` is also what cursor answers
+to a malformed `mcpServers` of ours — persisting `resume_gave_up` on it would strand
+a session over this daemon's own bug. It costs retries instead.
+
+**Status.** Current. Reverses Q5.85 for an agent with no `session/resume`; where
+both exist resume is still the only verb sent.
+
+### Q2.249 — A model chosen on a parked Cursor session, and the effort that did not appear
+
+**Question.** A parked session's chips are live and a tap is recorded for the wake
+(Q3.618). On 2026-09-30 the owner picked Claude Opus 5.5 on a parked Cursor session
+and the effort chip stayed a dash. Why, and what should a tap do?
+
+**Why it was a dash.** Cursor's controls other than its mode belong to the model:
+`parameterizedModelPicker` makes each model bring its own — Claude Opus 5.5 an
+`effort`, Codex 5.3 a `reasoning`, Auto nothing (Q6.115) — and only cursor can say
+which, after `session/set_config_option` reaches it. The recorded choice reached
+nobody, so the strip kept the options the parked agent last published, which were
+Auto's. The log shows it: two `agent_config` rows at 17:11 carrying a new model and
+no `effort`, and no `status` row between them and the park.
+
+**Decision.** On a harness whose controls are its model's (`modelScopesControls`,
+true exactly where `clientMetaFor` declares the picker, so cursor alone), a model
+tapped on a **parked** session records the choice and then wakes the agent through
+`resume`, whose `restoreConfig` sends it; the tap answers with what the woken agent
+published. And in every deferred state the recorded model drops the old model's
+controls, keeping only the mode, since `restoreConfig` would otherwise replay the old
+model's `effort` onto the new one whenever the value happened to exist — overriding
+the level cursor remembers for that model in `modelParameters`.
+
+**Parked only.** A `stopped`, `agent_exited` or `agent_signed_out` session still
+records and waits for a message: a person ended the first, the other two ended on a
+failure a tap should not retry. A parked session is one this daemon let go for its
+own reasons, and choosing a model is somebody using it.
+
+**Cost.** A tap on a parked Cursor session spawns an agent and may evict another at
+the machine's ceiling (`makeRoomForWake`), as a message would; the route already
+budgets a start and a config call (`START_TIMEOUT_MS`, `SET_CONFIG_TIMEOUT_MS`), as
+ultracode's restart needed. A failed wake answers `agent_config_failed` with the
+choice kept, as that restart does.
+
+**Status.** Current.
+
+### Q2.250 — A question Cursor's model cannot ask, and the tool this daemon gives it
+
+**Question.** Asked to put a multiple-choice question in front of its person, a
+Cursor session answered in text: *"this harness has no tool for a UI with
+buttons"*. Its own reasoning, in the log, looked for `AskQuestion` and found it
+unavailable. `cursor/ask_question` is handled (Q6.117) — why did it never arrive?
+
+**Measured 2026-09-30, on the owner's account, which is served Auto only** —
+Composer 2.5, Codex 5.3 and Claude Opus 5.5 each answer *Upgrade your plan to
+continue*. The model listed its tools, four ways: over ACP in `agent` mode, over
+ACP in `plan` mode (`CreatePlan` joins), over ACP with `clientInfo` naming `zed`,
+and through the terminal's own `cursor-agent -p`. Twenty-odd tools each time and
+`AskQuestion` in none. The tool list is the server's, sent per request; the ACP
+path tells it only `x-cursor-client-type: acp` and the host app's name, and reads
+neither `--allowed-tools` nor a custom header. So nothing this client sends can ask
+for it, and whether the gate is the client type, the plan or Auto is unmeasured.
+
+**Decision. `ask_question`, served by the `reemoat` MCP server to the harnesses in
+`QUESTION_TOOL_HARNESSES` — cursor alone.** Its input is cursor's own AskQuestion
+shape, parsed by the same `parseQuestionRequest`, drawn by the same form builder,
+so it is the card cursor's request would have drawn. Q2.14's rule stands: an agent
+with a question tool of its own is never given a second.
+
+**It returns at once, and the answer is a message.** A blocking call cannot work:
+cursor calls MCP tools with no timeout option, so the SDK's default 60 s cuts any
+answer given later than a minute. So `poseQuestion` opens an elicitation no request
+waits on, the tool tells the model to end its turn, and settling the card sends
+`answerText` through `deliverAnswer` as its answerer's message — the person's, or a
+plugin's (`sessions.answerElicitation`), which neither resets nor counts the peer
+budget — waking, queueing and refusing exactly as a typed one would. Submit sends the labels picked, Skip
+says it was skipped, ✕ sends nothing.
+
+**What it outlives, and what ends it.** One open at a time, refused in words
+otherwise. Kept on the row in `open_question_json` and redrawn by a restarted
+daemon under the same id; kept through every stop a message could revive, bar the
+person's own Stop, and dismissed by Stop on the turn. This is the one pending
+request that survives its agent going, which `daemon-sessions.md`'s invariant
+otherwise forbids — nothing on the agent's side is waiting on it. While open the
+session reads `blocked`, so it is not parked.
+
+**The permission in front of it is answered by the daemon**, the owner's call:
+cursor asks before every MCP call not in its allowlist, and the card behind this
+one is the consent that permission would ask for. `Session` learns the call is
+this tool from the `rawInput` cursor puts on its `tool_call_update` first
+(`readMcpToolCall`), answers `allow-once`, and logs it as a decision, the path a
+session with no resolver takes. Nothing is written to `~/.cursor/cli-config.json`.
+
+**No messaging switch withdraws it.** A question to your own person is not a
+message to another agent, so the endpoint now always listens, the server is
+injected for a question-tool harness with messaging off, holding that tool alone,
+and `callTool` answers it before the messaging refusal. Questions off
+(`REEMOAT_ELICITATION=0`) withdraw it.
+
+**Measured live the same day**, this tool's own definition on a loopback server:
+asked for a choice, the model called `reemoat: ask_question` by itself with a title,
+one question and three options, then ended its turn with *"pick an option on the
+card above"*. The `rawInput` naming the tool arrived 6 ms before the permission, and
+`tools/call` 3 ms after it was answered.
+
+**Status.** Current, and **amended by Q2.251**: the call now waits for the answer,
+and the message is only what an answer later than that becomes. If cursor starts
+sending `cursor/ask_question`, the model has two ways to ask and both draw the same
+card.
+
+### Q2.251 — A Cursor question answered as every other harness's is
+
+**Question.** The owner, on a cursor session, 2026-10-01: the answer appeared as their
+own message — a bubble reading *"Answer to your ask_question: … — …"* — under the
+answered card, *"if this is how asking is done, it must be done as for the other
+agents, with no difference at all"*. Read off that session's log, the difference was
+four rows, not one: the `reemoat: ask_question` tool row, a `permission_request` the
+daemon had answered itself (drawn *asked: … (answered)*), the model's *"the card is
+on screen — pick an option"* and its turn ending, then the bubble and a new turn.
+
+**Why it returned at once.** Q2.250's measurement stands and was read again, this time
+off cursor 2026.09.28's own bundle: `McpSdkClient.callTool` calls the SDK's
+`client.callTool({name, arguments})` with no options, so the request gets the SDK's
+`timeout ?? 6e4` and `resetTimeoutOnProgress ?? false` — 60 s, and no progress
+notification moves it. So a call cannot wait for a person who takes longer.
+
+**Decision. It waits as long as it may.** `poseQuestion` holds the call open for
+`ASK_WAIT_MS` (50 s, ten under cursor's cut, the permission in front having already
+been answered); an answer in that time settles `posedWaiter` and is the call's own
+result (`answerResult`), so the turn goes on and nothing is sent — what claude's
+question does. Past it, or when the client drops the POST (`res` closing aborts the
+wait), the call returns `ASK_PENDING`, which tells the model to end its turn writing
+nothing, and the answer goes as Q2.250's message. Skip and ✕ are results too, since
+a call has to return something.
+
+**And the transcript draws it as claude's.** The card takes the call's id —
+`Session.claimPosedCall`, the newest call whose `rawInput` named the tool, cleared
+when that call ends — and keeps it on `open_question_json` across a restart, so
+`askedThrough` folds the call away and `askedInput` reads the questions off cursor's
+MCP wrapper. A `permission_request` the daemon answered (`permissionId: null`) on a
+call that asked is not drawn. A late answer's prompt carries `answers` (the
+elicitation id) and is not drawn either: the card above already shows it.
+
+**What is still different, past 50 s.** The model ends its turn and a new one starts
+with the answer; it is told to write nothing, which it may not honour. Held longer
+would need a client that passes a timeout, or a loop of calls each under 60 s, which
+spends a model request a minute on nobody answering — not built.
+
+**Status.** Current.
+
 ## The web client
 
 ### What the client is
@@ -8714,10 +9430,11 @@ whose entire job is "this one, not the other forty" was drawing itself as two of
 the forty. Reported from a phone, where the rail is the whole screen and the
 duplication is at its most obvious.
 
-**What the copy was protecting is answered instead by `showPath`.** The second
-copy said where the session works, and that is a real thing to lose — so the
-pinned row draws its own path now, which it did not while a copy under the folder
-was saying it. One row, both facts.
+**What the copy was protecting was answered instead by the pinned row's own path.**
+The second copy said where the session works, and that is a real thing to lose — so
+the pinned row drew its own path, which it did not while a copy under the folder
+was saying it. One row, both facts. (No row draws a path since Q3.681; the prop that
+switched it is gone, and the conversation's header is where the path is read.)
 
 **And nothing is hidden.** `waitingFloor` counts by **subtraction** — everything
 blocked, minus everything this view draws — and it draws `pinnedFor`, so a blocked
@@ -9479,7 +10196,8 @@ shifts sideways. Those are the same defect at a lower cost — a menu you are al
 looking at, rather than the card that answers the agent — and they are listed here
 so the next reader knows the sweep happened and stopped on purpose.
 
-**Status.** Reversed an earlier decision
+**Status.** Reversed an earlier decision. Amended by Q3.684: the `Dropdown`'s chosen option
+carries the trailing check and no weight, so it no longer rewraps.
 
 #### Q3.43 — Does the conversation have a measure on a wide screen?
 
@@ -11202,7 +11920,8 @@ problem it looked like it prevented. The daemon's `auto` already does the right
 thing either way. "A worktree branches from a commit, so your uncommitted work is
 not in this session" is not a line to find by scrolling.
 
-**Status.** Reversed an earlier decision
+**Status.** Reversed an earlier decision. Amended by Q3.677: four things now, the
+nickname between agent and folder, arriving filled in.
 
 #### Q3.87 — Why was the first-prompt box removed from the create form?
 
@@ -11237,7 +11956,8 @@ could not carry what the row wants to say: `disabled` on an `<option>` is grey
 text and nothing more, so "not installed" was glued onto the label as a string,
 and the reachability dot had nowhere to go.
 
-**Status.** Current
+**Status.** Current, amended by Q3.684: a field's panel is its trigger's width and
+carries no heading.
 
 #### Q3.89 — Was the workspace warning really "promoted out of the transcript"?
 
@@ -11328,7 +12048,8 @@ the one thing a grantee can do on that row.
 from "not signed in" to the screen that fixes it — now goes straight to that agent
 on that machine, instead of to a screen that re-asked for both.
 
-**Status.** Current
+**Status.** Current, amended by Q3.686: a system's card goes up to the machine's
+Sign-ins list rather than to the machine.
 
 #### Q3.416 — Is a login transcript the interface?
 
@@ -13339,7 +14060,7 @@ something you can ask to stop, so the floor ignores both controls.
 computed reachability *without* the needle, so four letters typed into the search
 box hid an approval — which no amount of reading had caught.
 
-**Status.** Current
+**Status.** Reversed by Q3.674, the owner's call of 2026-09-25: there is no waiting section any more.
 
 #### Q3.201 — Which screens owe the waiting count, now that Settings is a pop-up?
 
@@ -13504,7 +14225,8 @@ permanently, for a selection and a navigation; both are `raised`/`plain` now, wi
 weight and a leading glyph carrying them — the same substitution a blocked row's
 title makes.
 
-**Status.** Current
+**Status.** Current, amended by Q3.684: a popover's highlighted row is `raised`, and its. Amended by Q3.694: the affirmative fill and the marks are `bg-brand`.
+chosen row carries the trailing check instead.
 
 #### Q3.210 — Does the rail keep its `border-r`?
 
@@ -13703,7 +14425,9 @@ while and is not now: a switch that waits behind a confirmation reads as broken,
 and one drawn flipped before the server answers is the optimistic paint this app
 forbids elsewhere.
 
-**Status.** Current
+**Status.** Current, amended by Q3.686: the control is a `SwitchRow` resting in a
+`TwoStep`. Tapping it to open puts the question in the row's place, so the switch never
+waits behind a confirmation; it flips on the 200, and closing is still one tap.
 
 #### Q3.221 — Which half of a shared composer flag is the rule?
 
@@ -15040,7 +15764,8 @@ and does not import `PLUGIN_SCOPE_TEXT`; and both the parse and `depthOf`/`upFro
 are driven through `parseSettingsRoute` rather than through a hand-written literal,
 since a literal is what keeps agreeing with a shape that no longer exists.
 
-**Status.** Decided
+**Status.** Decided; amended by Q3.686: a stale `…/plugins/:id` falls to the machine's
+Plugins list.
 
 #### Q3.460 — "Strictly limit the kinds of setting." What is a setting allowed to be?
 
@@ -15255,7 +15980,8 @@ stripped because the file now argues about the element it must not contain, so a
 lock its own docblock satisfies would pass over the code it was written to
 protect.
 
-**Status.** Decided
+**Status.** Decided; amended by Q3.684: the field draws no heading in its panel, and no
+`<select>` is left anywhere in `src/`.
 
 #### Q3.464 — "Where is K2.6, where is haiku?" Why did a plugin's picker offer agents instead of models?
 
@@ -18967,10 +19693,11 @@ the first band, which is `Dropdown`'s grouped-list idiom refused for the same
 reason it was refused before. Renaming the `SettingsGroup` id to match its title,
 which moves every pin for a label.
 
-**Status.** Applied. `webcheck` pins the six ids in order, that the table has
-exactly six entries, that `GROUP_TITLES.server` is "Admin" and that no row under it
-shares a word with its heading, and that each section is drawn from exactly one
-place in `Settings.tsx`.
+**Status.** Applied. `webcheck` pins the six ids in order, that the table has exactly
+six entries, that `GROUP_TITLES.server` is "Admin" and that no row under it shares a
+word with its heading, and that each section is drawn from exactly one place in
+`Settings.tsx`. Amended by Q3.687: the table holds eight sections — Permissions is gone,
+and Logs is listed only where the shell can run a daemon.
 
 #### Q3.544 — How short is a settings string allowed to be, and who enforces it?
 
@@ -19050,9 +19777,11 @@ a screen, which is a screen apologising before it has been used.
 **Alternatives taken out.** Confirming every revoke, which Q3.219 refuses.
 Consequences in tooltips, which a phone has no hover for.
 
-**Status.** Applied. `webcheck` pins the `this browser` badge and its subline as
-drawn only under an `api_key` credential, and the plugin and machine confirmations
-as naming their subject with Cancel last.
+**Status.** Applied. `webcheck` pins the `this browser` badge and its subline as drawn
+only under an `api_key` credential, and the plugin and machine confirmations as naming
+their subject with Cancel last. Amended by Q3.686: the Kimi note went with the
+per-vendor account lines, under the owner's rule against caveats; codex's is the one
+caveat left on the card.
 
 #### Q3.546 — Which key is "this browser", and what happens when you revoke it?
 
@@ -19162,10 +19891,10 @@ button — and the leaf screen only shows what came back, once, from a
 module-level handoff it reads and clears; arriving there with nothing in hand
 walks back to the table without minting.
 
-**Status.** Applied. `webcheck` pins the three leaves parsing, their way up,
-their titles, that Account holds no `editing` toggle above Devices, that the
-keys screen is a table whose New key navigates, and that no `CommandLine` is
-drawn there.
+**Status.** Applied. `webcheck` pins the three leaves parsing, their way up, their
+titles, that Account holds no `editing` toggle above Devices, that the keys screen is a
+table whose New key navigates, and that no `CommandLine` is drawn there. Amended by
+Q3.686: every form and one-time secret in settings is a leaf now, thirteen in all.
 
 #### Q3.550 — Is the Pinned section fleet-wide or per machine?
 
@@ -19209,7 +19938,11 @@ the dispatcher's call-site shape.
 **Decision.** Every two-step confirmation in the web client is `TwoStep`
 (`bits.tsx`) — fifteen mounts across fourteen sites, counted by `webcheck` as a
 table by file (fourteen across thirteen since Q1.631 took `KeyRow`'s two-step
-arm with the admin key panel that was its only user). It owns the layout property Q3.218 states: one container drawn in
+arm with the admin key panel that was its only user). Sixteen since 0.12.0, on the
+owner's word in its review: removing a saved agent key, which relaunches the
+machine's open chats, confirms and is drawn as danger in both of `AgentsPanel`'s
+branches — reversing the design pass's one-tap neutral ✕, kept to hold a card to one
+red control. It owns the layout property Q3.218 states: one container drawn in
 both arms, the act then Cancel with Cancel last in DOM order, Cancel `plain` and
 never `primary`, and — for an act that returns a promise — the wait: both
 answers disabled, a spinner in the act's label, the question closed only in
@@ -19292,15 +20025,17 @@ fixed-height question box and `2.5` margins sit on the `question` node it
 passes, and `align="end"` is what puts the answers in the kebab's slot, so the
 drag-measurement pin over that row still reads the classes it read before.
 
-**Status.** Applied. `webcheck` renders both arms under `react-dom/server` and
-asserts the order, the tones and the shared container on markup, drives
-`twoStepAct` with a promise it resolves and one it rejects, counts every `Cancel`
-token on every screen under `ui/settings/` plus `AgentBuilder` and
-`PluginConsent` against a named table (a `Cancel</Button>` count walked past a
-braced `{"Cancel"}` child and a raw `<button>`), holds the fifteen by file, pins
-the box string and the accessible name across the primitive, and re-points each
-site's own pin to what that site still decides — including, at the four sites
-with a shared flag, that the flag is held from the promise handed over.
+**Status.** Applied. `webcheck` renders both arms under `react-dom/server` and asserts
+the order, the tones and the shared container on markup, drives `twoStepAct` with a
+promise it resolves and one it rejects, counts every `Cancel` token on every screen
+under `ui/settings/` plus `AgentBuilder` and `PluginConsent` against a named table (a
+`Cancel</Button>` count walked past a braced `{"Cancel"}` child and a raw `<button>`),
+holds the fifteen by file, pins the box string and the accessible name across the
+primitive, and re-points each site's own pin to what that site still decides —
+including, at the four sites with a shared flag, that the flag is held from the promise
+handed over. Amended by Q3.686: `UserRow` swaps its cells for one cell spanning the
+table while confirming, `Registration`'s line is the primitive's own `consequence`, and
+`MachineLimitPanel` is a leaf screen whose buttons still share `TWO_STEP_BOX`.
 
 #### Q3.553 — Why does a sheet's body never scroll, and why has the settings pop-up no scrollbar at all?
 
@@ -20521,7 +21256,7 @@ and defining one against same-machine neighbours only would land the row somewhe
 other than where the finger pointed — "the list resisting", which Q3.533 already
 names. `Pin` and the two `Move` items stay in the kebab on every tab.
 
-**Status.** Built.
+**Status.** Built. Amended by Q3.696: the All tab's rows drag; a rank is one clock across machines.
 
 #### Q3.571 — The way out of every pop-up was 24px of ink. What changed?
 
@@ -23026,7 +23761,7 @@ unlayered `transition` shorthand swallows it.
 overlap by two pixels at the corner, so on the one machine that most needs reading —
 selected, with work blocked on it — they grew as a single shape.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.694: the filled mark is `bg-brand`.
 
 
 #### Q3.625 — the background panel collapses rather than vanishing, and every width it can be drawn at owes an exit
@@ -23212,7 +23947,7 @@ repair is loosening the pattern. A control asserts it does not match that line.
 the hand from every user-agent stylesheet, and reclaiming it would mean this app
 setting a cursor on the only elements whose shape is universally understood.
 
-**Status.** Current. Amended by Q3.665: the header's session name shows the text caret, the second named exception.
+**Status.** Current. Amended by Q3.665: the header's session name shows the text caret, the second named exception. Amended again by Q3.682: the pointer over a clickable `@name`, the third.
 
 
 #### Q3.628 — the menu drawer loses its weight and its ✕, and the build line becomes a stamp
@@ -26739,6 +27474,847 @@ order; the page's next boot or show repeats the theme.
 
 **Status.** Current.
 
+#### Q3.672 — Where are a machine's agent links shown, and what can be done about one?
+
+**Decision.** A leaf under the machine, `/settings/machines/:id/links`, reached by a
+row on the machine screen for its owner once it is enrolled — outside the
+reachability gate, because the list is the control plane's. A sentence says why the
+list is what it is (your own machines on this server, both ways, never a shared
+one), then a table: the direction first, so each row reads as a sentence, the other
+machine, and for an outgoing link the daemon's `lastError`, or *not handed to … yet*
+when the daemon holds no token for it. A bare 404 from `GET /peers/links` is one
+plain sentence that the daemon needs updating; the control plane's own unrouted
+`not_found` is *this server is too old for agent links*, with no retry.
+
+**Replace is one tap** (Q3.219, Q3.220 — ending a token widens nothing), and it
+re-syncs the link's source, whose daemon held the token.
+
+**Why it is not called Revoke.** The next sync links every eligible pair again with
+a new id, so the action ends a link and its token and hands over a new one: it
+answers a token that got out, and the screen says so. Parting two of your machines
+is Q7.151.
+
+**Rejected.** *A two-step confirm* — nothing widens. *Dropping the re-created link
+before the PUT* — the control plane would still hold a live row, and another device
+would push it again.
+
+**Status.** Reversed by Q3.676: the screen and the routes only it read are gone.
+
+#### Q3.673 — When does the app re-mint a machine's links?
+
+**Decision.** At the end of every `resume` and never from the poll, with
+`linkSyncDecision` as the whole rule. Refusals first: not owned, not enrolled, over
+the limit or owner-disabled, offline, or a daemon too old. Then a forced sync goes
+ahead; a failure under 15 minutes old waits; after that, never synced, a changed
+target set, the earliest expiry under 45 days away, or a last sync over a day old.
+The last sync is kept under `reemoat.agentLinks`, keyed by origin, account and
+machine.
+
+**Why the client's own target count.** The control plane also skips a target with no
+pinned key; compared against its answer, that skip would read as a change on every
+wake, and every wake would mint again. **Why `instanceId` and not the version.**
+Rule 1 of `compatibility.md`: nothing may behave differently by version label, and
+an update is always a restart, at the cost of one 404 per restart. **Why a retry
+wait.** A sync is a control-plane write, and the per-account throttle is shared with
+`POST /v1/tokens`.
+
+**Status.** Current. A renamed machine's label reaches other daemons only at the next
+daily re-sync.
+
+#### Q3.674 — Is there a section for sessions waiting on another machine?
+
+**Decision.** No. Removed on the owner's call on 2026-09-25, after a grok session on
+another machine sat in it for sixteen minutes, asking to call
+`reemoat__send_message`. A waiting session is shown where it already is, and
+nothing lifts it:
+- by its dot with a ring and its semibold title;
+- by its folder header's count;
+- by its machine tab's count.
+
+Q3.569 took hoisting out inside a folder; this takes it out across machines, and
+`visibleRows` now starts with nothing. webcheck sweeps every filter, tab and query:
+a waiting row is drawn exactly where the same row not waiting would be. It also
+asserts the absence of the section and of `waitingFloor`.
+
+**Why.** The section moved rows by need. The list is its reader's arrangement, and a
+row that jumps to the top whenever an agent asks something rearranges it for the
+agent's reasons. The machine tab still counts what is waiting there, so the wait is
+still said without moving anything.
+
+**What this gives up, stated.** Q3.200's closure. A filter or a search can now hide
+a waiting session. A machine tab scrolled off the end of the bar hides its count.
+
+**Status.** Reversed an earlier decision — Q3.200. Amended by Q3.695: a folder's header no longer counts what waits in it.
+
+#### Q3.675 — Where is agent messaging switched off, and why is it a switch?
+
+**Decision.** Three places, one per level of Q2.244.
+
+- **Settings → Permissions**, a section of its own after Machines, holding one row,
+  *Agent messaging*.
+- **The machine's screen**, a row for its owner, absent for anybody else. It shows
+  the machine's own choice, drawn off and locked while the account's switch is off
+  or the machine's own configuration is. Under it sits *Isolate sessions on this
+  machine*, drawn locked while messaging is not on there. The owner asked for it to
+  unlock below the first, and unlike an owner-only block it is a state its reader can
+  change.
+- **No line explains a switch.** The account's switch outranks the machine's, and
+  the machine's outranks the conversation's; the lock says that. Lines for "not yet
+  applied" and "a daemon too old" were built, one of them doubled when the first read
+  as done, and removed on the owner's call on 2026-09-26: a switch that needs a
+  sentence to be believed is a switch that should just work. A machine whose daemon
+  predates the switch is the case that makes it not work, and it is fixed by
+  updating the daemon, not by describing it.
+- **The session's menu**, a `menuitemcheckbox` after Pin, present only where the
+  machine allows messaging at all.
+
+**Why a switch, when Q3.220 retired one.** Q3.220 confirms the act that widens
+authority. Switching messaging on widens it too, but only back to the default and
+only across the owner's own machines, and the owner asked for a switch at every
+level. What Q3.220 keeps is the other half: nothing is drawn flipped before the
+server answers (`SwitchRow`), and the drawer's theme row shares its `SwitchKnob`.
+
+**Status.** Current. Narrows Q3.220 to acts that widen beyond the owner's own. Amended
+by Q3.687: the account's switch heads Machines as "All machines", and the Permissions
+section is gone.
+
+#### Q3.676 — Why is there no Agent links screen?
+
+**Decision.** Removed on the owner's call on 2026-09-26, with everything only it
+read: the leaf under the machine, `GET /v1/machines/:id/links`, `DELETE
+/v1/links/:id` and the daemon's `GET /peers/links`. Link sync still runs, unseen.
+What the screen offered has a switch now:
+- **Replace** answered a token that got out. Switching the machine off, or isolating
+  it, revokes every link it is either end of in one write, and switching it back
+  mints them again under new ids (Q1.654).
+- **Its failures** are read nowhere. A sync that fails is retried (Q3.673), and
+  nothing on a settings screen describes a switch (Q3.675).
+- A link's `lastError` has no reader left, so the daemon no longer writes it. The
+  column stays, since a migration may only add.
+
+**Why.** The screen answered a question nobody asks — which token each pair of
+machines holds. The one that is asked, whether a machine's agents may reach the
+others, has its own switch.
+
+**Status.** Current. Reverses Q3.672.
+#### Q3.677 — What names a session in the list, and where does its nickname go?
+
+**Decision.** The title, as before, and the nickname under it. `sessionLabel` still
+answers the title and then the folder, and Rename still edits the title. The
+nickname (Q2.245) is drawn as `@mira` by `nicknameLine`, at the head of the row's
+subline — `@mira · claude · subpath`, sans like the rest of the row — and at the head
+of the conversation header's subtitle, before the machine. A row from an older
+daemon carries no nickname and draws exactly what it drew before.
+
+New session asks four things: machine, agent, nickname and folder. The nickname
+field arrives filled in with a free name from `NICKNAMES` — free of every nickname
+this client can see on any machine — and the dice beside it deals another; a person
+may type their own. The field is narrow, since a nickname is a word, with an `@`
+mark before it. So it is never the optional empty field Q3.87 removed: Start
+works in one press, as it did. A draft outlives a trip to the agent builder or to
+settings, Start is refused while the value is not a nickname, and `409
+nickname_taken` lands on the screen's own error line. A daemon too old to keep a
+nickname answers with a snapshot that has none, and a toast says so.
+
+**Why.** The owner asked on 2026-09-28 for nicknames *instead of* titles, then
+corrected it the same day: the list is read by what each session is about, and the
+nickname belongs underneath. The nickname is what you type after `@`; the title is
+how you find the session in the first place.
+
+**Not built.** A control that changes a nickname — the daemon takes one on `/meta`,
+and `pnpm client nickname` sends it. Q7.153.
+
+**Status.** Current. Amends Q3.86.
+
+#### Q3.678 — What does `@` open in the composer?
+
+**Decision.** A list of every session this session's agent can reach, drawn the way
+Telegram draws its mentions: the harness's glyph, the title, then a faint `@mira`,
+and the machine for a session on another one. Choosing a row inserts `@mira `.
+- **Its source is the daemon**: `GET /sessions/:id/mentions` answers the same listing
+  `list_agents` gives that session's agent, on every linked machine, without the
+  session itself. It is `session:write`, since it names the owner's other machines,
+  and a writer could already get those by asking the agent. A name that is not
+  nickname-shaped — a slug from an older daemon elsewhere — is not offered, because
+  the daemon would not resolve it (Q2.246).
+- **Where it opens**: `mentionQuery` finds an `@` at the start of the message or
+  after whitespace, with the caret inside the token, and never in a draft that
+  starts with `/`, so it and the command menu can never both be open.
+  `mentionCompletion` keeps everything before the token and replaces the whole
+  token, where the command menu's completion owns index 0.
+- **One cache per session**, fifteen seconds, shared by every keystroke. An older
+  daemon's bare 404 is remembered against its instance id, so nothing opens there
+  until that daemon is replaced — and then it is asked again, with no reload.
+  Remembered for good, it was the first bug the owner hit: `@` asked of a daemon
+  minutes before its update, and offered nothing after it. Keyed by session rather
+  than held as the composer's state, so a switch of conversation owes it no reset.
+- **A bare `@` that offers nobody says so**, in the panel the rows would take: nobody
+  can be reached from here, or the listing failed. A menu that does not open reads as
+  a key that does nothing. A typed name that matches nobody closes it.
+- It is `MentionMenu`: the command menu's panel, keys and pointer handling, under
+  its own ids, which the message box's `aria-controls` follows.
+
+**Why.** The owner's reference was Telegram's `@` list. A session is found by what
+it is about, so the title leads the row as it leads the list (Q3.677), and the
+handle is what gets inserted.
+
+**Status.** Current. Amends Q7.20.
+
+#### Q3.679 — What does the line under a session's title carry?
+
+**Decision.** The nickname, then the harness's mark, then what is left of the path —
+`@rune`, a mark, `reemoat…`; the nickname leads, on the owner's word, since it is what
+gets typed after `@`. Two things came off it on the owner's call on 2026-09-28,
+reading the list as overloaded:
+- **The machine's name**, on rows under All chats and Pinned. The machine tabs and
+  the rail already say which machine is selected, and the conversation's header still
+  names it. A row under *No longer granted* keeps it, since there the machine is why
+  the row is there at all.
+- **The harness spelled out.** `AgentMark` draws the glyph New session and the `@`
+  menu already use, at the text's size, in the line's own colour, and names the
+  harness on hover and to a screen reader. A message from another agent names its
+  sender's harness the same way.
+
+**Why.** A row is the tightest slot in the app (web-typography.md): at 390px the
+line shares its width with the age and the kebab. The machine was the third of four
+fields, and the harness a word as wide as the nickname.
+
+**What this gives up, stated.** Under All, two sessions with one title on two
+machines read the same until one is opened. And a mark is recognised where a word is
+read, which is why the marks are the vendors' own (Q3.680).
+
+**Status.** Amended by Q3.681 the same day: the machine is back on every row, with
+its mark, and the path is off.
+
+#### Q3.680 — Whose marks draw the five harnesses?
+
+**Decision.** Their vendors': Claude's spark, Codex's, Kimi's, opencode's and Grok's,
+each in the one-colour form its vendor publishes, inked with `currentColor` so it
+takes the line's own colour and follows the palette. The paths are the ones
+`@lobehub/icons-static-svg` 1.95.1 draws (MIT), credited in `THIRD-PARTY.md`. A
+plugin's harness keeps its monogram. `AgentGlyph` still switches inside
+`isBuiltinAgentId`, so a sixth built-in without a mark is a compile error.
+
+**Why.** The owner, on 2026-09-28, of the shapes this replaced: *not schematic, the
+official logos.* A row now names its harness by the mark alone (Q3.679), and a mark
+nobody has seen before names nothing until somebody hovers it.
+
+**Chosen, and not.** Claude Code's own pixel mascot was the other candidate for
+`claude`; at the row's twelve pixels it is a blob, and the spark is the mark people
+know. No mark is drawn in its brand colour: the dark palette's check allows no colour
+outside the palette, and every other glyph in a row is monochrome.
+
+**Status.** Current. Replaces the shapes of our own that `AgentIcons.tsx` drew.
+
+#### Q3.681 — Does a row name its folder or its machine?
+
+**Decision.** Its machine, on every row, and no path at all: the line under a title is
+the nickname, the harness's mark and the machine, one even gap apart — twelve pixels,
+the owner's measure from the nickname to the mark, repeated from the mark to the
+machine. A machine is drawn as `MachineLabel` wherever a session line names one — the
+row, the conversation header, the `@` menu, New session's *on …* — a server mark
+before its name, as Paseo draws one. `machineDisplayName` still names it, so this
+computer is still `local`.
+
+**Why.** The owner, 2026-09-28: take the folders out of a session's line and put the
+machines there. A row already sits under its folder's header, which says where it
+works; which machine it runs on was the one fact the line could not otherwise give,
+and Q3.679 had just taken it away under All.
+
+**What this gives up, stated.** A row no longer says which subdirectory of its folder
+it works in (`rowSubpath`, Q3.581) — the header still does. Under a machine's own
+tab every row now names that machine, which is the repetition Q3.679 removed; the
+owner chose the same line everywhere over a line that changes with the tab.
+
+**Status.** Amended by Q3.691: the gap is `2.25em`. Amends Q3.679 and Q3.581.
+
+#### Q3.682 — What does an `@name` do where it is drawn?
+
+**Decision.** It is a link to that session, wherever this client can open it, and every
+nickname the app draws wears its `@`. The owner, 2026-09-28: *all nicknames with @,
+and every @ clickable, leading to the agent named after it.*
+- **In a person's message**, `UserBubble` draws `MentionText`: the words as typed, with
+  each `@name` a `MentionLink`. The daemon's own resolution for that message
+  (`prompt.mentions`, Q2.246) is what the link follows first.
+- **In an agent's reply or another agent's message**, `remarkMentions` turns each
+  `@name` in prose into a `mention` element — never inside a link or code — which the
+  Markdown component draws as the same link. An agent's text can only produce one by
+  writing `@name`: there is no raw HTML to forge the element with.
+- **In a peer message's headline**, *Message from @olga*, the name leads to the
+  sender's own ref rather than to whoever holds the name. The harness's mark came off
+  that line on the owner's word.
+- **What it leads to** is `mentionTarget`: the daemon's resolution, then a nickname on
+  this conversation's machine (`MentionScope`), then a name exactly one session holds
+  anywhere. Two elsewhere and none here is plain text, not a guess, and so is a name
+  no session this client can open answers to.
+
+**How it looks.** The name at the text's weight and no underline; under the pointer
+the whole `@name` sits in a pill and the pointer changes, on the owner's word — the
+third named exception to Q3.627, beside the separators and the header's name. The
+pill is `edge`, not `raised`, since `raised` is the person's own bubble and a pill of
+it would vanish there.
+
+**How.** A `<button>`, not an anchor, which Q3.646 keeps out of the bubble because it
+turns a drag into a link drag. It reads the store through a string key, so a streamed
+event re-renders no link whose target stayed put, and it loads the router only on a
+tap: the router parses the address bar as it loads, and the transcript is imported
+where there is none. `hug.ts` now joins the rects of one line (`lineSpans`), since a
+link cuts a line into three text nodes and the widest of them is not the line.
+
+**Status.** Current. Amends Q3.646: the bubble is still never parsed as Markdown, and
+is no longer one text node.
+
+#### Q3.683 — Is there a design system, and where does a new control go?
+
+**Decision.** Yes, and it is two files of primitives rather than a library. `ui/bits.tsx`
+keeps what it had — `Button`, `IconButton`, `TwoStep`, `Dropdown`, `Menu` and the class
+constants — because the drivers read them there and the gate bundle imports it. New
+families go in `ui/kit/`, which may import from `bits.tsx` and never the reverse. One
+height, `CONTROL` — `FIELD`'s own, 36px under a mouse and 44px under a finger — is shared
+by every field, dropdown trigger and popover row. A control that needs a shape the kit
+does not have gets a kit entry, not a local component. The owner, 2026-09-28: *many
+elements are unique; standardise them into one format and work out a design system.*
+
+**Why.** Three inventories counted what the one-off habit had produced: eight minimum
+heights, six radii and eight panel widths across the choosers alone, check marks at
+four sizes on either side, and three menu implementations, two of them without arrow
+keys. Each was argued for where it stood and none was wrong where it stood; together
+they read as an app nobody had designed.
+
+**Why the dependency runs one way.** `bits.tsx` already sits in a cycle with
+`Toast.tsx` that is benign only because each side reads the other inside function
+bodies. A module-level `${FIELD}` composed across a `bits`↔`kit` cycle would throw at
+load and blank the gate page. `webcheck.kit.ts` walks every kit module's value imports
+against the transport modules and asserts that `bits.tsx` imports nothing from `kit/`.
+
+**Rejected — a component library** (Radix, Headless UI, shadcn). Nothing here had
+considered one, and the reasons this repository refused a drag-and-drop dependency
+(Q3.533) and a validation library (Q7.75) apply unchanged: a library's correctness is
+asserted by having imported it, and the drivers read source text.
+
+**Status.** Current.
+
+#### Q3.684 — What does a dropdown draw, and how wide does it open?
+
+**Decision.** Three variants.
+- **A field** is `FIELD`'s box at `CONTROL`'s height with a chevron (`FIELD_TRIGGER`).
+  Its name is the `Field` label beside it: `aria-labelledby` names the label and then
+  the trigger, so the value is part of the name. Its panel is `inset-x-0`, exactly the
+  trigger's width, and it has no heading — `heading?: never` on that member.
+- **An icon** — the session filter and the model picker's provider filter — is an
+  `IconButton` whose `label` names it, lit while a choice narrows the list. Its panel
+  grows to its longest row, from 10rem up to 20rem, from the icon's edge. Only here may a
+  `heading` head the panel, because here the heading *is* the label.
+- **A row** is a whole settings row (Q3.686): its title on the left, the value and a
+  chevron on the right, the panel from the row's end.
+
+Options draw the label, then a `text-2xs text-faint` description under it, and the
+check on the **trailing** edge at 14px, so an option's text starts where the trigger's
+does. Rows are `menuRow` at `CONTROL` and `text-sm`. The direction is measured at the
+tap (`menuPlacement`) rather than handed in by the caller.
+
+**Why.** The owner's screenshot, 2026-09-28: New session's machine field read MACHINE
+above the trigger and MACHINE again inside a 240px panel under a full-width field —
+*it duplicates the heading and does not drop down across the width of the field*. Both
+call sites of the old `heading` prop spent it on that repetition, and the prop had no
+other use. The trigger was also 32px and `text-xs` beside a 36px `text-sm` text box, so
+a picker and a field in one form did not line up.
+
+**Why the filters became listboxes.** They were `Menu`s whose rows were `menuitem`s
+drawing a check with no `aria-checked` — a choice drawn as a set of actions. As a
+`Dropdown` they get `aria-selected`, the arrow keys and the one check for free. The
+native `<select>` on the Email screen went for Q3.463's reason, and `webcheck.kit.ts`
+now asserts that `<select` is absent across `src/`, not only in `PluginView`.
+
+**Also fixed.** `useListKeys` recorded `document.activeElement` at open so it could give
+focus back on close. WebKit does not focus a clicked button, so after a click that
+element was the body and focus never came back; it now finds the trigger
+(`triggerIn`). `Menu`'s panel is `MENU_PANEL`, which caps its height and clamps its
+width.
+
+**Status.** Current. Amends Q3.88 and Q3.463 on the panel's width and its heading, and
+the 240px panel Q3.421 names.
+
+#### Q3.685 — How is a form field labelled?
+
+**Decision.** In sentence case. `FIELD_LABEL` is `text-xs font-medium text-fg` and moved
+to `ui/kit/Field.tsx` beside `Field`, which draws it as a **sibling** `<label>` bound by
+`htmlFor`, then the control, then its hint or error, both attached by
+`aria-describedby`. Caps are left to the two heading constants. The owner chose this
+from two previews on 2026-09-28.
+
+**Why.** A caps label is the section heading's idiom one step larger, and on New
+session it *was* a section heading: `FieldLabel` drew `SETTINGS_HEADING` in an `<h2>`,
+so the form read as a stack of headings and the machine trigger had no accessible name
+at all. The label is a sibling rather than a wrapper because a `<label>` activates its
+first labelable descendant, and a `Dropdown` trigger is one — the help paragraph inside
+the plugin form's label opened the picker (plugin-ui.md).
+
+**Status.** Current. Amends Q5.115: the caps idiom has two constants, and `FIELD_LABEL`
+is no longer one of them.
+
+#### Q3.686 — What is a settings screen made of, and what may it say?
+
+**Decision.** A stack of `Group`s, as grouped cards. The owner chose them on 2026-09-28
+from three previews of one Machine screen: grouped cards, flat rows, and a label-left form.
+- A group is an optional caps title (with a count and one action), one `edge-strong` box of
+  rows split by hairlines, and an optional footer.
+- A row is exactly one of `LinkRow`, `ValueRow`, `ActionRow`, `SwitchRow`, `ChoiceRow`, a
+  `Dropdown` row, a record table, `EmptyRow`, or a `TwoStep` row (`TWO_STEP_ROW`) whose rest
+  is a `DangerRow` or a `Button`.
+- Inside the box a row carries no border: its glyph identifies it. A record row may carry
+  one `Button` at its end.
+- Every form and every one-time secret is a leaf screen: the machine's name and setup code,
+  plugin install, the server's domains, machine limit and provisioning key, SMTP, a test
+  mail, a new person, and a person's machine limit (`SettingsLeaf`). A secret is minted on
+  the row's tap and handed over as the new key is (Q3.549).
+
+**Why.** The brief was *a lot of filler text, and every settings field with its own UI*.
+The inventory backed both halves:
+- six row styles, five ways to draw a toggle, seven label styles, four copy buttons and
+  five "Check again" styles;
+- every single fact with its own caps heading and ruled band (`SETTINGS_SECTION`), so a
+  screen of five facts carried five headings and five sentences;
+- `OneTimeSecret` still drawn in place on three screens, and two panels that expanded under
+  their rows — the pop-ups the owner had already refused for API keys.
+
+**What the copy may say** is Q3.544's table, applied again:
+- A row's title is a noun, and its value sits at the trailing edge.
+- A subline appears only on a switch or choice row.
+- A footer carries only a consequence at rest, six words at most. An act's consequence
+  lives in its confirmation or on its leaf.
+
+What that removed:
+- Devices' "What this covers";
+- Machine's three paragraphs about this device;
+- "Another server is another account, from the menu.";
+- "Your API key is what signs you in.";
+- the admin nav blurbs;
+- the SMTP form's lead and its port hint.
+
+What it moved:
+- "Changing it signs out other devices." now sits on the password leaf, where the change is
+  made.
+- `cp-devices.md`'s second honest limit — open work stops only within minutes — is now said
+  in Retire's confirmation, where it is true, rather than at rest.
+
+**Registration is a switch again, and Q3.220's objection does not reach it.** That entry
+took the switch out because *a switch that waits behind a confirmation reads as broken*.
+Here the switch is the resting arm of a `TwoStep`: tapping it to open replaces the row with
+the question at once, so there is never a switch visibly waiting, and it still flips only on
+the 200. Closing is one tap on the same knob, and Cancel lands on its pixels (Q3.218).
+
+**Rejected — flat rows.** Hairlines with no boxes separate one group from the next too
+weakly on a phone.
+**Rejected — a label-left form.** It spends half a 390px width on labels, and its inline
+field-plus-Save is the in-place form the owner refused.
+
+**Status.** Current. Amends:
+- Q3.543 (the sections — see Q3.687);
+- Q3.549 (every form and secret, not three);
+- Q3.415 (a system's card goes up to the Sign-ins list);
+- Q3.459 (`…/plugins/:id` falls to the machine's Plugins list);
+- Q3.675 (the account's switch heads Machines);
+- Q3.220 (registration is a switch resting in a `TwoStep`);
+- Q3.552 (the users table's armed row and the machine limit's leaf);
+- Q1.631 (the machine limit is a leaf, not a panel);
+- Q3.545 and Q2.201 (the Kimi note is gone);
+- Q2.225 (the idle sentence is a row's subline over nine presets);
+- Q7.137 (the loopback cost is the Connection group's footer).
+
+#### Q3.687 — Which sections does the settings nav hold, and how is a row drawn there?
+
+**Decision.** Account, Devices, API keys, Machines, Logs, then under Admin: Server, Email and
+Users. It is a light regroup, the second of three the owner was shown on 2026-09-28.
+- **Permissions is gone.** Its one switch now heads Machines ("All machines"), above the
+  per-machine switches it already locks (`AccountMessaging`). It draws nothing at all where
+  the control plane cannot store it, instead of a sentence saying so.
+- **Logs is listed only where the shell can run a daemon.** It is `hostOnly`, read from
+  `state.host?.canHostDaemon` through one pure `visibleSections`, so the nav and the URL
+  guard cannot disagree. A typed `/settings/logs` in a browser falls to the index without
+  the admin sentence.
+- **A machine's Sign-ins and Plugins are screens of their own** under it.
+- **Rows carry a glyph and no blurb.** The rail draws no chevron: a rail row changes the
+  pane beside it rather than going deeper.
+
+**Why.**
+- A section holding one switch sent people away from the machines that switch governs, to a
+  screen with nothing else on it.
+- Logs in a browser or on a phone was a screen whose only possible content was a sentence
+  saying it had none.
+- Blurbs existed on the three admin rows only, so the nav contradicted itself about what a
+  row carries.
+
+**Status.** Current. Amends Q3.543.
+
+#### Q3.688 — Does Cursor get a tile on New session, when opencode does not?
+
+**Decision.** Yes: `startsBare` stays `true` for cursor, so tapping it starts a
+session on the model cursor's own config says is current. The owner's call,
+2026-09-29, asked with Q3.522 on the screen.
+
+**Why.** Q3.522 took opencode's tile away because its bare start ran
+`opencode/big-pickle`, a model nobody on the screen had chosen. Cursor also reaches
+several vendors, but its bare start runs `selectedModel` from
+`~/.cursor/cli-config.json` — a model the person picked, in the terminal or through
+this app's chip — and the chip names it from the first frame. Its builder row is
+unchanged: an assembled agent still pins a model.
+
+**Cost.** That default is shared with the terminal (Q6.115): the model a preset last
+pinned is what the next bare start runs. It is what cursor itself does between two
+terminal sessions.
+
+**Status.** Current.
+
+#### Q3.689 — What does a Sign-ins row say about a system a CLI signs in to?
+
+**Decision.** What that CLI's own probe said: `systemBadge`, over the same
+`agentStance` and `agentBadge` the card under the row draws, so *signed in*, *not
+signed in*, *not installed*, *would not start* or *cannot check* — and *key saved*
+where a stored key stands for the row. A listing that failed, or that lacks the
+harness, claims only the key, or nothing.
+
+**Why.** The row said *sign in* for every such system with no key saved, a call to
+action, because Q7.117 would not let `keySet` answer *signed in?*. Among badges it
+read as a state, and the wrong one: on 2026-09-30 the owner read six rows of *sign
+in* as six agents signed in, Cursor among them while it was not. The source Q7.117
+names was already on the screen — Q3.540 reads `GET /agent-auth` beside `GET
+/systems` for the harness rows — so the badge costs no request. And *sign in* was
+wrong outright for OpenCode Zen, whose CLI has no sign-in (`no_flow`).
+
+**Precedence.** An absent CLI, a refused start and a clean signed-out outrank a saved
+key: the probe runs with the key in its environment (`probe` in
+`src/runtime/local.ts`), so signed out beside a key is that key failing. Otherwise
+the key wins over *signed in* and *cannot check*, being the one fact the list holds
+for certain — and grok reads a bogus key as signed in (`AGENT_LOGIN`).
+
+**Cost.** Moonshot says *cannot check* until kimi has written its credentials file,
+which is what its card already said.
+
+**Status.** Current.
+
+#### Q3.690 — A file an agent hands over, and the three ways the download failed
+
+**Reported 2026-09-30** in a session that built a talk: *"give me the file in the
+chat"*, and after the agent answered, *"I can't download the file it gives me"*.
+
+**The name.** The agent wrote `slides.html` and `talk.md` for files it had made
+under `presentation/`, and `downloadablePath` joined a relative span to the root
+alone, so neither was offered. **Decision:** a relative span naming no touched file
+directly is matched against the tails of the touched set, and offered where exactly
+one ends in it. Never an absolute span, never two candidates, and still only files
+this session wrote or read.
+
+**The silence.** `saveBlob` sent the native save with `void`, so every refusal from
+the shell — not the account on screen, a location it could not use, a write that
+failed — was a press that did nothing, and `webcheck` pinned the `void`. It returns
+the promise now, and `SessionView`'s catch draws the refusal as a toast. A panel
+dismissed still answers `false` and draws nothing.
+
+**Android.** The save panel there is `ACTION_CREATE_DOCUMENT`, which answers a
+`content://` URI, and `into_path` refused every one — so Q7.145's *"`host_save_file`
+survives because a file panel has a mobile arm"* was true of compiling and false of
+saving. `host_save_file` writes through `tauri-plugin-fs`'s `open` now, which opens
+that URI through the ContentResolver and a desktop path through `std::fs`. The
+plugin was already in the tree under the dialog plugin; its page-facing commands
+stay unreachable, the capability set being empty.
+
+**The channel, which is what failed on the Mac.** `host_save_file` took the file as
+a raw IPC body, and a raw body exists only over Tauri's `ipc://` protocol. Tauri's
+own `ipc-protocol.js` uses `postMessage` instead on Android always, and on a desktop
+page for good once any one `ipc://` call has failed, and there the bytes arrive as a
+JSON array of numbers, which the raw-only arm refused as *"expected the file as
+bytes"*. That fits the report exactly: on the MacBook links opened and copying worked,
+both JSON commands behind the same on-screen check, while every save pressed spun
+briefly and wrote nothing anywhere. **Decision:** the file goes as base64 in JSON
+arguments, which both channels carry, at 1.33 times the bytes rather than a number
+array's six; `nativecheck` refuses `InvokeBody::Raw` in any command.
+
+**Not built.** A file made only by a shell command, and never read or written by a
+tool, is still no button; the agent in that session read its PDF to make it one. A
+way for an agent to hand a file over on purpose would be a tool of its own.
+
+**Measured.** `cargo check` for `aarch64-linux-android` and the host, `clippy -D
+warnings`, the 131 Rust tests. What first failed the `ipc://` call on that page is
+not known, and a save on a real phone is not measured.
+
+**Status.** Current.
+
+#### Q3.691 — Code and links in colour, a wider row line, a waiting row that keeps it, and a double-click on code
+
+**Asked 2026-09-30 and 2026-10-01 by the owner, with screenshots of Claude's own
+client beside this one.** These are the first colours in the app that are not a
+text tone, a diff band or a scrim, and they are spent in what an agent writes and
+asserted absent from everything else.
+
+- **Inline code is orange on a light chip and a link is blue, in what an agent
+  wrote** (`--color-code`, `--color-chip`, `--color-link`, `TRANSCRIPT_LINK`). The
+  owner: code *as Claude Code marks it*, links *classic blue*, and the chip lighter
+  and then softer, with Claude's as the reference — `#f0f0ef` on a `#fcfcfb` page,
+  1.11:1, read off the screenshot, and no rim. Ours is `#f3f1ed` on white, 1.13,
+  between `surface` and `raised` rather than on `raised`, and its `edge-strong`
+  border is gone: the step alone draws it, as Claude's does. Both inks are text tones, so they owe 4.5:1 on every
+  paper, and they do; code reads on its chip at 5.16 (dark 7.0). The download span
+  wears the ink and the chip too, since it is the same span. **The app's
+  own links keep `LINK`** — the gate, the legal pages and plugin settings — because
+  the request was about the conversation; a blue there is a second change nobody
+  asked for.
+- **The row line is `2.25em` apart**, from the nickname to the mark and from the
+  mark to the machine: the owner's twelve pixels, plus five, plus ten, which is 27
+  at the desk's `text-2xs`. In `em` on the owner's word — *scale it with the screen*
+  — so under a finger, where the whole scale is two pixels up (Q3.662), it is about
+  31 rather than staying 27 beside larger text. Amends Q3.681's measure and nothing
+  else about it.
+- **A waiting row keeps its line.** It used to replace the nickname, the mark and
+  the machine with the pending request's title — *Агенты*, a question's header —
+  so the one row somebody had to act on was the one that stopped saying which
+  agent on which machine. The owner: bold and the dot, and never wipe the
+  parameters. The title and the dot were already there (`statusTone`'s `blocked`,
+  `font-semibold`); the replacement is deleted and the request's own title stays
+  on the card that answers it.
+- **A triple-click on inline code selects the whole span**, `origin/dev`, where it
+  would select the paragraph; two clicks stay the engine's word. That is Claude's
+  client, as the owner put it on 2026-10-01 — *on two clicks a word, only on three
+  the whole code section*, and nothing more on a fourth. `selectWholeSpan` takes
+  every `mousedown` from the third on, prevents the paragraph and selects the
+  `<code>`'s contents. **Measured in a `WKWebView` with real `NSEvent` clicks** on
+  the bundled component: two clicks give `origin`, `dev`, `agent`; three give
+  `origin/dev` and `cursor-agent` whole; on plain text three give the paragraph.
+  WebKit's own fourth click took the paragraph back from a code span, which is why
+  the handler covers every click past two; on plain text the fourth and fifth
+  already kept the paragraph, measured, so nothing else is handled. ⚠ **The first version took the span on
+  the second click** — read off a screenshot of a selected `origin/dev` — and was
+  taken back the next morning. The download span is a button and keeps its click.
+
+**Neither colour carries a state, which is what Q7.70 guards.** Code is still told
+by its face and its chip and a link by its underline; the hue is redundant on both,
+so nothing here is read by hue alone.
+
+**The rest of what was tried alongside is on the `ui-experiments` branch** and not
+here: the landing's painting behind the session list, frosted glass, and the machine
+column in the painting's colour. The owner kept the conversation's changes and the
+row's.
+
+**Status.** Current. Amends Q3.681 and Q7.70. Amended by Q3.695: the row line is `2em`.
+
+#### Q3.692 — "local is unreachable" for the first quarter-minute after every launch
+
+**Reported 2026-10-01** with a screenshot of the pill reading *local is
+unreachable* on the owner's MacBook. Read-only on that machine: both servers and
+both relays answered, no second daemon held a root or a port, nothing crashed, and
+on the next launch of build 0951 both daemons announced and answered `/health`
+within five seconds, steadily for the next forty.
+
+**Cause.** The host starts every set-up daemon at launch on a thread of its own
+(`start_configured_at_launch`), and the page asks for this computer's machine at
+the same moment. With no announcement yet and no tunnel dialled, both legs fail,
+the machine is `offline` with `no_route`, and the pill names it after its one-second
+grace. Nothing asks again for `OFFLINE_RETRY_MS`, fifteen seconds, on a four-second
+poll — so for ten to nineteen seconds after each launch the app said a daemon was
+unreachable that had answered after five. The host had said so all along:
+`host_daemon_state` answers `starting` for a child it owns that has not announced,
+and `setUpThisComputer` returned on it, acting only on `absent` and `exited`.
+
+**Decision.**
+- **`starting` is waited out, beside the other machines.** `setUpThisComputer`
+  hands it to `awaitLaunchStart` without awaiting it — the bootstrap's resume of
+  every other machine is not held behind this one — and that runs the setup flow's
+  own `settleDaemon`, so a slow start still says so after thirty seconds and an
+  exit still says where to look.
+- **The pill is told while it lasts** (`AppState.localDaemonStarting`):
+  `connectionTrouble` does not name this computer's machine for a transport reason
+  while its daemon is starting, and reads it as *Connecting…*. A refusal on it is
+  still nobody's connection trouble, and another machine down is still named.
+- **The machine is probed the moment it answers**, inside `awaitLaunchStart` and
+  before the flag drops, because settle's own resume can be queued behind the
+  launch's and would leave the pill a beat of *unreachable*.
+
+**Status.** Current.
+
+#### Q3.693 — A code block is highlighted in colour again
+
+**The owner, 2026-10-01**, asked what colour could do for an app people call
+black and white, saw six accents tried on the real components, and took this one
+first. Q7.70 had named it as the plainest cost of the monochrome palette: *a string
+no longer differs from a number, and a function name no longer differs from a
+keyword*.
+
+**Decision.** Five inks, one for each kind of thing highlight.js names, in the
+stylesheet's `.hljs-*` rules and nowhere else: `--color-syn-keyword` (crimson),
+`-title` (violet, a function or class being named), `-string` (green), `-number`
+(blue, literals too) and `-type` (amber: attributes, types, built-ins, `meta`).
+Comments stay `faint` and italic; a diff's `+` and `-` lines take `add-ink` and
+`del-ink`. Keywords and titles lose the weight they carried as the only cue.
+
+**Every one is a text tone on every paper**, in both palettes, so `webcheck`
+weighs them with the others. The ground that matters is `raised`, where a block is
+drawn, and the light inks clear it at 5.26 (string) to 6.16 (number); the dark ones
+at 6.79 to 8.36.
+
+**Not taken from anybody's theme.** The set sits beside this palette's own warm
+neutrals rather than copying a vendor's, on the owner's word that the app should
+not look like Claude.
+
+**Status.** Current. Amends Q7.70.
+
+#### Q3.694 — One colour of its own: lake teal, on what asks for a press or says something waits
+
+**The owner, 2026-10-01.** Told that people call the app black and white, they saw
+six accents tried on the real components and asked whether the colour had to be
+Claude's terracotta. It did not: Reemoat's mark is ink on paper and names no hue. Five
+were rendered on the same screen — terracotta, lake teal, plum, indigo, graphite —
+and the owner took the second, *the green one*.
+
+**Decision.** `--color-brand`, lake teal off the landing's painting (`#1d6b67`; dark
+`#5fc2b5`), with `--color-on-brand` for what is drawn on it (white; dark `ink`). It
+takes exactly the places Q3.209 gave `bg-fg` as the affirmative action or a mark:
+- **Send** and every **primary** button and ask-card answer — the reversible
+  approval among them — with their hover;
+- the **chosen answer's** ring and mark on the ask card;
+- **what waits on you**: the bell's dot, the blocked status dot, the waiting counts
+  on a folder header and on a machine's tab or chip;
+- the **selected machine's** chip, and a switch's knob when on; the gate's *Open
+  the app* and the native checkbox's `accent-color`.
+
+Everything else keeps the palette's neutrals, and the other statuses — running,
+starting, ended — keep theirs; colouring them is a separate decision.
+
+**Named `brand`, not `accent`.** `accent` is one of the names Q7.70 retired, and
+`webcheck` refuses it in any utility, so a stale class from that era cannot come back
+to life looking like this one. The new name is the job: the one colour that is ours.
+
+**Contrast, computed in both palettes.** The label on the fill clears 4.5:1 at rest
+and at every hover the code writes, on every paper — 6.27 at rest in the light, 5.01
+at its weakest hover (`/90` over white). That is why the hovers went from `/85` to
+`/90`, and why an ask card's hint on the primary row is the label's own colour rather
+than three-quarters of it: at 70% over the hovered fill it measured 3.34. `brand`
+is a text tone too, for the waiting counts.
+
+**Status.** Current. Amends Q3.209, Q3.624 and Q7.70.
+
+#### Q3.695 — No count on a folder, a tighter row line, and the answer you are writing in front
+
+**The owner, 2026-10-01, on build 1136**, three items with screenshots, the last of
+them Claude's own mobile client mid-answer.
+
+- **A folder's header draws no waiting count.** *1 waiting* beside a folder's name
+  is gone from `GroupSection` and `FolderSection`, with the prop that fed it. The
+  row's dot and weight, the machine's tab and chip, and the bell still say it, so
+  what is lost is the one case Q3.674 kept it for — a *collapsed* folder. The count
+  itself stays in `groups.ts`, which the tabs read.
+- **The row line is `2em` apart**, three pixels less than Q3.691's `2.25em`: 24 at
+  the desk's `text-2xs`, about 28 under a finger.
+- **Writing your own answer brings it to the front, on a phone.** Once the caret is
+  in a typed box and there are words in it, `AskCard`'s answer rows fade to 35%
+  (`typing`) — Claude's client does exactly this, read off the screenshot: the rows
+  dim at the first letter, not at the tap, while the question and the box stay at
+  full strength. Under a finger only, `[@media(pointer:coarse)]`, as the owner
+  asked; at the desk nothing moves. The rows stay **drawn and live** — a tap on one
+  still picks it and moves the caret out, which restores them — so *every option is
+  visible at once* holds, and only *de-emphasis never in text* gives way, for this
+  one state. It is not a scrim: nothing outside the card dims, which Q3.39 refused
+  for the reason it still has.
+  `ElicitationCard` keeps which typed field holds the caret (`typingIn`) through the
+  box's own focus and blur, and a permission card, having no box, never types. The
+  keyboard does not need code here: `interactive-widget=resizes-content` already
+  shrinks the page under it, so the card, anchored to the composer, rises with it.
+
+**Measured** in a `WKWebView` on the bundled card, with the coarse query rewritten
+to match a mouse so the desk could draw it: four options and an empty box, then a
+letter typed — the rows faded, the question and the box did not. Not yet seen on a
+phone.
+
+**Status.** Current. Amends Q3.674 and Q3.691.
+
+#### Q3.696 — A tap answers, All reorders, and three clicks on the header take one thing
+
+**The owner, 2026-10-01**, four items, the second with a screenshot of a whole
+conversation header painted blue.
+
+- **One answer of one is sent as it is tapped.** A single-select row goes through
+  `pickOne`: it writes the pick, switches off your own words for that question
+  (`setExcluded` — they stay in their box, so *nothing typed is ever erased* holds),
+  then reads the answer **fresh from the store** — the render's `draft` is a tap
+  behind — and goes to the next question, or on the last one sends it. It does so
+  only where the step holds nothing to fill but the choice and its typed
+  alternative (`pickAnswersStep`); a step with a field of its own still waits. The
+  owner's two exceptions keep Next and Submit: **several answers**, since nothing
+  says when the last one was picked, and **your own words**, typed and then sent. A
+  chosen row tapped again now answers rather than clearing itself; Back reaches it.
+- **No answer shrinks under the finger.** `press` — `scale(0.97)` while held — is
+  off every answer row and answer button; Next, Submit and Skip keep it.
+- **The All tab's rows drag**, which Q3.570 had refused: *a rank is a per-machine
+  order, and a cross-machine drop would mean nothing.* It meant something all
+  along — `allRows` is `orderSessions` over every machine's rows, one rank clock,
+  and Pinned under All already dragged across machines through the same `respace`
+  that tolerates a daemon storing no rank. So the All group is a zone like a
+  folder's (`ALL_FOLDER` in `measure`'s wanted set), a drop lands between the two
+  rows it shows, and the rank is written to the dragged row's own machine.
+- **Three clicks on the header's line take the item under the pointer.** The line is
+  flex, every item a block of its own, and WebKit's third click took the item *with*
+  its line break — `reemoat/s_078b731c\n`, measured — so the range ran into the next
+  block and the gap fill painted the header's whole width, title included.
+  `selectUnit` takes the third click on: the nickname, the machine, the folder or the
+  branch (`data-unit`), and on a separator nothing new. Measured in a `WKWebView`:
+  the same clicks now give `reemoat/s_078b731c`, `~/reemoat-prod` and `@rune`, with
+  no line break.
+
+**Status.** Current. Amends Q3.570 and Q3.588.
+
+#### Q3.697 — The close button puts the app away on macOS and Windows
+
+**Question.** The owner, 2026-10-01: pressing the window's cross on the Mac must put
+the app away rather than close it, *"as Claude Code and Codex do; to end it you quit
+it explicitly — it is protection against an accidental click"*, and on Windows,
+*"study how it is done there and repeat it"*. Q6.108 had left the macOS half a
+non-goal, with one product question open: whether the daemons outlive the window.
+
+**They do, because the app does.** A hidden window is not a closed one, so the
+process runs on and with it every account's daemon (Q7.149) and every turn in
+flight. Quitting stays the one place they stop: `RunEvent::Exit` and `stop_all`.
+
+**macOS.** `away::on_close_requested` refuses the close and hides the window; the
+red button, ⌘W and the Window menu's Close all arrive as `CloseRequested`. The Dock
+icon brings it back (`RunEvent::Reopen` with no visible window, `bring_back`). ⌘Q,
+the app menu's Quit and the Dock's Quit send `terminate:`, which tao turns straight
+into `RunEvent::Exit` with no request to prevent, so the stop is where it was.
+Nothing is destroyed, so no `prevent_exit()` is needed. A full-screen window is
+hidden as ⌘H hides it, by hiding the app: hidden on its own it leaves its space black.
+
+**Windows, as the apps it is compared with do it**, read 2026-10-01: Telegram
+(`tray.cpp`), Slack (help article 201355156) and Discord keep running in the
+notification area when the window closes; Codex for Windows hides its window and
+keeps its processes (openai/codex#17205); Claude's Windows app offers "keep running
+in the system tray". Each has a tray icon whose click opens the window and whose
+menu quits, and none shows a "still running" notice. So `away::tray`: the close
+hides the window, a left click or *Open Reemoat* brings it back, *Quit Reemoat* is
+`AppHandle::exit`. A hidden window also takes its taskbar button, so launching the
+app again would start a second copy — the Codex bug above — and
+`tauri-plugin-single-instance`, registered first as it asks, shows the running one
+instead. Pinned `~2.4`: 2.5 asks for tauri 2.12, past the pair `nativecheck` holds.
+
+**Linux and the mobile shells are unchanged**: nobody asked, and Tauri delivers no
+tray click on Linux. Closing the last window still quits there (Q6.108).
+
+**What is checked.** macOS builds and `cargo test` passes. The Windows code —
+`away.rs` and `lib.rs`'s wiring — type-checks for `x86_64-pc-windows-msvc` in a
+scratch crate holding tauri with `tray-icon` and the plugin; the whole crate cannot
+be cross-checked here, since `aws-lc-sys` wants the Windows SDK's headers. Windows
+is built only by CI's `native` leg (`tauri build`, without the fmt, clippy and test
+gates) and has no published asset, so the tray has never been seen running.
+`nativecheck` holds the wiring.
+
+**A trap the first build sprang.** Mid-build, `Cargo.toml`'s Windows line gained
+`unstable`, which nobody had written. `tauri build` rewrites tauri's features: its
+`rewrite_manifest` (tauri-cli 2.11.4, `interface/rust/manifest.rs`) takes the first
+dependency table it meets, and when that is `target` it walks every target table
+with **one** feature set, so macOS's `unstable` was carried into Windows' line — the
+untested window-child arm `Cargo.toml` warns of. Reproduced with a port of that code.
+Every target table now sits below `[dependencies]`, where the rewrite stops at the
+plain line and leaves them alone, and `nativecheck` asserts the order.
+
+**Status.** Current. Amends Q6.108.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -29435,6 +31011,36 @@ and themed icons on Android 13+ have not been seen on a device.
 "writes nothing under either Android tree" no longer hold.
 `.claude/rules/native-packaging.md` is the area.
 
+### Q4.129 — Cursor installs through its vendor under either `--source`
+
+**Decision.** `ensure_cursor` fetches `https://cursor.com/install` whole and runs it
+with `bash`, under `--source vendor` and `--source npm` alike, and refreshes an
+installed copy with `cursor-agent --disable-auto-update update`. A copy outside
+`~/.local/bin` (Homebrew's cask) is named and left. It refuses to install at all when
+`~/.local/bin/agent` exists and is not a previous cursor's.
+
+**Why.** Cursor publishes no npm package, so the npm door Q4.125 gives grok does not
+exist here; a firewalled machine cannot install it either way, and the header says
+so. The installer, read 2026-09-29 at `2026.09.28-64d2043`, edits no shell profile,
+takes no root and writes only `~/.local/share/cursor-agent/versions/<build>/` plus two
+symlinks — `~/.local/bin/agent` and `~/.local/bin/cursor-agent` — after an
+unconditional `rm -f` of both. That `rm` is why the guard exists: `agent` is a name
+somebody else's program may hold.
+
+**Measured.** `cursor-agent update` with no TTY and no login: `Checking for
+updates...` / `Already up to date` on stderr, exit 0. Its own cleanup keeps any
+version a running agent marks in use (`install-in-use-marker`), which is why `--skip
+cursor` protects nothing and is passed only to keep the list whole. On a Mac reached
+over SSH every invocation, `--version` included, answers `Error: Your macOS login
+keychain is locked.` and exits 1, so a refresh from an SSH `deploy.sh` is a warning
+there; from the daemon's own launchd domain it is not.
+
+**How it is checked offline.** `deploycheck` puts a fake `cursor-agent` on every real
+run's PATH, since an absent cursor downloads its installer, and asserts the absent
+path only under `--check`, which fetches nothing.
+
+**Status.** Current.
+
 ## Invariants — rules that were defects first
 
 These are load-bearing. Each was a real defect before it was a rule, and none of
@@ -29614,6 +31220,27 @@ anything. So a leaked one is a working credential against any path that does not
 run this check, and the log is the one place it can leak in full.
 
 **Status.** Current
+
+#### Q5.121 — Whose budget does a link's stream spend, and what refuses a link?
+
+**Rule.** A link's streams count against the link, never against the owner its
+`sub` names: `MAX_STREAMS_PER_LINK` per link and `MAX_LINK_STREAMS_PER_TUNNEL`
+across every link on one tunnel. Channel opens spend `LinkConnectBudget` — a burst
+of `LINK_CONNECT_BURST`, one back every `LINK_CONNECT_REFILL_MS` — before the tunnel
+lookup, and an empty bucket is `429 link_rate_limited`. Every refusal that belongs
+to the link itself is the unknown machine's `404 machine_not_found`.
+
+**Why.** It is Q7.150's precondition. Keyed on `sub`, a looping agent spends its
+owner's 64 streams, and the owner's own phone is then refused `503 no_tunnel` on
+their own machine, which the client reads as the machine being off (Q1.100). The
+caller never sleeps, so it needs a rate as well, and spending it before the lookup
+bounds hammering a machine that is off too. One 404 keeps a link token from mapping
+which links and machines are alive.
+
+**Rejected.** *A code of its own for a link past its stream share* — the per-person
+cap has always answered 503.
+
+**Status.** Current.
 
 ### The client and the socket
 
@@ -29893,7 +31520,9 @@ upsert's `DO UPDATE` clause.
 identity, and an upsert that can rewrite them can corrupt a row it was only
 meant to touch.
 
-**Status.** Current
+**Status.** Current as a property, not as a list: the clause carries every mutable
+preference — `ultracode`, `rank`, and `nickname` since Q2.245 — and still never
+the identity. `files-paths-git.md` states it that way.
 
 #### Q5.29 — Why is there no synchronous filesystem call on a path the daemon did not create?
 
@@ -30994,10 +32623,12 @@ a clock.
 | Relay streams | **1 MiB** h2 window per stream (`STREAM_WINDOW_BYTES` — raised from 256 KiB as the coupled half of `EVENTS_PAGE_BYTES`, Q6.104; three comments went on saying 256 and were corrected in Q5.101), 256 concurrent streams per tunnel, 64 per caller, 8 MiB connection window (`CONNECTION_WINDOW_BYTES`, its own constant — same number as the socket valve, different fact). The per-stream window **is** the flow control — granted on consumption, so a stalled client stops its sender there and nowhere else |
 | Tunnel | 8 MiB socket-buffer valve (`MAX_TUNNEL_BUFFERED_BYTES`, should be unreachable; the windows exist to make it so), 20s ping / 2 misses, reconnect 1s→30s with **full** jitter — a relay restart reconnects a whole fleet at once, and ±20% would keep the herd synchronised. Backoff resets only after a tunnel has been up 60s (`TUNNEL_STABLE_AFTER_MS`) |
 | Grants listing | 500 per page, 2000 max, with a `total` — the one admin list that grows as users × machines |
-| Uploads | **100 MiB per file**, 10 per message, **1 GiB** *and* 100 files per session — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory — plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; consumed ones have no TTL and die with their session row. Q5.101 |
+| Uploads | **100 MiB per file**, 10 per message, and a session keeps **1 GiB** *and* 100 of the files sent to it — two bounds because a byte cap cannot see a hundred thousand one-byte uploads and each of those is a directory. Past either, the oldest file already sent is dropped; files still waiting to be sent are never dropped and are all that can refuse (Q2.247). An agent's returned images roll on their own **200 / 256 MiB**. Plus **300 MiB per 5 minutes** per session (`UPLOAD_RATE_BYTES`), the one refusal here that expires on its own and the only one carrying `Retry-After`. 200 bytes of filename, 128 of mime, both clamped at ingest so `truncateEvent` never has to touch an attachment. Inline images 5 MiB raw *to* the agent (~6.8 MiB of base64 in one write to its stdin); **25 MiB *from* one** (`MAX_AGENT_IMAGE_BYTES` — its own constant since the per-file cap moved, sharing one having put a ~133 MiB string in the base64 pre-check on the emit path). Unconsumed uploads expire at 24h; a sent one stays until its session goes or its budget needs the room. Q5.101 |
 | Downloads | 100 MiB, which **equals the upload cap by coincidence rather than by coupling** — this row said "deliberately not the upload number" and that was true at 25 MiB. Neither may be set by reading the other: that one bounds what a client may push onto disk against budgets outliving the request, this bounds a bearer-token-readable read of a whole workspace, where the cost of no bound is one of 256 tunnel streams held open for as long as somebody likes. The client refuses at the same number from `content-length`, before a `Blob` is resident on a phone |
 | Permission payload | 8 KiB each for `rawInput` and `content`, clamped by `clampBlob`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — a **refusal**, not a clip. Far below the per-event cap because all of it rides the snapshot, which `GET /sessions` returns for every session at once. **24 options**, `optionId` 256, both refusals. The two 200-character clips on `title` and an option `name` are gone: they cut a model-written answer on the one channel where kimi asks a question, breaking `askedQuestion`'s identity match against `rawInput` — Q2.214, Q7.82 |
 | Session title | 120 characters accepted from a rename, 60 for the one derived from the first prompt. Bounded for the same reason as the row above: it rides the snapshot, which `GET /sessions` returns for sixty sessions every four seconds |
+| Session nickname | 2–32 characters, one per machine; `NICKNAMES` holds 113, and past them a name takes the first free `-2`, `-3`. Q2.245 |
+| Mentions in a message | 8 distinct names resolved into the daemon's note; the rest stay text. Q2.246 |
 | Agent login | one run per agent (a second supersedes), 64 KiB of transcript, 10 minute TTL. Pasted credentials capped at 8 KiB, which is far above an OAuth token and far below an argv |
 | Passwords | scrypt N=2^15 r=8 p=1 — ~51ms on the machine this was measured on (Node 26, 2026-08-07), against ~25ms at 2^14 and ~103ms at 2^16 — holding `128·N·r` = 32 MiB for the duration of each. `maxmem` is passed explicitly at **128 MiB**, because Node's default ceiling is 32 MiB and OpenSSL refuses *at* the boundary: measured, N=2^15 r=8 throws `memory limit exceeded` while N=2^14 succeeds, and a KDF that throws for some parameter sets looks like a wrong password on one deployment rather than a configuration error. 12–256 characters, NFKC and never trimmed; the maximum is not about KDF cost (scrypt passes the input through one PBKDF2 iteration, so bcrypt's folklore does not apply) but about not storing a string somebody else sized. **4 concurrent hashes, at most 2 of them public** (Q1.39); wait lists per lane, 32 authenticated and 16 public, then `503 overloaded` with `Retry-After: 1` |
 | Sessions | 30 days absolute, 14 idle, `last_seen_at` written at most once per 15 minutes — the guard that makes idle expiry affordable at all, since the alternative is an fsync per request on a `synchronous = FULL` database in the process carrying every tunnel. 10 per user, the **oldest revoked** rather than the newest refused, evicted inside the mint's own transaction. Each records what it said about itself, clamped at ingest: 256 characters of `User-Agent`, 64 of address. A revoked row is kept **7 days** and swept at startup with its origin — short because no reader surfaces it (`listSessions` and the admin count both filter `revoked_at IS NULL`), non-zero because deleting on revoke would make the day something does read it unanswerable |
@@ -31119,7 +32750,7 @@ the window is asserted at the real numbers without writing 300 MiB to a temp
 directory, which is the only alternative and enough of a cost that it would have
 gone unasserted instead.
 
-**Status.** Current
+**Status.** Current, amended by Q2.247: both upload budgets roll, and an agent's images have their own.
 
 
 #### Q5.102 — Two callers unpack somebody else's archive. Why is there one unpacker?
@@ -31626,7 +33257,8 @@ The rename would break this file's own citation of the symbol, which `docscheck`
 asserts, and buy nothing the widened docblock does not. `MENU_HEADING` had no
 docblock at all and has one now.
 
-**Status.** Current
+**Status.** Current, amended by Q3.685: the idiom has two constants, and `FIELD_LABEL`
+is sentence case outside it.
 
 
 #### Q5.116 — The page gives up its credential before the host's origin moves
@@ -33242,6 +34874,9 @@ decided. Reversing it is not one line: it needs `prevent_exit()`, a `Reopen`
 handler, and an answer to whether the daemon survives a windowless app, which is a
 product question rather than a platform one.
 
+**Status.** Amended by Q3.697: on macOS and Windows the close button now puts the
+app away and only a Quit ends it. The measurement stands, and Linux still quits.
+
 ### Q6.109 — What Grok Build actually sends, measured against 1.0.40
 
 **The whole of why grok is the cheapest harness this repository has added.** Driven
@@ -33642,6 +35277,184 @@ run reached. `initialize` now advertises `cached_token` beside `grok.com`
 arrives with grok's own updater; the parser refuses rather than guesses and the
 driver holds these requests verbatim.
 
+### Q6.114 — What does each harness do with an injected http MCP server?
+
+**Measured** 2026-09-25, a loopback server with a bearer in `headers`, a new session
+then a `session/resume` with a fresh bearer:
+
+| Harness | `mcpCapabilities` | Handshake | Tool as seen | Permission |
+|---|---|---|---|---|
+| claude 2.1.281 (agent-sdk 0.3.257) | `http`, `sse` | `server/discover` at 2026-07-28, then `initialize` 2025-11-25; tries a GET | `mcp__reemoat__<tool>`, loaded through ToolSearch first | a request per call: allow once, always, reject |
+| codex 0.156.1 (codex-acp) | `http`; `sse` and `acp` false | `initialize` 2025-06-18 | `mcp.reemoat.<tool>`, `rawInput` `{server, tool, arguments}` | none reached the client: its own *Guardian Review* approved |
+| grok 1.0.40 | `http`, `sse` | `server/discover`, then `initialize` 2025-11-25 | through its `use_tool`, as `reemoat__<tool>`, found with `search_tool` | a request per call |
+| kimi 0.29.2 | `http`, `sse` | `initialize` 2025-11-25, a GET | not reached: kimi ended every turn empty on this machine, with or without the server | — |
+| cursor 2026.09.28-64d2043 | `http`, `sse` | not recorded | `reemoat: send_message`, drawn `MCP: tool` until its update; `rawInput` `{providerIdentifier, toolName, args}`; the call id carries a newline | a request per call until *Allow always*, which wrote `Mcp(reemoat:send_message)` to `permissions.allow` |
+
+All four carried the bearer on every request and none sent `Origin`. Cursor's row is
+2026-09-30, read off this daemon's log of a session the owner ran — a message sent
+to a claude session and delivered — rather than off the wire. Every one
+re-handshook on resume with the new bearer, which is why one is minted per launch.
+opencode is not installed here and is unmeasured.
+
+**What follows.** `server/discover` must be answered `-32601`: that is the answer
+both fall back from. claude and grok defer an MCP tool's schema until searched, so
+the three tools cost them their names until used; codex loads them whole. A
+permission card per send on claude, grok and cursor is the harness's policy, and is left
+alone until agent messaging has permissions of its own (Q7.150).
+
+**Status.** Current, for these versions.
+
+### Q6.115 — What Cursor's ACP server is, read and measured against 2026.09.28-64d2043
+
+**No adapter.** `cursor-agent acp` is a hidden subcommand of the CLI and the ACP
+registry's own entry (`cursor/agent.json`, `args: ["acp"]`). Global flags precede
+`acp`. `--disable-auto-update` is a real hidden flag — an unknown flag is refused —
+and the ACP path runs no background update in this build (the only `isAutoUpdate:
+true` call is the interactive agent's), so it is passed for the build after this one.
+
+**How this was taken.** The ACP server was read whole from the installed bundle
+(`3115.index.js`, pretty-printed), because the live half needs a Cursor account;
+what was driven live on 2026-09-29 is marked as such here and in Q6.116. The
+request and update shapes are Q6.117's.
+
+**`initialize`** answers `loadSession: true`, `sessionCapabilities: {list}` (plus
+`subagents` when the client declares it), `promptCapabilities: {image: true, audio:
+false, embeddedContext: false}`, `mcpCapabilities: {http, sse}`, one auth method
+`cursor_login`, **no `providers`** — so `hostable` refuses every foreign system with
+nothing written — and **no `_meta`**, so no steering: a message sent mid-turn is
+queued (Q2.226), which matters because a second `session/prompt` cancels the first.
+No `session/resume` (Q2.248), no `usage_update` ever, and `stopReason` is only
+`end_turn` or `cancelled`: a backend, plan or auth failure is agent text followed by
+`end_turn`.
+
+**The process's cwd is load-bearing.** Rules, skills, slash commands, config MCP
+servers, the `resource_link` root and every title's relative path come from
+`process.cwd()`, not the session's `cwd`. `AgentLaunchConfig.inSessionCwd` spawns
+cursor there, and only cursor.
+
+**Controls.** `configOptions` carries `mode` (`agent`, `plan`, `ask`, category
+`mode`) and `model`. Declaring `clientCapabilities._meta.parameterizedModelPicker`
+(`CURSOR_CLIENT_META`) makes `model` a list of bare ids and adds each model's
+parameters as their own selects — effort as `thought_level`, the rest as
+`model_config` — instead of one list of every variant. Both land on doors this
+daemon already drives. Measured 2026-09-30 on a signed-in account: `model` is 43
+bare ids led by `default`, named *Auto*, and a model's parameters arrive and leave
+with it — Claude Opus 5.5 brings `effort` (`low` to `max`) plus `context` and `fast`,
+Codex 5.3 calls its effort `reasoning`, Composer 2.5 has only `fast`, and Auto has
+none, so the effort chip comes and goes with the model.
+
+**A model choice is written to the person's global config.** Every model or
+parameter change, and `--model` itself, calls `setCurrentModelWithParameters`, which
+writes `selectedModel`, `modelParameters`, `hasChangedDefaultModel`,
+`modelSelectionHistory` and `model` into `~/.cursor/cli-config.json` — measured
+2026-09-30, the history in the order the chip chose them. The owner
+chose on 2026-09-29 to share that config with the terminal, as cursor does with
+itself, over giving this daemon a `CURSOR_CONFIG_DIR` of its own — which would have
+kept the terminal's default untouched and lost its permission rules and
+`approvalMode` with it. `allow-always` on a permission card writes
+`permissions.allow` in the same file.
+
+**Permissions are cursor's policy.** An edit inside the workspace never asks; a
+shell command asks unless `permissions.allow` names it (the default is `Shell(ls)`);
+a delete always asks; MCP asks unless allowlisted. `-f/--force` is the only flag the
+ACP path reads that answers every request itself, and `--yolo` is ignored there.
+Option ids are `allow-once`, `allow-always`, `reject-once`.
+
+**Tool calls are never `failed` and never closed.** Every one ends `completed`; a
+refusal or a non-zero exit is only in `rawOutput`. A call cursor abandons on a
+cancel or an error stays `in_progress`.
+
+**The keychain.** Every invocation reads the macOS login keychain, `--version`
+included. Measured 2026-09-29: from an SSH shell it answers `Error: Your macOS login
+keychain is locked.` and exits 1; from a job in the `gui/501` launchd domain, where
+this machine's daemon runs, it works. `ui/login.ts` names the first.
+
+**The environment.** Shells cursor starts get `CURSOR_AGENT=1`,
+`CURSOR_CONVERSATION_ID` and `CURSOR_REQUEST_ID`, and cursor reads the second
+itself; all three are in `SESSION_SCOPED_ENV`.
+
+**Status.** Current, for this build. What needs an account is Q7.154.
+
+### Q6.116 — Signing Cursor in: a key, a login, and the probe that can tell
+
+**A pasted `CURSOR_API_KEY` needs no `authenticate`.** cursor decides once at
+startup whether it is authenticated — a stored login, `--api-key` or
+`CURSOR_API_KEY` — and answers `session/new` accordingly. So `ACP_AUTH_METHOD` has
+no cursor row.
+
+**`authenticate` is never sent**, and the reason is Q6.111's arriving from the
+other side. `cursor_login`, the only method advertised, succeeds at once over a
+stored login and otherwise **opens a browser on the daemon's host** and blocks; with
+`NO_OPEN_BROWSER` or over SSH it answers `-32602` with the URL and no way to finish.
+
+**`status` is the wrong probe.** It reads stored tokens only, so it says `Not logged
+in` beside a key that works — and a clean `false` is what `admit` refuses on. The
+probe is `models`, which asks the backend with whatever credential is present and
+so proves it works rather than that it exists. Its two answers are on two streams,
+which is why `LoginStatusProbe.stream` gained `both`. Measured 2026-09-29 with
+nothing signed in: `Error: Authentication required. Run 'agent login', pass
+--api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.` on stderr, exit 1.
+Read from source: `Available models` or `No models available for this account.` on
+success, and `Authentication failed: your Cursor credentials or API key are invalid
+or expired.` for a rejected one; a network failure is `Failed to load models: …`,
+which reads as neither.
+
+**The wizard is a URL, not a code.** `login` under a pty with `NO_OPEN_BROWSER=1`
+(`LOGIN_SPAWN_ENV`) printed, 2026-09-29, `Open a browser and navigate to this link:
+https://cursor.com/loginDeepControl?challenge=…&uuid=…&mode=login&redirectTarget=cli…`
+and polls; `extractUrls` takes it and no code pattern matches in it. `logout` with
+nothing stored printed `Logout successful` and exited 0.
+
+**Where a login lives.** The macOS keychain, or `~/.config/cursor/auth.json` on Linux
+(`credentialPath`, whose absence proves nothing on a Mac). `AGENT_CLI_CREDENTIAL_STORE`
+is cursor's own switch and this daemon sets nothing.
+
+**Status.** Current. Finishing a login and the signed-in strings live are Q7.154.
+
+### Q6.117 — Cursor's own requests and its subagents
+
+**Five methods, all requests, none carrying a `sessionId`.** One agent process
+serves one session here, so `AcpClient` answers each on the only session registered
+and refuses otherwise. Each goes onto a door every agent already uses
+(`src/acp/cursor.ts`):
+
+| cursor sends | becomes | answered |
+|---|---|---|
+| `cursor/ask_question {toolCallId, title?, questions: [{id, prompt, options: [{id, label}], allowMultiple}]}` | an elicitation, one field per question valued by option id | `{outcome: {outcome: "answered", answers: [{questionId, selectedOptionIds}]}}`, Skip `skipped`, a cancel `cancelled` |
+| `cursor/create_plan {toolCallId, plan, …}` | a permission titled *Approve plan*, `rawInput: {plan}` | `accepted` / `rejected`, a cancel `cancelled` |
+| `cursor/update_todos {toolCallId, todos, merge}` | the session's `plan`, merged by id | `{}` |
+| `cursor/generate_image {toolCallId, filePath}` | the path on the image call's card | `{}` |
+| `cursor/task` | nothing | `{}` |
+
+⚠ **An error is not a refusal on this wire.** A `create_plan` answered with any
+JSON-RPC error makes cursor write the plan file itself and report success; an
+`ask_question` answered with one falls back to a permission per single-choice
+question and drops the multiple-choice ones. So a refusal is always cursor's own
+word — and `create_plan` never answers an error at all (`answerCursorPlan`, since the
+0.12.0 review): params it cannot read are `rejected`, no single session to send it to
+(a `session/load` still replaying) is `cancelled`, and a handler's throw is
+`rejected`; before, all three were errors cursor read as approval. With questions
+switched off (`REEMOAT_ELICITATION=0`) the question is
+`-32601` all the same, and cursor asks through permissions by itself. No free text:
+cursor reads option ids and nothing else, so the card offers no own-answer box.
+
+**A cancelled todo is left off.** ACP's plan has no such status, and drawing it as
+`pending` would say it is still to do. The list is held in memory and emptied by a
+`/clear`, so after a restart a `merge` builds on nothing until cursor next sends
+the whole list.
+
+**Subagents.** Declared as `clientCapabilities._meta.subagents`; a top-level
+`subagents` is stripped by the SDK's schema before cursor reads it. cursor then
+announces each on the parent with `subagent_spawned {subagentSessionId, _meta:
+{cursor: {toolCallId}}}` — outside the SDK's closed union, so diverted below it as
+the async-task drafts are — and sends the child's own frames on the child's session
+id. The router maps that id to the session that spawned it, and `Session` stamps the
+spawning call as each call's parent: what the subagent did survives, what it said
+does not (Q6.4). Its todo updates are ignored, a permission it asks on its own id is
+routed home, and a frame on an id nobody announced is dropped as any unknown one is.
+
+**Status.** Current. Shapes read from source; the live capture is Q7.154's.
+
 ## Open questions and deliberate non-goals
 
 ### Q7.1 — Was keeping full session history on disk an optimisation?
@@ -34018,7 +35831,10 @@ one, and ACP's `resource_link` content blocks in the prompt body.
 **What it would take.** Three separate pieces of work, sharing only the popup's
 chrome.
 
-**Status.** Not built.
+**Status.** Not built. `@` now opens a list of *sessions* (Q3.678), a different
+feature again: a session's nickname is one word, completed from one listing per
+conversation rather than per keystroke, and the popup stays anchored to the
+composer. `@file` would share that popup's chrome and its token rule, nothing else.
 
 ### Q7.21 — Are image attachments previewed inline?
 
@@ -35497,7 +37313,7 @@ comments — the opposite of the `groups.orphans` ban one section over, and
 deliberately: this one is about a class the browser will try to apply, and the
 docblocks explaining the hazard name the tokens in the course of explaining it.
 
-**Status.** Current
+**Status.** Current. Amended by Q3.691: two hues are back, and neither carries a state. Amended by Q3.693: code blocks are highlighted in colour again. Amended by Q3.694: one brand colour, on the affirmative fill and what waits on you.
 
 ### Q7.71 — remoslop → reemoat, including the protocol. What had to move by hand?
 
@@ -38408,7 +40224,13 @@ and an nginx config with no `package.json`, unlike `services/plugins` and
 `services/premium`, which do carry `pnpm check`. Standing a Node package and a CI
 workflow up to compare two font stacks costs more than the drift it catches.
 
-**Status.** Known limitation, taken deliberately
+**Status.** Retired 2026-10-01. The landing was rebuilt on 2026-09-24 (`services`
+f35416c) around a painting, with type of its own — `--sans` and `--mono` with
+different stacks, a serif for display, sizes in `rem`, and the *"lifted from
+app.reemoat.com"* header gone — so the pair of values meant to be one value no
+longer exists. The comparison failed on every development box from then on while
+CI skipped it; it was removed rather than pointed at the new names, which would
+have asserted a sameness nobody chose.
 
 
 ### Q7.134 — What the three documents deliberately do not do
@@ -38649,9 +40471,11 @@ Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
 (WebKitGTK) are open, and `docs/NATIVE.md` carries them. A platform that refuses
 costs nothing visible: `proveLocal` fails and the relay answers.
 
-**Status.** Reversed an earlier decision. Q7.135 is superseded. Where the
-announcement lives — one per state root rather than one under `homedir()` — and
-which daemon may remove it is Q7.148.
+**Status.** Reversed an earlier decision. Q7.135 is superseded. Where the announcement
+lives — one per state root rather than one under `homedir()` — and which daemon may
+remove it is Q7.148. Amended by Q3.686: the switch is "Direct connection" in the
+machine's Connection group, and the ~360 s is that group's footer, "Revocation lags up
+to six minutes."
 
 ### Q7.138 — Why the payload shipped a coding-agent CLI it deliberately does not ship
 
@@ -38780,6 +40604,7 @@ you work from is where it is called anything.
   the drag's announcement follow with no call of their own; New session reads
   `machinesAsDrawn`, which is the rail's order, names and therefore its default; the
   two `machine · path` lines, on a row under All and on a session's header, call it
+  (a row now names only its machine, on every row, Q3.681)
   directly. **Settings → Machines keeps the real label** and the badge, since that is
   where a label is renamed and told apart from a collision; **a sentence keeps it
   too**, because one is what gets pasted to somebody at another client.
@@ -39174,7 +40999,8 @@ Deleting the tree outright would have taken all four with it.
 `blocking_pick_folder` does not exist on mobile in `tauri-plugin-dialog` 2.7.3 —
 Android's own answer to "choose a folder" is `ACTION_OPEN_DOCUMENT_TREE`, a Storage
 Access Framework tree *URI* rather than a path, which the plugin does not wrap.
-`host_save_file` survives beside it only because a *file* panel has a mobile arm.
+`host_save_file` survives beside it only because a *file* panel has a mobile arm —
+which compiled and never saved, until Q3.690.
 The command was declared and registered unconditionally, so the APK failed to
 compile: `error[E0599]: no method named blocking_pick_folder`.
 
@@ -39866,3 +41692,138 @@ somebody about it. The owner's call, for this iteration.
 are per account now; its rejected "start every root at launch", since every listed
 account's set-up daemon starts with the app; and its recorded widening and race,
 both closed by Q1.651 and Q5.120.
+
+### Q7.150 — Can agents on different machines, relays or control planes message each other?
+
+**Position.** Built for one owner's machines on one server (Q1.652, Q2.240,
+Q2.241, Q5.121, Q1.653); across owners and servers the design below holds and the
+minting is not built (Q7.151). What the architecture did not carry before, and
+what now carries it:
+
+- **A daemon cannot open a stream.** The relay is the HTTP/2 client on a tunnel, so
+  only it opens streams. A daemon would have to dial a peer's relay at
+  `/__relay/channel` as an app does: a Noise_IK initiator whose static is its
+  machine key.
+- **A daemon cannot get a capability.** `POST /v1/tokens` needs a person's
+  credential, and the daemon makes exactly one control-plane request, ever.
+
+**The design.** A *link* capability minted by the **receiving** machine's Authority
+— `aud` the receiver, `cnf.jkt` the **sender's machine key**, one narrow scope
+`session:message`, a link id — delivered to the sending daemon by the owner's app
+over its own channel, the shape provisioning already uses. The receiving daemon's
+checks do not change (`iss`, `aud`, `cnf` against the handshake). Because the
+receiver's own Authority mints it, **two control planes need no trust between
+them**, and two relays of one need only a redirect to where the tunnel is, not a
+forward. Queued messages would live on the sending daemon: the Authority may hold
+none of an agent's work, and a tunnel with no daemon is a 503, never a queue.
+
+**What must be fixed first, or it is a denial of service.** The relay's stream
+budget per caller is keyed on the token's `sub`, a user; a link token carries the
+owner's, so a looping agent on one machine would spend the owner's own budget on
+the other and lock their phone out of their own machine. Link streams need a key
+and a ceiling of their own, and the relay a connection rate per link, since the
+caller is now a machine that never sleeps.
+
+**What it would cost, stated.** A link lets one machine's agents ask another's to
+do anything those agents can do, as the owner; a link token lives weeks where a
+capability lives minutes, and revocation rests on the relay reading the row at
+every connection; the daemon becomes a network client; the relay learns which
+machine talks to which. Encryption end to end is unchanged — the relay carries
+bytes it holds no key for, as for an app. And because revocation is the relay's
+alone, a relay rolled back past 0.12.0 ignores `lnk` and every revoked link
+connects again until it expires — `compatibility.md` says what to switch off first.
+
+**Status.** Current for one owner on one server; the rest is Q7.151.
+
+### Q7.151 — Can two of your own machines be kept apart, or another person's machine be linked?
+
+**Position.** Neither, yet. The app links every eligible pair of one owner's
+machines on one server, and nothing parts one pair: a machine switched off or
+isolated is parted from all of them at once (Q2.244). What keeps a machine's agents from being reached is its
+switch, the account's or a conversation's (Q2.244); none of them parts two machines
+that both allow it.
+
+**What it would take.** Parting a pair: a stored opt-out that `POST
+/v1/machines/:id/links` respects, beside Q1.654's tables, and a control that sets it. Another person's
+machine: an invitation, shaped like an enrollment code, redeemed by the other
+owner's app, after which the receiving Authority mints for the foreign key as it
+does for one of the owner's own. A machine on another server: the same capability,
+minted by that server's Authority for this machine's key, which needs the native
+host to act across two of the person's accounts — the page never names another
+account (`native-accounts.md`). None of the three needs a change to the relay or to
+a daemon.
+
+**Why not yet.** Each is a decision about who may ask whose agents to act, which is
+the permission design this feature deliberately did not include: a link lets one
+machine's agents ask another's to do anything those can do, as their owner.
+
+**A shared machine is the same question from inside, and the precondition for any
+sharing screen.** `PUT /v1/machines/:id/grants` lets an owner give another person
+write on one machine today, through the API only — no screen calls it. That
+person's agent there reaches the owner's other machines through its links, as the
+owner. Found in the 0.12.0 review and left, on the owner's word, because nothing
+offers sharing yet; before anything does, `POST /v1/machines/:id/links` must mint
+nothing for a machine shared with write, and a new grant must revoke its links in
+the same write.
+
+**Status.** Not built. The switches that decide whether a machine takes part at all
+are Q2.244's.
+
+### Q7.152 — What else could a permission for agent messaging decide?
+
+**Position.** Four things, none built.
+
+- **Ask before delivery**: a third state in which a message waits as a card until
+  somebody approves it.
+- **Pairs of machines**: the per-pair opt-out Q7.151 describes, beside Q1.654's
+  tables.
+- **A switch for the whole server**, for its admin.
+- **A boundary between harnesses**: a sandboxed agent may not wake an unconfined
+  one.
+
+**Why not yet.** Q2.244's switches answer whether a conversation takes part. Each of
+these decides *who may ask whom*, the question Q7.151 left open, and the first turns
+a switch into three positions.
+
+**Status.** Not built.
+
+### Q7.153 — What is not built around nicknames?
+
+**Position.** Five things, each left out on purpose.
+- **A control that changes a nickname.** The daemon takes one on
+  `POST /sessions/:id/meta`, `pnpm client nickname` sends it, and a plugin's
+  `setMeta` may; the app's Rename is the title's (Q3.677). A second in-place field
+  in the header would have to share Q3.665's pinned box with the title.
+- **Mentions from another agent or a plugin.** Only a person's message gets the note
+  (Q2.246). An agent already has `list_agents`, and a note inside an envelope would
+  be the daemon writing into another agent's words.
+- **A mention drawn as a mention.** The bubble shows `@mira` as the text it is. The
+  `prompt` event logs which names resolved (`mentions`), so a chip is a client
+  change when somebody wants one.
+- **One nickname per account.** Uniqueness is per machine (Q2.245); an ambiguous
+  name is answered with every match.
+- **A plugin API version for the field.** `nickname` is optional on
+  `sessions.create` and `setMeta`, and the snapshot returned says whether it held,
+  so a plugin that needs it can tell without a rung.
+
+**Status.** Not built.
+
+
+### Q7.154 — What about Cursor needs an account to measure?
+
+**Position.** Everything in Q6.115–Q6.117 that was read from the bundle rather than
+driven: the question, plan and todo requests as cursor actually sends them, a
+permission as it arrives for a shell command, the subagent frames, the replay a real
+`session/load` sends, and the `models` output signed in and with a bogus key. The
+model list, the pin and the MCP row were measured on 2026-09-30 and moved into
+Q6.115 and Q6.114. `cursor/ask_question` has never arrived at all: the server gave
+the model no `AskQuestion` on an Auto-only account (Q2.250), and whether a paid plan
+changes that is unmeasured. The
+drivers assert the shapes the source gives, so a difference measured later is a
+fixture to replace and never a silent pass.
+
+**What it would take.** A `CURSOR_API_KEY` in a raw ACP run against this build. A
+browser login has since been finished on this machine and carried a session under
+the launchd daemon; whether through the wizard is not recorded.
+
+**Status.** Known limitation.

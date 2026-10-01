@@ -45,8 +45,8 @@ in two rows on a 390px screen. Three rules keep it one box. ⚠ **The box is the
 `<form>`, so every hand-rolled `<button>` under it must name its `type`** — the
 default inside a form is `submit`, and `Select`, `Absent`, `Toggle` and the choice
 rows are all hand-rolled, so a typeless one sends the draft when a chip is tapped.
-`webcheck` scans every `<button` in both files, comment-stripped, and **that is the
-only guard**. **It may never take `overflow-hidden`** — `CommandMenu`, all three
+`webcheck` scans every `<button` in all three files, comment-stripped, and **that is the
+only guard**. **It may never take `overflow-hidden`** — `CommandMenu`, `MentionMenu`, all three
 chip menus, `Absent`'s panel and the `…` popover are `bottom-full` children of it.
 And it takes **no** `focus-within` treatment: Q3.414 is about this box now, and the
 caret is the indicator.
@@ -300,8 +300,8 @@ the sizers are **absent** as well as the cap present, a revert bringing the empt
 box back with them.
 
 **A control never leaves the strip, and the model gate is what breaks that.** All
-**five** agents build the effort list from the **currently selected model's** own
-levels; four publish the control and drop it when there are none, opencode never
+**six** agents build the effort list from the **currently selected model's** own
+levels; five publish the control and drop it when there are none, opencode never
 publishes one — see below. `holdConfig` merges by option id rather
 than replacing; `drawnControls` returns the live set **plus** the slots of anything
 missing, named in `unavailable`; and `Absent` draws that slot from **`chipParts`

@@ -73,7 +73,9 @@ the rule's one deliberate exemption.** A row is the tightest slot in the app: at
 ~0.6em average advance against sans's ~0.5em spends about a fifth of the characters
 on the family, and a row exists to be *scanned*, so characters are the whole of what
 it has to spend. `sessionLabel` answers a human-typed title or, failing that,
-`displayCwd`; the subline names the agent, the machine and what is left of the path.
+`displayCwd`; the subline is the nickname, the harness's mark (`AgentMark`, its
+vendor's own, Q3.680) and the machine (`MachineLabel`), one gap apart, and no path
+(Q3.681).
 All of it is sans, at one size, because a line that changed family halfway is what
 made the row unreadable when this was first tried.
 
@@ -153,9 +155,10 @@ from `h-4` to `h-5` with it. The one arbitrary size stays where it is. Q3.662.
 ## Nothing in this client changes the mouse
 
 **There is no `cursor` declaration and no `cursor-*` utility anywhere in
-`packages/web/src`, with exactly two named exceptions** — the separators'
-`col-resize`, and the text caret on the conversation header's session name, which
-is edited in place (the owner's word, Q3.665). `index.css` carried an
+`packages/web/src`, with exactly three named exceptions** — the separators'
+`col-resize`, the text caret on the conversation header's session name, which
+is edited in place (the owner's word, Q3.665), and the pointer over a clickable
+`@name`, which then sits in a pill (the owner's word, Q3.682). `index.css` carried an
 `@layer base` rule putting the hand shape on every enabled `button`, every
 `[role="button"]` and the one `<summary>` — restored on purpose after Tailwind v4's
 preflight dropped it, on the argument that with the accent colour gone an unfilled
@@ -224,17 +227,23 @@ app has one list treatment — with `space-y-1` rather than `space-y-0.5`, argue
 rather than copied: an item in a policy is a sentence and the tighter rhythm reads
 as a wall. `legal-pages.md` is the area.
 
-## The three caps constants
+## The two caps constants, and the label that left them
 
 `text-2xs font-semibold tracking-wider … uppercase` — small caps with tracking — is
-one idiom with three owners, and **which one is a colour decision, never a size
+one idiom with two owners, and **which one is a colour decision, never a size
 decision.** Compose layout onto them; never restate the type.
 
 | Constant | Where | Tone |
 |---|---|---|
-| `SETTINGS_HEADING` | a named band of anything — a section, a form field's label on the gate, a plugin's column, a table head | `text-muted` |
+| `SETTINGS_HEADING` | a named band of anything — a settings group, a plugin's column, a table head | `text-muted` |
 | `MENU_HEADING` | inside a popover; carries its own `px-2.5 py-1.5` because it shares a left edge with the rows under it | `text-faint` |
-| `FIELD_LABEL` | a field's name on a settings form. One step larger on purpose: a heading is scanned, a label is read off a form somebody is filling in from a phone | `text-muted` |
+
+**A field's name is not a heading.** `FIELD_LABEL` (`ui/kit/Field.tsx`) is sentence
+case, `text-xs font-medium text-fg`, on the owner's call (Q3.685): a caps label read
+as a stack of section headings, and on New session it was one. It still carries a
+colour, so it stays in the no-colour-appended sweep below; it is no longer in the
+census, because it no longer spends the idiom. The gate's fields took it too, so
+`SETTINGS_HEADING` labels no field anywhere.
 
 `SETTINGS_HEADING`'s name is narrower than its reach and stays that way — renaming
 it would break the citation `docs/DECISIONS.md` makes of the symbol, which
@@ -242,38 +251,36 @@ it would break the citation `docs/DECISIONS.md` makes of the symbol, which
 
 **Extracting a constant does not retire an idiom.** The string was written out
 fourteen times before `SETTINGS_HEADING` existed; the count did not fall afterwards,
-it moved — fifteen copies in thirteen files, nine of them using none of the three
+it moved — fifteen copies in thirteen files, nine of them using none of the
 constants, two of them byte-identical local `const label` declarations in two files
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-**Five** sites spend the idiom outside the constants **on purpose**, and every one
-of them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
-louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
-`AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
+**Three** sites spend the idiom outside the constants **on purpose**, and every one
+of them says so at the code: `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
 rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why), `MenuDrawer`'s `DRAWER_HEADING` (`text-faint` at that panel's own `px-3`, because
 `MENU_HEADING` carries `px-2.5` and put the word 2px inboard of the rows it heads),
 and `TaskPanel`'s `FINISHED_HEADING` (`text-faint`, spent by **both** arms of the
 finished band — every other heading in that panel names work that is *going*, and
 splitting the tone across the fold and its empty form would change the band's
 colour at the one moment nothing about it has changed).
-`webcheck.typography.ts` names `RETIRE_HEADING` and `HIDDEN_PROVIDER_HEADING` in
-the same breath, as the two spelled out to avoid appending a colour. The sweep that
-finds them all is `grep -rn 'tracking-wider' packages/web/src` less `ui/bits.tsx`;
-`SettingField`'s hit is `FIELD_LABEL`, i.e. one of the three constants rather than
-an exception to them — the third constant, and the one that does not live in
-`bits.tsx`.
+`MachineSection`'s `RETIRE_HEADING` (`text-danger`) was a fourth and is gone:
+retiring a machine is a `DangerRow` in that screen's last group (Q3.686), and
+`webcheck.typography.ts` asserts the name and a danger-coloured copy of the idiom
+absent there. The sweep that finds the three is `grep -rn 'tracking-wider'
+packages/web/src` less `ui/bits.tsx`.
 
 ⚠ **This said *four* for a release, and nothing could see that it had stopped being
-true** — it has since said *five*, and the same thing happened again. `DRAWER_HEADING` arrived with its own docblock arguing for itself, and the
+true** — it then said *five*, and the same thing happened again; it said *four* again
+when the waiting band went (Q3.674), and *three* since the retire heading did. `DRAWER_HEADING` arrived with its own docblock arguing for itself, and the
 only sweep that existed was for a *colour appended to a constant*, which this is
 not — so the number was the whole record of the set and the record was wrong. It is
 not prose any more: `webcheck.typography.ts` carries the **census**, a table of
 every file that spends the idiom with its hit count, differenced against the sweep
-above over comment-stripped source. A sixth site fails it as *found, not listed*; a
+above over comment-stripped source. A new site fails it as *found, not listed*; a
 deleted one fails it as *listed, not found*. A count could do neither, which is the
 general shape — a census, never a `length === N`. It also requires a comment to
-close immediately above each of the five, which is what makes the "says so at the
+close immediately above each of the three, which is what makes the "says so at the
 code" clause above enforced rather than asserted.
 
 **The background panel's head is spelled out at its own height, and composing the
@@ -310,24 +317,22 @@ screen". And `Phases` is not an exception to
 the constants at all — it is outside the **idiom**: `text-2xs font-medium text-fg`,
 with no `tracking-wider` and no `uppercase`, so the sweep above does not even reach
 it. It is louder than the box beneath it and sits over a frame rather than at the
-head of a list, where a caps band would read as a second card's header — and its
-own comment in `TaskPanel.tsx` makes exactly that argument, naming these three
-constants and declining the idiom itself, so it says so at the code the way the
-four above do. Choosing between the three caps
-constants stays a colour decision, because they are one idiom at three tones;
+head of a list, where a caps band would read as a second card's header. Choosing
+between the two caps constants stays a colour decision, because they are one idiom
+at two tones;
 choosing the dialog title or `Phases` instead is not — those differ in size, weight
 and case as well, and that is a different treatment rather than a different tone.
 
 **⚠ A colour cannot be appended to one of these.** `` `${SETTINGS_HEADING}
 text-danger` `` is a silent no-op: two members of one family, resolved by Tailwind's
-alphabetical emission and not by the order in the string. `RETIRE_HEADING` is spelled
-out for exactly that reason. The same trap is what `menuRow(align)` exists to close,
+alphabetical emission and not by the order in the string. `HIDDEN_PROVIDER_HEADING`
+is spelled out for exactly that reason. The same trap is what `menuRow(align)` exists to close,
 and `webcheck` sweeps every shared class string for it.
 
 ## What is checked
 
-`webcheck.typography.ts`. Nothing checked any of this before — a changed stack, a new
-web font or a drift from the landing page would have passed all eight drivers.
+`webcheck.typography.ts`. Nothing checked any of this before — a changed stack or a
+new web font would have passed all eight drivers.
 
 1. **Two families, and both are tokens.** A third `font-family` anywhere in
    `index.css` fails, as does a literal stack written in place of a token.
@@ -335,12 +340,10 @@ web font or a drift from the landing page would have passed all eight drivers.
    stylesheet and the HTML shell. Comments are stripped first, because
    `--font-sans`'s own docblock discusses woff2 in prose.
 3. **Every size is from the scale**, with the one exception named in the driver.
-4. **The landing page has not drifted** — and it **`skip()`s in CI**. Q7.133.
-   `services/landing/index.html` is a hand-copy of both stacks and five of the six
-   scale steps, and it lives in the *other* repository, so the comparison only runs
-   where both are on one disk. Absent, it says so and is counted; it must never
-   print `ok`. Its scale is asserted as a **subset**, because the landing has no
-   `--text-xl` and legitimately should not.
+4. **Not the landing page, any more.** It was a hand-copy of both stacks and the
+   scale until its rebuild on 2026-09-24 gave it type of its own — `--sans`,
+   `--mono`, a serif, sizes in `rem` — so there is nothing shared left to compare,
+   and the comparison is gone rather than red. Q7.133.
 
 **Every sweep here carries a floor.** A regex that matches nothing passes silently,
 which is the failure mode of every source-text assertion in `webcheck` — see

@@ -16,7 +16,8 @@ import type { InstanceConfig } from "../../instance";
 import { LEGAL_DOCS, legalPath, legalTitle, legalPublishable } from "../../legal";
 import { navigate } from "../../router";
 import { store, type GateState } from "../../gateStore";
-import { Button, FIELD, LINK, SETTINGS_HEADING, Spinner } from "../bits";
+import { Button, FIELD, LINK, Spinner } from "../bits";
+import { CHECKBOX, FIELD_LABEL } from "../kit/Field";
 import { SignIn } from "../SignIn";
 import { GateCard, HANDOFF_LABEL, HANDOFF_PATH, ToHandoff } from "./GateCard";
 import { Handoff } from "./Handoff";
@@ -25,7 +26,7 @@ import { Handoff } from "./Handoff";
 // /verify is the one exception, and only on an account already signed in (see gateNeedsSession).
 
 const field = `mt-1 w-full ${FIELD}`;
-const label = `mt-3 block ${SETTINGS_HEADING}`;
+const label = `mt-3 block ${FIELD_LABEL}`;
 
 // Marked on every field: a marker on one alone would read as the rest being optional.
 function FieldLabel({ htmlFor, children }: { htmlFor: string; children: string }): ReactNode {
@@ -367,7 +368,7 @@ function Register({ state }: { state: GateState }): ReactNode {
               type="checkbox"
               checked={accepted}
               onChange={(event) => setAccepted(event.target.checked)}
-              className="mt-0.5 h-4 w-4 shrink-0 accent-fg"
+              className={`mt-0.5 ${CHECKBOX}`}
             />
             <span>
               I agree to

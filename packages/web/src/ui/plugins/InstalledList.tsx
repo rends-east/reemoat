@@ -1,4 +1,4 @@
-import { ChevronRight, Upload } from "lucide-react";
+import { Upload } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { CATALOGUE_PATHS, isNewer, readCatalogue, type CatalogueEntry } from "../../catalogue";
 import type { MachineId } from "../../ids";
@@ -11,9 +11,10 @@ import { consentBroken, ConsentBrokenError } from "../../plugins";
 import { navigate } from "../../router";
 import type { AppState } from "../../store";
 import type { PluginSummary } from "../../wire";
-import { Badge, Button, DangerButton, Empty, Icon, SETTINGS_HEADING, SETTINGS_SECTION } from "../bits";
+import { Badge, Button, DangerButton, Empty, SETTINGS_HEADING, SETTINGS_SECTION } from "../bits";
 import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
 import { MachineInstalls } from "./MachineInstalls";
+import { Group, LinkRow } from "../kit/List";
 import { useCatalogue } from "./MarketList";
 
 /** Plugins gathered across machines by plugin; configuration stays per machine, on the plugin's page. */
@@ -28,13 +29,11 @@ export function InstalledList({ state, base }: { state: AppState; base: string |
       {rows.length === 0 ? (
         <Empty>Nothing is installed on any of your machines yet.</Empty>
       ) : (
-        <ul className="flex flex-col gap-2">
+        <Group>
           {rows.map((row) => (
-            <li key={row.id}>
-              <InstalledRow state={state} row={row} entry={catalogue.find((one) => one.id === row.id) ?? null} />
-            </li>
+            <InstalledRow key={row.id} state={state} row={row} entry={catalogue.find((one) => one.id === row.id) ?? null} />
           ))}
-        </ul>
+        </Group>
       )}
 
       <section className={rows.length === 0 ? "" : SETTINGS_SECTION}>
@@ -69,20 +68,13 @@ function InstalledRow({ state, row, entry }: { state: AppState; row: Row; entry:
   const behind = entry !== null && versions.some((version) => isNewer(entry.version, version));
 
   return (
-    <button
+    <LinkRow
+      title={row.name}
+      value={versions.join(", ")}
+      badge={behind && entry !== null ? <Badge tone="strong">{entry.version} available</Badge> : undefined}
+      subline={whereText(state, row)}
       onClick={() => navigate(marketEntryPath(row.id))}
-      className="tap press flex w-full min-h-14 items-center gap-3 rounded-lg border border-edge bg-surface px-3 py-2.5 text-left hover:border-edge-strong"
-    >
-      <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          <span className="min-w-0 truncate text-sm font-medium">{row.name}</span>
-          <span className="shrink-0 text-xs text-muted">{versions.join(", ")}</span>
-          {behind && entry !== null && <Badge tone="strong">{entry.version} available</Badge>}
-        </span>
-        <span className="block truncate text-2xs text-muted">{whereText(state, row)}</span>
-      </span>
-      <Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />
-    </button>
+    />
   );
 }
 

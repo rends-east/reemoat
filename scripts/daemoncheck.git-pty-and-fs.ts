@@ -136,7 +136,7 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     });
 
     const client = await AcpClient.launch(
-      { id: "kimi", displayName: "fake", command: "fake", args: [], env: {}, authHint: "" },
+      { id: "kimi", displayName: "fake", command: "fake", args: [], env: {}, authHint: "", inSessionCwd: false },
       agent.process as never,
       // No auth method: a real id sends an authenticate the fake agent never answers, stalling on AUTHENTICATE_TIMEOUT_MS.
       { ...options, authMethod: null },

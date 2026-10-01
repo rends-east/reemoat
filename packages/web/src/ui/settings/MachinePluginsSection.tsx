@@ -1,23 +1,57 @@
 import type { ReactNode } from "react";
 import type { MachineId } from "../../ids";
+import { daemonRead } from "../../machine";
 import { MACHINE_GONE } from "../../plugins";
+import { navigate } from "../../router";
+import { settingsPath } from "../../settings";
 import type { AppState } from "../../store";
-import { Empty } from "../bits";
-import { PluginList } from "./PluginsPanel";
+import { Button, Empty, NotReachable, Spinner } from "../bits";
+import { PluginInstall, PluginList } from "./PluginsPanel";
 
-/** Per-machine plugin state only; each plugin's settings live on its own page, and reachability is stated by `MachineSection`. */
-export function MachinePluginsSection({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
+/** Per-machine plugin state only, on a screen of its own; each plugin's settings live on its own page (Q3.459). */
+export function MachinePluginsList({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
 
   if (machine === null) {
-    // Reads `state.machines` itself, so it owes the absent case an answer.
-    return <Empty>{MACHINE_GONE}</Empty>;
+    // The chevron leads back to a machine that is gone as well, so the way out to the list is drawn here (Q3.415).
+    return (
+      <Empty
+        action={
+          <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
+            All machines
+          </Button>
+        }
+      >
+        {MACHINE_GONE}
+      </Empty>
+    );
   }
 
-  return (
-    <div className="mt-3">
-      {/* Keyed on the machine: `usePlugins` has no late-write gate, so a stale listing could send Remove to the wrong daemon. */}
-      <PluginList key={machineId} machineId={machineId} />
-    </div>
-  );
+  // A machine not yet asked is a wait; only offline earns the unreachable sentence.
+  const read = daemonRead(machine.reach);
+  if (read === "asking") {
+    return (
+      <Empty>
+        <span className="inline-flex items-center gap-2">
+          <Spinner /> Checking whether {machine.name} is reachable…
+        </span>
+      </Empty>
+    );
+  }
+  if (read === "unreachable") {
+    return (
+      <Empty failed>
+        <NotReachable machine={machine} />
+      </Empty>
+    );
+  }
+
+  // Keyed on the machine: `usePlugins` has no late-write gate, so a stale listing could send Remove to the wrong daemon.
+  return <PluginList key={machineId} machineId={machineId} />;
+}
+
+export function PluginInstallScreen({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
+  const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
+  if (machine === null) return <Empty>{MACHINE_GONE}</Empty>;
+  return <PluginInstall key={machineId} machineId={machineId} />;
 }

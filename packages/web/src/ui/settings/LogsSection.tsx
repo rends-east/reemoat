@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { daemonLog, daemonState, inNativeShell } from "../../native";
-import { Button, Empty, SETTINGS_HEADING, Spinner } from "../bits";
-import { copyText } from "../clipboard";
-import { toast } from "../Toast";
+import { Empty } from "../bits";
+import { CopyButton } from "../kit/CopyButton";
+import { Group } from "../kit/List";
+import { Pending } from "../kit/Status";
 
 const LOG_POLL_MS = 2_000;
 
@@ -50,54 +51,36 @@ export function LogsSection(): ReactNode {
   }, [lines]);
 
   return (
-    // No padding: `Settings.tsx` already pads the column.
-    <div>
-      <section>
-        <div className="flex items-baseline gap-2">
-          <h2 className={SETTINGS_HEADING}>This computer&rsquo;s daemon</h2>
-          {lines.length > 0 && <span className="text-2xs text-faint">last {lines.length} lines</span>}
+    // `still`: the box holds output to read, not a control, so it takes the hairline.
+    <Group
+      title="This computer’s daemon"
+      count={lines.length > 0 ? `last ${lines.length} lines` : undefined}
+      action={lines.length > 0 ? <CopyButton value={lines.join("\n")} label="the daemon’s output" /> : undefined}
+      still
+    >
+      {!native ? (
+        <Empty>The daemon&rsquo;s output is on the computer it runs on. Open Reemoat there to read it.</Empty>
+      ) : !read ? (
+        <div className="px-4">
+          <Pending>Reading the daemon’s output…</Pending>
         </div>
-
-        <div className="mt-3">
-          {!native ? (
-            <Empty>The daemon&rsquo;s output is on the computer it runs on. Open Reemoat there to read it.</Empty>
-          ) : !read ? (
-            <Spinner />
-          ) : lines.length === 0 ? (
-            <Empty failed={status === "exited"}>{nothingHere(status, stranger)}</Empty>
-          ) : (
-            <>
-              <pre
-                ref={paneRef}
-                onScroll={(event) => {
-                  following.current = followsTail(event.currentTarget);
-                }}
-                className="max-h-[60vh] overflow-auto overscroll-contain rounded-md border border-edge bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80"
-              >
-                {lines.join("\n")}
-              </pre>
-              <div className="mt-2 flex items-center gap-2">
-                <Button
-                  onClick={() => {
-                    void copyText(lines.join("\n")).then((ok) => {
-                      toast(ok ? "ok" : "error", ok ? "Copied." : "Could not copy.");
-                    });
-                  }}
-                >
-                  Copy
-                </Button>
-                {/* No Clear: an empty ring tells `host_daemon_state` nothing was ever started here. */}
-                <span className="text-2xs text-faint">{FOOTNOTE}</span>
-              </div>
-            </>
-          )}
-        </div>
-      </section>
-    </div>
+      ) : lines.length === 0 ? (
+        <Empty failed={status === "exited"}>{nothingHere(status, stranger)}</Empty>
+      ) : (
+        // No Clear: an empty ring tells `host_daemon_state` nothing was ever started here.
+        <pre
+          ref={paneRef}
+          onScroll={(event) => {
+            following.current = followsTail(event.currentTarget);
+          }}
+          className="max-h-[60vh] overflow-auto overscroll-contain rounded-lg p-3 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80"
+        >
+          {lines.join("\n")}
+        </pre>
+      )}
+    </Group>
   );
 }
-
-const FOOTNOTE = "A ring in memory, not a file — it starts empty at every launch.";
 
 /** Four states share one empty list, so the sentence comes from `status`; every one is about this server (Q7.148). */
 function nothingHere(status: string | null, stranger: boolean): string {

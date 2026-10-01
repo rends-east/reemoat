@@ -14,6 +14,10 @@ await import("./webcheck.decision-surfaces.js");
 await import("./webcheck.command-menu-and-browser.js");
 await import("./webcheck.chips-and-tail.js");
 await import("./webcheck.tail-subagents-and-runs.js");
+await import("./webcheck.peer-messages.js");
+await import("./webcheck.nicknames-and-mentions.js");
+await import("./webcheck.agent-links.js");
+await import("./webcheck.permissions.js");
 await import("./webcheck.transcript-refusals-and-composer.js");
 await import("./webcheck.interrupted-and-spawn-routes.js");
 await import("./webcheck.history-and-cursor.js");
@@ -47,6 +51,7 @@ await import("./webcheck.model-list.js");
 await import("./webcheck.local-route.js");
 await import("./webcheck.e2ee.js");
 await import("./webcheck.typography.js");
+await import("./webcheck.kit.js");
 await import("./webcheck.theme.js");
 
 finish();

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { probeText } from "../stall.js";
 
 /** The built-in harnesses only, never what a machine offers (see HarnessCatalogue); sweeps against AGENT_LOGIN rely on that. Q6.106, Q4.114. */
-export const AGENT_IDS = ["claude", "kimi", "codex", "opencode", "grok"] as const;
+export const AGENT_IDS = ["claude", "kimi", "codex", "opencode", "grok", "cursor"] as const;
 
 export type BuiltinAgentId = (typeof AGENT_IDS)[number];
 
@@ -48,6 +48,10 @@ export interface AgentLaunchConfig {
   args: string[];
   env: NodeJS.ProcessEnv;
   authHint: string;
+  /** Spawned in the session's cwd: cursor reads its rules, skills, commands and MCP config off the process's own (Q6.115). */
+  inSessionCwd: boolean;
+  /** Where the harness puts MCP headers on a command line and expands `${VAR}` in them: the reemoat bearer is spawned into this variable instead (Q2.236). */
+  mcpBearerEnv?: string;
 }
 
 /** installable is true only for a built-in's missing CLI, the one absence deploy/agents.sh repairs; auto-resume defers on nothing else. */
@@ -79,10 +83,16 @@ export const SESSION_SCOPED_ENV = [
   "CODEX_SANDBOX",
   "CODEX_SANDBOX_NETWORK_DISABLED",
   "CODEX_THREAD_ID",
+  "CURSOR_AGENT",
+  "CURSOR_CONVERSATION_ID",
+  "CURSOR_REQUEST_ID",
 ];
 
 /** Stripped from agent spawns as hygiene, not confinement: the agent runs as this uid. */
 export const DAEMON_ENV_PREFIX = "REEMOAT_";
+
+/** Added after agentEnv(), so the agent keeps it; the prefix keeps it from the agents of any daemon that agent starts. */
+export const MCP_BEARER_ENV = "REEMOAT_MCP_BEARER";
 
 export function agentEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -96,6 +106,9 @@ export function agentEnv(): NodeJS.ProcessEnv {
 /** claude's session flag, reachable only through _meta.claudeCode.options on session open, so changing it means reopening the session. */
 export const ULTRACODE_SETTING = "ultracode";
 
+/** Claude Code's own way to find other sessions, withdrawn from every claude session: it never lists what this daemon runs (Q2.242). */
+export const CLAUDE_WITHDRAWN_PEER_TOOLS: readonly string[] = ["ListAgents"];
+
 /** undefined rather than an empty object, so the request carries no _meta key at all. */
 export function sessionMetaFor(
   agent: string,
@@ -103,14 +116,22 @@ export function sessionMetaFor(
 ): Record<string, unknown> | undefined {
   // grok keeps its question tool whatever the client declares, so withdrawing it is this key, measured (Q6.113).
   if (agent === "grok") return flags.elicitation ? undefined : { askUserQuestion: false };
-  if (agent !== "claude" || !flags.ultracode) return undefined;
-  return { claudeCode: { options: { settings: { [ULTRACODE_SETTING]: true } } } };
+  if (agent !== "claude") return undefined;
+  // Never settings for the withdrawal: the adapter drops its CLAUDE_MODEL_CONFIG settings whenever any are passed.
+  return {
+    claudeCode: {
+      options: {
+        ...(flags.ultracode ? { settings: { [ULTRACODE_SETTING]: true } } : {}),
+        disallowedTools: [...CLAUDE_WITHDRAWN_PEER_TOOLS],
+      },
+    },
+  };
 }
 
-/** The stream is explicit because codex answers its status on stderr. */
+/** The stream is explicit because codex answers its status on stderr; cursor's two answers are one on each (both). */
 export type LoginStatusProbe = {
   args: string[];
-  stream: "stdout" | "stderr";
+  stream: "stdout" | "stderr" | "both";
 } & ({ reads: "json" } | { reads: "text"; signedIn: RegExp; signedOut: RegExp });
 
 /** Fixed on purpose: no route can name a program to run. command is the CLI, not the ACP adapter resolveAgent resolves (Q4.114). */
@@ -199,6 +220,33 @@ export const AGENT_LOGIN: Record<
     executableEnv: null,
     credentialPath: ".grok/auth.json",
   },
+  cursor: {
+    command: "cursor-agent",
+    // --disable-auto-update leads every argv for grok's reason; the URL flow needs NO_OPEN_BROWSER (LOGIN_SPAWN_ENV).
+    args: ["--disable-auto-update", "login"],
+    interactiveStdin: false,
+    logoutArgs: ["--disable-auto-update", "logout"],
+    envNames: ["CURSOR_API_KEY"],
+    // Not `status`, which reads only a stored login and says "Not logged in" beside a working key; models asks the backend (Q6.116).
+    status: {
+      args: ["--disable-auto-update", "models"],
+      stream: "both",
+      reads: "text",
+      signedIn: /^[ \t]*(?:Available models|No models available for this account)\b/im,
+      signedOut: /^[ \t]*(?:Error: Authentication required|Authentication failed:)/im,
+    },
+    executableEnv: null,
+    // Linux only: macOS keeps the login in the keychain, where absence of this file proves nothing.
+    credentialPath: ".config/cursor/auth.json",
+  },
+};
+
+/** Harnesses whose model is given no question tool over ACP, so the reemoat MCP server offers ask_question (Q2.250). */
+export const QUESTION_TOOL_HARNESSES: readonly string[] = ["cursor"];
+
+/** Environment for the sign-in wizard alone: cursor's login opens a browser on this host unless told to print the URL. */
+export const LOGIN_SPAWN_ENV: Partial<Record<BuiltinAgentId, Readonly<Record<string, string>>>> = {
+  cursor: Object.freeze({ NO_OPEN_BROWSER: "1" }),
 };
 
 /** grok's own question timeout answers "declined" and tells the client nothing; the environment outranks the user's config (Q6.113). */
@@ -311,6 +359,8 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         command,
         args: [],
         env: agentEnv(),
+        inSessionCwd: false,
+        mcpBearerEnv: MCP_BEARER_ENV,
         authHint:
           "The Claude adapter uses the credentials of the `claude` CLI, and it is not signed in. " +
           "Run `claude setup-token` in a terminal on this machine and paste the token below — " +
@@ -334,6 +384,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         command,
         args: ["acp"],
         env: agentEnv(),
+        inSessionCwd: false,
         authHint:
           "Kimi is not logged in. Settings → Machines → Configure agent will run its device-code " +
           "login here, or `kimi login` in a terminal on this machine does the same thing; " +
@@ -360,6 +411,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         command,
         args: [],
         env: agentEnv(),
+        inSessionCwd: false,
         authHint:
           "The Codex adapter uses the credentials of the `codex` CLI, and it is not signed in. " +
           "Settings → Machines → Configure agent will run its device-code login here; " +
@@ -385,6 +437,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         command,
         args: ["acp"],
         env: agentEnv(),
+        inSessionCwd: false,
         authHint:
           "opencode refused this session. It needs no signing in — with nothing configured it " +
           "runs on OpenCode Zen's free models — so this is a model whose provider wants a key. " +
@@ -409,10 +462,35 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         // Never add --always-approve: it suppresses every permission request.
         args: ["--no-auto-update", "agent", "stdio"],
         env: { ...agentEnv(), ...GROK_SPAWN_ENV },
+        inSessionCwd: false,
         authHint:
           "Grok refused this session. Sign in with the wizard on this machine, or paste an xAI " +
           "API key under Settings → Machines → this machine. A key from console.x.ai is what " +
           "works where no browser can be opened.",
+      };
+    }
+    case "cursor": {
+      const command = findOnPath("cursor-agent");
+      if (!command) {
+        throw new AgentUnavailableError(
+          "cursor-agent not found on this daemon's PATH. deploy/agents.sh installs it " +
+            "(or `curl https://cursor.com/install -fsS | bash`).",
+          { installable: true },
+        );
+      }
+      return {
+        id,
+        displayName: "Cursor Agent CLI",
+        command,
+        // Never -f/--force: it is the one flag ACP reads that stops every permission request (Q6.115).
+        args: ["--disable-auto-update", "acp"],
+        env: agentEnv(),
+        inSessionCwd: true,
+        authHint:
+          "Cursor refused this session. Paste a Cursor API key under Settings → Machines → this " +
+          "machine, or sign in with the wizard there; `cursor-agent login` in a terminal on this " +
+          "machine does the same. On macOS the login lives in the keychain, which a shell reached " +
+          "over SSH cannot open.",
       };
     }
   }
@@ -432,6 +510,7 @@ function contributedLaunchConfig(harness: ContributedHarness): AgentLaunchConfig
     command,
     args: [...harness.args],
     env: agentEnv(),
+    inSessionCwd: false,
     authHint:
       harness.authHint ??
       `${harness.name} refused this session. It was added by the ${harness.pluginName} plugin, ` +

@@ -93,6 +93,20 @@ export const MAX_CONCURRENT_STREAMS = 256;
 
 export const MAX_STREAMS_PER_SUBJECT = 64;
 
+/** A link's own share of a tunnel, keyed on the link and never on its owner, so a looping agent cannot lock the owner out (Q7.150). */
+export const MAX_STREAMS_PER_LINK = 4;
+
+/** Every link's streams on one tunnel together; the owner's MAX_STREAMS_PER_SUBJECT is untouched by them. */
+export const MAX_LINK_STREAMS_PER_TUNNEL = 32;
+
+/** Channel opens per link: a burst, then one per LINK_CONNECT_REFILL_MS. The caller is a machine that never sleeps. */
+export const LINK_CONNECT_BURST = 20;
+
+export const LINK_CONNECT_REFILL_MS = 1_000;
+
+/** On a 421 wrong_relay: where the relay holding the machine's tunnel is reached. */
+export const RELAY_URL_HEADER = "x-reemoat-relay-url";
+
 /** Deliberately separate from CONNECTION_WINDOW_BYTES although the values match. */
 export const MAX_TUNNEL_BUFFERED_BYTES = 8 * 1024 * 1024;
 

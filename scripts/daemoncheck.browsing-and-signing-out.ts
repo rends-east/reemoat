@@ -397,7 +397,8 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
     const session = readFileSync(new URL("../src/session.ts", import.meta.url), "utf8");
     check("only a typed auth_required writes it", (session.match(/noteStartRefusal\(/g) ?? []).length, 2);
     check("on the start path", /session\/new: authentication required[\s\S]{0,900}noteStartRefusal\(/.test(session), true);
-    check("and on the resume path", /session\/resume: authentication required[\s\S]{0,600}noteStartRefusal\(/.test(session), true);
+    // Resume and load share one arm now, so the sentence names the verb that was sent.
+    check("and on the resume path", /session\/\$\{verb\}: authentication required[\s\S]{0,600}noteStartRefusal\(/.test(session), true);
     check("and the pump writes nothing", /noteStartRefusal/.test(code), false);
     // Anchored after a successful open: two calls in the catch arms would satisfy a count and mean the opposite.
     check("while a session that opens forgets it", (session.match(/forgetStartRefusal\(options\.agent\)/g) ?? []).length, 2);

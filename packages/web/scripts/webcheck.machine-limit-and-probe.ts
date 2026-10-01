@@ -256,6 +256,23 @@ process.stdout.write("\nthe machine limit\n");
     // Released, never latched: a latched guard would make Retry a no-op for setup until the app restarts.
     check("and it is released when the run settles", /\.finally\(\(\) => \{\s*this\.settingUp = null;/.test(store), true);
     check("the setup flow settles rather than assuming a spawn worked", /settleDaemon\(/.test(setUp), true);
+    // Q3.692: the host starts a set-up daemon at launch itself, so the page meets "starting" and must neither ignore it nor wait on it.
+    check(
+      "a daemon the host is already starting is waited out beside the other machines, not ahead of them",
+      [/if \(state\.status === "starting"\) \{\s*void this\.awaitLaunchStart\(state\.claimed\);\s*return;/.test(setUp), setUp.indexOf('state.status === "starting"') < setUp.indexOf('state.status !== "absent"')],
+      [true, true],
+    );
+    const launch = /private async awaitLaunchStart\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check(
+      "and the pill is told for exactly as long, with this computer's machine probed before it is untold",
+      [
+        /this\.patch\(\{ localDaemonStarting: true \}\)/.test(launch),
+        /await this\.settleDaemon\(claim\)/.test(launch),
+        launch.indexOf("this.resumeMachine(") > 0 && launch.indexOf("this.resumeMachine(") < launch.indexOf("localDaemonStarting: false"),
+        /finally \{\s*this\.patch\(\{ localDaemonStarting: false \}\);/.test(launch),
+      ],
+      [true, true, true, true],
+    );
     const settle = /private async settleDaemon\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     check("and the settle loop exists to be checked", settle.length > 0, true);
@@ -483,7 +500,29 @@ process.stdout.write("\nthe machine limit\n");
       [/setMinting\(/.test(machineSrc), /setRetiring\(/.test(machineSrc), /onAct=\{revoke\}/.test(machineSrc)],
       [true, false, true],
     );
-    check("and Retire's resting button is not locked by a mint", /rest=\{\s*<DangerButton icon=\{Trash2\} onClick=\{\(\) => setConfirming\(true\)\}>/.test(machineSrc), true);
+    check(
+      "and Retire rests as the screen's one danger row, named for the machine and not locked by a mint",
+      /rest=\{\s*<DangerRow label=\{`Retire \$\{machine\.name\}`\} icon=\{Trash2\} onClick=\{\(\) => setConfirming\(true\)\} \/>\s*\}/.test(machineSrc),
+      true,
+    );
+    check("in a row's box, its answers where the question ends", /align="end"\s*className=\{TWO_STEP_ROW\}/.test(machineSrc), true);
+    // The code is minted on the row's tap and handed to a leaf of its own, never drawn on this screen (Q3.428, Q3.549).
+    const setupScreen = machineSrc.slice(machineSrc.indexOf("export function SetupCodeScreen("));
+    check(
+      "a setup code is minted on the tap, then handed to its own screen",
+      [/handoff = \{\s*machineId: machine\.id,/.test(machineSrc), /navigate\(machineLeafPath\(machine\.id, "setup-code"\)\)/.test(machineSrc)],
+      [true, true],
+    );
+    check(
+      "which mints nothing, takes the code only for its own machine, clears it first and walks back without one",
+      [
+        /mintEnrollment\(/.test(setupScreen),
+        /held !== null && held\.machineId === machineId \? held : null/.test(setupScreen),
+        /useEffect\(\(\) => \{\s*clearHandoff\(\);\s*if \(minted === null\) back\(\);/.test(setupScreen),
+      ],
+      [false, true, true],
+    );
+    check("and the machine's screen draws no secret of its own", machineSrc.slice(0, machineSrc.indexOf("export function SetupCodeScreen(")).includes("<OneTimeSecret"), false);
     check("the retire toast carries no facts nothing can re-read", /enrollment code.*stopped working|expire within/.test(machineSrc), false);
     check("the unreachable line names the reason and stops", /so its systems, agents and plugins/.test(machineSrc), false);
     // `enrolledBy` is the only disclosure that somebody else enrolled a machine for you, so a client drawing nothing hides it.
@@ -504,7 +543,7 @@ process.stdout.write("\nthe machine limit\n");
       check("the fragment carries no punctuation of its own", /[.!?]$/.test(enrolledByText("casey") ?? ""), false);
     }
     // Nothing typed can hold a placement, so both surfaces are read off disk.
-    check("the list row draws it as a subline of its own", /\{provenance !== null && <span className="block truncate text-2xs text-muted">\{provenance\}<\/span>\}/.test(src), true);
+    check("the list row draws it as a line of its own", /detail=\{provenance \?\? undefined\}/.test(src), true);
     check("the machine's own screen draws it as a sentence", /\{provenance !== null && <p className="mt-1 text-xs text-muted">\{provenance\}\.<\/p>\}/.test(machineSrc), true);
     check(
       "both from the one shared sentence",
@@ -536,7 +575,7 @@ process.stdout.write("\nthe machine limit\n");
     check("and states the consequence before lowering", /machineLimitChangeNotice\(/.test(src), true);
     check(
       "and the decision to confirm is that function's answer",
-      /consequence\s*===\s*null\s*\?/.test(src) && /consequence\s*=\s*dirty\s*\?\s*machineLimitChangeNotice\(/.test(src),
+      /consequence\s*===\s*null\s*(?:\?|\))/.test(src) && /consequence\s*=\s*dirty\s*\?\s*machineLimitChangeNotice\(/.test(src),
       true,
     );
     // Lowering undoes itself once raised again, so it is `TwoStep`'s plain act, never a `DangerButton`.
@@ -561,23 +600,34 @@ process.stdout.write("\nthe machine limit\n");
     );
     check("nor declares a keys count on the fleet row", /^\s*keys\?: number;/m.test(cpSrc), false);
     check("a failed user listing says so with Try again wired to refresh", /\{error !== null && \(\s*<Empty failed action=\{<Button size="sm" onClick=\{refresh\}>Try again<\/Button>\}>\s*\{error\}\s*<\/Empty>\s*\)\}/.test(src), true);
-    // One panel per row, as a union of one (Q1.631): the next panel is a member, never a boolean beside it.
-    check("the row's panels are one union, of one", /type RowPanel = "limit" \| null;/.test(src), true);
-    check("held in one state per row", (src.match(/useState<RowPanel>\(null\)/g) ?? []).length, 1);
-    check("and the one panel is gated on it", [/\{panel === "limit" && \(/.test(src), /panel === "keys"/.test(src)], [true, false]);
-    const adminBox = src.indexOf('type="checkbox"');
-    const createButton = src.indexOf('type="submit"');
-    check("the admin checkbox is drawn", adminBox >= 0, true);
+    // The row's one form is the machine limit (Q1.631), and it is a screen of its own rather than a panel under the row (Q3.549).
+    check("the row opens the machine limit on its own screen", /navigate\(userLimitPath\(user\.id\)\)/.test(src), true);
+    check(
+      "and nothing opens under the row, the limit's panel or a keys one",
+      [/useState<RowPanel>|type RowPanel/.test(src), /panel === "limit"|panel === "keys"/.test(src), /scrollIntoView/.test(src)],
+      [false, false, false],
+    );
+    // The switch precedes Create in DOM order, so tabbing reaches the choice before the button.
+    const create = src.slice(src.indexOf("function CreateUser("), src.indexOf("function MachineLimitPanel("));
+    const adminSwitch = create.search(/<SwitchRow\s+title="Admin"/);
+    const createButton = create.indexOf('type="submit"');
+    check("the admin choice is a switch, and no checkbox is left", [adminSwitch >= 0, /type="checkbox"/.test(src)], [true, false]);
     check("and so is Create", createButton >= 0, true);
-    check("and the checkbox comes first", adminBox >= 0 && createButton >= 0 && adminBox < createButton, true);
+    check("and the switch comes first", adminSwitch >= 0 && createButton >= 0 && adminSwitch < createButton, true);
     check("the grant sentence has left the screen", /cpctl admin grant/.test(src), false);
     check("and the empty arm is one somebody can reach", /Only you so far\./.test(src), true);
     check("and \"Nobody yet\" is not drawn over a list that always has you in it", /Nobody yet/.test(src), false);
-    // The panel's direction is measured on the tap, never taken from the index.
+    // RowMenu measures its direction at the tap; the screen holds none of its own, and nothing indexes one.
     check(
-      "the kebab's direction is measured, not indexed",
-      /menuPlacement\(/.test(src) && !/openUp/.test(src) && !/index/.test(src.slice(src.indexOf("setPlacement") - 200, src.indexOf("setPlacement") + 200)),
-      true,
+      "the kebab is the one settings rows share, with no direction of the screen's own",
+      [/<RowMenu label=\{`Actions for \$\{user\.name\}`\}>/.test(src), /menuPlacement\(|setPlacement\(|openUp/.test(src), /MoreHorizontal/.test(src)],
+      [true, false, false],
+    );
+    // Delete asks across the whole row: one cell spanning the fixed columns, so none of them reflows.
+    check(
+      "the people table has fixed columns, and a row asking to delete spans all of them",
+      [/<table className=\{`\$\{TABLE\} table-fixed`\}>/.test(src), /<td colSpan=\{3\}/.test(src), (src.match(/<col\b/g) ?? []).length],
+      [true, true, 3],
     );
   }
 
@@ -662,11 +712,11 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
   check("and the one that keeps an ellipsis has a word in front of it", /^probing…$/.test(reachText("probing", null)), true);
 
   // Every screen branches on the partition, and only `NotReachable` in `bits.tsx` composes the sentence.
-  // `MachinePluginsSection` is absent on purpose: its one caller says it for it.
   const REACH_SCREENS = [
     "ui/settings/MachineSystemsSection.tsx",
     "ui/settings/MachineAgentsSection.tsx",
     "ui/settings/MachineSection.tsx",
+    "ui/settings/MachinePluginsSection.tsx",
     "ui/AgentBuilder.tsx",
   ] as const;
   const asksTheBoolean: string[] = [];
@@ -706,13 +756,14 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
     check("and the full stop is the default ending", /tail = "\."/.test(body), true);
   }
   {
-    const plugins = stripComments(
-      readFileSync(new URL("../src/ui/settings/MachinePluginsSection.tsx", import.meta.url), "utf8"),
+    // The plugin list is a screen of its own now, so it says reachability itself; the machine's page only links to it.
+    const machinePage = stripComments(
+      readFileSync(new URL("../src/ui/settings/MachineSection.tsx", import.meta.url), "utf8"),
     );
     check(
-      "the section whose caller says it for it does not say it twice",
-      [/daemonRead\(/.test(plugins), /is not reachable right now/.test(plugins), /NotReachable/.test(plugins)],
-      [false, false, false],
+      "and no screen mounts the plugin list under a sentence of its own, so it is said once",
+      [/<PluginList\b/.test(machinePage), /<MachinePluginsSection\b/.test(machinePage), /machineListPath\(machineId, "plugins"\)/.test(machinePage)],
+      [false, false, true],
     );
   }
 
@@ -825,7 +876,16 @@ process.stdout.write("\na sign-in that is not offered\n");
     ],
   );
 
-  check("the command is rendered inside the credential slot", /howTo !== null && editable && <CommandLine/.test(panel), true);
+  {
+    // The slot's editable arm is its form; the saved-key row that nothing typed can help carries no command.
+    const slot = panel.slice(panel.indexOf("function CredentialSlot("), panel.indexOf("function loginKey("));
+    const savedRow = slot.slice(slot.indexOf("if (!editable) {"), slot.indexOf("<form"));
+    check(
+      "the command is rendered inside the credential slot, on its form and never on a saved key's row",
+      [savedRow.length > 0, /howTo !== null && <CommandLine/.test(slot.slice(slot.indexOf("<form"))), /CommandLine/.test(savedRow)],
+      [true, true, false],
+    );
+  }
   check("and only on the slot that command actually fills", /slot\.envName === "CLAUDE_CODE_OAUTH_TOKEN"/.test(panel), true);
   check("and only where the wizard cannot run", /login\.blocked === "interactive_pty"/.test(panel), true);
   check("naming the command the CLI really has", /"claude setup-token"/.test(panel), true);
@@ -861,10 +921,68 @@ process.stdout.write("\na sign-in that is not offered\n");
   }
   check("and its width is left alone", /max-w-80/.test(panel), false);
 
-  // Remove's target reaches 10px past its face, so it keeps an extra 4px where the row tightens to an 8px gap.
-  check("the field and Save sit closer", /mt-3 flex gap-2/.test(panel), true);
-  check("and Remove carries the room its own target needs", /tone="destructive"[\s\S]{0,220}className="ml-1"/.test(panel), true);
+  check("the field and Save sit closer", /<div className="flex gap-2">\s*<input/.test(panel), true);
   check("with Save wide enough to hold its label", /min-w-20/.test(panel), true);
+}
+
+// It clears the key and relaunches the agent's open chats, so it is Destroy something's control, not a ghost ✕ (design-system.md).
+process.stdout.write("\nremoving a saved key asks first\n");
+{
+  const panel = stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8"));
+  const slot = panel.slice(panel.indexOf("function CredentialSlot("), panel.indexOf("function loginKey("));
+  const asks = slot.indexOf("<TwoStep");
+  const twoStep = asks < 0 ? "" : slot.slice(asks, asks + slot.slice(asks).search(/^\s*\/>/m));
+  const savedRow = slot.slice(slot.indexOf("if (!editable) {"), slot.indexOf("<form"));
+  const form = slot.slice(slot.indexOf("<form"));
+  check("the slot and its one confirmation were found", [slot.length > 0, twoStep.length > 0, (slot.match(/<TwoStep\b/g) ?? []).length], [true, true, 1]);
+  check("no icon button is left to remove a key in one tap", [/<IconButton\b/.test(slot), /icon=\{X\}/.test(panel)], [false, false]);
+  check(
+    "the act is the primitive's danger act, named for the key, and waits on the daemon",
+    [
+      /act=\{\{ label: "Remove", danger: true, icon: Trash2, ariaLabel: `Remove the \$\{label\.name\}` \}\}/.test(twoStep),
+      /onAct=\{remove\}/.test(twoStep),
+      /disabled=\{busy \|\| daemon === undefined\}/.test(twoStep),
+      /question=\{<>Remove the \{label\.name\} from this machine\?<\/>\}/.test(twoStep),
+      /consequence=\{`Open \$\{harnessName\(agent\)\} chats restart without it\.`\}/.test(twoStep),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "and the removal holds the slot's busy, so Save is refused while it is out",
+    /const remove = \(\): Promise<void> \| undefined => \{\s*if \(daemon === undefined\) return undefined;\s*setBusy\(true\);\s*return daemon\s*\.clearCredential\(agent\.id, slot\.envName\)[\s\S]*?\.finally\(\(\) => setBusy\(false\)\);\s*\};/.test(slot),
+    true,
+  );
+  check(
+    "on the form, a danger row of its own under the field, never beside Save",
+    [
+      /removal\(\s*<DangerRow label=\{`Remove the \$\{label\.name\}`\} icon=\{Trash2\} disabled=\{busy\} onClick=\{\(\) => setConfirming\(true\)\} \/>/.test(form),
+      form.indexOf("removal(") > form.indexOf("</Field>"),
+    ],
+    [true, true],
+  );
+  check(
+    "on a saved key's row, a danger button that names the key, and armed the question spans the row",
+    [
+      /<DangerButton\s+icon=\{Trash2\}\s+size="sm"\s+ariaLabel=\{`Remove the \$\{label\.name\}`\}\s+disabled=\{busy\}\s+onClick=\{\(\) => setConfirming\(true\)\}\s*>/.test(savedRow),
+      /if \(confirming\) \{\s*return \(\s*<tr[^>]*>\s*<td colSpan=\{2\} className=\{TD\}>\s*\{removal\(null\)\}/.test(savedRow),
+    ],
+    [true, true],
+  );
+  check(
+    "whose table fixes its columns, so an armed row reflows nothing under it",
+    /<table className=\{`\$\{TABLE\} table-fixed`\}>\s*<colgroup>\s*<col \/>\s*<col className="w-32" \/>\s*<\/colgroup>/.test(panel),
+    true,
+  );
+  const bits = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  const list = stripComments(readFileSync(new URL("../src/ui/kit/List.tsx", import.meta.url), "utf8"));
+  const sm = /\bsm: "([^"]*)"/.exec(bits.slice(bits.indexOf("const BUTTON_SIZE = {")))?.[1] ?? "";
+  const control = /export const CONTROL = "([^"]*)";/.exec(bits)?.[1] ?? "";
+  const dangerRow = list.slice(list.indexOf("export function DangerRow("), list.indexOf("export const TWO_STEP_ROW"));
+  check(
+    "and both rests reach 44px under a finger",
+    [/\[@media\(pointer:coarse\)\]:min-h-11/.test(sm), /\[@media\(pointer:coarse\)\]:min-h-11/.test(control), /\$\{CONTROL\}/.test(dangerRow)],
+    [true, true, true],
+  );
 }
 
 process.stdout.write("\nimporting a codebase\n");

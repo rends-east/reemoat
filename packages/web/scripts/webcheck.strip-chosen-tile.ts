@@ -642,9 +642,9 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
   check("and the builder is the thing that remembers one", /rememberRemoval\(machineId, going\);/.test(builderSrc), true);
 
   check(
-    "Start is refused where nothing is chosen, in the button and again in the handler",
+    "Start is refused where nothing is chosen, or the nickname cannot be sent, in the button and again in the handler",
     [
-      /disabled=\{busy \|\| selected === null \|\| cwd === null \|\| picked === null\}/.test(footer),
+      /disabled=\{busy \|\| selected === null \|\| cwd === null \|\| picked === null \|\| nickname === null\}/.test(footer),
       /if \(picked === null\) \{\s*setError\("Choose an agent first\."\);/.test(newSessionSrc),
     ],
     [true, true],

@@ -35,6 +35,7 @@ home.
 | `kimi` 0.29.x, 2026-08-25 | absent | — | `-32601` |
 | `opencode` 1.18.23, 2026-08-25 | absent | — | `-32601` |
 | `grok` 1.0.40, 2026-09-21 | absent | — | no method |
+| `cursor-agent` 2026.09.28, from source | absent | — | `-32601` |
 
 opencode is the native side of **two** rows, publishes them in one list, and has
 no sign-in at all; `agent-catalogue.md` owns both consequences.

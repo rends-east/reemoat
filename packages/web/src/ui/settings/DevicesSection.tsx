@@ -6,7 +6,8 @@ import { errorText } from "../../http";
 import { hostDeviceKeyReset, inNativeShell } from "../../native";
 import { platformName } from "../../platform";
 import type { DeviceRecord } from "../../wire";
-import { Badge, Button, Empty, SETTINGS_HEADING, SETTINGS_SECTION, SkeletonRow, TwoStep, shortDuration } from "../bits";
+import { Badge, Button, Empty, SkeletonRow, TwoStep, shortDuration } from "../bits";
+import { EmptyRow, Group, TABLE, TD } from "../kit/List";
 import { toast } from "../Toast";
 
 /** Retires computers rather than sign-ins; a device with hasKey false cannot reach any machine and offers a re-key. */
@@ -39,8 +40,12 @@ export function DevicesSection(): ReactNode {
 
   return (
     <>
-      <section>
-        <h2 className={SETTINGS_HEADING}>Devices</h2>
+      <Group
+        title="In use"
+        count={!failed && rows !== null && limit !== null ? `${String(live.length)} of ${String(limit)}` : undefined}
+        // Keyed on === false: an older control plane omits hasKey, and absent is not refused.
+        footer={!failed && live.some((row) => row.hasKey === false) ? "No key: re-key from that device." : undefined}
+      >
         {rows === null && !failed && <SkeletonRow />}
         {failed && (
           <Empty
@@ -54,54 +59,39 @@ export function DevicesSection(): ReactNode {
             {CONTROL_PLANE_UNREACHABLE}
           </Empty>
         )}
-        {!failed && rows !== null && live.length === 0 && (
-          <p className="mt-1.5 text-xs text-muted">
-            No devices registered. The Reemoat app registers one when you sign in; a browser and an API key do not.
-          </p>
-        )}
-        {!failed && live.length > 0 && (
-          <div className="mt-2">
-            {live.map((row) => (
-              <DeviceRow key={row.id} row={row} onChanged={refresh} />
-            ))}
-          </div>
-        )}
-        {!failed && rows !== null && limit !== null && live.length > 0 && (
-          <p className="mt-2 text-2xs text-muted">
-            {`${String(live.length)} of ${String(limit)} allowed. Retiring one makes room straight away.`}
-          </p>
-        )}
-        {/* Keyed on === false: an older control plane omits hasKey, and absent is not refused. */}
-        {!failed && live.some((row) => row.hasKey === false) && (
-          <p className="mt-1.5 text-2xs text-muted">
-            A device with no key cannot reach your machines, and signing in again on it does not register one. Re-key it
-            from its own row, on that computer.
-          </p>
-        )}
-      </section>
+        {!failed && rows !== null && live.length === 0 && <EmptyRow>No devices yet.</EmptyRow>}
+        {!failed && live.length > 0 && <DeviceTable rows={live} onChanged={refresh} />}
+      </Group>
 
       {!failed && retired.length > 0 && (
-        <section className={SETTINGS_SECTION}>
-          <h2 className={SETTINGS_HEADING}>Recently retired</h2>
-          <div className="mt-2">
-            {retired.map((row) => (
-              <DeviceRow key={row.id} row={row} onChanged={refresh} />
-            ))}
-          </div>
-        </section>
+        <Group title="Recently retired">
+          <DeviceTable rows={retired} onChanged={refresh} />
+        </Group>
       )}
-
-      <section className={SETTINGS_SECTION}>
-        <h2 className={SETTINGS_HEADING}>What this covers</h2>
-        <p className="mt-1.5 text-xs text-muted">
-          An API key is not a sign-in, so nothing holding one appears here. Retire a key under API keys.
-        </p>
-        <p className="mt-1.5 text-xs text-muted">
-          Retiring a device ends its sign-ins at once. Work already open on one of your machines can carry on for a few
-          minutes before it stops.
-        </p>
-      </section>
     </>
+  );
+}
+
+/** Fixed columns: a row that arms its TwoStep spans both, and an auto layout would reflow the others under it. */
+function DeviceTable({
+  rows,
+  onChanged,
+}: {
+  rows: DeviceRecord[];
+  onChanged: () => Promise<DeviceRecord[] | null>;
+}): ReactNode {
+  return (
+    <table className={`${TABLE} table-fixed`}>
+      <colgroup>
+        <col />
+        <col className="w-44" />
+      </colgroup>
+      <tbody>
+        {rows.map((row) => (
+          <DeviceRow key={row.id} row={row} onChanged={onChanged} />
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -152,11 +142,60 @@ function DeviceRow({
     toast(refused ? "error" : "ok", rekeyToast(row.name, refused ? "refused" : "registered"));
   };
 
+  // Both acts share one TwoStep so arming one hides the other's button; armed, it takes the whole row.
+  const decision = (
+    <TwoStep
+      armed={confirming !== null}
+      onArm={(next) => {
+        if (!next) setConfirming(null);
+      }}
+      align="end"
+      question={confirming === "rekey" ? `Give ${row.name} a new key?` : `Retire ${row.name}?`}
+      consequence={
+        confirming === "rekey"
+          ? "The old key is given up first. This device keeps its place in the list."
+          : row.current
+            ? "This signs you out here. Sign in again to use this device."
+            : "Its sign-ins end now; open work stops within minutes."
+      }
+      act={
+        confirming === "rekey"
+          ? { label: "Re-key", ariaLabel: `Re-key ${row.name}` }
+          : { label: "Retire", danger: true, icon: Trash2, ariaLabel: `Retire ${row.name}` }
+      }
+      onAct={confirming === "rekey" ? rekey : retire}
+      onFailure={(cause) => toast("error", errorText(cause))}
+      // Retire stays last so a double tap lands on Cancel rather than the act.
+      rest={
+        <span className="ml-auto flex gap-2">
+          {rekeyable && (
+            <Button size="sm" onClick={() => setConfirming("rekey")}>
+              Re-key
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setConfirming("retire")}>
+            Retire
+          </Button>
+        </span>
+      }
+    />
+  );
+
+  if (confirming !== null) {
+    return (
+      <tr className="border-t border-edge first:border-t-0">
+        <td colSpan={2} className={TD}>
+          {decision}
+        </td>
+      </tr>
+    );
+  }
+
   return (
-    <div className="flex min-h-11 items-center gap-3 border-b border-edge/60 py-2 last:border-b-0">
-      <span className="min-w-0 flex-1">
+    <tr className="border-t border-edge first:border-t-0">
+      <td className={TD}>
         <span className="flex min-w-0 items-center gap-2">
-          <span className={`min-w-0 truncate text-sm font-medium ${retired ? "text-muted" : ""}`}>{row.name}</span>
+          <span className={`min-w-0 truncate font-medium ${retired ? "text-muted" : ""}`}>{row.name}</span>
           {/* One badge per row: retired, then no key, then this device. */}
           {retired ? (
             <span className="shrink-0">
@@ -174,7 +213,7 @@ function DeviceRow({
             )
           )}
         </span>
-        <span className="mt-0.5 block text-2xs text-muted">
+        <span className="block truncate text-2xs text-faint">
           {platformName(row.platform)}
           {" · "}
           {retired
@@ -185,49 +224,9 @@ function DeviceRow({
                 ? "never signed in"
                 : `last used ${shortDuration(Math.max(0, now - row.lastSeenAt))} ago`}
         </span>
-      </span>
-
-      {/* Both acts share one TwoStep so arming one hides the other's button. */}
-      {!retired && (
-        <span className="shrink-0">
-          <TwoStep
-            armed={confirming !== null}
-            onArm={(next) => {
-              if (!next) setConfirming(null);
-            }}
-            align="end"
-            question={confirming === "rekey" ? `Give ${row.name} a new key?` : `Retire ${row.name}?`}
-            consequence={
-              confirming === "rekey"
-                ? "The old key is given up first. This device keeps its place in the list."
-                : row.current
-                  ? "This signs you out here. Sign in again to use this device."
-                  : "Its sign-ins end. No other device is affected."
-            }
-            act={
-              confirming === "rekey"
-                ? { label: "Re-key", ariaLabel: `Re-key ${row.name}` }
-                : { label: "Retire", danger: true, icon: Trash2, ariaLabel: `Retire ${row.name}` }
-            }
-            onAct={confirming === "rekey" ? rekey : retire}
-            onFailure={(cause) => toast("error", errorText(cause))}
-            // Retire stays last so a double tap lands on Cancel rather than the act.
-            rest={
-              <>
-                {rekeyable && (
-                  <Button size="sm" onClick={() => setConfirming("rekey")}>
-                    Re-key
-                  </Button>
-                )}
-                <Button size="sm" onClick={() => setConfirming("retire")}>
-                  Retire
-                </Button>
-              </>
-            }
-          />
-        </span>
-      )}
-    </div>
+      </td>
+      <td className={`${TD} text-right`}>{!retired && decision}</td>
+    </tr>
   );
 }
 

@@ -39,6 +39,40 @@ process.stdout.write("\nconnection trouble is one pill at the bottom-left, never
     [null, null, null, null, null, null],
   );
   check("a machine this screen does not read is not its trouble", connectionTrouble(down("no_route"), { machines: ["laptop" as never], open: null }), null);
+  // Q3.692: at launch the page asks before the host's child has announced, so this computer's machine reads offline for a few seconds.
+  const launching = (starting: boolean) => ({ ...down("no_route"), localMachineId: "studio" as never, localDaemonStarting: starting });
+  check(
+    "this computer's daemon still starting is connecting rather than unreachable, on its tab and under All",
+    [connectionTrouble(launching(true), tab), connectionTrouble(launching(true), all)],
+    [
+      { kind: "connecting", e2ee: false },
+      { kind: "connecting", e2ee: false },
+    ],
+  );
+  check(
+    "and once the host has stopped starting it, the same offline machine is named again",
+    connectionTrouble(launching(false), tab),
+    { kind: "unreachable", names: ["studio"] },
+  );
+  check(
+    "while another machine the wire cannot reach is still named beside it",
+    connectionTrouble(
+      {
+        ...launching(true),
+        machines: [
+          machine("studio", { reach: "offline", offlineReason: "no_route", route: null }),
+          machine("laptop", { reach: "offline", offlineReason: "no_route", route: null }),
+        ],
+      },
+      { machines: ["studio" as never, "laptop" as never], open: null },
+    ),
+    { kind: "unreachable", names: ["laptop"] },
+  );
+  check(
+    "and a refusal on this computer's machine is still nobody's connection trouble",
+    connectionTrouble({ ...launching(true), machines: [machine("studio", { reach: "offline", offlineReason: "over_limit", route: null })] }, tab),
+    null,
+  );
   check(
     "the open conversation's machine is read whatever the list shows",
     connectionTrouble(down("no_route"), { machines: [], open: { machine: "studio" as never, stream: null } }),

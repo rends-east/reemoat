@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { check } from "./webcheck.env.js";
+import { check, report } from "./webcheck.env.js";
 import { snapshot } from "./webcheck.ws.js";
 import { openableHref } from "./webcheck.modules.js";
 import { stripComments } from "./webcheck.source.js";
@@ -526,6 +526,49 @@ process.stdout.write("\nthe question an agent asked\n");
       0,
     );
     check("and an ordinary tool call still is", plain.rows.map((row: any) => row.kind), ["tool"]);
+
+    // Q2.251: cursor's question, as its log holds it, draws as claude's does — the answered card and nothing else of the call.
+    const options = [{ id: "a", label: "All of them" }, { id: "b", label: "Claude" }];
+    const cursorAsk = [
+      ev(1, { type: "tool_call", toolCallId: "c1", title: "MCP: tool", kind: "other", status: "pending", locations: [], rawInput: {} }),
+      ev(2, { type: "tool_call_update", toolCallId: "c1", title: "reemoat: ask_question", status: null, locations: [], rawInput: { providerIdentifier: "reemoat", toolName: "ask_question", args: { title: "Agents", questions: [{ id: "q", prompt: "Which agent?", options }] } } }),
+      ev(3, { type: "permission_request", permissionId: null, toolCallId: "c1", title: "reemoat-ask_question: ask_question", options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }], decision: "allow-once" }),
+      ev(4, { type: "elicitation_request", elicitationId: "e1", toolCallId: "c1", message: "Agents" }),
+      ev(5, { type: "elicitation_resolved", elicitationId: "e1", toolCallId: "c1", message: "Agents", action: "accept", answers: [{ key: "question_0", label: "Which agent?", value: "All of them" }], by: "client" }),
+      ev(6, { type: "tool_call_update", toolCallId: "c1", title: null, status: "completed", locations: [], rawInput: null }),
+      ev(7, { type: "text", role: "agent", thought: false, text: "On it.", messageId: null }),
+    ];
+    const asked = buildTail(cursorAsk, [], 0);
+    check(
+      "cursor's ask_question draws as the answered card alone: no tool row, no daemon-answered permission",
+      asked.rows.map((row: any) => (row.kind === "event" ? row.stored.event.type : row.kind)),
+      ["elicitation_resolved", "text"],
+    );
+    check(
+      "and the card reads the question off the call, as claude's does",
+      (asked.rows[0] as any)?.asked?.map((one: any) => [one.question, one.value]),
+      [["Which agent?", "All of them"]],
+    );
+    const late = buildTail(
+      [
+        ...cursorAsk.slice(0, 6),
+        ev(7, { type: "prompt", text: "Answer to your ask_question:\nWhich agent? — All of them", attachments: null, from: null, answers: "e1" }),
+        ev(8, { type: "prompt", text: "and one more thing", attachments: null, from: null }),
+      ],
+      [],
+      0,
+    );
+    check(
+      "an answer sent as a message because the call could not wait is not drawn again as the person's own",
+      late.rows.map((row: any) => (row.kind === "event" ? row.stored.event.type : row.kind)),
+      ["elicitation_resolved", "prompt"],
+    );
+    const parked = buildTail(
+      [ev(1, { type: "tool_call", toolCallId: "t2", title: "Terminal", kind: "execute", status: "completed", locations: [], rawInput: null }), ev(2, { type: "permission_request", permissionId: null, toolCallId: "t2", title: "Run ls", options: [], decision: "allow-once" })],
+      [],
+      0,
+    );
+    check("while a permission the daemon answered on a call that asked nothing keeps its row", parked.rows.map((row: any) => row.kind), ["tool", "event"]);
   }
 
   const errorOf = (status: number, body: unknown, code = "http_409"): unknown =>
@@ -573,6 +616,73 @@ process.stdout.write("\nthe question an agent asked\n");
   check("while the anchor is still drawn as one", /<a\s+href=\{target\}/.test(componentMap), true);
 }
 
+process.stdout.write("\nwriting your own answer on a phone lets the other answers recede\n");
+{
+  // Q3.695: as Claude's client does — the rows fade once there are words in the box, under a finger only, and nothing is hidden or disabled.
+  const askCard = stripComments(readFileSync(new URL("../src/ui/AskCard.tsx", import.meta.url), "utf8"));
+  const elicitation = stripComments(readFileSync(new URL("../src/ui/ElicitationCard.tsx", import.meta.url), "utf8"));
+  const rows = /\{layout === "rows" && options\.length > 0 && \(([\s\S]*?)\)\}\s*\{extra\}/.exec(askCard)?.[1] ?? "";
+  report("the card's answer rows were found", rows.length > 100, `${rows.length} chars`);
+  check(
+    "they fade while somebody types, under a finger alone, and stay drawn and live",
+    [/\$\{typing \? "\[@media\(pointer:coarse\)\]:opacity-35" : ""\}/.test(rows), /\bhidden\b|pointer-events-none|disabled=\{typing/.test(rows), /<OptionRow key=\{option\.id\} option=\{option\} index=\{index\} disabled=\{busy\} \/>/.test(rows)],
+    [true, false, true],
+  );
+  check("and the extra fields, where the typing happens, are not faded with them", /opacity-35[\s\S]*\{extra\}/.test(askCard) && !/\{extra\}[^<]*opacity/.test(askCard), true);
+  check(
+    "the question card says it is typing only with the caret in a typed box and words in it",
+    [
+      /const typing = typeof typedValue === "string" && typedValue\.trim\(\)\.length > 0;/.test(elicitation),
+      /onFocusChange=\{\(on\) => setTypingIn\(on \? field\.key : null\)\}/.test(elicitation),
+      (elicitation.match(/onFocus=\{\(\) => onFocusChange\(true\)\}/g) ?? []).length,
+      (elicitation.match(/onBlur=\{\(\) => onFocusChange\(false\)\}/g) ?? []).length,
+      /typing=\{typing\}/.test(elicitation),
+    ],
+    [true, true, 2, 2, true],
+  );
+}
+
+process.stdout.write("\none answer of one is sent as it is tapped\n");
+{
+  // Q3.696: a pick answers the step unless the step has more to fill; several, or your own words, wait for Next or Submit.
+  const elicitation = stripComments(readFileSync(new URL("../src/ui/ElicitationCard.tsx", import.meta.url), "utf8"));
+  const askCard = stripComments(readFileSync(new URL("../src/ui/AskCard.tsx", import.meta.url), "utf8"));
+  const pick = elicitation.slice(elicitation.indexOf("const pickOne ="), elicitation.indexOf("const chosenValue ="));
+  report("the single pick was found", pick.length > 200, `${pick.length} chars`);
+  check(
+    "a single-select row goes through it, a multi-select row toggles as before",
+    [/: pickOne\(choice\.field\.key, option\.value\)/.test(elicitation), /multi\s*\?\s*write\(/.test(elicitation)],
+    [true, true],
+  );
+  check(
+    "it advances only when the step has nothing else to fill, and only past a step it answers",
+    [
+      /const pickAnswersStep = choice !== null && rest\.every\(\(field\) => displacedBy\(form, field\.key\)\.includes\(choice\.field\.key\)\);/.test(elicitation),
+      /if \(!pickAnswersStep\) return;/.test(pick),
+      /!stepAnswered\(form, index, fresh\.content\)/.test(pick),
+      /if \(!last\) setStep\(/.test(pick),
+      /else if \(fresh\.canSubmit\) respond\("accept", fresh\.content\);/.test(pick),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "and your own words stay in their box, switched off rather than erased",
+    [/setExcluded\(sessionKey, pending\.elicitationId, field\.key, true\)/.test(pick), /set\(field\.key, ""\)/.test(pick)],
+    [true, false],
+  );
+  check(
+    "the answer is read fresh from the store, never from this render's draft",
+    /elicitationAnswer\(form, draftFor\(sessionKey, pending\.elicitationId\), excludedFor\(sessionKey, pending\.elicitationId\)\)/.test(pick),
+    true,
+  );
+  // The owner's word: an answer that shrinks under the finger reads as a press that did not land.
+  // OptionRow and OptionButton by their own classes; AskAction (Next, Submit, Skip) keeps its press.
+  const rowsAndButtons = [...askCard.matchAll(/className=\{`tap( press)? relative flex min-h-11 (?:w-full items-start gap-2\.5|items-center gap-1\.5)/g)].map((m) => m[1] ?? "");
+  check("no answer row or answer button scales when pressed", rowsAndButtons, ["", ""]);
+  // A form's own answers too: a second choice in one step, and yes or no.
+  check("nor an answer inside a form", /\bpress\b/.test(elicitation), false);
+}
+
 process.stdout.write("\na question says how many of its answers you may pick\n");
 {
   // Comment-stripped for absence checks: both files argue in prose about the role they do not claim.
@@ -594,7 +704,7 @@ process.stdout.write("\na question says how many of its answers you may pick\n")
   check("and no radius creeps back onto the box", /rounded-sm/.test(markBody), false);
   check(
     "filled, one is a tick and the other a dot",
-    [/<Icon as=\{Check\}/.test(askCard), /h-1\.5 w-1\.5 rounded-full bg-ink/.test(askCard)],
+    [/<Icon as=\{Check\}/.test(askCard), /h-1\.5 w-1\.5 rounded-full bg-on-brand/.test(askCard)],
     [true, true],
   );
   check("and it is a ring rather than a border, so nothing reflows", /ring-1 ring-inset \$\{chosen/.test(askCard), true);

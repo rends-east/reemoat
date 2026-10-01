@@ -3,12 +3,40 @@ import type { Me } from "./wire";
 
 // Not in `router.ts`: webcheck cannot import that module, whose body touches `window`.
 
-export type SettingsSection = "account" | "devices" | "keys" | "machines" | "logs" | "server" | "email" | "users";
+export type SettingsSection =
+  | "account"
+  | "devices"
+  | "keys"
+  | "machines"
+  | "logs"
+  | "server"
+  | "email"
+  | "users";
 
 export type SettingsGroup = "server";
 
-/** Forms get their own address: nothing on a settings screen expands in place. */
-export type SettingsLeaf = "password" | "email" | "new-key";
+/** Forms and one-time secrets get their own address: nothing on a settings screen expands in place. */
+export type SettingsLeaf =
+  | "password"
+  | "email"
+  | "new-key"
+  | "machine-name"
+  | "setup-code"
+  | "plugin-install"
+  | "domains"
+  | "machine-limit"
+  | "provisioning-key"
+  | "smtp"
+  | "test-mail"
+  | "new-user"
+  | "user-limit"
+  | "routing-key";
+
+/** The leaves that hang off one machine; `machineLeafPath` builds them. A system's leaf needs the system too: `routingKeyPath`. */
+export type MachineLeaf = Extract<SettingsLeaf, "machine-name" | "setup-code" | "plugin-install">;
+
+/** A machine's own lists, each a screen between the machine and the card it opens. */
+export type SettingsList = "systems" | "plugins";
 
 /** Machine-level fields are set only under `machines`; `parseSettingsRoute` enforces that, not the type. */
 export interface SettingsRoute {
@@ -20,73 +48,30 @@ export interface SettingsRoute {
   /** Under `…/signin/` only a harness no provider speaks for (Q3.540); under `…/agents/` any harness (Q3.640). */
   signin: string | null;
   leaf: SettingsLeaf | null;
+  /** Present only on a machine's list, so a route written out by hand needs no new key. */
+  list?: SettingsList;
+  /** Present only on a Users leaf about one person. */
+  userId?: string;
 }
 
 export interface SectionSpec {
   id: SettingsSection;
   title: string;
-  blurb: string | null;
   adminOnly: boolean;
+  /** Listed only where this app can run a daemon; a browser or a phone has none to read. */
+  hostOnly: boolean;
   group: SettingsGroup | null;
 }
 
 export const SECTION_SPECS: readonly SectionSpec[] = [
-  {
-    id: "account",
-    title: "Account",
-    blurb: null,
-    adminOnly: false,
-    group: null,
-  },
-  {
-    id: "devices",
-    title: "Devices",
-    blurb: null,
-    adminOnly: false,
-    group: null,
-  },
-  {
-    id: "keys",
-    title: "API keys",
-    blurb: null,
-    adminOnly: false,
-    group: null,
-  },
-  {
-    id: "machines",
-    title: "Machines",
-    blurb: null,
-    adminOnly: false,
-    group: null,
-  },
-  {
-    id: "logs",
-    title: "Logs",
-    blurb: null,
-    adminOnly: false,
-    group: null,
-  },
-  {
-    id: "server",
-    title: "Server",
-    blurb: "Registration, limits, provisioning.",
-    adminOnly: true,
-    group: "server",
-  },
-  {
-    id: "email",
-    title: "Email",
-    blurb: "SMTP and delivery.",
-    adminOnly: true,
-    group: "server",
-  },
-  {
-    id: "users",
-    title: "Users",
-    blurb: "People and their access.",
-    adminOnly: true,
-    group: "server",
-  },
+  { id: "account", title: "Account", adminOnly: false, hostOnly: false, group: null },
+  { id: "devices", title: "Devices", adminOnly: false, hostOnly: false, group: null },
+  { id: "keys", title: "API keys", adminOnly: false, hostOnly: false, group: null },
+  { id: "machines", title: "Machines", adminOnly: false, hostOnly: false, group: null },
+  { id: "logs", title: "Logs", adminOnly: false, hostOnly: true, group: null },
+  { id: "server", title: "Server", adminOnly: true, hostOnly: false, group: "server" },
+  { id: "email", title: "Email", adminOnly: true, hostOnly: false, group: "server" },
+  { id: "users", title: "Users", adminOnly: true, hostOnly: false, group: "server" },
 ];
 
 /** Drawn by the pane at a bare `/settings`, never parsed into. Must never be an `adminOnly` section. */
@@ -107,60 +92,56 @@ export function parseSettingsRoute(
   decode: (part: string) => string = (part) => part,
 ): SettingsRoute {
   const section = parseSettingsSection(segments[0]);
-  if (section === "account" || section === "keys") {
-    const leaf = leafOf(section, segments[1]);
-    return { section, machineId: null, system: null, signin: null, agents: false, leaf };
+  const bare: SettingsRoute = { section, machineId: null, system: null, signin: null, agents: false, leaf: null };
+  if (section === "users") {
+    if (segments[1] === "new") return { ...bare, leaf: "new-user" };
+    const user = segments[1] === undefined ? "" : decode(segments[1]);
+    const named = user.length > 0 && user.length <= MAX_USER_ID_CHARS;
+    return segments[2] === "limit" && named ? { ...bare, leaf: "user-limit", userId: user } : bare;
   }
-  if (section !== "machines" || segments[1] === undefined) {
-    return { section, machineId: null, system: null, signin: null, agents: false, leaf: null };
+  if (section !== "machines") return { ...bare, leaf: leafOf(section, segments[1]) };
+  if (segments[1] === undefined) return bare;
+  const at: SettingsRoute = { ...bare, machineId: machineId(decode(segments[1])) };
+  const named = segments[3] === undefined ? "" : decode(segments[3]);
+  switch (segments[2]) {
+    case "agents":
+      return { ...at, signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null, agents: true };
+    case "signin":
+      return { ...at, signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null };
+    case "name":
+      return { ...at, leaf: "machine-name" };
+    case "setup-code":
+      return { ...at, leaf: "setup-code" };
+    // A plugin's own settings live under /plugins (Q3.459), so a stale `…/plugins/:id` falls to the machine's list.
+    case "plugins":
+      return segments[3] === "install" ? { ...at, leaf: "plugin-install" } : { ...at, list: "plugins" };
+    case "systems":
+      if (named.length === 0 || named.length > MAX_SYSTEM_ID_CHARS) return { ...at, list: "systems" };
+      return segments[4] === "routing-key" ? { ...at, system: named, leaf: "routing-key" } : { ...at, system: named };
+    default:
+      return at;
   }
-  const machine = machineId(decode(segments[1]));
-  if (segments[2] === "agents") {
-    const named = segments[3] === undefined ? "" : decode(segments[3]);
-    return {
-      section,
-      machineId: machine,
-      system: null,
-      signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
-      agents: true,
-      leaf: null,
-    };
-  }
-  if (segments[2] === "signin") {
-    const named = segments[3] === undefined ? "" : decode(segments[3]);
-    return {
-      section,
-      machineId: machine,
-      system: null,
-      signin: named.length > 0 && named.length <= MAX_HARNESS_ID_CHARS ? named : null,
-      agents: false,
-      leaf: null,
-    };
-  }
-  if (segments[2] !== "systems" || segments[3] === undefined) {
-    return { section, machineId: machine, system: null, signin: null, agents: false, leaf: null };
-  }
-  const wanted = decode(segments[3]);
-  return {
-    section,
-    machineId: machine,
-    system: wanted.length > 0 && wanted.length <= MAX_SYSTEM_ID_CHARS ? wanted : null,
-    signin: null,
-    agents: false,
-    leaf: null,
-  };
 }
 
-function leafOf(section: "account" | "keys", segment: string | undefined): SettingsLeaf | null {
-  if (section === "account") {
-    if (segment === "password") return "password";
-    if (segment === "email") return "email";
-    return null;
+function leafOf(section: SettingsSection | null, segment: string | undefined): SettingsLeaf | null {
+  switch (section) {
+    case "account":
+      return segment === "password" ? "password" : segment === "email" ? "email" : null;
+    case "keys":
+      return segment === "new" ? "new-key" : null;
+    case "server":
+      return segment === "domains" || segment === "machine-limit" || segment === "provisioning-key" ? segment : null;
+    case "email":
+      return segment === "smtp" ? "smtp" : segment === "test" ? "test-mail" : null;
+    default:
+      return null;
   }
-  return segment === "new" ? "new-key" : null;
 }
 
-export function settingsLeafPath(leaf: SettingsLeaf): string {
+/** The leaves a section holds directly; the machine, system and user ones need an id and have builders of their own. */
+export type SectionLeaf = Exclude<SettingsLeaf, MachineLeaf | "user-limit" | "routing-key">;
+
+export function settingsLeafPath(leaf: SectionLeaf): string {
   switch (leaf) {
     case "password":
       return `${settingsPath("account")}/password`;
@@ -168,8 +149,45 @@ export function settingsLeafPath(leaf: SettingsLeaf): string {
       return `${settingsPath("account")}/email`;
     case "new-key":
       return `${settingsPath("keys")}/new`;
+    case "domains":
+    case "machine-limit":
+    case "provisioning-key":
+      return `${settingsPath("server")}/${leaf}`;
+    case "smtp":
+      return `${settingsPath("email")}/smtp`;
+    case "test-mail":
+      return `${settingsPath("email")}/test`;
+    case "new-user":
+      return `${settingsPath("users")}/new`;
   }
 }
+
+export function machineLeafPath(machine: MachineId, leaf: MachineLeaf): string {
+  switch (leaf) {
+    case "machine-name":
+      return `${settingsPath("machines", machine)}/name`;
+    case "setup-code":
+      return `${settingsPath("machines", machine)}/setup-code`;
+    case "plugin-install":
+      return `${machineListPath(machine, "plugins")}/install`;
+  }
+}
+
+/** Under the system's card, so the chevron and a finished form both walk back to it. */
+export function routingKeyPath(machine: MachineId, system: string): string {
+  return `${settingsPath("machines", machine, system)}/routing-key`;
+}
+
+export function machineListPath(machine: MachineId, list: SettingsList): string {
+  return `${settingsPath("machines", machine)}/${list}`;
+}
+
+export function userLimitPath(user: string): string {
+  return `${settingsPath("users")}/${encodeURIComponent(user)}/limit`;
+}
+
+/** Control-plane user ids are at most 64 characters (`accounts::is_user_id`). */
+const MAX_USER_ID_CHARS = 64;
 
 const MAX_SYSTEM_ID_CHARS = 64;
 
@@ -206,9 +224,16 @@ export function settingsUp(
   origin: string | null = null,
 ): { path: string; withinNav: boolean } | null {
   if (route.section === null) return null;
+  const machine = route.section === "machines" ? route.machineId : null;
   // `typeof`, not `!== null`: the drivers build partial routes by hand.
   if (typeof route.leaf === "string") {
-    return { path: settingsPath(route.section), withinNav: false };
+    if (machine === null) return { path: settingsPath(route.section), withinNav: false };
+    if (route.leaf === "routing-key" && typeof route.system === "string") {
+      return { path: settingsPath("machines", machine, route.system), withinNav: false };
+    }
+    return route.leaf === "plugin-install"
+      ? { path: machineListPath(machine, "plugins"), withinNav: false }
+      : { path: settingsPath("machines", machine), withinNav: false };
   }
   if (
     route.agents &&
@@ -218,34 +243,48 @@ export function settingsUp(
   ) {
     return { path: origin, withinNav: false };
   }
-  if (route.section === "machines" && route.machineId !== null) {
+  if (machine !== null) {
     if (route.agents && typeof route.signin === "string") {
-      return { path: agentStripPath(route.machineId), withinNav: false };
+      return { path: agentStripPath(machine), withinNav: false };
     }
-    if (route.system !== null || route.signin !== null || route.agents) {
-      return { path: settingsPath("machines", route.machineId), withinNav: false };
+    // A system's card and a harness's sign-in hang off the Sign-ins list, one level up rather than two (Q3.415).
+    if (route.system !== null || route.signin !== null) {
+      return { path: machineListPath(machine, "systems"), withinNav: false };
+    }
+    if (route.agents || typeof route.list === "string") {
+      return { path: settingsPath("machines", machine), withinNav: false };
     }
     return { path: settingsPath("machines"), withinNav: false };
   }
   return { path: settingsPath(), withinNav: true };
 }
 
+const LEAF_TITLES: Record<SettingsLeaf, string> = {
+  password: "Password",
+  email: "Your email",
+  "new-key": "New key",
+  "machine-name": "Name",
+  "setup-code": "Setup code",
+  "plugin-install": "Install a plugin",
+  domains: "Allowed domains",
+  "machine-limit": "Machine limit",
+  "provisioning-key": "Provisioning key",
+  smtp: "SMTP",
+  "test-mail": "Send a test",
+  "new-user": "Add a person",
+  "user-limit": "Machine limit",
+  "routing-key": "Routing key",
+};
+
 /** Non-null exactly when `settingsUp` is, and never equal to its parent's title: `settingsUpLabel` depends on that (Q3.427, Q3.433). */
 export function settingsPaneTitle(route: SettingsRoute): string | null {
   if (route.section === null) return null;
-  if (route.leaf === "password") return "Password";
-  if (route.leaf === "email") return "Your email";
-  if (route.leaf === "new-key") return "New key";
-  if (route.section === "machines" && route.machineId !== null && route.agents) {
-    return typeof route.signin === "string" ? "Setup" : "Agents";
-  }
-  if (route.section === "machines" && route.machineId !== null && route.system !== null) {
-    return "Sign-in";
-  }
-  if (route.section === "machines" && route.machineId !== null && route.signin !== null) {
-    return "Sign-in";
-  }
+  if (typeof route.leaf === "string") return LEAF_TITLES[route.leaf];
   if (route.section === "machines" && route.machineId !== null) {
+    if (route.agents) return typeof route.signin === "string" ? "Setup" : "Agents";
+    if (route.system !== null || route.signin !== null) return "Sign-in";
+    if (route.list === "systems") return "Sign-ins";
+    if (route.list === "plugins") return "Plugins";
     return "Machine settings";
   }
   return SECTION_SPECS.find((spec) => spec.id === route.section)?.title ?? null;
@@ -261,25 +300,31 @@ export function settingsUpLabel(route: SettingsRoute, origin: string | null = nu
   );
 }
 
-export function visibleSections(me: Me | null): readonly SectionSpec[] {
-  return SECTION_SPECS.filter((spec) => !spec.adminOnly || me?.isAdmin === true);
+/** `canHostDaemon` is the shell's (`state.host`); absent, as in a browser, it is false. */
+export function visibleSections(me: Me | null, canHostDaemon = false): readonly SectionSpec[] {
+  return SECTION_SPECS.filter(
+    (spec) => (!spec.adminOnly || me?.isAdmin === true) && (!spec.hostOnly || canHostDaemon),
+  );
 }
 
 /** This only hides; the control plane's `requireAdmin` is the guard. */
-export function sectionAllowed(section: SettingsSection, me: Me | null): boolean {
-  return visibleSections(me).some((spec) => spec.id === section);
+export function sectionAllowed(section: SettingsSection, me: Me | null, canHostDaemon = false): boolean {
+  return visibleSections(me, canHostDaemon).some((spec) => spec.id === section);
 }
 
-/** Leaves the address alone. Says "admins" because `visibleSections` filters on `adminOnly` alone. */
+/** Leaves the address alone, and speaks only for an admin section: a hidden Logs falls to the index without a sentence. */
 export function refusedSectionText(section: SettingsSection | null, me: Me | null): string | null {
-  if (section === null || sectionAllowed(section, me)) return null;
-  const title = SECTION_SPECS.find((spec) => spec.id === section)?.title ?? null;
-  return title === null ? null : `${title} is for admins, and this account is not one.`;
+  const spec = SECTION_SPECS.find((one) => one.id === section);
+  if (spec === undefined || !spec.adminOnly || me?.isAdmin === true) return null;
+  return `${spec.title} is for admins, and this account is not one.`;
 }
 
-export function navRows(me: Me | null): readonly { spec: SectionSpec; heading: SettingsGroup | null }[] {
+export function navRows(
+  me: Me | null,
+  canHostDaemon = false,
+): readonly { spec: SectionSpec; heading: SettingsGroup | null }[] {
   const seen = new Set<SettingsGroup>();
-  return visibleSections(me).map((spec) => {
+  return visibleSections(me, canHostDaemon).map((spec) => {
     if (spec.group === null || seen.has(spec.group)) return { spec, heading: null };
     seen.add(spec.group);
     return { spec, heading: spec.group };

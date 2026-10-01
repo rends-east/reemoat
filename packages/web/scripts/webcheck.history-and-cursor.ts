@@ -723,6 +723,18 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   check("and so is the column, which owns the space between messages", /className=\{`sel-root \$\{COLUMN\}/.test(eventList), true);
   check("and the zero-width space it replaced is not still there", /content: "\\200B"/.test(strip(css)), false);
 
+  // Q3.691: a double-click is the engine's word, as in Claude's client, and a triple-click the span rather than the paragraph — and so is every
+  // click after it, where WebKit's fourth took the paragraph back; measured in a WKWebView.
+  const inlineCode = markdown.slice(markdown.indexOf("function InlineCode"), markdown.indexOf("function CodeBlock"));
+  const wholeSpan = markdown.slice(markdown.indexOf("function selectWholeSpan"), markdown.indexOf("function InlineCode"));
+  report("the inline code and its triple-click were found", inlineCode.length > 200 && wholeSpan.length > 100, `${inlineCode.length} and ${wholeSpan.length} chars`);
+  check("a triple-click on inline code selects the whole span", /<code\s+onMouseDown=\{selectWholeSpan\}/.test(inlineCode), true);
+  check(
+    "from the third click on, in place of the paragraph, so a double-click is still the engine's word",
+    [/event\.detail < 3/.test(wholeSpan), /event\.detail !== [23]/.test(wholeSpan), /event\.preventDefault\(\)/.test(wholeSpan), /range\.selectNodeContents\(event\.currentTarget\)/.test(wholeSpan)],
+    [true, false, true, true],
+  );
+
   // CSS fit-content cannot hug wrapped text, so the width is computed from the line rects.
   check("a bubble is as wide as its longest line plus its chrome", hugWidth([120, 300.2, 80], 28), 329);
   check("and the rounding is up, never down", hugWidth([300.05], 0), 301);
@@ -769,8 +781,8 @@ process.stdout.write("\na person's message, exactly as they sent it\n");
 {
   // Drawn, never parsed: `1)` stays text rather than a list marker nobody can select, `**x**` stays asterisks (Q3.646).
   const bubble = stripComments(srcFile("ui/Bubble.tsx"));
-  const drawn = /<div className="([^"]*)">\{text\}<\/div>/.exec(bubble)?.[1] ?? "";
-  check("the bubble draws the text itself, as one node", drawn !== "", true);
+  const drawn = /<div className="([^"]*)">\s*<MentionText text=\{text\} mentions=\{mentions\} \/>\s*<\/div>/.exec(bubble)?.[1] ?? "";
+  check("the bubble draws the text itself, with only its @names made links (Q3.682)", drawn !== "", true);
   check(
     "keeping every space and line break, and wrapping a long token",
     ["select-text", "whitespace-pre-wrap", "wrap-anywhere"].filter((name) => !drawn.split(" ").includes(name)),

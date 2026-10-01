@@ -13,6 +13,7 @@ import { generateKeyPairSync, randomBytes, scryptSync } from "node:crypto";
 import { jwkThumbprint, parseClaims, publicKeyToJwk, signToken, x25519Jwk, type TokenClaims } from "../src/token.js";
 import { describeError } from "../src/http.js";
 import { RelayTunnel } from "../src/relay/tunnel.js";
+import { peerEndToEnd } from "./relaycheck.peer-e2e.js";
 import { SignedTokenVerifier } from "../src/auth.js";
 import {
   FRAME,
@@ -32,6 +33,11 @@ import {
   CLOSE_TUNNEL_SUPERSEDED,
   CONNECTION_WINDOW_BYTES,
   MAX_STREAMS_PER_SUBJECT,
+  MAX_STREAMS_PER_LINK,
+  MAX_LINK_STREAMS_PER_TUNNEL,
+  LINK_CONNECT_BURST,
+  LINK_CONNECT_REFILL_MS,
+  RELAY_URL_HEADER,
   MAX_TUNNEL_BUFFERED_BYTES,
   MAX_TUNNEL_MESSAGE_BYTES,
   RECONNECT_MAX_MS,
@@ -68,8 +74,10 @@ import {
   dbRelayView,
   releaseRelayId,
 } from "../packages/control-plane/src/relay/presence.js";
-import { RelayTunnel as EndpointTunnel, TunnelRegistry } from "../packages/control-plane/src/relay/registry.js";
+import { RelayTunnel as EndpointTunnel, TunnelRegistry, type StreamLimiter } from "../packages/control-plane/src/relay/registry.js";
+import { LinkConnectBudget } from "../packages/control-plane/src/relay/proxy.js";
 import {
+  activePublicKeys,
   ensureSigningKey,
   issueTunnelKey,
   keyIdFor,
@@ -79,8 +87,9 @@ import {
   pruneEnrollmentCodes,
   retireSigningKey,
 } from "../packages/control-plane/src/keys.js";
-import { KEY_TOUCH_INTERVAL_MS, createControlPlaneApp } from "../packages/control-plane/src/app.js";
+import { KEY_TOUCH_INTERVAL_MS, LINK_TOKEN_TTL_SECONDS, createControlPlaneApp } from "../packages/control-plane/src/app.js";
 import { applyControlPlaneSchema } from "../packages/control-plane/src/store.js";
+import { machineMessaging } from "../packages/control-plane/src/permissions.js";
 import {
   DEVICE_PUBLIC_KEY_CHARS,
   DEVICE_REVOKED_RETENTION_MS,
@@ -1379,7 +1388,7 @@ process.stdout.write("\none caller's share of a tunnel\n");
 
   // An `error` listener on every stream: teardown emits `ECONNRESET`, and an unhandled `error` is an uncaught exception.
   const hold = (subject: string): ClientHttp2Stream | null => {
-    const stream = shared.open(subject, STREAM_ENCRYPTION_NOISE_IK);
+    const stream = shared.open(subject, { key: subject, max: MAX_STREAMS_PER_SUBJECT, link: false }, STREAM_ENCRYPTION_NOISE_IK);
     stream?.on("error", () => {});
     return stream;
   };
@@ -1397,6 +1406,103 @@ process.stdout.write("\none caller's share of a tunnel\n");
 
   shared.close(1000, "done");
   session.destroy();
+}
+
+// A link's streams have a key and a ceiling of their own: keyed on the owner, a looping agent would lock them out of their machine (Q7.150).
+
+process.stdout.write("\na link's share of a tunnel\n");
+{
+  const nowhere = new Duplex({
+    read() {},
+    write(_chunk, _encoding, done) {
+      done();
+    },
+  });
+  const session = h2connect("http://tunnel", { createConnection: () => nowhere });
+  session.on("error", () => {});
+  const shared = new EndpointTunnel("m_linkshare", Date.now(), RELAY_PROTOCOL_VERSION, session, () => session.destroy());
+
+  const person = (subject: string): StreamLimiter => ({ key: subject, max: MAX_STREAMS_PER_SUBJECT, link: false });
+  const link = (id: string): StreamLimiter => ({ key: `lnk:${id}`, max: MAX_STREAMS_PER_LINK, link: true });
+  // The subject is the owner's on every stream, as the relay stamps it: what is counted is the limiter, never the header.
+  const hold = (limiter: StreamLimiter): ClientHttp2Stream | null => {
+    const stream = shared.open("u_linkowner", limiter, STREAM_ENCRYPTION_NOISE_IK);
+    stream?.on("error", () => {});
+    return stream;
+  };
+  const opened = (streams: (ClientHttp2Stream | null)[]): number => streams.filter((stream) => stream !== null).length;
+
+  const first = Array.from({ length: MAX_STREAMS_PER_LINK }, () => hold(link("lk_first")));
+  check("a link may hold its whole share", opened(first), MAX_STREAMS_PER_LINK);
+  check("and is refused the one past it", hold(link("lk_first")), null);
+
+  const owners = Array.from({ length: MAX_STREAMS_PER_SUBJECT }, () => hold(person("u_linkowner")));
+  check(
+    "while the person the link was minted by still holds every stream of their own",
+    opened(owners),
+    MAX_STREAMS_PER_SUBJECT,
+  );
+  const second = hold(link("lk_second"));
+  report("and another link is unaffected by the first being full", second !== null, "lk_second got a stream");
+
+  // A link's share at a time until the tunnel refuses, so the refusal is the tunnel's; the loop runs past the ceiling
+  // rather than to it, so the count it stopped at is a measurement and a ceiling too high or too low both show.
+  const links: (ClientHttp2Stream | null)[] = [...first, second];
+  let granted = opened(links);
+  let refusedAfter: number | null = null;
+  for (let n = 0; refusedAfter === null && n <= MAX_LINK_STREAMS_PER_TUNNEL; n += 1) {
+    for (let i = 0; refusedAfter === null && i < MAX_STREAMS_PER_LINK; i += 1) {
+      const stream = hold(link(`lk_fill_${n}`));
+      if (stream === null) refusedAfter = granted;
+      else {
+        links.push(stream);
+        granted += 1;
+      }
+    }
+  }
+  check("every link together is held to one ceiling per tunnel", refusedAfter, MAX_LINK_STREAMS_PER_TUNNEL);
+  check("so a link with none of its own share spent is refused past it", hold(link("lk_late")), null);
+  report("while a person still gets a stream on the same tunnel", hold(person("u_someone_else")) !== null, "not counted");
+
+  links.at(-1)?.close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  report("and a closed link stream gives the tunnel's slot back", hold(link("lk_late")) !== null, "lk_late got one");
+
+  shared.close(1000, "done");
+  session.destroy();
+}
+
+// Per link, on the relay's own clock: the caller is a machine that never sleeps.
+
+process.stdout.write("\na link's connect budget\n");
+{
+  const budget = new LinkConnectBudget();
+  const burst = Array.from({ length: LINK_CONNECT_BURST }, () => budget.take("lnk:lk_a", 0));
+  check("a link may open a burst of channels at once", burst.filter(Boolean).length, LINK_CONNECT_BURST);
+  check("and is refused the one past it", budget.take("lnk:lk_a", 0), false);
+  check("while another link spends its own", budget.take("lnk:lk_b", 0), true);
+  check(
+    "one more is allowed a refill interval later, and only one",
+    [budget.take("lnk:lk_a", LINK_CONNECT_REFILL_MS), budget.take("lnk:lk_a", LINK_CONNECT_REFILL_MS)],
+    [true, false],
+  );
+  const refilled = Array.from({ length: LINK_CONNECT_BURST + 1 }, () =>
+    budget.take("lnk:lk_a", LINK_CONNECT_REFILL_MS * (LINK_CONNECT_BURST + 1)),
+  );
+  check("and the whole burst after long enough, never more", refilled.filter(Boolean).length, LINK_CONNECT_BURST);
+
+  const stepped = new LinkConnectBudget();
+  for (let i = 0; i < LINK_CONNECT_BURST - 1; i += 1) stepped.take("lnk:lk_c", 10_000);
+  check("a clock stepped backwards drains nothing that was left", stepped.take("lnk:lk_c", 5_000), true);
+  check("and refills nothing either", stepped.take("lnk:lk_c", 5_000), false);
+
+  // Swept every 256 takes: a bucket that has refilled is the same as none, so the map holds only links that are spending.
+  const swept = new LinkConnectBudget();
+  for (let i = 0; i < 300; i += 1) swept.take(`lnk:lk_many_${i}`, 0);
+  check("buckets are kept while they are short", swept.size, 300);
+  const later = LINK_CONNECT_REFILL_MS * LINK_CONNECT_BURST;
+  for (let i = 300; i < 512; i += 1) swept.take("lnk:lk_hot", later);
+  check("and forgotten once refilled, leaving the one still spending", swept.size, 1);
 }
 
 // The relay reads live rows, so a revocation takes effect immediately rather than at token expiry.
@@ -1760,7 +1866,7 @@ process.stdout.write("\nwhat a stream is stamped with\n");
   session.on("error", () => {});
 
   const held = new EndpointTunnel("m_stamp", Date.now(), NEGOTIATED, session, () => session.destroy());
-  const stream = held.open("u_someone", STREAM_ENCRYPTION_NOISE_IK);
+  const stream = held.open("u_someone", { key: "u_someone", max: MAX_STREAMS_PER_SUBJECT, link: false }, STREAM_ENCRYPTION_NOISE_IK);
   // Awaited on the response: an unref'd timer lets the process exit before the assertion runs.
   await new Promise<void>((resolve) => {
     if (stream === null) return resolve();
@@ -4783,10 +4889,25 @@ process.stdout.write("\nmachines somebody owns\n");
     {
       const doomed = withKey("doomed");
       writeMachineLimit(db, doomed.id, 7, "u_admin");
+      await send("/v1/me/permissions", {
+        method: "PUT",
+        headers: doomed.headers,
+        body: JSON.stringify({ agentMessaging: false }),
+      });
+      check(
+        "a user's messaging switch is a row of their own",
+        Number(db.prepare("SELECT COUNT(*) AS n FROM account_permissions WHERE user_id = ?").get(doomed.id)?.["n"]),
+        1,
+      );
       await send(`/v1/admin/users/${doomed.id}`, { method: "DELETE", headers: admin.headers });
       check(
         "deleting a user takes their machine-limit row with them",
         Number(db.prepare("SELECT COUNT(*) AS n FROM user_machine_limits WHERE user_id = ?").get(doomed.id)?.["n"]),
+        0,
+      );
+      check(
+        "and their messaging switch",
+        Number(db.prepare("SELECT COUNT(*) AS n FROM account_permissions WHERE user_id = ?").get(doomed.id)?.["n"]),
         0,
       );
     }
@@ -6115,6 +6236,7 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
     const WRITTEN: Record<string, number> = {
       two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
       eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
+      seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
     };
     const stated = /There are \*\*([a-z]+)\*\*/.exec(appSource)?.[1] ?? "";
     report("spendWrite's docblock still states its count as a word", stated in WRITTEN, `"${stated}"`);
@@ -6729,6 +6851,878 @@ process.stdout.write("\na daemon that takes the stream and never answers\n");
   parked.destroy();
   wedgedServer.close();
 }
+
+// A link is one person's two machines: a 90-day capability minted by the target's Authority, bound to the source's pinned key (Q7.150).
+
+process.stdout.write("\nlinks between machines one person owns\n");
+{
+  const app = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+  const send = (path: string, init: RequestInit = {}): Promise<Response> => Promise.resolve(app.request(path, init));
+  const outcome = async (response: Response): Promise<[number, string]> => [
+    response.status,
+    ((await response.json()) as { error?: { code?: string } }).error?.code ?? "ok",
+  ];
+
+  const person = (name: string): { id: string; headers: Record<string, string> } => {
+    const id = newId("u");
+    const key = newApiKey();
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, ?, 0, ?)").run(id, name, now);
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId("ak"),
+      id,
+      key.prefix,
+      key.hash,
+      now,
+    );
+    return { id, headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" } };
+  };
+  const owner = person("linker");
+  const grantee = person("linkgrantee");
+  const loner = person("linkloner");
+
+  // Acquisition order is the rank order the limit reads, so each machine's place below is deliberate.
+  let acquired = now;
+  const own = (
+    who: string,
+    label: string,
+    options: { enrolled?: boolean; key?: string | null; revoked?: boolean; granted?: boolean } = {},
+  ): string => {
+    const id = newId("m");
+    acquired += 1;
+    db.prepare("INSERT INTO machines (id, name, created_at, enrolled_at, revoked_at) VALUES (?, ?, ?, ?, ?)").run(
+      id,
+      `${label}-${id}`,
+      acquired,
+      options.enrolled === false ? null : acquired,
+      options.revoked === true ? acquired : null,
+    );
+    if (options.key !== null) {
+      setMachineKey(db, id, options.key ?? Buffer.from(generateStaticKey().publicKey).toString("base64url"));
+    }
+    db.prepare("INSERT INTO machine_owners (machine_id, user_id, label, created_at) VALUES (?, ?, ?, ?)").run(
+      id,
+      who,
+      label,
+      acquired,
+    );
+    if (options.granted !== false) {
+      db.prepare("INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?)").run(
+        who,
+        id,
+        "session:read session:write machine:admin",
+        acquired,
+      );
+    }
+    return id;
+  };
+
+  const sourceStatic = generateStaticKey();
+  const targetStatic = generateStaticKey();
+  const keyOf = (pair: { publicKey: Uint8Array }): string => Buffer.from(pair.publicKey).toString("base64url");
+  const target = own(owner.id, "link-target", { key: keyOf(targetStatic) });
+  const offline = own(owner.id, "link-offline");
+  const source = own(owner.id, "link-source", { key: keyOf(sourceStatic) });
+  const unenrolled = own(owner.id, "link-unenrolled", { enrolled: false });
+  const keyless = own(owner.id, "link-keyless", { key: null });
+  const revoked = own(owner.id, "link-revoked", { revoked: true });
+  const ungranted = own(owner.id, "link-ungranted", { granted: false });
+  const newest = own(owner.id, "link-newest");
+  own(loner.id, "alone");
+  db.prepare("INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?)").run(
+    grantee.id,
+    source,
+    "session:read session:write machine:admin",
+    now,
+  );
+
+  interface MintedLink {
+    id: string;
+    token: string;
+    expiresAt: number;
+    target: { id: string; name: string; key: string; relayUrl: string | null };
+  }
+  const mintLinks = async (machine: string, who = owner): Promise<Response> =>
+    send(`/v1/machines/${machine}/links`, { method: "POST", headers: who.headers });
+  const linksFrom = async (machine: string): Promise<MintedLink[]> =>
+    ((await (await mintLinks(machine)).json()) as { links: MintedLink[] }).links;
+  const payloadOf = (token: string): Record<string, unknown> =>
+    JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as Record<string, unknown>;
+
+  check("a machine somebody only holds a grant on is not theirs to link from", await outcome(await mintLinks(source, grantee)), [
+    404,
+    "machine_not_found",
+  ]);
+  check("nor is one that does not exist", await outcome(await mintLinks("m_nothing")), [404, "machine_not_found"]);
+  check("a machine that has not enrolled has nothing to link", await outcome(await mintLinks(unenrolled)), [
+    409,
+    "machine_not_enrolled",
+  ]);
+  check("nor does one with no pinned key, since a link is bound to it", await outcome(await mintLinks(keyless)), [
+    409,
+    "machine_key_missing",
+  ]);
+  check("a revoked one is refused as revoked", await outcome(await mintLinks(revoked)), [403, "machine_revoked"]);
+  check(
+    "an owner with one machine is answered an empty list rather than a refusal",
+    await (await mintLinks(`alone`, loner)).json(),
+    { links: [], messaging: true, isolated: false, policyAt: 0 },
+  );
+
+  const minted = await linksFrom(source);
+  check(
+    "a link is minted to every other machine that is enrolled, keyed, live, granted and within the limit",
+    minted.map((link) => link.target.id),
+    [target, offline, newest],
+  );
+  // Each is owned by the caller, so leaving it out is the eligibility filter's doing and not ownership's.
+  check(
+    "and not to one unenrolled, keyless, revoked or with no grant for its owner",
+    [unenrolled, keyless, revoked, ungranted].filter((id) => minted.some((link) => link.target.id === id)),
+    [],
+  );
+  check(
+    "each target named as its owner names it, with the key it must answer as",
+    minted[0]?.target,
+    { id: target, name: "link-target", key: keyOf(targetStatic), relayUrl },
+  );
+  check("and a link id of its own shape", minted.every((link) => /^lk_[0-9a-f]{16}$/.test(link.id)), true);
+
+  const claims = payloadOf(minted[0]?.token ?? "");
+  check("the capability carries these claims and no others", Object.keys(claims).sort(), [
+    "aud",
+    "cnf",
+    "exp",
+    "iat",
+    "iss",
+    "jti",
+    "lnk",
+    "nbf",
+    "scp",
+    "src",
+    "srcl",
+    "sub",
+  ]);
+  check("one scope, which no grant stores", claims["scp"], ["session:message"]);
+  check(
+    "bound to the source machine's pinned key, not to any device",
+    claims["cnf"],
+    { jkt: jwkThumbprint(x25519Jwk(sourceStatic.publicKey)) },
+  );
+  check(
+    "naming the link, the source and the source's label",
+    [claims["lnk"], claims["src"], claims["srcl"]],
+    [minted[0]?.id, source, "link-source"],
+  );
+  check("for the target, on the owner's authority", [claims["aud"], claims["sub"], claims["iss"]], [target, owner.id, ISSUER]);
+  check("living ninety days", [LINK_TOKEN_TTL_SECONDS, Number(claims["exp"]) - Number(claims["iat"])], [7_776_000, 7_776_000]);
+  report(
+    "from now",
+    Math.abs(Number(claims["iat"]) - Date.now() / 1000) < 5,
+    `iat ${String(claims["iat"])} against ${Math.floor(Date.now() / 1000)}`,
+  );
+  check("and the answer's expiresAt is the same instant", minted[0]?.expiresAt, Number(claims["exp"]) * 1000);
+
+  const rowsFor = (machine: string): number =>
+    Number(db.prepare("SELECT COUNT(*) AS n FROM machine_links WHERE source_machine_id = ?").get(machine)?.["n"] ?? -1);
+  const again = await linksFrom(source);
+  check("asking again finds the same links", again.map((link) => link.id), minted.map((link) => link.id));
+  check("rather than writing new rows", rowsFor(source), 3);
+  report(
+    "with a freshly minted capability for each",
+    again.every((link, i) => payloadOf(link.token)["jti"] !== payloadOf(minted[i]?.token ?? "")["jti"]),
+    "every jti differs",
+  );
+  check(
+    "and a machine is found by its owner's label as well as its id",
+    (await linksFrom("link-source")).map((link) => link.id),
+    minted.map((link) => link.id),
+  );
+
+  writeMachineLimit(db, owner.id, 7, "u_admin");
+  check(
+    "a target past its owner's limit is left out",
+    (await linksFrom(source)).map((link) => link.target.id),
+    [target, offline],
+  );
+  writeMachineLimit(db, owner.id, 2, "u_admin");
+  check("and a source past it is refused", await outcome(await mintLinks(source)), [403, "machine_over_limit"]);
+  clearMachineLimit(db, owner.id);
+
+  const fromTarget = await linksFrom(target);
+  check(
+    "the other machine links back with links of its own",
+    fromTarget.map((link) => link.target.id),
+    [offline, source, newest],
+  );
+  check(
+    "and nothing lists or removes a link one at a time any more: the machine's own switch does both (Q3.676)",
+    [
+      (await send(`/v1/machines/${source}/links`, { headers: owner.headers })).status,
+      (await send(`/v1/links/${fromTarget[0]?.id ?? "lk_none"}`, { method: "DELETE", headers: owner.headers })).status,
+    ],
+    [404, 404],
+  );
+
+  // Authorize alone first: every refusal of a link's own is the unknown machine's 404.
+  const authorizer = createRelayAuthorizer(db, ISSUER);
+  const toTarget = minted[0]!;
+  const toOffline = minted[1]!;
+  const forged = (overrides: Record<string, unknown>): string => {
+    const seconds = Math.floor(Date.now() / 1000);
+    const base: Record<string, unknown> = {
+      iss: ISSUER,
+      sub: owner.id,
+      aud: target,
+      jti: newId("t"),
+      iat: seconds,
+      nbf: seconds,
+      exp: seconds + 300,
+      scp: ["session:message"],
+      cnf: { jkt: jwkThumbprint(x25519Jwk(sourceStatic.publicKey)) },
+      lnk: toTarget.id,
+      src: source,
+      srcl: "link-source",
+    };
+    return signToken({ ...base, ...overrides } as unknown as TokenClaims, signing.kid, signing.privateKey);
+  };
+  const decided = (token: string): unknown => {
+    const answer = authorizer.authorize(token);
+    return answer.ok ? { subject: answer.subject, limiter: answer.limiter } : [answer.status, answer.code];
+  };
+
+  check("a link's capability is authorized on its own share, stamped with its owner", decided(toTarget.token), {
+    subject: owner.id,
+    limiter: { key: `lnk:${toTarget.id}`, max: MAX_STREAMS_PER_LINK, link: true },
+  });
+  check("while a person's is counted against theirs", decided(tokenFor(owner.id, target)), {
+    subject: owner.id,
+    limiter: { key: owner.id, max: MAX_STREAMS_PER_SUBJECT, link: false },
+  });
+  check("a link naming another source than its row's is refused as no machine", decided(forged({ src: offline })), [
+    404,
+    "machine_not_found",
+  ]);
+  // The owner holds a grant on `offline`, so the only thing wrong with this one is the row.
+  check("and one aimed at another target than its row's", decided(forged({ aud: offline })), [404, "machine_not_found"]);
+  check("and a link that does not exist", decided(forged({ lnk: "lk_0000000000000000" })), [404, "machine_not_found"]);
+  check(
+    "a link claim without its source is malformed rather than an ordinary capability",
+    [decided(forged({ src: undefined })), decided(forged({ srcl: undefined })), decided(forged({ lnk: 7 }))],
+    [
+      [401, "malformed_token"],
+      [401, "malformed_token"],
+      [401, "malformed_token"],
+    ],
+  );
+
+  db.prepare("UPDATE machines SET revoked_at = ? WHERE id = ?").run(Date.now(), source);
+  check("a source since revoked is refused as no machine", decided(toTarget.token), [404, "machine_not_found"]);
+  db.prepare("UPDATE machines SET revoked_at = NULL WHERE id = ?").run(source);
+
+  // `source` is the owner's third acquisition, so a limit of two switches it off and leaves the target on.
+  writeMachineLimit(db, owner.id, 2, "u_admin");
+  check("a source past its owner's limit is refused as no machine", decided(toTarget.token), [404, "machine_not_found"]);
+  check("while its owner still reaches the target", (decided(tokenFor(owner.id, target)) as { subject?: string }).subject, owner.id);
+  clearMachineLimit(db, owner.id);
+
+  db.prepare("UPDATE users SET disabled_at = ? WHERE id = ?").run(Date.now(), owner.id);
+  check("and a source whose owner is banned", decided(toTarget.token), [404, "machine_not_found"]);
+  db.prepare("UPDATE users SET disabled_at = NULL WHERE id = ?").run(owner.id);
+
+  // Through the shipped relay, to the target's real tunnel end, which checks `cnf` against the handshake.
+  const targetTunnel = RelayTunnel.start({
+    relayUrl,
+    tunnelKey: issueTunnelKey(db, target),
+    local: { host: "127.0.0.1", port: daemonPort },
+    staticKey: localStaticKey(targetStatic.secretKey),
+    verifier: new SignedTokenVerifier({
+      identity: { machineId: target, issuer: ISSUER, keys: activePublicKeys(db) },
+    }),
+  });
+  check("the target's tunnel is up", await waitForTunnel(target), true);
+  const asSource = { secretKey: sourceStatic.secretKey, remoteStatic: targetStatic.publicKey };
+
+  {
+    const before = proxied(target);
+    const through = await relayFetch("/sessions", toTarget.token, asSource);
+    check("a link's capability opens a channel to its target, from the source machine's key", through.status, 200);
+    report("down the target's tunnel", proxied(target) - before === 1, `${proxied(target) - before} streams`);
+    const stolen = await relayFetch("/sessions", toTarget.token, { remoteStatic: targetStatic.publicKey });
+    check(
+      "and from any other key it is refused at the target, because cnf names the source",
+      [stolen.status, stolen.body],
+      [401, "wrong_device"],
+    );
+    check(
+      "while the owner's own capability reaches the same machine",
+      (await relayFetch("/sessions", tokenFor(owner.id, target), { remoteStatic: targetStatic.publicKey })).status,
+      200,
+    );
+  }
+
+  // Held open without a handshake: the relay's stream lives as long as the socket, which is what a share counts.
+  const holdChannel = (port: number, token: string): Promise<{ status: number | "open"; ws: WebSocket }> =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(token)}`);
+      ws.on("open", () => resolve({ status: "open", ws }));
+      ws.on("unexpected-response", (_req, res) => {
+        ws.terminate();
+        resolve({ status: res.statusCode ?? 0, ws });
+      });
+      ws.on("error", () => resolve({ status: 0, ws }));
+    });
+  const refusedWith = (port: number, token: string): Promise<{ status: number; line: string; headers: Record<string, unknown> }> =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(token)}`);
+      ws.on("open", () => {
+        ws.terminate();
+        resolve({ status: 101, line: "open", headers: {} });
+      });
+      ws.on("unexpected-response", (_req, res) => {
+        ws.terminate();
+        resolve({ status: res.statusCode ?? 0, line: res.statusMessage ?? "", headers: res.headers });
+      });
+      ws.on("error", () => resolve({ status: 0, line: "(no channel)", headers: {} }));
+    });
+
+  {
+    const held = await Promise.all(Array.from({ length: MAX_STREAMS_PER_LINK }, () => holdChannel(relayPort, toTarget.token)));
+    check("a link holds its whole share of the target's tunnel", held.map((one) => one.status), Array(MAX_STREAMS_PER_LINK).fill("open"));
+    const past = await refusedWith(relayPort, toTarget.token);
+    check("and is refused one channel past it", [past.status, past.line], [503, "no_tunnel"]);
+    const fromOffline = (await linksFrom(offline)).find((link) => link.target.id === target)!;
+    const second = await holdChannel(relayPort, fromOffline.token);
+    check("while another link to the same machine still opens", second.status, "open");
+    check(
+      "and the owner's own capability too",
+      (await relayFetch("/sessions", tokenFor(owner.id, target), { remoteStatic: targetStatic.publicKey })).status,
+      200,
+    );
+    for (const one of [...held, second]) one.ws.terminate();
+    const settled = Date.now() + 2_000;
+    while (Date.now() < settled && activeStreams(target) !== 0) await sleep(25);
+    check("and every one of those streams is given back", activeStreams(target), 0);
+  }
+
+  {
+    // `offline` holds no tunnel, so every open below is a cheap 503 and the only thing that can change is the budget.
+    const started = Date.now();
+    const burst: number[] = [];
+    for (let i = 0; i < LINK_CONNECT_BURST; i += 1) burst.push((await refusedWith(relayPort, toOffline.token)).status);
+    const over = await refusedWith(relayPort, toOffline.token);
+    const elapsed = Date.now() - started;
+    check("a link opens a burst of channels, even at a machine that is offline", burst, Array(LINK_CONNECT_BURST).fill(503));
+    report(
+      "and the one past the burst inside a second is refused as too fast",
+      over.status === 429 && over.line === "link_rate_limited",
+      `${over.status} ${over.line} after ${elapsed}ms`,
+    );
+    check("saying when to ask again", over.headers["retry-after"], String(Math.ceil(LINK_CONNECT_REFILL_MS / 1000)));
+    check(
+      "while its owner, on the same machine, is charged nothing",
+      (await refusedWith(relayPort, tokenFor(owner.id, offline))).line,
+      "no_tunnel",
+    );
+    check("and another link spends a budget of its own", (await relayFetch("/sessions", toTarget.token, asSource)).status, 200);
+  }
+
+  {
+    const isolate = (machine: string, isolated: boolean): Promise<Response> =>
+      send(`/v1/machines/${machine}/permissions`, {
+        method: "PUT",
+        headers: owner.headers,
+        body: JSON.stringify({ isolated }),
+      });
+    // The target, so the source's other links stay live for the sibling relay below.
+    check("isolating the target is its owner's to do", (await isolate(target, true)).status, 200);
+
+    const before = proxied(target);
+    const refused = await relayFetch("/sessions", toTarget.token, asSource);
+    check("and the relay refuses its link's next channel as no machine", [refused.status, refused.body], [404, "machine_not_found"]);
+    report("before it reached the tunnel", proxied(target) === before, `requestsProxied stayed at ${before}`);
+    check(
+      "while the owner's own capability still reaches the machine",
+      (await relayFetch("/sessions", tokenFor(owner.id, target), { remoteStatic: targetStatic.publicKey })).status,
+      200,
+    );
+    check(
+      "an isolated machine is handed no links, and no other machine one to it",
+      [(await linksFrom(target)).length, (await linksFrom(source)).some((link) => link.target.id === target)],
+      [0, false],
+    );
+    await isolate(target, false);
+    const relinked = (await linksFrom(source)).find((link) => link.target.id === target);
+    report(
+      "no longer isolated, asking again makes a new link rather than reviving the old one",
+      relinked !== undefined && relinked.id !== toTarget.id,
+      `${toTarget.id} then ${relinked?.id ?? "none"}`,
+    );
+    check(
+      "which the relay lets through",
+      (await relayFetch("/sessions", relinked?.token ?? "", asSource)).status,
+      200,
+    );
+  }
+
+  await targetTunnel.stop();
+
+  // Several relays: the one a daemon dialled holds no tunnel for this machine, and says which one does.
+  {
+    const siblingRegistry = new TunnelRegistry();
+    const siblingListener = createRelayListener({
+      db,
+      issuer: ISSUER,
+      host: "127.0.0.1",
+      port: 0,
+      registry: siblingRegistry,
+      siblings: { view: dbRelayView(db), urls: { "relay-2": "https://r2.example" }, relayId: "relay-1" },
+    });
+    await listening(siblingListener.server);
+    const siblingPort = (siblingListener.server.address() as AddressInfo).port;
+    const elsewhere = createPresenceWriter(db, { relayId: "relay-2" });
+    elsewhere.up(offline, Date.now());
+
+    const redirected = await refusedWith(siblingPort, tokenFor(owner.id, offline));
+    check("a machine a sibling relay holds is answered 421", [redirected.status, redirected.line], [421, "wrong_relay"]);
+    check("naming where that relay is reached", redirected.headers[RELAY_URL_HEADER], "https://r2.example");
+    const linkRedirect = await refusedWith(siblingPort, toOffline.token);
+    check("and a link is sent the same way", [linkRedirect.status, linkRedirect.headers[RELAY_URL_HEADER]], [
+      421,
+      "https://r2.example",
+    ]);
+    check(
+      "but never before the capability is authorized, or it would say where any machine is",
+      (await refusedWith(siblingPort, tokenFor(mallory, offline))).status,
+      404,
+    );
+    check(
+      "and never by a relay with no map of its siblings",
+      (await refusedWith(relayPort, tokenFor(owner.id, offline))).line,
+      "no_tunnel",
+    );
+
+    const stray = createPresenceWriter(db, { relayId: "relay-9" });
+    stray.up(offline, Date.now() + 1);
+    check(
+      "a relay the map does not name is no_tunnel rather than a redirect to nowhere",
+      (await refusedWith(siblingPort, tokenFor(owner.id, offline))).line,
+      "no_tunnel",
+    );
+    const itself = createPresenceWriter(db, { relayId: "relay-1" });
+    itself.up(offline, Date.now() + 2);
+    check(
+      "and a row naming this relay is a tunnel it has just lost, never a sibling",
+      (await refusedWith(siblingPort, tokenFor(owner.id, offline))).line,
+      "no_tunnel",
+    );
+
+    for (const writer of [elsewhere, stray, itself]) writer.clear();
+    siblingListener.close();
+  }
+
+  process.stdout.write("  who may switch agent messaging off\n");
+  {
+    interface MintAnswer {
+      links: MintedLink[];
+      messaging?: boolean;
+      isolated?: boolean;
+      policyAt?: number;
+    }
+    interface Switched {
+      agentMessaging: boolean;
+      isolated?: boolean;
+      policyAt: number;
+    }
+    interface ListedMachine {
+      id: string;
+      agentMessaging?: boolean;
+      agentMessagingMachine?: boolean;
+      agentMessagingIsolated?: boolean;
+    }
+    const minted = async (machine: string, who = owner): Promise<MintAnswer> =>
+      (await (await mintLinks(machine, who)).json()) as MintAnswer;
+    const switchAccount = (on: unknown, who = owner): Promise<Response> =>
+      send("/v1/me/permissions", { method: "PUT", headers: who.headers, body: JSON.stringify({ agentMessaging: on }) });
+    const switchMachine = (machine: string, on: unknown, who = owner): Promise<Response> =>
+      send(`/v1/machines/${machine}/permissions`, {
+        method: "PUT",
+        headers: who.headers,
+        body: JSON.stringify({ agentMessaging: on }),
+      });
+    const listing = async (who = owner): Promise<Map<string, ListedMachine>> =>
+      new Map(
+        ((await (await send("/v1/machines", { headers: who.headers })).json()) as { machines: ListedMachine[] }).machines.map(
+          (row) => [row.id, row],
+        ),
+      );
+    const flagsOf = (row: ListedMachine | undefined): [unknown, unknown] => [row?.agentMessaging, row?.agentMessagingMachine];
+    const accountFlag = async (who = owner): Promise<unknown> =>
+      ((await (await send("/v1/me", { headers: who.headers })).json()) as { permissions?: { agentMessaging?: unknown } })
+        .permissions?.agentMessaging;
+    const liveLinksTouching = (machine: string): number =>
+      Number(
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM machine_links WHERE revoked_at IS NULL AND (source_machine_id = ? OR target_machine_id = ?)",
+          )
+          .get(machine, machine)?.["n"] ?? -1,
+      );
+
+    check("an account's messaging is on until somebody says otherwise", await accountFlag(), true);
+    const before = await listing();
+    check("and so is each machine it owns, as it stands and on its own", flagsOf(before.get(source)), [true, true]);
+    check("a machine somebody only holds a grant on carries neither", flagsOf((await listing(grantee)).get(source)), [
+      undefined,
+      undefined,
+    ]);
+
+    check("a grantee cannot switch a machine off", await outcome(await switchMachine(source, false, grantee)), [
+      404,
+      "machine_not_found",
+    ]);
+    check("nor can somebody with no part in it", await outcome(await switchMachine(source, false, loner)), [
+      404,
+      "machine_not_found",
+    ]);
+    check("nor can anybody switch one that does not exist", await outcome(await switchMachine("m_nothing", false)), [
+      404,
+      "machine_not_found",
+    ]);
+    check(
+      "the switch takes a boolean and nothing that merely reads as one",
+      [
+        await outcome(await switchMachine(source, "false")),
+        await outcome(await switchMachine(source, 0)),
+        await outcome(await switchAccount(null)),
+        await outcome(await send("/v1/me/permissions", { method: "PUT", headers: owner.headers })),
+      ],
+      [
+        [400, "bad_request"],
+        [400, "bad_request"],
+        [400, "bad_request"],
+        [400, "bad_request"],
+      ],
+    );
+    check("and a refused switch changed nothing", flagsOf((await listing()).get(source)), [true, true]);
+
+    const standing = (await linksFrom(source)).find((link) => link.target.id === target)!;
+    const through = (token: string): unknown => (decided(token) as { subject?: string }).subject ?? decided(token);
+    check("a link to the target is authorized before anything is switched", through(standing.token), owner.id);
+    const inbound = (await linksFrom(target)).find((link) => link.target.id === source)!;
+
+    const off = await switchMachine(target, false);
+    const offAnswer = (await off.json()) as Switched;
+    check("its owner switches one machine off", [off.status, offAnswer.agentMessaging], [200, false]);
+    check(
+      "and a link minted to it is refused by the relay on its next channel, before any daemon has heard",
+      decided(standing.token),
+      [404, "machine_not_found"],
+    );
+    check("so is one minted from it", decided(inbound.token), [404, "machine_not_found"]);
+    check("because every live link touching it was revoked with the write", liveLinksTouching(target), 0);
+    check(
+      "while the owner's own capability still reaches it, since this is about agents and not people",
+      through(tokenFor(owner.id, target)),
+      owner.id,
+    );
+    const offSource = await minted(target);
+    check(
+      "its daemon is told so rather than handed links",
+      [offSource.links, offSource.messaging, offSource.policyAt],
+      [[], false, offAnswer.policyAt],
+    );
+    const aroundIt = await minted(source);
+    check(
+      "and the others are linked to everything but it",
+      [aroundIt.links.map((link) => link.target.id), aroundIt.messaging],
+      [[offline, newest], true],
+    );
+    check("the listing says which machine is off and why", flagsOf((await listing()).get(target)), [false, false]);
+    check("and leaves the rest alone", flagsOf((await listing()).get(source)), [true, true]);
+
+    // `keyless` could never hold a link, which is exactly why it must still be told.
+    await switchMachine(keyless, false);
+    const keylessOff = await minted(keyless);
+    check("a machine with no key is still told it is off, rather than refused for its key", [keylessOff.links, keylessOff.messaging], [
+      [],
+      false,
+    ]);
+    const keylessOn = ((await (await switchMachine(keyless, true)).json()) as Switched).policyAt;
+    const refusedForKey = await mintLinks(keyless);
+    check("and back on is refused for its key again", await outcome(refusedForKey.clone()), [409, "machine_key_missing"]);
+    check(
+      "with the switch in the refusal, so the app can still hand a keyless machine its way back on",
+      ((await refusedForKey.json()) as { error: { detail: unknown } }).error.detail,
+      { messaging: true, isolated: false, policyAt: keylessOn },
+    );
+
+    const stamps: number[] = [];
+    for (const on of [true, false, true, false, true]) stamps.push(((await (await switchMachine(target, on)).json()) as Switched).policyAt);
+    report(
+      "every switch is stamped above the last, even inside one millisecond",
+      stamps.every((stamp, i) => i === 0 || stamp > stamps[i - 1]!) && stamps[0]! > offAnswer.policyAt,
+      stamps.join(" < "),
+    );
+    const onAgain = await minted(source);
+    const relinked = onAgain.links.find((link) => link.target.id === target);
+    report(
+      "switched back on, the pair is linked again under a new id rather than the revoked one",
+      relinked !== undefined && relinked.id !== standing.id,
+      `${standing.id} then ${relinked?.id ?? "none"}`,
+    );
+    check("which the relay lets through", through(relinked?.token ?? ""), owner.id);
+    check("and the target's own answer carries the newest stamp", (await minted(target)).policyAt, stamps.at(-1));
+
+    // Somebody else's two machines, linked to each other, so the account switch has links it must not reach.
+    const neighbour = person("linkneighbour");
+    const nearA = own(neighbour.id, "near-a");
+    const nearB = own(neighbour.id, "near-b");
+    const nearLinks = [...(await minted(nearA, neighbour)).links, ...(await minted(nearB, neighbour)).links];
+    check(
+      "another account's two machines are linked both ways",
+      nearLinks.map((link) => [link.target.id, through(link.token)]),
+      [
+        [nearB, neighbour.id],
+        [nearA, neighbour.id],
+      ],
+    );
+    const revokedAt = (id: string | undefined): unknown => {
+      const row = db.prepare("SELECT revoked_at FROM machine_links WHERE id = ?").get(id ?? "");
+      return row === undefined ? "no row" : row["revoked_at"];
+    };
+
+    // `offline` is switched off on its own first, so the account switch has a choice to preserve.
+    await switchMachine(offline, false);
+    const accountOff = await switchAccount(false);
+    const accountAnswer = (await accountOff.json()) as Switched;
+    check("the owner switches the whole account off", [accountOff.status, accountAnswer.agentMessaging], [200, false]);
+    check("and reads it back", await accountFlag(), false);
+    check("a link between two machines that were both on is refused at once", decided(relinked?.token ?? ""), [
+      404,
+      "machine_not_found",
+    ]);
+    check(
+      "no machine it owns has a live link left",
+      [source, target, offline, newest].map(liveLinksTouching),
+      [0, 0, 0, 0],
+    );
+    check(
+      "while another account's links stay live: the revocation is filtered on the owner who switched",
+      [typeof revokedAt(relinked?.id), ...nearLinks.map((link) => revokedAt(link.id)), liveLinksTouching(nearA)],
+      ["number", null, null, 2],
+    );
+    check(
+      "and the relay still lets them through",
+      nearLinks.map((link) => through(link.token)),
+      [neighbour.id, neighbour.id],
+    );
+    const everyAnswer = await Promise.all([source, target, offline, newest].map((machine) => minted(machine)));
+    check(
+      "every machine it owns is told it is off, with the account's stamp",
+      everyAnswer.map((answer) => [answer.links.length, answer.messaging, answer.policyAt]),
+      Array(4).fill([0, false, accountAnswer.policyAt]),
+    );
+    const underAccount = await listing();
+    check(
+      "the listing draws every machine off, and each keeps its own choice underneath",
+      [flagsOf(underAccount.get(source)), flagsOf(underAccount.get(offline))],
+      [
+        [false, true],
+        [false, false],
+      ],
+    );
+    check("somebody else's account is untouched", [await accountFlag(loner), (await minted("alone", loner)).messaging], [true, true]);
+
+    await switchAccount(true);
+    const restored = await listing();
+    check(
+      "switched back on, each machine returns to its own choice",
+      [flagsOf(restored.get(source)), flagsOf(restored.get(offline))],
+      [
+        [true, true],
+        [false, false],
+      ],
+    );
+    const afterAccount = await minted(source);
+    check(
+      "so the machine switched off on its own stays out",
+      [afterAccount.links.map((link) => link.target.id), afterAccount.messaging],
+      [[target, newest], true],
+    );
+    check("and is still told it is off", (await minted(offline)).messaging, false);
+    report(
+      "with a stamp above the account's, so its daemon takes it",
+      (afterAccount.policyAt ?? 0) > accountAnswer.policyAt,
+      `${accountAnswer.policyAt} then ${afterAccount.policyAt ?? "none"}`,
+    );
+    await switchMachine(offline, true);
+    check("and the others relink once it is back", (await minted(source)).links.map((link) => link.target.id), [target, offline, newest]);
+
+    process.stdout.write("  a machine whose sessions message only each other\n");
+    const setMachine = (machine: string, body: unknown, who = owner): Promise<Response> =>
+      send(`/v1/machines/${machine}/permissions`, { method: "PUT", headers: who.headers, body: JSON.stringify(body) });
+    const isolatedOf = (row: ListedMachine | undefined): [unknown, unknown, unknown] => [
+      row?.agentMessaging,
+      row?.agentMessagingMachine,
+      row?.agentMessagingIsolated,
+    ];
+    check("no machine is isolated until somebody says so", isolatedOf((await listing()).get(target)), [true, true, false]);
+    check("and a grantee's listing carries no isolation either", (await listing(grantee)).get(source)?.agentMessagingIsolated, undefined);
+    check(
+      "the body names one field or both, each a boolean, and nothing else will do",
+      [
+        await outcome(await setMachine(target, {})),
+        await outcome(await setMachine(target, { isolated: "yes" })),
+        await outcome(await setMachine(target, { agentMessaging: true, isolated: 1 })),
+        await outcome(await setMachine(target, { isolated: true }, grantee)),
+      ],
+      [
+        [400, "bad_request"],
+        [400, "bad_request"],
+        [400, "bad_request"],
+        [404, "machine_not_found"],
+      ],
+    );
+    check("and a refused one changed nothing", isolatedOf((await listing()).get(target)), [true, true, false]);
+
+    const outward = (await linksFrom(source)).find((link) => link.target.id === target)!;
+    const inward = (await linksFrom(target)).find((link) => link.target.id === source)!;
+    check("both directions are authorized before", [through(outward.token), through(inward.token)], [owner.id, owner.id]);
+    const isolating = await setMachine(target, { isolated: true });
+    const isolatedAnswer = (await isolating.json()) as Switched;
+    check(
+      "its owner isolates one machine, and it stays on",
+      [isolating.status, isolatedAnswer.agentMessaging, isolatedAnswer.isolated],
+      [200, true, true],
+    );
+    check(
+      "every link either way is refused by the relay at once, before any daemon has heard",
+      [decided(outward.token), decided(inward.token)],
+      [
+        [404, "machine_not_found"],
+        [404, "machine_not_found"],
+      ],
+    );
+    check("since the write revoked them all", liveLinksTouching(target), 0);
+    const isolatedMint = await minted(target);
+    check(
+      "its daemon is told it may message, but only its own sessions",
+      [isolatedMint.links, isolatedMint.messaging, isolatedMint.isolated, isolatedMint.policyAt],
+      [[], true, true, isolatedAnswer.policyAt],
+    );
+    check("and no other machine is linked to it", (await minted(source)).links.map((link) => link.target.id), [offline, newest]);
+    check("the listing says so", isolatedOf((await listing()).get(target)), [true, true, true]);
+    check("every other mint says it is not", [(await minted(source)).isolated, (await minted(offline)).isolated], [false, false]);
+
+    const offWhileIsolated = (await (await setMachine(target, { agentMessaging: false })).json()) as Switched;
+    check("switching it off keeps it isolated underneath", [offWhileIsolated.agentMessaging, offWhileIsolated.isolated], [false, true]);
+    const offMint = await minted(target);
+    check("and its daemon is told it is off, and isolated for later", [offMint.messaging, offMint.isolated], [false, true]);
+    await setMachine(target, { agentMessaging: true });
+    check("back on, it is still isolated", [(await minted(target)).isolated, isolatedOf((await listing()).get(target))[2]], [true, true]);
+
+    const freed = (await (await setMachine(target, { isolated: false })).json()) as Switched;
+    check("its owner lets it out again", [freed.agentMessaging, freed.isolated], [true, false]);
+    const outAgain = (await minted(source)).links.find((link) => link.target.id === target);
+    const inAgain = (await minted(target)).links.find((link) => link.target.id === source);
+    report(
+      "and both directions are linked under new ids, not the revoked ones",
+      outAgain !== undefined && inAgain !== undefined && outAgain.id !== outward.id && inAgain.id !== inward.id,
+      `${outward.id}/${inward.id} then ${outAgain?.id ?? "none"}/${inAgain?.id ?? "none"}`,
+    );
+    check("which the relay lets through", [through(outAgain?.token ?? ""), through(inAgain?.token ?? "")], [owner.id, owner.id]);
+    report(
+      "and each of those writes was stamped above the last",
+      freed.policyAt > offWhileIsolated.policyAt && offWhileIsolated.policyAt > isolatedAnswer.policyAt,
+      `${isolatedAnswer.policyAt} < ${offWhileIsolated.policyAt} < ${freed.policyAt}`,
+    );
+  }
+
+  {
+    // The table as the first build of the switches wrote it, before isolation: migrate() adds the column (Q1.654).
+    const earlier = new DatabaseSync(":memory:");
+    earlier.exec(
+      "CREATE TABLE machine_permissions (machine_id TEXT PRIMARY KEY, agent_messaging_off INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+    );
+    earlier.prepare("INSERT INTO machine_permissions (machine_id, agent_messaging_off, updated_at) VALUES ('m_before', 1, 42)").run();
+    applyControlPlaneSchema(earlier);
+    applyControlPlaneSchema(earlier);
+    check(
+      "a switches table from before isolation gains the column, and twice is harmless",
+      earlier.prepare("PRAGMA table_info(machine_permissions)").all().map((column) => String(column["name"])).includes("isolated"),
+      true,
+    );
+    check(
+      "and a row that was there reads as it was, not isolated",
+      [machineMessaging(earlier, "m_before").on, machineMessaging(earlier, "m_before").isolated, machineMessaging(earlier, "m_before").at],
+      [false, false, 42],
+    );
+    earlier.close();
+  }
+}
+
+process.stdout.write("\na link's claims, read once and by parseClaims\n");
+{
+  const authorizer = createRelayAuthorizer(db, ISSUER);
+  const owner = addUser("u_claims_owner");
+  const source = addMachine("m_claims_source");
+  const target = addMachine("m_claims_target");
+  grant(owner, target);
+  const linkId = "lk_c1a1c1a1c1a1c1a1";
+  db.prepare(
+    "INSERT INTO machine_links (id, source_machine_id, target_machine_id, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(linkId, source, target, owner, now);
+  const signed = (link: Record<string, unknown>): string => {
+    const seconds = Math.floor(Date.now() / 1000);
+    const claims = { iss: ISSUER, sub: owner, aud: target, jti: newId("t"), iat: seconds, nbf: seconds, exp: seconds + 300 };
+    return signToken({ ...claims, scp: ["session:message"], ...link } as unknown as TokenClaims, signing.kid, signing.privateKey);
+  };
+  const decided = (token: string): unknown => {
+    const answer = authorizer.authorize(token);
+    return answer.ok ? answer.limiter : [answer.status, answer.code];
+  };
+  const whole = { lnk: linkId, src: source, srcl: "claims-source" };
+
+  check("a whole link is counted on the link's own share", decided(signed(whole)), {
+    key: `lnk:${linkId}`,
+    max: MAX_STREAMS_PER_LINK,
+    link: true,
+  });
+  check("and a capability with none of the three on its person's", decided(signed({})), {
+    key: owner,
+    max: MAX_STREAMS_PER_SUBJECT,
+    link: false,
+  });
+  check(
+    "any part of a link without the rest is malformed, a source with no link included, never read as a person's",
+    [
+      { src: source, srcl: "claims-source" },
+      { lnk: linkId, srcl: "claims-source" },
+      { lnk: linkId, src: source },
+      { ...whole, lnk: "" },
+      { ...whole, src: "" },
+      { ...whole, srcl: 7 },
+      { ...whole, lnk: null },
+    ].map((link) => decided(signed(link))),
+    Array(7).fill([401, "malformed_token"]),
+  );
+  check("the source parseClaims handed over is compared to the row's", decided(signed({ ...whole, src: target })), [
+    404,
+    "machine_not_found",
+  ]);
+  db.prepare("UPDATE machine_links SET revoked_at = ? WHERE id = ?").run(Date.now(), linkId);
+  check("and so is the row's revocation", decided(signed(whole)), [404, "machine_not_found"]);
+
+  const authorizeTs = readFileSync(new URL("../packages/control-plane/src/relay/authorize.ts", import.meta.url), "utf8");
+  check(
+    "the payload is parsed once per channel, by parseClaims, with no second reader beside it",
+    [(authorizeTs.match(/payloadJson/g) ?? []).length, /parseClaims\(decoded\.payloadJson\)/.test(authorizeTs)],
+    [1, true],
+  );
+}
+
+// While the shared relay is still up: it starts two daemons of its own against it.
+await peerEndToEnd({ db, issuer: ISSUER, relayUrl, registry, check, waitForTunnel });
 
 relayListener.close();
 daemon.close();

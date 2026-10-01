@@ -6,6 +6,7 @@ export const SYSTEM_IDS = [
   "anthropic",
   "openai",
   "openrouter",
+  "cursor",
   "xai",
   "moonshot",
   "zhipu",
@@ -13,7 +14,7 @@ export const SYSTEM_IDS = [
   "zen",
 ] as const;
 
-/** One of the eight this repository ships. */
+/** One of the nine this repository ships. */
 export type BuiltinSystemId = (typeof SYSTEM_IDS)[number];
 
 export type SystemId = string;
@@ -85,6 +86,19 @@ export const SYSTEMS: Record<BuiltinSystemId, SystemConfig> = {
     models: [],
     nativeModelPrefix: null,
     keyEnv: "XAI_API_KEY",
+  },
+  cursor: {
+    displayName: "Cursor",
+    // Irrelevant with no baseUrl: Cursor documents no endpoint another harness could be pointed at.
+    apiType: "openai",
+    baseUrl: null,
+    authHeader: null,
+    nativeHarness: "cursor",
+    loginVia: "cursor",
+    models: [],
+    // Bare ids under the parameterized picker (claude-opus-4-8, gpt-5), the only ones this client asks for (Q6.115).
+    nativeModelPrefix: null,
+    keyEnv: "CURSOR_API_KEY",
   },
   moonshot: {
     displayName: "Moonshot",

@@ -85,7 +85,8 @@ every grantee read that row and to them `local` is somewhere else (Q7.139).
 `sessionGroups` fills `MachineGroup.name` from it, so the strip, the rail (label,
 `title`, the monogram's letter) and the drag's announcement inherit it with no call
 of their own; New session reads `machinesAsDrawn` for the rail's order, names and
-default; the two `machine · path` lines (a row under All, `WorkspaceLine`) call it
+default; every row's machine (`MachineLabel`, Q3.681) and `WorkspaceLine`'s
+`machine · path` call it
 directly.
 
 ⚠ **`local` means this computer and nothing else, on this client.** A machine
@@ -369,9 +370,9 @@ rectangles at unrelated offsets, which is what was reported as the column lookin
 crooked. Pinning the offsets would leave the next change to either rhythm to reopen
 it; removing the band removes the edge there is nothing to line up.
 
-⚠ **`bg-fg` on a mark narrows Q3.209 rather than repealing it.** This app already
-keeps a shorter list than that sentence: the bell is a
-dot with `ring-2 ring-ink`, and the blocked count is `bg-fg text-ink` at 16px in
+⚠ **The affirmative fill on a mark narrows Q3.209 rather than repealing it** — `bg-brand`
+since Q3.694, `bg-fg` before. This app already keeps a shorter list than that sentence: the bell is a
+dot with `ring-2 ring-ink`, and the blocked count is `bg-brand text-on-brand` at 16px in
 three places. The measurement is **area** — the chip is 784px², smaller than the
 32px circle `Composer` already draws and a quarter of the pill that rule was written
 about. Barred as a pill-sized fill, licensed as a mark. Q3.624.
@@ -383,7 +384,7 @@ the selection *snaps*. It must never be `transition-transform`: `webcheck` bans 
 string in this file outright, for the `slides` reason above.
 
 **And the badge gained `ring-2 ring-ink`.** The count and the selected mark are both
-`bg-fg` and overlap by two pixels at the mark's corner, so on the one machine that
+`bg-brand` and overlap by two pixels at the mark's corner, so on the one machine that
 most needs reading — selected, with work blocked on it — they grew as one shape.
 
 ## The tabs' own numbers
@@ -418,7 +419,7 @@ underline, switched at the turn, and never toward All.
 
 **At rest the pill is the selected tab's own**: `TabLabel`'s span, `bg-raised`
 behind the label — `raised` being what Q3.209 spends on *a tab you are on*, with
-the count still `bg-fg` on top of it. So a scroll, a reorder (it rides the lifted
+the count still `bg-brand` on top of it. So a scroll, a reorder (it rides the lifted
 tab), a resize, a font load, a machine arriving or leaving and a first render all
 move it with no code, and none can animate it from nowhere.
 

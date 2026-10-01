@@ -155,28 +155,39 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   );
 
   check(
-    "a bare plugins segment is the machine",
+    "a bare plugins segment is the machine's Plugins list",
     parseSettingsRoute(["machines", "m_1", "plugins"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null, list: "plugins" },
   );
+  // A plugin's own settings live under /plugins (Q3.459), so an address that still names one falls to the list.
   check(
     "and so is one that still names a plugin",
     parseSettingsRoute(["machines", "m_1", "plugins", "board"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null, list: "plugins" },
   );
   check(
     "including one nobody has installed",
     parseSettingsRoute(["machines", "m_1", "plugins", "not-installed"]),
-    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null },
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null, list: "plugins" },
+  );
+  check(
+    "while install is the list's one leaf",
+    parseSettingsRoute(["machines", "m_1", "plugins", "install"]),
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: "plugin-install" },
+  );
+  check(
+    "and a bare systems segment is the Sign-ins list",
+    parseSettingsRoute(["machines", "m_1", "systems"]),
+    { section: "machines", machineId: "m_1", system: null, signin: null, agents: false, leaf: null, list: "systems" },
   );
   {
     const source = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
     check("settings.ts builds no path to a plugin", /plugins\/\$\{/.test(source), false);
   }
   check(
-    "a system goes up to its machine",
+    "a system goes up to the Sign-ins list its row sits on",
     settingsUp({ section: "machines", machineId: "m_1" as never, system: "moonshot", signin: null, agents: false, leaf: null }),
-    { path: "/settings/machines/m_1", withinNav: false },
+    { path: "/settings/machines/m_1/systems", withinNav: false },
   );
   check(
     "the agent strip goes up to its machine, wherever it was opened from",
@@ -184,9 +195,9 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     { path: "/settings/machines/m_1", withinNav: false },
   );
   check(
-    "a sign-in goes up to its machine, like the two leaves beside it",
+    "a sign-in goes up to the same list, whose other rows it sits among",
     settingsUp({ section: "machines", machineId: "m_1" as never, system: null, signin: "acme:gemini", agents: false, leaf: null }),
-    { path: "/settings/machines/m_1", withinNav: false },
+    { path: "/settings/machines/m_1/systems", withinNav: false },
   );
   {
     const setup = {
@@ -277,18 +288,30 @@ process.stdout.write("\nwhich settings screen a URL names\n");
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
-  check("a plain user sees five sections", visibleSections(plain).map((s) => s.id), ["account", "devices", "keys", "machines", "logs"]);
   check(
-    "an admin sees eight",
-    visibleSections(admin).map((s) => s.id),
-    ["account", "devices", "keys", "machines", "logs", "server", "email", "users"],
+    "a plain user sees four sections in a browser",
+    visibleSections(plain).map((s) => s.id),
+    ["account", "devices", "keys", "machines"],
+  );
+  check(
+    "and Logs as a fifth where this app can run a daemon",
+    visibleSections(plain, true).map((s) => s.id),
+    ["account", "devices", "keys", "machines", "logs"],
+  );
+  check(
+    "an admin sees seven, or eight with Logs",
+    [visibleSections(admin).map((s) => s.id), visibleSections(admin, true).length],
+    [["account", "devices", "keys", "machines", "server", "email", "users"], 8],
   );
   check("and the table has exactly eight entries", SECTION_SPECS.length, 8);
+  // Permissions was one switch; it heads Machines now, above the per-machine switches it locks.
+  check("Permissions is gone as a section", SECTION_SPECS.some((spec) => (spec.id as string) === "permissions"), false);
   check("and Logs is not an admin section", SECTION_SPECS.find((spec) => spec.id === "logs")?.adminOnly, false);
+  check("no section carries a blurb, since a glyph beside its title says what it is", SECTION_SPECS.every((spec) => !("blurb" in spec)), true);
   check(
-    "the user sections carry no blurb and the admin sections do",
-    SECTION_SPECS.map((spec) => spec.blurb !== null),
-    SECTION_SPECS.map((spec) => spec.adminOnly),
+    "a hidden Logs refuses nothing aloud, and a typed address to it falls to the index",
+    [sectionAllowed("logs", plain), sectionAllowed("logs", plain, true)],
+    [false, true],
   );
 
   const leafOf = (segments: readonly string[]): string | null => parseSettingsRoute(segments).leaf;
@@ -308,6 +331,30 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     (["password", "email", "new-key"] as const).map((leaf) => parseSettingsRoute(settingsLeafPath(leaf).split("/").slice(2)).leaf),
     ["password", "email", "new-key"],
   );
+  {
+    const { machineLeafPath, machineListPath, userLimitPath } = await import("../src/settings.js");
+    const back = (path: string) => parseSettingsRoute(path.split("/").slice(2), decodeURIComponent);
+    const sectionLeaves = ["domains", "machine-limit", "provisioning-key", "smtp", "test-mail", "new-user"] as const;
+    check("and so does every leaf a section holds", sectionLeaves.map((leaf) => back(settingsLeafPath(leaf)).leaf), [...sectionLeaves]);
+    check(
+      "and every leaf a machine holds, with its machine",
+      (["machine-name", "setup-code", "plugin-install"] as const).map((leaf) => {
+        const route = back(machineLeafPath("m 1" as never, leaf));
+        return [route.leaf, route.machineId];
+      }),
+      [["machine-name", "m 1"], ["setup-code", "m 1"], ["plugin-install", "m 1"]],
+    );
+    check(
+      "and both of a machine's lists",
+      (["systems", "plugins"] as const).map((list) => back(machineListPath("m_1" as never, list)).list),
+      ["systems", "plugins"],
+    );
+    check(
+      "and a person's machine limit, carrying who it is about",
+      [back(userLimitPath("u_1")).leaf, back(userLimitPath("u_1")).userId, parseSettingsRoute(["users", "x".repeat(65), "limit"]).leaf],
+      ["user-limit", "u_1", null],
+    );
+  }
   check(
     "a form screen goes up to its section, outside the nav",
     [settingsUp(parseSettingsRoute(["account", "password"])), settingsUp(parseSettingsRoute(["keys", "new"]))],
@@ -321,7 +368,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   const accountSrc = stripComments(readFileSync(new URL("../src/ui/settings/AccountSection.tsx", import.meta.url), "utf8"));
   const keysSrc = stripComments(readFileSync(new URL("../src/ui/settings/KeysSection.tsx", import.meta.url), "utf8"));
   check("no row on Account opens a form in place", /setEditing|\[editing,/.test(accountSrc), false);
-  check("and its verbs navigate to the leaf", (accountSrc.match(/navigate\(settingsLeafPath\(/g) ?? []).length >= 3, true);
+  check("and its rows navigate to the leaves", (accountSrc.match(/navigate\(settingsLeafPath\(/g) ?? []).length >= 2, true);
   check("the keys screen is a table", /<KeyTable>/.test(keysSrc), true);
   check("whose New key leaves the screen rather than opening under itself", /navigate\(settingsLeafPath\("new-key"\)\)/.test(keysSrc) && !/setAsking/.test(keysSrc), true);
   const newKeyScreen = keysSrc.slice(keysSrc.indexOf("export function NewKeyScreen"));
@@ -343,9 +390,13 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check("no settings list draws two placeholder rows", twoInARow, []);
   const machinesSrc = stripComments(readFileSync(new URL("../src/ui/settings/MachinesSection.tsx", import.meta.url), "utf8"));
   check("the machines list's skeleton is the tall one", /<SkeletonRow tall \/>/.test(machinesSrc), true);
-  check("and the machine row is min-h-14", /className="tap press flex w-full min-h-14 items-center/.test(machinesSrc), true);
+  check("and the machine row is a LinkRow in its group", /<LinkRow/.test(machinesSrc), true);
   check("while no other settings list asks for it", readdirSync(settingsDir).filter((name) => name !== "MachinesSection.tsx" && /<SkeletonRow tall/.test(readFileSync(new URL(name, settingsDir), "utf8"))), []);
-  check("and somebody we could not identify sees five", visibleSections(null).map((s) => s.id), ["account", "devices", "keys", "machines", "logs"]);
+  check(
+    "and somebody we could not identify sees four",
+    visibleSections(null).map((s) => s.id),
+    ["account", "devices", "keys", "machines"],
+  );
   check("the default section is a real one", SECTION_SPECS.some((spec) => spec.id === DEFAULT_SECTION), true);
   check("and it is the first row, so the rail's highlight is not a choice somebody made", SECTION_SPECS[0]?.id, DEFAULT_SECTION);
   check(
@@ -382,14 +433,35 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   check("the index has nowhere to go", up([]), null);
   check("a section goes to the index", up(["account"]), { path: "/settings", withinNav: true });
   check("and so does Machines", up(["machines"]), { path: "/settings", withinNav: true });
-  check("a machine's systems go up to Machines, at every width", up(["machines", "m_1", "systems"]), {
-    path: "/settings/machines",
-    withinNav: false,
-  });
-  check("and one system goes up to its machine", up(["machines", "m_1", "systems", "anthropic"]), {
+  check("a machine's Sign-ins list goes up to its machine", up(["machines", "m_1", "systems"]), {
     path: "/settings/machines/m_1",
     withinNav: false,
   });
+  check("and one system goes up to that list, one level rather than two (Q3.415)", up(["machines", "m_1", "systems", "anthropic"]), {
+    path: "/settings/machines/m_1/systems",
+    withinNav: false,
+  });
+  check(
+    "each leaf goes up to the screen it was opened from",
+    [
+      up(["machines", "m_1", "name"]),
+      up(["machines", "m_1", "setup-code"]),
+      up(["machines", "m_1", "plugins", "install"]),
+      up(["server", "provisioning-key"]),
+      up(["email", "smtp"]),
+      up(["users", "u_1", "limit"]),
+      up(["machines", "m_1", "systems", "moonshot", "routing-key"]),
+    ].map((one) => one?.path ?? null),
+    [
+      "/settings/machines/m_1",
+      "/settings/machines/m_1",
+      "/settings/machines/m_1/plugins",
+      "/settings/server",
+      "/settings/email",
+      "/settings/users",
+      "/settings/machines/m_1/systems/moonshot",
+    ],
+  );
   const reachable: readonly (readonly (string | undefined)[])[] = [
     ["account"],
     ["users"],
@@ -397,23 +469,52 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     ["machines", "m_1"],
     ["machines", "m_1", "agents"],
     ["machines", "m_1", "agents", "claude"],
+    ["machines", "m_1", "links"],
     ["machines", "m_1", "systems"],
     ["machines", "m_1", "systems", "moonshot"],
+    ["machines", "m_1", "systems", "moonshot", "routing-key"],
+    ["machines", "m_1", "plugins"],
+    ["machines", "m_1", "plugins", "install"],
+    ["machines", "m_1", "name"],
+    ["machines", "m_1", "setup-code"],
     ["account", "password"],
     ["account", "email"],
     ["keys"],
     ["keys", "new"],
     ["email"],
+    ["email", "smtp"],
+    ["email", "test"],
+    ["server", "domains"],
+    ["server", "machine-limit"],
+    ["server", "provisioning-key"],
+    ["users", "new"],
+    ["users", "u_1", "limit"],
   ];
+  // A screen is a path every segment of which the parser reads: an unknown one falls up to its parent's route unchanged.
+  const isScreen = (path: string): boolean => {
+    const parts = path.split("/").filter((part) => part.length > 0);
+    if (parts[0] !== "settings") return false;
+    const read = (n: number): string => JSON.stringify(parseSettingsRoute(parts.slice(1, n + 1), decodeURIComponent));
+    return parts.slice(1).every((_, i) => read(i + 1) !== read(i));
+  };
+  check(
+    "a path naming a segment no screen has is not a screen, wherever the segment sits",
+    [
+      "/settings/nowhere",
+      "/settings/account/nowhere",
+      "/settings/machines/m_1/nowhere",
+      "/settings/nowhere/new",
+      "/elsewhere/account",
+    ].map(isScreen),
+    [false, false, false, false, false],
+  );
   check(
     "every parent a chevron names is itself a real settings screen",
-    reachable.every((segments) => {
-      const parent = settingsUp(parseSettingsRoute(segments));
-      if (parent === null) return false;
-      const parts = parent.path.split("/").filter((part) => part.length > 0);
-      return parts[0] === "settings" && parseSettingsRoute(parts.slice(1)).section !== undefined;
-    }),
-    true,
+    reachable
+      .map((segments) => [segments.join("/"), settingsUp(parseSettingsRoute(segments))?.path ?? "(none)"] as const)
+      .filter(([, parent]) => !isScreen(parent))
+      .map(([child, parent]) => `${child} -> ${parent}`),
+    [],
   );
 
   // The sheet head names the pop-up and the pane names the screen, because the head spans the section rail at sm and above (Q3.427).
@@ -432,8 +533,9 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       pane(["machines", "m_1", "systems"]),
       pane(["machines", "m_1", "systems", "moonshot"]),
       pane(["machines", "m_1", "signin", "byo:gemini"]),
+      pane(["machines", "m_1", "plugins"]),
     ],
-    ["Machine settings", "Machine settings", "Sign-in", "Sign-in"],
+    ["Machine settings", "Sign-ins", "Sign-in", "Sign-in", "Plugins"],
   );
   {
     const { unspokenFor, anyKeySet } = await import("../src/agents.js");
@@ -519,10 +621,24 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       ],
       [true, true, true, true],
     );
+    // The list moved off the machine's page onto its own screen; the page keeps one row to it, named as that screen is.
     check(
-      "and the heading no longer says the half that came first",
-      [machinePane.includes(">Sign-ins</h2>"), machinePane.includes(">Systems</h2>")],
+      "and the row that opens them says Sign-ins, never the half that came first",
+      [
+        /<LinkRow title="Sign-ins" onClick=\{\(\) => navigate\(machineListPath\(machineId, "systems"\)\)\} \/>/.test(machinePane),
+        /"Systems"|>Systems</.test(machinePane),
+      ],
       [true, false],
+    );
+    check(
+      "and the machine's page no longer draws the list itself, which its own screen mounts",
+      [
+        /<MachineSystemsSection\b|<SystemChooser\b/.test(machinePane),
+        /<MachineSystemsSection state=\{state\} machineId=\{machineId\} system=\{null\} signin=\{null\} \/>/.test(
+          stripComments(readFileSync(new URL("../src/ui/settings/MachineSystemsSection.tsx", import.meta.url), "utf8")),
+        ),
+      ],
+      [false, true],
     );
   }
   check(
@@ -609,7 +725,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     check(
       "and every one of them has somewhere up, which is what the head declines to draw",
       popups.map((route) => upFrom(route as never, "/")),
-      ["/settings", "/settings/machines/m_1", "/", "/", "/", "/agent/m_1"],
+      ["/settings", "/settings/machines/m_1/systems", "/", "/", "/", "/agent/m_1"],
     );
     check(
       "so the head's chevron is the builder's alone",
@@ -676,7 +792,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       settingsUpLabel(parseSettingsRoute(["machines", "m_1", "systems", "anthropic"])),
       settingsUpLabel(parseSettingsRoute(["machines", "m_1", "agents", "claude"])),
     ],
-    ["Settings", "Machines", "Machine settings", "Agents"],
+    ["Settings", "Machines", "Sign-ins", "Agents"],
   );
   check("and says nothing at the index", settingsUpLabel(parseSettingsRoute([])), null);
   check(
@@ -718,6 +834,85 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     );
     check("and it cannot be left out", [/^\s*paneName: string \| null;$/m.test(nav), /paneName\?:/.test(nav)], [true, false]);
   }
+}
+
+// The one form a system's card opened in place; now a leaf of the card like every other settings form (Q3.549).
+process.stdout.write("\na borrowed routing key is overridden on a leaf, never in place\n");
+{
+  const { parseSettingsRoute, routingKeyPath, settingsPath, settingsPaneTitle, settingsUp, settingsUpLabel } = await import(
+    "../src/settings.js"
+  );
+  const { depthOf, navMove } = await import("../src/nav.js");
+  const at = (segments: readonly string[]) => parseSettingsRoute(segments);
+  check(
+    "the leaf is the system's card plus one segment, and carries both",
+    at(["machines", "m_1", "systems", "moonshot", "routing-key"]),
+    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false, leaf: "routing-key" },
+  );
+  check(
+    "anything else past a system is the card, and an absurd system is the list with no leaf",
+    [
+      [at(["machines", "m_1", "systems", "moonshot", "nope"]).system, at(["machines", "m_1", "systems", "moonshot", "nope"]).leaf],
+      [at(["machines", "m_1", "systems", "x".repeat(65), "routing-key"]).list, at(["machines", "m_1", "systems", "x".repeat(65), "routing-key"]).leaf],
+    ],
+    [["moonshot", null], ["systems", null]],
+  );
+  const walked = parseSettingsRoute(routingKeyPath("m 1" as never, "acme:gemini").split("/").slice(2), decodeURIComponent);
+  check(
+    "its path round-trips with the machine and the system encoded",
+    [routingKeyPath("m_1" as never, "moonshot"), walked.leaf, walked.machineId, walked.system],
+    ["/settings/machines/m_1/systems/moonshot/routing-key", "routing-key", "m 1", "acme:gemini"],
+  );
+  const leaf = at(["machines", "m_1", "systems", "moonshot", "routing-key"]);
+  const card = at(["machines", "m_1", "systems", "moonshot"]);
+  check(
+    "its chevron walks back to the card, which names it, and the leaf is titled by what it is",
+    [settingsUp(leaf), settingsUpLabel(leaf), settingsPaneTitle(leaf)],
+    [{ path: settingsPath("machines", "m_1" as never, "moonshot"), withinNav: false }, "Sign-in", "Routing key"],
+  );
+  const route = (one: typeof leaf) => ({ name: "settings", ...one }) as never;
+  check(
+    "one depth past the card, so opening it slides in and leaving it slides back",
+    [depthOf(route(card)), depthOf(route(leaf)), navMove(route(card), route(leaf)), navMove(route(leaf), route(card))],
+    [5, 6, "section-push", "section-pop"],
+  );
+
+  const systems = stripComments(readFileSync(new URL("../src/ui/settings/SystemsPanel.tsx", import.meta.url), "utf8"));
+  const keyOnly = systems.slice(systems.indexOf("export function KeyOnly("), systems.indexOf("function keyNameOf("));
+  check("the card and the leaf were both found", [keyOnly.length > 0, /export function RoutingKeyScreen\(/.test(systems)], [true, true]);
+  check(
+    "the card holds no flag that opens a form under itself",
+    [/overriding|setOverriding/.test(keyOnly), /<ActionRow\b/.test(keyOnly)],
+    [false, false],
+  );
+  check(
+    "a borrowed key's row goes deeper, by push, to the leaf",
+    /\{borrowed \? \(\s*<Group title="Routing key" footer="Covered by the key above\.">\s*<LinkRow title="Use a different key here" onClick=\{\(\) => navigate\(routingKeyPath\(machineId, system\.id\)\)\} \/>/.test(keyOnly),
+    true,
+  );
+  const screen = systems.slice(systems.indexOf("export function RoutingKeyScreen("));
+  const form = screen.slice(screen.indexOf("function RoutingKeyForm("));
+  check(
+    "the leaf walks back to the card by replace, after a save and on Cancel",
+    [
+      /const back = \(\): void => navigate\(settingsPath\("machines", machineId, systemId\), true\);/.test(screen),
+      /onDone=\{back\}/.test(screen),
+      /\.saveSystemKey\(system\.id, value\.trim\(\)\)\s*\.then\(\(\) => \{\s*toast\("ok", `Routing key saved for \$\{system\.displayName\}\.`\);\s*onDone\(\);/.test(form),
+      /<Button disabled=\{busy\} onClick=\{onDone\}>\s*Cancel\s*<\/Button>/.test(form),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and a system with no routing key walks back rather than drawing a form",
+    /if \(systems !== null && !routes\) back\(\);/.test(screen),
+    true,
+  );
+  const shell = stripComments(readFileSync(new URL("../src/ui/settings/Settings.tsx", import.meta.url), "utf8"));
+  check(
+    "and the settings pane draws it for its leaf, keyed on the machine and the system",
+    /case "routing-key":\s*return machine === null \|\| route\.system === null \? null : \(\s*<RoutingKeyScreen key=\{`\$\{machine\}:\$\{route\.system\}`\} machineId=\{machine\} systemId=\{route\.system\} \/>/.test(shell),
+    true,
+  );
 }
 
 // TwoStep's rule is pinned here once, over the primitive; each site's own pin covers only what it still decides (Q3.552).
@@ -778,7 +973,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
   const users = stripComments(readFileSync(new URL("../src/ui/settings/UsersSection.tsx", import.meta.url), "utf8"));
   check(
     "and the one form that draws the box itself takes it by name",
-    [/import \{[^}]*\bTWO_STEP_BOX\b[^}]*\} from "\.\.\/bits"/.test(users), /<div className=\{`\$\{TWO_STEP_BOX\} mt-2`\}>/.test(users), /"mt-2 flex flex-wrap items-center gap-2"/.test(users)],
+    [/import \{[^}]*\bTWO_STEP_BOX\b[^}]*\} from "\.\.\/bits"/.test(users), /<div className=\{TWO_STEP_BOX\}>/.test(users), /"flex flex-wrap items-center gap-2"/.test(users)],
     [true, true, false],
   );
   const led = { lead: h("i", null, "lead") };
@@ -845,20 +1040,29 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
   check(
     "and every Cancel left, counted as a token, is a form's way back or an abort",
     swept.map(([name, src]) => [name, (src.match(/\bCancel\b/g) ?? []).length] as const).filter(([, n]) => n > 0),
-    [["AccountSection.tsx", 2], ["AgentsPanel.tsx", 1], ["PluginsPanel.tsx", 2]],
+    [
+      ["AccountSection.tsx", 2],
+      ["AgentsPanel.tsx", 1],
+      ["EmailSection.tsx", 1],
+      ["MachineSection.tsx", 1],
+      ["PluginsPanel.tsx", 1],
+      ["ServerSection.tsx", 2],
+      ["SystemsPanel.tsx", 1],
+      ["UsersSection.tsx", 2],
+    ],
   );
-  check("and no Cancel anywhere on them is filled", swept.filter(([, src]) => /tone="primary"[\s\S]{0,160}?>\s*Cancel\s*</.test(src)).map(([name]) => name), []);
+  check("and no Cancel anywhere on them is filled", swept.filter(([, src]) => /<Button\b(?:=>|[^>])*?\btone="primary"(?:=>|[^>])*>\s*Cancel\s*</.test(src)).map(([name]) => name), []);
   const sites = swept
     .map(([name, src]) => [name, (src.match(/<TwoStep\b/g) ?? []).length] as const)
     .filter(([, n]) => n > 0)
     .sort(([a], [b]) => (a < b ? -1 : 1));
   check(
-    "the fifteen confirmations are the primitive's, by file",
+    "the sixteen confirmations are the primitive's, by file",
     sites,
     [
       ["AccountSection.tsx", 1],
       ["AgentBuilder.tsx", 1],
-      ["AgentsPanel.tsx", 1],
+      ["AgentsPanel.tsx", 2],
       ["DevicesSection.tsx", 1],
       ["EmailSection.tsx", 1],
       ["MachineAgentsSection.tsx", 1],
@@ -869,7 +1073,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
       ["UsersSection.tsx", 3],
     ],
   );
-  check("fifteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 15);
+  check("sixteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 16);
   check(
     "and every one of those files imports it from bits",
     sites.filter(([name]) => !/import \{[^}]*\bTwoStep\b[^}]*\} from "\.\.?\/bits"/.test(swept.find(([n]) => n === name)?.[1] ?? "")).map(([name]) => name),

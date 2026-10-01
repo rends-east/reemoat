@@ -2,6 +2,7 @@
 paths:
   - packages/control-plane/src/machines.ts
   - packages/control-plane/src/quota.ts
+  - packages/control-plane/src/permissions.ts
   - packages/web/src/quota.ts
   - packages/web/src/enrollment.ts
   - packages/web/src/ui/settings/MachinesSection.tsx
@@ -271,6 +272,7 @@ appears without a wake.
 | `packages/web/src/quota.ts` | How many machines *this person* may have, and what to say when they may not. `mayAddMachine` reads the control plane's own `canAddMachine` and **fails open** on absence — it gates the one-line installer, the only way a machine is added from this app; `webcheck` pins the pair — a notice is `null` **iff** the door is drawn. Also `machineLimitProblem`, the validator both admin screens call, and `machineLimitChangeNotice`, whose non-`null` **is** the decision to confirm a lowering |
 | `packages/control-plane/src/machines.ts` | The label, the name that cannot collide, create-plus-grant in one transaction, `releaseOwner`, and `isUniqueViolation`, exported so a third caller one file over is not a third copy of a `"UNIQUE"` string match. `MAX_MACHINES_PER_USER` is the **ceiling** and lives here; the limit does not. `createOwnedMachine` takes the limit as a **required** argument, so both call sites are a compile error until they say which limit they mean |
 | `packages/control-plane/src/quota.ts` | **The rank rule and nothing else** — one SQL statement answering owner, position and override together, and the clamp that keeps a row written by a looser release from out-ranking this one's ceiling. `null` from `machineStanding` means *nobody owns it* and every caller must read that as allowed: `?.over ?? true` is the natural spelling and takes every pre-ownership machine offline. Its own statement cache, because the SQL and the rule that reads it are one rule |
+| `packages/control-plane/src/permissions.ts` | Whether agent messaging is on for an account and for a machine, **not** in `quota.ts`, which is the rank rule alone. No row is on; `nextPolicyAt` only grows, so a daemon can keep the newer of two pushes; `messagingOffMachineIds` is what a mint leaves out. Q1.654 |
 
 ## Bounds
 
@@ -286,3 +288,18 @@ the client, and `deploycheck` that `main.ts` no longer reads
 `REEMOAT_CP_MACHINES_OFFER_URL` by name — only its retirement list names it, to warn
 an env file that still sets it. Bringing it back starts at Q1.632, whose placement
 argument — inside the `mayAddMachine` arm, below the command — still holds.
+
+## Links between one owner's machines
+
+**A link is the owner's verb, and it is not a grant.** `POST /v1/machines/:id/links`
+resolves `:id` as `POST /v1/tokens` does, then requires the caller to *own* it (a
+grantee gets 404), and answers a link per other machine the caller owns that is
+enrolled, keyed, live, granted to them and within the limit — finding the live
+`machine_links` row or writing one, and minting a fresh capability on every call.
+Each has `aud` the target, `sub` the owner and `LINK_SCOPE` only, and `cnf.jkt` is
+the **source's** key from `machineKeyFor`, never from the request. It lives
+`LINK_TOKEN_TTL_SECONDS`, because revocation is the relay reading the row.
+Nothing removes one link: a machine switched off or isolated has every link it is
+either end of revoked in the same write, and switching back mints them under new
+ids (Q1.654, Q3.676). No link path writes `grants`, and `LINK_SCOPE` must
+never enter `ALL_SCOPES`, which is what a grant stores. Q1.652.

@@ -80,8 +80,8 @@ asks for a credential; **creates the machine before it clones anything**, so a
 refusal costs seconds rather than a clone, a ~220 MB `pnpm install` and ~700 MB of
 agent CLIs; clones the version that instance runs; `pnpm install
 --frozen-lockfile` (the daemon and the two ACP adapters — no CLI is vendored);
-runs `deploy/agents.sh` for the four coding-agent CLIs, which are the only copies
-there are; writes `~/.reemoat/daemon.env`; and then hands the rest to
+runs `deploy/agents.sh` for the coding-agent CLIs `--install-agents` names, and
+for none by default; writes `~/.reemoat/daemon.env`; and then hands the rest to
 `deploy/install.sh daemon --non-interactive`, which renders the unit, starts it
 and probes it. It reimplements none of that.
 
@@ -101,13 +101,14 @@ Flags: `--url`, `--api-key`, `--enroll-code`, `--label`, `--dir` (default
 **What it will not do:** no `sudo`, no package manager, nothing written to a
 shell profile. Reemoat's own state is under `~/.reemoat` and the checkout. The
 coding-agent CLIs are not part of `pnpm install` — nothing vendors them any more —
-but are installed by `deploy/agents.sh` — by default three of them with each
-vendor's own installer into the vendors' own directories (`~/.local/bin`,
-`~/.local/share/claude`, `~/.codex`, `~/.opencode`), because none of those
-installers is relocatable, and kimi from the npm registry into
-`~/.reemoat/toolchain`. `--agent-source npm` installs all four from the npm
-registry instead, everything under `~/.reemoat/toolchain`, for a machine that
-cannot reach the vendors' hosts (point npm at your mirror the way npm is pointed
+but are installed by `deploy/agents.sh` — by default claude, codex, opencode and
+cursor with each vendor's own installer into the vendors' own directories
+(`~/.local/bin`, `~/.local/share/claude`, `~/.local/share/cursor-agent`,
+`~/.codex`, `~/.opencode`), because none of those installers is relocatable, and
+kimi and grok from the npm registry into `~/.reemoat/toolchain`.
+`--agent-source npm` installs every one that has a package from the npm registry
+instead, everything under `~/.reemoat/toolchain`, for a machine that cannot reach
+the vendors' hosts — cursor has none, so it takes its vendor's installer either way (point npm at your mirror the way npm is pointed
 anywhere, in `~/.npmrc` or `npm_config_registry`); it is written into the env
 file as `REEMOAT_AGENT_SOURCE=npm`, so the daemon's daily re-run of that script —
 which is what keeps them current — agrees with the install. It is a choice rather
@@ -130,11 +131,12 @@ script installed — only once the service is confirmed stopped. If it cannot be
 still runs, and says which `--dir` would work. It **names your data and deletes
 none of it**: the env file, the SQLite database and above all
 `~/.reemoat/worktrees`, which holds git working copies that may carry uncommitted
-work. The toolchain it removes holds the CLIs installed from npm — kimi, and all
-four under `--agent-source npm` — so those go with it; the vendor-installed CLIs
-stay, and so does every sign-in, which lives in the vendors' own directories
-(`~/.claude`, `~/.codex`, `~/.kimi-code`, opencode's data directory) that nothing
-here touches. `--purge`
+work. The toolchain it removes holds the CLIs installed from npm — kimi and grok, and
+every other one with a package under `--agent-source npm` — so those go with it;
+the vendor-installed CLIs stay, and so does every sign-in, which lives in the
+vendors' own directories (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`,
+opencode's data directory, and cursor's — the macOS keychain, or
+`~/.config/cursor` on Linux) that nothing here touches. `--purge`
 deletes the data too, and always asks first, naming the database, the checkout,
 every worktree and the desktop app's daemons for other servers under
 `~/.reemoat/servers` — each of those a database and working copies of its own;

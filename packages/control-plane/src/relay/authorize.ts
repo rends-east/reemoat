@@ -1,9 +1,11 @@
 import type { KeyObject } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { AUTH_LEEWAY_MS } from "../../../../src/auth.js";
+import { MAX_STREAMS_PER_LINK, MAX_STREAMS_PER_SUBJECT } from "../../../../src/relay/protocol.js";
 import { decodeToken, jwkToPublicKey, parseClaims, verifySignature } from "../../../../src/token.js";
 import { machineStanding } from "../quota.js";
-import { activeUser, grantFor, machineById } from "../store.js";
+import { activeUser, grantFor, linkById, machineById } from "../store.js";
+import type { StreamLimiter } from "./registry.js";
 
 // Reachability only; what a token may do stays with the daemon's requireScope.
 // Reads live rows per request, so a revoked grant stops here at once, sooner than on the direct path.
@@ -17,6 +19,7 @@ export type RelayAuth =
       /** Epoch ms. Checked once, at open: the daemon's ping tick ends a stream whose token expired. */
       expiresAt: number;
       tokenId: string;
+      limiter: StreamLimiter;
     }
   | { ok: false; status: 401 | 403 | 404; code: string; message: string };
 
@@ -53,6 +56,17 @@ export function createRelayAuthorizer(db: DatabaseSync, issuer: string): RelayAu
   const keyFor = (kid: string): KeyObject | null => {
     if (Date.now() - refreshedAt >= KEY_REFRESH_MS) refresh();
     return cache.get(kid) ?? null;
+  };
+
+  // The row, both of its ends against the token, and the source's own standing; the target's is checked below with every caller's.
+  const linkIsLive = (linkId: string, sourceMachineId: string | undefined, targetMachineId: string): boolean => {
+    const row = linkById(db, linkId);
+    if (row === null || row.revoked) return false;
+    if (row.targetMachineId !== targetMachineId || row.sourceMachineId !== sourceMachineId) return false;
+    const source = machineById(db, sourceMachineId);
+    if (source === null || source.revoked) return false;
+    const standing = machineStanding(db, sourceMachineId);
+    return standing === null || (!standing.ownerDisabled && !standing.over);
   };
 
   return {
@@ -102,6 +116,11 @@ export function createRelayAuthorizer(db: DatabaseSync, issuer: string): RelayAu
         return { ok: false, status: 404, code: "machine_not_found", message: "no such machine" };
       }
 
+      // Every link refusal is the unknown machine's 404, so a link token cannot map which machine or link is alive.
+      if (claims.lnk !== undefined && !linkIsLive(claims.lnk, claims.src, machineId)) {
+        return { ok: false, status: 404, code: "machine_not_found", message: "no such machine" };
+      }
+
       const user = activeUser(db, claims.sub);
       if (!user) {
         return { ok: false, status: 403, code: "user_disabled", message: "this user has been disabled" };
@@ -147,6 +166,10 @@ export function createRelayAuthorizer(db: DatabaseSync, issuer: string): RelayAu
         scopes,
         expiresAt: claims.exp * 1000,
         tokenId: claims.jti,
+        limiter:
+          claims.lnk === undefined
+            ? { key: claims.sub, max: MAX_STREAMS_PER_SUBJECT, link: false }
+            : { key: `lnk:${claims.lnk}`, max: MAX_STREAMS_PER_LINK, link: true },
       };
     },
   };

@@ -99,7 +99,7 @@ person's own message is not markdown at all — see below.
   the panel keeps became unreachable. The session header's kebab is the other door
   and is why that kebab now exists at every width: `Background tasks` is on no rail
   row, unlike every other row in it. Q3.631.
-  `WaitingFoot` counts both sources and opens `TaskPanel`; it holds no list of its own and claims no region under it
+  It holds no list of its own and claims no region under it
   (`aria-haspopup="dialog"`, never `aria-expanded`). The panel's own decisions —
   the section order and labels, the chip table over the five states, the duration
   and token formatters, the four-cell meter — are `tasks.ts`, so `webcheck` drives
@@ -252,16 +252,17 @@ person's own message is not markdown at all — see below.
   `ElicitationResolvedEvent` carries `message` plus `{key, label, value}` per
   answer, and for a multi-question form `message` is the adapter's preamble while
   each real question sits in its field's *description*, which the resolution does
-  not carry — so the row read *"Please answer the following questions."* over four
-  bare values. `answeredQuestions` recovers the wording from the arguments of the
-  tool call `askedThrough` merges away, joining **by identity on the chosen label**
-  and never by parsing `question_0` / `<question>__other`, which are two adapters'
-  spellings of one idea. A label two questions share matches neither, because
-  attributing an answer to the wrong question is worse than attributing it to none.
-  The join is in `tail.ts` and arrives as `EventNode.asked`, the same arrangement
-  `heading` uses; `null` means *draw what you drew before* and is reached three
-  honest ways — the call is outside the window, its `rawInput` is the
-  `{truncated, bytes}` stand-in, or the form was never an `AskUserQuestion`.
+  not carry — so the row read the preamble over bare values. `answeredQuestions`
+  recovers the wording from the arguments of the tool call `askedThrough` merges
+  away, joining **by identity on the chosen label** and never by parsing
+  `question_0` / `<question>__other`, two adapters' spellings of one idea. A label
+  two questions share matches neither: the wrong question is worse than none.
+  Joined in `tail.ts` as `EventNode.asked`, as `heading` is; `null` means *draw
+  what you drew before* and comes three honest ways — the call is outside the
+  window, its `rawInput` is the `{truncated, bytes}` stand-in, or the form was
+  never an `AskUserQuestion`. cursor's `ask_question` reads alike (`askedInput`); its
+  call, the daemon's yes to it and a late answer's `answers` prompt draw nothing.
+  Q2.251.
 - **Consecutive plan updates are one card, drawn where the newest one landed.**
   One `TodoWrite` emits a `plan` per streaming refinement — nine events for a
   three-item list, each a full replacement — so the same checklist was drawn nine
@@ -291,10 +292,11 @@ person's own message is not markdown at all — see below.
   nothing above the cells substitutes. What it cannot reach is the **anonymous**
   block a tight list item wraps its sentence in; `remarkListItemBlocks` marks such
   an item `spread` so the paragraph comes back, costing no pixels. The zero-width
-  `::after` this replaced is **gone**, not kept beside it. Blink is byte-identical
-  either way, paint and copy. Q3.638.
+  `::after` this replaced is **gone**, not kept beside it. Q3.638. **A
+  triple-click on inline code selects the whole span**, `selectWholeSpan`; two
+  clicks stay the word. Q3.691.
 - **A person's message is drawn exactly as sent, and never parsed.** `UserBubble`
-  draws one text node, `whitespace-pre-wrap wrap-anywhere`: `1)` stays text, not a
+  draws it as typed, each `@name` a button (Q3.682), `whitespace-pre-wrap wrap-anywhere`: `1)` stays text, not a
   `::marker`; `**x**` stays asterisks. Every row of a person's words is that
   component. ⚠ **Reverses Q3.639**: with no parse there is no `<br>` to double. No
   anchor — it turns a drag into a link drag. The composer sends `sentText` (blank

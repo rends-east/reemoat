@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type MouseEvent,
   type ReactNode,
 } from "react";
 import { backgroundReporting } from "../tasks";
@@ -13,6 +14,7 @@ import { echoFor, echoVersion, subscribeEchoes } from "../echo";
 import { hiddenFinished, hiddenFinishedVersion, hideFinished, subscribeHiddenFinished } from "../finishedTasks";
 import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
+import { ApiError } from "../http";
 import { describe, missingRowReason } from "../machine";
 import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths";
 import { navigate } from "../router";
@@ -41,6 +43,7 @@ import { useFollow } from "./follow";
 import { FileAccessContext, type FileAccess } from "./files";
 import { saveBlob } from "./download";
 import { Header } from "./Header";
+import { MentionScope } from "./MentionLink";
 import { ElicitationCard } from "./ElicitationCard";
 import { PermissionCard } from "./PermissionCard";
 import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
@@ -49,7 +52,9 @@ import { TASK_PANEL_GUTTER } from "./TaskPanel";
 import {
   COLUMN,
   Icon,
+  MachineLabel,
   TranscriptSkeleton,
+  nicknameLine,
   sessionLabel,
   sessionNotice,
 } from "./bits";
@@ -96,6 +101,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   const closeTasks = useCallback(() => setTasksOpen(false), []);
   // Opaque, because below lg a back swipe draws the list under it (Q3.663).
   const back = useBackSwipe();
+  const mentionScope = useMemo(() => ({ here: sessionRef.machineId as string, mentions: [] }), [sessionRef.machineId]);
 
   if (row === undefined) {
     const why = missingRowReason(machine?.reach ?? null, state.listed.has(sessionRef.machineId));
@@ -151,6 +157,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         }
         subtitle={
           <WorkspaceLine
+            nickname={nicknameLine(session)}
             machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
             workspace={session.workspace}
             roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
@@ -172,16 +179,19 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
       <ExitNotice row={row} machineName={row.machineName} />
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Transcript
-          sessionRef={sessionRef}
-          state={state}
-          tailRequest={tailRequest}
-          stale={stale}
-          askHeight={askHeight}
-          tasksOpen={tasksOpen}
-          onOpenTasks={openTasks}
-          onCloseTasks={closeTasks}
-        />
+        {/* Every `@name` drawn below resolves against this conversation's machine first (Q3.682). */}
+        <MentionScope.Provider value={mentionScope}>
+          <Transcript
+            sessionRef={sessionRef}
+            state={state}
+            tailRequest={tailRequest}
+            stale={stale}
+            askHeight={askHeight}
+            tasksOpen={tasksOpen}
+            onOpenTasks={openTasks}
+            onCloseTasks={closeTasks}
+          />
+        </MentionScope.Provider>
 
         {/* Keyed per request, or two parked requests reconcile as one instance and carry state across. */}
         {/* Not gated on a transcript: a cold open without a connection has none, and the card fetches its own context. */}
@@ -307,10 +317,12 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
 }
 
 function WorkspaceLine({
+  nickname,
   machineName,
   workspace,
   roots,
 }: {
+  nickname: string | null;
   machineName: string;
   workspace: SessionSnapshot["workspace"];
   roots: readonly string[];
@@ -318,21 +330,45 @@ function WorkspaceLine({
   const where = workspace.requestedCwd;
   const branch = workspace.git?.branch ?? null;
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
-      <span className="shrink-0">{machineName}</span>
+    <span onMouseDown={selectUnit} className="flex min-w-0 items-center gap-1.5">
+      {nickname !== null && (
+        <>
+          <span data-unit="" className="shrink-0">{nickname}</span>
+          <span className="shrink-0 text-faint">·</span>
+        </>
+      )}
+      <span data-unit="" className="flex shrink-0">
+        <MachineLabel name={machineName} />
+      </span>
       <span className="shrink-0 text-faint">·</span>
-      <span className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
+      <span data-unit="" className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
       {workspace.mode === "worktree" && branch !== null && (
         <>
           <span className="text-faint">·</span>
           <span className="flex min-w-0 items-center gap-1 text-muted">
             <Icon as={GitBranch} size={10} />
-            <span className="truncate">{branch}</span>
+            <span data-unit="" className="truncate">{branch}</span>
           </span>
         </>
       )}
     </span>
   );
+}
+
+/**
+ * From the third click on, the header line selects the one item under the pointer — the folder, the branch — and nothing on a
+ * separator, where WebKit's paragraph took the title too and painted the header's whole width (Q3.696).
+ */
+function selectUnit(event: MouseEvent<HTMLElement>): void {
+  if (event.detail < 3 || event.button !== 0) return;
+  event.preventDefault();
+  const unit = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-unit]") : null;
+  const selection = window.getSelection();
+  if (unit === null || selection === null || !event.currentTarget.contains(unit)) return;
+  const range = document.createRange();
+  range.selectNodeContents(unit);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 function Transcript({
@@ -418,7 +454,7 @@ function Transcript({
       spanTarget: (span: string) => downloadablePath(span, root, touched.current),
       download: async (rel, name) => {
         try {
-          saveBlob(await daemon.downloadFile(sessionRef.sessionId, rel), name);
+          await saveBlob(await daemon.downloadFile(sessionRef.sessionId, rel), name);
         } catch (error) {
           toast("error", describe(error));
         }
@@ -426,9 +462,11 @@ function Transcript({
       fetchUpload: (uploadId) => daemon.downloadUpload(sessionRef.sessionId, uploadId),
       downloadUpload: async (uploadId, name) => {
         try {
-          saveBlob(await daemon.downloadUpload(sessionRef.sessionId, uploadId), name);
+          await saveBlob(await daemon.downloadUpload(sessionRef.sessionId, uploadId), name);
         } catch (error) {
-          toast("error", describe(error));
+          // A session keeps its newest files only (Q2.247); an older one is gone rather than broken.
+          const gone = ApiError.isApiError(error) && error.code === "upload_not_found";
+          toast("error", gone ? `${name} is no longer kept.` : describe(error));
         }
       },
     };

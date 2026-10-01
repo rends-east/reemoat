@@ -3,10 +3,17 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, createWebSocketStream } from "ws";
 import { corsHeaders } from "../../../../src/cors.js";
-import { MAX_TUNNEL_MESSAGE_BYTES, STREAM_ENCRYPTION_NOISE_IK } from "../../../../src/relay/protocol.js";
+import {
+  LINK_CONNECT_BURST,
+  LINK_CONNECT_REFILL_MS,
+  MAX_TUNNEL_MESSAGE_BYTES,
+  RELAY_URL_HEADER,
+  STREAM_ENCRYPTION_NOISE_IK,
+} from "../../../../src/relay/protocol.js";
 import { bearerToken } from "../../../../src/http.js";
 import { createRelayAuthorizer } from "./authorize.js";
-import type { TunnelRegistry } from "./registry.js";
+import type { RelayView, TunnelRegistry } from "./registry.js";
+import type { RelayUrlMap } from "./routing.js";
 
 // Nothing reaches a tunnel before the grant check passes; the daemon re-verifies the token regardless.
 
@@ -16,6 +23,16 @@ export interface RelayProxyOptions {
   registry: TunnelRegistry;
   onEvent?: (event: string, detail: string) => void;
   channelTimeoutMs?: number;
+  /** Absent, a tunnel this relay does not hold is a 503; present, one a named sibling holds is a 421 naming where. */
+  siblings?: SiblingRelays | null;
+}
+
+export interface SiblingRelays {
+  /** Presence as rows, which is the only place another relay's tunnels are visible from here. */
+  view: RelayView;
+  urls: RelayUrlMap;
+  /** This relay's own slot: a row naming it is a tunnel that has just gone, never a sibling. */
+  relayId: string;
 }
 
 export interface RelayProxy {
@@ -36,6 +53,17 @@ export function createRelayProxy(options: RelayProxyOptions): RelayProxy {
   const channelTimeoutMs = options.channelTimeoutMs ?? CHANNEL_OPEN_TIMEOUT_MS;
   const authorizer = createRelayAuthorizer(db, options.issuer);
   const channels = new WebSocketServer({ noServer: true, maxPayload: MAX_TUNNEL_MESSAGE_BYTES });
+  const linkOpens = new LinkConnectBudget();
+  const siblings = options.siblings ?? null;
+
+  const siblingUrlFor = (machineId: string): string | null => {
+    if (siblings === null) return null;
+    const slot = siblings.view.relayFor(machineId);
+    if (slot === null || slot === siblings.relayId || !Object.hasOwn(siblings.urls, slot)) return null;
+    const url = siblings.urls[slot]!;
+    // Written into a raw status line below, so anything but visible ASCII is not a URL worth sending.
+    return /^[\x21-\x7e]+$/.test(url) ? url : null;
+  };
 
   return {
     /** Plaintext proxying is retired: refused with 426, and not authorized first because no credential makes this path work. */
@@ -70,13 +98,27 @@ export function createRelayProxy(options: RelayProxyOptions): RelayProxy {
         return refuseUpgrade(socket, auth.status, auth.code);
       }
 
+      // Spent before the tunnel is looked up, so a link hammering a machine that is offline is bounded too.
+      if (auth.limiter.link && !linkOpens.take(auth.limiter.key)) {
+        onEvent("channel_rate_limited", `${auth.machineId} ${auth.limiter.key}`);
+        return refuseUpgrade(socket, 429, "link_rate_limited", {
+          "retry-after": String(Math.ceil(LINK_CONNECT_REFILL_MS / 1000)),
+        });
+      }
+
       const tunnel = registry.get(auth.machineId);
       if (tunnel === null) {
+        // Only after authorize: where a machine's tunnel is would otherwise be answered to anyone holding any token.
+        const elsewhere = siblingUrlFor(auth.machineId);
+        if (elsewhere !== null) {
+          onEvent("channel_wrong_relay", auth.machineId);
+          return refuseUpgrade(socket, 421, "wrong_relay", { [RELAY_URL_HEADER]: elsewhere });
+        }
         onEvent("channel_no_tunnel", auth.machineId);
         return refuseUpgrade(socket, 503, "no_tunnel");
       }
 
-      const stream = tunnel.open(auth.subject, STREAM_ENCRYPTION_NOISE_IK);
+      const stream = tunnel.open(auth.subject, auth.limiter, STREAM_ENCRYPTION_NOISE_IK);
       if (stream === null) {
         onEvent("channel_no_tunnel", `${auth.machineId} (stream limit)`);
         return refuseUpgrade(socket, 503, "no_tunnel");
@@ -178,11 +220,53 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-function refuseUpgrade(socket: Duplex, status: number, code: string): void {
+function refuseUpgrade(socket: Duplex, status: number, code: string, headers: Record<string, string> = {}): void {
+  const extra = Object.entries(headers)
+    .map(([name, value]) => `${name}: ${value}\r\n`)
+    .join("");
   try {
-    socket.write(`HTTP/1.1 ${status} ${code}\r\nConnection: close\r\n\r\n`);
+    socket.write(`HTTP/1.1 ${status} ${code}\r\n${extra}Connection: close\r\n\r\n`);
   } catch {
     // Peer already gone.
   }
   socket.destroy();
+}
+
+/** How often a take sweeps buckets that have refilled, which are then the same as absent ones. */
+const LINK_BUDGET_SWEEP_EVERY = 256;
+
+/** A token bucket per link: LINK_CONNECT_BURST opens, then one per LINK_CONNECT_REFILL_MS. Keyed on the link, so its owner is never charged. */
+export class LinkConnectBudget {
+  private readonly buckets = new Map<string, { tokens: number; at: number }>();
+  private takes = 0;
+
+  take(key: string, now: number = Date.now()): boolean {
+    this.takes += 1;
+    if (this.takes % LINK_BUDGET_SWEEP_EVERY === 0) this.sweep(now);
+    const tokens = this.available(key, now);
+    if (tokens < 1) {
+      this.buckets.set(key, { tokens, at: now });
+      return false;
+    }
+    this.buckets.set(key, { tokens: tokens - 1, at: now });
+    return true;
+  }
+
+  get size(): number {
+    return this.buckets.size;
+  }
+
+  private available(key: string, now: number): number {
+    const held = this.buckets.get(key);
+    if (held === undefined) return LINK_CONNECT_BURST;
+    // max(0, …): a clock stepped backwards refills nothing rather than draining the bucket.
+    const refilled = Math.max(0, now - held.at) / LINK_CONNECT_REFILL_MS;
+    return Math.min(LINK_CONNECT_BURST, held.tokens + refilled);
+  }
+
+  private sweep(now: number): void {
+    for (const key of [...this.buckets.keys()]) {
+      if (this.available(key, now) >= LINK_CONNECT_BURST) this.buckets.delete(key);
+    }
+  }
 }

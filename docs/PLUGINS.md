@@ -230,7 +230,7 @@ Every one of these is refused unless the manifest declared the matching scope,
 | Scope | |
 |---|---|
 | `sessions.read` | `ctx.sessions.list()` · `.get(id)` · `.events(id, {since, limit})` · `.changes(id)` · `.diff(id, path)` · `.workspace(id)` |
-| `sessions.write` | `ctx.sessions.create({agent, cwd, worktree, branch})` · `.prompt(id, text)` · `.cancel(id)` · `.stop(id)` · `.setMeta(id, {title, pinned})` · `.answerPermission(id, permissionId, optionId)` · `.answerElicitation(id, elicitationId, {content}\|{decline}\|{cancel})` |
+| `sessions.write` | `ctx.sessions.create({agent, cwd, worktree, branch, nickname})` · `.prompt(id, text)` · `.cancel(id)` · `.stop(id)` · `.setMeta(id, {title, pinned, nickname})` · `.answerPermission(id, permissionId, optionId)` · `.answerElicitation(id, elicitationId, {content}\|{decline}\|{cancel})` |
 | `files.read` | `ctx.files.read(sessionId, path)` — a file inside that session's workspace, up to 64 KiB |
 | `store` | `ctx.store.get(key)` · `.set(key, value)` · `.delete(key)` · `.keys(prefix)` · `.entries(prefix, after)` |
 | `net` | `ctx.net.fetch(url, init)` — https only, only the hosts in `net` |

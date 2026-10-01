@@ -611,12 +611,25 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   });
   const claude = effort(["default", "low", "medium", "high", "xhigh", "max"]);
 
-  check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ultracode: true, elicitation: true }), {
-    claudeCode: { options: { settings: { ultracode: true } } },
+  const asked = { ultracode: false, elicitation: true };
+  // Q2.242: Claude Code's own ListAgents never lists what this daemon runs, so no claude session is handed it.
+  const withdrawn = { disallowedTools: ["ListAgents"] };
+  check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ...asked, ultracode: true }), {
+    claudeCode: { options: { settings: { ultracode: true }, ...withdrawn } },
   });
-  check("and asked nothing at all when it is off", sessionMetaFor("claude", { ultracode: false, elicitation: true }), undefined);
-  check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ultracode: true, elicitation: true }), undefined);
-  check("nor codex", sessionMetaFor("codex", { ultracode: true, elicitation: true }), undefined);
+  check("and asked for nothing but the withdrawal when it is off", sessionMetaFor("claude", asked), { claudeCode: { options: withdrawn } });
+  check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ...asked, ultracode: true }), undefined);
+  check("nor codex", sessionMetaFor("codex", { ...asked, ultracode: true }), undefined);
+  check(
+    "claude keeps SendMessage, which is also how it talks to its own subagents",
+    JSON.stringify(sessionMetaFor("claude", asked)).includes("SendMessage"),
+    false,
+  );
+  check(
+    "and the withdrawal never rides settings, which would drop the adapter's own model settings",
+    sessionMetaFor("claude", asked),
+    { claudeCode: { options: { disallowedTools: ["ListAgents"] } } },
+  );
 
   // Which control the extra row belongs on — by category, never by id.
   check("the row goes on claude's effort control", ultracodeOptionId(claude, "claude"), "effort");
@@ -718,7 +731,7 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   });
   await asking.dispose().catch(() => {});
   check("the flag reaches session/new in the shape claude's adapter reads", opened[0]?._meta, {
-    claudeCode: { options: { settings: { ultracode: true } } },
+    claudeCode: { options: { settings: { ultracode: true }, disallowedTools: ["ListAgents"] } },
   });
   check("beside the parameters that were always there", [opened[0]?.cwd === process.cwd(), opened[0]?.mcpServers], [
     true,
@@ -1498,7 +1511,7 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
   const fixtures: Record<string, SessionEvent> = {
     // Clipped to `maxBytes`, so the size of the field cannot matter.
     text: { type: "text", role: "agent", thought: false, text: BIG, messageId: null },
-    prompt: { type: "prompt", text: BIG, attachments: null },
+    prompt: { type: "prompt", text: BIG, attachments: null, from: null },
     agent_log: { type: "agent_log", line: BIG },
     error: { type: "error", message: BIG, data: { blob: BIG } },
     other: { type: "other", sessionUpdate: "unknown", raw: { blob: BIG } },

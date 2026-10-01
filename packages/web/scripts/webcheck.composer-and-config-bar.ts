@@ -389,6 +389,17 @@ process.stdout.write("\nthe composer's send key\n");
         .map((match) => composerCode.slice(match.index, composerCode.indexOf(">", match.index)))
         .filter((tag) => !/\btype=/.test(tag));
       check("nor anything hand-rolled in the composer itself", composerTypeless, []);
+      // The `@` menu is a child of the same form; a tag is read to its first `>`, so `type` leads every one.
+      const mentionCode = stripComments(readFileSync(new URL("../src/ui/MentionMenu.tsx", import.meta.url), "utf8"));
+      const mentionButtons = [...mentionCode.matchAll(/<button\b/g)];
+      check("and the scan found the `@` menu's rows", mentionButtons.length >= 1, true);
+      check(
+        "nor in the `@` menu",
+        mentionButtons
+          .map((match) => mentionCode.slice(match.index, mentionCode.indexOf(">", match.index)))
+          .filter((tag) => !/\btype=/.test(tag)),
+        [],
+      );
     }
 
     check(

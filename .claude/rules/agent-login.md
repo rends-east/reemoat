@@ -79,11 +79,14 @@ pasted key is for, and exactly the state the gate lets the call through in.
 
 ## Logging an agent in
 
-Four of the five authenticate out of band — opencode nowhere at all: it reaches its
+Five of the six authenticate out of band — opencode nowhere at all: it reaches its
 own gateway anonymously, and every other provider it knows is a key you hand it —
-and for those four the daemon can only inherit credentials from disk. **grok is the
-exception and it is the section above**: a machine holding a *pasted* key needs
-ACP's `authenticate` for that key to be spent at all, so there the daemon does make
+and for those five the daemon can only inherit credentials from disk or hand over a
+pasted key. cursor is one of them: its `CURSOR_API_KEY` is read at startup and needs
+no `authenticate`, and the only method it advertises opens a browser on this host, so
+it is never sent (Q6.116). **grok is the exception and it is the section above**: a
+machine holding a *pasted* key needs ACP's `authenticate` for that key to be spent
+at all, so there the daemon does make
 the call, with an id it writes down rather than reads — and on a machine signed in
 by `grok login` it makes none, because there the credential is already on disk like
 everybody else's. Either way something has to put a credential where the agent will
@@ -199,6 +202,21 @@ so a present-but-wrong key becomes `lastStartRefusal` — *would not start* — 
 than a harness nothing will spawn again. This row was `null` for a release with a
 docblock saying the signed-in string had not been seen on any machine here; it has
 now, and all three were taken on one machine against one binary.
+
+⚠ **cursor's is a fourth: `status` is the wrong command, and `models` answers on
+both streams.** `status` reads a stored login only and says `Not logged in` beside a
+key that works — a clean `false`, which `admit` refuses on. `models` asks the backend
+with whatever credential is there, so it proves a key *works* rather than that it is
+present: `Available models` (or `No models available for this account.`) on stdout,
+`Error: Authentication required` or `Authentication failed:` on stderr, both exit 1.
+`LoginStatusProbe.stream` gained `both` for it. A network failure and a locked macOS
+keychain match neither and read as cannot tell. Q6.116.
+
+**cursor's wizard is a URL and nothing to type.** Its `login` opens a browser on the
+host unless `NO_OPEN_BROWSER` is set, which `LOGIN_SPAWN_ENV` puts in the pty's
+environment and nowhere else; it prints `…/loginDeepControl?challenge=…` and polls.
+Over SSH on a Mac it cannot run at all — the keychain is locked for that session —
+and `ui/login.ts` says so.
 
 **No new WebSocket.** Output is polled; input is an HTTP request whose response
 confirms it landed. A login code is sent once and unrecoverable if it evaporates,

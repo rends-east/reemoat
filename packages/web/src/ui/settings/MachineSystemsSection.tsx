@@ -68,3 +68,8 @@ export function MachineSystemsSection({
     </div>
   );
 }
+
+/** A machine's Sign-ins, a screen of its own between the machine and each card, which walks back here (Q3.415). */
+export function MachineSystemsList({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
+  return <MachineSystemsSection state={state} machineId={machineId} system={null} signin={null} />;
+}

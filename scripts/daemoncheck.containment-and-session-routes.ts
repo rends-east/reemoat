@@ -1,11 +1,30 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { listDirs, makeDir, PathError, resolveCwd } from "../src/browse.js";
 import { atOrUnder, containedIn } from "../src/paths.js";
+import { isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, NICKNAMES } from "../src/nickname.js";
+import { PeerHub } from "../src/peers/hub.js";
 import { MAX_TITLE_CHARS } from "../src/registry.js";
+import { createApp } from "../src/server.js";
+import { SqlitePeerLinkStore } from "../src/store/sqlite.js";
 import { check, report } from "./daemoncheck.env.js";
-import { uAb, uAbcd, escape, aFile, tokenFor, app, get } from "./daemoncheck.fixtures.js";
+import {
+  uAb,
+  uAbcd,
+  escape,
+  aFile,
+  tokenFor,
+  app,
+  get,
+  registry,
+  verifier,
+  credentials,
+  users,
+  now,
+  signedClaims,
+} from "./daemoncheck.fixtures.js";
 
 process.stdout.write("\ncontainment\n");
 
@@ -262,6 +281,71 @@ check("and an empty body is refused too", (await metaOf("s_one", "u_alice", {}))
   await metaOf("s_three", "u_alice", { rank: null });
 }
 
+process.stdout.write("\na session's nickname\n");
+{
+  // The fixture rows were written with none, as an older build wrote them; all three have ended, and still hold one.
+  const listed = (await get("/sessions", "u_alice")).body.sessions as { id: string; nickname: string }[];
+  const held = listed.map((session) => session.nickname);
+  check(
+    "every restored session is given one from the list, and no two the same",
+    [held.every((name) => NICKNAMES.includes(name)), new Set(held).size],
+    [true, 3],
+  );
+
+  const renamed = await metaOf("s_one", "u_alice", { nickname: " Scout " });
+  check("meta changes it, trimmed and lowercased", [renamed.status, ((await renamed.json()) as any).session.nickname], [200, "scout"]);
+  const taken = await metaOf("s_two", "u_alice", { nickname: "SCOUT" });
+  check(
+    "one another session holds is refused, whatever its case, and left alone",
+    [taken.status, ((await taken.json()) as any).error?.code, registry.get("s_two")?.nickname],
+    [409, "nickname_taken", held[1]],
+  );
+  check("while a session may be given back its own", (await metaOf("s_one", "u_alice", { nickname: "scout" })).status, 200);
+
+  const refused: [string, unknown][] = [
+    ["one character", "a"],
+    ["one character over the bound", "x".repeat(MAX_NICKNAME_CHARS + 1)],
+    ["an underscore, which reads as a session id", "s_x"],
+    ["a space", "mi ra"],
+    ["a leading hyphen", "-mi"],
+    ["null, since a session always has one", null],
+    ["a number", 7],
+  ];
+  for (const [name, nickname] of refused) {
+    const answer = await metaOf("s_one", "u_alice", { nickname });
+    const body = (await answer.json()) as any;
+    check(`${name} is refused as invalid_nickname`, [answer.status, body.error?.code], [400, "invalid_nickname"]);
+  }
+  check("and none of those changed it", registry.get("s_one")?.nickname, "scout");
+  check("the longest one allowed is taken", (await metaOf("s_one", "u_alice", { nickname: "x".repeat(MAX_NICKNAME_CHARS) })).status, 200);
+  await metaOf("s_one", "u_alice", { nickname: "scout" });
+
+  // The cwd does not exist, so a nickname check that let this through would answer the path's refusal instead, and spawn nothing.
+  const create = async (nickname: unknown) => {
+    const response = await app.fetch(
+      new Request("http://d/sessions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        body: JSON.stringify({ agent: "claude", cwd: "/nowhere-in-particular", nickname }),
+      }),
+    );
+    return { status: response.status, body: (await response.json()) as any };
+  };
+  const count = registry.list().length;
+  const clash = await create("Scout");
+  check("creating a session under a nickname one here holds is a 409", [clash.status, clash.body.error?.code], [409, "nickname_taken"]);
+  const bad = await create("s_x");
+  check(
+    "and under one that is not a nickname a 400 saying what one is",
+    [bad.status, bad.body.error?.code, bad.body.error?.detail],
+    [400, "invalid_nickname", { min: MIN_NICKNAME_CHARS, max: MAX_NICKNAME_CHARS }],
+  );
+  check("so is one that is not a string", (await create(7)).status, 400);
+  check("while a free one gets past it to the next refusal", (await create("free-name")).body.error?.code, "not_found");
+  check("and no refusal left a session behind", registry.list().length, count);
+  check("the snapshot always carries it", listed.every((session) => isNickname(session.nickname)), true);
+}
+
 // A DELETE with `machine:admin` still cannot invent a session. The scope widens
 // what may be done to a row, never which rows exist.
 const adminDelete = await app.fetch(
@@ -271,3 +355,50 @@ const adminDelete = await app.fetch(
   }),
 );
 check("machine:admin cannot reach an id that does not exist", adminDelete.status, 404);
+
+// session:message passes the scope gate by itself, so on a capability naming no link the route is what refuses (Q7.150).
+process.stdout.write("\na message capability that names no link\n");
+{
+  const linkDb = new DatabaseSync(":memory:");
+  linkDb.exec(readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8"));
+  const { app: peered } = createApp({
+    registry,
+    verifier,
+    instanceId: "i_peers_unlinked",
+    startedAt: now,
+    credentials,
+    roots: [users],
+    peers: { hub: new PeerHub({ registry, enabled: true }), links: new SqlitePeerLinkStore(linkDb) },
+  });
+  const answered = async (token: string): Promise<string[]> => {
+    const out: string[] = [];
+    for (const [method, path] of [
+      ["GET", "/peer/agents"],
+      ["POST", "/peer/messages"],
+      ["POST", "/peer/notices"],
+    ] as const) {
+      const response = await peered.fetch(
+        new Request(`http://d${path}`, {
+          method,
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          ...(method === "POST" ? { body: "{}" } : {}),
+        }),
+      );
+      const raw = await response.text();
+      const code = raw.length === 0 ? null : ((JSON.parse(raw) as { error?: { code?: string } }).error?.code ?? null);
+      out.push(`${method} ${path}: ${response.status}${code === null ? "" : ` ${code}`}`);
+    }
+    return out;
+  };
+  check(
+    "a session:message capability with no link is refused by every peer route, as not a link",
+    await answered(signedClaims({})),
+    ["GET /peer/agents: 403 not_a_link", "POST /peer/messages: 403 not_a_link", "POST /peer/notices: 403 not_a_link"],
+  );
+  // The control: a route refusing everybody would pass the check above.
+  check(
+    "while a whole link on the same app gets past it to each route's own answer",
+    await answered(signedClaims({ lnk: "lk_whole", src: "m_other", srcl: "studio" })),
+    ["GET /peer/agents: 200", "POST /peer/messages: 200", "POST /peer/notices: 409 unexpected_notice"],
+  );
+}

@@ -1,7 +1,6 @@
-import { Check, Copy, Download, ExternalLink, LogIn, LogOut, RefreshCw, X } from "lucide-react";
+import { Check, Download, ExternalLink, LogIn, LogOut, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../daemon";
-import type { CredentialWritten } from "../../wire";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { store } from "../../store";
@@ -13,8 +12,7 @@ import type {
   AgentLoginSupport,
   InstallRunView,
 } from "../../wire";
-import { Badge, Button, DangerButton, Empty, FIELD, Icon, IconButton, Spinner, TwoStep } from "../bits";
-import { copyText } from "../clipboard";
+import { Badge, Button, DangerButton, Empty, FIELD, GROUP_ROW, Icon, Spinner, TwoStep } from "../bits";
 import { CommandLine } from "../CommandLine";
 import {
   installElapsed,
@@ -37,12 +35,15 @@ import {
   multiSlotLine,
   signOutSentence,
   stanceLine,
-  STALE_READ,
   storedChip,
   tokenBlockFor,
   type AgentStance,
 } from "../agentCard";
 import { toast } from "../Toast";
+import { CopyButton } from "../kit/CopyButton";
+import { Field } from "../kit/Field";
+import { ActionRow, DangerRow, Group, TABLE, TD, TWO_STEP_ROW } from "../kit/List";
+import { Pending, RecheckButton } from "../kit/Status";
 
 function useAgentAuth(machineId: MachineId): {
   listing: AgentAuthListing | null;
@@ -96,22 +97,6 @@ function statusOf(agent: AgentAuthInfo): { tone: "plain" | "strong"; text: strin
   );
 }
 
-function RecheckButton({ onClick, busy }: { onClick: () => void; busy: boolean }): ReactNode {
-  return (
-    <button
-      onClick={onClick}
-      disabled={busy}
-      className="tap press -mx-2 inline-flex min-h-11 items-center gap-1.5 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-40"
-    >
-      <Icon as={RefreshCw} size={12} /> {busy ? "Checking…" : "Check again"}
-    </button>
-  );
-}
-
-function StaleNotice(): ReactNode {
-  return <p className="text-xs text-muted">{STALE_READ}</p>;
-}
-
 export function AgentDetail({
   machineId,
   agentId,
@@ -127,13 +112,7 @@ export function AgentDetail({
 }): ReactNode {
   const { listing, error, loading, refresh } = useAgentAuth(machineId);
 
-  if (loading && listing === null) {
-    return (
-      <div className="mt-4 flex items-center gap-2 text-xs text-muted">
-        <Spinner /> Asking that machine…
-      </div>
-    );
-  }
+  if (loading && listing === null) return <Pending>Asking that machine…</Pending>;
   if (listing === null) {
     return (
       <Empty
@@ -157,19 +136,15 @@ export function AgentDetail({
   const login = agent.login ?? { supported: listing.loginSupported, needsInput: true };
 
   return (
-    <div className="mt-4 space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          {title ?? harnessName(agent)}
-        </span>
+    <div>
+      <div className="flex items-center gap-2 px-4">
+        <span className="min-w-0 flex-1 truncate text-base font-semibold">{title ?? harnessName(agent)}</span>
         {loading ? (
           <Badge tone="plain">checking…</Badge>
         ) : (
           status !== null && <Badge tone={status.tone}>{status.text}</Badge>
         )}
       </div>
-
-      {error !== null && <StaleNotice />}
 
       <SignIn
         machineId={machineId}
@@ -181,8 +156,6 @@ export function AgentDetail({
         checkFailed={error !== null}
         onChanged={refresh}
       />
-
-      <RecheckButton onClick={refresh} busy={loading} />
     </div>
   );
 }
@@ -220,6 +193,7 @@ function SignIn({
     }
   });
   const [installing, setInstalling] = useState(() => heldInstall(machineId, agent.id) !== null);
+  const [rechecking, setRechecking] = useState(false);
   /** The daemon said it installs nothing. The auth listing does not fold that into installable, so this is the only suppression; it only ever rises. */
   const [noInstallRoute, setNoInstallRoute] = useState(false);
   // Adopt what the daemon is already running: one install run daemon-wide, while the stored id is per tab and per agent.
@@ -272,23 +246,48 @@ function SignIn({
   const divider = wholeAgent ? dividerWord(stance, signInAbove, block) : null;
   const caveat = wholeAgent ? credentialCaveat(agent.id, canSignIn) : null;
   const choice = wholeAgent ? multiSlotLine(agent, slots.length) : null;
+  const control = primaryControl({
+    stance,
+    installRunning: installing,
+    wizardOpen: wizard,
+    installable: canInstall,
+    canSignIn,
+    // Read loosely on purpose, unlike canInstall: this refusal is a 503 carrying the route's sentence, so offering it costs a clean error.
+    canSignOut: login.canSignOut !== false,
+  });
+  // The card's one line: the stance, or why a signed-in agent offers no Sign out.
+  const said = line ?? (control === "none" && stance === "signed_in" ? signOutSentence(agent.id, stored) : null);
+  const refused = wholeAgent && stance === "start_refused";
+
+  /** One Check again per card: for a refusal it asks the daemon to measure the start again, otherwise it re-reads. */
+  const recheck = (): void => {
+    if (!refused) {
+      onChanged();
+      return;
+    }
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) {
+      toast("error", "That machine is not reachable.");
+      return;
+    }
+    setRechecking(true);
+    void daemon
+      .recheckAgent(agent.id)
+      .catch((cause: unknown) =>
+        toast("error", `Couldn't ask ${harnessName(agent)} again — ${errorText(cause)}.`),
+      )
+      .finally(() => {
+        setRechecking(false);
+        onChanged();
+      });
+  };
 
   return (
-    <div>
-      {line !== null && <p className="text-xs text-muted">{line}</p>}
+    <>
+      {said !== null && <p className="mt-1 px-4 text-sm text-muted">{said}</p>}
 
       {(() => {
-        switch (
-          primaryControl({
-            stance,
-            installRunning: installing,
-            wizardOpen: wizard,
-            installable: canInstall,
-            canSignIn,
-            // Read loosely on purpose, unlike canInstall: this refusal is a 503 carrying the route's sentence, so offering it costs a clean error.
-            canSignOut: login.canSignOut !== false,
-          })
-        ) {
+        switch (control) {
           case "installing":
             return (
               <InstallPane
@@ -324,86 +323,84 @@ function SignIn({
             );
           case "install":
             return (
-              <Button tone="primary" className="mt-2 w-full" onClick={() => setInstalling(true)}>
-                <Icon as={Download} size={14} />
-                Install {harnessName(agent)}
-              </Button>
+              <Group>
+                <ActionRow title={`Install ${harnessName(agent)}`} glyph={Download} onClick={() => setInstalling(true)} />
+              </Group>
             );
           case "sign_out":
             return <SignOutButton machineId={machineId} agent={agent} onChanged={onChanged} />;
           case "sign_in":
             return (
-              <Button tone="primary" className="mt-2 w-full" onClick={() => setWizard(true)}>
-                <Icon as={LogIn} size={14} />
-                Sign in to {harnessName(agent)}
-              </Button>
+              <Group>
+                <ActionRow title={`Sign in to ${harnessName(agent)}`} glyph={LogIn} onClick={() => setWizard(true)} />
+              </Group>
             );
           case "none":
-            return stance === "signed_in" ? (
-              <p className="mt-2 text-xs text-muted">{signOutSentence(agent.id, stored)}</p>
-            ) : null;
+            return null;
         }
       })()}
 
-      {wholeAgent && stance === "start_refused" && (
-        <Button
-          className="mt-2 w-full"
-          onClick={() => {
-            const daemon = store.daemonFor(machineId);
-            if (daemon === undefined) {
-              toast("error", "That machine is not reachable.");
-              return;
-            }
-            void daemon
-              .recheckAgent(agent.id)
-              .catch((cause: unknown) =>
-                toast("error", `Couldn't ask ${harnessName(agent)} again — ${errorText(cause)}.`),
-              )
-              .finally(onChanged);
-          }}
-        >
-          Check again
-        </Button>
+      {block === "editable" && (
+        <Group title={divider ?? "Keys"} footer={choice ?? undefined} unboxed>
+          <div className="flex flex-col gap-4">
+            {slots.map((slot) => (
+              <CredentialSlot
+                key={slot.envName}
+                machineId={machineId}
+                agent={agent}
+                slot={slot}
+                stance={stance}
+                caveat={caveat}
+                howTo={
+                  login.blocked === "interactive_pty" && slot.envName === "CLAUDE_CODE_OAUTH_TOKEN"
+                    ? "claude setup-token"
+                    : null
+                }
+                editable
+                onChanged={onChanged}
+              />
+            ))}
+          </div>
+        </Group>
+      )}
+      {block === "stored_only" && (
+        <Group title={divider ?? "Saved keys"}>
+          {/* Fixed columns: a row that arms its TwoStep spans both, and an auto layout would reflow the others under it. */}
+          <table className={`${TABLE} table-fixed`}>
+            <colgroup>
+              <col />
+              <col className="w-32" />
+            </colgroup>
+            <tbody>
+              {slots
+                .filter((slot) => slot.set)
+                .map((slot) => (
+                  <CredentialSlot
+                    key={slot.envName}
+                    machineId={machineId}
+                    agent={agent}
+                    slot={slot}
+                    stance={stance}
+                    caveat={null}
+                    howTo={null}
+                    editable={false}
+                    onChanged={onChanged}
+                  />
+                ))}
+            </tbody>
+          </table>
+        </Group>
       )}
 
-      {divider !== null && (
-        <div className="mt-3 flex items-center gap-3">
-          <span className="h-px flex-1 bg-edge" />
-          <span className="shrink-0 text-2xs text-muted">{divider}</span>
-          <span className="h-px flex-1 bg-edge" />
-        </div>
-      )}
-
-      {block !== "hidden" && (
-        <>
-          {block === "editable" && choice !== null && (
-            <p className="mt-2 text-xs text-muted">{choice}</p>
-          )}
-          {slots.map((slot) => (
-            <CredentialSlot
-              key={slot.envName}
-              machineId={machineId}
-              agent={agent}
-              slot={slot}
-              stance={stance}
-              caveat={caveat}
-              howTo={
-                login.blocked === "interactive_pty" && slot.envName === "CLAUDE_CODE_OAUTH_TOKEN"
-                  ? "claude setup-token"
-                  : null
-              }
-              editable={block === "editable"}
-              onChanged={onChanged}
-            />
-          ))}
-        </>
-      )}
-    </div>
+      {/* px-1.5 plus the button's own padding puts its glyph on the rows' 16px text edge. */}
+      <div className="mt-6 px-1.5">
+        <RecheckButton onClick={recheck} busy={checking || rechecking} />
+      </div>
+    </>
   );
 }
 
-
-/** Two taps, danger on the first, Cancel last: a second tap on the centred pair lands in the gap or on Cancel, never on the act. */
+/** Two taps, Cancel last: the rest sits at the row's start, so a second tap lands on the question and never on the act (Q3.218). */
 function SignOutButton({
   machineId,
   agent,
@@ -422,27 +419,24 @@ function SignOutButton({
   };
 
   return (
-    <TwoStep
-      armed={confirming}
-      onArm={setConfirming}
-      align="center"
-      size="md"
-      className="mt-2"
-      question={<>Sign {harnessName(agent)} out on this machine?</>}
-      act={{ label: "Sign out", danger: true, icon: LogOut }}
-      disabled={daemon === undefined}
-      onAct={run}
-      onFailure={(cause) => toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`)}
-      rest={
-        <DangerButton icon={LogOut} onClick={() => setConfirming(true)}>
-          Sign out
-        </DangerButton>
-      }
-    />
+    <Group>
+      <TwoStep
+        armed={confirming}
+        onArm={setConfirming}
+        align="end"
+        className={TWO_STEP_ROW}
+        question={<>Sign {harnessName(agent)} out on this machine?</>}
+        act={{ label: "Sign out", danger: true, icon: LogOut }}
+        disabled={daemon === undefined}
+        onAct={run}
+        onFailure={(cause) => toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`)}
+        rest={<DangerRow label="Sign out" icon={LogOut} onClick={() => setConfirming(true)} />}
+      />
+    </Group>
   );
 }
 
-/** One saved key, named by what it is; the raw variable name survives only as a title and the wire key (Q3.431). */
+/** One saved key, named by what it is; the raw variable name survives only as the saved row's title and the wire key (Q3.431). */
 function CredentialSlot({
   machineId,
   agent,
@@ -464,115 +458,162 @@ function CredentialSlot({
 }): ReactNode {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const daemon = store.daemonFor(machineId);
 
   const label = credentialLabel(slot.envName);
-
-  const withDaemon = (
-    run: (daemon: DaemonClient) => Promise<CredentialWritten>,
-    removing = false,
-  ): void => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) {
-      toast("error", "That machine is not reachable.");
-      return;
-    }
-    setBusy(true);
-    void run(daemon)
-      .then((answer) => {
-        setValue("");
-        // Open chats on this machine are relaunched with the change, since a credential reaches an agent only at spawn.
-        toast("ok", credentialToast(removing, answer.restarting));
-        onChanged();
-      })
-      .catch((cause: unknown) =>
-        toast(
-          "error",
-          `Couldn't ${removing ? "remove" : "save"} the ${label.name} — ${errorText(cause)}.`,
-        ),
-      )
-      .finally(() => setBusy(false));
-  };
 
   // Exactly MAX_CREDENTIAL_CHARS in src/server.ts: a lower bound would refuse a key the daemon accepts.
   const tooLong = value.length > 8192;
   const canSave = !busy && value.trim().length > 0 && !tooLong;
   const save = (): void => {
     if (!canSave) return;
-    withDaemon((daemon) => daemon.saveCredential(agent.id, slot.envName, value));
+    const reached = store.daemonFor(machineId);
+    if (reached === undefined) {
+      toast("error", "That machine is not reachable.");
+      return;
+    }
+    setBusy(true);
+    void reached
+      .saveCredential(agent.id, slot.envName, value)
+      .then((answer) => {
+        setValue("");
+        // Open chats on this machine are relaunched with the change, since a credential reaches an agent only at spawn.
+        toast("ok", credentialToast(false, answer.restarting));
+        onChanged();
+      })
+      .catch((cause: unknown) => toast("error", `Couldn't save the ${label.name} — ${errorText(cause)}.`))
+      .finally(() => setBusy(false));
   };
-  const remove = (
-    <IconButton
-      icon={X}
-      tone="destructive"
-      // chip, not lg: a fixed 44px box would stretch this row past the CommandLine box above.
-      size="chip"
-      className="ml-1"
-      label={`Remove ${label.name}`}
-      onClick={() => withDaemon((daemon) => daemon.clearCredential(agent.id, slot.envName), true)}
-      disabled={busy}
+
+  // busy is the slot's one lock and is held for the removal, so Save is refused while a removal is out.
+  const remove = (): Promise<void> | undefined => {
+    if (daemon === undefined) return undefined;
+    setBusy(true);
+    return daemon
+      .clearCredential(agent.id, slot.envName)
+      .then((answer) => {
+        setValue("");
+        toast("ok", credentialToast(true, answer.restarting));
+        onChanged();
+      })
+      .finally(() => setBusy(false));
+  };
+  const removal = (rest: ReactNode): ReactNode => (
+    <TwoStep
+      armed={confirming}
+      onArm={setConfirming}
+      align="end"
+      question={<>Remove the {label.name} from this machine?</>}
+      consequence={`Open ${harnessName(agent)} chats restart without it.`}
+      act={{ label: "Remove", danger: true, icon: Trash2, ariaLabel: `Remove the ${label.name}` }}
+      disabled={busy || daemon === undefined}
+      onAct={remove}
+      onFailure={(cause) => toast("error", `Couldn't remove the ${label.name} — ${errorText(cause)}.`)}
+      rest={rest}
     />
   );
+  const saved = slot.set ? (
+    <span className="flex items-center gap-1">
+      <Icon as={Check} size={11} /> {storedChip(agent, stance)}
+    </span>
+  ) : null;
+
+  // Nothing typed here can help, but a saved key must stay removable.
+  if (!editable) {
+    // Armed, the question spans the row, so Cancel lands where Remove was (Q3.218).
+    if (confirming) {
+      return (
+        <tr className="border-t border-edge first:border-t-0">
+          <td colSpan={2} className={TD}>
+            {removal(null)}
+          </td>
+        </tr>
+      );
+    }
+    return (
+      <tr className="border-t border-edge first:border-t-0">
+        <td className={TD}>
+          <span className="block truncate" title={slot.envName}>
+            {label.name}
+          </span>
+          <span className="block text-2xs text-muted">{saved}</span>
+        </td>
+        <td className={`${TD} text-right`}>
+          <DangerButton
+            icon={Trash2}
+            size="sm"
+            ariaLabel={`Remove the ${label.name}`}
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
+            Remove
+          </DangerButton>
+        </td>
+      </tr>
+    );
+  }
 
   return (
-    <div className="mt-3">
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-xs text-fg" title={slot.envName}>
-          {label.name}
-        </span>
-        {slot.set && (
-          <span className="flex shrink-0 items-center gap-1 text-2xs text-muted">
-            <Icon as={Check} size={11} /> {storedChip(agent, stance)}
-          </span>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        save();
+      }}
+      className="flex flex-col gap-1.5"
+    >
+      <Field
+        label={label.name}
+        hint={
+          label.note === null && saved === null ? undefined : (
+            <>
+              {label.note}
+              {saved}
+            </>
+          )
+        }
+        error={tooLong ? "That’s too long to be a key." : null}
+      >
+        {({ id, describedBy }) => (
+          <>
+            {howTo !== null && <CommandLine command={howTo} />}
+            {caveat !== null && <p className="text-xs text-fg">{caveat}</p>}
+            <div className="flex gap-2">
+              <input
+                id={id}
+                aria-describedby={describedBy}
+                value={value}
+                onChange={(event) => setValue(event.target.value)}
+                // Plain text, not a password field, so no browser offers an account password here.
+                type="text"
+                name="reemoat-agent-key"
+                data-1p-ignore=""
+                data-lpignore="true"
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={slot.set ? "paste a new key" : "paste the key"}
+                className={`${FIELD} min-w-0 flex-1 font-mono`}
+              />
+              <Button
+                size="sm"
+                type="submit"
+                className="min-w-20 [@media(pointer:coarse)]:min-h-11"
+                disabled={!canSave}
+              >
+                {busy ? <Spinner /> : "Save"}
+              </Button>
+            </div>
+          </>
         )}
-      </div>
-      <p className="text-2xs text-muted">{label.note}</p>
-
-      {howTo !== null && editable && <CommandLine command={howTo} />}
-
-      {editable && caveat !== null && <p className="mt-1 text-xs text-fg">{caveat}</p>}
-
-      {editable ? (
-        <>
-          <form
-            className="mt-3 flex gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              save();
-            }}
-          >
-            <input
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-              // Plain text, not a password field, so no browser offers an account password here.
-              type="text"
-              name="reemoat-agent-key"
-              data-1p-ignore=""
-              data-lpignore="true"
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={slot.set ? "paste a new key" : "paste the key"}
-              aria-label={label.name}
-              className={`${FIELD} min-w-0 flex-1 font-mono`}
-            />
-            <Button
-              size="sm"
-              type="submit"
-              className="min-w-20 [@media(pointer:coarse)]:min-h-11"
-              disabled={!canSave}
-            >
-              {busy ? <Spinner /> : "Save"}
-            </Button>
-            {slot.set && remove}
-          </form>
-          {tooLong && <p className="mt-1 text-xs text-danger">That&apos;s too long to be a key.</p>}
-        </>
-      ) : (
-        // Nothing typed here can help, but a saved key must stay removable.
-        slot.set && <div className="mt-1 flex justify-end">{remove}</div>
-      )}
-    </div>
+      </Field>
+      {/* The rest sits at the row's start, so a second tap lands on the question and never on the act (Q3.218). */}
+      {slot.set &&
+        removal(
+          <DangerRow label={`Remove the ${label.name}`} icon={Trash2} disabled={busy} onClick={() => setConfirming(true)} />,
+        )}
+    </form>
   );
 }
 
@@ -858,110 +899,88 @@ function LoginWizard({
     if (drawn.length < 2 || at < 0) return imperative;
     return `Step ${at + 1} — ${imperative}`;
   };
+  const saying =
+    trouble !== null || view.message !== null || view.phase === "starting" || view.phase === "waiting" || outcome !== null;
 
   return (
-    <div className="mt-2 space-y-2">
-      {trouble !== null && (
-        <p className={`text-xs ${trouble.retrying ? "text-muted" : "text-danger"}`}>
-          {trouble.text}
-        </p>
-      )}
-      {view.message !== null && (
-        <p className={`text-xs ${view.phase === "failed" ? "text-danger" : "text-fg font-medium"}`}>
-          {view.message}
-        </p>
-      )}
-
-      {view.phase === "starting" && (
-        <p className="flex items-center gap-2 text-xs text-muted">
-          <Spinner /> starting {agent}'s sign-in…
-        </p>
-      )}
-
-      {showPage && (
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          className="tap press flex min-h-11 items-center gap-2 rounded-md border border-edge-strong bg-surface px-3 text-sm font-medium text-fg hover:bg-raised"
-        >
-          <Icon as={ExternalLink} size={14} />
-          {stepLabel("page", "Open the sign-in page")}
-        </a>
+    <>
+      {(showPage || showCode) && (
+        <Group>
+          {showPage && (
+            // An anchor the native-bridge census reviews here, at the one call site that knows the address.
+            <a href={url} target="_blank" rel="noreferrer" className={`tap ${GROUP_ROW} hover:bg-raised`}>
+              <span className="min-w-0 flex-1 text-sm">{stepLabel("page", "Open the sign-in page")}</span>
+              <Icon as={ExternalLink} size={16} className="text-muted" />
+            </a>
+          )}
+          {/* The device code is one of the two values read once, so it keeps a real fill inside the box (web-shell.md). */}
+          {showCode && (
+            <div className={GROUP_ROW}>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm">{stepLabel("code", "Enter this code there")}</span>
+                <code className="mt-1 inline-block max-w-full truncate rounded-md bg-raised px-2 py-0.5 font-mono text-lg tracking-widest">
+                  {code}
+                </code>
+              </span>
+              <CopyButton value={code} label="the code" />
+            </div>
+          )}
+        </Group>
       )}
 
-      {showCode && (
-        <div className="rounded-md border border-edge bg-raised p-3">
-          <div className="text-2xs text-muted">{stepLabel("code", "enter this code there")}</div>
-          <div className="mt-1 flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate font-mono text-lg tracking-widest">
-              {code}
-            </code>
-            <IconButton icon={Copy} label="Copy the code" size="lg" onClick={() => copy(code)} />
-          </div>
+      {saying && (
+        <div className="mt-6 space-y-2 px-4">
+          {trouble !== null && (
+            <p className={`text-sm ${trouble.retrying ? "text-muted" : "text-danger"}`}>{trouble.text}</p>
+          )}
+          {view.message !== null && (
+            <p className={`text-sm ${view.phase === "failed" ? "text-danger" : "font-medium text-fg"}`}>{view.message}</p>
+          )}
+          {view.phase === "starting" && <Pending>Starting {displayName}’s sign-in…</Pending>}
+          {view.phase === "waiting" && <Pending>Waiting for you to finish on that page…</Pending>}
+          {outcome === "checking" && <Pending>Checking with your machine…</Pending>}
+          {outcome === "signedIn" && (
+            <p className="flex items-center gap-1.5 text-sm text-fg">
+              <Icon as={Check} size={14} /> Signed in to {displayName}.
+            </p>
+          )}
+          {outcome === "notSignedIn" && <p className="text-sm text-fg">That didn’t sign {displayName} in. Try again.</p>}
+          {outcome === "cannotTell" && <p className="text-sm text-muted">Finished — start a chat to check.</p>}
+          {outcome === "unreachable" && (
+            <p className="text-sm text-danger">Couldn’t reach that machine to check whether it worked.</p>
+          )}
         </div>
-      )}
-
-      {(view.phase === "acting" || view.phase === "waiting") && (
-        <p className="text-xs text-muted">You can leave this page.</p>
-      )}
-
-      {view.phase === "waiting" && (
-        <p className="flex items-center gap-2 text-xs text-muted">
-          <Spinner /> Waiting for you to finish on that page…
-        </p>
-      )}
-
-      {outcome === "checking" && (
-        <p className="flex items-center gap-2 text-xs text-muted">
-          <Spinner /> Checking with your machine…
-        </p>
-      )}
-      {outcome === "signedIn" && (
-        <p className="flex items-center gap-1.5 text-xs text-fg">
-          <Icon as={Check} size={14} /> Signed in to {displayName}.
-        </p>
-      )}
-      {outcome === "notSignedIn" && (
-        <p className="text-xs text-fg">That didn&apos;t sign {displayName} in. Try again.</p>
-      )}
-      {outcome === "cannotTell" && (
-        <p className="text-xs text-muted">Finished — start a chat to check.</p>
-      )}
-      {outcome === "unreachable" && (
-        <p className="text-xs text-danger">Couldn&apos;t reach that machine to check whether it worked.</p>
       )}
 
       {showInput && (
-        <div>
-          <label className="text-2xs text-muted" htmlFor={`login-${agent}`}>
-            {stepLabel("input", "paste the code from that page")}
-          </label>
-          <div className="mt-1 flex gap-3">
-          <input
-            id={`login-${agent}`}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                send();
-              }
-            }}
-            disabled={loginId === null}
-            className={`${FIELD} min-w-0 flex-1 font-mono disabled:opacity-40`}
-          />
-          <Button onClick={send} disabled={loginId === null || sending}>
-            {sending ? <Spinner /> : "Send"}
-          </Button>
-          </div>
-        </div>
+        <Group unboxed>
+          <Field label={stepLabel("input", "Paste the code from that page")}>
+            {({ id }) => (
+              <div className="flex gap-2">
+                <input
+                  id={id}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      send();
+                    }
+                  }}
+                  disabled={loginId === null}
+                  className={`${FIELD} min-w-0 flex-1 font-mono disabled:opacity-40`}
+                />
+                <Button onClick={send} disabled={loginId === null || sending}>
+                  {sending ? <Spinner /> : "Send"}
+                </Button>
+              </div>
+            )}
+          </Field>
+        </Group>
       )}
 
-      <details open={rawTranscriptIsOpen(view, outcome)}>
-        <summary className="tap list-none text-2xs text-muted hover:text-fg">
-          Show terminal output
-        </summary>
+      <details className="mt-6 px-4" open={rawTranscriptIsOpen(view, outcome)}>
+        <summary className="tap list-none text-xs text-muted hover:text-fg">Show terminal output</summary>
         <pre
           ref={paneRef}
           className="mt-1 max-h-56 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80"
@@ -970,18 +989,18 @@ function LoginWizard({
         </pre>
       </details>
 
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="mt-6 flex flex-wrap items-center gap-2">
         {outcome === "notSignedIn" && (
           <Button tone="primary" onClick={retry}>
             Try again
           </Button>
         )}
-        {outcome === "unreachable" && <Button onClick={onDone}>Check again</Button>}
+        {outcome === "unreachable" && <RecheckButton onClick={onDone} busy={checking} />}
         <Button tone="ghost" onClick={() => close(!done)}>
           {done ? "Close" : "Cancel"}
         </Button>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -1138,54 +1157,55 @@ function InstallPane({
   const failure = run?.done === true ? installFailure(run.outcome, displayName) : null;
   const elapsed = run === null ? null : installElapsed(run.startedAt, now);
   const step = installStep(run?.phase ?? null);
+  const saying = running || failure !== null || result !== null || trouble !== null;
 
   return (
-    <div className="mt-2">
-      {running && (
-        <>
-          <p className="flex items-center gap-2 text-xs text-muted">
-            <Spinner />
-            <span className="min-w-0 flex-1 truncate">
-              {step ?? `Installing ${displayName}…`}
-              {elapsed === null ? "" : ` · ${elapsed}`}
-            </span>
-          </p>
-          <p className="sr-only" role="status" aria-live="polite">
-            {step ?? `Installing ${displayName}`}
-          </p>
-        </>
-      )}
-      {failure !== null && <p className="mt-2 text-xs wrap-anywhere text-danger">{failure}</p>}
-      {result !== null && failure === null && (
-        <p className={`mt-2 text-xs ${result === "unreachable" ? "text-danger" : "text-muted"}`}>
-          {result === "checking" ? (
-            <span className="flex items-center gap-2">
-              <Spinner /> Checking with your machine…
-            </span>
-          ) : (
-            installResultLine(result, displayName)
+    <>
+      {saying && (
+        <div className="mt-6 space-y-2 px-4">
+          {running && (
+            <>
+              <p className="flex items-center gap-2 text-sm text-fg">
+                <Spinner />
+                <span className="min-w-0 flex-1 truncate">
+                  {step ?? `Installing ${displayName}…`}
+                  {elapsed === null ? "" : ` · ${elapsed}`}
+                </span>
+              </p>
+              <p className="sr-only" role="status" aria-live="polite">
+                {step ?? `Installing ${displayName}`}
+              </p>
+            </>
           )}
-        </p>
-      )}
-      {trouble !== null && (
-        <p className={`mt-2 text-xs ${trouble.retrying ? "text-muted" : "text-danger"}`}>
-          {trouble.retrying ? `${trouble.text} — still trying` : trouble.text}
-        </p>
+          {failure !== null && <p className="text-sm wrap-anywhere text-danger">{failure}</p>}
+          {result !== null && failure === null && (
+            <p className={`text-sm ${result === "unreachable" ? "text-danger" : "text-fg"}`}>
+              {result === "checking" ? (
+                <span className="flex items-center gap-2 text-muted">
+                  <Spinner /> Checking with your machine…
+                </span>
+              ) : (
+                installResultLine(result, displayName)
+              )}
+            </p>
+          )}
+          {trouble !== null && (
+            <p className={`text-sm ${trouble.retrying ? "text-muted" : "text-danger"}`}>
+              {trouble.retrying ? `${trouble.text} — still trying` : trouble.text}
+            </p>
+          )}
+        </div>
       )}
       {output.length > 0 && (
-        <details className="mt-2" open={rawInstallIsOpen(run)}>
-          <summary className="tap list-none text-2xs text-muted hover:text-fg">
-            What the installer said
-          </summary>
-          {gap && (
-            <p className="mt-1 text-2xs text-muted">Some earlier output was dropped.</p>
-          )}
+        <details className="mt-4 px-4" open={rawInstallIsOpen(run)}>
+          <summary className="tap list-none text-xs text-muted hover:text-fg">What the installer said</summary>
+          {gap && <p className="mt-1 text-2xs text-muted">Some earlier output was dropped.</p>}
           <pre className="mt-1 max-h-56 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80">
             {output}
           </pre>
         </details>
       )}
-      <div className="mt-2 flex justify-end gap-2">
+      <div className="mt-4 flex justify-end gap-2">
         {running && (
           <Button
             tone="ghost"
@@ -1205,18 +1225,9 @@ function InstallPane({
           {running ? "Hide" : "Close"}
         </Button>
       </div>
-    </div>
+    </>
   );
 }
-
-// copyText, since the clipboard API is absent on a plain-http origin; both outcomes are toasted.
-function copy(text: string): void {
-  void copyText(text).then((ok) => {
-    toast(ok ? "ok" : "error", ok ? "code copied" : "could not copy — select it by hand");
-  });
-}
-
-
 
 /** undefined is not zero: a daemon predating the relaunch omits the count. A removal's tail says the chats restart without the key. */
 export function credentialToast(removing: boolean, restarting: number | undefined): string {

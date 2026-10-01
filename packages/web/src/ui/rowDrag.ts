@@ -6,7 +6,7 @@ import { isTypingInto } from "../keys";
 import { canReorder, rankForMove, resolveDrop, type Placement } from "../sessionOrder";
 import type { SessionKey } from "../ids";
 import { sessionGroups, store, type AppState, type SessionRow } from "../store";
-import { PINNED_FOLDER, folderId, folderPathOf, siblingsOf } from "./groups";
+import { ALL_FOLDER, PINNED_FOLDER, folderId, folderPathOf, siblingsOf } from "./groups";
 import { toast } from "./Toast";
 
 /** How long a finger must stay still before the row arms: past a tap, under the platform's 500ms long press. */
@@ -207,7 +207,8 @@ export function useRowDrag(state: AppState): RowDrag {
     const box = scroller.current;
     if (box === null) return { zones: [], height: 0 };
     const offset = box.getBoundingClientRect().top - box.scrollTop;
-    const wanted = new Set<string>([PINNED_FOLDER, folderId(row.ref.machineId, folderPathOf(row))]);
+    // All draws one group across machines; ranks share one clock, so a drop between two of them lands where it shows (Q3.696).
+    const wanted = new Set<string>([PINNED_FOLDER, ALL_FOLDER, folderId(row.ref.machineId, folderPathOf(row))]);
     const byZone = new Map<string, { rows: SessionRow[]; middles: number[]; top: number; bottom: number }>();
     let height = 0;
     for (const node of box.querySelectorAll<HTMLElement>("[data-row-key][data-zone]")) {

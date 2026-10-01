@@ -59,6 +59,9 @@ import {
 import { CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, CORS_MAX_AGE_SECONDS } from "./cors.js";
 import { RELAY_PROTOCOL_VERSION } from "./relay/protocol.js";
 import { DAEMON_VERSION } from "./version.js";
+import type { PeerHub } from "./peers/hub.js";
+import { linksFromBody, policyFromBody } from "./peers/links.js";
+import type { SqlitePeerLinkStore } from "./store/sqlite.js";
 import {
   DEFAULT_MAX_CHANGED_FILES,
   DEFAULT_MAX_DIFF_BYTES,
@@ -86,18 +89,22 @@ import {
   jsonError,
   readJsonObject,
 } from "./http.js";
+import { MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS } from "./nickname.js";
 import { containedInResolved } from "./paths.js";
 import { inspectWorkspace, listWorktrees, removeWorkspace, WorktreeError, type RemoveRefusal } from "./worktree.js";
 import {
   awaitingHuman,
   describeResumeFailure,
+  invalidNickname,
   MAX_TITLE_CHARS,
+  NicknameError,
   SessionLimitError,
   StartTimeoutError,
   type ElicitationAnswerBody,
   type ElicitationContentValue,
   type ManagedSession,
   type PermissionAnswer,
+  type SessionMetaChange,
   type SessionRegistry,
   type SessionSnapshot,
   type WorktreePolicy,
@@ -181,6 +188,8 @@ export interface ServerOptions {
   // Narrows the browse surface only; resolveCwd is deliberately not confined to these.
   roots?: string[];
   plugins?: PluginHost | null;
+  // Absent, every /peer and /peers route answers 503.
+  peers?: { hub: PeerHub; links: SqlitePeerLinkStore } | null;
 }
 
 export interface AppBundle {
@@ -199,6 +208,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const uploads = options.uploads ?? null;
   const roots = options.roots ?? [homedir()];
   const plugins = options.plugins ?? null;
+  const peers = options.peers ?? null;
   const maxChangedFiles = options.maxChangedFiles ?? DEFAULT_MAX_CHANGED_FILES;
   const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   const app = new Hono<AppEnv>();
@@ -281,6 +291,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const read = requireScope("session:read");
   const write = requireScope("session:write");
   const admin = requireScope("machine:admin");
+  const message = requireScope("session:message");
 
   // A thunk, never captured: PluginHost replaces the catalogue on every install, update, remove and enable.
   const machineOf = () => registry.machineCatalogue;
@@ -300,6 +311,11 @@ export function createApp(options: ServerOptions): AppBundle {
 
   const requireJson = async (c: Context<AppEnv>): Promise<Record<string, unknown> | Response> =>
     (await readJsonObject(c)) ?? jsonError(c, 400, "bad_request", "expected a JSON object body");
+
+  const nicknameRefused = (c: Context<AppEnv>, error: NicknameError): Response =>
+    error.code === "nickname_taken"
+      ? jsonError(c, 409, error.code, error.message)
+      : jsonError(c, 400, error.code, error.message, { min: MIN_NICKNAME_CHARS, max: MAX_NICKNAME_CHARS });
 
   const requestedPath = async (
     c: Context<AppEnv>,
@@ -1210,10 +1226,18 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const branch = typeof branchRaw === "string" ? branchRaw : null;
 
+    // Absent or null picks a free one here, where /meta refuses null: a session always has one.
+    const nicknameRaw = body["nickname"];
+    if (nicknameRaw !== undefined && nicknameRaw !== null && typeof nicknameRaw !== "string") {
+      return nicknameRefused(c, invalidNickname());
+    }
+    const nickname = typeof nicknameRaw === "string" ? nicknameRaw : null;
+
     try {
-      const managed = await registry.create({ agent, customAgent, cwd, worktree, branch });
+      const managed = await registry.create({ agent, customAgent, cwd, worktree, branch, nickname });
       return c.json({ session: managed.snapshot() }, 201);
     } catch (error) {
+      if (error instanceof NicknameError) return nicknameRefused(c, error);
       if (error instanceof PathError) {
         return jsonError(c, pathErrorStatus(error, 400), error.code, error.message);
       }
@@ -1243,6 +1267,54 @@ export function createApp(options: ServerOptions): AppBundle {
       const code = isAuthRequiredMessage(message) ? "agent_auth_required" : "agent_launch_failed";
       return jsonError(c, 502, code, message);
     }
+  });
+
+  // Another machine's daemon, holding a link capability: the only routes session:message reaches (Q7.150).
+  const linkOf = (c: Context<AppEnv>) => c.get("principal").link;
+  app.get("/peer/agents", message, (c) => {
+    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
+    if (linkOf(c) === null) return jsonError(c, 403, "not_a_link", "only another machine's link may ask this");
+    if (!peers.hub.allowed) return jsonError(c, 403, "messaging_off", "messages between agents are switched off on this machine");
+    if (!peers.hub.reachesOthers) return jsonError(c, 403, "messaging_isolated", "this machine's sessions message only each other");
+    return c.json({ agents: peers.hub.localRows() });
+  });
+
+  app.post("/peer/messages", message, async (c) => {
+    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
+    const link = linkOf(c);
+    if (link === null) return jsonError(c, 403, "not_a_link", "only another machine's link may send this");
+    if (registry.isShuttingDown) return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+    const result = await peers.hub.receive(link, await readJsonObject(c));
+    // Refused once a shutdown began, which may be why: answered as on entry, so its sender holds it rather than reporting it ended.
+    if (!result.ok && registry.isShuttingDown) return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+    // A refusal is an answer the sending agent reads, so it rides a 200 like a delivery does.
+    return c.json(result);
+  });
+
+  app.post("/peer/notices", message, async (c) => {
+    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
+    const link = linkOf(c);
+    if (link === null) return jsonError(c, 403, "not_a_link", "only another machine's link may send this");
+    if (!peers.hub.allowed) return jsonError(c, 403, "messaging_off", "messages between agents are switched off on this machine");
+    if (!peers.hub.reachesOthers) return jsonError(c, 403, "messaging_isolated", "this machine's sessions message only each other");
+    const taken = await peers.hub.receiveNotice(link, await readJsonObject(c));
+    return taken ? c.body(null, 202) : jsonError(c, 409, "unexpected_notice", "nothing here asked to be told that");
+  });
+
+  app.put("/peers/links", admin, async (c) => {
+    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
+    const body = await readJsonObject(c);
+    const links = linksFromBody(body);
+    if (typeof links === "string") return jsonError(c, 400, "bad_request", links);
+    const policy = policyFromBody(body);
+    if (typeof policy === "string") return jsonError(c, 400, "bad_request", policy);
+    // Before the links and with no await between: switched off, nothing may go out over the old set (Q1.654).
+    if (policy !== null) peers.hub.setPolicy(policy);
+    peers.links.replaceAll(links);
+    return c.json({
+      links: links.map((link) => ({ id: link.id, target: { id: link.targetMachineId, name: link.targetName }, expiresAt: link.expiresAt })),
+      messaging: peers.hub.messagingState(),
+    });
   });
 
   // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.
@@ -1348,15 +1420,10 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 400, "bad_request", `text exceeds ${MAX_PROMPT_CHARS} characters`);
     }
 
-    // A restart this daemon started is waited out rather than answered turn_in_flight, and first, so everything below reads a settled session.
-    // Deliberately no signed-in probe: signOutSessions and the pump's isAuthFailure cover both cases (Q7.99).
-    await managed.whenRestarted();
-
+    // Shared with messages from other agents. A restart is waited out rather than answered turn_in_flight; no signed-in probe (Q7.99).
     // The workspace is checked on every message: a folder deleted while open otherwise surfaces as an agent's internal error.
-    const workspace = await workspaceReady(c, managed);
-    if (workspace) return workspace;
-
-    await registry.wakeForPrompt(managed);
+    const readiness = await registry.readyForMessage(managed, "person");
+    if (readiness !== "ready") return workspaceRefused(c, managed, readiness);
 
     // /clear is carried out here, not forwarded: claude forks underneath ACP and never reports the new id. Exact match only.
     if (text.trim() === "/clear" && staged.length === 0) {
@@ -1382,13 +1449,15 @@ export function createApp(options: ServerOptions): AppBundle {
       }
     }
 
-    const result = managed.prompt(text, staged);
+    // Resolved from what this daemon already holds, so a machine that is slow to list never delays a message (Q2.246).
+    const note = peers?.hub.mentionNote(managed.id, text) ?? null;
+    const result = managed.prompt(text, staged, null, note);
     switch (result.kind) {
       case "accepted":
         return c.json({ accepted: true, turn: result.turn, seq: result.seq, session: managed.snapshot() }, 202);
       // A running turn is not a refusal: sendMidTurn steers or queues, both a 202 carrying the seq.
       case "turn_in_flight": {
-        const mid = await managed.sendMidTurn(text, staged);
+        const mid = await managed.sendMidTurn(text, staged, null, note);
         switch (mid.kind) {
           case "steered":
             return c.json(
@@ -1572,13 +1641,14 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 413, "upload_too_large", `a file may not exceed ${MAX_UPLOAD_BYTES} bytes`, {
           limit: MAX_UPLOAD_BYTES,
         });
+      // Both refusals are about files not yet sent: a sent one is dropped to make room (Q2.247).
       case "quota":
-        return jsonError(c, 413, "upload_quota_exceeded", "this session has no room for that file", {
+        return jsonError(c, 413, "upload_quota_exceeded", "files not yet sent already fill this session's space", {
           limit: MAX_SESSION_UPLOAD_BYTES,
           used: result.used,
         });
       case "too_many":
-        return jsonError(c, 409, "upload_limit", "this session already holds too many staged files", {
+        return jsonError(c, 409, "upload_limit", `${MAX_UPLOADS_PER_SESSION} files are already waiting to be sent`, {
           limit: MAX_UPLOADS_PER_SESSION,
         });
       case "rate": {
@@ -1672,7 +1742,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    const change: { title?: string | null; pinned?: boolean; rank?: number | null } = {};
+    const change: SessionMetaChange = {};
 
     if ("title" in body) {
       const title = body["title"];
@@ -1691,6 +1761,12 @@ export function createApp(options: ServerOptions): AppBundle {
       change.pinned = pinned;
     }
 
+    if ("peerMessages" in body) {
+      const peerMessages = body["peerMessages"];
+      if (typeof peerMessages !== "boolean") return jsonError(c, 400, "bad_request", "peerMessages must be a boolean");
+      change.peerMessages = peerMessages;
+    }
+
     // Finite only: Infinity or NaN would break the list's sort order.
     if ("rank" in body) {
       const rank = body["rank"];
@@ -1700,11 +1776,34 @@ export function createApp(options: ServerOptions): AppBundle {
       change.rank = rank;
     }
 
-    if (change.title === undefined && change.pinned === undefined && change.rank === undefined) {
-      return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"}, {"pinned"} or {"rank"}');
+    // Never null: a session always has one (Q2.245).
+    if ("nickname" in body) {
+      const nickname = body["nickname"];
+      if (typeof nickname !== "string") return nicknameRefused(c, invalidNickname());
+      change.nickname = nickname;
     }
 
-    return c.json({ session: managed.setMeta(change) });
+    if (
+      change.title === undefined &&
+      change.pinned === undefined &&
+      change.rank === undefined &&
+      change.nickname === undefined &&
+      change.peerMessages === undefined
+    ) {
+      return jsonError(
+        c,
+        400,
+        "bad_request",
+        'body must carry at least one of {"title"}, {"pinned"}, {"rank"}, {"nickname"} or {"peerMessages"}',
+      );
+    }
+
+    try {
+      return c.json({ session: registry.setMeta(managed, change) });
+    } catch (error) {
+      if (error instanceof NicknameError) return nicknameRefused(c, error);
+      throw error;
+    }
   }));
 
   app.post("/sessions/:id/permissions/:permissionId", write, withSession(async (c, managed) => {
@@ -1844,6 +1943,12 @@ export function createApp(options: ServerOptions): AppBundle {
   app.get("/sessions/:id/commands", read, withSession((c, managed) => {
     const { commands, dropped } = managed.agentCommands;
     return c.json({ revision: managed.commandsRevision, commands, dropped });
+  }));
+
+  // write, not read: it names the owner's other machines, which a write grantee could already have the agent list.
+  app.get("/sessions/:id/mentions", write, withSession(async (c, managed) => {
+    if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
+    return c.json(await peers.hub.mentionListing(managed.id));
   }));
 
   app.get("/sessions/:id/changes", read, withSession(async (c, managed) => {
@@ -2742,10 +2847,19 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
 }
 
 async function workspaceReady(c: Context, managed: ManagedSession): Promise<Response | null> {
-  // Never a synchronous check: for a plain session the root is the caller's cwd and may be a stalled mount. Gone is 409, not answering 503.
+  // Never a synchronous check: for a plain session the root is the caller's cwd and may be a stalled mount.
   const present = await probeExists(managed.workspace.root);
   if (present === true) return null;
-  if (present === null) {
+  return workspaceRefused(c, managed, present === null ? "workspace_unresponsive" : "workspace_missing");
+}
+
+// Gone is 409, not answering 503.
+function workspaceRefused(
+  c: Context,
+  managed: ManagedSession,
+  verdict: "workspace_missing" | "workspace_unresponsive",
+): Response {
+  if (verdict === "workspace_unresponsive") {
     return jsonError(
       c,
       503,

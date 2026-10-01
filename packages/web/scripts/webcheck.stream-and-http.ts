@@ -315,6 +315,8 @@ process.stdout.write("\nwhat content type a body gets\n");
 
   check("a string is json", contentTypeFor(JSON.stringify({ text: "hi" })), "application/json");
   check("a blob is bytes", contentTypeFor(new Blob([new Uint8Array([1, 2])])), "application/octet-stream");
+  // The relay used to send a pasted screenshot as bare bytes, so the agent was handed a file where it takes an image.
+  check("unless it carries a type of its own", contentTypeFor(new Blob([new Uint8Array([1])], { type: "image/png" })), "image/png");
   check("so is an array buffer", contentTypeFor(new ArrayBuffer(4)), "application/octet-stream");
   check("and a typed array", contentTypeFor(new Uint8Array([1])), "application/octet-stream");
   check("no body means no header", contentTypeFor(undefined), null);
@@ -399,7 +401,7 @@ process.stdout.write("\nhow long a slow route is given\n");
   const chains: [verb: string, path: string, budgets: Budget[]][] = [
     ["POST", "/sessions", [...availability, ["git.ts", "GIT_TIMEOUT_MUTATE_MS"], agentStart]],
     ["POST", "/sessions/s_1/resume", [agentStart]],
-    // A control that restarts the agent, then restores the rest of its config.
+    // A control that restarts or wakes the agent, then restores the rest of its config.
     ["POST", "/sessions/s_1/config", [agentStart, ["session.ts", "SET_CONFIG_TIMEOUT_MS"]]],
     // Waits out a restart already running, wakes an interrupted session, then may open a fresh conversation for a /clear.
     ["POST", "/sessions/s_1/prompt", [agentStart, ["session.ts", "SET_CONFIG_TIMEOUT_MS"], agentStart, ["session.ts", "NEW_SESSION_TIMEOUT_MS"]]],

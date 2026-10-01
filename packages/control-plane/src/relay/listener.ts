@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
 import { TUNNEL_PATH } from "../../../../src/relay/protocol.js";
 import { startPresenceFlush, type PresenceWriter } from "./presence.js";
-import { createRelayProxy } from "./proxy.js";
+import { createRelayProxy, type SiblingRelays } from "./proxy.js";
 import type { TunnelRegistry } from "./registry.js";
 import { createTunnelEndpoint } from "./tunnel-endpoint.js";
 
@@ -21,6 +21,7 @@ export interface RelayListenerOptions {
   presence?: PresenceWriter | null;
   onEvent?: (event: string, detail: string) => void;
   channelTimeoutMs?: number;
+  siblings?: SiblingRelays | null;
   /** A callback, because each entry point prints a different remedy. */
   onListenError?: (error: NodeJS.ErrnoException) => void;
 }
@@ -35,7 +36,14 @@ export function createRelayListener(options: RelayListenerOptions): RelayListene
   const presence = options.presence ?? null;
   const onEvent = options.onEvent ?? ((): void => {});
 
-  const proxy = createRelayProxy({ db, issuer, registry, onEvent, channelTimeoutMs: options.channelTimeoutMs });
+  const proxy = createRelayProxy({
+    db,
+    issuer,
+    registry,
+    onEvent,
+    channelTimeoutMs: options.channelTimeoutMs,
+    siblings: options.siblings ?? null,
+  });
   const endpoint = createTunnelEndpoint({ db, registry, onEvent });
   const healthRead = db.prepare("SELECT 1 AS ok FROM signing_keys LIMIT 1");
 

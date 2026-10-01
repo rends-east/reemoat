@@ -140,7 +140,15 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
     /new Blob\(\[blob\], \{ type: "application\/octet-stream" \}\)/.test(download),
     true,
   );
-  check("and the native arm returns before it rather than beside it", /if \(inNativeShell\(\)\) \{\s*void saveNative\(blob, filename\);\s*return;/.test(download), true);
+  check("and the native arm returns before it rather than beside it", /if \(inNativeShell\(\)\) \{\s*await saveNative\(blob, filename\);\s*return;/.test(download), true);
+  const nativeSrc = stripComments(src("native.ts"));
+  check(
+    "the file reaches the shell as JSON arguments, which both of Tauri's IPC channels carry",
+    [/invoke<boolean>\("host_save_file", \{ filename, data: await base64Of\(blob\) \}\)/.test(nativeSrc), /arrayBuffer\(\)/.test(nativeSrc)],
+    [true, false],
+  );
+  // A voided save made every refusal from the shell a click that did nothing; Android's all were (Q3.690).
+  check("and a refusal from the shell reaches the caller rather than vanishing", /void saveNative/.test(download), false);
   check(
     "nothing in this app opens a URL in a new browsing context",
     files.filter((f) => /window\.open\(/.test(stripComments(src(f)))),
@@ -423,8 +431,8 @@ process.stdout.write("\nwhich document a command comes from\n");
   check("and nothing is claimed before the host has answered", bridge.withGeneration("host_cp", null), undefined);
   check(
     "a caller's own headers ride beside it",
-    bridge.withGeneration("host_save_file", "g_1", { headers: { "x-reemoat-filename": "a%20b" } }),
-    { headers: { "x-reemoat-filename": "a%20b", "reemoat-generation": "g_1" } },
+    bridge.withGeneration("host_cp", "g_1", { headers: { "x-own": "a%20b" } }),
+    { headers: { "x-own": "a%20b", "reemoat-generation": "g_1" } },
   );
   check(
     "and cannot overwrite the value the host issued",

@@ -197,9 +197,10 @@ browser at that point nor the daemon ever holds the catalogue.
 
 ⚠ **A harness that is a router has no tile of its own.** `startsBare` is false for
 opencode alone, and the statement is about the **model** rather than about the CLI:
-the other three harnesses *are* the model they run, so tapping one is a whole
-decision, while a bare opencode session pins nothing and starts on
-`opencode/big-pickle` — a model nobody on the screen chose. A saved
+the others *are* the model they run, or — cursor — run the one its person last
+chose, so tapping one is a whole decision (Q3.688), while a bare opencode session
+pins nothing and starts on `opencode/big-pickle` — a model nobody on the screen
+chose. A saved
 `OPENROUTER_API_KEY` widens its catalogue to 362 and moves that default not one
 row, which is the measurement that settles it. It closes three doors with one
 predicate (the tile row, the auto-default, and a restored pick through
@@ -259,9 +260,10 @@ the middle would move every heading below it under a thumb. `plugin-contribution
 every provider it cannot; that array orders each of the two halves and is still the
 only place the default is written down. Anthropic and OpenAI — the two vendors
 most choices are between, each serving a harness that ships by default — then
-OpenRouter, widest catalogue and commonest reason to scroll, then xAI, Moonshot,
-Z.ai, MiniMax, then OpenCode Zen. (**Six** of the eight carry a `nativeHarness`, so
-"reached natively" is not what puts the first two in front.) Q3.535.
+OpenRouter, widest catalogue and commonest reason to scroll, then Cursor, the other
+subscription to many vendors' models, then xAI, Moonshot, Z.ai, MiniMax, then
+OpenCode Zen. (**Seven** of the nine carry a `nativeHarness`, so "reached natively"
+is not what puts the first two in front.) Q3.535.
 
 ⭐ **"Ready" is `keyMissing`'s own answer, which is the function that greys the
 rows.** A provider floats exactly when the picker will *not* write "No <provider>
@@ -364,9 +366,9 @@ refused `connect-src` arrives as a bare `TypeError` a person cannot act on.
 
 ⚠ **And the same distinction is owed to every provider whose list comes from a
 harness, which is where it was missing entirely.** A group with no rows is not
-drawn — there is no heading for an empty one — and **five of the eight** systems
+drawn — there is no heading for an empty one — and **six of the nine** systems
 carry an empty `models` table on purpose because their CLI publishes the real list
-(four harnesses covering five providers: opencode is the native side of two). So a
+(five harnesses covering six providers: opencode is the native side of two). So a
 harness the daemon could not spawn took its provider off the picker in
 silence, and the reader's only available conclusion was that the product had
 dropped it. `unreadSystemsNotice` in `agents.ts` is the sentence, drawn in

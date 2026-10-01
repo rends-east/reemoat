@@ -31,6 +31,7 @@ import { machineBadgeText } from "../../quota";
 import { store, type AppState } from "../../store";
 import { ambiguousNames, type PluginSummary } from "../../wire";
 import { Badge, Button, DangerButton, Empty, Icon, IconButton, Menu, menuRow, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
+import { CHECKBOX } from "../kit/Field";
 
 // Where this plugin is: a table with per-row acts and a bar acting on the ticked rows. Removal and a fleet install ask first, in the bar only (Q3.218, Q3.469).
 // Every enablement and word is decided in install.ts, and a row the filter hides stays selected.
@@ -427,7 +428,7 @@ export function MachineInstalls({
               });
             }}
             aria-label={`Select the ${shown.length} machines shown`}
-            className="h-4 w-4 shrink-0"
+            className={CHECKBOX}
           />
         </label>
         <div className="relative min-w-0 flex-1">
@@ -625,7 +626,7 @@ function MachineRow({
               checked={one.selected}
               disabled={out}
               onChange={onToggle}
-              className="h-4 w-4 shrink-0"
+              className={CHECKBOX}
             />
           </label>
           <label htmlFor={boxId} className="min-w-0 flex-1">

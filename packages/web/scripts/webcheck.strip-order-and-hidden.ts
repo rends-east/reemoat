@@ -278,8 +278,8 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
         pane,
       ),
       /navigate\(\s*agentSetupPath\(\s*machineId,\s+behind\.id\s*\)\s*\)/.test(pane),
-      pane.indexOf("<Menu") > 0 &&
-        pane.indexOf("agentSetupPath(machineId, behind.id)") > pane.indexOf("<Menu"),
+      pane.indexOf("<RowMenu") > 0 &&
+        pane.indexOf("agentSetupPath(machineId, behind.id)") > pane.indexOf("<RowMenu"),
       /onInstall/.test(pane),
       /\.startInstall\(/.test(pane),
     ],
@@ -295,13 +295,20 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true],
   );
-  check(
-    "and so does the card that says so",
-    /stance === "start_refused" && \(\s*<Button[\s\S]{0,400}recheckAgent\(agent\.id\)/.test(
-      stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8")),
-    ),
-    true,
-  );
+  {
+    // One Check again per card: for this stance it asks the daemon to measure the start again rather than only re-reading.
+    const card = stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8"));
+    check(
+      "and so does the card that says so",
+      [
+        /const refused = wholeAgent && stance === "start_refused";/.test(card),
+        /if \(!refused\) \{\s*onChanged\(\);\s*return;\s*\}[\s\S]{0,400}recheckAgent\(agent\.id\)/.test(card),
+        /<RecheckButton onClick=\{recheck\} busy=\{checking \|\| rechecking\} \/>/.test(card),
+        (card.match(/recheckAgent\(/g) ?? []).length,
+      ],
+      [true, true, true, 1],
+    );
+  }
   check(
     "and the verb it calls is the daemon's own re-check route",
     /recheckAgent\([\s\S]{0,200}\/agent-auth\/\$\{encodeURIComponent\(agent\)\}\/recheck/.test(
@@ -330,17 +337,19 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [true, true],
   );
   // Read off the kebab's own JSX, because the handle and the Remove item legitimately carry a frozen disable.
-  const kebabAt = pane.indexOf("icon={MoreHorizontal}");
-  check("the kebab was found", kebabAt > 0, true);
-  const kebab = pane.slice(kebabAt, pane.indexOf("onClick={toggle}", kebabAt));
+  const kebabAt = pane.indexOf("<RowMenu");
+  check("the kebab was found, and it is the settings row's one kebab", [kebabAt > 0, /icon=\{MoreHorizontal\}/.test(pane)], [true, false]);
+  const kebab = pane.slice(kebabAt, pane.indexOf(">", kebabAt));
+  const rowMenuSrc = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
   check(
     "the kebab is live on every row, and not even an old daemon switches it off",
     [
       /disabled=/.test(kebab),
+      /export function RowMenu\(\{\s*label,\s*children,\s*\}/.test(rowMenuSrc),
       /disabled=\{frozen \|\| harness\}/.test(pane.replace(/\s+/g, " ")),
       /\{!harness && \(/.test(pane),
     ],
-    [false, false, false],
+    [false, true, false, false],
   );
   check(
     "and only the item that writes the strip is what an old daemon disables",
@@ -411,7 +420,15 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [true, true, true, true, false, true],
   );
-  check("and it is drawn at the size a row's icon is drawn at", /size="lg"/.test(pane), true);
+  {
+    const rowMenu = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+    const menuAt = rowMenu.indexOf("export function RowMenu(");
+    check(
+      "and it is drawn at the size a row's icon is drawn at",
+      [/<RowMenu label=\{`More for \$\{name\}`\}>/.test(pane), menuAt >= 0 && /size="lg"/.test(rowMenu.slice(menuAt, rowMenu.indexOf("\n}\n", menuAt)))],
+      [true, true],
+    );
+  }
   check(
     "the drag is captured, keyboard-reachable, and does not fight the phone's scroller",
     [
@@ -444,10 +461,20 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
   );
   check(
     "a list with no rows says whether the machine has no agents or only ones that need a model",
-    /listing\.agents\.length === 0\s*\?\s*"This machine reports no agents\."\s*:\s*"Every agent on this machine needs a model\. Add an agent to pick one\."/.test(
+    /listing\.agents\.length === 0\s*\?\s*"This machine reports no agents\."\s*:\s*"Every agent on this machine needs a model\."/.test(
       pane,
     ),
     true,
+  );
+  // Eight words at most (Q3.544): its one action is the Add an agent row directly under it, in the same box.
+  check(
+    "and it is a row of the list's own box, with Add an agent as the box's last row",
+    [
+      /<EmptyRow>\s*\{listing\.agents\.length === 0/.test(pane),
+      /<ActionRow title="Add an agent" glyph=\{Plus\} disabled=\{!supported\} onClick=\{\(\) => navigate\(agentPath\(machineId\)\)\} \/>\s*<\/Group>/.test(pane),
+      /Add an agent to pick one/.test(pane),
+    ],
+    [true, true, false],
   );
   {
     const missingAt = pane.search(/const presetMissing = preset !== null && \(behind === null \|\| !behind\.available\);/);
@@ -527,9 +554,19 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     [true, true, false],
   );
   check("the handle answers to the daemon and to nothing else", /disabled=\{frozen\}/.test(pane), true);
-  const listAt = pane.indexOf('<ul className="mt-1 border-y border-edge">');
+  // The Group draws the frame; the rows keep their own border, since a drag measures one row for every neighbour.
+  const listAt = pane.indexOf("<ul>");
   const statusAt = pane.indexOf('role="status"');
   check("the status line was found, after the list", listAt > 0 && statusAt > listAt, true);
+  check(
+    "the list is framed by its Group, and each row still carries the border a drag measures",
+    [
+      pane.indexOf("<Group footer={provenance}>") >= 0 && pane.indexOf("<Group footer={provenance}>") < listAt,
+      /border-y border-edge/.test(pane),
+      /className=\{`border-b border-edge last:border-b-0 first:rounded-t-lg /.test(pane),
+    ],
+    [true, false, true],
+  );
   check(
     "and it reserves no height until it has something to say",
     [
@@ -539,15 +576,17 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
     ],
     [false, true, true],
   );
+  // The default badge says which row opens a session, so the screen carries no line above the list.
   check(
-    "the lede says what the list is and which row is the default, and no more",
+    "the screen has no lede: the default badge says which row is the default",
     [
-      /\)\. The first that can start is the\{" "\}\s*<em>default<\/em>\./.test(pane),
+      /The first that can start is the/.test(pane),
+      /New session's agents on/.test(pane),
       /Removing one signs nothing out/.test(pane),
+      /return <StripEditor key=\{machineId\} machineId=\{machineId\} \/>;/.test(pane),
     ],
-    [true, false],
+    [false, false, false, true],
   );
-  check("and opens on what the list is rather than on a question", /New session's agents on \{machine\.name\} \(/.test(pane), true);
   const tooOld = /supported \? "" : "([^"]+)"/.exec(pane)?.[1] ?? "";
   check("the old-daemon caveat names the fact and the remedy", /^Daemon too old to reorder agents — update it\.$/.test(tooOld), true);
   check("at the ten-word caveat cap, the dash counted", tooOld.length > 0 && tooOld.trim().split(/\s+/).length <= 10, true);
@@ -597,9 +636,9 @@ process.stdout.write("\nwhere the opening mode is explained\n");
     true,
   );
   check(
-    "and draws it only when something is actually set",
-    /settingsMode !== null && \(/.test(pane),
-    true,
+    "and draws it only when something is actually set, as the list's footer",
+    [/const provenance =\s*settingsMode === null \? undefined : \(/.test(pane), /<Group footer=\{provenance\}>/.test(pane)],
+    [true, true],
   );
   check("naming the setting and the file it came from", /permissions\.defaultMode/.test(pane) && /settingsMode\.file/.test(pane), true);
   const rowStart = pane.indexOf("function StripRowView(");

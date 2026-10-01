@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   owner_subject    TEXT,
 
   title            TEXT,
+  -- Unique per machine by the registry's reservation, not an index: an older row may hold a duplicate until restore re-picks it.
+  nickname         TEXT,
   pinned           INTEGER NOT NULL DEFAULT 0,
 
   rank             REAL,
@@ -161,3 +163,43 @@ CREATE TABLE IF NOT EXISTS machine_keys (
   created_at  INTEGER NOT NULL,
   retired_at  INTEGER
 );
+
+
+-- Capabilities another machine's Authority minted for this one's agents to reach it (Q7.150). Replaced whole by the owner's app.
+CREATE TABLE IF NOT EXISTS peer_links (
+  id                TEXT PRIMARY KEY,
+  target_machine_id TEXT    NOT NULL,
+  target_name       TEXT    NOT NULL,
+  target_key        TEXT    NOT NULL,
+  relay_url         TEXT,
+  token             TEXT    NOT NULL,
+  expires_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  last_error        TEXT,
+  last_error_at     INTEGER
+);
+
+
+-- Messages for a linked machine that was offline; this daemon's own, since the relay may queue nothing (Q7.150).
+CREATE TABLE IF NOT EXISTS peer_outbox (
+  id                TEXT PRIMARY KEY,
+  sender_session    TEXT    NOT NULL,
+  link_id           TEXT    NOT NULL,
+  target_machine_id TEXT    NOT NULL,
+  target_name       TEXT    NOT NULL,
+  body              TEXT    NOT NULL,
+  created_at        INTEGER NOT NULL,
+  next_at           INTEGER NOT NULL,
+  attempts          INTEGER NOT NULL DEFAULT 0,
+  last_error        TEXT
+);
+
+
+-- Message ids another machine delivered here, kept a day so a retry that outlives a restart is still a duplicate (Q2.241).
+CREATE TABLE IF NOT EXISTS peer_seen (
+  source_machine_id TEXT    NOT NULL,
+  message_id        TEXT    NOT NULL,
+  seen_at           INTEGER NOT NULL,
+  PRIMARY KEY (source_machine_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_peer_seen_at ON peer_seen (seen_at);

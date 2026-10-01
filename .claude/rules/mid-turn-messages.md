@@ -114,8 +114,9 @@ own doing, which is also what makes `restartAgent`'s `deliverQueued` live code
 rather than dead.
 
 ⚠ **The terminal/stopping pair and the bound are re-taken after `sendMidTurn`'s
-awaits — and only those two, which is worth saying rather than rounding up to
-"every guard".** `blocksFor` and `steer` are two real suspension points, and a stop
+awaits — and, for another agent's message, the switch (`peerDrop`, which
+`dropQueuedPeer` bumps; Q2.244) — and nothing else, which is worth saying rather
+than rounding up to "every guard".** `blocksFor` and `steer` are two real suspension points, and a stop
 landing inside them used to answer `202 {queued: true}` for a session that was
 already terminal — with `doStop`'s own drop having run while the queue was still
 empty, so nothing was said, and the entry then riding `queuedPrompts` on every
@@ -344,7 +345,7 @@ today's behaviour, degraded rather than broken. Nothing branches on a daemon
 |---|---|
 | `src/acp/client.ts` | `supportsSteering`, the fourth capability shape and the fourth way of reading one |
 | `src/session.ts` | `STEER_METHOD`, `STEER_TIMEOUT_MS`, `SteerOutcome` and `Session.steer` — the one place the extension is spoken, with the measurements at the constant |
-| `src/registry.ts` | `MidTurnResult`, `QueuedPrompt`, `MAX_QUEUED_PROMPTS`, `sendMidTurn`, `armTurn`/`recordPrompt`/`runTurn` and `deliverQueued` |
+| `src/registry.ts` | `MidTurnResult`, `QueuedPrompt`, `MAX_QUEUED_PROMPTS`, `sendMidTurn`, `armTurn`/`recordPrompt`/`runTurn` and `deliverQueued`. A person's mention note (Q2.246) rides beside the attachments: the steer's extra blocks, `QueuedEntry.note`, `pump` |
 | `packages/web/src/attach.ts` | `canSend`, whose third argument no longer means "a turn is in flight" — it is now `refused`, and what is left to refuse is named by `Composer`'s `sendRefused` |
 | `packages/web/src/wire.ts` | `QueuedPrompt` (named as `registry.ts` names it, or the hand-mirror sweep never compares it), `acceptsMidTurn` (does the daemon take one at all — what un-gates Send) and `queuedSeqs`. Both predicates fail toward today's behaviour on a daemon that cannot say |
 | `scripts/daemoncheck.mid-turn-messages.ts` | Two stubs, one advertising steering and one not, plus the one that advertises and then refuses. What is pinned is that the message is never lost and never doubled: no second prompt on the wire, no second `prompt` event on delivery, one `turn_end` per turn |

@@ -106,6 +106,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
     const installSrc = readFileSync(new URL("../../../src/agentinstall.ts", import.meta.url), "utf8");
     const runtimeTypesSrc = readFileSync(new URL("../../../src/runtime/types.ts", import.meta.url), "utf8");
     const browseSrc = readFileSync(new URL("../../../src/browse.ts", import.meta.url), "utf8");
+    const peersSrc = readFileSync(new URL("../../../src/peers/hub.ts", import.meta.url), "utf8");
     const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
     const behind: string[] = [];
     let compared = 0;
@@ -122,6 +123,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
         installSrc,
         runtimeTypesSrc,
         browseSrc,
+        peersSrc,
       ]
         .map((src) => fieldsOf(src, name))
         .find((one) => one !== null);
@@ -167,6 +169,13 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
     // A floor, because finding nothing to compare reports no drift; it moves with the list of sources above.
     report("there are mirrored interfaces to compare at all", compared >= 64, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
+    check(
+      "and so are the rows `@` offers, read where the daemon declares them",
+      ["PeerRow", "MentionListing", "PromptMention"].map(
+        (name) => (fieldsOf(peersSrc, name) ?? fieldsOf(eventsSrc, name)) !== null && fieldsOf(clientSrc, name) !== null,
+      ),
+      [true, true, true],
+    );
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 
     const daemonTags = tagsOf(daemonSrc);

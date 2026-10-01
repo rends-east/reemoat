@@ -16,6 +16,11 @@ const FAILURES: readonly { pattern: RegExp; message: string }[] = [
     message: "This machine cannot run the sign-in program. Close this and save a key below instead.",
   },
   {
+    // cursor's, on a Mac reached over SSH: the login keychain is not unlocked for that session.
+    pattern: /login keychain is locked/i,
+    message: "This machine's keychain is locked to the sign-in program. Close this and save a key below instead.",
+  },
+  {
     pattern: /command not found|No such file or directory|is not recognized as/i,
     message: "The sign-in program is not installed on this machine, so it cannot be run from here.",
   },

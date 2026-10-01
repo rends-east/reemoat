@@ -73,8 +73,10 @@ the switch, and switches it off per machine. What makes that trade defensible is
 already holds the daemon's database, its signing keys and every transcript.
 `docs/DECISIONS.md` Q7.137.
 
-Not built, on purpose: no device identity, no updater, no menu bar, no tray, no
-notifications, and no badge for an account that is not on screen (Q7.149).
+Not built, on purpose: no device identity, no updater, no menu bar, no
+notifications, and no badge for an account that is not on screen (Q7.149). The one
+tray is Windows': there the close button hides the window to it, as it hides to the
+Dock on macOS, and only a Quit ends the app (Q3.697).
 
 ## Developing
 
@@ -569,7 +571,9 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     `ps -o pid,ppid,command -ax | grep scripts/daemon.ts` shows the second server's
     child with the same pid. Switch back: the turn was not interrupted, and neither
     switch asked for a sign-in — each account kept its own.
-24. Quit with ⌘Q, and separately with ⌘W: every child the app started is gone
+24. Close the window with ⌘W and with its red button: the app stays in the Dock,
+    every child keeps running, and a click on the Dock icon brings the window
+    back. Then quit with ⌘Q: every child the app started is gone
     within seconds, and launchd's daemon is still running.
 25. `kill -9` the app while both children run, relaunch, and check `ps`: the
     orphans are adopted silently as `foreign`, and no third daemon starts.
@@ -726,8 +730,9 @@ Recorded here rather than discovered, in the column this repository keeps them i
   direct webview calls, not proxied. The failure would be a signed-in app whose
   machines are all unreachable, with the reason only in a console. One LAN fleet
   settles it.
-- **A 100 MiB save through raw IPC.** The download bound is 100 MiB and
-  `host_save_file` takes bytes; nobody has timed the round trip.
+- **A 100 MiB save through IPC.** The download bound is 100 MiB and
+  `host_save_file` takes it as base64 in JSON, 133 MiB of string; nobody has timed
+  the round trip. Q3.690 is why it is not a raw body.
 - **An intermediary in front of a real relay meeting `Origin: tauri://localhost`.**
   The relay itself answers `*` and never `Access-Control-Allow-Credentials`; a CDN
   in front of it may not.

@@ -1,4 +1,5 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
+import { LinkSync, linkCandidate, type LinkCandidate, type LinkScope, type LinkSyncStatus } from "./agentLinks";
 import { forgetAttachments } from "./attach";
 import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
 import { claimEcho, clearEcho, landEcho, settleEcho, type PendingEcho } from "./echo";
@@ -14,6 +15,7 @@ import { describe, MachineConnection, type MachineState } from "./machine";
 import {
   addNativeAccount,
   confirmNativeAccount,
+  controlPlaneOrigin,
   DAEMON_CONFIG,
   DAEMON_EXIT,
   daemonState,
@@ -429,6 +431,8 @@ export interface AppState {
   commands: ReadonlyMap<SessionKey, AgentCommandList>;
   /** Never written to `cpError`, which would take over the whole app. */
   setup: SetupState | null;
+  /** The host is bringing this computer's daemon up, so `localMachineId` is a few seconds from answering, not down (Q3.692). */
+  localDaemonStarting: boolean;
   cpError: string | null;
   config: InstanceConfig | null;
   authError: string | null;
@@ -453,6 +457,7 @@ class AppStore implements StreamSink {
     // The keyring answer is async, so a native launch starts loading instead of flashing sign-in.
     phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
     setup: null,
+    localDaemonStarting: false,
     host: null,
     pickingServer: false,
     localMachineId: null,
@@ -488,8 +493,19 @@ class AppStore implements StreamSink {
   private commandsWanted = new Map<SessionKey, number>();
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly links = new LinkSync({
+    link: (id) => cp.linkMachine(id),
+    push: async (id, links, policy) => {
+      const daemon = this.daemons.get(machineId(id));
+      if (daemon === undefined) throw new Error("that machine is no longer in the list");
+      return daemon.putPeerLinks(links, policy);
+    },
+    now: () => Date.now(),
+  });
   private resumeInFlight: Promise<void> | null = null;
   private resumeQueued = false;
+  /** Taken by the next resume to start, so a resume already listing machines never spends it on the listing before the change. */
+  private linksForced = false;
   private epoch = 0;
 
   subscribe = (listener: () => void): (() => void) => {
@@ -678,6 +694,12 @@ class AppStore implements StreamSink {
         this.patch({ setup: { step: "failed", said: FOREIGN_DAEMON_DETAIL } });
         return;
       }
+      // The host starts every set-up daemon at launch on a thread of its own, so the page usually meets it here; waited out
+      // beside the other machines, never ahead of them, and re-probed the moment it answers rather than on the offline retry.
+      if (state.status === "starting") {
+        void this.awaitLaunchStart(state.claimed);
+        return;
+      }
       if (state.status !== "absent" && state.status !== "exited") return;
 
       if (state.config === DAEMON_CONFIG.elsewhere) {
@@ -713,6 +735,23 @@ class AppStore implements StreamSink {
       await this.settleDaemon(created.machine.id);
     } catch (error) {
       this.patch({ setup: { step: "failed", said: describe(error) } });
+    }
+  }
+
+  private async awaitLaunchStart(claim: string | null): Promise<void> {
+    this.patch({ localDaemonStarting: true });
+    try {
+      await this.settleDaemon(claim);
+      // Probed here, before the flag drops: settle's resume may only be queued behind the launch's own.
+      await this.refreshLocalMachine();
+      const id = this.snapshot.localMachineId;
+      const connection = id === null ? undefined : this.connections.get(id);
+      if (id !== null && connection !== undefined) {
+        this.nextProbeAt.delete(id);
+        await this.resumeMachine(connection, this.epoch);
+      }
+    } finally {
+      this.patch({ localDaemonStarting: false });
     }
   }
 
@@ -968,6 +1007,8 @@ class AppStore implements StreamSink {
 
   private async runResume(reason: string): Promise<void> {
     const epoch = ++this.epoch;
+    const forceLinks = this.linksForced;
+    this.linksForced = false;
     this.patch({ resuming: true });
 
     await this.refreshLocalMachine();
@@ -1009,7 +1050,48 @@ class AppStore implements StreamSink {
       [...this.connections.values()].map((connection) => this.resumeMachine(connection, epoch)),
     );
 
-    if (epoch === this.epoch) this.patch({ resuming: false, lastResumeAt: Date.now() });
+    if (epoch === this.epoch) {
+      this.patch({ resuming: false, lastResumeAt: Date.now() });
+      // After the listing and the probes, so each machine's reach and daemon are this wake's answer.
+      const scope = this.linkScope();
+      if (scope !== null) void this.links.syncAll(scope, this.linkCandidates(), forceLinks);
+      else if (forceLinks) this.linksForced = true;
+    }
+  }
+
+  private linkScope(): LinkScope | null {
+    const me = this.snapshot.me;
+    return me === null ? null : { origin: controlPlaneOrigin(), account: me.id };
+  }
+
+  private linkCandidates(): LinkCandidate[] {
+    return [...this.connections.values()].map((connection) => linkCandidate(connection.state()));
+  }
+
+  linkStatus(id: MachineId): LinkSyncStatus | null {
+    const connection = this.connections.get(id);
+    return connection === undefined ? null : this.links.status(linkCandidate(connection.state()));
+  }
+
+  /** The answer is the account's flag, so `me` takes it at once; what it adds up to per machine waits for the listing. Q2.244. */
+  async saveAccountMessaging(on: boolean): Promise<void> {
+    const answer = await cp.saveAccountPermissions(on);
+    const me = this.snapshot.me;
+    if (me !== null) this.patch({ me: { ...me, permissions: { agentMessaging: answer.agentMessaging } } });
+    void this.permissionsChanged();
+  }
+
+  /** Only the switches named; the answer is the machine's own pair, drawn on the 200 and never before. */
+  async saveMachinePermissions(id: MachineId, patch: { agentMessaging?: boolean; isolated?: boolean }): Promise<void> {
+    const answer = await cp.saveMachinePermissions(id, patch);
+    this.connections.get(id)?.noteOwnMessaging(answer);
+    void this.permissionsChanged();
+  }
+
+  /** Every machine is handed the new policy past its backoff, since a switch left unapplied for fifteen minutes is a lie. */
+  private async permissionsChanged(): Promise<void> {
+    this.linksForced = true;
+    await this.machinesChanged("permissions-changed");
   }
 
   private async resumeMachine(connection: MachineConnection, epoch: number): Promise<void> {
@@ -1518,7 +1600,7 @@ class AppStore implements StreamSink {
   /** Drawn now, errors through `report`; returns whether the write was issued. */
   setSessionMeta(
     ref: SessionRef,
-    patch: { title?: string | null; pinned?: boolean; rank?: number | null },
+    patch: { title?: string | null; pinned?: boolean; rank?: number | null; peerMessages?: boolean },
     report: (message: string) => void,
   ): boolean {
     const daemon = this.daemonFor(ref.machineId);

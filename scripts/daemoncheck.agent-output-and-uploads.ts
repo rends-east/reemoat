@@ -7,8 +7,12 @@ import { estimateBytes, truncateEvent } from "../src/events.js";
 import {
   contentDispositionFor,
   inlinesImage,
+  isAgentImage,
+  MAX_AGENT_IMAGES_PER_SESSION,
   MAX_SESSION_UPLOAD_BYTES,
   MAX_UPLOAD_BYTES,
+  roomFor,
+  sniffImageMime,
   uploadRateVerdict,
   UPLOAD_RATE_BYTES,
   UPLOAD_RATE_WINDOW_MS,
@@ -645,7 +649,7 @@ process.stdout.write("\ntaking a file in\n");
       mime: null,
       body: body.stream,
     });
-    check("the hundred-and-first file is refused", result.kind, "too_many");
+    check("a hundred files not yet sent refuse the next one", result.kind, "too_many");
     check("without reading a byte of it", body.state.pulled, 0);
     check("and the sender is released rather than parked", body.state.cancelled, true);
     check("with nothing left on disk", dirsFor("s_many"), []);
@@ -684,7 +688,7 @@ process.stdout.write("\ntaking a file in\n");
       mime: null,
       body: body.stream,
     });
-    check("a session already at its budget refuses the next file", result.kind, "quota");
+    check("files not yet sent filling the budget refuse the next file", result.kind, "quota");
     check("saying how much of it is already spent", result.kind === "quota" && result.used, MAX_SESSION_UPLOAD_BYTES);
     check("the refusal is immediate rather than after the whole body", body.state.pulled < 8, true);
     check("the body is released", body.state.cancelled, true);
@@ -707,10 +711,117 @@ process.stdout.write("\ntaking a file in\n");
     check("part-way through rather than after taking all of it", body.state.pulled < chunks.length, true);
     check("the body is released", body.state.cancelled, true);
     check("and the partial file is gone, not merely unreferenced", dirsFor("s_big"), []);
-    check("with nothing recorded against the session", index.bytesFor("s_big"), 0);
+    check("with nothing recorded against the session", index.listFor("s_big").length, 0);
+  }
+
+  {
+    // Sent files make room for the next: the oldest one sent goes, and one still waiting to be sent never does.
+    const place = (row: UploadRow): void => {
+      index.insert(row);
+      mkdirSync(join(root, row.sessionId, row.uploadId), { recursive: true });
+      writeFileSync(join(root, row.sessionId, row.uploadId, row.name), "x");
+    };
+    for (let n = 0; n < MAX_UPLOADS_PER_SESSION - 1; n += 1) {
+      place({ sessionId: "s_roll", uploadId: `u_sent${n}`, name: "old", origName: "old", mime: null, bytes: 1, createdAt: now + n, consumedAt: now + n });
+    }
+    place({ sessionId: "s_roll", uploadId: "u_draft", name: "draft", origName: "draft", mime: null, bytes: 1, createdAt: now - 1, consumedAt: null });
+    const result = await uploads.receive("s_roll", {
+      name: "new.txt",
+      origName: "new.txt",
+      mime: "text/plain",
+      body: bodyOf([chunk(4)]).stream,
+    });
+    check("a session full of sent files still takes the next one", result.kind, "ok");
+    check("by dropping the oldest file already sent", index.get("s_roll", "u_sent0"), null);
+    check("bytes and all", existsSync(join(root, "s_roll", "u_sent0")), false);
+    check("never one still waiting to be sent, however old", index.get("s_roll", "u_draft") !== null, true);
+    check("so the session holds exactly its hundred", index.listFor("s_roll").length, MAX_UPLOADS_PER_SESSION);
+    check("and says so", result.kind === "ok" && result.sessionCount, MAX_UPLOADS_PER_SESSION);
+
+    place({ sessionId: "s_room", uploadId: "u_bigsent", name: "big", origName: "big", mime: null, bytes: MAX_SESSION_UPLOAD_BYTES - 2, createdAt: now, consumedAt: now });
+    const more = await uploads.receive("s_room", {
+      name: "more.txt",
+      origName: "more.txt",
+      mime: "text/plain",
+      body: bodyOf([chunk(4)]).stream,
+    });
+    check("the byte budget rolls the same way", [more.kind, index.get("s_room", "u_bigsent")], ["ok", null]);
+  }
+
+  {
+    // The relay used to send every file as bare bytes, and the agent is handed an image only under an image type.
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48]);
+    const sniffed = await uploads.receive("s_sniff", {
+      name: "image.png",
+      origName: "image.png",
+      mime: "application/octet-stream",
+      body: bodyOf([png.subarray(0, 3), png.subarray(3)]).stream,
+    });
+    check("a file sent as bare bytes is stored as the image it is, even split across chunks", sniffed.kind === "ok" && sniffed.row.mime, "image/png");
+    const bare = await uploads.receive("s_sniff", { name: "blob", origName: "blob", mime: null, body: bodyOf([png]).stream });
+    check("and so is one that declared nothing", bare.kind === "ok" && bare.row.mime, "image/png");
+    const declared = await uploads.receive("s_sniff", {
+      name: "notes.txt",
+      origName: "notes.txt",
+      mime: "text/plain",
+      body: bodyOf([png]).stream,
+    });
+    check("while a declared type is kept as declared", declared.kind === "ok" && declared.row.mime, "text/plain");
   }
 
   await uploads.shutdown();
+}
+
+process.stdout.write("\nwhat a session keeps of its files\n");
+{
+  const row = (uploadId: string, at: number, sent: boolean, bytes = 1): UploadRow => ({
+    sessionId: "s_plan",
+    uploadId,
+    name: uploadId,
+    origName: uploadId,
+    mime: null,
+    bytes,
+    createdAt: at,
+    consumedAt: sent ? at : null,
+  });
+  const budget = { count: 3, bytes: 100 };
+  const evicted = (room: ReturnType<typeof roomFor>): string[] | string =>
+    room.ok ? room.evict.map((one) => one.uploadId) : `full:${room.full}`;
+  check("under both bounds nothing goes", evicted(roomFor([row("u_a", 1, true)], 1, budget)), []);
+  check("over the count, the oldest sent goes first", evicted(roomFor([row("u_b", 2, true), row("u_a", 1, true), row("u_c", 3, true)], 1, budget)), ["u_a"]);
+  check("passing over one not yet sent, however old", evicted(roomFor([row("u_a", 1, false), row("u_b", 2, true), row("u_c", 3, true)], 1, budget)), ["u_b"]);
+  check("bytes are a bound of their own", evicted(roomFor([row("u_a", 1, true, 60), row("u_b", 2, true, 30)], 20, budget)), ["u_a"]);
+  check("as many as it takes", evicted(roomFor([row("u_a", 1, true, 40), row("u_b", 2, true, 40)], 90, budget)), ["u_a", "u_b"]);
+  check(
+    "and files not yet sent filling a bound refuse, naming which",
+    [
+      evicted(roomFor([row("u_a", 1, false), row("u_b", 2, false), row("u_c", 3, false)], 1, budget)),
+      evicted(roomFor([row("u_a", 1, false, 95)], 10, budget)),
+    ],
+    ["full:count", "full:bytes"],
+  );
+
+  const bytes = (...values: number[]): Uint8Array => new Uint8Array(values);
+  check(
+    "an image type is read off its first bytes",
+    [
+      sniffImageMime(bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)),
+      sniffImageMime(bytes(0xff, 0xd8, 0xff, 0xe0)),
+      sniffImageMime(bytes(0x47, 0x49, 0x46, 0x38, 0x39, 0x61)),
+      sniffImageMime(bytes(0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50)),
+    ],
+    ["image/png", "image/jpeg", "image/gif", "image/webp"],
+  );
+  check(
+    "and nothing else is called one",
+    [
+      sniffImageMime(bytes(0x25, 0x50, 0x44, 0x46)),
+      sniffImageMime(bytes(0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x41, 0x56, 0x45)),
+      sniffImageMime(bytes(0x89, 0x50)),
+      sniffImageMime(bytes()),
+    ],
+    [null, null, null, null],
+  );
 }
 
 // Driven as the pure decision: reaching `UPLOAD_RATE_BYTES` end-to-end would write 300 MiB per run.
@@ -835,6 +946,21 @@ process.stdout.write("\nwhat an attachment becomes\n");
   check("an unusable session id is refused", uploads.keepAgentImage("../escape", "image/png", returned.toString("base64")), null);
   check("and so is an empty payload", uploads.keepAgentImage("s_agent", "image/png", ""), null);
 
+  // An agent's images roll on a budget of their own and never touch a file somebody sent.
+  for (let n = 0; n < MAX_AGENT_IMAGES_PER_SESSION; n += 1) {
+    const id = `a_old${String(n).padStart(3, "0")}`;
+    index.insert({ sessionId: "s_shots", uploadId: id, name: "old.png", origName: "old.png", mime: "image/png", bytes: 1, createdAt: now + n, consumedAt: now + n });
+    mkdirSync(join(uploadRoot, "s_shots", id), { recursive: true });
+  }
+  index.insert({ sessionId: "s_shots", uploadId: "u_mine", name: "mine.png", origName: "mine.png", mime: "image/png", bytes: 1, createdAt: now - 1, consumedAt: now - 1 });
+  const shots = [0, 1].map(() => uploads.keepAgentImage("s_shots", "image/png", returned.toString("base64")));
+  check("an agent past its image budget still keeps the newest, two in one burst", shots.every((shot) => shot !== null), true);
+  check("by dropping its own two oldest", [index.get("s_shots", "a_old000"), index.get("s_shots", "a_old001")], [null, null]);
+  check("never a file somebody sent, though older still", index.get("s_shots", "u_mine") !== null, true);
+  check("so its images stay at the budget", index.listFor("s_shots").filter(isAgentImage).length, MAX_AGENT_IMAGES_PER_SESSION);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  check("and the dropped directories follow, off the emit path", existsSync(join(uploadRoot, "s_shots", "a_old000")), false);
+
   const sentinel = join(uploadRoot, "..", "sentinel-must-survive");
   writeFileSync(sentinel, "keep", "utf8");
   await uploads.forgetSession("../escape");
@@ -842,7 +968,7 @@ process.stdout.write("\nwhat an attachment becomes\n");
 
   await uploads.forgetSession("s_one");
   check("forgetting a session takes its directory", existsSync(join(uploadRoot, "s_one")), false);
-  check("and its rows", index.countFor("s_one"), 0);
+  check("and its rows", index.listFor("s_one").length, 0);
   await uploads.shutdown();
 }
 
@@ -855,13 +981,13 @@ process.stdout.write("\nwhat an attachment costs an event\n");
     bytes: 1234,
     inlined: false,
   }));
-  const bare = { type: "prompt", text: "hi", attachments: null } as const;
-  const laden = { type: "prompt" as const, text: "hi", attachments: refs };
+  const bare = { type: "prompt", text: "hi", attachments: null, from: null } as const;
+  const laden = { type: "prompt" as const, text: "hi", attachments: refs, from: null };
 
   check("an attachment is accounted rather than ignored", estimateBytes(laden) > estimateBytes(bare), true);
   check("and ten maximal ones stay far under the per-event cap", estimateBytes(laden) < 128 * 1024, true);
 
-  const long = { type: "prompt" as const, text: "y".repeat(200 * 1024), attachments: refs };
+  const long = { type: "prompt" as const, text: "y".repeat(200 * 1024), attachments: refs, from: null };
   const cut = truncateEvent(long, 128 * 1024) as typeof long;
   // Untouched: a clipped attachment is a reference to a file that cannot be found.
   check("every attachment survives truncation byte for byte", cut.attachments, refs);

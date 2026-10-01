@@ -1,11 +1,12 @@
 import { useRef, useState, useEffect, type ReactNode } from "react";
-import { AlertTriangle, ChevronRight, MoreHorizontal, Trash2, Upload } from "lucide-react";
+import { Trash2, Upload } from "lucide-react";
 import { consentBroken, MACHINE_GONE, pluginFailure, pluginPath, pluginStateText } from "../../plugins";
 import { peekPluginArchive, type ArchivePeek, type ManifestPreview } from "../../pluginArchive";
 import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
 import type { MachineId } from "../../ids";
 import { marketEntryPath } from "../../market";
 import { navigate } from "../../router";
+import { machineLeafPath, machineListPath } from "../../settings";
 import { store } from "../../store";
 import type { PluginSummary } from "../../wire";
 import {
@@ -13,14 +14,16 @@ import {
   DangerButton,
   Empty,
   Icon,
-  IconButton,
-  Menu,
   RowAction,
+  RowMenu,
   SETTINGS_HEADING,
+  SkeletonRow,
   Spinner,
   TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
+import { ActionRow, EmptyRow, Group, LinkRow, TWO_STEP_ROW } from "../kit/List";
+import { Notice, Pending, RecheckButton } from "../kit/Status";
 
 function usePlugins(machineId: MachineId): {
   plugins: PluginSummary[] | null;
@@ -58,55 +61,109 @@ function usePlugins(machineId: MachineId): {
   return { plugins, error, loading, refresh };
 }
 
+interface Handoff {
+  machineId: MachineId;
+  file: File;
+}
+
+// The chosen archive, handed over in module state rather than the URL; peeked in state, cleared on mount.
+let handoff: Handoff | null = null;
+
+function peekHandoff(): Handoff | null {
+  return handoff;
+}
+
+function clearHandoff(): void {
+  handoff = null;
+}
+
+type Hold = (pluginId: string, doing: string | null) => void;
+
 export function PluginList({ machineId }: { machineId: MachineId }): ReactNode {
   const { plugins, error, loading, refresh } = usePlugins(machineId);
+  // Per plugin, so a row's acts and its failure's restart hold one lock, and the row's subline says what is under way.
+  const [pending, setPending] = useState<ReadonlyMap<string, string>>(new Map());
+  const input = useRef<HTMLInputElement | null>(null);
 
-  const again = (
-    <Button onClick={refresh} disabled={loading}>
-      {loading ? "Checking…" : "Check again"}
-    </Button>
-  );
+  const hold: Hold = (pluginId, doing) =>
+    setPending((was) => {
+      const next = new Map(was);
+      if (doing === null) next.delete(pluginId);
+      else next.set(pluginId, doing);
+      return next;
+    });
+
+  // Nothing is read or sent from here: the leaf reads the manifest before anything goes to the daemon.
+  const choose = (file: File): void => {
+    handoff = { machineId, file };
+    navigate(machineLeafPath(machineId, "plugin-install"));
+  };
+
+  const again = <RecheckButton onClick={refresh} busy={loading} />;
 
   if (plugins === null) {
-    if (error !== null) {
-      return (
-        <Empty failed action={again}>
-          {error}
-        </Empty>
-      );
-    }
     return (
-      <div className="flex justify-center py-6">
-        <Spinner />
-      </div>
+      <Group title="Installed">
+        {error === null ? (
+          <SkeletonRow />
+        ) : (
+          <Empty failed action={again}>
+            {error}
+          </Empty>
+        )}
+      </Group>
     );
   }
 
+  const failed = plugins.filter((plugin) => plugin.failure !== null);
   return (
     <div>
-      {/* A failed re-read sits above the last list rather than replacing it. */}
-      {error !== null && (
-        <div role="status" className="mb-3 flex flex-wrap items-center gap-2 px-1">
-          <p className="flex min-w-0 flex-1 items-start gap-1.5 text-xs text-fg">
-            <Icon as={AlertTriangle} size={14} className="mt-0.5 shrink-0 text-muted" />
-            <span>{error}</span>
-          </p>
-          {again}
+      {/* A failed re-read is said under the last list rather than replacing it. */}
+      <Group title="Installed" action={error === null ? undefined : again} error={error}>
+        {plugins.length === 0 ? (
+          <EmptyRow>Nothing installed.</EmptyRow>
+        ) : (
+          plugins.map((plugin) => (
+            <PluginRow
+              key={plugin.id}
+              machineId={machineId}
+              plugin={plugin}
+              pending={pending.get(plugin.id) ?? null}
+              hold={hold}
+              onChanged={refresh}
+            />
+          ))
+        )}
+      </Group>
+      {failed.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {failed.map((plugin) => (
+            <PluginFailure
+              key={plugin.id}
+              machineId={machineId}
+              plugin={plugin}
+              pending={pending.get(plugin.id) ?? null}
+              hold={hold}
+              onChanged={refresh}
+            />
+          ))}
         </div>
       )}
-      {plugins.length === 0 ? (
-        <Empty>Nothing installed.</Empty>
-      ) : (
-        <ul className="flex flex-col">
-          {plugins.map((plugin) => (
-            <PluginRow key={plugin.id} machineId={machineId} plugin={plugin} onChanged={refresh} />
-          ))}
-        </ul>
-      )}
-      <div className="mt-6">
-        <h3 className={SETTINGS_HEADING}>Install</h3>
-        <InstallPlugin machineId={machineId} onInstalled={refresh} />
-      </div>
+      <Group title="Install">
+        <ActionRow title="Install from a file" glyph={Upload} onClick={() => input.current?.click()} />
+      </Group>
+      <input
+        ref={input}
+        type="file"
+        accept={PLUGIN_ARCHIVE_ACCEPT}
+        className="hidden"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          // Cleared so choosing the same file again still fires change.
+          event.target.value = "";
+          if (file !== undefined) choose(file);
+        }}
+      />
     </div>
   );
 }
@@ -114,149 +171,106 @@ export function PluginList({ machineId }: { machineId: MachineId }): ReactNode {
 function PluginRow({
   machineId,
   plugin,
+  pending,
+  hold,
   onChanged,
 }: {
   machineId: MachineId;
   plugin: PluginSummary;
+  pending: string | null;
+  hold: Hold;
   onChanged: () => void;
 }): ReactNode {
-  const [pending, setPending] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const busy = pending !== null;
 
   const run = (work: Promise<unknown>, doing: string, done: string): void => {
-    setPending(doing);
+    hold(plugin.id, doing);
     void work
       .then(() => {
         toast("ok", done);
         onChanged();
       })
       .catch((cause: unknown) => toast("error", pluginFailure(cause)))
-      .finally(() => setPending(null));
+      .finally(() => hold(plugin.id, null));
   };
 
   const daemon = store.daemonFor(machineId);
 
-  // Sending true resets the start budget, so this revives a plugin that gave up; the answer decides the toast.
-  const restart = (): void => {
-    if (daemon === undefined || busy) return;
-    setPending("Starting…");
-    void daemon
-      .setPluginEnabled(plugin.id, true)
-      .then((answer) => {
-        const up = answer.plugin.state === "running";
-        toast(
-          up ? "ok" : "error",
-          up ? `${plugin.name} is running again.` : `${plugin.name} did not start — see its row.`,
-        );
-        onChanged();
-      })
-      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
-      .finally(() => setPending(null));
-  };
-
-  return (
-    <li className="border-b border-edge last:border-b-0">
-      {confirming ? (
-        <TwoStep
-          armed
-          onArm={setConfirming}
-          align="end"
-          className="min-h-14 min-w-0 px-1 py-2.5"
-          question={
-            <>
-              Remove <span className="font-medium">{plugin.name}</span> and its data?
-            </>
-          }
-          act={{ label: "Remove", danger: true, icon: Trash2 }}
-          disabled={busy || daemon === undefined}
-          onAct={() => {
-            if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
-          }}
-        />
-      ) : (
-      <div className="flex min-w-0 items-center gap-1">
-        <button
-          type="button"
-          onClick={() => navigate(marketEntryPath(plugin.id))}
-          className="tap press flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-lg px-1 py-2.5 text-left hover:bg-raised"
-        >
-          <span className="min-w-0 flex-1">
-            <span className="flex min-w-0 items-baseline gap-x-2">
-              <span className="truncate text-sm font-medium">{plugin.name}</span>
-              <span className="shrink-0 text-xs text-muted">{plugin.version}</span>
+  return confirming ? (
+    <TwoStep
+      armed
+      onArm={setConfirming}
+      align="end"
+      className={TWO_STEP_ROW}
+      question={
+        <>
+          Remove <span className="font-medium">{plugin.name}</span> and its data?
+        </>
+      }
+      act={{ label: "Remove", danger: true, icon: Trash2 }}
+      disabled={busy || daemon === undefined}
+      onAct={() => {
+        if (daemon !== undefined) run(daemon.removePlugin(plugin.id), "Removing…", "Removed");
+      }}
+    />
+  ) : (
+    // The link is not the box's own child, so the last row hands it the bottom corners its hover fill would square off.
+    <div className="flex min-w-0 items-center pr-1 last:[&>button]:rounded-b-lg">
+      <LinkRow
+        title={plugin.name}
+        value={plugin.version}
+        subline={
+          pending === null ? (
+            pluginStateText(plugin)
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <Spinner />
+              {pending}
             </span>
-            <span className="flex min-w-0 items-center gap-1.5 text-2xs text-muted">
-              {pending !== null && <Spinner />}
-              <span className="truncate">{pending ?? pluginStateText(plugin)}</span>
-            </span>
-          </span>
-          <Icon as={ChevronRight} size={16} className="shrink-0 text-faint" />
-        </button>
-        <Menu
-          align="right"
-          panelClassName="w-56"
-          trigger={(open, toggle) => (
-            // lg, not sm: sm's grown hit target overlaps the row button and steals its taps.
-            <IconButton
-              icon={MoreHorizontal}
-              label={`Actions for ${plugin.name}`}
-              size="lg"
-              active={open}
+          )
+        }
+        onClick={() => navigate(marketEntryPath(plugin.id))}
+      />
+      <RowMenu label={`Actions for ${plugin.name}`}>
+        {(close) => (
+          <>
+            {plugin.contributes.screen !== null && (
+              <RowAction
+                label="Open"
+                disabled={!plugin.enabled}
+                onClick={() => {
+                  close();
+                  navigate(pluginPath(machineId, plugin.id));
+                }}
+              />
+            )}
+            <RowAction
+              label={plugin.enabled ? "Switch off" : "Switch on"}
               disabled={busy}
-              onClick={toggle}
+              onClick={() => {
+                close();
+                if (daemon === undefined) return;
+                run(
+                  daemon.setPluginEnabled(plugin.id, !plugin.enabled),
+                  plugin.enabled ? "Switching off…" : "Switching on…",
+                  plugin.enabled ? "Switched off" : "Switched on",
+                );
+              }}
             />
-          )}
-        >
-          {(close) => (
-            <>
-              {plugin.contributes.screen !== null && (
-                <RowAction
-                  label="Open"
-                  disabled={!plugin.enabled}
-                  onClick={() => {
-                    close();
-                    navigate(pluginPath(machineId, plugin.id));
-                  }}
-                />
-              )}
-              <RowAction
-                label={plugin.enabled ? "Switch off" : "Switch on"}
-                onClick={() => {
-                  close();
-                  if (daemon === undefined) return;
-                  run(
-                    daemon.setPluginEnabled(plugin.id, !plugin.enabled),
-                    plugin.enabled ? "Switching off…" : "Switching on…",
-                    plugin.enabled ? "Switched off" : "Switched on",
-                  );
-                }}
-              />
-              <RowAction
-                label="Remove"
-                danger
-                onClick={() => {
-                  close();
-                  setConfirming(true);
-                }}
-              />
-            </>
-          )}
-        </Menu>
-      </div>
-      )}
-
-      {plugin.failure !== null && (
-        <PluginFailure
-          failure={plugin.failure}
-          // A switched-off plugin's failure is history; Switch on resets the same budget.
-          restartable={plugin.enabled}
-          onRestart={restart}
-          busy={busy}
-        />
-      )}
-
-    </li>
+            <RowAction
+              label="Remove"
+              danger
+              disabled={busy}
+              onClick={() => {
+                close();
+                setConfirming(true);
+              }}
+            />
+          </>
+        )}
+      </RowMenu>
+    </div>
   );
 }
 
@@ -270,57 +284,112 @@ function failureParts(failure: string): { said: string; log: string | null } {
 
 /** No scroller: the daemon clips the failure to MAX_FAILURE_CHARS, and a nested scroller traps touch drags. */
 function PluginFailure({
-  failure,
-  restartable,
-  onRestart,
-  busy,
+  machineId,
+  plugin,
+  pending,
+  hold,
+  onChanged,
 }: {
-  failure: string;
-  restartable: boolean;
-  onRestart: () => void;
-  busy: boolean;
+  machineId: MachineId;
+  plugin: PluginSummary;
+  pending: string | null;
+  hold: Hold;
+  onChanged: () => void;
 }): ReactNode {
-  const { said, log } = failureParts(failure);
+  const { said, log } = failureParts(plugin.failure ?? "");
+  const busy = pending !== null;
+  const daemon = store.daemonFor(machineId);
+
+  // Sending true resets the start budget, so this revives a plugin that gave up; the answer decides the toast.
+  const restart = (): void => {
+    if (daemon === undefined || busy) return;
+    hold(plugin.id, "Starting…");
+    void daemon
+      .setPluginEnabled(plugin.id, true)
+      .then((answer) => {
+        const up = answer.plugin.state === "running";
+        toast(up ? "ok" : "error", up ? `${plugin.name} is running again.` : `${plugin.name} did not start.`);
+        onChanged();
+      })
+      .catch((cause: unknown) => toast("error", pluginFailure(cause)))
+      .finally(() => hold(plugin.id, null));
+  };
+
   return (
-    <div className="mb-2 rounded-md bg-raised/50 px-2.5 py-2">
-      <p className="text-xs text-fg">{said}</p>
+    // Under the list rather than inside its box, so it names the plugin it is about.
+    <Notice tone="warn">
+      <span className="block">
+        <span className="font-medium">{plugin.name}</span>: {said}
+      </span>
       {log !== null && (
         <>
-          <p className={`${SETTINGS_HEADING} mt-2`}>What it printed</p>
+          <span className={`mt-2 block ${SETTINGS_HEADING}`}>What it printed</span>
           <pre className="mt-1 font-mono text-2xs leading-snug whitespace-pre-wrap wrap-anywhere text-muted">
             {log}
           </pre>
         </>
       )}
-      {restartable && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-2">
-          <Button size="sm" className="[@media(pointer:coarse)]:min-h-11" disabled={busy} onClick={onRestart}>
+      {/* A switched-off plugin's failure is history; Switch on resets the same budget. */}
+      {plugin.enabled && (
+        <span className="mt-2 block">
+          <Button size="sm" tone="ghost" className="[@media(pointer:coarse)]:min-h-11" disabled={busy} onClick={restart}>
             {busy ? <Spinner /> : "Start it again"}
           </Button>
-        </div>
+        </span>
       )}
-    </div>
+    </Notice>
   );
 }
 
-function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onInstalled: () => void }): ReactNode {
+/** The install leaf: shows the handed-off file's consent and reads nothing of its own first; with nothing in hand it walks back. */
+export function PluginInstall({ machineId }: { machineId: MachineId }): ReactNode {
+  const [file] = useState<File | null>(() => {
+    const held = peekHandoff();
+    return held !== null && held.machineId === machineId ? held.file : null;
+  });
+  const back = (): void => navigate(machineListPath(machineId, "plugins"), true);
+
+  useEffect(() => {
+    clearHandoff();
+    if (file === null) back();
+  }, [file]);
+
+  if (file === null) return null;
+  return <InstallPlugin machineId={machineId} file={file} onDone={back} />;
+}
+
+function InstallPlugin({
+  machineId,
+  file: handed,
+  onDone,
+}: {
+  machineId: MachineId;
+  file: File;
+  onDone: () => void;
+}): ReactNode {
   const input = useRef<HTMLInputElement | null>(null);
+  const [file, setFile] = useState(handed);
+  const [peek, setPeek] = useState<ArchivePeek | null>(null);
   const [phase, setPhase] = useState<
-    | { kind: "idle" }
-    | { kind: "reading" }
-    | { kind: "confirming"; file: File; peek: ArchivePeek }
-    | { kind: "sending"; fraction: number }
-    | { kind: "failed"; message: string }
+    { kind: "idle" } | { kind: "sending"; fraction: number } | { kind: "failed"; message: string }
   >({ kind: "idle" });
   const stop = useRef<AbortController | null>(null);
 
-  const choose = (file: File): void => {
-    setPhase({ kind: "reading" });
-    void peekPluginArchive(file).then((peek) => setPhase({ kind: "confirming", file, peek }));
-  };
+  // The manifest is read before anything is sent, again for every file chosen here.
+  useEffect(() => {
+    let live = true;
+    setPeek(null);
+    setPhase({ kind: "idle" });
+    void peekPluginArchive(file).then((answer) => {
+      if (live) setPeek(answer);
+    });
+    return () => {
+      live = false;
+    };
+  }, [file]);
 
   // shown is the manifest the consent screen described, or null when nothing was shown.
-  const send = (file: File, shown: ManifestPreview | null): void => {
+  const send = (shown: ManifestPreview | null): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
       setPhase({ kind: "failed", message: MACHINE_GONE });
@@ -332,8 +401,7 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
     void daemon
       .installPlugin(file, (fraction) => setPhase({ kind: "sending", fraction }), controller.signal)
       .then((answer) => {
-        setPhase({ kind: "idle" });
-        onInstalled();
+        onDone();
         // The daemon's parsed manifest may claim more than the consent screen showed; report that instead of success.
         const broken = shown === null ? null : consentBroken(shown, answer.plugin);
         if (broken !== null) {
@@ -358,68 +426,78 @@ function InstallPlugin({ machineId, onInstalled }: { machineId: MachineId; onIns
       });
   };
 
+  const sending = phase.kind === "sending";
+  const progress = phase.kind === "sending" ? `${Math.round(phase.fraction * 100)}%` : null;
+
   return (
-    <div className="mt-2">
+    <div className="max-w-xl">
       <PluginArchiveNote />
+      {peek === null ? (
+        <Pending>Reading…</Pending>
+      ) : peek.kind === "ok" ? (
+        <PluginConsent manifest={peek.manifest} />
+      ) : (
+        <PluginUnreadable reason={peek.reason} checker="This machine" />
+      )}
+      {phase.kind === "failed" && (
+        <div className="mt-3">
+          <Notice tone="warn">
+            <span className="block max-h-56 overflow-auto whitespace-pre-wrap wrap-anywhere">{phase.message}</span>
+          </Notice>
+        </div>
+      )}
       <input
         ref={input}
         type="file"
         accept={PLUGIN_ARCHIVE_ACCEPT}
         className="hidden"
         onChange={(event) => {
-          const file = event.target.files?.[0];
-          // Cleared so choosing the same file again still fires change.
+          const next = event.target.files?.[0];
           event.target.value = "";
-          if (file !== undefined) choose(file);
+          if (next !== undefined) setFile(next);
         }}
       />
 
-      {phase.kind === "confirming" && phase.peek.kind === "ok" && <PluginConsent manifest={phase.peek.manifest} />}
-      {phase.kind === "confirming" && phase.peek.kind === "unreadable" && (
-        <PluginUnreadable reason={phase.peek.reason} checker="This machine" />
-      )}
-
-      <div className="mt-3 flex items-center gap-2">
-        <Button
-          disabled={phase.kind === "sending" || phase.kind === "reading"}
-          onClick={() => {
-            // With an unreadable archive this press must reopen the picker, or the only live control is the unsafe install.
-            if (phase.kind === "confirming" && phase.peek.kind === "ok") {
-              send(phase.file, phase.peek.manifest);
-              return;
-            }
-            input.current?.click();
-          }}
-        >
-          {phase.kind === "sending" ? <Spinner /> : <Upload size={14} />}
-          {phase.kind === "sending"
-            ? `${Math.round(phase.fraction * 100)}%`
-            : phase.kind === "reading"
-              ? "Reading…"
-              : phase.kind === "confirming"
-                ? phase.peek.kind === "ok"
-                  ? "Install it"
-                  : "Choose another file"
-                : "Choose a file"}
-        </Button>
-        {phase.kind === "confirming" && phase.peek.kind === "unreadable" && (
-          <DangerButton icon={Upload} onClick={() => send(phase.file, null)}>
-            Install without reading it
-          </DangerButton>
-        )}
-        {phase.kind === "confirming" && <Button onClick={() => setPhase({ kind: "idle" })}>Cancel</Button>}
-        {phase.kind === "sending" && (
+      <div className="mt-6 flex flex-wrap items-center gap-2">
+        {peek !== null && peek.kind === "unreadable" ? (
+          <>
+            {/* The first press reopens the picker, so the unsafe install is never the only way on from here. */}
+            <Button disabled={sending} onClick={() => input.current?.click()}>
+              <Icon as={Upload} size={14} />
+              Choose another file
+            </Button>
+            <DangerButton icon={Upload} disabled={sending} onClick={() => send(null)}>
+              {progress ?? "Install without reading it"}
+            </DangerButton>
+          </>
+        ) : (
           <Button
+            tone="primary"
+            disabled={peek === null || sending}
             onClick={() => {
-              stop.current?.abort();
-              setPhase({ kind: "idle" });
+              if (peek !== null && peek.kind === "ok") send(peek.manifest);
             }}
           >
-            Cancel
+            {progress === null ? (
+              "Install it"
+            ) : (
+              <>
+                <Spinner />
+                {progress}
+              </>
+            )}
           </Button>
         )}
+        {/* Mid-upload it aborts too, through the signal the upload was handed, so nothing is left sending. */}
+        <Button
+          onClick={() => {
+            stop.current?.abort();
+            onDone();
+          }}
+        >
+          Cancel
+        </Button>
       </div>
-      {phase.kind === "failed" && <p className="mt-2 max-h-56 overflow-auto text-xs whitespace-pre-wrap wrap-anywhere text-fg">{phase.message}</p>}
     </div>
   );
 }

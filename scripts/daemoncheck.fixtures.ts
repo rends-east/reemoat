@@ -17,9 +17,6 @@ export function memoryUploadIndex(): UploadIndex {
   return {
     insert: (row) => void rows.set(key(row.sessionId, row.uploadId), row),
     get: (sessionId, uploadId) => rows.get(key(sessionId, uploadId)) ?? null,
-    bytesFor: (sessionId) =>
-      [...rows.values()].filter((row) => row.sessionId === sessionId).reduce((total, row) => total + row.bytes, 0),
-    countFor: (sessionId) => [...rows.values()].filter((row) => row.sessionId === sessionId).length,
     markConsumed: (sessionId, ids, at) => {
       for (const id of ids) {
         const row = rows.get(key(sessionId, id));
@@ -136,6 +133,12 @@ export function tokenFor(sub: string): string {
   return tokenWith(sub, ["session:read", "session:write", "machine:admin"]);
 }
 
+/** Claims of the caller's choosing over the defaults, signed with the key the verifier trusts: a link capability, or a broken one. */
+export function signedClaims(extra: Record<string, unknown>, scp: string[] = ["session:message"]): string {
+  const claims = { iss: "reemoat-cp", sub: "u_alice", aud: "m_self", jti: `t_${extra["lnk"] ?? "x"}`, iat, nbf: iat, exp: iat + 300, scp, ...extra };
+  return signToken(claims as TokenClaims, kid, privateKey);
+}
+
 export const verifier = new SignedTokenVerifier({ identity });
 
 /** Enough of a store to drive `restore()`; nothing here is ever written back. */
@@ -146,7 +149,7 @@ export function storeOf(rows: PersistedSession[]): SessionStore {
 export function rowFor(
   id: string,
   root: string,
-  meta: { title?: string | null; pinned?: boolean; rank?: number | null } = {},
+  meta: { title?: string | null; nickname?: string | null; pinned?: boolean; rank?: number | null } = {},
 ): PersistedSession {
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, "notes.txt"), "hi\n", "utf8");
@@ -177,8 +180,10 @@ export function rowFor(
     lastSeq: 0,
     dropped: 0,
     title: meta.title ?? null,
+    nickname: meta.nickname ?? null,
     pinned: meta.pinned ?? false,
     rank: meta.rank ?? null,
+    peerMessagesOff: false,
     ultracode: null,
     customAgent: null,
     agentState: null,
@@ -244,5 +249,6 @@ export function stubAgentConfig(agent: AgentId): AgentLaunchConfig {
     args: [],
     env: {},
     authHint: "",
+    inSessionCwd: false,
   };
 }

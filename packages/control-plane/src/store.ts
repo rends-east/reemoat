@@ -57,11 +57,12 @@ export function openControlStore(options: OpenControlStoreOptions): ControlStore
   };
 }
 
-// Prepared once per database: the relay's authorize runs all three on every request. Weak so a closed database is not retained.
+// Prepared once per database: the relay's authorize runs these on every request, link on a link's. Weak so a closed database is not retained.
 interface Statements {
   grant: ReturnType<DatabaseSync["prepare"]>;
   machine: ReturnType<DatabaseSync["prepare"]>;
   user: ReturnType<DatabaseSync["prepare"]>;
+  link: ReturnType<DatabaseSync["prepare"]>;
 }
 
 const statementCache = new WeakMap<DatabaseSync, Statements>();
@@ -73,6 +74,7 @@ function statements(db: DatabaseSync): Statements {
       grant: db.prepare("SELECT scopes FROM grants WHERE user_id = ? AND machine_id = ?"),
       machine: db.prepare("SELECT id, name, enrolled_at, revoked_at FROM machines WHERE id = ?"),
       user: db.prepare("SELECT id, name, disabled_at FROM users WHERE id = ?"),
+      link: db.prepare("SELECT source_machine_id, target_machine_id, revoked_at FROM machine_links WHERE id = ?"),
     };
     statementCache.set(db, held);
   }
@@ -102,6 +104,23 @@ export function machineById(db: DatabaseSync, machineId: string): MachineRow | n
     id: String(row["id"]),
     name: String(row["name"]),
     enrolled: row["enrolled_at"] !== null,
+    revoked: row["revoked_at"] !== null,
+  };
+}
+
+export interface LinkRow {
+  sourceMachineId: string;
+  targetMachineId: string;
+  revoked: boolean;
+}
+
+/** Read live on every channel a link token opens, so revoking the row stops every token minted for it at once. */
+export function linkById(db: DatabaseSync, linkId: string): LinkRow | null {
+  const row = statements(db).link.get(linkId);
+  if (!row) return null;
+  return {
+    sourceMachineId: String(row["source_machine_id"]),
+    targetMachineId: String(row["target_machine_id"]),
     revoked: row["revoked_at"] !== null,
   };
 }
@@ -144,6 +163,7 @@ function migrate(db: DatabaseSync): void {
   const users = columnsOf("PRAGMA table_info(users)");
   const apiKeys = columnsOf("PRAGMA table_info(api_keys)");
   const userSessions = columnsOf("PRAGMA table_info(user_sessions)");
+  const machinePermissions = columnsOf("PRAGMA table_info(machine_permissions)");
   const has = (name: string): boolean => machines.has(name);
 
   addColumn(db, has("daemon_version"), "ALTER TABLE machines ADD COLUMN daemon_version TEXT");
@@ -161,6 +181,11 @@ function migrate(db: DatabaseSync): void {
   addColumn(db, users.has("password_changed_at"), "ALTER TABLE users ADD COLUMN password_changed_at INTEGER");
   addColumn(db, apiKeys.has("last_used_at"), "ALTER TABLE api_keys ADD COLUMN last_used_at INTEGER");
   addColumn(db, userSessions.has("device_id"), "ALTER TABLE user_sessions ADD COLUMN device_id TEXT");
+  addColumn(
+    db,
+    machinePermissions.has("isolated"),
+    "ALTER TABLE machine_permissions ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0",
+  );
   // Here rather than in schema.sql: that file runs before this function, so an index on an added column fails on every existing database.
   db.exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_device ON user_sessions (device_id)");
 }

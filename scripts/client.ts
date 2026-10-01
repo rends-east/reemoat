@@ -64,6 +64,7 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   elicit <id> <qId> --decline      skip it; the agent's turn carries on
   elicit <id> <qId> --cancel       abandon the tool call that asked
   title <id> [text]                name a session; no text clears it
+  nickname <id> <name>             change the name other agents and @ address it by
   pin <id> | unpin <id>            keep it at the top of the list
   resume <id>                      reattach an agent to a session that ended
   cancel <id>                      stop the turn in flight; the session stays up
@@ -87,6 +88,7 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   --prompt <text>                  with new: send this once the session is up
   --worktree | --no-worktree       with new: override the daemon's default
   --branch <name>                  with new: name the session's branch
+  --nickname <name>                with new: its nickname; without, one is picked
   --mode <id>                      with config: set the mode rather than an option
   --set <env> | --clear <env>      with agentauth: which credential to write
   --ignored                        with changes: include gitignored files
@@ -317,6 +319,8 @@ function describeSession(session: SessionSnapshot): string {
   if (usage !== null && usage.size > 0) {
     parts.push(`ctx ${Math.round((usage.used / usage.size) * 100)}%`);
   }
+  // An older daemon's snapshot carries no nickname.
+  if (session.nickname != null) parts.push(`@${session.nickname}`);
   parts.push(session.title ?? session.cwd);
   return parts.join("  ");
 }
@@ -783,6 +787,7 @@ async function main(): Promise<void> {
       since: { type: "string" },
       base: { type: "string" },
       branch: { type: "string" },
+      nickname: { type: "string" },
       mode: { type: "string" },
       set: { type: "string" },
       clear: { type: "string" },
@@ -932,7 +937,7 @@ async function main(): Promise<void> {
       const worktree = values["no-worktree"] ? false : values.worktree ? true : undefined;
       const { session } = await api<{ session: SessionSnapshot }>("/sessions", {
         method: "POST",
-        body: JSON.stringify({ agent, cwd, worktree, branch: values.branch }),
+        body: JSON.stringify({ agent, cwd, worktree, branch: values.branch, nickname: values.nickname }),
       });
       warn(`created ${session.id}  ${session.agent}  ${session.cwd}`);
       if (session.workspace.mode === "worktree") {
@@ -1344,6 +1349,19 @@ async function main(): Promise<void> {
       });
       // The daemon's value, not the argument: a title is normalized on the way in.
       out(session.title ?? "(cleared)");
+      return;
+    }
+
+    case "nickname": {
+      const id = positionals[1];
+      const name = positionals[2];
+      if (!id || !name) fail("nickname requires a session id and a name");
+      const { session } = await api<{ session: SessionSnapshot }>(`/sessions/${id}/meta`, {
+        method: "POST",
+        body: JSON.stringify({ nickname: name }),
+      });
+      // The daemon's value: a nickname is lowercased on the way in.
+      out(session.nickname);
       return;
     }
 

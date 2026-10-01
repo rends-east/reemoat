@@ -736,10 +736,10 @@ function regenerateShims() {
  * The coding-agent CLIs, which this payload deliberately does not ship.
  *
  * `AGENT_LOGIN[*].command` in `src/acp/agents.ts` is the list; `nativecheck`
- * reads both and asserts they are the same set, because a sixth agent added
- * there and not here is this whole defect back on the sixth agent.
+ * reads both and asserts they are the same set, because an agent added there and
+ * not here is this whole defect back on that agent.
  */
-const AGENT_CLIS = ["claude", "kimi", "codex", "opencode", "grok"];
+const AGENT_CLIS = ["claude", "kimi", "codex", "opencode", "grok", "cursor-agent"];
 
 /**
  * Take the agent CLIs' shims back out of `.bin`.
@@ -767,7 +767,7 @@ const AGENT_CLIS = ["claude", "kimi", "codex", "opencode", "grok"];
  * the adapters and the runtime — `claude-agent-acp`, `codex-acp`, `tsx`, `node`,
  * `npm` — and naming those exhaustively means a transitive rename breaks the
  * payload silently. What this file actually knows is narrower and stable: **the
- * payload is not where a coding-agent CLI comes from.** So the four names are
+ * payload is not where a coding-agent CLI comes from.** So those names are
  * refused and everything else npm wrote stays.
  */
 function pruneAgentClis() {

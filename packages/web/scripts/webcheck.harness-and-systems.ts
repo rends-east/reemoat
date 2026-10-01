@@ -697,7 +697,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     ["acme:gemini"],
   );
   check(
-    "while the default is still the five this product ships, in their own order",
+    "while the default is still the six this product ships, in their own order",
     supportingHarnesses(tabled, withPlugin as never),
     ["claude"],
   );

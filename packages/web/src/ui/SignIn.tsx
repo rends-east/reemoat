@@ -8,7 +8,8 @@ import { signInAuth } from "../signInAuth";
 import { signInExits } from "../slot";
 import type { InstanceConfig } from "../instance";
 import { useBackAccount } from "./backAccount";
-import { Button, FIELD, Icon, LINK, SETTINGS_HEADING } from "./bits";
+import { Button, FIELD, Icon, LINK } from "./bits";
+import { FIELD_LABEL } from "./kit/Field";
 
 /** A real form with the username field before the password field: password managers key on the autocomplete tokens and that order. */
 export function SignIn({
@@ -97,7 +98,7 @@ export function SignIn({
           {/* autoComplete stays username for either identifier kind; email would stop a manager offering a saved username. */}
           <label
             htmlFor="signin-name"
-            className={`mt-4 block ${SETTINGS_HEADING}`}
+            className={`mt-4 block ${FIELD_LABEL}`}
           >
             Username or email
           </label>
@@ -116,7 +117,7 @@ export function SignIn({
 
           <label
             htmlFor="signin-password"
-            className={`mt-3 block ${SETTINGS_HEADING}`}
+            className={`mt-3 block ${FIELD_LABEL}`}
           >
             Password
           </label>

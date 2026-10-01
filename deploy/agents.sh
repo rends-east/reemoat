@@ -15,7 +15,7 @@ SOURCE=vendor
 # claude's own two channel spellings; anything else is refused here (Q4.115).
 CHANNEL=latest
 
-AGENTS="claude codex opencode kimi grok"
+AGENTS="claude codex opencode kimi grok cursor"
 
 _want_skip=0
 _want_only=0
@@ -359,12 +359,42 @@ ensure_grok() {
   ensure_npm grok @xai-official/grok "grok         "
 }
 
+ensure_cursor() {
+  # The vendor's installer under either --source: cursor publishes no npm package (Q4.129). It edits no profile and needs no root.
+  case "$(provenance cursor-agent)" in
+    "") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "cursor       "; return 0; fi ;;
+    outside) outside_note "cursor       " cursor-agent; return 0 ;;
+    *)
+      # Its own cleanup skips any version a running agent holds, so there is no previous build for --skip to spare.
+      if attempt "cursor" cursor-agent --disable-auto-update update; then done_note "cursor       " refresh cursor-agent
+      else warn "  cursor        update failed; keeping $(cursor-agent --version 2>/dev/null | head -1)"; failed=$((failed + 1)); fi
+      return 0
+      ;;
+  esac
+  # The installer replaces ~/.local/bin/agent unasked; a file there that is not a previous cursor's is somebody else's.
+  _other=$HOME_DIR/.local/bin/agent
+  if [ -e "$_other" ] || [ -L "$_other" ]; then
+    case "$(readlink "$_other" 2>/dev/null || true)" in
+      "$HOME_DIR"/.local/share/cursor-agent/*) : ;;
+      *) warn "  cursor        not installed: its installer would replace $_other, which is not cursor's"; failed=$((failed + 1)); return 0 ;;
+    esac
+  fi
+  have curl || { warn "  cursor        skipped: curl is not on PATH"; failed=$((failed + 1)); return 0; }
+  if download cursor https://cursor.com/install && attempt "cursor" bash "$TMP/cursor.sh"; then
+    done_note "cursor       " install cursor-agent
+  else
+    warn "  cursor        install failed; this machine has no copy of it until the next run"
+    failed=$((failed + 1))
+  fi
+}
+
 main() {
   take_lock
   if [ "$SOURCE" = npm ]; then _how="from the npm registry"
   elif wanted claude; then _how="with each vendor's own installer, claude on its $CHANNEL channel"
   else _how="with each vendor's own installer"; fi
   if [ "$SOURCE" = npm ] && [ "$CHANNEL" != latest ]; then note "claude        --channel $CHANNEL does not apply under --source npm: the registry has no channels, so @latest is what is installed"; fi
+  if [ "$SOURCE" = npm ] && wanted cursor; then note "cursor        has no npm package, so --source npm installs it with the vendor's installer too"; fi
   _mode=""
   if [ "$REFRESH_ONLY" = 1 ]; then _mode="refresh only, nothing new is installed; "; fi
   if [ "$ONLY" != " " ]; then _named=${ONLY# }; _mode="$_mode${_named% } only; "; fi
@@ -382,6 +412,7 @@ main() {
       opencode) ensure_opencode ;;
       kimi)     ensure_kimi ;;
       grok)     ensure_grok ;;
+      cursor)   ensure_cursor ;;
     esac
     if [ "$failed" = "$_was" ]; then step "$_which" done; else step "$_which" failed; fi
   done

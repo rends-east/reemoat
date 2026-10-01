@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { ALL_SCOPES, AUTH_LEEWAY_MS, type Scope } from "../../../src/auth.js";
+import { ALL_SCOPES, AUTH_LEEWAY_MS, LINK_SCOPE, type Scope } from "../../../src/auth.js";
 import { bearerToken, boundedInt, describeError, gzipResponses, jsonError, readJsonObject } from "../../../src/http.js";
 import {
   RELAY_PROTOCOL_MIN_VERSION,
@@ -108,6 +108,16 @@ import {
 } from "./machines.js";
 import { DEFAULT_TRUSTED_PROXY_HOPS, callerAddressOf } from "./net.js";
 import {
+  accountMessaging,
+  isolatedMachineIds,
+  machineMessaging,
+  messagingOffMachineIds,
+  messagingPolicy,
+  nextPolicyAt,
+  writeAccountMessaging,
+  writeMachineMessaging,
+} from "./permissions.js";
+import {
   clearMachineLimit,
   effectiveLimit,
   instanceMachineLimit,
@@ -159,7 +169,7 @@ import {
 
 // AGPL section 13 source offer: change SOURCE_URL if you run a modified copy. relaycheck pins VERSION to package.json.
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.11.0";
+const VERSION = "0.12.0";
 
 // Work answered before it is done. Every deferred body must stay synchronous: main.ts drains the set on SIGTERM before closing the store.
 const deferred = new Set<() => void>();
@@ -184,6 +194,10 @@ export function drainDeferred(): number {
 // Never consulted to verify a token: daemons enroll once and verify every token locally.
 
 export const DEFAULT_TOKEN_TTL_SECONDS = 300;
+
+/** A link capability's life: revocation is the relay reading the row per channel, not expiry (Q7.150). */
+export const LINK_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
+
 
 /** A token is accepted over nbf minus leeway to exp plus leeway, so below this floor the leeway dominates its lifetime. */
 export const MIN_TOKEN_TTL_SECONDS = (2 * AUTH_LEEWAY_MS) / 1000;
@@ -353,7 +367,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const writeThrottle = new LoginThrottle(WRITE_THROTTLE);
 
   // Null means carry on. Recorded with fail, since a legitimate write is still a write.
-  // There are **fourteen** call sites; relaycheck compares that word with the calls.
+  // There are **seventeen** call sites; relaycheck compares that word with the calls.
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
     const key = writeKey(caller.userId, what);
@@ -1251,6 +1265,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       machineCount: owned,
       machineLimit: quota.limit,
       canAddMachine: owned < quota.limit,
+      permissions: { agentMessaging: accountMessaging(db, caller.userId).on },
     });
   });
 
@@ -1653,6 +1668,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     // Over-limit machines are listed, not filtered, so the owner can still retire one.
     const overLimit = overLimitMachineIds(db);
     const ownerDisabled = ownerDisabledMachineIds(db);
+    const accountOn = accountMessaging(db, caller.userId).on;
+    const messagingOff = messagingOffMachineIds(db, caller.userId);
+    const isolated = isolatedMachineIds(db, caller.userId);
     // Names whoever else enrolled a machine for this caller, so a freed name re-registered on someone else's hardware is visible. A name to show, not a flag to trust.
     const enrolledByIds = new Set(
       rows.map((row) => String(row["enrolled_by"] ?? "")).filter((id) => id.length > 0 && id !== caller.userId),
@@ -1688,6 +1706,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         relayOnline: relayOnline(String(row["id"])),
         lastSeenAt: lastSeenAt(String(row["id"])),
         enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? ""), row["enrolled_at"] !== null),
+        // The owner's alone: a grantee is shown none of them, so draws no switch it could not throw.
+        ...(row["label"] === null
+          ? {}
+          : {
+              agentMessaging: accountOn && !messagingOff.has(String(row["id"])),
+              agentMessagingMachine: !messagingOff.has(String(row["id"])),
+              agentMessagingIsolated: isolated.has(String(row["id"])),
+            }),
       })),
     });
   });
@@ -1742,6 +1768,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           scopes: [...ALL_SCOPES],
           relayUrl,
           relayOnline: false,
+          agentMessaging: accountMessaging(db, caller.userId).on,
+          agentMessagingMachine: true,
+          agentMessagingIsolated: false,
         },
         enrollment: { code: enrollment.code, expiresAt: enrollment.expiresAt },
         // From the server, not the browser's origin: in dev that is Vite's proxy port, which a machine cannot reach.
@@ -2060,6 +2089,215 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       },
       // So a client can tell "my clock is wrong" from "the token was refused".
       serverTime: Date.now(),
+    });
+  });
+
+  const readAgentMessaging = (body: Record<string, unknown> | null): boolean | null => {
+    const value = body?.["agentMessaging"];
+    return typeof value === "boolean" ? value : null;
+  };
+
+  // Off revokes in the write's own transaction, so the relay refuses every outstanding link token before any daemon hears (Q1.654).
+  app.put("/v1/me/permissions", async (c) => {
+    const writeGuard = spendWrite(c, "permissions");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const on = readAgentMessaging(await readJsonObject(c));
+    if (on === null) return jsonError(c, 400, "bad_request", "agentMessaging must be true or false");
+    const at = nextPolicyAt(db);
+    db.exec("BEGIN");
+    try {
+      writeAccountMessaging(db, caller.userId, on, at);
+      if (!on) {
+        db.prepare(
+          "UPDATE machine_links SET revoked_at = ? WHERE revoked_at IS NULL AND (" +
+            "source_machine_id IN (SELECT machine_id FROM machine_owners WHERE user_id = ?) OR " +
+            "target_machine_id IN (SELECT machine_id FROM machine_owners WHERE user_id = ?))",
+        ).run(at, caller.userId, caller.userId);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return c.json({ agentMessaging: on, policyAt: at });
+  });
+
+  // The machine's own row; what its daemon enforces is this and its owner's account row together (Q2.244).
+  // Either field alone is a write of that field; isolated is kept while the machine is off.
+  app.put("/v1/machines/:id/permissions", async (c) => {
+    const writeGuard = spendWrite(c, "permissions");
+    if (writeGuard !== null) return writeGuard;
+
+    const body = await readJsonObject(c);
+    const owned = ownedMachine(c);
+    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
+    const given = { on: body?.["agentMessaging"], isolated: body?.["isolated"] };
+    const wellTyped = Object.values(given).every((value) => value === undefined || typeof value === "boolean");
+    if (!wellTyped || (given.on === undefined && given.isolated === undefined)) {
+      return jsonError(c, 400, "bad_request", "give agentMessaging or isolated, each true or false");
+    }
+    const held = machineMessaging(db, owned.id);
+    const next = {
+      on: typeof given.on === "boolean" ? given.on : held.on,
+      isolated: typeof given.isolated === "boolean" ? given.isolated : held.isolated,
+    };
+    const at = nextPolicyAt(db);
+    db.exec("BEGIN");
+    try {
+      writeMachineMessaging(db, owned.id, next, at);
+      // Isolated ends its links as off does, so the relay refuses both directions before its daemon hears (Q1.654).
+      if (!next.on || next.isolated) {
+        db.prepare(
+          "UPDATE machine_links SET revoked_at = ? WHERE revoked_at IS NULL AND " +
+            "(source_machine_id = ? OR target_machine_id = ?)",
+        ).run(at, owned.id, owned.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return c.json({
+      agentMessaging: next.on,
+      isolated: next.isolated,
+      policyAt: messagingPolicy(db, owned.userId, owned.id).at,
+    });
+  });
+
+  // Resolved like POST /v1/tokens, then owned by the caller or a 404, so the mint probes nothing.
+  const ownedRef = (c: Context<AppEnv>): OwnedMachine | null => {
+    const caller = c.get("caller");
+    const resolved = resolveMachineRef(db, caller.userId, c.req.param("id") ?? "");
+    const owner = resolved === null ? null : ownerOf(db, resolved);
+    return owner !== null && owner.userId === caller.userId ? owner : null;
+  };
+
+  // A link per other machine the caller owns, each with a capability bound to this machine's pinned key (Q7.150).
+  app.post("/v1/machines/:id/links", (c) => {
+    const writeGuard = spendWrite(c, "links");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const source = ownedRef(c);
+    const row =
+      source === null
+        ? undefined
+        : db.prepare("SELECT name, enrolled_at, revoked_at FROM machines WHERE id = ?").get(source.id);
+    if (source === null || !row) return jsonError(c, 404, "machine_not_found", "no such machine");
+    if (row["revoked_at"] !== null) return jsonError(c, 403, "machine_revoked", "this machine has been revoked");
+    if (row["enrolled_at"] === null) {
+      return jsonError(c, 409, "machine_not_enrolled", "this machine has not enrolled yet");
+    }
+    // Ahead of the key check: a machine that cannot hold a link still has to be told it may not message (Q1.654).
+    const policy = messagingPolicy(db, caller.userId, source.id);
+    if (!policy.on) return c.json({ links: [], messaging: false, isolated: policy.isolated, policyAt: policy.at });
+    if (policy.isolated) return c.json({ links: [], messaging: true, isolated: true, policyAt: policy.at });
+    const standing = machineStanding(db, source.id);
+    if (standing !== null && standing.ownerDisabled) {
+      return jsonError(c, 403, "owner_disabled", "this machine's owner has been disabled, so it is switched off");
+    }
+    if (standing !== null && standing.over) {
+      return jsonError(
+        c,
+        403,
+        "machine_over_limit",
+        "this machine is over your machine limit and is switched off, so it can reach no other machine. Retire " +
+          "another machine, or ask whoever runs this control plane to raise the limit.",
+      );
+    }
+    // From this service's own pin, never from the request: it is the key the target will demand on the handshake.
+    const sourceKey = machineKeyFor(db, source.id);
+    if (sourceKey === null) {
+      return jsonError(
+        c,
+        409,
+        "machine_key_missing",
+        "this machine has not announced its key yet, so no link can be bound to it. Update it and let it reconnect.",
+        // A machine with no key holds no link, so the app may still hand it this switch with an empty set (Q1.654).
+        { messaging: true, isolated: false, policyAt: policy.at },
+      );
+    }
+    const signing = activeSigningKeys(db)[0];
+    if (!signing) return jsonError(c, 503, "no_signing_key", "this control plane has no signing key");
+
+    const targets = db
+      .prepare(
+        "SELECT o.machine_id, o.label, m.machine_key FROM machine_owners o " +
+          "JOIN machines m ON m.id = o.machine_id " +
+          "JOIN grants g ON g.machine_id = o.machine_id AND g.user_id = o.user_id " +
+          "WHERE o.user_id = ? AND o.machine_id != ? AND m.enrolled_at IS NOT NULL AND m.revoked_at IS NULL " +
+          "AND m.machine_key IS NOT NULL ORDER BY o.created_at ASC, o.machine_id ASC",
+      )
+      .all(caller.userId, source.id)
+      .map((target) => ({
+        id: String(target["machine_id"]),
+        name: String(target["label"]),
+        key: String(target["machine_key"]),
+      }))
+      .filter((target) => {
+        const held = machineStanding(db, target.id);
+        return held === null || (!held.ownerDisabled && !held.over);
+      })
+      .filter((target) => {
+        const held = machineMessaging(db, target.id);
+        return held.on && !held.isolated;
+      });
+
+    const now = Date.now();
+    const findLive = db.prepare(
+      "SELECT id FROM machine_links WHERE source_machine_id = ? AND target_machine_id = ? AND revoked_at IS NULL",
+    );
+    const insert = db.prepare(
+      "INSERT INTO machine_links (id, source_machine_id, target_machine_id, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    const linkIds: string[] = [];
+    // Never return between BEGIN and COMMIT: the shared connection would stay inside the transaction.
+    db.exec("BEGIN");
+    try {
+      for (const target of targets) {
+        const live = findLive.get(source.id, target.id);
+        const id = live === undefined ? newId("lk") : String(live["id"]);
+        if (live === undefined) insert.run(id, source.id, target.id, caller.userId, now);
+        linkIds.push(id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    const jkt = jwkThumbprint(x25519Jwk(Buffer.from(sourceKey, "base64url")));
+    const sourceLabel = labelOrName(source.label, String(row["name"]));
+    const seconds = Math.floor(now / 1000);
+    return c.json({
+      links: targets.map((target, index) => {
+        const claims = {
+          iss: issuer,
+          sub: caller.userId,
+          aud: target.id,
+          jti: newId("t"),
+          iat: seconds,
+          nbf: seconds,
+          exp: seconds + LINK_TOKEN_TTL_SECONDS,
+          // The only scope a link carries, and no grant ever stores it: an older daemon drops it and refuses every route.
+          scp: [LINK_SCOPE],
+          cnf: { jkt },
+          lnk: linkIds[index]!,
+          src: source.id,
+          srcl: sourceLabel,
+        } satisfies TokenClaims;
+        return {
+          id: claims.lnk,
+          token: signToken(claims, signing.kid, signing.privateKey),
+          expiresAt: claims.exp * 1000,
+          target: { id: target.id, name: target.name, key: target.key, relayUrl: relayUrlFor(target.id) },
+        };
+      }),
+      messaging: true,
+      isolated: false,
+      policyAt: policy.at,
     });
   });
 
@@ -2606,6 +2844,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       deleteEmailState(db, userId);
       db.prepare("DELETE FROM password_obligations WHERE user_id = ?").run(userId);
       db.prepare("DELETE FROM user_machine_limits WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM account_permissions WHERE user_id = ?").run(userId);
       db.prepare("DELETE FROM devices WHERE user_id = ?").run(userId);
       codesInvalidated += burnUserCodes(db, userId, "user_deleted", removedAt);
       for (const row of db

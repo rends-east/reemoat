@@ -91,12 +91,19 @@ export function downloadablePath(span: string, root: string, touched: ReadonlySe
   if (text.length === 0 || text.length > 4096) return null;
   if (/\s/.test(text)) return null;
 
-  const absolute = text.startsWith("/")
-    ? text
-    : `${root.endsWith("/") ? root.slice(0, -1) : root}/${text}`;
-  if (!touched.has(absolute)) return null;
+  const base = root.endsWith("/") ? root.slice(0, -1) : root;
+  const absolute = text.startsWith("/") ? text : `${base}/${text}`;
+  if (touched.has(absolute)) return relativeTo(root, absolute);
+  if (text.startsWith("/")) return null;
 
-  return relativeTo(root, absolute);
+  // Relative to a folder under the root, as an agent names a file it just made there: offered only where one touched file ends so (Q3.690).
+  let found: string | null = null;
+  for (const path of touched) {
+    if (!path.startsWith(`${base}/`) || !path.endsWith(`/${text}`)) continue;
+    if (found !== null) return null;
+    found = path;
+  }
+  return found === null ? null : relativeTo(root, found);
 }
 
 export function formatBytes(bytes: number): string {

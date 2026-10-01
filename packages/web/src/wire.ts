@@ -2,8 +2,8 @@
 // It can drift, so every narrowing fails open, and a field added after the first release is optional.
 
 /** Closed on purpose: AGENT_LABEL and AgentGlyph's exhaustive switch need a fixed list. */
-export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok"];
-export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok";
+export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok", "cursor"];
+export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok" | "cursor";
 
 export type AgentId = string;
 
@@ -185,10 +185,35 @@ export interface PromptAttachmentRef extends StoredFileRef {
   inlined: boolean;
 }
 
+/** Mirrors src/events.ts: another session's message, as its daemon verified it. */
+export interface PeerOrigin {
+  /** An unknown kind from a newer daemon is drawn as a message, which is the one that claims least. */
+  kind: "message" | "notice";
+  name: string;
+  ref: string;
+  machineId: string | null;
+  machineLabel: string | null;
+  harness: string;
+  messageId: string;
+  hops: number;
+}
+
 export interface PromptEvent {
   type: "prompt";
+  /** What the agent received; for another agent's message, the envelope with it. */
   text: string;
   attachments?: PromptAttachmentRef[];
+  /** Absent from an older daemon; null for a person's message. */
+  from?: PeerOrigin | null;
+  /** The `@name`s the daemon resolved in a person's message; absent when there were none. */
+  mentions?: PromptMention[];
+  /** On an ask_question answer sent as a message: the elicitation whose resolution already draws it (Q2.251). */
+  answers?: string;
+}
+
+export interface PromptMention {
+  name: string;
+  ref: string;
 }
 
 export interface UploadAccepted {
@@ -542,8 +567,12 @@ export interface SessionSnapshot {
   // size 0 means occupancy without a window: never divide by it or substitute a default.
   contextUsage?: { used: number; size: number; cost: { amount: number; currency: string } | null } | null;
   title?: string | null;
+  // Absent or null from a daemon older than nicknames, which draws no `@` line. Q3.677.
+  nickname?: string | null;
   pinned?: boolean;
   rank?: number | null;
+  // The conversation's own switch; absent from a daemon that cannot turn it off. Q2.244.
+  peerMessages?: boolean;
   resume?: SessionResumeState;
 }
 
@@ -973,6 +1002,11 @@ export interface MachineRecord {
   // Whose code enrolled it, when not the reader: the visible half of a substitution that cannot be refused.
   // Names who minted the code, never who redeemed it.
   enrolledBy?: string | null;
+  // Owned rows only, absent from an older control plane: whether its agents may message (account and machine), and the machine's own switch. Q2.244.
+  agentMessaging?: boolean;
+  agentMessagingMachine?: boolean;
+  // The machine's own isolation switch: its sessions message only each other. Kept while messaging is off. Q2.244.
+  agentMessagingIsolated?: boolean;
   scopes: Scope[];
   relayUrl: string | null;
   relayOnline: boolean;
@@ -995,6 +1029,61 @@ export interface IssuedToken {
   serverTime?: number;
 }
 
+/** One link as `POST /v1/machines/:id/links` answers it; `PUT /peers/links` is sent the same objects, unread and unchanged. */
+export interface MachineLinkGrant {
+  id: string;
+  token: string;
+  expiresAt: number;
+  target: { id: string; name: string; key: string; relayUrl: string | null };
+}
+
+/** `POST /v1/machines/:id/links`: `messaging`, `isolated` and `policyAt` are absent from an older control plane. Q1.654. */
+export interface MachineLinkAnswer {
+  links: MachineLinkGrant[];
+  messaging?: boolean;
+  isolated?: boolean;
+  policyAt?: number;
+}
+
+/** What `PUT /v1/machines/:id/permissions` answers: the machine's own switches, never the account's. */
+export interface MachinePermissions {
+  agentMessaging: boolean;
+  isolated: boolean;
+  policyAt: number;
+}
+
+/** What a daemon enforces, echoed by `PUT /peers/links`; an older daemon echoes nothing. */
+export interface PeerMessagingState {
+  /** The pushed policy, true when none ever was. */
+  policy: boolean;
+  /** Its sessions message only each other; false when none was ever pushed. */
+  isolated: boolean;
+  /** Its own `REEMOAT_PEER_MESSAGES`, which no push can override. */
+  env: boolean;
+  policyAt: number;
+}
+
+export type PeerStatus = "working" | "idle" | "waiting_for_user" | "asleep" | "starting";
+
+/** One session another session's agent can reach, as `list_agents` shows it. */
+export interface PeerRow {
+  name: string;
+  ref: string;
+  address: string;
+  machine: { label: string | null; isThis: boolean };
+  harness: string;
+  status: PeerStatus;
+  title: string | null;
+  folder: string;
+  self: boolean;
+}
+
+/** `GET /sessions/:id/mentions`: whom `@` may name, the session itself left out. Q3.678. */
+export interface MentionListing {
+  agents: PeerRow[];
+  unreachable: { machine: string; reason: string }[];
+}
+
 export interface Me {
   id: string;
   name: string;
@@ -1011,6 +1100,8 @@ export interface Me {
   machineCount?: number;
   machineLimit?: number | null;
   canAddMachine?: boolean;
+  // Absent from an older control plane, which cannot store it.
+  permissions?: { agentMessaging: boolean };
 }
 
 export interface SessionToken {

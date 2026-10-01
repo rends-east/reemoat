@@ -136,6 +136,18 @@ export function secretFieldText(field: ConfigField | undefined): string | null {
   return field.envSet ? "A password is set in the environment." : "No password is set.";
 }
 
+/** The presence `secretFieldText` words, for a row that says only whether there is one. */
+export function secretPresent(field: ConfigField | undefined): boolean {
+  return field !== undefined && (field.set === true || field.envSet);
+}
+
+/** A row's provenance badge: the environment, or a row here winning over it. The ordinary cases carry none. */
+export function originBadge(...fields: (ConfigField | undefined)[]): "env" | "overrides env" | null {
+  const origins = fields.filter((field) => field !== undefined).map(fieldOrigin);
+  if (origins.includes("overrides_env")) return "overrides env";
+  return origins.includes("env") ? "env" : null;
+}
+
 export function originText(origin: FieldOrigin): string {
   switch (origin) {
     case "env":

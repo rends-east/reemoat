@@ -63,7 +63,9 @@ folder panel there**: `tauri-plugin-dialog` 2.7.3 offers `blocking_pick_file` on
 mobile and not `blocking_pick_folder`, because the platform's own answer to
 "choose a folder" is `ACTION_OPEN_DOCUMENT_TREE` — a Storage Access Framework tree
 *URI* rather than a path — which the plugin does not wrap. `host_save_file`
-survives beside it only because a *file* panel does have a mobile arm.
+survives beside it only because a *file* panel does have a mobile arm — and it
+writes through `tauri-plugin-fs`, since that arm answers a `content://` URI no path
+names (Q3.690).
 
 Two guesses were available and both are wrong. Keying on `platform` reads
 `"android"` through `hostPlatform`, which narrows it to `"other"` **along with

@@ -133,6 +133,16 @@ a crash loop that takes the relay and the whole fleet's reachability with it. **
 rollback is what you do when a release is broken; it must not be the thing that
 breaks everything else.**
 
+⚠ **One rollback re-opens what was closed: the relay's, past 0.12.0.** A link
+capability lives 90 days and its revocation is the relay reading `machine_links` at
+every connection (Q7.150); an older relay ignores `lnk` and admits the token on the
+owner's grant alone. So every link revoked by a switch, an isolation or a revoked
+machine connects again until it expires. A daemon's own policy still refuses where
+it was delivered; nothing refuses for a revoked machine. Switch agent messaging off
+on each account first. The same release adds a fifth skew, **daemon to daemon** over
+`/peer/*`: two of one owner's machines update apart, so every field those parsers
+require is one no later daemon may drop.
+
 ⚠ Every driver used to build its database with `exec(readFileSync(schema.sql))`
 and nothing else — eight sites in `relaycheck` alone — which tested a schema
 production never has. That is why applying the schema is a function now.

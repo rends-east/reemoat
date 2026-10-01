@@ -7,6 +7,26 @@ import type { AgentLaunchConfig } from "./agents.js";
 import type { AgentRouting } from "./systems.js";
 import { AIR_CLIENT_CAPABILITY, ASYNC_TASK_MARKER, ASYNC_TASK_UPDATES, agentAdvertisesAsyncTasks } from "./asynctasks.js";
 import {
+  CURSOR_ASK_QUESTION,
+  CURSOR_CREATE_PLAN,
+  CURSOR_GENERATE_IMAGE,
+  CURSOR_SUBAGENT_UPDATES,
+  CURSOR_TASK,
+  CURSOR_UPDATE_TODOS,
+  clientMetaFor,
+  parseImageRequest,
+  parsePlanRequest as parseCursorPlanRequest,
+  parseQuestionRequest as parseCursorQuestionRequest,
+  parseTodosRequest,
+  readSubagentSpawn,
+  type CursorImageRequest,
+  type CursorPlanRequest,
+  type CursorPlanResponse,
+  type CursorQuestionRequest,
+  type CursorQuestionResponse,
+  type CursorTodosRequest,
+} from "./cursor.js";
+import {
   XAI_ASK_USER_QUESTION,
   XAI_EXIT_PLAN_MODE,
   XAI_MCP_ELICIT,
@@ -25,6 +45,8 @@ import {
 
 export interface SessionHandlers {
   onUpdate(notification: acp.SessionNotification): void;
+  /** A frame cursor sent on a subagent's own session id, delivered to the session that spawned it (acp/cursor.ts). */
+  onDelegatedUpdate(notification: acp.SessionNotification, parentToolCallId: string): void;
   onPermission(
     request: acp.RequestPermissionRequest,
     signal: AbortSignal,
@@ -42,6 +64,11 @@ export interface SessionHandlers {
   onXaiMcpElicit(request: XaiMcpElicitRequest, signal: AbortSignal): Promise<XaiMcpElicitResponse>;
   /** grok settled one of them itself: how its own timeout withdraws a question it never tells the client about. */
   onXaiInteractionResolved(toolCallId: string): void;
+  /** cursor's own requests (acp/cursor.ts); the last two are answered at once, since cursor reads nothing back. */
+  onCursorQuestion(request: CursorQuestionRequest, signal: AbortSignal): Promise<CursorQuestionResponse>;
+  onCursorPlan(request: CursorPlanRequest, signal: AbortSignal): Promise<CursorPlanResponse>;
+  onCursorTodos(request: CursorTodosRequest): void;
+  onCursorImage(request: CursorImageRequest): void;
 }
 
 export type ElicitationRequest = acp.ElicitationFormMode &
@@ -71,8 +98,18 @@ const AUTHENTICATE_TIMEOUT_MS = 15_000;
 const EXIT_GRACE_MS = 3_000;
 const STDERR_RING_SIZE = 20;
 
+/** Subagent session ids remembered per agent process; the oldest goes first, and a frame on a forgotten one is dropped as any unknown id is. */
+const MAX_DELEGATED_SESSIONS = 256;
+
+interface Delegation {
+  /** The registered session the frame is delivered to, however deep the nesting. */
+  root: string;
+  parentToolCallId: string;
+}
+
 interface Router {
   sessions: Map<string, SessionHandlers>;
+  delegations: Map<string, Delegation>;
   logListeners: Set<LogListener>;
   notificationListeners: Set<NotificationListener>;
   recentStderr: string[];
@@ -106,6 +143,7 @@ export class AcpClient {
     const elicitation = options.elicitation;
     const router: Router = {
       sessions: new Map(),
+      delegations: new Map(),
       logListeners: new Set(),
       notificationListeners: new Set(),
       recentStderr: [],
@@ -127,7 +165,31 @@ export class AcpClient {
           router.notificationListeners.delete(listener);
         }
       }
-      router.sessions.get(notification.sessionId)?.onUpdate(notification);
+      const kind = (notification.update as { sessionUpdate?: unknown }).sessionUpdate;
+      if (typeof kind === "string" && CURSOR_SUBAGENT_UPDATES.includes(kind)) {
+        const spawn = readSubagentSpawn(notification.update);
+        if (spawn === null) return;
+        // A child spawned by a child resolves to the session the first spawn came from.
+        const root = router.delegations.get(notification.sessionId)?.root ?? notification.sessionId;
+        router.delegations.delete(spawn.childSessionId);
+        router.delegations.set(spawn.childSessionId, { root, parentToolCallId: spawn.parentToolCallId });
+        while (router.delegations.size > MAX_DELEGATED_SESSIONS) {
+          const oldest = router.delegations.keys().next().value;
+          if (oldest === undefined) break;
+          router.delegations.delete(oldest);
+        }
+        return;
+      }
+      const handlers = router.sessions.get(notification.sessionId);
+      if (handlers !== undefined) {
+        handlers.onUpdate(notification);
+        return;
+      }
+      const delegation = router.delegations.get(notification.sessionId);
+      if (delegation === undefined) return;
+      router.sessions
+        .get(delegation.root)
+        ?.onDelegatedUpdate({ ...notification, sessionId: delegation.root }, delegation.parentToolCallId);
     };
 
     const stream = acp.ndJsonStream(
@@ -135,8 +197,10 @@ export class AcpClient {
       Readable.toWeb(splitAsyncTaskUpdates(child.stdout, deliver)) as ReadableStream<Uint8Array>,
     );
 
+    // A subagent's session id reaches the session that spawned it: cursor asks for its web fetches there (Q6.117).
     const route = <T>(sessionId: string, pick: (handlers: SessionHandlers) => T): T => {
-      const handlers = router.sessions.get(sessionId);
+      const home = router.delegations.get(sessionId)?.root;
+      const handlers = router.sessions.get(sessionId) ?? (home === undefined ? undefined : router.sessions.get(home));
       if (!handlers) {
         throw acp.RequestError.invalidParams(
           { sessionId },
@@ -144,6 +208,40 @@ export class AcpClient {
         );
       }
       return pick(handlers);
+    };
+
+    const soleHandlers = (): SessionHandlers | null => {
+      const [only, ...others] = router.sessions.values();
+      return only === undefined || others.length > 0 ? null : only;
+    };
+
+    const sole = <T>(method: string, pick: (handlers: SessionHandlers) => T): T => {
+      const only = soleHandlers();
+      if (only === null) {
+        throw acp.RequestError.invalidParams(
+          { method },
+          `${method} names no session and this process holds ${router.sessions.size}`,
+        );
+      }
+      return pick(only);
+    };
+
+    // Answered in cursor's own word whatever goes wrong: any error here is read as acceptance (Q6.117).
+    const answerCursorPlan = async (params: unknown, signal: AbortSignal): Promise<CursorPlanResponse> => {
+      let request: CursorPlanRequest;
+      try {
+        request = parseCursorPlanRequest(params);
+      } catch {
+        return { outcome: { outcome: "rejected" } };
+      }
+      // Nobody here to ask, as while a load replays: nothing was refused.
+      const only = soleHandlers();
+      if (only === null) return { outcome: { outcome: "cancelled" } };
+      try {
+        return await only.onCursorPlan(request, signal);
+      } catch {
+        return { outcome: { outcome: "rejected" } };
+      }
     };
 
     const connection = acp
@@ -200,6 +298,23 @@ export class AcpClient {
         if (!elicitation) throw acp.RequestError.methodNotFound(XAI_MCP_ELICIT);
         return route(ctx.params.sessionId, (h) => h.onXaiMcpElicit(ctx.params, ctx.signal));
       })
+      // cursor's carry no sessionId; one process serves one session, so the only one registered is the one asked.
+      // With questions off cursor asks through the permission channel instead, which it does by itself on this refusal.
+      .onRequest(CURSOR_ASK_QUESTION, parseCursorQuestionRequest, (ctx) => {
+        if (!elicitation) throw acp.RequestError.methodNotFound(CURSOR_ASK_QUESTION);
+        return sole(CURSOR_ASK_QUESTION, (h) => h.onCursorQuestion(ctx.params, ctx.signal));
+      })
+      .onRequest(CURSOR_CREATE_PLAN, (params: unknown) => params, (ctx) => answerCursorPlan(ctx.params, ctx.signal))
+      .onRequest(CURSOR_UPDATE_TODOS, parseTodosRequest, (ctx) => {
+        sole(CURSOR_UPDATE_TODOS, (h) => h.onCursorTodos(ctx.params));
+        return {};
+      })
+      .onRequest(CURSOR_GENERATE_IMAGE, parseImageRequest, (ctx) => {
+        sole(CURSOR_GENERATE_IMAGE, (h) => h.onCursorImage(ctx.params));
+        return {};
+      })
+      // Answered and not read: its subagentType is a serialised proto nothing could draw, and the card already says the rest.
+      .onRequest(CURSOR_TASK, (params: unknown) => params, () => ({}))
       .connect(stream);
 
     const failed = deferred<never>();
@@ -243,7 +358,7 @@ export class AcpClient {
             // Absence is the only way to decline: there is no form false.
             ...(elicitation ? { elicitation: { form: {} } } : {}),
             // See acp/asynctasks.ts. Declaring it also adds the backgrounded marker that readBackgroundedMarker reads.
-            _meta: AIR_CLIENT_CAPABILITY,
+            _meta: { ...AIR_CLIENT_CAPABILITY, ...clientMetaFor(config.id) },
           },
           clientInfo: { name: "reemoat", version: "0.0.0" },
         }),
@@ -380,9 +495,14 @@ export class AcpClient {
     return this.initializeResult.agentCapabilities?.sessionCapabilities?.close != null;
   }
 
-  /** session/resume, never session/load, which would replay a transcript we already hold. */
+  /** Preferred over load wherever both exist: resume replays nothing. */
   supportsSessionResume(): boolean {
     return this.initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
+  }
+
+  /** A declared boolean. The replay it sends precedes its answer and so reaches no registered session (Q2.248). */
+  supportsSessionLoad(): boolean {
+    return this.initializeResult.agentCapabilities?.loadSession === true;
   }
 
   /** A declared boolean, so === true. embeddedContext is deliberately not exposed: nothing has measured resource blocks. */
@@ -451,7 +571,7 @@ const MAX_STDERR_LINE_CHARS = 64 * 1024;
 const MAX_STDOUT_FRAME_CHARS = 16 * 1024 * 1024;
 
 /**
- * Diverts the draft async-task updates the SDK rejects: zSessionUpdate is a closed union parsed by ClientApp's SessionUpdateRouter,
+ * Diverts the draft async-task and cursor subagent updates the SDK rejects: zSessionUpdate is a closed union parsed by ClientApp's SessionUpdateRouter,
  * which no option or registerAppNotification parser bypasses. Everything else is forwarded byte for byte.
  */
 export function splitAsyncTaskUpdates(
@@ -520,7 +640,7 @@ export function splitAsyncTaskUpdates(
 }
 
 function diverted(line: string, deliver: (notification: acp.SessionNotification) => void): boolean {
-  if (!line.includes(ASYNC_TASK_MARKER)) return false;
+  if (!line.includes(ASYNC_TASK_MARKER) && !CURSOR_SUBAGENT_UPDATES.some((kind) => line.includes(kind))) return false;
   let message: unknown;
   try {
     message = JSON.parse(line);
@@ -535,7 +655,9 @@ function diverted(line: string, deliver: (notification: acp.SessionNotification)
   const params = envelope.params as { sessionId?: unknown; update?: { sessionUpdate?: unknown } };
   if (typeof params?.sessionId !== "string") return false;
   const kind = params.update?.sessionUpdate;
-  if (typeof kind !== "string" || !ASYNC_TASK_UPDATES.includes(kind)) return false;
+  if (typeof kind !== "string" || (!ASYNC_TASK_UPDATES.includes(kind) && !CURSOR_SUBAGENT_UPDATES.includes(kind))) {
+    return false;
+  }
   deliver(params as unknown as acp.SessionNotification);
   return true;
 }

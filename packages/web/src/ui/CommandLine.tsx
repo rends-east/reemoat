@@ -4,7 +4,7 @@ import { Icon } from "./bits";
 import { copyText } from "./clipboard";
 
 /** Wraps at a space and never scrolls, so the command is readable whole before it is pasted; the copy control is a flex sibling, not overlaid. */
-export function CommandLine({ command }: { command: string }): ReactNode {
+export function CommandLine({ command, className = "mt-3" }: { command: string; className?: string }): ReactNode {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -13,7 +13,7 @@ export function CommandLine({ command }: { command: string }): ReactNode {
   }, [copied]);
 
   return (
-    <div className="mt-3 flex min-h-9 items-stretch overflow-hidden rounded-md border border-edge-strong bg-ink [@media(pointer:coarse)]:min-h-11">
+    <div className={`${className} flex min-h-9 items-stretch overflow-hidden rounded-md border border-edge-strong bg-ink [@media(pointer:coarse)]:min-h-11`}>
       <pre className="flex min-w-0 flex-1 items-center whitespace-pre-wrap px-2.5 py-2 font-mono text-[11px] leading-5 tracking-tight text-fg [overflow-wrap:anywhere]">
         {command}
       </pre>

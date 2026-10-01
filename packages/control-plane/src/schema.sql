@@ -275,6 +275,39 @@ CREATE TABLE IF NOT EXISTS relay_instances (
   last_seen_at INTEGER NOT NULL
 );
 
+-- A source machine's agents may message a target's (Q7.150). Both owned by created_by at creation; the relay reads the row per channel.
+CREATE TABLE IF NOT EXISTS machine_links (
+  id                TEXT PRIMARY KEY,   -- lk_<hex>
+  source_machine_id TEXT    NOT NULL,
+  target_machine_id TEXT    NOT NULL,
+  created_by        TEXT    NOT NULL,
+  created_at        INTEGER NOT NULL,
+  -- Kills every token minted for the link at once: the relay refuses it on the next channel.
+  revoked_at        INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_machine_links_live
+  ON machine_links (source_machine_id, target_machine_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_machine_links_target
+  ON machine_links (target_machine_id) WHERE revoked_at IS NULL;
+
+-- Whether an account's machines may message each other at all (Q2.244). No row means on.
+CREATE TABLE IF NOT EXISTS account_permissions (
+  user_id             TEXT PRIMARY KEY,
+  agent_messaging_off INTEGER NOT NULL,
+  -- A stamp above every earlier one in either permissions table, so a daemon can refuse a stale copy (Q1.654).
+  updated_at          INTEGER NOT NULL
+);
+
+-- The same for one machine, beneath its owner's account row. No row means on.
+CREATE TABLE IF NOT EXISTS machine_permissions (
+  machine_id          TEXT PRIMARY KEY,
+  agent_messaging_off INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  -- Its sessions message only each other; kept while it is off. Also added by migrate() (Q2.244).
+  isolated            INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS machine_last_seen (
   machine_id TEXT PRIMARY KEY,
   at         INTEGER NOT NULL

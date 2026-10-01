@@ -19,6 +19,8 @@ import type {
   DeviceRecord,
   EnrollmentCode,
   IssuedToken,
+  MachineLinkAnswer,
+  MachinePermissions,
   MachineRecord,
   Me,
   SessionRecord,
@@ -469,6 +471,39 @@ export function revokeMachine(id: string): Promise<{
   outstandingTokensExpireWithinSeconds?: number;
 }> {
   return cpFetch(`/v1/machines/${encodeURIComponent(id)}/revoke`, { method: "POST" });
+}
+
+/** Finds or makes a link from this machine to every other one the caller owns, and mints each a fresh token. */
+export async function linkMachine(id: string): Promise<MachineLinkAnswer> {
+  const body = await cpFetch<MachineLinkAnswer>(`/v1/machines/${encodeURIComponent(id)}/links`, {
+    method: "POST",
+  });
+  // Only well-typed policy is carried on, so a daemon is never handed a messaging value it would misread.
+  return {
+    links: body.links,
+    ...(typeof body.messaging === "boolean" ? { messaging: body.messaging } : {}),
+    ...(typeof body.isolated === "boolean" ? { isolated: body.isolated } : {}),
+    ...(typeof body.policyAt === "number" && Number.isFinite(body.policyAt) ? { policyAt: body.policyAt } : {}),
+  };
+}
+
+/** The account's switch for messages between agents, every machine it owns included. Q2.244. */
+export function saveAccountPermissions(agentMessaging: boolean): Promise<{ agentMessaging: boolean; policyAt: number }> {
+  return cpFetch<{ agentMessaging: boolean; policyAt: number }>("/v1/me/permissions", {
+    method: "PUT",
+    body: JSON.stringify({ agentMessaging }),
+  });
+}
+
+/** One machine's own switches, only the ones named; the answer is that machine's, never the account's. */
+export function saveMachinePermissions(
+  id: string,
+  patch: { agentMessaging?: boolean; isolated?: boolean },
+): Promise<MachinePermissions> {
+  return cpFetch<MachinePermissions>(`/v1/machines/${encodeURIComponent(id)}/permissions`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
 }
 
 export function mintToken(machine: string): Promise<IssuedToken> {

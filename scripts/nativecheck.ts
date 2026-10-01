@@ -566,6 +566,13 @@ check("and every command lives in commands.rs", strayCommands, []);
     /\baccount: Option<String>/.test(paramsOf("host_account_switch")),
     true,
   );
+  // A raw body rides only ipc://, which Android never uses and a page abandons for good after one failed call (Q3.690).
+  check(
+    "no command reads a raw IPC body, which only one of Tauri's two channels carries",
+    declared.filter((name) => /InvokeBody::Raw/.test(bodyOf(name))),
+    [],
+  );
+  check("and a save takes its file as named JSON arguments", /filename: String,\s*data: String/.test(paramsOf("host_save_file")), true);
   check(
     "only the boot and a confirm read a sign-in out of the keyring",
     // `credential::read` as a name rather than a call: `host_boot` passes it as a function.
@@ -859,12 +866,19 @@ const tauriLines = [...cargoToml.matchAll(/^(\[[^\n]+\])\n(?:[^[\n][^\n]*\n)*?ta
   (m) => [m[1], m[2], m[3]],
 );
 check(
-  "tauri's unstable feature is enabled for the macOS target alone, at the one pin",
+  "tauri's unstable feature is enabled for the macOS target alone and its tray for Windows alone, at the one pin",
   tauriLines,
   [
-    ["[target.'cfg(target_os = \"macos\")'.dependencies]", cratePin, '"unstable"'],
     ["[dependencies]", cratePin, ""],
+    ["[target.'cfg(target_os = \"macos\")'.dependencies]", cratePin, '"unstable"'],
+    ["[target.'cfg(target_os = \"windows\")'.dependencies]", cratePin, '"tray-icon"'],
   ],
+);
+// `tauri build` rewrites tauri's features in the first dependency table it meets and pools them across target tables (Q3.697).
+check(
+  "every target table sits below [dependencies], so the CLI's rewrite never reaches them",
+  cargoToml.indexOf("\n[dependencies]\n") > 0 && cargoToml.indexOf("\n[dependencies]\n") < cargoToml.indexOf("\n[target."),
+  true,
 );
 const MEASURED_TAURI = ["2.11.5", "2.11.4"];
 check(
@@ -2554,6 +2568,38 @@ check("and it asks the one route below the auth gate", /GET \/health/.test(probe
 const libCode = libRs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 check("the shell handles its own exit", /matches!\(event, tauri::RunEvent::Exit\)/.test(flat(libCode)), true);
 check("and stops every daemon it started there", /daemon::stop_all\(/.test(libCode), true);
+// Q3.697: on macOS and Windows the close button puts the app away, and the Dock, the tray or a second launch bring it back.
+{
+  const awayCode = read(`${TAURI_DIR}/src/away.rs`).replace(/\/\/[^\n]*/g, "");
+  const wired = flat(libCode);
+  check(
+    "a close request on the window goes to away.rs",
+    /WindowEvent::CloseRequested \{ api,\.\.\} = event \{ away::on_close_requested\(window, api\);/.test(wired),
+    true,
+  );
+  check(
+    "which puts the app away on macOS and Windows alone",
+    /pub const PUTS_AWAY: bool = cfg!\(any\(target_os = "macos", target_os = "windows"\)\);/.test(awayCode),
+    true,
+  );
+  check("by refusing the close and hiding the window", /api\.prevent_close\(\);[\s\S]*window\.hide\(\)/.test(awayCode), true);
+  check("the Dock icon brings it back", /RunEvent::Reopen \{ has_visible_windows,\.\.\} = event \{ if !has_visible_windows \{ away::bring_back\(handle\);/.test(wired), true);
+  check(
+    "on Windows the tray icon does, with Quit on its menu",
+    [/TrayIconBuilder::with_id/.test(awayCode), /"quit" => app\.exit\(0\)/.test(awayCode), /away::tray\(app\)\?;/.test(wired)],
+    [true, true, true],
+  );
+  check(
+    "and a second launch does, through the single-instance plugin registered before every other",
+    /let builder = tauri::Builder::default\(\); #\[cfg\(target_os = "windows"\)\] let builder = builder\.plugin\(tauri_plugin_single_instance::init/.test(wired),
+    true,
+  );
+  check(
+    "Cargo.toml asks for the tray on Windows alone",
+    /\[target\.'cfg\(target_os = "windows"\)'\.dependencies\]\s*tauri = \{ version = "[^"]+", features = \["tray-icon"\] \}/.test(cargoToml),
+    true,
+  );
+}
 {
   const stopAllBy = /fn stop_all_by<[\s\S]*?\n\}/.exec(daemonRs)?.[0] ?? "";
   check("the quit's stop was found to read", stopAllBy.length > 0, true);
@@ -2621,7 +2667,8 @@ check(
   const pruning = staged.split(",").map((name) => name.trim().replace(/^"|"$/g, "")).filter(Boolean).sort();
   const agentsTs = read("src/acp/agents.ts");
   const login = /export const AGENT_LOGIN[\s\S]*?\n\};/.exec(agentsTs)?.[0] ?? "";
-  const commands = [...login.matchAll(/^    command: "([a-z]+)",$/gm)].map((m) => m[1]).sort();
+  // A hyphen is part of a command: cursor's is cursor-agent, and [a-z]+ matched nothing on its line.
+  const commands = [...login.matchAll(/^    command: "([a-z][a-z-]*)",$/gm)].map((m) => m[1]).sort();
   check("both lists were found", pruning.length > 0 && commands.length > 0, true);
   check("and the payload prunes exactly the CLIs this daemon drives", pruning, commands);
   // `.bin` stays first on the daemon's PATH so the adapters and runtime resolve with no profile.
@@ -2694,7 +2741,7 @@ process.stdout.write("\nwhat a keystroke becomes\n");
   // The web process is handed the state when it starts, so this must run before any webview is built.
   check(
     "before anything else the shell does",
-    /pub fn run\(\) \{ #\[cfg\(target_os = "macos"\)\] leave_typing_alone\(\); tauri::Builder::default\(\)/.test(flat(lib)),
+    /pub fn run\(\) \{ #\[cfg\(target_os = "macos"\)\] leave_typing_alone\(\); let builder = tauri::Builder::default\(\);/.test(flat(lib)),
     true,
   );
   check("and cargo test asks Foundation that it held", /fn a_keystroke_is_left_as_typed\(\)/.test(lib), true);

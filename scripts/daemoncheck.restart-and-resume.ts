@@ -24,6 +24,7 @@ import {
   type BackgroundTask,
 } from "../src/acp/asynctasks.js";
 import { IdleParking } from "../src/idlepark.js";
+import { NICKNAMES } from "../src/nickname.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
@@ -118,6 +119,48 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
   );
 }
 
+process.stdout.write("\nwhich nickname a restored session answers to\n");
+{
+  const saved = new Map<string, PersistedSession>();
+  const store: SessionStore = {
+    put: (row) => void saved.set(row.id, row),
+    list: () => [...saved.values()],
+    remove: (id) => void saved.delete(id),
+  };
+  // Listed newest first, so only a walk in age order hands the older of the two the name they share.
+  const rows: PersistedSession[] = [
+    { ...rowFor("s_nick_newer", join(users, "u_alice", "nick-newer"), { nickname: "mira" }), createdAt: now + 2 },
+    { ...rowFor("s_nick_older", join(users, "u_alice", "nick-older"), { nickname: "mira" }), createdAt: now + 1 },
+    { ...rowFor("s_nick_none", join(users, "u_alice", "nick-none")), createdAt: now + 3 },
+    { ...rowFor("s_nick_bad", join(users, "u_alice", "nick-bad"), { nickname: "Bad_Name" }), createdAt: now + 4 },
+  ];
+  for (const row of rows) saved.set(row.id, row);
+  const first = new SessionRegistry(new MemoryEventStore(), store);
+  first.restore({ reapOrphans: false });
+  const nickOf = (registry: SessionRegistry, id: string): string => registry.get(id)?.nickname ?? "<missing>";
+  check("of two rows holding one nickname, the older keeps it", nickOf(first, "s_nick_older"), "mira");
+  check(
+    "and the newer is given another from the list",
+    [nickOf(first, "s_nick_newer") !== "mira", NICKNAMES.includes(nickOf(first, "s_nick_newer"))],
+    [true, true],
+  );
+  check("a row an older build wrote with none is given one from the list", NICKNAMES.includes(nickOf(first, "s_nick_none")), true);
+  check("and one that is not a nickname is picked afresh rather than kept", NICKNAMES.includes(nickOf(first, "s_nick_bad")), true);
+  check("every one of them distinct", new Set(rows.map((row) => nickOf(first, row.id))).size, rows.length);
+  check(
+    "and written back, since nothing else would",
+    rows.map((row) => saved.get(row.id)?.nickname),
+    rows.map((row) => nickOf(first, row.id)),
+  );
+  const second = new SessionRegistry(new MemoryEventStore(), store);
+  second.restore({ reapOrphans: false });
+  check(
+    "so the next restart answers to the same ones",
+    rows.map((row) => nickOf(second, row.id)),
+    rows.map((row) => nickOf(first, row.id)),
+  );
+}
+
 process.stdout.write("\nputting agents back on interrupted sessions\n");
 {
   const acp = await import("@agentclientprotocol/sdk");
@@ -153,6 +196,8 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     stallPrompt?: boolean;
     // Publishes one `select` option and accepts `session/set_config_option` on it.
     config?: boolean;
+    // Adds an effort select beside it that follows the model, as cursor's does: a model set answers it at its default.
+    effort?: boolean;
     // `true` and `false` are ordinary answers (false: already finished); "error" is the third. Default `true`.
     stopAnswer?: boolean | "error";
     // The AIR `_meta` on `initialize`: `true` is claude-agent-acp's shape, absent/false is none, "old" a lower version, "unnamed" lacks `asyncTasks`.
@@ -189,6 +234,21 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       ],
     };
     const withValue = (value: unknown) => ({ ...modelOption, currentValue: value });
+    const effortOption = {
+      id: "effort",
+      name: "Effort",
+      description: null,
+      category: "thought_level",
+      type: "select",
+      currentValue: "medium",
+      options: [
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ],
+    };
+    let currentModel: unknown = modelOption.currentValue;
+    const published = (effort: unknown = effortOption.currentValue) =>
+      options.effort === true ? [withValue(currentModel), { ...effortOption, currentValue: effort }] : [withValue(currentModel)];
 
     class ResumeRig extends LocalRuntime {
       override describe(agent: AgentId): AgentLaunchConfig {
@@ -251,7 +311,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                   id,
                   result: {
                     sessionId: `conv_${opened}`,
-                    ...(options.config === true ? { configOptions: [modelOption] } : {}),
+                    ...(options.config === true ? { configOptions: published() } : {}),
                   },
                 });
                 break;
@@ -259,10 +319,12 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                 const params = message["params"] as Record<string, any>;
                 configSets.push({ id: String(params["configId"]), value: params["value"] });
                 options.onConfigSet?.();
+                const isEffort = params["configId"] === "effort";
+                if (!isEffort) currentModel = params["value"];
                 send({
                   jsonrpc: "2.0",
                   id,
-                  result: { configOptions: [withValue(params["value"])] },
+                  result: { configOptions: isEffort ? published(params["value"]) : published() },
                 });
                 break;
               }
@@ -295,7 +357,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                     send({
                       jsonrpc: "2.0",
                       id,
-                      result: options.config === true ? { configOptions: [modelOption] } : {},
+                      result: options.config === true ? { configOptions: published() } : {},
                     });
                   }
                 }, options.stallMs ?? 15);
@@ -578,6 +640,32 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     await new Promise((resolve) => setTimeout(resolve, 5));
     check("a slot comes back on its own", await refusal(gone), "PathError");
 
+    await own.shutdown();
+  }
+
+  // The nickname is reserved before the first await (Q2.245), so every refusal after that point has to hand it back.
+  {
+    const rig = rigWith({ resume: true });
+    // CI installs no harness, so availability is the rig's word here as describe already is; the real one probes PATH.
+    rig.runtime.availability = async () => [
+      { id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null },
+    ];
+    const own = new SessionRegistry(new MemoryEventStore(), storeOf([]), undefined, rig.runtime);
+    const named = async (cwd: string): Promise<string> =>
+      own.create({ agent: "kimi", cwd, nickname: "nick-freed" }).then(
+        (made) => `created as ${made.nickname}`,
+        (error: unknown) => (error as Error).name,
+      );
+    check(
+      "a create naming a nickname is refused after reserving it, for its path",
+      await named(join(users, "u_alice", "no_such_dir_at_all")),
+      "PathError",
+    );
+    check(
+      "and gives the nickname back, so the next create naming it is that session",
+      await named(join(users, "u_alice", "proj")),
+      "created as nick-freed",
+    );
     await own.shutdown();
   }
 
@@ -2013,6 +2101,65 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     await own.shutdown();
   }
 
+  // cursor's controls other than its mode are its model's, published only by a live agent: a model chosen while parked wakes it (Q2.249).
+  {
+    const rig = rigWith({ resume: true, config: true, effort: true });
+    const store = storeOf([
+      { ...interruptedRow("s_cur", "daemon_restarted", "a_cur"), agent: "cursor" },
+      { ...interruptedRow("s_cur_off", "daemon_restarted", "a_cur_off"), agent: "cursor" },
+      interruptedRow("s_kimi_fx", "daemon_restarted", "a_kimi_fx"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const cur = own.get("s_cur");
+    const off = own.get("s_cur_off");
+    const kimi = own.get("s_kimi_fx");
+    const shown = (one: typeof cur) =>
+      (one?.snapshot().agentConfig?.options ?? []).map((o) => `${o.id}=${String(o.value)}`);
+    check(
+      "each offers a model and an effort",
+      [shown(cur), shown(off), shown(kimi)],
+      [["model=opus", "effort=medium"], ["model=opus", "effort=medium"], ["model=opus", "effort=medium"]],
+    );
+    // Set live, so a replay of it onto the next model would be visible on the wire.
+    for (const one of [cur, off, kimi]) await one?.setConfigOption("effort", "high");
+    await off?.stop("stopped");
+    await own.parkIdleSessions(now + 31 * 60_000);
+    check("two released and one stopped", [cur?.status, kimi?.status, off?.status], ["parked", "parked", "exited"]);
+
+    const launched = rig.launches();
+    const sent = rig.configSets().length;
+    const set = await cur?.setConfigOption("model", "sonnet");
+    check("a model chosen on a parked cursor session is accepted", set?.kind, "ok");
+    check("and wakes it", [rig.launches() - launched, cur?.status], [1, "idle"]);
+    check(
+      "the fresh agent is sent the model and not the old model's effort",
+      rig.configSets().slice(sent),
+      [{ id: "model", value: "sonnet" }],
+    );
+    check(
+      "so the new model's effort is on the session when the tap answers",
+      (set?.kind === "ok" ? set.config?.options ?? [] : []).map((o) => `${o.id}=${String(o.value)}`),
+      ["model=sonnet", "effort=medium"],
+    );
+
+    const offLaunched = rig.launches();
+    const offSet = await off?.setConfigOption("model", "sonnet");
+    check("a stopped cursor session records the model and starts nothing", [offSet?.kind, rig.launches() - offLaunched, off?.status], ["ok", 0, "exited"]);
+    check("and drops the old model's effort rather than keep it for the next run", shown(off), ["model=sonnet"]);
+
+    const kimiLaunched = rig.launches();
+    await kimi?.setConfigOption("model", "sonnet");
+    check(
+      "a harness whose controls are not its model's defers as before, keeping them",
+      [rig.launches() - kimiLaunched, kimi?.status, ...shown(kimi)],
+      [0, "parked", "model=sonnet", "effort=high"],
+    );
+
+    await own.shutdown();
+  }
+
   // `revivableByPrompt` is the one gate: a stopped session keeps its controls and defers a choice like a parked one.
   {
     const rig = rigWith({ resume: true, config: true });
@@ -2397,7 +2544,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
 
     // Only the last marker or prompt decides whether the conversation is empty; an older clear must not.
     const clr = own.get("s_clr");
-    clr?.log.append({ type: "prompt", text: "we talked about it", attachments: [] });
+    clr?.log.append({ type: "prompt", text: "we talked about it", attachments: [], from: null });
     clr?.log.append({ type: "context_cleared", agentSessionId: "a_newer", previousAgentSessionId: "conv_1" });
 
     own.get("s_clr")?.markInterrupted(true, null);
