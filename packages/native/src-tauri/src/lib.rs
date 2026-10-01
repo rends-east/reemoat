@@ -135,7 +135,9 @@ pub fn run() {
     let builder = tauri::Builder::default();
     // First of the plugins, as it asks: a second launch shows the running app rather than starting another (Q3.697).
     #[cfg(target_os = "windows")]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| away::bring_back(app)));
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        away::bring_back(app)
+    }));
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -296,7 +298,11 @@ pub fn run() {
              * is the failure this block exists to prevent, for that one only.
              */
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
                 if !has_visible_windows {
                     away::bring_back(handle);
                 }

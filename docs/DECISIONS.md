@@ -28260,8 +28260,9 @@ tray click on Linux. Closing the last window still quits there (Q6.108).
 **What is checked.** macOS builds and `cargo test` passes. The Windows code —
 `away.rs` and `lib.rs`'s wiring — type-checks for `x86_64-pc-windows-msvc` in a
 scratch crate holding tauri with `tray-icon` and the plugin; the whole crate cannot
-be cross-checked here, since `aws-lc-sys` wants the Windows SDK's headers. There is
-no Windows build (no CI leg, no asset), so the tray has never been seen running.
+be cross-checked here, since `aws-lc-sys` wants the Windows SDK's headers. Windows
+is built only by CI's `native` leg (`tauri build`, without the fmt, clippy and test
+gates) and has no published asset, so the tray has never been seen running.
 `nativecheck` holds the wiring.
 
 **A trap the first build sprang.** Mid-build, `Cargo.toml`'s Windows line gained

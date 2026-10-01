@@ -55,7 +55,8 @@ fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Window<R>> {
 
 #[cfg(target_os = "windows")]
 fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Window<R>> {
-    app.get_webview_window(MAIN).map(|window| window.as_ref().window())
+    app.get_webview_window(MAIN)
+        .map(|window| window.as_ref().window())
 }
 
 /// The notification-area icon: a click shows the window, the menu shows it or quits.
