@@ -8672,9 +8672,23 @@ sends arrives as a `prompt`, through the prompt route's own machinery (Q2.243).
 not be loopback, and `REEMOAT_PORT=0` means it has no listener at all.
 
 **A bearer per launch.** `mcpServersFor` mints one each time an agent is handed the
-server and retires the one before, so a replaced process stops naming the session.
-It identifies the caller; it does not confine it, since every agent runs as the
-same user and can read another's — the same position as `agentEnv()`.
+server and retires the one before, so a replaced process stops naming the session;
+since the 0.12.0 review it is also retired, by token, when its process ends. It
+identifies the caller; it does not confine it, since every agent runs as the same
+user and can read another's — the same position as `agentEnv()`.
+
+**claude's bearer is not on a command line.** Measured 2026-10-01: claude-agent-acp
+0.73.0 hands an http server's headers to the SDK, which starts the CLI with
+`--mcp-config <json>`, so the bearer sat in argv, readable by **every** local
+account (`ps`, `/proc/<pid>/cmdline`) — the premise above held only for the same
+user. Claude Code 2.1.286 expands `${VAR}` in those headers (a probe server received
+the value), and the adapter builds the CLI's environment from its own. So for claude
+the bearer is minted before the spawn into `REEMOAT_MCP_BEARER`
+(`AgentLaunchConfig.mcpBearerEnv`) and the header names the variable; through the
+real adapter the CLI's argv carried only `${REEMOAT_MCP_BEARER}` and the server got
+the value. The other five take MCP servers over stdio and get the literal header.
+Rejected: a table keyed by agent id (a stub would get a header it cannot expand),
+and minting in the hub before the spawn (a second callback before `initialize`).
 
 **Rejected.**
 - *A stdio shim per session* — one more process per agent, for the one transport
@@ -8755,9 +8769,14 @@ decision without asking them.
 **Decision.** On the sending daemon, in `peer_outbox`. A send whose answer is the
 relay's `503` — or no answer — is held and reported `pending`, then retried by
 `pumpOutbox` from 30 s to 10 min apart for 24 h, **byte-identical**, so the
-receiving daemon's per-link message-id check delivers it once however many tries it
-took. A refusal on a later try, or the day running out, wakes the sender with a
-notice saying so, within the budget any notice is (Q2.243). At most
+receiving daemon's per-machine message-id check (Q2.241) delivers it once however
+many tries it took — and since the 0.12.0 review however many restarts too: the ids
+are kept in `peer_seen` for a day, because the sender gives up after 10 s while a
+wake may take 45, so a retry is the common case and an in-memory set forgot it at
+every restart. A delivery a shutdown cuts off answers `503 shutting_down`, which
+every sender holds, rather than `ended`. A refusal on a later try, or the day
+running out, wakes the sender with a notice saying so, within the budget any notice
+is (Q2.243) — another machine's words only ever as a quotation in it. At most
 `MAX_OUTBOX_PER_SESSION` per session and `MAX_OUTBOX` on the machine.
 
 **Why here.** A tunnel with no daemon is a 503, never a queue (Q5.21), and the
@@ -8773,10 +8792,14 @@ hold it is the one whose agent wrote it.
 Which *machine* is the capability's (`principal.link`, all three link claims or
 the token is malformed). Every link has its own token bucket here, whatever the
 other daemon says it enforces; a message id is delivered once per sending machine for a
-day, since a Replace between two tries hands the same sender a new link id; a
+day, since re-minted links hand the same sender a new link id, and kept in
+`peer_seen` so a restart forgets none; a refusal is re-read too — its code kept only
+if `PeerRefusal` has it, its words one line of `MAX_REMOTE_REFUSAL_CHARS`; a
 notice is taken only when this machine asked for it, once (`expectedNotices`), so a
 link cannot wake a session by claiming to answer it; a listing row is re-read field
-by field (`remoteRowOf`), and one whose ref names a machine is dropped. A link
+by field (`remoteRowOf`), and one whose ref names a machine is dropped, while one
+whose status this build does not know is kept and shown as idle (`compatibility.md`
+rule 2) — dropped, it let a bare name resolve to a same-named session here. A link
 reaches `/peer/*` only: `session:message` opens no other route, and a person's
 capability never carries it.
 
@@ -8891,8 +8914,10 @@ needs, because it narrows and a grantee who can prompt the session already has m
   taken back:
   - a message already steered into a running turn;
   - a turn another agent already started;
-  - a send already inside `sendMidTurn`;
   - an outbox request already on the wire.
+  A send inside `sendMidTurn` is dropped too since the 0.12.0 review: a steer that
+  fails after the switch fell through to the queue and was delivered, so
+  `dropQueuedPeer` bumps a counter the steer re-reads after its await.
 - **A conversation that is off neither sends nor receives.** Other agents do not
   see it, and it is refused both ways with `conversation_messaging_off`. A parked
   one is refused without being woken first.
@@ -8945,6 +8970,15 @@ or accepted, stays put.
 - *One per account, across machines.* No daemon sees another's rows without the
   network, and the Authority holds no sessions. The app's dice avoids every name it
   can see instead (Q3.677), and an ambiguous name is answered by listing each match.
+
+**A bare name never resolves by elimination.** Found in the 0.12.0 review: a linked
+machine whose listing failed was skipped, so `mira` here and a `mira` on a machine
+that did not answer resolved to this one. With any listing unchecked — no answer, a
+transport failure, an unexpected status — one match is refused `ambiguous_recipient`
+naming the machine and the match's full address, and none `unknown_recipient` naming
+what could not be checked. A machine that answered off, isolated or too old does
+not block, or one old daemon would refuse every bare name for good; a full address
+waits on no listing.
 
 **Status.** Current.
 
@@ -9144,8 +9178,9 @@ with a question tool of its own is never given a second.
 cursor calls MCP tools with no timeout option, so the SDK's default 60 s cuts any
 answer given later than a minute. So `poseQuestion` opens an elicitation no request
 waits on, the tool tells the model to end its turn, and settling the card sends
-`answerText` through `deliverAnswer` as the person's own message — waking, queueing
-and refusing exactly as a typed one would. Submit sends the labels picked, Skip
+`answerText` through `deliverAnswer` as its answerer's message — the person's, or a
+plugin's (`sessions.answerElicitation`), which neither resets nor counts the peer
+budget — waking, queueing and refusing exactly as a typed one would. Submit sends the labels picked, Skip
 says it was skipped, ✕ sends nothing.
 
 **What it outlives, and what ends it.** One open at a time, refused in words
@@ -19903,7 +19938,11 @@ the dispatcher's call-site shape.
 **Decision.** Every two-step confirmation in the web client is `TwoStep`
 (`bits.tsx`) — fifteen mounts across fourteen sites, counted by `webcheck` as a
 table by file (fourteen across thirteen since Q1.631 took `KeyRow`'s two-step
-arm with the admin key panel that was its only user). It owns the layout property Q3.218 states: one container drawn in
+arm with the admin key panel that was its only user). Sixteen since 0.12.0, on the
+owner's word in its review: removing a saved agent key, which relaunches the
+machine's open chats, confirms and is drawn as danger in both of `AgentsPanel`'s
+branches — reversing the design pass's one-tap neutral ✕, kept to hold a card to one
+red control. It owns the layout property Q3.218 states: one container drawn in
 both arms, the act then Cancel with Cancel last in DOM order, Cancel `plain` and
 never `primary`, and — for an act that returns a promise — the wait: both
 answers disabled, a spinner in the act's label, the question closed only in
@@ -35391,7 +35430,11 @@ and refuses otherwise. Each goes onto a door every agent already uses
 JSON-RPC error makes cursor write the plan file itself and report success; an
 `ask_question` answered with one falls back to a permission per single-choice
 question and drops the multiple-choice ones. So a refusal is always cursor's own
-word. With questions switched off (`REEMOAT_ELICITATION=0`) the question is
+word — and `create_plan` never answers an error at all (`answerCursorPlan`, since the
+0.12.0 review): params it cannot read are `rejected`, no single session to send it to
+(a `session/load` still replaying) is `cancelled`, and a handler's throw is
+`rejected`; before, all three were errors cursor read as approval. With questions
+switched off (`REEMOAT_ELICITATION=0`) the question is
 `-32601` all the same, and cursor asks through permissions by itself. No free text:
 cursor reads option ids and nothing else, so the card offers no own-answer box.
 
@@ -40181,7 +40224,13 @@ and an nginx config with no `package.json`, unlike `services/plugins` and
 `services/premium`, which do carry `pnpm check`. Standing a Node package and a CI
 workflow up to compare two font stacks costs more than the drift it catches.
 
-**Status.** Known limitation, taken deliberately
+**Status.** Retired 2026-10-01. The landing was rebuilt on 2026-09-24 (`services`
+f35416c) around a painting, with type of its own — `--sans` and `--mono` with
+different stacks, a serif for display, sizes in `rem`, and the *"lifted from
+app.reemoat.com"* header gone — so the pair of values meant to be one value no
+longer exists. The comparison failed on every development box from then on while
+CI skipped it; it was removed rather than pointed at the new names, which would
+have asserted a sameness nobody chose.
 
 
 ### Q7.134 — What the three documents deliberately do not do
@@ -41680,7 +41729,9 @@ do anything those agents can do, as the owner; a link token lives weeks where a
 capability lives minutes, and revocation rests on the relay reading the row at
 every connection; the daemon becomes a network client; the relay learns which
 machine talks to which. Encryption end to end is unchanged — the relay carries
-bytes it holds no key for, as for an app.
+bytes it holds no key for, as for an app. And because revocation is the relay's
+alone, a relay rolled back past 0.12.0 ignores `lnk` and every revoked link
+connects again until it expires — `compatibility.md` says what to switch off first.
 
 **Status.** Current for one owner on one server; the rest is Q7.151.
 
@@ -41705,6 +41756,15 @@ a daemon.
 **Why not yet.** Each is a decision about who may ask whose agents to act, which is
 the permission design this feature deliberately did not include: a link lets one
 machine's agents ask another's to do anything those can do, as their owner.
+
+**A shared machine is the same question from inside, and the precondition for any
+sharing screen.** `PUT /v1/machines/:id/grants` lets an owner give another person
+write on one machine today, through the API only — no screen calls it. That
+person's agent there reaches the owner's other machines through its links, as the
+owner. Found in the 0.12.0 review and left, on the owner's word, because nothing
+offers sharing yet; before anything does, `POST /v1/machines/:id/links` must mint
+nothing for a machine shared with write, and a new grant must revoke its links in
+the same write.
 
 **Status.** Not built. The switches that decide whether a machine takes part at all
 are Q2.244's.

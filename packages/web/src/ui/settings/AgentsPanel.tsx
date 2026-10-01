@@ -1,7 +1,6 @@
-import { Check, Download, ExternalLink, LogIn, LogOut, X } from "lucide-react";
+import { Check, Download, ExternalLink, LogIn, LogOut, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../daemon";
-import type { CredentialWritten } from "../../wire";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { store } from "../../store";
@@ -13,7 +12,7 @@ import type {
   AgentLoginSupport,
   InstallRunView,
 } from "../../wire";
-import { Badge, Button, Empty, FIELD, GROUP_ROW, Icon, IconButton, Spinner, TwoStep } from "../bits";
+import { Badge, Button, DangerButton, Empty, FIELD, GROUP_ROW, Icon, Spinner, TwoStep } from "../bits";
 import { CommandLine } from "../CommandLine";
 import {
   installElapsed,
@@ -366,7 +365,12 @@ function SignIn({
       )}
       {block === "stored_only" && (
         <Group title={divider ?? "Saved keys"}>
-          <table className={TABLE}>
+          {/* Fixed columns: a row that arms its TwoStep spans both, and an auto layout would reflow the others under it. */}
+          <table className={`${TABLE} table-fixed`}>
+            <colgroup>
+              <col />
+              <col className="w-32" />
+            </colgroup>
             <tbody>
               {slots
                 .filter((slot) => slot.set)
@@ -454,51 +458,59 @@ function CredentialSlot({
 }): ReactNode {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const daemon = store.daemonFor(machineId);
 
   const label = credentialLabel(slot.envName);
-
-  const withDaemon = (
-    run: (daemon: DaemonClient) => Promise<CredentialWritten>,
-    removing = false,
-  ): void => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) {
-      toast("error", "That machine is not reachable.");
-      return;
-    }
-    setBusy(true);
-    void run(daemon)
-      .then((answer) => {
-        setValue("");
-        // Open chats on this machine are relaunched with the change, since a credential reaches an agent only at spawn.
-        toast("ok", credentialToast(removing, answer.restarting));
-        onChanged();
-      })
-      .catch((cause: unknown) =>
-        toast(
-          "error",
-          `Couldn't ${removing ? "remove" : "save"} the ${label.name} — ${errorText(cause)}.`,
-        ),
-      )
-      .finally(() => setBusy(false));
-  };
 
   // Exactly MAX_CREDENTIAL_CHARS in src/server.ts: a lower bound would refuse a key the daemon accepts.
   const tooLong = value.length > 8192;
   const canSave = !busy && value.trim().length > 0 && !tooLong;
   const save = (): void => {
     if (!canSave) return;
-    withDaemon((daemon) => daemon.saveCredential(agent.id, slot.envName, value));
+    const reached = store.daemonFor(machineId);
+    if (reached === undefined) {
+      toast("error", "That machine is not reachable.");
+      return;
+    }
+    setBusy(true);
+    void reached
+      .saveCredential(agent.id, slot.envName, value)
+      .then((answer) => {
+        setValue("");
+        // Open chats on this machine are relaunched with the change, since a credential reaches an agent only at spawn.
+        toast("ok", credentialToast(false, answer.restarting));
+        onChanged();
+      })
+      .catch((cause: unknown) => toast("error", `Couldn't save the ${label.name} — ${errorText(cause)}.`))
+      .finally(() => setBusy(false));
   };
-  const remove = (
-    <IconButton
-      icon={X}
-      // chip, not lg: a fixed 44px box would stretch this row past the CommandLine box above.
-      size="chip"
-      className="ml-1"
-      label={`Remove ${label.name}`}
-      onClick={() => withDaemon((daemon) => daemon.clearCredential(agent.id, slot.envName), true)}
-      disabled={busy}
+
+  // busy is the slot's one lock and is held for the removal, so Save is refused while a removal is out.
+  const remove = (): Promise<void> | undefined => {
+    if (daemon === undefined) return undefined;
+    setBusy(true);
+    return daemon
+      .clearCredential(agent.id, slot.envName)
+      .then((answer) => {
+        setValue("");
+        toast("ok", credentialToast(true, answer.restarting));
+        onChanged();
+      })
+      .finally(() => setBusy(false));
+  };
+  const removal = (rest: ReactNode): ReactNode => (
+    <TwoStep
+      armed={confirming}
+      onArm={setConfirming}
+      align="end"
+      question={<>Remove the {label.name} from this machine?</>}
+      consequence={`Open ${harnessName(agent)} chats restart without it.`}
+      act={{ label: "Remove", danger: true, icon: Trash2, ariaLabel: `Remove the ${label.name}` }}
+      disabled={busy || daemon === undefined}
+      onAct={remove}
+      onFailure={(cause) => toast("error", `Couldn't remove the ${label.name} — ${errorText(cause)}.`)}
+      rest={rest}
     />
   );
   const saved = slot.set ? (
@@ -509,15 +521,35 @@ function CredentialSlot({
 
   // Nothing typed here can help, but a saved key must stay removable.
   if (!editable) {
+    // Armed, the question spans the row, so Cancel lands where Remove was (Q3.218).
+    if (confirming) {
+      return (
+        <tr className="border-t border-edge first:border-t-0">
+          <td colSpan={2} className={TD}>
+            {removal(null)}
+          </td>
+        </tr>
+      );
+    }
     return (
       <tr className="border-t border-edge first:border-t-0">
-        <td className={`${TD} w-full max-w-0`}>
+        <td className={TD}>
           <span className="block truncate" title={slot.envName}>
             {label.name}
           </span>
           <span className="block text-2xs text-muted">{saved}</span>
         </td>
-        <td className={`${TD} w-px text-right whitespace-nowrap`}>{remove}</td>
+        <td className={`${TD} text-right`}>
+          <DangerButton
+            icon={Trash2}
+            size="sm"
+            ariaLabel={`Remove the ${label.name}`}
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
+            Remove
+          </DangerButton>
+        </td>
       </tr>
     );
   }
@@ -528,6 +560,7 @@ function CredentialSlot({
         event.preventDefault();
         save();
       }}
+      className="flex flex-col gap-1.5"
     >
       <Field
         label={label.name}
@@ -571,11 +604,15 @@ function CredentialSlot({
               >
                 {busy ? <Spinner /> : "Save"}
               </Button>
-              {slot.set && remove}
             </div>
           </>
         )}
       </Field>
+      {/* The rest sits at the row's start, so a second tap lands on the question and never on the act (Q3.218). */}
+      {slot.set &&
+        removal(
+          <DangerRow label={`Remove the ${label.name}`} icon={Trash2} disabled={busy} onClick={() => setConfirming(true)} />,
+        )}
     </form>
   );
 }

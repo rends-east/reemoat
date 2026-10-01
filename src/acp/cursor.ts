@@ -11,8 +11,7 @@ export const CURSOR_UPDATE_TODOS = "cursor/update_todos";
 export const CURSOR_TASK = "cursor/task";
 export const CURSOR_GENERATE_IMAGE = "cursor/generate_image";
 
-/** Two updates outside the SDK's closed union, diverted below it as the async-task drafts are. */
-export const CURSOR_SUBAGENT_MARKER = "subagent_";
+/** Two updates outside the SDK's closed union, diverted below it as the async-task drafts are; each name is also the stdout pre-filter. */
 export const CURSOR_SUBAGENT_UPDATES: readonly string[] = ["subagent_spawned", "subagent_state_update"];
 
 /** Only under `_meta`: the SDK strips a top-level clientCapabilities key before cursor reads it. */
@@ -264,7 +263,6 @@ export function parseImageRequest(params: unknown): CursorImageRequest {
   };
 }
 
-/** Never throws: it runs on every diverted update line. */
 /** Which MCP server and tool a call names, read off the rawInput cursor puts on its `tool_call_update`. */
 export function readMcpToolCall(rawInput: unknown): { server: string; tool: string } | null {
   if (typeof rawInput !== "object" || rawInput === null) return null;
@@ -273,6 +271,7 @@ export function readMcpToolCall(rawInput: unknown): { server: string; tool: stri
   return { server: shape.providerIdentifier, tool: shape.toolName };
 }
 
+/** Never throws: it runs on every diverted update line. */
 export function readSubagentSpawn(update: unknown): SubagentSpawn | null {
   if (typeof update !== "object" || update === null) return null;
   const shape = update as { sessionUpdate?: unknown; subagentSessionId?: unknown; _meta?: unknown };

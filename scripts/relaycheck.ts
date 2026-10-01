@@ -1445,14 +1445,22 @@ process.stdout.write("\na link's share of a tunnel\n");
   const second = hold(link("lk_second"));
   report("and another link is unaffected by the first being full", second !== null, "lk_second got a stream");
 
-  // Filled a link's share at a time up to the tunnel's ceiling, so the refusal below is the tunnel's and not a link's.
+  // A link's share at a time until the tunnel refuses, so the refusal is the tunnel's; the loop runs past the ceiling
+  // rather than to it, so the count it stopped at is a measurement and a ceiling too high or too low both show.
   const links: (ClientHttp2Stream | null)[] = [...first, second];
-  for (let n = 0; opened(links) < MAX_LINK_STREAMS_PER_TUNNEL; n += 1) {
-    for (let i = 0; i < MAX_STREAMS_PER_LINK && opened(links) < MAX_LINK_STREAMS_PER_TUNNEL; i += 1) {
-      links.push(hold(link(`lk_fill_${n}`)));
+  let granted = opened(links);
+  let refusedAfter: number | null = null;
+  for (let n = 0; refusedAfter === null && n <= MAX_LINK_STREAMS_PER_TUNNEL; n += 1) {
+    for (let i = 0; refusedAfter === null && i < MAX_STREAMS_PER_LINK; i += 1) {
+      const stream = hold(link(`lk_fill_${n}`));
+      if (stream === null) refusedAfter = granted;
+      else {
+        links.push(stream);
+        granted += 1;
+      }
     }
   }
-  check("every link together is held to one ceiling per tunnel", opened(links), MAX_LINK_STREAMS_PER_TUNNEL);
+  check("every link together is held to one ceiling per tunnel", refusedAfter, MAX_LINK_STREAMS_PER_TUNNEL);
   check("so a link with none of its own share spent is refused past it", hold(link("lk_late")), null);
   report("while a person still gets a stream on the same tunnel", hold(person("u_someone_else")) !== null, "not counted");
 
@@ -7465,6 +7473,24 @@ process.stdout.write("\nlinks between machines one person owns\n");
     check("which the relay lets through", through(relinked?.token ?? ""), owner.id);
     check("and the target's own answer carries the newest stamp", (await minted(target)).policyAt, stamps.at(-1));
 
+    // Somebody else's two machines, linked to each other, so the account switch has links it must not reach.
+    const neighbour = person("linkneighbour");
+    const nearA = own(neighbour.id, "near-a");
+    const nearB = own(neighbour.id, "near-b");
+    const nearLinks = [...(await minted(nearA, neighbour)).links, ...(await minted(nearB, neighbour)).links];
+    check(
+      "another account's two machines are linked both ways",
+      nearLinks.map((link) => [link.target.id, through(link.token)]),
+      [
+        [nearB, neighbour.id],
+        [nearA, neighbour.id],
+      ],
+    );
+    const revokedAt = (id: string | undefined): unknown => {
+      const row = db.prepare("SELECT revoked_at FROM machine_links WHERE id = ?").get(id ?? "");
+      return row === undefined ? "no row" : row["revoked_at"];
+    };
+
     // `offline` is switched off on its own first, so the account switch has a choice to preserve.
     await switchMachine(offline, false);
     const accountOff = await switchAccount(false);
@@ -7479,6 +7505,16 @@ process.stdout.write("\nlinks between machines one person owns\n");
       "no machine it owns has a live link left",
       [source, target, offline, newest].map(liveLinksTouching),
       [0, 0, 0, 0],
+    );
+    check(
+      "while another account's links stay live: the revocation is filtered on the owner who switched",
+      [typeof revokedAt(relinked?.id), ...nearLinks.map((link) => revokedAt(link.id)), liveLinksTouching(nearA)],
+      ["number", null, null, 2],
+    );
+    check(
+      "and the relay still lets them through",
+      nearLinks.map((link) => through(link.token)),
+      [neighbour.id, neighbour.id],
     );
     const everyAnswer = await Promise.all([source, target, offline, newest].map((machine) => minted(machine)));
     check(

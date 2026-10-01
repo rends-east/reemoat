@@ -727,6 +727,13 @@ export function Composer({
             attach(files);
           }}
           onKeyDown={(event) => {
+            // The notice is a menu with no rows, so Escape is its too; widening menuOpen instead would make Enter choose from nothing.
+            if (event.key === "Escape" && mentionNotice !== null && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              event.stopPropagation();
+              closeMenu();
+              return;
+            }
             // React does not forward `isComposing`; the pointer is read per keystroke so an attached keyboard is seen.
             const action = composerKey(
               { ...event, isComposing: event.nativeEvent.isComposing },

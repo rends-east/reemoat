@@ -303,7 +303,7 @@ export class PluginApi {
             : input["cancel"] === true
               ? ({ cancel: true } as const)
               : { content: (input["content"] ?? {}) as Record<string, ElicitationContentValue> };
-        const result = managed.answerElicitation(elicitationId, body);
+        const result = managed.answerElicitation(elicitationId, body, "plugin");
         if (result.kind === "invalid_content") {
           throw new PluginApiError("elicitation_invalid", JSON.stringify(result.problems));
         }

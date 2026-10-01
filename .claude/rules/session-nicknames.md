@@ -111,7 +111,8 @@ then one held by exactly one session anywhere; otherwise plain text.
 
 ## New session (Q3.677)
 
-Four things now: machine, agent, nickname, folder. The field is narrow, after an `@`
+Four things now: machine, agent, nickname, folder. The field is the kit's `Field`,
+its refusal bound by `aria-describedby`, narrow, after an `@`
 mark, and arrives filled in, from
 names nobody on any visible machine holds, so Start still works in one press and
 this is not Q3.87's optional box back. The draft is module state, since the screen

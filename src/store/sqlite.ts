@@ -108,6 +108,7 @@ export interface StoreBundle {
   pluginData: SqlitePluginDataStore;
   peerLinks: SqlitePeerLinkStore;
   peerOutbox: SqlitePeerOutboxStore;
+  peerSeen: SqlitePeerSeenStore;
   /** Ids the prune deleted: the caller removes their upload directories, which the prune runs too early to reach. */
   prunedSessions: string[];
   close(): void;
@@ -172,6 +173,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const pluginData = new SqlitePluginDataStore(db);
   const peerLinks = new SqlitePeerLinkStore(db);
   const peerOutbox = new SqlitePeerOutboxStore(db);
+  const peerSeen = new SqlitePeerSeenStore(db);
 
   return {
     db,
@@ -189,6 +191,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     pluginData,
     peerLinks,
     peerOutbox,
+    peerSeen,
     prunedSessions,
     close() {
       try {
@@ -855,6 +858,8 @@ export class SqliteSessionStore implements SessionStore {
       }
       this.db.exec("DELETE FROM events WHERE session_id NOT IN (SELECT id FROM sessions)");
       this.db.exec("DELETE FROM uploads WHERE session_id NOT IN (SELECT id FROM sessions)");
+      // A held message whose sender was pruned would otherwise be sent from a session nothing can answer.
+      this.db.exec("DELETE FROM peer_outbox WHERE sender_session NOT IN (SELECT id FROM sessions)");
       // Plugin data with no plugin row: host.ts removes the two separately, and strays would pass to the next install of that id.
       this.db.exec("DELETE FROM plugin_data WHERE plugin_id NOT IN (SELECT id FROM plugins)");
       // Pasted credentials are deliberately never swept; only their routes remove them (Q7.124).
@@ -1097,7 +1102,6 @@ function normalizeExit(value: unknown): SessionExit | null {
   return exit;
 }
 
-/** Its own try: an unreadable blob costs the remembered strip, never the session. */
 /** Shape only: the registry re-reads the questions through ask_question's own parser, and drops what it cannot draw. */
 function toOpenQuestion(value: unknown): OpenQuestionRow | null {
   if (value == null) return null;
@@ -1119,6 +1123,7 @@ function toOpenQuestion(value: unknown): OpenQuestionRow | null {
   }
 }
 
+/** Its own try: an unreadable blob costs the remembered strip, never the session. */
 function toAgentState(value: unknown): AgentStateMemory | null {
   if (value == null) return null;
   try {
@@ -2039,6 +2044,31 @@ export class SqlitePeerOutboxStore {
     const rows = (senderSession === null ? this.takeAllStmt.all() : this.takeForStmt.all(senderSession)).map(outboxEntryOf);
     for (const row of rows) this.removeStmt.run(row.id);
     return rows;
+  }
+}
+
+/** Keyed on the sending machine, never the link: a Replace between two tries hands the same sender a new link id (Q2.241). */
+export class SqlitePeerSeenStore {
+  private readonly hasStmt: StatementSync;
+  private readonly addStmt: StatementSync;
+  private readonly forgetStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.hasStmt = db.prepare("SELECT 1 AS n FROM peer_seen WHERE source_machine_id = ? AND message_id = ?");
+    this.addStmt = db.prepare("INSERT OR REPLACE INTO peer_seen (source_machine_id, message_id, seen_at) VALUES (?, ?, ?)");
+    this.forgetStmt = db.prepare("DELETE FROM peer_seen WHERE seen_at <= ?");
+  }
+
+  has(sourceMachineId: string, messageId: string): boolean {
+    return this.hasStmt.get(sourceMachineId, messageId) !== undefined;
+  }
+
+  add(sourceMachineId: string, messageId: string, at: number): void {
+    this.addStmt.run(sourceMachineId, messageId, at);
+  }
+
+  forgetUpTo(at: number): void {
+    this.forgetStmt.run(at);
   }
 }
 

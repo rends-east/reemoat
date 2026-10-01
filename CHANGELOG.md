@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-01
+
 ### Added
 
 - **Cursor is the sixth agent.** It has a tile on New session like Claude Code, runs on the model your Cursor account last chose, and offers its own modes (Agent, Plan, Ask), its models and each model's effort in the strip under the message box. Sign in with a Cursor API key under Settings → Machines, or with the sign-in page it prints; Install fetches it with Cursor's own installer, and the daily refresh keeps it current. Its questions, its plan approval and its to-do list are drawn as the other agents' are, a subagent's steps are nested under the step that started it, and a Cursor session comes back after a restart like any other. Cursor keeps one configuration for your terminal and this app: a model chosen here, or "Allow always" on one of its cards, is remembered in `~/.cursor/cli-config.json` for both. It edits files in the session's folder without asking, and asks before a shell command its allowlist does not name, as it does in a terminal.
@@ -51,10 +53,17 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Security
 
+- **The key that lets an agent use the messaging tools is no longer on a command line.** Claude Code was handed it in its arguments, where any other account on the same computer could read it and send messages as that conversation. It now travels in the agent's own environment, which only you can read; the other agents never had it on a command line. A key also stops working the moment its agent's process ends.
+- **A message from another agent can no longer pass as Claude Code's or Codex's own text.** More of the tags those harnesses write are neutralised inside a message, and what another machine says when it refuses a message is checked, shortened and shown only as a quotation.
 - **Continuous deployment no longer trusts the deploy host's key on first use.** `deploy/ci-deploy.sh` pins the new `DEPLOY_KNOWN_HOSTS` secret with `StrictHostKeyChecking=yes` and refuses to deploy without it. Add the secret before the next dispatch: the host's keys as `ssh-keyscan -H <DEPLOY_HOST>` prints them, checked against the host's own fingerprints.
 
 ### Fixed
 
+- **A message between machines is delivered once, even across a restart.** A retry that reached a machine after it restarted could be delivered a second time; delivered messages are now remembered on disk for a day. A message a shutdown cut off is held and retried rather than reported as ended.
+- **A bare name never reaches the wrong session.** When one of your machines did not answer, `send_message` to a nickname shared with a session on it went to the one here; it now asks for the full address. A session on a newer machine whose state this one does not know is still listed.
+- **Cursor never approves a plan by itself.** An unreadable plan request, or one that arrived while a conversation was being reopened, was answered in a way Cursor reads as approval; it is now declined.
+- **Switching agent messaging off also stops a message that was being handed to a busy agent at that moment**, a stopped conversation can no longer send messages, and a plugin answering a question no longer counts as you.
+- **Removing a saved agent key asks first**, since it restarts the machine's open chats. The nickname field on New session is a proper form field, and a routing key is overridden on its own screen.
 - **The app no longer says "local is unreachable" for its first quarter-minute.** On every launch it asked for this computer's daemon before the daemon had finished starting, and then waited fifteen seconds to ask again. It now says *Connecting…* while the daemon starts and reaches it the moment it answers.
 - **Saving a file an agent names works again in the desktop app, and on Android for the first time, and a failed save says why.** The file was handed to the app's save panel in a form that one of the app's two internal channels drops, and a page switches to that channel for good after a single hiccup — on Android it is the only one. The press spun briefly and saved nothing, with no message. On Android the save panel also returned a location the app could not write to. A failed save now shows why on every platform, and a file an agent names relative to the folder it made it in — `slides.html` for `presentation/slides.html` — is offered for download too.
 - **Choosing a model on a Cursor session that had gone to sleep shows that model's effort at once.** The choice used to be kept for the next message, so the effort control stayed empty until then; it now wakes the session, and a level chosen for the previous model is no longer carried over to the new one.

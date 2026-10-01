@@ -3,7 +3,7 @@ import { useId, type ReactNode } from "react";
 /** A field's name on a form: sentence case, so it is never mistaken for a group heading (owner's call, 2026-09-28). */
 export const FIELD_LABEL = "text-xs font-medium text-fg";
 
-/** Pick several: a native box in the palette's ink, since WebKit otherwise paints its own blue into a monochrome app. */
+/** Pick several: a native box in the brand accent, since WebKit otherwise paints its own blue. */
 export const CHECKBOX = "size-4 shrink-0 accent-brand";
 
 /**

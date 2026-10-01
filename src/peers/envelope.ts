@@ -11,8 +11,27 @@ export const MAX_PEER_ADDRESS_CHARS = 256;
 const PEER_NAME = /^[\p{L}\p{N}:-]+$/u;
 
 // Tags a harness or this daemon writes itself; a peer's copy of one is defused so it reads as text.
-const IMITATED_TAG =
-  /<(\/?)(peer-message|peer-notice|session-mentions|system-reminder|system|cross-session-message|teammate-message|user|assistant)\b/gi;
+const IMITATED_TAGS = [
+  "peer-message",
+  "peer-notice",
+  "session-mentions",
+  "system-reminder",
+  "system",
+  "cross-session-message",
+  "teammate-message",
+  "user",
+  "assistant",
+  "command-name",
+  "command-message",
+  "command-args",
+  "local-command-stdout",
+  "local-command-caveat",
+  "task-notification",
+  // `\b` falls between `user` and `-` but not `_`, so `user` alone does not cover this one.
+  "user_instructions",
+  "environment_context",
+];
+const IMITATED_TAG = new RegExp(`<(\\/?)(${IMITATED_TAGS.join("|")})\\b`, "gi");
 const ROLE_LINE = /^([ \t]*)(Human|Assistant|System):/gim;
 
 export function defuse(body: string): string {
@@ -62,7 +81,12 @@ export function peerMessage(from: PeerOrigin, body: string, replyable: boolean):
   return `${head("peer-message", from)}\n${defuse(body)}\n</peer-message>\n${footer}`;
 }
 
-export function peerNotice(from: PeerOrigin, what: "idle" | "ended" | "undelivered", detail = ""): string {
+/** A string `detail` is this daemon's own reason; `answered` is another machine's refusal, only ever quoted. */
+export function peerNotice(
+  from: PeerOrigin,
+  what: "idle" | "ended" | "undelivered",
+  detail: string | { answered: string } = "",
+): string {
   let sentence: string;
   switch (what) {
     case "idle":
@@ -72,7 +96,9 @@ export function peerNotice(from: PeerOrigin, what: "idle" | "ended" | "undeliver
       sentence = `${attribute(from.name)}'s session ended without writing back to you.`;
       break;
     case "undelivered":
-      sentence = `Your message to ${attribute(address(from.name, from.ref))} was never delivered: ${defuse(detail)}`;
+      sentence =
+        `Your message to ${attribute(address(from.name, from.ref))} was never delivered: ` +
+        (typeof detail === "string" ? defuse(detail) : `its machine answered "${attribute(detail.answered)}"`);
       break;
   }
   return `${head("peer-notice", from)}${sentence}</peer-notice>`;

@@ -240,6 +240,8 @@ process.stdout.write("\ncursor's own requests, through the real client\n");
   const rigs: Rig[] = [];
   /** Handed to the next process spawned: a load replays what the conversation held. */
   const nextReplay: Record<string, unknown>[] = [];
+  /** Run by the next session/load before it answers, while nothing is registered on that process yet. */
+  let beforeLoadAnswers: ((rig: Rig) => Promise<void>) | null = null;
 
   const spawnCursor = (): AgentProcess => {
     const toAgent = new PassThrough();
@@ -301,10 +303,18 @@ process.stdout.write("\ncursor's own requests, through the real client\n");
             rig.opened.push({ method: message["method"], params: message["params"] });
             const sessionId = message["method"] === acp.methods.agent.session.new ? "cursor_s" : message["params"].sessionId;
             if (message["method"] === acp.methods.agent.session.load) for (const update of rig.replay) rig.update(sessionId, update);
-            send({ jsonrpc: "2.0", id, result: message["method"] === acp.methods.agent.session.new ? { sessionId, ...opened } : opened });
-            // A different list after a load, so a check on it cannot pass on what the previous process left.
-            const name = message["method"] === acp.methods.agent.session.load ? "after-load" : "copy-request-id";
-            setTimeout(() => rig.update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: [{ name, description: "Copy the last request ID" }] }), 0);
+            const answer = (): void => {
+              send({ jsonrpc: "2.0", id, result: message["method"] === acp.methods.agent.session.new ? { sessionId, ...opened } : opened });
+              // A different list after a load, so a check on it cannot pass on what the previous process left.
+              const name = message["method"] === acp.methods.agent.session.load ? "after-load" : "copy-request-id";
+              setTimeout(() => rig.update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: [{ name, description: "Copy the last request ID" }] }), 0);
+            };
+            const hold = message["method"] === acp.methods.agent.session.load ? beforeLoadAnswers : null;
+            if (hold === null) answer();
+            else {
+              beforeLoadAnswers = null;
+              void hold(rig).then(answer);
+            }
             break;
           }
           case acp.methods.agent.session.prompt:
@@ -390,6 +400,16 @@ process.stdout.write("\ncursor's own requests, through the real client\n");
   await settle();
   await post(`/sessions/${managed.id}/permissions/${managed.snapshot().pendingPermissions[0]?.permissionId}`, { optionId: "rejected" });
   check("and rejecting it is rejected, never an error, which cursor would read as acceptance", (await rejected).result, { outcome: { outcome: "rejected" } });
+  const answered = (answer: { result?: any; error?: any }) => [answer.error?.code ?? null, answer.result ?? null];
+  const REJECTED = [null, { outcome: { outcome: "rejected" } }];
+  check(
+    "a plan with no toolCallId is cursor's rejected and never an error, since any error here makes cursor write the plan itself",
+    answered(await rig.ask("cursor/create_plan", { plan: PLAN.plan })),
+    REJECTED,
+  );
+  check("so is one whose plan is not a string", answered(await rig.ask("cursor/create_plan", { ...PLAN, toolCallId: "toolu_plan_3", plan: 42 })), REJECTED);
+  check("and one whose toolCallId is too long to tie to a card", answered(await rig.ask("cursor/create_plan", { ...PLAN, toolCallId: "x".repeat(257) })), REJECTED);
+  check("with nothing parked for any of them", managed.snapshot().pendingPermissions.length, 0);
 
   const plansBefore = log().filter((event) => event.type === "plan").length;
   check("a todo update is answered at once, since cursor holds it open", (await rig.ask("cursor/update_todos", TODOS)).result, {});
@@ -450,10 +470,19 @@ process.stdout.write("\ncursor's own requests, through the real client\n");
     { sessionUpdate: "tool_call", toolCallId: "replay-0-0", title: "Read README.md", kind: "read", status: "pending" },
     { sessionUpdate: "tool_call_update", toolCallId: "replay-0-0", status: "completed" },
   );
+  const duringLoad: { answer: { result?: any; error?: any } | null } = { answer: null };
+  beforeLoadAnswers = async (loading) => {
+    duringLoad.answer = await loading.ask("cursor/create_plan", { ...PLAN, toolCallId: "toolu_plan_load" });
+  };
   await managed.resume();
   nextReplay.length = 0;
   await settle();
   const loadRig = rigs.at(-1)!;
+  check(
+    "a plan asked while a load is still replaying, with no session registered to ask, is cursor's cancelled and never an error",
+    duringLoad.answer === null ? "unanswered" : answered(duringLoad.answer),
+    [null, { outcome: { outcome: "cancelled" } }],
+  );
   check("a session comes back through session/load, cursor having no resume", loadRig.opened.map((one) => [one.method, one.params.sessionId]), [["session/load", "cursor_s"]]);
   check(
     "and nothing the load replayed is written a second time",

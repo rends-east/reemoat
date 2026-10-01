@@ -437,7 +437,6 @@ function SidebarHeader({
   );
 }
 
-// `inset-x-4` must equal the tab's `px-4`; `-bottom-px` puts the mark on the bar's hairline.
 /** The selected tab's own pill is this span's ground, so it rides a scroll, a reorder or a resize with its tab (Q3.656). */
 function TabLabel({ tab }: { tab: MachineTab }): ReactNode {
   return (

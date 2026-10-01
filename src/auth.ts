@@ -225,9 +225,9 @@ export class SignedTokenVerifier implements TokenVerifier {
         deviceId: claims.dev ?? null,
         via: "signed",
         link:
-          claims.lnk === undefined || claims.src === undefined
+          claims.lnk === undefined || claims.src === undefined || claims.srcl === undefined
             ? null
-            : { id: claims.lnk, sourceMachineId: claims.src, sourceLabel: claims.srcl ?? claims.src },
+            : { id: claims.lnk, sourceMachineId: claims.src, sourceLabel: claims.srcl },
       },
     };
   }

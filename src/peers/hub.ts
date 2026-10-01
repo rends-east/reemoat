@@ -2,8 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { PeerOrigin, PeerPolicyKey, PromptMention } from "../events.js";
-import type { ManagedSession, MentionNote, MidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
-import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore } from "../store/sqlite.js";
+import type { ManagedSession, MentionNote, PeerMidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
+import type { McpLaunch } from "../session.js";
+import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore, SqlitePeerSeenStore } from "../store/sqlite.js";
 import { ASK_WAIT_MS, parseAskArguments, type PoseResult } from "./ask.js";
 import type { PeerAnswer } from "./channel.js";
 import {
@@ -47,6 +48,10 @@ const HELD_REFUSALS: ReadonlySet<PeerRefusal> = new Set(["offline", "rate_limite
 export const REMOTE_LIST_TIMEOUT_MS = 3_000;
 const REMOTE_LIST_CONCURRENCY = 8;
 const MAX_REMOTE_REF_CHARS = 64;
+/** Another machine's words for a refusal, as its sender is shown them and as a notice quotes them. */
+export const MAX_REMOTE_REFUSAL_CHARS = 300;
+/** A failure code a relay or another daemon names, inside a sentence of this daemon's. */
+const MAX_REMOTE_CODE_CHARS = 64;
 // A session id: no slash, so a row cannot name a machine, and nothing that can close a quote or a tag.
 const REMOTE_REF = /^[\w-]+$/;
 const MAX_ECHOED_ADDRESS_CHARS = 64;
@@ -92,28 +97,34 @@ export interface MentionListing {
 
 export type PeerDelivery = "started_turn" | "injected" | "queued" | "pending";
 
-export type PeerRefusal =
-  | "messaging_off"
-  | "unknown_caller"
-  | "bad_request"
-  | "too_large"
-  | "unknown_recipient"
-  | "ambiguous_recipient"
-  | "self"
-  | "hops_exceeded"
-  | "rate_limited"
-  | "duplicate"
-  | "recipient_paused"
-  | "queue_full"
-  | "busy"
-  | "starting"
-  | "ended"
-  | "workspace_missing"
-  | "offline"
-  | "peer_too_old"
-  | "link_refused"
-  | "conversation_messaging_off"
-  | "messaging_isolated";
+const PEER_REFUSALS = [
+  "messaging_off",
+  "unknown_caller",
+  "bad_request",
+  "too_large",
+  "unknown_recipient",
+  "ambiguous_recipient",
+  "self",
+  "hops_exceeded",
+  "rate_limited",
+  "duplicate",
+  "recipient_paused",
+  "queue_full",
+  "busy",
+  "starting",
+  "ended",
+  "workspace_missing",
+  "offline",
+  "peer_too_old",
+  "link_refused",
+  "conversation_messaging_off",
+  "messaging_isolated",
+] as const;
+
+export type PeerRefusal = (typeof PEER_REFUSALS)[number];
+
+/** What a linked machine's refusal may say it is; any other code reads as link_refused. */
+const KNOWN_REFUSALS: ReadonlySet<string> = new Set(PEER_REFUSALS);
 
 export type SendResult =
   | { ok: true; id: string; delivery: PeerDelivery; position: number | null; to: string; notify: boolean }
@@ -168,7 +179,12 @@ type Resolved =
   | { ok: true; kind: "remote"; link: PeerLink; sessionId: string; name: string }
   | { ok: false; code: PeerRefusal; message: string };
 
+/** A linked machine's listing, or why there is none; `unchecked` when nobody can say which sessions it holds. */
+type RemoteListing = PeerRow[] | { reason: string; unchecked: boolean };
+
 export type PeerOutbox = Pick<SqlitePeerOutboxStore, "add" | "due" | "retry" | "remove" | "count" | "countFor" | "take">;
+
+export type PeerSeen = Pick<SqlitePeerSeenStore, "has" | "add" | "forgetUpTo">;
 
 /** What the owner's Authority last said about this machine, as its app delivered it; `at` orders two deliveries (Q1.654). */
 export interface PeerPolicy {
@@ -201,6 +217,8 @@ export interface PeerHubOptions {
   machineId?: string | null;
   network?: PeerNetwork | null;
   outbox?: PeerOutbox | null;
+  /** Message ids delivered from another machine; absent, they are kept in memory and a restart forgets them. */
+  seen?: PeerSeen | null;
   policy?: PeerPolicyStore | null;
   now?: () => number;
   onWarning?: (detail: string) => void;
@@ -224,16 +242,16 @@ export class PeerHub {
   private readonly warn: ((detail: string) => void) | null;
   private readonly askWaitMs: number;
   private endpoint: string | null = null;
-  // Minted at every launch: an older process's bearer stops naming the session the moment a new one is handed out.
+  // One per launch: a bearer stops naming the session when its process ends or a new one is handed out.
   private readonly tokenBySession = new Map<string, string>();
   private readonly sessionByToken = new Map<string, string>();
   private readonly buckets = new Map<string, { tokens: number; at: number }>();
   private readonly recent = new Map<string, number>();
-  private readonly seenMessageIds = new Map<string, number>();
+  private readonly seen: PeerSeen;
   private readonly receiving = new Map<string, Promise<SendResult>>();
   private readonly pausedNoted = new Set<string>();
   private readonly subscriptions = new Set<Subscription>();
-  private readonly remoteLists = new Map<string, { at: number; answer: Promise<PeerRow[] | string> }>();
+  private readonly remoteLists = new Map<string, { at: number; answer: Promise<RemoteListing> }>();
   // Each link's last listing that succeeded, keyed by link id: what a mention resolves against, so a prompt never waits on a machine.
   private readonly remoteSettled = new Map<string, PeerRow[]>();
   // Notices this machine asked another for; anything else a link sends as a notice is refused.
@@ -245,6 +263,7 @@ export class PeerHub {
     this.network = options.network ?? null;
     this.machineId = options.machineId ?? null;
     this.outbox = options.outbox ?? null;
+    this.seen = options.seen ?? memorySeen();
     this.policyStore = options.policy ?? null;
     this.policy = storedPolicy(this.policyStore?.readPolicy(POLICY_KEY) ?? null);
     this.now = options.now ?? Date.now;
@@ -319,29 +338,39 @@ export class PeerHub {
     this.endpoint = url;
   }
 
-  /** Asked at every launch, so the process being replaced loses its bearer even when the new one gets none. */
-  mcpServersFor(sessionId: string, capabilities: acp.McpCapabilities): acp.McpServer[] {
+  /** Asked at every launch, so the process being replaced loses its bearer even when the new one gets none. Without `launch` the header is literal and outlives its process. */
+  mcpServersFor(sessionId: string, capabilities: acp.McpCapabilities, launch: McpLaunch | null = null): acp.McpServer[] {
     const previous = this.tokenBySession.get(sessionId);
-    if (previous !== undefined) {
-      this.sessionByToken.delete(previous);
-      this.tokenBySession.delete(sessionId);
-    }
+    if (previous !== undefined) this.retireBearer(sessionId, previous);
     if (this.endpoint === null || capabilities.http !== true) return [];
     const session = this.registry.get(sessionId);
     const messaging = this.allowed && session?.peerMessages !== false;
     // Also served with messaging off: ask_question is a question to its own person, which no messaging switch is about (Q2.250).
     if (!messaging && session?.takesPosedQuestions !== true) return [];
-    const token = randomBytes(32).toString("base64url");
+    const bearer = launch?.bearer ?? null;
+    const token = bearer?.token ?? randomBytes(32).toString("base64url");
     this.tokenBySession.set(sessionId, token);
     this.sessionByToken.set(token, sessionId);
+    // A person's Stop, a park or a crash ends the process, and whoever kept its bearer stops naming the session.
+    void launch?.gone.then(
+      () => this.retireBearer(sessionId, token),
+      () => this.retireBearer(sessionId, token),
+    );
     return [
       {
         type: "http",
         name: PEER_SERVER_NAME,
         url: this.endpoint,
-        headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+        // claude's adapter puts headers on its CLI's argv, and the CLI expands this from its own environment (Q2.236).
+        headers: [{ name: "Authorization", value: bearer === null ? `Bearer ${token}` : `Bearer \${${bearer.env}}` }],
       },
     ];
+  }
+
+  /** By token, never by session alone: a late exit must not retire the bearer of the launch that replaced it. */
+  private retireBearer(sessionId: string, token: string): void {
+    this.sessionByToken.delete(token);
+    if (this.tokenBySession.get(sessionId) === token) this.tokenBySession.delete(sessionId);
   }
 
   /** Which session a bearer names; this is hygiene, not a fence, since every agent here runs as the same user. */
@@ -396,8 +425,8 @@ export class PeerHub {
     const unreachable: PeerListing["unreachable"] = [];
     const listings = await this.remoteListings();
     for (const [link, rows] of listings) {
-      if (typeof rows === "string") unreachable.push({ machine: link.targetName, reason: rows });
-      else agents.push(...rows);
+      if (Array.isArray(rows)) agents.push(...rows);
+      else unreachable.push({ machine: link.targetName, reason: rows.reason });
     }
     const self = agents.find((row) => row.self) ?? null;
     // A session hands its own address to agents elsewhere, and the short one names nothing on their machine.
@@ -508,13 +537,13 @@ export class PeerHub {
     if (wait > 0) return refuse("rate_limited", `that machine is taking messages too fast; wait ${Math.ceil(wait / 1000)}s`);
     const at = this.now();
     this.forgetStale(at);
-    // Keyed on the machine, not the link: a Replace between two tries mints a new link id for the same sender.
+    // Keyed on the machine, not the link: links re-minted between two tries (a switch off and on) give the same sender a new id.
+    if (this.seen.has(link.sourceMachineId, message.id)) return refuse("duplicate", "that message was already delivered");
     const seen = `${link.sourceMachineId}\0${message.id}`;
-    if (this.seenMessageIds.has(seen)) return refuse("duplicate", "that message was already delivered");
     // A retry landing while the first try is still being delivered gets that try's answer, never a second delivery (Q2.240).
     const inFlight = this.receiving.get(seen);
     if (inFlight !== undefined) return await inFlight;
-    const delivery = this.deliverReceived(link, message, seen, at);
+    const delivery = this.deliverReceived(link, message, at);
     this.receiving.set(seen, delivery);
     try {
       return await delivery;
@@ -523,7 +552,7 @@ export class PeerHub {
     }
   }
 
-  private async deliverReceived(link: IncomingLink, message: RemoteMessage, seen: string, at: number): Promise<SendResult> {
+  private async deliverReceived(link: IncomingLink, message: RemoteMessage, at: number): Promise<SendResult> {
     const target = this.registry.get(message.to);
     if (target === undefined) return refuse("unknown_recipient", "no such session on that machine");
     if (!target.peerMessages) return refuse("conversation_messaging_off", RECIPIENT_MESSAGING_OFF);
@@ -545,7 +574,12 @@ export class PeerHub {
       message.notify && back !== null ? { kind: "remote", machineId: link.sourceMachineId, sessionRef: message.from.ref } : null;
     const result = await this.deliverLocal(target, from, message.message, back !== null, subscriber, null);
     if (!result.ok) return result;
-    this.seenMessageIds.set(seen, at);
+    try {
+      this.seen.add(link.sourceMachineId, message.id, at);
+    } catch (error) {
+      // Already delivered: answering an error would have its sender report a message that arrived as one that did not.
+      this.warn?.(`a delivered message id was not recorded: ${String(error)}`);
+    }
     // Its sender answered: the notice this machine was waiting on for that pair is no longer coming.
     this.expectedNotices.delete(expectationKey(link.sourceMachineId, message.from.ref, target.id));
     return result;
@@ -556,6 +590,8 @@ export class PeerHub {
     if (!this.reachesOthers) return false;
     const notice = remoteNoticeOf(body);
     if (notice === null) return false;
+    // As receive bounds a message: the value lands in peerDepth, and one past the bound would stop its subscriber sending.
+    if (notice.from.hops > MAX_PEER_HOPS) return false;
     const expected = expectationKey(link.sourceMachineId, notice.from.ref, notice.subscriber);
     const until = this.expectedNotices.get(expected);
     if (until === undefined || until < this.now()) return false;
@@ -637,11 +673,15 @@ export class PeerHub {
       }
       this.outbox.remove(entry.id);
       this.expectedNotices.delete(expected);
-      this.undelivered(entry, result.code === "offline" ? "its machine stayed unreachable for 24 hours" : result.message);
+      const said = remoteRefusalOf(answer)?.said ?? null;
+      this.undelivered(
+        entry,
+        result.code === "offline" ? "its machine stayed unreachable for 24 hours" : said === null ? result.message : { answered: said },
+      );
     }
   }
 
-  private undelivered(entry: OutboxEntry, reason: string): void {
+  private undelivered(entry: OutboxEntry, reason: string | { answered: string }): void {
     const parsed = parseAddress(entry.targetName);
     const from: PeerOrigin = {
       kind: "notice",
@@ -757,30 +797,23 @@ export class PeerHub {
   private remoteResult(link: PeerLink, answer: PeerAnswer, to: string): SendResult {
     // No link records its failures: nothing reads them since the links screen went (Q3.676).
     const offline = (why: string): SendResult =>
-      refuse("offline", `${link.targetName} is not reachable right now (${why}); try again later`);
+      refuse("offline", `${link.targetName} is not reachable right now (${theirWords(why, MAX_REMOTE_CODE_CHARS)}); try again later`);
     if (!answer.ok) {
       if (UNREACHABLE_STATUSES.has(answer.status) || UNREACHABLE_CODES.has(answer.code)) return offline(answer.code);
       if (answer.status === 429) return refuse("rate_limited", `${link.targetName}'s relay is refusing messages this fast; wait and retry`);
-      return refuse(
-        "link_refused",
-        `${link.targetName} refused this machine's link (${answer.code}); its owner's app renews links when it next opens`,
-      );
+      const code = theirWords(answer.code, MAX_REMOTE_CODE_CHARS);
+      return refuse("link_refused", `${link.targetName} refused this machine's link (${code}); its owner's app renews links when it next opens`);
     }
     if (answer.status === 404) {
       return refuse("peer_too_old", `${link.targetName}'s daemon is too old to take messages from agents; it needs updating`);
     }
     // Its daemon's own 503 (shutting_down, peers_unavailable) is a machine going away, not a refusal of the link.
     if (answer.status === 503) return offline(envelopeCode(answer.body) ?? "503");
+    const refused = remoteRefusalOf(answer);
+    if (refused !== null) return refuse(refused.code, refused.said ?? `${link.targetName} refused it`);
     const body = answer.body as Partial<SendResult> | null;
     if (answer.status !== 200 || body === null || typeof body !== "object" || typeof body.ok !== "boolean") {
       return refuse("link_refused", `${link.targetName} answered ${answer.status}`);
-    }
-    if (!body.ok) {
-      const refusal = body as { code?: unknown; message?: unknown };
-      return refuse(
-        typeof refusal.code === "string" ? (refusal.code as PeerRefusal) : "link_refused",
-        typeof refusal.message === "string" ? refusal.message : `${link.targetName} refused it`,
-      );
     }
     const accepted = body as { id?: unknown; delivery?: unknown; position?: unknown; notify?: unknown };
     const delivery = accepted.delivery;
@@ -822,21 +855,32 @@ export class PeerHub {
     // What list_agents shows the caller, and nothing else.
     const localMatches = this.localRows(callerId).filter((row) => !row.self && row.name.toLowerCase() === wanted);
     const remoteMatches: PeerRow[] = [];
+    // Machines whose sessions nobody could list: a bare name is never settled by elimination while one is missing.
+    const unchecked: string[] = [];
     // A bare name must be one session's across every machine list_agents shows, so it waits on their listings.
     if (this.network !== null) {
-      for (const [, rows] of await this.remoteListings()) {
-        if (typeof rows !== "string") remoteMatches.push(...rows.filter((row) => row.name.toLowerCase() === wanted));
+      for (const [link, rows] of await this.remoteListings()) {
+        if (Array.isArray(rows)) remoteMatches.push(...rows.filter((row) => row.name.toLowerCase() === wanted));
+        else if (rows.unchecked) unchecked.push(link.targetName);
       }
     }
     const total = localMatches.length + remoteMatches.length;
     if (total === 0) {
       const caller = this.registry.get(callerId);
       if (caller !== undefined && this.nameOf(caller).toLowerCase() === wanted) return refuse("self", "that is this session");
-      return this.unknownRecipient(callerId, to);
+      return this.unknownRecipient(callerId, to, unchecked);
     }
     if (total > 1) {
       const candidates = [...localMatches, ...remoteMatches].map((row) => row.address);
       return refuse("ambiguous_recipient", `more than one session is called that; use one of: ${candidates.join(", ")}`);
+    }
+    if (unchecked.length > 0) {
+      const found = (localMatches[0] ?? remoteMatches[0])!.address;
+      return refuse(
+        "ambiguous_recipient",
+        `${unchecked.join(", ")} did not answer, so a session there may also be called ${echoed(to)}; ` +
+          `use a full address instead, name [ref]: ${found} is the one that answered`,
+      );
     }
     if (remoteMatches.length === 1) {
       if (!this.reachesOthers) return refuse("messaging_isolated", MACHINE_ISOLATED);
@@ -865,11 +909,18 @@ export class PeerHub {
     return { ok: true, kind: "local", target };
   }
 
-  private unknownRecipient(callerId: string, to: string): Resolved {
+  private unknownRecipient(callerId: string, to: string, unchecked: readonly string[] = []): Resolved {
+    const asked = echoed(to);
+    if (unchecked.length > 0) {
+      return refuse(
+        "unknown_recipient",
+        `no session that answered is called ${asked}; ${unchecked.join(", ")} did not answer, so its sessions could not be checked: ` +
+          "reach one there by its full address, name [ref], as list_agents or its own message gave it",
+      );
+    }
     const names = this.localRows(callerId)
       .filter((row) => !row.self)
       .map((row) => row.address);
-    const asked = JSON.stringify(to.length > MAX_ECHOED_ADDRESS_CHARS ? `${to.slice(0, MAX_ECHOED_ADDRESS_CHARS)}…` : to);
     return refuse(
       "unknown_recipient",
       names.length === 0
@@ -884,12 +935,12 @@ export class PeerHub {
     return this.network.links().find((link) => link.targetMachineId === machineId && link.expiresAt > at) ?? null;
   }
 
-  private async remoteListings(): Promise<[PeerLink, PeerRow[] | string][]> {
+  private async remoteListings(): Promise<[PeerLink, RemoteListing][]> {
     if (this.network === null || !this.reachesOthers) return [];
     const at = this.now();
     const links = this.network.links().filter((link) => link.expiresAt > at);
     for (const id of this.remoteSettled.keys()) if (!links.some((link) => link.id === id)) this.remoteSettled.delete(id);
-    const out: [PeerLink, PeerRow[] | string][] = [];
+    const out: [PeerLink, RemoteListing][] = [];
     for (let i = 0; i < links.length; i += REMOTE_LIST_CONCURRENCY) {
       const batch = links.slice(i, i + REMOTE_LIST_CONCURRENCY);
       const answers = await Promise.all(batch.map((link) => this.remoteRows(link)));
@@ -899,18 +950,21 @@ export class PeerHub {
   }
 
   /** Cached briefly: one list_agents fans out to every linked machine, and a name lookup reads the same answer. */
-  private remoteRows(link: PeerLink): Promise<PeerRow[] | string> {
+  private remoteRows(link: PeerLink): Promise<RemoteListing> {
     const at = this.now();
     const cached = this.remoteLists.get(link.id);
     if (cached !== undefined && at - cached.at < REMOTE_LIST_TTL_MS) return cached.answer;
+    // These three answered for every session there: none of them takes a message, so none can be the one a bare name means.
+    const nobodyThere = (reason: string): RemoteListing => ({ reason, unchecked: false });
+    const unknown = (reason: string): RemoteListing => ({ reason, unchecked: true });
     const answer = this.network!.request(link, { method: "GET", path: "/peer/agents" }, REMOTE_LIST_TIMEOUT_MS).then(
-      (reply): PeerRow[] | string => {
-        if (!reply.ok) return reply.status === 503 ? "offline" : reply.code;
-        if (reply.status === 404) return "its daemon is too old for messages from agents";
-        if (reply.status === 403 && errorCodeOf(reply.body) === "messaging_off") return "agent messaging is off there";
-        if (reply.status === 403 && errorCodeOf(reply.body) === "messaging_isolated") return "its sessions are isolated";
+      (reply): RemoteListing => {
+        if (!reply.ok) return unknown(reply.status === 503 ? "offline" : reply.code);
+        if (reply.status === 404) return nobodyThere("its daemon is too old for messages from agents");
+        if (reply.status === 403 && envelopeCode(reply.body) === "messaging_off") return nobodyThere("agent messaging is off there");
+        if (reply.status === 403 && envelopeCode(reply.body) === "messaging_isolated") return nobodyThere("its sessions are isolated");
         const rows = (reply.body as { agents?: unknown } | null)?.agents;
-        if (reply.status !== 200 || !Array.isArray(rows)) return `answered ${reply.status}`;
+        if (reply.status !== 200 || !Array.isArray(rows)) return unknown(`answered ${reply.status}`);
         return rows.flatMap((row) => {
           const remote = remoteRowOf(row);
           if (remote === null) return [];
@@ -920,8 +974,8 @@ export class PeerHub {
       },
     ).then((rows) => {
       // A failed listing forgets the last good one, as list_agents does.
-      if (typeof rows === "string") this.remoteSettled.delete(link.id);
-      else this.remoteSettled.set(link.id, rows);
+      if (Array.isArray(rows)) this.remoteSettled.set(link.id, rows);
+      else this.remoteSettled.delete(link.id);
       return rows;
     });
     this.remoteLists.set(link.id, { at, answer });
@@ -951,6 +1005,8 @@ export class PeerHub {
   private senderRefusal(sender: ManagedSession): SendResult | null {
     if (!this.allowed) return refuse("messaging_off", MACHINE_MESSAGING_OFF);
     if (!sender.peerMessages) return refuse("messaging_off", CONVERSATION_MESSAGING_OFF);
+    // What another agent may not wake may not send either: a person's Stop covers whoever still holds its bearer (Q2.239).
+    if (this.peerStatus(sender) === null) return refuse("ended", "this session has ended or was stopped by its person");
     return null;
   }
 
@@ -1014,9 +1070,7 @@ export class PeerHub {
     for (const [key, sentAt] of this.recent) {
       if (at - sentAt >= PEER_DUPLICATE_WINDOW_MS) this.recent.delete(key);
     }
-    for (const [key, seenAt] of this.seenMessageIds) {
-      if (at - seenAt >= PEER_MESSAGE_ID_WINDOW_MS) this.seenMessageIds.delete(key);
-    }
+    this.seen.forgetUpTo(at - PEER_MESSAGE_ID_WINDOW_MS);
     for (const [key, until] of this.expectedNotices) {
       if (until < at) this.expectedNotices.delete(key);
     }
@@ -1129,6 +1183,18 @@ export class PeerHub {
   }
 }
 
+function memorySeen(): PeerSeen {
+  const seenAt = new Map<string, number>();
+  const key = (machineId: string, messageId: string): string => `${machineId}\0${messageId}`;
+  return {
+    has: (machineId, messageId) => seenAt.has(key(machineId, messageId)),
+    add: (machineId, messageId, at) => void seenAt.set(key(machineId, messageId), at),
+    forgetUpTo: (at) => {
+      for (const [one, when] of seenAt) if (when <= at) seenAt.delete(one);
+    },
+  };
+}
+
 function refuse(code: PeerRefusal, message: string): { ok: false; code: PeerRefusal; message: string } {
   return { ok: false, code, message };
 }
@@ -1158,11 +1224,6 @@ function storedPolicy(raw: string | null): PeerPolicy {
   return unset;
 }
 
-function errorCodeOf(body: unknown): string | null {
-  const error = (body as { error?: { code?: unknown } } | null)?.error;
-  return typeof error?.code === "string" ? error.code : null;
-}
-
 function invalidMessage(message: string): { ok: false; code: PeerRefusal; message: string } | null {
   if (message.trim().length === 0) return refuse("bad_request", "message is empty");
   if (message.length > MAX_PEER_MESSAGE_CHARS) {
@@ -1180,6 +1241,28 @@ function outboxBackoff(attempt: number): number {
 
 function expectationKey(machineId: string, targetRef: string, subscriberRef: string): string {
   return `${machineId}\0${targetRef}\0${subscriberRef}`;
+}
+
+/** An address as the agent wrote it, quoted back clipped. */
+function echoed(to: string): string {
+  return JSON.stringify(to.length > MAX_ECHOED_ADDRESS_CHARS ? `${to.slice(0, MAX_ECHOED_ADDRESS_CHARS)}…` : to);
+}
+
+/** Another machine's words inside this daemon's own: one line, and short. */
+function theirWords(value: string, max: number): string {
+  const line = value.replace(/[\u0000-\u001f\u007f]/g, " ");
+  return line.length <= max ? line : `${line.slice(0, max)}…`;
+}
+
+/** A refusal a linked machine's daemon wrote, re-read: only a code this daemon has, and its words as one short line. */
+function remoteRefusalOf(answer: PeerAnswer): { code: PeerRefusal; said: string | null } | null {
+  if (!answer.ok || answer.status !== 200 || typeof answer.body !== "object" || answer.body === null) return null;
+  const body = answer.body as { ok?: unknown; code?: unknown; message?: unknown };
+  if (body.ok !== false) return null;
+  return {
+    code: typeof body.code === "string" && KNOWN_REFUSALS.has(body.code) ? (body.code as PeerRefusal) : "link_refused",
+    said: typeof body.message === "string" && body.message.trim().length > 0 ? theirWords(body.message, MAX_REMOTE_REFUSAL_CHARS) : null,
+  };
 }
 
 function envelopeCode(body: unknown): string | null {
@@ -1259,12 +1342,11 @@ function remoteRowOf(value: unknown): Omit<PeerRow, "address" | "machine" | "sel
   const row = value as Record<string, unknown>;
   const title = row["title"];
   const folder = row["folder"];
+  const status = row["status"];
   if (
     !nameString(row["name"]) ||
     !refString(row["ref"]) ||
     !shortString(row["harness"], MAX_PEER_HARNESS_CHARS) ||
-    typeof row["status"] !== "string" ||
-    !STATUSES.has(row["status"]) ||
     (title !== null && typeof title !== "string") ||
     typeof folder !== "string"
   ) {
@@ -1274,14 +1356,16 @@ function remoteRowOf(value: unknown): Omit<PeerRow, "address" | "machine" | "sel
     name: row["name"],
     ref: row["ref"],
     harness: row["harness"],
-    status: row["status"] as PeerStatus,
+    // Only ever drawn, so one this build has not heard of is shown as idle: dropping the row would hide a name a bare address must see.
+    status: typeof status === "string" && STATUSES.has(status) ? (status as PeerStatus) : "idle",
     title: title === null ? null : (title as string).slice(0, 200),
-    folder: folder.slice(0, 200),
+    // list_agents prints it bare on a line of its own, so a newline would write rows of its own.
+    folder: folder.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200),
   };
 }
 
 function deliveryOf(
-  result: MidTurnResult,
+  result: PeerMidTurnResult,
 ):
   | { ok: true; delivery: PeerDelivery; position: number | null }
   | { ok: false; code: PeerRefusal; describe: (to: string) => string } {
@@ -1304,5 +1388,9 @@ function deliveryOf(
       return { ok: false, code: "starting", describe: (to) => `${to} is still starting; try again shortly` };
     case "terminal":
       return { ok: false, code: "ended", describe: (to) => `${to} has ended` };
+    case "messaging_off":
+      return result.where === "machine"
+        ? { ok: false, code: "messaging_off", describe: (to) => `agent messaging was switched off before this reached ${to}` }
+        : { ok: false, code: "conversation_messaging_off", describe: () => RECIPIENT_MESSAGING_OFF };
   }
 }

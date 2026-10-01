@@ -15,7 +15,7 @@ import { RelayTunnel } from "../src/relay/tunnel.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
-import { SqlitePeerLinkStore, SqlitePeerOutboxStore, type StoredMachineKey } from "../src/store/sqlite.js";
+import { SqlitePeerLinkStore, SqlitePeerOutboxStore, SqlitePeerSeenStore, type StoredMachineKey } from "../src/store/sqlite.js";
 import { jwkThumbprint, signToken, x25519Jwk, type TokenClaims } from "../src/token.js";
 import { activeSigningKeys, issueTunnelKey, newApiKey, newId } from "../packages/control-plane/src/keys.js";
 import { setMachineKey } from "../packages/control-plane/src/machinekeys.js";
@@ -161,6 +161,7 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
     store.exec(readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8"));
     const links = new SqlitePeerLinkStore(store);
     const outbox = new SqlitePeerOutboxStore(store);
+    const seen = new SqlitePeerSeenStore(store);
     const sessions = new SessionRegistry(new MemoryEventStore(), null, undefined, new StubRuntime(), null);
     const hub = new PeerHub({
       registry: sessions,
@@ -168,6 +169,7 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
       machineId: id,
       network: createPeerNetwork(links, { active: () => stored }),
       outbox,
+      seen,
       now: () => clock,
     });
     const verifier = new SignedTokenVerifier({ identity: { machineId: id, issuer, keys: keys.map((one) => ({ kid: one.kid, jwk: one.jwk })) } });

@@ -1,12 +1,30 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { listDirs, makeDir, PathError, resolveCwd } from "../src/browse.js";
 import { atOrUnder, containedIn } from "../src/paths.js";
 import { isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, NICKNAMES } from "../src/nickname.js";
+import { PeerHub } from "../src/peers/hub.js";
 import { MAX_TITLE_CHARS } from "../src/registry.js";
+import { createApp } from "../src/server.js";
+import { SqlitePeerLinkStore } from "../src/store/sqlite.js";
 import { check, report } from "./daemoncheck.env.js";
-import { uAb, uAbcd, escape, aFile, tokenFor, app, get, registry } from "./daemoncheck.fixtures.js";
+import {
+  uAb,
+  uAbcd,
+  escape,
+  aFile,
+  tokenFor,
+  app,
+  get,
+  registry,
+  verifier,
+  credentials,
+  users,
+  now,
+  signedClaims,
+} from "./daemoncheck.fixtures.js";
 
 process.stdout.write("\ncontainment\n");
 
@@ -337,3 +355,50 @@ const adminDelete = await app.fetch(
   }),
 );
 check("machine:admin cannot reach an id that does not exist", adminDelete.status, 404);
+
+// session:message passes the scope gate by itself, so on a capability naming no link the route is what refuses (Q7.150).
+process.stdout.write("\na message capability that names no link\n");
+{
+  const linkDb = new DatabaseSync(":memory:");
+  linkDb.exec(readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8"));
+  const { app: peered } = createApp({
+    registry,
+    verifier,
+    instanceId: "i_peers_unlinked",
+    startedAt: now,
+    credentials,
+    roots: [users],
+    peers: { hub: new PeerHub({ registry, enabled: true }), links: new SqlitePeerLinkStore(linkDb) },
+  });
+  const answered = async (token: string): Promise<string[]> => {
+    const out: string[] = [];
+    for (const [method, path] of [
+      ["GET", "/peer/agents"],
+      ["POST", "/peer/messages"],
+      ["POST", "/peer/notices"],
+    ] as const) {
+      const response = await peered.fetch(
+        new Request(`http://d${path}`, {
+          method,
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          ...(method === "POST" ? { body: "{}" } : {}),
+        }),
+      );
+      const raw = await response.text();
+      const code = raw.length === 0 ? null : ((JSON.parse(raw) as { error?: { code?: string } }).error?.code ?? null);
+      out.push(`${method} ${path}: ${response.status}${code === null ? "" : ` ${code}`}`);
+    }
+    return out;
+  };
+  check(
+    "a session:message capability with no link is refused by every peer route, as not a link",
+    await answered(signedClaims({})),
+    ["GET /peer/agents: 403 not_a_link", "POST /peer/messages: 403 not_a_link", "POST /peer/notices: 403 not_a_link"],
+  );
+  // The control: a route refusing everybody would pass the check above.
+  check(
+    "while a whole link on the same app gets past it to each route's own answer",
+    await answered(signedClaims({ lnk: "lk_whole", src: "m_other", srcl: "studio" })),
+    ["GET /peer/agents: 200", "POST /peer/messages: 200", "POST /peer/notices: 409 unexpected_notice"],
+  );
+}

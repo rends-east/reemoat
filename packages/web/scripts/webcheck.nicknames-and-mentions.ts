@@ -535,7 +535,7 @@ process.stdout.write("\nwhere the `@` menu and the Nickname field are drawn\n");
   );
 
   const start = stripComments(srcFile("ui/NewSession.tsx"));
-  const labels = ["<FieldLabel>Agent</FieldLabel>", "<FieldLabel>Nickname</FieldLabel>", "<FieldLabel>Directory</FieldLabel>"].map((one) =>
+  const labels = ["<FieldLabel>Agent</FieldLabel>", '<Field label="Nickname"', "<FieldLabel>Directory</FieldLabel>"].map((one) =>
     start.indexOf(one),
   );
   check("New session asks for a nickname between the agent and the folder", labels.every((at, i) => at >= 0 && (i === 0 || at > (labels[i - 1] ?? 0))), true);
@@ -544,15 +544,55 @@ process.stdout.write("\nwhere the `@` menu and the Nickname field are drawn\n");
     "in a field that never rewrites a keystroke, with a dice beside it",
     [
       /\{\.\.\.VERBATIM_FIELD\}/.test(block),
-      /aria-label="Nickname"/.test(block),
       /autoCapitalize="off"/.test(block),
       /<Icon as=\{AtSign\} size=\{16\} className="text-muted" \/>\s*<input/.test(block),
       /className=\{`w-40 min-w-0 \$\{FIELD\}`\}/.test(block),
       /icon=\{Dices\}\s+label="Random nickname"\s+size="nav"/.test(block),
-      /text-danger/.test(block),
     ],
-    [true, true, true, true, true, true, true],
+    [true, true, true, true, true],
   );
+  // The kit's Field, as the Machine picker above it: a label bound by htmlFor, and the refusal read out with the box (design-system.md).
+  const nicknameInput = /<input\b(?:=>|[^>])*>/.exec(block)?.[0] ?? "";
+  check(
+    "named by Field's label and refused through Field's error, all of it inside the render prop",
+    [
+      /<Field label="Nickname" error=\{nicknameRefusal\}[^>]*>\s*\{\(\{ id, describedBy \}\) => \(/.test(block),
+      /\bid=\{id\}/.test(nicknameInput),
+      /aria-describedby=\{describedBy\}/.test(nicknameInput),
+      /aria-invalid=\{nicknameRefusal !== null\}/.test(nicknameInput),
+      block.indexOf("icon={Dices}") > block.indexOf("<input") && block.indexOf("icon={Dices}") < block.indexOf("</Field>"),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "with no name of its own and no refusal drawn by hand",
+    [/aria-label=/.test(nicknameInput), /<p\b/.test(block), /text-danger/.test(block)],
+    [false, false, false],
+  );
+  {
+    const React = await import("react");
+    // tsx compiles the kit with the classic JSX runtime, so rendering needs a global React.
+    (globalThis as Record<string, unknown>)["React"] = React;
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { Field } = await import("../src/ui/kit/Field.js");
+    const drawn = renderToStaticMarkup(
+      React.createElement(Field, {
+        label: "Nickname",
+        error: "Use a letter first.",
+        children: ({ id, describedBy }: { id: string; describedBy: string | undefined }) =>
+          React.createElement("input", { id, "aria-describedby": describedBy }),
+      }),
+    );
+    const labelFor = /<label [^>]*for="([^"]+)"/.exec(drawn)?.[1];
+    const inputId = /<input [^>]*id="([^"]+)"/.exec(drawn)?.[1];
+    const describedBy = /<input [^>]*aria-describedby="([^"]+)"/.exec(drawn)?.[1];
+    const errorId = /<p id="([^"]+)" class="text-xs text-danger">Use a letter first\.<\/p>/.exec(drawn)?.[1];
+    check(
+      "and Field binds what that input is handed: the label to it, its description to the refusal",
+      [labelFor !== undefined && labelFor === inputId, errorId !== undefined && describedBy === errorId],
+      [true, true],
+    );
+  }
   check(
     "seeded from every row's nickname on every machine, and outliving the builder's round trip",
     [/nicknamesIn\(state\.rowsByKey\.values\(\)\)/.test(start), /^let nicknameDraft/m.test(start), /nicknameDraft = null;/.test(start)],

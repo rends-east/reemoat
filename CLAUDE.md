@@ -383,7 +383,8 @@ Three specifics, each a measurement before it was a policy, each of which reads
 as a bug if you find it without this section:
 
 **The agent inherits this process's environment.** `agentEnv()` strips the
-session-scoped `CLAUDE_*` names and everything `REEMOAT_*`, and that is
+session-scoped `CLAUDE_*` names and everything `REEMOAT_*` — claude gets one back,
+its own `REEMOAT_MCP_BEARER` (Q2.236) — and that is
 **hygiene, not a fence** — the agent runs as this uid and can read
 `/proc/<pid>/environ`, the env file and `REEMOAT_DB` itself. What the strip
 prevents is three accidents: an agent running `env` and pasting the output into a

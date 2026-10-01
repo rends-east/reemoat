@@ -1269,7 +1269,6 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   });
 
-  // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.
   // Another machine's daemon, holding a link capability: the only routes session:message reaches (Q7.150).
   const linkOf = (c: Context<AppEnv>) => c.get("principal").link;
   app.get("/peer/agents", message, (c) => {
@@ -1285,8 +1284,11 @@ export function createApp(options: ServerOptions): AppBundle {
     const link = linkOf(c);
     if (link === null) return jsonError(c, 403, "not_a_link", "only another machine's link may send this");
     if (registry.isShuttingDown) return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+    const result = await peers.hub.receive(link, await readJsonObject(c));
+    // Refused once a shutdown began, which may be why: answered as on entry, so its sender holds it rather than reporting it ended.
+    if (!result.ok && registry.isShuttingDown) return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
     // A refusal is an answer the sending agent reads, so it rides a 200 like a delivery does.
-    return c.json(await peers.hub.receive(link, await readJsonObject(c)));
+    return c.json(result);
   });
 
   app.post("/peer/notices", message, async (c) => {
@@ -1315,6 +1317,7 @@ export function createApp(options: ServerOptions): AppBundle {
     });
   });
 
+  // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.
   app.get("/sessions", read, (c) => {
     const all = registry.list().map((session) => session.snapshot({ listing: true }));
     const limitParam = c.req.query("limit");

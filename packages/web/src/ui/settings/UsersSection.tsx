@@ -163,7 +163,7 @@ function UserRow({
         {typeof user.machineLimit === "number" ? `${owned} of ${user.machineLimit}` : String(owned)}
       </td>
       <td className="pr-1.5 text-right align-middle">
-        {/* Disable and Delete are absent on your own row: the server refuses both, and nothing undoes them. */}
+        {/* Disable and Delete are absent on your own row: the server refuses both, and nothing undoes a Delete. */}
         <RowMenu label={`Actions for ${user.name}`}>
           {(close) => (
             <>

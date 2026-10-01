@@ -25,6 +25,7 @@ import { MachineNameScreen, MachineSection, SetupCodeScreen } from "./MachineSec
 import { MachinesSection } from "./MachinesSection";
 import { SettingsNav } from "./SettingsNav";
 import { DomainsScreen, MachineLimitScreen, ProvisioningKeyScreen, ServerSection } from "./ServerSection";
+import { RoutingKeyScreen } from "./SystemsPanel";
 import { NewUserScreen, UserLimitScreen, UsersSection } from "./UsersSection";
 
 export function Settings({ state, route }: { state: AppState; route: SettingsRoute }): ReactNode {
@@ -131,6 +132,10 @@ function LeafScreen({ state, route }: { state: AppState; route: SettingsRoute })
       return machine === null ? null : <SetupCodeScreen machineId={machine} />;
     case "plugin-install":
       return machine === null ? null : <PluginInstallScreen state={state} machineId={machine} />;
+    case "routing-key":
+      return machine === null || route.system === null ? null : (
+        <RoutingKeyScreen key={`${machine}:${route.system}`} machineId={machine} systemId={route.system} />
+      );
     case "domains":
       return <DomainsScreen />;
     case "machine-limit":

@@ -29,9 +29,10 @@ export type SettingsLeaf =
   | "smtp"
   | "test-mail"
   | "new-user"
-  | "user-limit";
+  | "user-limit"
+  | "routing-key";
 
-/** The leaves that hang off one machine; `machineLeafPath` builds them. */
+/** The leaves that hang off one machine; `machineLeafPath` builds them. A system's leaf needs the system too: `routingKeyPath`. */
 export type MachineLeaf = Extract<SettingsLeaf, "machine-name" | "setup-code" | "plugin-install">;
 
 /** A machine's own lists, each a screen between the machine and the card it opens. */
@@ -115,7 +116,8 @@ export function parseSettingsRoute(
     case "plugins":
       return segments[3] === "install" ? { ...at, leaf: "plugin-install" } : { ...at, list: "plugins" };
     case "systems":
-      return named.length > 0 && named.length <= MAX_SYSTEM_ID_CHARS ? { ...at, system: named } : { ...at, list: "systems" };
+      if (named.length === 0 || named.length > MAX_SYSTEM_ID_CHARS) return { ...at, list: "systems" };
+      return segments[4] === "routing-key" ? { ...at, system: named, leaf: "routing-key" } : { ...at, system: named };
     default:
       return at;
   }
@@ -136,8 +138,8 @@ function leafOf(section: SettingsSection | null, segment: string | undefined): S
   }
 }
 
-/** The leaves a section holds directly; the machine and user ones need an id and have builders of their own. */
-export type SectionLeaf = Exclude<SettingsLeaf, MachineLeaf | "user-limit">;
+/** The leaves a section holds directly; the machine, system and user ones need an id and have builders of their own. */
+export type SectionLeaf = Exclude<SettingsLeaf, MachineLeaf | "user-limit" | "routing-key">;
 
 export function settingsLeafPath(leaf: SectionLeaf): string {
   switch (leaf) {
@@ -169,6 +171,11 @@ export function machineLeafPath(machine: MachineId, leaf: MachineLeaf): string {
     case "plugin-install":
       return `${machineListPath(machine, "plugins")}/install`;
   }
+}
+
+/** Under the system's card, so the chevron and a finished form both walk back to it. */
+export function routingKeyPath(machine: MachineId, system: string): string {
+  return `${settingsPath("machines", machine, system)}/routing-key`;
 }
 
 export function machineListPath(machine: MachineId, list: SettingsList): string {
@@ -221,6 +228,9 @@ export function settingsUp(
   // `typeof`, not `!== null`: the drivers build partial routes by hand.
   if (typeof route.leaf === "string") {
     if (machine === null) return { path: settingsPath(route.section), withinNav: false };
+    if (route.leaf === "routing-key" && typeof route.system === "string") {
+      return { path: settingsPath("machines", machine, route.system), withinNav: false };
+    }
     return route.leaf === "plugin-install"
       ? { path: machineListPath(machine, "plugins"), withinNav: false }
       : { path: settingsPath("machines", machine), withinNav: false };
@@ -263,6 +273,7 @@ const LEAF_TITLES: Record<SettingsLeaf, string> = {
   "test-mail": "Send a test",
   "new-user": "Add a person",
   "user-limit": "Machine limit",
+  "routing-key": "Routing key",
 };
 
 /** Non-null exactly when `settingsUp` is, and never equal to its parent's title: `settingsUpLabel` depends on that (Q3.427, Q3.433). */

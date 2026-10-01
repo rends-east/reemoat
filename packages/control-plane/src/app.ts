@@ -169,7 +169,7 @@ import {
 
 // AGPL section 13 source offer: change SOURCE_URL if you run a modified copy. relaycheck pins VERSION to package.json.
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.11.0";
+const VERSION = "0.12.0";
 
 // Work answered before it is done. Every deferred body must stay synchronous: main.ts drains the set on SIGTERM before closing the store.
 const deferred = new Set<() => void>();
@@ -1706,7 +1706,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         relayOnline: relayOnline(String(row["id"])),
         lastSeenAt: lastSeenAt(String(row["id"])),
         enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? ""), row["enrolled_at"] !== null),
-        // The owner's alone: a grantee is shown neither, so draws no switch it could not throw.
+        // The owner's alone: a grantee is shown none of them, so draws no switch it could not throw.
         ...(row["label"] === null
           ? {}
           : {

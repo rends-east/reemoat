@@ -114,8 +114,9 @@ own doing, which is also what makes `restartAgent`'s `deliverQueued` live code
 rather than dead.
 
 ⚠ **The terminal/stopping pair and the bound are re-taken after `sendMidTurn`'s
-awaits — and only those two, which is worth saying rather than rounding up to
-"every guard".** `blocksFor` and `steer` are two real suspension points, and a stop
+awaits — and, for another agent's message, the switch (`peerDrop`, which
+`dropQueuedPeer` bumps; Q2.244) — and nothing else, which is worth saying rather
+than rounding up to "every guard".** `blocksFor` and `steer` are two real suspension points, and a stop
 landing inside them used to answer `202 {queued: true}` for a session that was
 already terminal — with `doStop`'s own drop having run while the queue was still
 empty, so nothing was said, and the entry then riding `queuedPrompts` on every

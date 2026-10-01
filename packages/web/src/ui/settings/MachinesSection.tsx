@@ -26,7 +26,7 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
 
   return (
     <div>
-      {/* The switch for every machine heads the list of them, above the per-machine switches it locks (Q2.244). */}
+      {/* The switch for every machine heads the list of them and locks each machine's own (Q2.244). */}
       <AccountMessaging me={state.me} />
 
       <Group title="Your machines" count={allowance ?? undefined}>

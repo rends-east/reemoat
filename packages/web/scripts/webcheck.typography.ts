@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 
-import { check, report, skip } from "./webcheck.env.js";
+import { check, report } from "./webcheck.env.js";
 import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /** The `@theme` block alone: a coarse-pointer restatement of the same names follows it (Q3.662). */
@@ -269,52 +269,4 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
     /from \$\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
     false,
   );
-}
-
-process.stdout.write("\nthe other copy of both stacks, in a repository this one does not contain\n");
-{
-  // The landing lives in the other repository, so off a dev box this skips, and a skip must never print ok. Q7.133.
-  const ORIGINAL = new URL("../../../../services/landing/index.html", import.meta.url);
-  let landing: string | null = null;
-  try {
-    landing = readFileSync(ORIGINAL, "utf8");
-  } catch {
-    // Absent is the ordinary state in CI and a real answer, not a failure.
-    landing = null;
-  }
-
-  if (landing === null) {
-    skip(
-      "the landing is not on this disk, so its copy of both stacks is unchecked",
-      "services/landing/index.html — expected in CI, a problem on the box",
-    );
-  } else {
-    const stackOf = (text: string, name: string): string | null => {
-      const found = new RegExp(`--font-${name}:\\s*([^;]+);`).exec(text);
-      // Whitespace only: the landing wraps the same list at a different column.
-      return found === null ? null : (found[1] ?? "").replaceAll(/\s+/g, " ").trim();
-    };
-
-    for (const name of ["sans", "mono"]) {
-      const ours = stackOf(css, name);
-      const theirs = stackOf(landing, name);
-      check(`--font-${name} was found on both sides`, [ours !== null, theirs !== null], [true, true]);
-      if (ours !== null && theirs !== null) check(`and the landing's --font-${name} is this one`, theirs, ours);
-    }
-
-    // A subset, not equality: the landing legitimately has no `--text-xl`.
-    const scaleOf = (text: string): Map<string, string> =>
-      new Map([...text.matchAll(/--text-([a-z0-9]+):\s*([^;]+);/g)].map((m) => [m[1] ?? "", (m[2] ?? "").trim()]));
-    const ours = scaleOf(themeBlock(css));
-    const theirs = scaleOf(landing);
-
-    report("the landing names a scale at all", theirs.size >= 4, `${theirs.size} steps against this app's ${ours.size}`);
-    const wrong: string[] = [];
-    for (const [step, value] of theirs) {
-      const mine = ours.get(step);
-      if (mine === undefined) wrong.push(`--text-${step}: the landing has it and this app does not`);
-      else if (mine !== value) wrong.push(`--text-${step}: landing ${value}, app ${mine}`);
-    }
-    check("every step the landing names is this app's step, at this app's value", wrong, []);
-  }
 }

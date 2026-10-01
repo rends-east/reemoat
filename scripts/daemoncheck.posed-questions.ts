@@ -137,34 +137,37 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
               .map((block: any) => block.text)
               .join("");
             current?.prompts.push(text);
-            const asks = /^CALL (\S+)$/.exec(text);
+            // `CALL <tool>` is a tool on the reemoat server; `CALL <server>/<tool>` names another server.
+            const asks = /^CALL (?:(\S+)\/)?(\S+)$/.exec(text);
             if (asks === null) {
               send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
               break;
             }
             // What cursor sends for an MCP call, in its measured order: the update naming the tool, then the permission.
-            const tool = asks[1]!;
-            const callId = `call-${tool}`;
+            const provider = asks[1] ?? "reemoat";
+            const tool = asks[2]!;
+            const key = asks[1] === undefined ? tool : `${provider}/${tool}`;
+            const callId = asks[1] === undefined ? `call-${tool}` : `call-${provider}-${tool}`;
             const update = (payload: Record<string, unknown>) =>
               send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: payload } });
             update({ sessionUpdate: "tool_call", toolCallId: callId, title: "MCP: tool", kind: "other", status: "pending", rawInput: {} });
             update({
               sessionUpdate: "tool_call_update",
               toolCallId: callId,
-              title: `reemoat: ${tool}`,
-              rawInput: { providerIdentifier: "reemoat", toolName: tool, args: {} },
+              title: `${provider}: ${tool}`,
+              rawInput: { providerIdentifier: provider, toolName: tool, args: {} },
             });
             const ask = ++outbound;
             const caller = current;
             awaiting.set(ask, (result) => {
-              caller?.permissionAnswers.set(tool, result);
+              caller?.permissionAnswers.set(key, result);
               const finish = () => {
                 update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
                 send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
               };
               // Allowed, it then calls the tool on the server it was handed, as cursor does, and the turn waits on the call.
               const server = caller?.mcpServers[0];
-              if (tool !== ASK_TOOL_NAME || (result as any)?.outcome?.optionId !== "allow-once" || server === undefined) {
+              if (provider !== "reemoat" || tool !== ASK_TOOL_NAME || (result as any)?.outcome?.optionId !== "allow-once" || server === undefined) {
                 finish();
                 return;
               }
@@ -186,7 +189,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
               method: "session/request_permission",
               params: {
                 sessionId,
-                toolCall: { toolCallId: callId, title: `reemoat-${tool}: ${tool}`, kind: "other", status: "pending" },
+                toolCall: { toolCallId: callId, title: `${provider}-${tool}: ${tool}`, kind: "other", status: "pending" },
                 options: [
                   { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
                   { optionId: "allow-always", name: "Allow always", kind: "allow_always" },
@@ -420,6 +423,17 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   const other = cur.snapshot().pendingPermissions;
   check("any other tool on the same server still asks its person", other.map((one) => one.toolCallId), ["call-send_message"]);
   cur.answerPermission(other[0]!.permissionId, { cancel: true });
+  await settle();
+  // Both halves of the match: a tool named ask_question on a server that is not this daemon's is somebody else's tool.
+  await cur.prompt("CALL elsewhere/ask_question");
+  await settle();
+  const foreign = cur.snapshot().pendingPermissions;
+  check(
+    "and so does a tool named ask_question on a server that is not this daemon's, parked rather than answered",
+    [foreign.map((one) => one.toolCallId), agentOf(cur).permissionAnswers.has("elsewhere/ask_question")],
+    [["call-elsewhere-ask_question"], false],
+  );
+  if (foreign[0] !== undefined) cur.answerPermission(foreign[0].permissionId, { cancel: true });
   await cla.prompt("CALL ask_question");
   await settle();
   const claudeAsks = cla.snapshot().pendingPermissions;

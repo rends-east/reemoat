@@ -193,3 +193,13 @@ CREATE TABLE IF NOT EXISTS peer_outbox (
   attempts          INTEGER NOT NULL DEFAULT 0,
   last_error        TEXT
 );
+
+
+-- Message ids another machine delivered here, kept a day so a retry that outlives a restart is still a duplicate (Q2.241).
+CREATE TABLE IF NOT EXISTS peer_seen (
+  source_machine_id TEXT    NOT NULL,
+  message_id        TEXT    NOT NULL,
+  seen_at           INTEGER NOT NULL,
+  PRIMARY KEY (source_machine_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_peer_seen_at ON peer_seen (seen_at);

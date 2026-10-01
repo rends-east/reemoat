@@ -331,8 +331,8 @@ and `webcheck` sweeps every shared class string for it.
 
 ## What is checked
 
-`webcheck.typography.ts`. Nothing checked any of this before — a changed stack, a new
-web font or a drift from the landing page would have passed all eight drivers.
+`webcheck.typography.ts`. Nothing checked any of this before — a changed stack or a
+new web font would have passed all eight drivers.
 
 1. **Two families, and both are tokens.** A third `font-family` anywhere in
    `index.css` fails, as does a literal stack written in place of a token.
@@ -340,12 +340,10 @@ web font or a drift from the landing page would have passed all eight drivers.
    stylesheet and the HTML shell. Comments are stripped first, because
    `--font-sans`'s own docblock discusses woff2 in prose.
 3. **Every size is from the scale**, with the one exception named in the driver.
-4. **The landing page has not drifted** — and it **`skip()`s in CI**. Q7.133.
-   `services/landing/index.html` is a hand-copy of both stacks and five of the six
-   scale steps, and it lives in the *other* repository, so the comparison only runs
-   where both are on one disk. Absent, it says so and is counted; it must never
-   print `ok`. Its scale is asserted as a **subset**, because the landing has no
-   `--text-xl` and legitimately should not.
+4. **Not the landing page, any more.** It was a hand-copy of both stacks and the
+   scale until its rebuild on 2026-09-24 gave it type of its own — `--sans`,
+   `--mono`, a serif, sizes in `rem` — so there is nothing shared left to compare,
+   and the comparison is gone rather than red. Q7.133.
 
 **Every sweep here carries a floor.** A regex that matches nothing passes silently,
 which is the failure mode of every source-text assertion in `webcheck` — see

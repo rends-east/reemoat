@@ -10,6 +10,7 @@ import {
   findOnPath,
   forgetPathHits,
   hasLoginFlow,
+  MCP_BEARER_ENV,
   resolveAgent,
   type AgentId,
   type AgentLaunchConfig,
@@ -29,10 +30,13 @@ import {
   spawnPlan,
 } from "../src/runtime/local.js";
 import { toCommands } from "../src/session.js";
-import type { AgentProcess } from "../src/runtime/types.js";
+import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
+import { MACHINE_MESSAGING_OFF, PeerHub } from "../src/peers/hub.js";
+import { PeerMcpEndpoint } from "../src/peers/mcp.js";
+import { tmp } from "./tmp.js";
 import { check, report } from "./daemoncheck.env.js";
-import { sandbox, users, now, tokenFor, verifier, credentials } from "./daemoncheck.fixtures.js";
+import { sandbox, users, now, tokenFor, verifier, credentials, stubAgentConfig } from "./daemoncheck.fixtures.js";
 
 // Login is stubbed on a LocalRuntime subclass, so a new required SessionRuntime member is a type error here.
 process.stdout.write("\na login id names its own run\n");
@@ -1731,4 +1735,229 @@ process.stdout.write("\nwhich build of a CLI runs\n");
   if (prior.claude !== undefined) process.env["CLAUDE_CODE_EXECUTABLE"] = prior.claude;
   if (prior.codex !== undefined) process.env["CODEX_PATH"] = prior.codex;
   forgetPathHits();
+}
+
+// claude's adapter puts an MCP server's headers on its CLI's command line, where any uid can read them; the CLI expands ${VAR} there (Q2.236).
+process.stdout.write("\nthe reemoat server's bearer\n");
+{
+  const acp = await import("@agentclientprotocol/sdk");
+  const bin = tmp("bearerbin-");
+  for (const name of ["claude", "codex", "kimi", "opencode", "grok", "cursor-agent"]) {
+    writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, name), 0o755);
+  }
+  const prior = { path: process.env["PATH"], claude: process.env["CLAUDE_CODE_EXECUTABLE"], codex: process.env["CODEX_PATH"] };
+  process.env["PATH"] = `${bin}:${prior.path ?? ""}`;
+  process.env["CLAUDE_CODE_EXECUTABLE"] = join(bin, "claude");
+  process.env["CODEX_PATH"] = join(bin, "codex");
+  forgetPathHits();
+  const real = new Map<AgentId, AgentLaunchConfig>();
+  try {
+    for (const id of AGENT_IDS) real.set(id, resolveAgent(id));
+  } finally {
+    for (const [name, value] of [["PATH", prior.path], ["CLAUDE_CODE_EXECUTABLE", prior.claude], ["CODEX_PATH", prior.codex]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    forgetPathHits();
+  }
+  check(
+    "claude alone is handed its bearer through a variable of its own, the one harness whose MCP headers reach a command line",
+    [...real].filter(([, config]) => config.mcpBearerEnv !== undefined).map(([id, config]) => [id, config.mcpBearerEnv]),
+    [["claude", MCP_BEARER_ENV]],
+  );
+
+  interface Launch {
+    agent: AgentId;
+    env: NodeJS.ProcessEnv;
+    opened: any[][];
+  }
+  const launches: Launch[] = [];
+  let conversations = 0;
+  const spawnStub = (launch: Launch): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    // The process going away is its stdout ending, which is what closes the client.
+    toAgent.on("end", () => toClient.end());
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { resume: {} }, mcpCapabilities: { http: true } },
+                authMethods: [],
+              },
+            });
+            break;
+          case acp.methods.agent.session.new:
+          case acp.methods.agent.session.resume:
+            launch.opened.push(message["params"]?.["mcpServers"] ?? []);
+            send({ jsonrpc: "2.0", id, result: message["method"] === acp.methods.agent.session.new ? { sessionId: `s_bearer_${++conversations}` } : {} });
+            break;
+          case acp.methods.agent.session.prompt:
+            send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      handle: null,
+      onceStartError: () => () => {},
+      onceExit: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    } as unknown as AgentProcess;
+  };
+
+  // A stub binary, described with what the real launch config says about the variable.
+  class BearerRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return (["claude", "codex", "kimi"] as const).map((id) => ({
+        id,
+        displayName: id,
+        available: true,
+        installable: false,
+        loggedIn: true,
+        hint: null,
+        lastStartRefusal: null,
+      }));
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      const variable = real.get(agent)?.mcpBearerEnv;
+      return { ...stubAgentConfig(agent), ...(variable === undefined ? {} : { mcpBearerEnv: variable }) };
+    }
+    override async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}): Promise<AgentProcess> {
+      const launch: Launch = { agent, env: { ...extra }, opened: [] };
+      launches.push(launch);
+      return spawnStub(launch);
+    }
+  }
+
+  const registry = new SessionRegistry(new MemoryEventStore(), null, undefined, new BearerRuntime());
+  const hub = new PeerHub({ registry, enabled: true });
+  const endpoint = await PeerMcpEndpoint.listen(hub);
+  hub.setEndpoint(endpoint.url);
+  registry.setPeerMcpServers((sessionId, capabilities, launch) => hub.mcpServersFor(sessionId, capabilities, launch));
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 30));
+  const headerOf = (servers: any[] | undefined): string | undefined =>
+    servers?.[0]?.headers?.find((header: { name: string }) => header.name === "Authorization")?.value;
+  const dir = tmp("bearercheck-");
+
+  const lead = await registry.create({ agent: "claude", cwd: dir, nickname: "bearer-lead" });
+  const leadLaunch = launches.at(-1)!;
+  const worker = await registry.create({ agent: "codex", cwd: dir, nickname: "bearer-worker" });
+  const workerLaunch = launches.at(-1)!;
+  const plain = await registry.create({ agent: "kimi", cwd: dir, nickname: "bearer-plain" });
+  const plainLaunch = launches.at(-1)!;
+  const leadToken = leadLaunch.env[MCP_BEARER_ENV] ?? "";
+
+  check(
+    "claude's server names the variable and carries no token, so nothing secret reaches the CLI's argv",
+    [headerOf(leadLaunch.opened[0]), JSON.stringify(leadLaunch.opened[0]).includes(leadToken)],
+    [`Bearer \${${MCP_BEARER_ENV}}`, false],
+  );
+  check("while the token is in the environment the agent was spawned with, before it was asked anything", /^[\w-]{43}$/.test(leadToken), true);
+  check(
+    "and is the session's once claude has expanded the header, and never as the variable's name",
+    [hub.callerOf(`Bearer ${leadToken}`), hub.callerOf(headerOf(leadLaunch.opened[0]))],
+    [lead.id, null],
+  );
+  const workerBearer = headerOf(workerLaunch.opened[0]);
+  const plainBearer = headerOf(plainLaunch.opened[0]);
+  check(
+    "codex and kimi read mcpServers off stdio and expand nothing, so theirs is the bearer itself and no variable is set",
+    [
+      hub.callerOf(workerBearer),
+      hub.callerOf(plainBearer),
+      MCP_BEARER_ENV in workerLaunch.env,
+      MCP_BEARER_ENV in plainLaunch.env,
+    ],
+    [worker.id, plain.id, false, false],
+  );
+
+  const cleared = await lead.clearContext("/clear");
+  check(
+    "a /clear opens its conversation with the list its process was given, which still names the session",
+    [cleared.kind, leadLaunch.opened.length, headerOf(leadLaunch.opened[1]), hub.callerOf(`Bearer ${leadToken}`)],
+    ["cleared", 2, `Bearer \${${MCP_BEARER_ENV}}`, lead.id],
+  );
+
+  await lead.stop();
+  await worker.stop();
+  await settle();
+  check(
+    "a person's Stop ends the process, and whoever kept its bearer no longer names the session",
+    [hub.callerOf(`Bearer ${leadToken}`), hub.callerOf(workerBearer)],
+    [null, null],
+  );
+
+  await lead.resume();
+  const relaunch = launches.at(-1)!;
+  const nextToken = relaunch.env[MCP_BEARER_ENV] ?? "";
+  check(
+    "started again, it is spawned with a bearer of its own",
+    [relaunch.agent, nextToken !== leadToken, hub.callerOf(`Bearer ${nextToken}`)],
+    ["claude", true, lead.id],
+  );
+
+  const leadAddress = `${lead.nickname} [${lead.id}]`;
+  const fromStopped = await hub.send(worker.id, { to: leadAddress, message: "sent by a stopped session", notify: false });
+  check("a session its person stopped sends nothing, whoever still holds its bearer", fromStopped.ok ? "sent" : fromStopped.code, "ended");
+  const fromLive = await hub.send(plain.id, { to: leadAddress, message: "sent by a live one", notify: false });
+  check("while a live session's message still goes through", fromLive.ok, true);
+
+  hub.setPolicy({ on: false, at: Date.now() });
+  const off = await fetch(endpoint.url, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${nextToken}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_agents", arguments: {} } }),
+  });
+  const offBody = (await off.json().catch(() => null)) as any;
+  check(
+    "messaging switched off keeps the bearer and answers in words, never a 401 that claude reads as a sign-in to start",
+    [off.status, offBody?.result?.isError, offBody?.result?.content?.[0]?.text],
+    [200, true, MACHINE_MESSAGING_OFF],
+  );
+  hub.setPolicy({ on: true, at: Date.now() + 1 });
+
+  // Driven by hand: the order two processes of one session end in is not one a stub can force.
+  let endFirst!: () => void;
+  const first = hub.mcpServersFor(plain.id, { http: true }, { bearer: null, gone: new Promise<void>((resolve) => (endFirst = resolve)) });
+  const second = hub.mcpServersFor(plain.id, { http: true }, { bearer: null, gone: new Promise<void>(() => {}) });
+  endFirst();
+  await settle();
+  check(
+    "a process ending after its replacement was launched retires its own bearer and never the replacement's",
+    [hub.callerOf(headerOf(first)), hub.callerOf(headerOf(second))],
+    [null, plain.id],
+  );
+
+  const daemonWiring = readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8");
+  check(
+    "and the daemon hands every launch through to the hub, or claude's bearer is back on its command line",
+    /setPeerMcpServers\(\(sessionId, capabilities, launch\) => peers\.mcpServersFor\(sessionId, capabilities, launch\)\)/.test(daemonWiring),
+    true,
+  );
+
+  await registry.shutdown();
+  await endpoint.close();
 }

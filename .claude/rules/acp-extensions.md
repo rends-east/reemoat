@@ -97,7 +97,10 @@ success; an `ask_question` answered with one falls back to a permission per
 single-choice question and silently drops the multiple-choice ones. So every refusal
 a person makes goes back in cursor's own word — `rejected`, `skipped`, `cancelled` —
 and the one error this client sends is `-32601` for a question with questions
-switched off, where cursor's fallback is the behaviour wanted.
+switched off, where cursor's fallback is the behaviour wanted. `create_plan` sends
+none at all: `answerCursorPlan` parses inside the handler, so unreadable params are
+`rejected`, no single session (a load still replaying) `cancelled`, a throw
+`rejected`; `sole` still answers `-32602` for the others.
 
 **No free text.** cursor reads option ids and nothing else, so its question has no
 own-answer box — the field kimi's and claude's cards carry would take text cursor

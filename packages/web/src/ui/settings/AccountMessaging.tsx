@@ -6,7 +6,7 @@ import { SwitchRow } from "../bits";
 import { Group } from "../kit/List";
 
 /**
- * One switch for every machine you own, at the head of Machines, above the per-machine switches it outranks and locks
+ * One switch for every machine you own, at the head of Machines; it outranks and locks each machine's own switch
  * (Q2.244, Q3.675). A control plane that cannot store it draws nothing: no switch claims a state and no line explains.
  */
 export function AccountMessaging({ me }: { me: Me | null }): ReactNode {

@@ -50,6 +50,8 @@ export interface AgentLaunchConfig {
   authHint: string;
   /** Spawned in the session's cwd: cursor reads its rules, skills, commands and MCP config off the process's own (Q6.115). */
   inSessionCwd: boolean;
+  /** Where the harness puts MCP headers on a command line and expands `${VAR}` in them: the reemoat bearer is spawned into this variable instead (Q2.236). */
+  mcpBearerEnv?: string;
 }
 
 /** installable is true only for a built-in's missing CLI, the one absence deploy/agents.sh repairs; auto-resume defers on nothing else. */
@@ -88,6 +90,9 @@ export const SESSION_SCOPED_ENV = [
 
 /** Stripped from agent spawns as hygiene, not confinement: the agent runs as this uid. */
 export const DAEMON_ENV_PREFIX = "REEMOAT_";
+
+/** Added after agentEnv(), so the agent keeps it; the prefix keeps it from the agents of any daemon that agent starts. */
+export const MCP_BEARER_ENV = "REEMOAT_MCP_BEARER";
 
 export function agentEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -355,6 +360,7 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         args: [],
         env: agentEnv(),
         inSessionCwd: false,
+        mcpBearerEnv: MCP_BEARER_ENV,
         authHint:
           "The Claude adapter uses the credentials of the `claude` CLI, and it is not signed in. " +
           "Run `claude setup-token` in a terminal on this machine and paste the token below — " +

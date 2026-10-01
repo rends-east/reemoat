@@ -1,8 +1,10 @@
-import { KeyRound, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Trash2 } from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { errorText, meansRouteAbsent } from "../../http";
 import type { MachineId } from "../../ids";
 import { MACHINE_GONE } from "../../plugins";
+import { navigate } from "../../router";
+import { routingKeyPath, settingsPath } from "../../settings";
 import { store } from "../../store";
 import type { AgentAuthInfo, SystemInfo } from "../../wire";
 import { anyKeySet, unspokenFor } from "../../agents";
@@ -10,7 +12,7 @@ import { boundedName, harnessName, STALE_READ, systemBadge } from "../agentCard"
 import { Badge, Button, Empty, FIELD, SkeletonRow, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { Field } from "../kit/Field";
-import { ActionRow, DangerRow, Group, LinkRow, TWO_STEP_ROW } from "../kit/List";
+import { DangerRow, Group, LinkRow, TWO_STEP_ROW } from "../kit/List";
 import { Pending, RecheckButton } from "../kit/Status";
 import { AgentDetail } from "./AgentsPanel";
 
@@ -212,8 +214,7 @@ export function KeyOnly({
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const daemon = store.daemonFor(machineId);
 
-  // One name for the placeholder, the question and the Remove, distinguishing word first: a phone clips from the right.
-  const keyName = routing ? `routing key for ${system.displayName}` : `${system.displayName} key`;
+  const keyName = keyNameOf(system, routing);
 
   const save = (): void => {
     if (daemon === undefined || value.trim().length === 0 || busy) return;
@@ -254,7 +255,6 @@ export function KeyOnly({
 
   // Borrowed: keySet with a null keyUpdatedAt means the harness's own key covers it, so no Save or Clear over it.
   const borrowed = routing && system.keySet && system.keyUpdatedAt === null;
-  const [overriding, setOverriding] = useState(false);
 
   return (
     <>
@@ -266,9 +266,9 @@ export function KeyOnly({
         </div>
       )}
 
-      {borrowed && !overriding ? (
+      {borrowed ? (
         <Group title="Routing key" footer="Covered by the key above.">
-          <ActionRow title="Use a different key here" glyph={KeyRound} onClick={() => setOverriding(true)} />
+          <LinkRow title="Use a different key here" onClick={() => navigate(routingKeyPath(machineId, system.id))} />
         </Group>
       ) : (
         <Group title={routing ? "Routing key" : undefined} unboxed>
@@ -279,27 +279,18 @@ export function KeyOnly({
             }}
           >
             <Field
-              label={routing ? `Key for ${system.displayName}` : keyName}
-              hint={routing ? `For agents routed to ${system.displayName}; its CLI sign-in doesn't cover this.` : undefined}
+              label={routing ? routingLabel(system) : keyName}
+              hint={routing ? routingHint(system) : undefined}
             >
               {({ id, describedBy }) => (
                 <div className="flex gap-2">
-                  <input
+                  <KeyInput
                     id={id}
-                    aria-describedby={describedBy}
+                    describedBy={describedBy}
                     value={value}
-                    onChange={(event) => setValue(event.target.value)}
-                    // Not a password input: password managers key on the type and ignore autocomplete off; the data attributes are their opt-outs.
-                    type="text"
-                    name="reemoat-provider-key"
-                    data-1p-ignore=""
-                    data-lpignore="true"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    autoComplete="off"
+                    onChange={setValue}
                     placeholder={system.keySet ? `paste a new ${keyName}` : `paste the ${keyName}`}
-                    className={`${FIELD} min-w-0 flex-1 font-mono`}
+                    className="min-w-0 flex-1"
                   />
                   <Button type="submit" size="sm" disabled={busy || value.trim().length === 0}>
                     {busy ? <Spinner /> : "Save"}
@@ -329,5 +320,137 @@ export function KeyOnly({
         </Group>
       )}
     </>
+  );
+}
+
+/** One name for the placeholder, the question and the Remove, distinguishing word first: a phone clips from the right. */
+function keyNameOf(system: SystemInfo, routing: boolean): string {
+  return routing ? `routing key for ${system.displayName}` : `${system.displayName} key`;
+}
+
+function routingLabel(system: SystemInfo): string {
+  return `Key for ${system.displayName}`;
+}
+
+function routingHint(system: SystemInfo): string {
+  return `For agents routed to ${system.displayName}; its CLI sign-in doesn't cover this.`;
+}
+
+/** Not a password input: password managers key on the type and ignore autocomplete off; the data attributes are their opt-outs. */
+function KeyInput({
+  id,
+  describedBy,
+  value,
+  onChange,
+  placeholder,
+  autoFocus = false,
+  className = "",
+}: {
+  id: string;
+  describedBy: string | undefined;
+  value: string;
+  onChange: (next: string) => void;
+  placeholder: string;
+  autoFocus?: boolean;
+  className?: string;
+}): ReactNode {
+  return (
+    <input
+      id={id}
+      aria-describedby={describedBy}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      type="text"
+      name="reemoat-provider-key"
+      data-1p-ignore=""
+      data-lpignore="true"
+      autoCapitalize="off"
+      autoCorrect="off"
+      spellCheck={false}
+      autoComplete="off"
+      autoFocus={autoFocus}
+      placeholder={placeholder}
+      className={`${FIELD} font-mono ${className}`}
+    />
+  );
+}
+
+/** A borrowed routing key's override, a leaf under the system's card that walks back to it by replace (Q3.549). */
+export function RoutingKeyScreen({ machineId, systemId }: { machineId: MachineId; systemId: string }): ReactNode {
+  const { systems, error, supported, loading, refresh } = useSystems(machineId);
+  const back = (): void => navigate(settingsPath("machines", machineId, systemId), true);
+  const system = systems?.find((candidate) => candidate.id === systemId);
+  // Only a system with a CLI and a route has a routing key; the card says what any other one has.
+  const routes = system !== undefined && system.loginVia !== null && system.routable === true;
+
+  useEffect(() => {
+    if (systems !== null && !routes) back();
+  }, [systems, routes]);
+
+  if (loading && systems === null) return <Pending>Asking that machine…</Pending>;
+  if (systems === null) {
+    return (
+      <Empty failed={supported} action={supported ? <RecheckButton onClick={refresh} busy={loading} /> : undefined}>
+        {supported
+          ? (error ?? "Could not read this machine's systems.")
+          : "Update this machine's daemon to sign in here."}
+      </Empty>
+    );
+  }
+  if (system === undefined || !routes) return null;
+  return <RoutingKeyForm machineId={machineId} system={system} onDone={back} />;
+}
+
+function RoutingKeyForm({
+  machineId,
+  system,
+  onDone,
+}: {
+  machineId: MachineId;
+  system: SystemInfo;
+  onDone: () => void;
+}): ReactNode {
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const daemon = store.daemonFor(machineId);
+  const keyName = keyNameOf(system, true);
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault();
+    if (daemon === undefined || value.trim().length === 0 || busy) return;
+    setBusy(true);
+    void daemon
+      .saveSystemKey(system.id, value.trim())
+      .then(() => {
+        toast("ok", `Routing key saved for ${system.displayName}.`);
+        onDone();
+      })
+      .catch((cause: unknown) => toast("error", errorText(cause)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <form onSubmit={submit} className="flex max-w-sm flex-col gap-4">
+      <Field label={routingLabel(system)} hint={routingHint(system)}>
+        {({ id, describedBy }) => (
+          <KeyInput
+            id={id}
+            describedBy={describedBy}
+            value={value}
+            onChange={setValue}
+            placeholder={system.keySet ? `paste a new ${keyName}` : `paste the ${keyName}`}
+            autoFocus
+          />
+        )}
+      </Field>
+      <div className="flex items-center gap-2">
+        <Button tone="primary" type="submit" disabled={busy || value.trim().length === 0}>
+          {busy ? <Spinner /> : "Save"}
+        </Button>
+        <Button disabled={busy} onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </form>
   );
 }

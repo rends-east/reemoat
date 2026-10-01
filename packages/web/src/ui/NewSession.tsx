@@ -453,35 +453,36 @@ function NewSession({
           )}
         </div>
 
-        <div className="shrink-0">
-          <FieldLabel>Nickname</FieldLabel>
-          {/* Narrow, since a nickname is a word; the mark says what it becomes. Q3.677. */}
-          <div className="flex items-center gap-2">
-            <Icon as={AtSign} size={16} className="text-muted" />
-            <input
-              {...VERBATIM_FIELD}
-              value={nicknameText}
-              onChange={(event) => editNickname(event.target.value, false)}
-              aria-label="Nickname"
-              aria-invalid={nicknameRefusal !== null}
-              autoCapitalize="off"
-              autoComplete="off"
-              placeholder="mira"
-              className={`w-40 min-w-0 ${FIELD}`}
-            />
-            <IconButton
-              icon={Dices}
-              label="Random nickname"
-              size="nav"
-              onClick={() => {
-                const seen = seenNicknames(state);
-                if (nickname !== null) seen.add(nickname);
-                editNickname(randomNickname(seen), true);
-              }}
-            />
-          </div>
-          {nicknameRefusal !== null && <p className="mt-1.5 text-2xs text-danger">{nicknameRefusal}</p>}
-        </div>
+        <Field label="Nickname" error={nicknameRefusal} className="shrink-0">
+          {({ id, describedBy }) => (
+            // Narrow, since a nickname is a word; the mark says what it becomes. Q3.677.
+            <div className="flex items-center gap-2">
+              <Icon as={AtSign} size={16} className="text-muted" />
+              <input
+                {...VERBATIM_FIELD}
+                id={id}
+                aria-describedby={describedBy}
+                value={nicknameText}
+                onChange={(event) => editNickname(event.target.value, false)}
+                aria-invalid={nicknameRefusal !== null}
+                autoCapitalize="off"
+                autoComplete="off"
+                placeholder="mira"
+                className={`w-40 min-w-0 ${FIELD}`}
+              />
+              <IconButton
+                icon={Dices}
+                label="Random nickname"
+                size="nav"
+                onClick={() => {
+                  const seen = seenNicknames(state);
+                  if (nickname !== null) seen.add(nickname);
+                  editNickname(randomNickname(seen), true);
+                }}
+              />
+            </div>
+          )}
+        </Field>
 
         <div className="flex min-h-0 flex-1 flex-col">
           <FieldLabel>Directory</FieldLabel>

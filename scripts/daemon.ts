@@ -287,6 +287,7 @@ const peers = new PeerHub({
   machineId,
   network: createPeerNetwork(stores.peerLinks, stores.machineKeys),
   outbox: stores.peerOutbox,
+  seen: stores.peerSeen,
   // What the owner's app last delivered; the env above is a ceiling it never lifts (Q2.244).
   policy: stores.machineSettings,
   onWarning: (detail: string) => console.error(`peers: ${detail}`),
@@ -294,7 +295,7 @@ const peers = new PeerHub({
 // Always, whatever the env and the policy: a switch turned back on needs no restart, and ask_question needs neither (Q2.250).
 const peerEndpoint = await PeerMcpEndpoint.listen(peers);
 peers.setEndpoint(peerEndpoint.url);
-registry.setPeerMcpServers((sessionId, capabilities) => peers.mcpServersFor(sessionId, capabilities));
+registry.setPeerMcpServers((sessionId, capabilities, launch) => peers.mcpServersFor(sessionId, capabilities, launch));
 registry.setPeerMessagesOff((sessionId) => peers.conversationSwitchedOff(sessionId));
 peers.startOutbox();
 // Before restore, or a preset's sessions resume on the bare harness; the harness goes back so ManagedSession.assembled can spot a changed preset.

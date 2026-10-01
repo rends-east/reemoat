@@ -10,7 +10,6 @@ import {
   CURSOR_ASK_QUESTION,
   CURSOR_CREATE_PLAN,
   CURSOR_GENERATE_IMAGE,
-  CURSOR_SUBAGENT_MARKER,
   CURSOR_SUBAGENT_UPDATES,
   CURSOR_TASK,
   CURSOR_UPDATE_TODOS,
@@ -211,15 +210,38 @@ export class AcpClient {
       return pick(handlers);
     };
 
-    const sole = <T>(method: string, pick: (handlers: SessionHandlers) => T): T => {
+    const soleHandlers = (): SessionHandlers | null => {
       const [only, ...others] = router.sessions.values();
-      if (only === undefined || others.length > 0) {
+      return only === undefined || others.length > 0 ? null : only;
+    };
+
+    const sole = <T>(method: string, pick: (handlers: SessionHandlers) => T): T => {
+      const only = soleHandlers();
+      if (only === null) {
         throw acp.RequestError.invalidParams(
           { method },
           `${method} names no session and this process holds ${router.sessions.size}`,
         );
       }
       return pick(only);
+    };
+
+    // Answered in cursor's own word whatever goes wrong: any error here is read as acceptance (Q6.117).
+    const answerCursorPlan = async (params: unknown, signal: AbortSignal): Promise<CursorPlanResponse> => {
+      let request: CursorPlanRequest;
+      try {
+        request = parseCursorPlanRequest(params);
+      } catch {
+        return { outcome: { outcome: "rejected" } };
+      }
+      // Nobody here to ask, as while a load replays: nothing was refused.
+      const only = soleHandlers();
+      if (only === null) return { outcome: { outcome: "cancelled" } };
+      try {
+        return await only.onCursorPlan(request, signal);
+      } catch {
+        return { outcome: { outcome: "rejected" } };
+      }
     };
 
     const connection = acp
@@ -282,9 +304,7 @@ export class AcpClient {
         if (!elicitation) throw acp.RequestError.methodNotFound(CURSOR_ASK_QUESTION);
         return sole(CURSOR_ASK_QUESTION, (h) => h.onCursorQuestion(ctx.params, ctx.signal));
       })
-      .onRequest(CURSOR_CREATE_PLAN, parseCursorPlanRequest, (ctx) =>
-        sole(CURSOR_CREATE_PLAN, (h) => h.onCursorPlan(ctx.params, ctx.signal)),
-      )
+      .onRequest(CURSOR_CREATE_PLAN, (params: unknown) => params, (ctx) => answerCursorPlan(ctx.params, ctx.signal))
       .onRequest(CURSOR_UPDATE_TODOS, parseTodosRequest, (ctx) => {
         sole(CURSOR_UPDATE_TODOS, (h) => h.onCursorTodos(ctx.params));
         return {};
@@ -620,7 +640,7 @@ export function splitAsyncTaskUpdates(
 }
 
 function diverted(line: string, deliver: (notification: acp.SessionNotification) => void): boolean {
-  if (!line.includes(ASYNC_TASK_MARKER) && !line.includes(CURSOR_SUBAGENT_MARKER)) return false;
+  if (!line.includes(ASYNC_TASK_MARKER) && !CURSOR_SUBAGENT_UPDATES.some((kind) => line.includes(kind))) return false;
   let message: unknown;
   try {
     message = JSON.parse(line);

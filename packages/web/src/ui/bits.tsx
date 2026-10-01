@@ -852,7 +852,7 @@ export function menuRow(align: "start" | "center"): string {
   const cross = align === "center" ? "items-center" : "items-start";
   return `tap flex ${CONTROL} w-full ${cross} gap-2 rounded-md px-2.5 py-2 text-left text-sm`;
 }
-/** The caps idiom (uppercase, tracking-wider, font-semibold) belongs to these constants and FIELD_LABEL; webcheck's census lists every hand-written copy (Q5.115). */
+/** The caps idiom (uppercase, tracking-wider, font-semibold) belongs to these constants; webcheck's census lists every hand-written copy (Q5.115). */
 export const MENU_HEADING =
   "px-2.5 py-1.5 text-2xs font-semibold tracking-wider text-faint uppercase";
 

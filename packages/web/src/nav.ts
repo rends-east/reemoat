@@ -33,7 +33,7 @@ export function depthOf(route: Route): number {
       // `typeof` for the two keys the drivers' hand-built routes leave out; a leaf is one step past the screen it opens from.
       const leaf = typeof route.leaf === "string" ? 1 : 0;
       if (route.agents) return typeof route.signin === "string" ? 5 : 4;
-      if (route.system !== null || route.signin !== null) return 5;
+      if (route.system !== null || route.signin !== null) return 5 + leaf;
       if (typeof route.list === "string") return 4;
       if (route.leaf === "plugin-install") return 5;
       if (route.machineId !== null) return 3 + leaf;

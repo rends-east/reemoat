@@ -921,12 +921,68 @@ process.stdout.write("\na sign-in that is not offered\n");
   }
   check("and its width is left alone", /max-w-80/.test(panel), false);
 
-  // Remove's target reaches 10px past its face, so it keeps an extra 4px where the row tightens to an 8px gap.
   check("the field and Save sit closer", /<div className="flex gap-2">\s*<input/.test(panel), true);
-  check("and Remove carries the room its own target needs", /icon=\{X\}[\s\S]{0,220}className="ml-1"/.test(panel), true);
-  // One resting danger control per view: a card may hold Sign out, and claude's two saved keys would be two more.
-  check("and Remove is no danger control, since a card can hold two of them", /icon=\{X\}\s*tone="destructive"/.test(panel), false);
   check("with Save wide enough to hold its label", /min-w-20/.test(panel), true);
+}
+
+// It clears the key and relaunches the agent's open chats, so it is Destroy something's control, not a ghost ✕ (design-system.md).
+process.stdout.write("\nremoving a saved key asks first\n");
+{
+  const panel = stripComments(readFileSync(new URL("../src/ui/settings/AgentsPanel.tsx", import.meta.url), "utf8"));
+  const slot = panel.slice(panel.indexOf("function CredentialSlot("), panel.indexOf("function loginKey("));
+  const asks = slot.indexOf("<TwoStep");
+  const twoStep = asks < 0 ? "" : slot.slice(asks, asks + slot.slice(asks).search(/^\s*\/>/m));
+  const savedRow = slot.slice(slot.indexOf("if (!editable) {"), slot.indexOf("<form"));
+  const form = slot.slice(slot.indexOf("<form"));
+  check("the slot and its one confirmation were found", [slot.length > 0, twoStep.length > 0, (slot.match(/<TwoStep\b/g) ?? []).length], [true, true, 1]);
+  check("no icon button is left to remove a key in one tap", [/<IconButton\b/.test(slot), /icon=\{X\}/.test(panel)], [false, false]);
+  check(
+    "the act is the primitive's danger act, named for the key, and waits on the daemon",
+    [
+      /act=\{\{ label: "Remove", danger: true, icon: Trash2, ariaLabel: `Remove the \$\{label\.name\}` \}\}/.test(twoStep),
+      /onAct=\{remove\}/.test(twoStep),
+      /disabled=\{busy \|\| daemon === undefined\}/.test(twoStep),
+      /question=\{<>Remove the \{label\.name\} from this machine\?<\/>\}/.test(twoStep),
+      /consequence=\{`Open \$\{harnessName\(agent\)\} chats restart without it\.`\}/.test(twoStep),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "and the removal holds the slot's busy, so Save is refused while it is out",
+    /const remove = \(\): Promise<void> \| undefined => \{\s*if \(daemon === undefined\) return undefined;\s*setBusy\(true\);\s*return daemon\s*\.clearCredential\(agent\.id, slot\.envName\)[\s\S]*?\.finally\(\(\) => setBusy\(false\)\);\s*\};/.test(slot),
+    true,
+  );
+  check(
+    "on the form, a danger row of its own under the field, never beside Save",
+    [
+      /removal\(\s*<DangerRow label=\{`Remove the \$\{label\.name\}`\} icon=\{Trash2\} disabled=\{busy\} onClick=\{\(\) => setConfirming\(true\)\} \/>/.test(form),
+      form.indexOf("removal(") > form.indexOf("</Field>"),
+    ],
+    [true, true],
+  );
+  check(
+    "on a saved key's row, a danger button that names the key, and armed the question spans the row",
+    [
+      /<DangerButton\s+icon=\{Trash2\}\s+size="sm"\s+ariaLabel=\{`Remove the \$\{label\.name\}`\}\s+disabled=\{busy\}\s+onClick=\{\(\) => setConfirming\(true\)\}\s*>/.test(savedRow),
+      /if \(confirming\) \{\s*return \(\s*<tr[^>]*>\s*<td colSpan=\{2\} className=\{TD\}>\s*\{removal\(null\)\}/.test(savedRow),
+    ],
+    [true, true],
+  );
+  check(
+    "whose table fixes its columns, so an armed row reflows nothing under it",
+    /<table className=\{`\$\{TABLE\} table-fixed`\}>\s*<colgroup>\s*<col \/>\s*<col className="w-32" \/>\s*<\/colgroup>/.test(panel),
+    true,
+  );
+  const bits = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  const list = stripComments(readFileSync(new URL("../src/ui/kit/List.tsx", import.meta.url), "utf8"));
+  const sm = /\bsm: "([^"]*)"/.exec(bits.slice(bits.indexOf("const BUTTON_SIZE = {")))?.[1] ?? "";
+  const control = /export const CONTROL = "([^"]*)";/.exec(bits)?.[1] ?? "";
+  const dangerRow = list.slice(list.indexOf("export function DangerRow("), list.indexOf("export const TWO_STEP_ROW"));
+  check(
+    "and both rests reach 44px under a finger",
+    [/\[@media\(pointer:coarse\)\]:min-h-11/.test(sm), /\[@media\(pointer:coarse\)\]:min-h-11/.test(control), /\$\{CONTROL\}/.test(dangerRow)],
+    [true, true, true],
+  );
 }
 
 process.stdout.write("\nimporting a codebase\n");

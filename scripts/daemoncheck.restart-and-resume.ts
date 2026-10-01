@@ -643,6 +643,28 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     await own.shutdown();
   }
 
+  // The nickname is reserved before the first await (Q2.245), so every refusal after that point has to hand it back.
+  {
+    const rig = rigWith({ resume: true });
+    const own = new SessionRegistry(new MemoryEventStore(), storeOf([]), undefined, rig.runtime);
+    const named = async (cwd: string): Promise<string> =>
+      own.create({ agent: "kimi", cwd, nickname: "nick-freed" }).then(
+        (made) => `created as ${made.nickname}`,
+        (error: unknown) => (error as Error).name,
+      );
+    check(
+      "a create naming a nickname is refused after reserving it, for its path",
+      await named(join(users, "u_alice", "no_such_dir_at_all")),
+      "PathError",
+    );
+    check(
+      "and gives the nickname back, so the next create naming it is that session",
+      await named(join(users, "u_alice", "proj")),
+      "created as nick-freed",
+    );
+    await own.shutdown();
+  }
+
   // REEMOAT_SESSION_CREATE_BURST above the default is a raise at boot, and the refill is too slow to reach it.
   {
     const gone = join(users, "u_alice", "no_such_dir_at_all");

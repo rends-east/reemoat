@@ -90,7 +90,7 @@ const badState: [string, string][] = [
 
   {
     const first = openStores({ path: dbPath, instanceId: "i_writer" });
-    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: true });
+    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: false });
     // A second put of the same row: only a DO UPDATE that carries the column moves it from the first value.
     first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", nickname: "mira", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: true });
     first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", nickname: "nora", pinned: true, rank: 1_700_000_000_123.5, peerMessagesOff: true });

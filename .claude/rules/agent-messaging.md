@@ -36,6 +36,10 @@ listener at all. Hand-written Streamable HTTP, JSON answers only, no SDK (zod).
   session. It says *which* session is calling; it is **hygiene, not a fence** —
   every agent runs as the same user and can read another's bearer, exactly as it
   can read `REEMOAT_DB`. Across machines the identity is the machine key (Q7.150).
+  It is also retired, by token, when its process ends. claude's never reaches a
+  command line: the SDK puts MCP config in argv, which every local account can read,
+  so it is minted before the spawn into `REEMOAT_MCP_BEARER` and the header names
+  the variable (`mcpBearerEnv`, Q2.236).
 - **A request carrying `Origin` is refused.** No browser has a reason to be there.
 - **`server/discover` is `-32601`, on purpose.** claude and grok send it first
   (MCP 2026-07-28) and fall back to `initialize` on exactly that answer (Q6.114).
@@ -84,7 +88,8 @@ would wake the one who answered for nothing.
   still shows `<peer-message from=…>` inside the bubble, never the person's words.
 - `recordPrompt` names a session only from a person's message or a plugin's, and
   only a person's — a `/clear` included — resets `peerTurnsSinceHuman` and
-  `peerDepth`. A plugin's neither resets nor counts, and is logged with `from: null`.
+  `peerDepth`. A plugin's neither resets nor counts, and is logged with `from: null`
+  — its `ask_question` answer included (Q2.250).
 - Peer entries hold at most `MAX_QUEUED_PEER_PROMPTS` of the queue, so another
   agent can never make a person's own message answer 429; consecutive ones are
   sent as one turn by `deliverQueued`.
@@ -94,7 +99,8 @@ would wake the one who answered for nothing.
 `peerMessage` builds it from `PeerOrigin`, which is the daemon's own record of the
 sender — only `name` is derived from what anybody typed. `defuse` breaks every
 tag a harness or this daemon writes (`peer-message`, `system-reminder`,
-`teammate-message`, …) and every `Human:`/`Assistant:` line, so a body cannot close
+`teammate-message`, claude's `command-*` and `task-notification`, codex's
+`user_instructions`, …; `\b` does not stop at `_`, so an underscored tag is listed) and every `Human:`/`Assistant:` line, so a body cannot close
 its own envelope or pass as the harness. Attributes are escaped, and so is a
 sender's name or address wherever this daemon's own words carry it — the footer, a
 notice's sentence. Another machine's name for its session is taken only if
@@ -124,7 +130,10 @@ nickname (Q2.245), one per machine, so a bare name is ambiguous only across
 machines; an older daemon elsewhere still names its sessions by `peerName`'s slug.
 One naming this machine resolves here. A bare name is matched against what `list_agents` shows the caller
 — never the caller, never a stopped session — on **every** machine, so it waits on
-the listings `list_agents` warms; a qualified address fetches none.
+the listings `list_agents` warms; a qualified address fetches none. **It never
+resolves by elimination**: with a listing unchecked, one match is
+`ambiguous_recipient` and none `unknown_recipient`, each naming the machine (Q2.245).
+A person-stopped session cannot send either (`ended`).
 
 ## Who may switch it off (Q2.244, Q1.654)
 
@@ -145,7 +154,8 @@ conversation's.** A conversation takes part only when all of them and the env al
   path needs the same check, or off stops meaning off.
 - **A running agent keeps its tool names**, and a call is answered with a sentence.
   Never revoke its bearer for this: a `401` reads to claude as a sign-in to start.
-- **Off drops what is waiting**: queued peer prompts, idle-notice subscriptions and
+- **Off drops what is waiting**: queued peer prompts — one caught mid-steer too
+  (`peerDrop`) — idle-notice subscriptions and
   the outbox, with one quiet line per sender and no wake.
 - **A machine may be isolated instead**: its sessions message each other and nothing
   crosses to or from another machine (`reachesOthers`, `messaging_isolated`). The
@@ -188,15 +198,19 @@ and no envelope or plugin prompt gets one. `session-nicknames.md` has the rest.
   and a person's capability never carries it.
 - **A linked machine is not trusted to limit itself.** Every link has its own token
   bucket here, a message id is delivered once per sending machine, whatever link it
-  came over — a retry landing while the first try is still being delivered gets that
-  try's answer — and a notice is taken only when this machine asked for it, once
+  came over, kept in `peer_seen` for a day so a restart forgets none — a retry
+  landing while the first try is still being delivered gets that try's answer — and
+  a refusal is re-read: a code `PeerRefusal` lacks is `link_refused`, its words one
+  line of `MAX_REMOTE_REFUSAL_CHARS`, quoted in any notice. A notice is taken only when this machine asked for it, once
   (`expectedNotices`). A remote listing row is re-read field by field
-  (`remoteRowOf`) and one naming a machine is dropped.
+  (`remoteRowOf`): one naming a machine is dropped, one with a status this build
+  does not know is kept as idle (`compatibility.md` rule 2).
 - **Offline is not a refusal.** A message for a machine that cannot be reached — no
   tunnel, the relay's 421, 502 or 504, its daemon's own 503, no answer — goes to
   `peer_outbox` and is retried, byte-identical so its id holds, from 30 s to 10 min
   apart for 24 h. A retry waits out `rate_limited`, `busy`, `starting` and
-  `queue_full`, and `duplicate` is an earlier try that landed, which re-arms the idle
+  `queue_full`, a delivery a shutdown cut off answers `503 shutting_down` rather than
+  `ended`, and `duplicate` is an earlier try that landed, which re-arms the idle
   notice the hold may have outlasted; any other refusal, or expiry, wakes the sender
   with a notice saying so.
   The relay may queue nothing and the Authority may hold none of an agent's work, so

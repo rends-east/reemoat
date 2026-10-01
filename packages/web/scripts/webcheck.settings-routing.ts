@@ -450,6 +450,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       up(["server", "provisioning-key"]),
       up(["email", "smtp"]),
       up(["users", "u_1", "limit"]),
+      up(["machines", "m_1", "systems", "moonshot", "routing-key"]),
     ].map((one) => one?.path ?? null),
     [
       "/settings/machines/m_1",
@@ -458,6 +459,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
       "/settings/server",
       "/settings/email",
       "/settings/users",
+      "/settings/machines/m_1/systems/moonshot",
     ],
   );
   const reachable: readonly (readonly (string | undefined)[])[] = [
@@ -470,6 +472,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     ["machines", "m_1", "links"],
     ["machines", "m_1", "systems"],
     ["machines", "m_1", "systems", "moonshot"],
+    ["machines", "m_1", "systems", "moonshot", "routing-key"],
     ["machines", "m_1", "plugins"],
     ["machines", "m_1", "plugins", "install"],
     ["machines", "m_1", "name"],
@@ -487,15 +490,31 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     ["users", "new"],
     ["users", "u_1", "limit"],
   ];
+  // A screen is a path every segment of which the parser reads: an unknown one falls up to its parent's route unchanged.
+  const isScreen = (path: string): boolean => {
+    const parts = path.split("/").filter((part) => part.length > 0);
+    if (parts[0] !== "settings") return false;
+    const read = (n: number): string => JSON.stringify(parseSettingsRoute(parts.slice(1, n + 1), decodeURIComponent));
+    return parts.slice(1).every((_, i) => read(i + 1) !== read(i));
+  };
+  check(
+    "a path naming a segment no screen has is not a screen, wherever the segment sits",
+    [
+      "/settings/nowhere",
+      "/settings/account/nowhere",
+      "/settings/machines/m_1/nowhere",
+      "/settings/nowhere/new",
+      "/elsewhere/account",
+    ].map(isScreen),
+    [false, false, false, false, false],
+  );
   check(
     "every parent a chevron names is itself a real settings screen",
-    reachable.every((segments) => {
-      const parent = settingsUp(parseSettingsRoute(segments));
-      if (parent === null) return false;
-      const parts = parent.path.split("/").filter((part) => part.length > 0);
-      return parts[0] === "settings" && parseSettingsRoute(parts.slice(1)).section !== undefined;
-    }),
-    true,
+    reachable
+      .map((segments) => [segments.join("/"), settingsUp(parseSettingsRoute(segments))?.path ?? "(none)"] as const)
+      .filter(([, parent]) => !isScreen(parent))
+      .map(([child, parent]) => `${child} -> ${parent}`),
+    [],
   );
 
   // The sheet head names the pop-up and the pane names the screen, because the head spans the section rail at sm and above (Q3.427).
@@ -817,6 +836,85 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   }
 }
 
+// The one form a system's card opened in place; now a leaf of the card like every other settings form (Q3.549).
+process.stdout.write("\na borrowed routing key is overridden on a leaf, never in place\n");
+{
+  const { parseSettingsRoute, routingKeyPath, settingsPath, settingsPaneTitle, settingsUp, settingsUpLabel } = await import(
+    "../src/settings.js"
+  );
+  const { depthOf, navMove } = await import("../src/nav.js");
+  const at = (segments: readonly string[]) => parseSettingsRoute(segments);
+  check(
+    "the leaf is the system's card plus one segment, and carries both",
+    at(["machines", "m_1", "systems", "moonshot", "routing-key"]),
+    { section: "machines", machineId: "m_1", system: "moonshot", signin: null, agents: false, leaf: "routing-key" },
+  );
+  check(
+    "anything else past a system is the card, and an absurd system is the list with no leaf",
+    [
+      [at(["machines", "m_1", "systems", "moonshot", "nope"]).system, at(["machines", "m_1", "systems", "moonshot", "nope"]).leaf],
+      [at(["machines", "m_1", "systems", "x".repeat(65), "routing-key"]).list, at(["machines", "m_1", "systems", "x".repeat(65), "routing-key"]).leaf],
+    ],
+    [["moonshot", null], ["systems", null]],
+  );
+  const walked = parseSettingsRoute(routingKeyPath("m 1" as never, "acme:gemini").split("/").slice(2), decodeURIComponent);
+  check(
+    "its path round-trips with the machine and the system encoded",
+    [routingKeyPath("m_1" as never, "moonshot"), walked.leaf, walked.machineId, walked.system],
+    ["/settings/machines/m_1/systems/moonshot/routing-key", "routing-key", "m 1", "acme:gemini"],
+  );
+  const leaf = at(["machines", "m_1", "systems", "moonshot", "routing-key"]);
+  const card = at(["machines", "m_1", "systems", "moonshot"]);
+  check(
+    "its chevron walks back to the card, which names it, and the leaf is titled by what it is",
+    [settingsUp(leaf), settingsUpLabel(leaf), settingsPaneTitle(leaf)],
+    [{ path: settingsPath("machines", "m_1" as never, "moonshot"), withinNav: false }, "Sign-in", "Routing key"],
+  );
+  const route = (one: typeof leaf) => ({ name: "settings", ...one }) as never;
+  check(
+    "one depth past the card, so opening it slides in and leaving it slides back",
+    [depthOf(route(card)), depthOf(route(leaf)), navMove(route(card), route(leaf)), navMove(route(leaf), route(card))],
+    [5, 6, "section-push", "section-pop"],
+  );
+
+  const systems = stripComments(readFileSync(new URL("../src/ui/settings/SystemsPanel.tsx", import.meta.url), "utf8"));
+  const keyOnly = systems.slice(systems.indexOf("export function KeyOnly("), systems.indexOf("function keyNameOf("));
+  check("the card and the leaf were both found", [keyOnly.length > 0, /export function RoutingKeyScreen\(/.test(systems)], [true, true]);
+  check(
+    "the card holds no flag that opens a form under itself",
+    [/overriding|setOverriding/.test(keyOnly), /<ActionRow\b/.test(keyOnly)],
+    [false, false],
+  );
+  check(
+    "a borrowed key's row goes deeper, by push, to the leaf",
+    /\{borrowed \? \(\s*<Group title="Routing key" footer="Covered by the key above\.">\s*<LinkRow title="Use a different key here" onClick=\{\(\) => navigate\(routingKeyPath\(machineId, system\.id\)\)\} \/>/.test(keyOnly),
+    true,
+  );
+  const screen = systems.slice(systems.indexOf("export function RoutingKeyScreen("));
+  const form = screen.slice(screen.indexOf("function RoutingKeyForm("));
+  check(
+    "the leaf walks back to the card by replace, after a save and on Cancel",
+    [
+      /const back = \(\): void => navigate\(settingsPath\("machines", machineId, systemId\), true\);/.test(screen),
+      /onDone=\{back\}/.test(screen),
+      /\.saveSystemKey\(system\.id, value\.trim\(\)\)\s*\.then\(\(\) => \{\s*toast\("ok", `Routing key saved for \$\{system\.displayName\}\.`\);\s*onDone\(\);/.test(form),
+      /<Button disabled=\{busy\} onClick=\{onDone\}>\s*Cancel\s*<\/Button>/.test(form),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and a system with no routing key walks back rather than drawing a form",
+    /if \(systems !== null && !routes\) back\(\);/.test(screen),
+    true,
+  );
+  const shell = stripComments(readFileSync(new URL("../src/ui/settings/Settings.tsx", import.meta.url), "utf8"));
+  check(
+    "and the settings pane draws it for its leaf, keyed on the machine and the system",
+    /case "routing-key":\s*return machine === null \|\| route\.system === null \? null : \(\s*<RoutingKeyScreen key=\{`\$\{machine\}:\$\{route\.system\}`\} machineId=\{machine\} systemId=\{route\.system\} \/>/.test(shell),
+    true,
+  );
+}
+
 // TwoStep's rule is pinned here once, over the primitive; each site's own pin covers only what it still decides (Q3.552).
 process.stdout.write("\nthe two-step confirmation is one primitive\n");
 {
@@ -949,6 +1047,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
       ["MachineSection.tsx", 1],
       ["PluginsPanel.tsx", 1],
       ["ServerSection.tsx", 2],
+      ["SystemsPanel.tsx", 1],
       ["UsersSection.tsx", 2],
     ],
   );
@@ -958,12 +1057,12 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
     .filter(([, n]) => n > 0)
     .sort(([a], [b]) => (a < b ? -1 : 1));
   check(
-    "the fifteen confirmations are the primitive's, by file",
+    "the sixteen confirmations are the primitive's, by file",
     sites,
     [
       ["AccountSection.tsx", 1],
       ["AgentBuilder.tsx", 1],
-      ["AgentsPanel.tsx", 1],
+      ["AgentsPanel.tsx", 2],
       ["DevicesSection.tsx", 1],
       ["EmailSection.tsx", 1],
       ["MachineAgentsSection.tsx", 1],
@@ -974,7 +1073,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
       ["UsersSection.tsx", 3],
     ],
   );
-  check("fifteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 15);
+  check("sixteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 16);
   check(
     "and every one of those files imports it from bits",
     sites.filter(([name]) => !/import \{[^}]*\bTwoStep\b[^}]*\} from "\.\.?\/bits"/.test(swept.find(([n]) => n === name)?.[1] ?? "")).map(([name]) => name),

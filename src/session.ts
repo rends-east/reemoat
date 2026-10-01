@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
@@ -64,7 +65,7 @@ import {
   type MachineCatalogue,
   type SystemId,
 } from "./acp/systems.js";
-import type { AgentId } from "./acp/agents.js";
+import type { AgentId, AgentLaunchConfig } from "./acp/agents.js";
 import { clip, jsonBytes } from "./events.js";
 import type {
   AgentCommand,
@@ -194,7 +195,21 @@ export interface SessionOptions {
   // Passed in, never read from a module (Q2.215). Absent means BUILTIN_CATALOGUE.
   machine?: MachineCatalogue | null;
   // Called after initialize, once per agent process: /clear reuses the answer.
-  mcpServers?: ((capabilities: acp.McpCapabilities) => acp.McpServer[]) | null;
+  mcpServers?: ((capabilities: acp.McpCapabilities, launch: McpLaunch) => acp.McpServer[]) | null;
+}
+
+/** A bearer minted before the spawn and already in the agent's environment under `env`. */
+export interface McpBearer {
+  env: string;
+  token: string;
+}
+
+/** What one agent process is handed the reemoat server with. */
+export interface McpLaunch {
+  /** null where the harness expands nothing: the header is then the token itself. */
+  bearer: McpBearer | null;
+  /** Settles, resolved or rejected, once the process is gone. */
+  gone: Promise<void>;
 }
 
 export interface ResumeOptions extends SessionOptions {
@@ -459,9 +474,10 @@ export class Session {
       options.system ?? null,
       options.machine ?? BUILTIN_CATALOGUE,
     );
+    const bearer = mcpBearerOf(options, config);
     const client = await AcpClient.launch(
       config,
-      await runtime.launch(options.agent, spawnEnvOf(options), pairing, options.cwd),
+      await runtime.launch(options.agent, spawnEnvOf(options, bearer), pairing, options.cwd),
       {
         fileIo: runtime.clientFileIo,
         elicitation: options.elicitations != null,
@@ -477,7 +493,7 @@ export class Session {
       throw error;
     }
 
-    const mcpServers = mcpServersOf(options, client);
+    const mcpServers = mcpServersOf(options, client, bearer);
     let response: acp.NewSessionResponse;
     try {
       response = await withDeadline(
@@ -537,9 +553,10 @@ export class Session {
       options.system ?? null,
       options.machine ?? BUILTIN_CATALOGUE,
     );
+    const bearer = mcpBearerOf(options, config);
     const client = await AcpClient.launch(
       config,
-      await runtime.launch(options.agent, spawnEnvOf(options), pairing, options.cwd),
+      await runtime.launch(options.agent, spawnEnvOf(options, bearer), pairing, options.cwd),
       {
         fileIo,
         elicitation: options.elicitations != null,
@@ -562,7 +579,7 @@ export class Session {
       throw new ResumeUnsupportedError(config.displayName);
     }
 
-    const mcpServers = mcpServersOf(options, client);
+    const mcpServers = mcpServersOf(options, client, bearer);
     const reopen = {
       sessionId: options.agentSessionId,
       cwd: options.cwd,
@@ -1764,8 +1781,15 @@ function boundToolCallId(id: string): string {
   return clip(id, MAX_PARENT_ID_CHARS);
 }
 
-function mcpServersOf(options: SessionOptions, client: AcpClient): acp.McpServer[] {
-  return options.mcpServers?.(client.initializeResult.agentCapabilities?.mcpCapabilities ?? {}) ?? [];
+function mcpServersOf(options: SessionOptions, client: AcpClient, bearer: McpBearer | null): acp.McpServer[] {
+  const capabilities = client.initializeResult.agentCapabilities?.mcpCapabilities ?? {};
+  return options.mcpServers?.(capabilities, { bearer, gone: client.closed }) ?? [];
+}
+
+// Minted before the spawn, which is the only moment the agent's environment can be given anything (Q2.236).
+function mcpBearerOf(options: SessionOptions, config: AgentLaunchConfig): McpBearer | null {
+  if (options.mcpServers == null || config.mcpBearerEnv === undefined) return null;
+  return { env: config.mcpBearerEnv, token: randomBytes(32).toString("base64url") };
 }
 
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {
@@ -1812,11 +1836,12 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
 
 const MODEL_NAMES_IN_PIN_REFUSAL = 8;
 
-function spawnEnvOf(options: SessionOptions): NodeJS.ProcessEnv {
+function spawnEnvOf(options: SessionOptions, bearer: McpBearer | null): NodeJS.ProcessEnv {
+  const held = bearer === null ? {} : { [bearer.env]: bearer.token };
   const system = options.system ?? null;
   const model = options.model ?? null;
-  if (system === null || model === null || model === "") return {};
-  return routedModelEnv(options.agent, system, model, options.machine ?? BUILTIN_CATALOGUE);
+  if (system === null || model === null || model === "") return held;
+  return { ...routedModelEnv(options.agent, system, model, options.machine ?? BUILTIN_CATALOGUE), ...held };
 }
 
 // Between handshake and session/new: provider config is process-scoped. Returns whether it routed.

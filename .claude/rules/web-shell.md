@@ -155,8 +155,7 @@ have to enter. These are the rules a change here must not break:
   folder — but both groups are on **one screen at one time**, so that was the same
   row drawn twice. Three things follow: `blockedCount` does not count it (a
   header's count is about the rows under *that* header), a pinned orphan is in
-  `pinned` only, and its row names its machine as every row does. Nothing is hidden — `waitingFloor`
-  subtracts what the view draws, and it draws `pinnedFor`. Q3.11.
+  `pinned` only, and its row names its machine as every row does. Q3.11.
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
   drawing. Q3.15.
@@ -283,7 +282,8 @@ say. Q1.637.
 
 **Systems live inside a machine, and there is no top-level section for them.**
 `/settings/machines/:machineId/systems` is the machine's Sign-ins list and
-`…/systems/:systemId` one system's card (Q3.686): the machine rides the URL for
+`…/systems/:systemId` one system's card (Q3.686), and `…/routing-key` its key
+override, a leaf like every form: the machine rides the URL for
 `/new/:machineId`'s reasons, the **◀** walks one level up — card to list, list to
 machine — rather than to the index, and the segments are `parseSettingsRoute`'s so
 `webcheck` can assert them. A stale
@@ -312,8 +312,8 @@ per machine and holds a socket only for the three most recently viewed sessions.
 
 **The two-step confirmation is the only modal-shaped control on a settings
 *row*, and every one of them is `TwoStep`** (Q3.552): `grep -c '<TwoStep'` over
-`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **fifteen** (fourteen sites,
-two in `MachineLimitPanel`), a table `webcheck` holds by file. Revoking an API
+`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **sixteen**, two each in
+`MachineLimitPanel` and `AgentsPanel`, a table `webcheck` holds by file. Revoking an API
 key is a bare `Revoke` on one tap — the only list is your own, `KeysSection`,
 its one consequence at rest the `this browser` row's, decided by
 `thisBrowsersKey`, never under a session credential (Q3.219, Q3.545, Q3.546).
