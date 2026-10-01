@@ -646,6 +646,10 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
   // The nickname is reserved before the first await (Q2.245), so every refusal after that point has to hand it back.
   {
     const rig = rigWith({ resume: true });
+    // CI installs no harness, so availability is the rig's word here as describe already is; the real one probes PATH.
+    rig.runtime.availability = async () => [
+      { id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null },
+    ];
     const own = new SessionRegistry(new MemoryEventStore(), storeOf([]), undefined, rig.runtime);
     const named = async (cwd: string): Promise<string> =>
       own.create({ agent: "kimi", cwd, nickname: "nick-freed" }).then(
