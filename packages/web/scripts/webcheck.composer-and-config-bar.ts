@@ -651,47 +651,47 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
   check(
     "a mode an agent published in lower case is drawn with a capital",
     [
-      choiceLabel({ category: "mode" }, modeChoice("build", "build")),
-      choiceLabel({ category: "mode" }, modeChoice("plan", "plan")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("build", "build")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("plan", "plan")),
     ],
     ["Build", "Plan"],
   );
   check(
     "and one that already has one is untouched, letter for letter",
     [
-      choiceLabel({ category: "mode" }, modeChoice("yolo", "YOLO")),
-      choiceLabel({ category: "mode" }, modeChoice("acceptEdits", "Accept Edits")),
-      choiceLabel({ category: "mode" }, modeChoice("plan", "Plan Mode")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("yolo", "YOLO")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("acceptEdits", "Accept Edits")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("plan", "Plan Mode")),
     ],
     ["YOLO", "Accept Edits", "Plan Mode"],
   );
   check(
     "and a name with no capital to give is returned as it came",
     [
-      choiceLabel({ category: "mode" }, modeChoice("a", "")),
-      choiceLabel({ category: "mode" }, modeChoice("b", "3.5-turbo")),
-      choiceLabel({ category: "mode" }, modeChoice("c", "(default)")),
-      choiceLabel({ category: "mode" }, modeChoice("d", "\u{1f680} launch")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("a", "")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("b", "3.5-turbo")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("c", "(default)")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("d", "\u{1f680} launch")),
     ],
     ["", "3.5-turbo", "(default)", "\u{1f680} launch"],
   );
   check(
     "and no other category is cased at all",
     [
-      choiceLabel({ category: "model" }, modeChoice("gpt-5.6-sol", "gpt-5.6-sol")),
-      choiceLabel({ category: "thought_level" }, modeChoice("low", "low")),
-      choiceLabel({ category: "unheard_of" }, modeChoice("x", "whatever")),
-      choiceLabel({ category: null }, modeChoice("y", "whatever")),
+      choiceLabel({ category: "model", choices: [] }, modeChoice("gpt-5.6-sol", "gpt-5.6-sol")),
+      choiceLabel({ category: "thought_level", choices: [] }, modeChoice("low", "low")),
+      choiceLabel({ category: "unheard_of", choices: [] }, modeChoice("x", "whatever")),
+      choiceLabel({ category: null, choices: [] }, modeChoice("y", "whatever")),
     ],
     ["gpt-5.6-sol", "low", "whatever", "whatever"],
   );
   check(
     "a value this client does rename is renamed, not merely capitalised",
     [
-      choiceLabel({ category: "thought_level" }, modeChoice("default", "Default")),
-      choiceLabel({ category: "mode" }, modeChoice("default", "default")),
+      choiceLabel({ category: "thought_level", choices: [] }, modeChoice("default", "Default")),
+      choiceLabel({ category: "mode", choices: [] }, modeChoice("default", "default")),
     ],
-    ["Adaptive", "Default"],
+    ["Auto", "Default"],
   );
 
   const choice = (value: string, name: string, group: string | null = null) => ({

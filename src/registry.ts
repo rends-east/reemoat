@@ -974,9 +974,12 @@ export class ManagedSession {
 
   private restart: { readonly config: AgentConfig; readonly done: Promise<void> } | null = null;
 
-  // Serves the restart's captured config over the new conversation's; never assigned into agentConfigState, which validation reads.
+  // A wake's captured choices, served while the agent comes back on its own defaults and restoreConfig walks them back (Q2.254).
+  private wakeConfig: AgentConfig | null = null;
+
+  // Serves the restart's or the wake's captured config over the new conversation's; never assigned into agentConfigState, which validation reads.
   private get snapshotConfigSource(): AgentConfig {
-    const held = this.restart?.config ?? null;
+    const held = this.restart?.config ?? this.wakeConfig ?? null;
     if (held === null || held.options.length === 0) return this.agentConfigState;
     // No live agent yet: report that rather than a memory.
     if (this.agentConfigState.options.length === 0) return this.agentConfigState;
@@ -1615,6 +1618,7 @@ export class ManagedSession {
 
     // An empty conversation is opened, not resumed: claude writes nothing to disk before the first turn, so a resume can only fail.
     const empty = this.conversationKnownEmpty();
+    this.wakeConfig = wantedConfig;
     try {
       await this.launch(
         empty
@@ -1635,6 +1639,11 @@ export class ManagedSession {
         this.touchSafe();
       }
       throw error;
+    } finally {
+      this.wakeConfig = null;
+      // One event for where the restore landed: the held set, unless the agent refused or withdrew part of it.
+      if (this.session !== null) this.applyAgentConfig(this.session.agentConfig);
+      else this.touchSafe();
     }
   }
 
@@ -1729,6 +1738,8 @@ export class ManagedSession {
 
   private applyAgentConfig(config: AgentConfig): void {
     this.agentConfigState = config;
+    // Mid-wake states are the agent's defaults half walked back; the wake writes its one event when the restore settles.
+    if (this.wakeConfig !== null) return;
     this.safeAppend({ type: "agent_config", modes: config.modes, options: config.options });
     this.touchSafe();
   }

@@ -37,9 +37,11 @@ it — so a citation here would be the one kind nothing checks.
 - **Stop appears the moment you send.** A session that had been quiet for a while kept Send on screen, with a spinner, while its agent was brought back, and only then turned into Stop; pressing Stop during that wait now stops the message once the machine has it.
 - **An agent's file sends say which file they read**, so a relative path taken from the wrong folder shows where it went, and a file behind a folder the machine will not open is reported as that rather than as missing. Claude Code's permission prompt for sending a file, which appears only where your own Claude settings ask for one, is now left to you.
 - **File names in an agent's reply are plain text again**, rather than download buttons. To get a file, ask the agent to send it: it arrives as a card that saves the copy it sent.
+- **Claude's effort says what level it really runs at.** The choice that was called "Adaptive" is "Auto", as Claude Code calls it, and shows the level Claude Code itself picks for the current model: "Auto · Medium" on Opus 5.5, "Auto · High" on Fable, "Auto · Xhigh" on Opus 4.7. It follows the model when you switch, and nothing is pinned. The level appears once the machine is updated; until then the choice reads "Auto".
 
 ### Fixed
 
+- **The controls under the message box flickered when a quiet session woke up**, showing the agent's own defaults for a moment — Manual, default effort — before your choices came back. They now keep your choices throughout. This needs the machine updated.
 - **A file larger than about a megabyte could not be downloaded from a machine reached through the relay.** Pressing a sent file's card, or a changed file's download, did nothing for two minutes and then failed. The file now arrives in pieces, and the card shows a spinner while it does. This needs the machine updated; against an older one the app downloads as before.
 
 - **"working…" was a button into Background tasks in sessions with nothing running in the background.** It is a button only while something is.

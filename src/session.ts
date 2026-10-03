@@ -99,6 +99,10 @@ const CLOSE_TIMEOUT_MS = 2_000;
 // ACP extension injecting into the running turn; the original session/prompt still resolves exactly once.
 const STEER_METHOD = "_session/steering";
 
+/** Served only by this repository's patch to claude-agent-acp: what claude's effort `default` resolves to (Q6.121). */
+const EFFORT_METHOD = "_reemoat/effort";
+const EFFORT_TIMEOUT_MS = 2_000;
+
 // Stops one background task without cancelling the turn; `{stopped: false}` means it already finished.
 const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
 
@@ -259,6 +263,12 @@ export class Session {
   private disposed: Promise<void> | null = null;
   private config: AgentConfig = { modes: null, options: [] };
   private readonly configListeners = new Set<(config: AgentConfig) => void>();
+  // Off for every agent but claude, and for claude once its adapter refuses the request (Q6.121).
+  private asksEffort = false;
+  // Per model value, so an update that drops the level can carry it until the adapter answers again.
+  private readonly effortByModel = new Map<string, string>();
+  private effortAsking = false;
+  private effortAgain = false;
   private usage: ContextUsage | null = null;
   private readonly usageListeners = new Set<(usage: ContextUsage) => void>();
   private agentNumbersMessages = false;
@@ -346,6 +356,7 @@ export class Session {
       modes: toModes(opened.modes),
       options: toConfigOptions(opened.configOptions),
     };
+    await this.settleEffort();
 
     if (this.client.supportsSessionClose()) {
       await withDeadline(
@@ -538,6 +549,7 @@ export class Session {
       await session.dispose();
       throw error;
     }
+    await session.settleEffort();
     return session;
   }
 
@@ -645,6 +657,7 @@ export class Session {
         data: { code: "model_not_pinned", model: options.model ?? null },
       });
     }
+    await session.settleEffort();
     return session;
   }
 
@@ -664,6 +677,7 @@ export class Session {
       options.keepImage,
     );
     session.cwd = options.cwd;
+    session.asksEffort = options.agent === "claude";
     // Kept as sent: /clear opens its new conversation with exactly these.
     session.mcpServers = mcpServers;
     session.sessionMeta = sessionMetaOf(options);
@@ -707,8 +721,79 @@ export class Session {
       SET_CONFIG_TIMEOUT_MS,
       `session/set_config_option (${configId})`,
     );
-    this.updateConfig({ options: toConfigOptions(response.configOptions) });
+    // Asked before the update, so a model change never shows its effort unresolved first.
+    this.updateConfig({ options: await this.withResolvedEffort(toConfigOptions(response.configOptions)) });
     return this.config;
+  }
+
+  /** For a conversation just opened, before anybody listens: no notification. */
+  private async settleEffort(): Promise<void> {
+    const options = await this.withResolvedEffort(this.config.options);
+    if (options !== this.config.options) this.config = { ...this.config, options };
+  }
+
+  /** The same options with claude's effort `default` resolved where it is selected, or the very same array (Q6.121). */
+  private async withResolvedEffort(options: AgentConfigOption[]): Promise<AgentConfigOption[]> {
+    const carried = this.carryEffort(options);
+    const effort = selectedDefaultEffort(carried);
+    if (!this.asksEffort || effort === undefined) return carried;
+
+    let answer: unknown;
+    try {
+      answer = await withAbandonableDeadline(
+        (sendOptions) =>
+          this.client.agent.request<unknown, unknown>(EFFORT_METHOD, { sessionId: this.sessionId }, sendOptions),
+        EFFORT_TIMEOUT_MS,
+        `${this.client.config.displayName} reporting its effort`,
+      );
+    } catch (error) {
+      // An adapter without the patch answers -32601 and is not asked again; a timeout is asked again next change.
+      if (hasRpcCode(error, -32601)) this.asksEffort = false;
+      return carried;
+    }
+
+    const level = answer !== null && typeof answer === "object" ? (answer as Record<string, unknown>)["effort"] : undefined;
+    const model = modelValueOf(carried);
+    if (typeof level !== "string" || !effort.choices.some((choice) => choice.value === level)) {
+      if (model !== null) this.effortByModel.delete(model);
+      if (effort.resolvedDefault === undefined) return carried;
+      return carried.map((option) => (option === effort ? withoutResolvedDefault(option) : option));
+    }
+    if (model !== null) this.effortByModel.set(model, level);
+    if (effort.resolvedDefault === level) return carried;
+    return carried.map((option) => (option === effort ? { ...option, resolvedDefault: level } : option));
+  }
+
+  /** What this model resolved to last time, held over an update that dropped it until the adapter answers again. */
+  private carryEffort(options: AgentConfigOption[]): AgentConfigOption[] {
+    const effort = selectedDefaultEffort(options);
+    const model = modelValueOf(options);
+    if (effort === undefined || effort.resolvedDefault !== undefined || model === null) return options;
+    const known = this.effortByModel.get(model);
+    if (known === undefined || !effort.choices.some((choice) => choice.value === known)) return options;
+    return options.map((option) => (option === effort ? { ...option, resolvedDefault: known } : option));
+  }
+
+  /** For an update the agent sent by itself: asked in the background, applied only over the options it read. */
+  private refreshEffort(): void {
+    if (!this.asksEffort) return;
+    if (this.effortAsking) {
+      this.effortAgain = true;
+      return;
+    }
+    this.effortAsking = true;
+    void (async () => {
+      try {
+        do {
+          this.effortAgain = false;
+          const read = this.config.options;
+          const next = await this.withResolvedEffort(read);
+          if (next !== read && this.config.options === read) this.updateConfig({ options: next });
+        } while (this.effortAgain && this.asksEffort);
+      } finally {
+        this.effortAsking = false;
+      }
+    })();
   }
 
   async setMode(modeId: string): Promise<AgentConfig> {
@@ -1533,7 +1618,8 @@ export class Session {
         return;
 
       case "config_option_update":
-        this.updateConfig({ options: toConfigOptions(update.configOptions) });
+        this.updateConfig({ options: this.carryEffort(toConfigOptions(update.configOptions)) });
+        this.refreshEffort();
         return;
 
       case "available_commands_update":
@@ -2099,6 +2185,21 @@ function toModes(modes: acp.SessionModeState | null | undefined): AgentModes | n
         description: mode.description == null ? null : clip(mode.description, MAX_CONFIG_DESCRIPTION_CHARS),
       })),
   };
+}
+
+/** The effort control while its `default` is selected: claude-agent-acp's spelling, read by category (Q6.121). */
+function selectedDefaultEffort(options: readonly AgentConfigOption[]): AgentConfigOption | undefined {
+  return options.find((option) => option.category === "thought_level" && option.kind === "select" && option.value === "default");
+}
+
+function modelValueOf(options: readonly AgentConfigOption[]): string | null {
+  const model = options.find((option) => option.category === "model");
+  return typeof model?.value === "string" ? model.value : null;
+}
+
+function withoutResolvedDefault(option: AgentConfigOption): AgentConfigOption {
+  const { resolvedDefault: _dropped, ...rest } = option;
+  return rest;
 }
 
 function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined): AgentConfigOption[] {

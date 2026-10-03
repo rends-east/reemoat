@@ -50,6 +50,10 @@ RUN npm install -g --no-fund --no-audit pnpm@11.17.0
 # installs the filtered subset, so a workspace missing one of them is not the
 # workspace the lockfile describes and the check fails rather than passing.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# The adapter patch `pnpm-workspace.yaml` names. pnpm opens every
+# `patchedDependencies` file before it installs, filter or not, and fails with
+# ENOENT on a missing one — measured with this exact install (Q6.121).
+COPY patches ./patches
 COPY packages/control-plane/package.json ./packages/control-plane/
 COPY packages/web/package.json ./packages/web/
 # ⚠ **`packages/protocol` is a workspace member, so its manifest belongs here even

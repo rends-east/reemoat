@@ -1,0 +1,47 @@
+diff --git a/dist/acp-agent.js b/dist/acp-agent.js
+index 0214a509eb5e7b777a69e4e34637941c275d27b1..b98c6bc53f6d392e1a19d6358739440ca2934292 100644
+--- a/dist/acp-agent.js
++++ b/dist/acp-agent.js
+@@ -101,6 +101,15 @@ const TURN_NO_RESULT_MESSAGE = "The turn ended without a result: the agent went
+  *  agreed ACP steering wire protocol; advertised to clients via the top-level
+  *  `InitializeResponse._meta.steering.supported`. */
+ const STEER_METHOD = "_session/steering";
++// Reemoat: the effort level the CLI will send on its next request — what /effort and the status line
++// resolve `default` to for the current model — read from get_settings' `applied.effort`.
++const REEMOAT_EFFORT_METHOD = "_reemoat/effort";
++function parseReemoatEffortRequest(params) {
++    if (!params || typeof params !== "object" || typeof params.sessionId !== "string" || params.sessionId.length === 0) {
++        throw RequestError.invalidParams(undefined, "_reemoat/effort params require a non-empty sessionId");
++    }
++    return { sessionId: params.sessionId };
++}
+ /** Stops one Claude background task without cancelling the parent prompt turn. */
+ const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
+ function parseAsyncTaskStopRequest(value) {
+@@ -1183,6 +1192,18 @@ export class ClaudeAcpAgent {
+         }
+         await this.publishGoal(sessionId, goal);
+     }
++    async reemoatEffort(params) {
++        const session = this.sessions[params.sessionId];
++        if (!session) {
++            throw new Error("Session not found");
++        }
++        if (session.queryClosed) {
++            throw RequestError.internalError(undefined, SESSION_ENDED_MESSAGE);
++        }
++        const settings = await session.query.getSettings();
++        const effort = settings?.applied?.effort;
++        return { effort: typeof effort === "string" ? effort : null };
++    }
+     /** Steer the session per the ACP steering wire protocol: inject a follow-up
+      *  message into the turn that is currently running. If that turn already
+      *  settled, the established default starts a new detached turn; Hosts may opt
+@@ -7501,6 +7522,7 @@ export function runAcp(logger) {
+         .onRequest(methods.agent.session.prompt, (ctx) => runPromptWithCancellation(agent, ctx.params, ctx.signal))
+         .onNotification(methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
+         .onRequest(STEER_METHOD, { parse: parseSteerRequest }, (ctx) => agent.steer(ctx.params))
++        .onRequest(REEMOAT_EFFORT_METHOD, { parse: parseReemoatEffortRequest }, (ctx) => agent.reemoatEffort(ctx.params))
+         .onRequest(ASYNC_TASK_STOP_METHOD, { parse: parseAsyncTaskStopRequest }, (ctx) => agent.stopAsyncTask(ctx.params))
+         .onRequest(GOAL_CONTROL_METHOD, { parse: parseGoalRequest }, (ctx) => agent.goal(ctx.params))
+         .connect(stream);

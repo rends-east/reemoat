@@ -157,8 +157,20 @@ process.stdout.write("\nchip labels\n");
     value: "default",
     choices: [{ value: "default", name: "Default", description: null, group: null }],
   });
-  // `Adaptive`: with effort unset claude sends no effort parameter, and the model then thinks adaptively.
-  check("claude's default effort is named for what it is", chipValue(effort), "Adaptive");
+  // Claude Code's own word for an unset effort, `/effort auto`: the model's default level (Q6.121).
+  check("claude's default effort is named as Claude Code names it", chipValue(effort), "Auto");
+  const resolvedTo = (level: string) =>
+    opt({
+      category: "thought_level",
+      value: "default",
+      resolvedDefault: level,
+      choices: [
+        { value: "default", name: "Default", description: null, group: null },
+        { value: "medium", name: "Medium", description: null, group: null },
+      ],
+    });
+  check("and says which level that is, where the agent reports it", chipValue(resolvedTo("medium")), "Auto · Medium");
+  check("a reported level that is none of the choices is not drawn", chipValue(resolvedTo("ludicrous")), "Auto");
   const kimiThinking = opt({
     category: "thought_level",
     value: "off",

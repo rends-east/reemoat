@@ -101,6 +101,8 @@ export interface AgentConfigOption {
   value: string | boolean;
   choices: AgentConfigChoice[];
   truncated?: boolean;
+  /** While `default` is selected, the choice it resolves to now; claude's effort alone says (Q6.121). */
+  resolvedDefault?: string;
 }
 
 export interface AgentModes {

@@ -112,7 +112,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -441,6 +441,39 @@ function installDependencies(runtime, versions) {
     // same node the payload will.
     env: { ...process.env, PATH: `${join(runtime, "bin")}:${process.env.PATH ?? ""}` },
   });
+}
+
+/**
+ * Every patch `pnpm install` applies at the root, applied to this npm tree too (Q6.121).
+ *
+ * npm knows nothing of pnpm's `patchedDependencies`, so without this the app's daemon
+ * would run an adapter the repository's own daemon does not. Read off
+ * `pnpm-workspace.yaml` rather than listed here, and refused when the payload installed
+ * a different version than the one patched, or when a patch does not apply.
+ *
+ * ⚠ **`GIT_CEILING_DIRECTORIES` is what makes `git apply` apply.** `stageDir` is inside
+ * this checkout, so git would take the repository's root for the patch's paths and skip
+ * every one outside the working subdirectory — exit 0, nothing changed, measured.
+ */
+function applyPatches() {
+  const lines = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8").split("\n");
+  const start = lines.findIndex((line) => line.trimEnd() === "patchedDependencies:");
+  if (start < 0) return;
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (!/^\s/.test(line)) break;
+    const entry = /^\s+'?((?:@[^/\s']+\/)?[^@\s']+)@([^'\s]+)'?:\s*(\S+)\s*$/.exec(line);
+    if (entry === null) fail(`pnpm-workspace.yaml: unreadable patchedDependencies line ${JSON.stringify(line.trim())}`);
+    const [, name, version, patch] = entry;
+    const dir = ["node_modules", ...name.split("/")].join("/");
+    const installed = readJson(join(stageDir, dir, "package.json")).version;
+    if (installed !== version) fail(`${name} is patched at ${version}, but the payload installed ${installed}`);
+    step(`patching ${name}@${version}`);
+    run("git", ["apply", "-p1", `--directory=${dir}`, join(repoRoot, patch)], {
+      cwd: stageDir,
+      env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(stageDir) },
+    });
+  }
 }
 
 /**
@@ -827,6 +860,7 @@ function payloadSize() {
 process.stdout.write(`build-daemon: staging for ${triple}\n`);
 const runtime = fetchRuntime();
 installDependencies(runtime, entryVersions());
+applyPatches();
 copySource(runtime);
 placeRuntime(runtime);
 regenerateShims();

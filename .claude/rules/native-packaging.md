@@ -125,6 +125,13 @@ written into the refusal, so they survive the day somebody changes the decision.
 `nativecheck` asserts the refusal names a file that exists, because a refusal
 pointing at nothing reads as authoritative and is not.
 
+**The payload is npm's tree, so pnpm's patches are applied by hand.**
+`applyPatches` reads `pnpm-workspace.yaml`'s `patchedDependencies`, refuses a
+payload that installed another version than the one patched, and runs `git apply`
+under `GIT_CEILING_DIRECTORIES` — inside this checkout git would read the paths
+against the repository root and skip them all, exit 0. Without it the app's daemon
+would run the claude adapter without `_reemoat/effort` (Q6.121).
+
 **Every desktop triple stays in `TARGETS` even where nothing ships from it.**
 `nativecheck` counts the table and asserts every row names an esbuild binary — an
 assertion that goes vacuous the moment the table describes one platform, which is

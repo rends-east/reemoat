@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1123 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1125 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -242,7 +242,8 @@ pnpm nativecheck                     # packages/native: the Boot payload's keys 
                                      #   sites, and the one workspace line three deploy behaviours
                                      #   depend on. Offline, and deliberately **no cargo**
 pnpm pincheck                        # every place a version is written down. The agents':
-                                     #   three copies each, and the adapters actually installed.
+                                     #   three copies each, the claude adapter's patch key a
+                                     #   fourth, and the adapters actually installed.
                                      #   And six of this release's seven — the root and all three
                                      #   manifests, `src/version.ts` and the CHANGELOG's newest
                                      #   dated heading; `app.ts`'s VERSION is relaycheck's, off the

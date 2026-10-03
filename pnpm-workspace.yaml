@@ -103,7 +103,19 @@ overrides:
 #
 # `pnpm pincheck` asserts that each names the version `package.json` pins, so these
 # are not free-floating — they are the second of the three places a pin is written
-# down, and a bump that edits one file and not the other fails there.
+# down (four for the claude adapter, whose patch below is keyed on its version), and a
+# bump that edits one file and not the other fails there.
 minimumReleaseAgeExclude:
   - '@agentclientprotocol/claude-agent-acp@0.73.0'
   - '@agentclientprotocol/codex-acp@1.8.0'
+
+# **One adapter is patched, and only to ask its CLI a question it already answers.**
+# `claude-agent-acp` names claude's effort `default` and never says what that
+# resolves to; the CLI does, as `get_settings`' `applied.effort` — the level its own
+# `/effort` and status line show, per model and after the organization's caps. The
+# patch adds one request, `_reemoat/effort`, that reads it (Q6.121). pnpm refuses an
+# install whose patch no longer applies, so a bump of the pin is a re-patch rather
+# than a silent loss; `packages/native/scripts/build-daemon.mjs` applies the same
+# file to the app's npm tree, and `pnpm pincheck` holds the key to the pin.
+patchedDependencies:
+  '@agentclientprotocol/claude-agent-acp@0.73.0': patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch

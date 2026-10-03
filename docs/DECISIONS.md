@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 111 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 112 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 447 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 80 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 81 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1123** | |
+| | | **1125** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1123 rather than the 560
+dividers. So the count is over **both** depths, and it says 1125 rather than the 562
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9428,6 +9428,34 @@ nothing answers for it.
 
 **Status.** Current. Amends Q2.252.
 
+### Q2.254 — What the controls show while a released agent comes back
+
+**Reported 2026-10-03 by the owner**: on a wake the strip under the message box
+twitched, *"as if for a moment the effort switched to the default"*.
+
+**Measured on that session's own log.** A wake opens a fresh agent on its own
+defaults and `restoreConfig` then walks the session's choices back, one call each.
+Every step was written and fanned out. 18963 `mode=default, effort=default` at
+16:26:06.074, then `mode=auto` twice at .084, then `effort=xhigh` at .107: four
+snapshots in 33 ms, and the person saw the first three, which are not their session.
+`restartAgent` had always held its captured config over that window
+(`snapshotConfigSource`); a wake held nothing.
+
+**Decision.** `doResume` holds the config it captured, `wakeConfig`, from before the
+spawn until the restore settles. The snapshot serves it over the agent's defaults,
+and `applyAgentConfig` writes no event while it is held. When the restore settles,
+one `agent_config` is written for where it landed. That is the held set unless the
+agent refused or withdrew part of it, so a value that did not come back still shows
+as it really is. A tap in the window was already refused as busy (`resuming`), so
+nothing needed holding against a person.
+
+Covers every wake: a message to a parked session, a daemon restart's pass and
+Resume. `daemoncheck` samples the snapshot at the moment the fresh agent, still on
+its default, receives the replay; without the hold it read the default, and the log
+held three events where it now holds one.
+
+**Status.** Current.
+
 ## The web client
 
 ### What the client is
@@ -10962,7 +10990,13 @@ effort parameter is sent**, and the documented behaviour with none sent is
 choosing per turn. The narrowing matters because kimi's equivalent is `off` and
 means something else.
 
-**Status.** Current
+**Reversed 2026-10-03 (Q6.121).** The premise did not survive claude 2.1.288: an
+unset effort is the model's own *level*, which the CLI keeps per model and calls
+`auto`, and adaptive thinking is a separate thing beside it. The control says
+`Auto` now, and `Auto · Medium` where the agent reports the level. The narrowing
+to `thought_level` and the literal `default` stands.
+
+**Status.** Reversed by Q6.121
 
 #### Q3.68 — What happens when a placeholder choice duplicates a real one?
 
@@ -35912,6 +35946,76 @@ behaves as before. Only a daemon that answers ranges closes the exposure.
 there; the owner's next press is that measurement.
 
 **Status.** Current.
+
+### Q6.121 — What claude's effort `default` resolves to, and the one patch that asks
+
+**Asked 2026-10-03 by the owner**: *"can we learn the model's default from auto and
+show it? Claude Code does."* Q3.67 had named the choice `Adaptive`, and Claude Code
+names it nothing of the kind.
+
+**What `default` is, measured on claude 2.1.288.** Claude Code calls it `auto`:
+*"Use the default effort level for your model"*. The CLI keeps a level per model in
+its own table, with organization settings from its server able to override it, and
+it pins nothing. Choosing a model moves the level. Its `get_settings` control
+request answers `applied.effort`, *"the effort level the session will send on its
+next request — after env overrides, session state, org caps and model-support
+downgrades"*. That is the one number worth showing. Asked through the SDK's
+`getSettings()` on a fresh query, before any turn, in 0.5 s:
+
+| Model | `applied.effort` |
+|---|---|
+| opus (Opus 5.5) | medium |
+| sonnet (Sonnet 5.5) | medium |
+| fable (Fable 5.1) | high |
+| claude-opus-4-7 | xhigh |
+| haiku | `null`, no effort |
+
+A level set outright answers that level, and clearing it answers the model's again.
+
+**Why it needed a patch.** `claude-agent-acp` 0.73.0 never calls `getSettings()`,
+and its effort option says `Default` and nothing more. 0.85.1 does not either: its
+`recommendedValue` mode drops the `default` row for `medium` on every model, which is
+not the CLI's answer for Fable or Opus 4.7. The only way through ACP is the adapter.
+
+**Decision.**
+
+- **One request, in a pnpm patch.** `patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch`
+  adds `_reemoat/effort` and nothing else. It reads `applied.effort` for a session.
+- **Asked only of claude.** The session asks it after a conversation opens, after a
+  `/clear`, after every change it makes, and in the background after a change the
+  agent makes itself. The answer lands on the effort option as `resolvedDefault`,
+  and only while `default` is selected and only when it names one of the choices.
+- **No flicker.** Each model's last answer is carried over an update until the
+  adapter answers again. A change of ours waits for the answer before it is applied,
+  so the strip never shows a level-less row first. An adapter without the patch
+  answers -32601 and is not asked again.
+- **The strip says `Auto`**, Claude Code's word, and `Auto · Medium` once the level
+  is known.
+- **Shown, never pinned.** Pinning the level would stop it following the model, which
+  is the half of `auto` that matters.
+
+**What the patch costs, every part of it measured or enforced.**
+
+- **The image.** pnpm opens every patch file before it installs, filter or not, and
+  fails with ENOENT on a missing one; the control plane's image installs the root
+  importer, which depends on the adapter. So `patches` is in `.dockerignore` and in
+  the Dockerfile's `manifests` stage.
+- **The app.** It installs its daemon with npm, which knows no patches, so
+  `build-daemon.mjs` applies them itself. Measured there: inside the checkout,
+  `git apply` exits 0 and changes nothing; `GIT_CEILING_DIRECTORIES` makes it apply.
+- **The fleet.** A bump of the pin is a re-patch: pnpm refuses an install whose
+  patch does not apply, and `pincheck` holds the key to the pinned version.
+- **The relay.** The lockfile records the patch's hash, and `RELAY_INPUTS` matches
+  the lockfile, so the next control-plane deploy recreates the relay once.
+
+**Measured end to end** on a throwaway daemon with the real CLI and the patched
+adapter, without a prompt. A fresh session read `opus · default → medium`; sonnet
+medium, fable high, claude-opus-4-7 xhigh, back to opus medium; `high` set outright
+carried no resolution, and `default` again read medium. A stop and resume on fable
+came back `high` in one `agent_config` event, and every change wrote one event that
+already carried its level.
+
+**Status.** Current. Reverses Q3.67's label.
 
 ## Open questions and deliberate non-goals
 

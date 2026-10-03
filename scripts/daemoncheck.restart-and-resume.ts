@@ -182,6 +182,9 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     caps: () => Record<string, unknown>;
     notify: (sessionId: string, update: Record<string, unknown>) => void;
     stops: () => { sessionId: string; asyncTaskId: string }[];
+    effortAsks: () => number;
+    // Holds every later `_reemoat/effort` answer this long, so what is drawn before it lands can be read.
+    holdEffort: (ms: number) => void;
   }
 
   // Fresh pipes per launch: an ended `PassThrough` is spent.
@@ -204,6 +207,8 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     advertisesTasks?: boolean | "old" | "unnamed";
     // Fires inside `restoreConfig`'s replay, after `session` is assigned: the one window where a tap could be silently overwritten.
     onConfigSet?: () => void;
+    // claude's effort as claude-agent-acp publishes it, `default` selected; "answers" is the patched `_reemoat/effort` (Q6.121).
+    effortDefault?: "answers" | "refuses";
   }): Rig => {
     let launched = 0;
     let opened = 0;
@@ -247,8 +252,28 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       ],
     };
     let currentModel: unknown = modelOption.currentValue;
+    const defaultEffortOption = {
+      id: "effort",
+      name: "Effort",
+      description: "Available effort levels for this model",
+      category: "thought_level",
+      type: "select",
+      currentValue: "default",
+      options: [
+        { value: "default", name: "Default" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ],
+    };
+    let currentEffort: unknown = "default";
+    let effortAsks = 0;
+    let effortHoldMs = 0;
     const published = (effort: unknown = effortOption.currentValue) =>
-      options.effort === true ? [withValue(currentModel), { ...effortOption, currentValue: effort }] : [withValue(currentModel)];
+      options.effortDefault !== undefined
+        ? [withValue(currentModel), { ...defaultEffortOption, currentValue: currentEffort }]
+        : options.effort === true
+          ? [withValue(currentModel), { ...effortOption, currentValue: effort }]
+          : [withValue(currentModel)];
 
     class ResumeRig extends LocalRuntime {
       override describe(agent: AgentId): AgentLaunchConfig {
@@ -321,6 +346,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                 options.onConfigSet?.();
                 const isEffort = params["configId"] === "effort";
                 if (!isEffort) currentModel = params["value"];
+                else currentEffort = params["value"];
                 send({
                   jsonrpc: "2.0",
                   id,
@@ -369,6 +395,16 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                   break;
                 }
                 send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+                break;
+              // The CLI's own resolution as the patch reports it: per model, and the pin itself once one is set.
+              case "_reemoat/effort":
+                effortAsks += 1;
+                if (options.effortDefault === "answers") {
+                  const level = currentEffort !== "default" ? currentEffort : currentModel === "sonnet" ? "high" : "medium";
+                  setTimeout(() => send({ jsonrpc: "2.0", id, result: { effort: level } }), effortHoldMs);
+                } else {
+                  send({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
+                }
                 break;
               // Written out, not left to `default`: its `{}` reads as `stopped: false`.
               case "_session/async_task/stop": {
@@ -424,6 +460,10 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       configSets: () => configSets,
       caps: () => caps,
       stops: () => stops,
+      effortAsks: () => effortAsks,
+      holdEffort: (ms) => {
+        effortHoldMs = ms;
+      },
       notify: (sessionId, update) => {
         pushes.get(sessionId)?.({
           jsonrpc: "2.0",
@@ -2112,13 +2152,26 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     // A tap inside the wake's config replay must answer busy (`resuming` in `replacingConfig`), not be silently overwritten.
     // Collected into an array so a hook that never fired is a distinguishable answer.
     const midWake: string[] = [];
+    // Sampled when the fresh agent, still on its own default, receives the replay: the moment the strip used to show it (Q2.254).
+    const shownMidWake: unknown[] = [];
     armConfigSet = () => {
+      shownMidWake.push(cfg?.snapshot().agentConfig?.options[0]?.value);
       void cfg?.setMode("plan").then((r) => void midWake.push(r.kind));
       void cfg?.setConfigOption("model", "opus").then((r) => void midWake.push(r.kind));
     };
+    const configEvents = () => (cfg?.log.read(0, 1000, 1 << 20) ?? []).filter((stored) => stored.event.type === "agent_config");
+    const writtenBefore = configEvents().length;
     await cfg?.resume();
     armConfigSet = null;
     check("the wake sends the choice to the fresh agent", rig.configSets(), [{ id: "model", value: "sonnet" }]);
+    check("and while that agent was still on its own default, the session showed the choice", shownMidWake, ["sonnet"]);
+    check(
+      "the wake writes one config event, where it landed, and none of the agent's defaults",
+      configEvents()
+        .slice(writtenBefore)
+        .map((stored) => (stored.event.type === "agent_config" ? stored.event.options[0]?.value : null)),
+      ["sonnet"],
+    );
     check("which is live again on the chosen model", [cfg?.status, cfg?.snapshot().agentConfig?.options[0]?.value], ["idle", "sonnet"]);
     check(
       "a tap arriving inside the wake is refused rather than silently overwritten",
@@ -2127,6 +2180,68 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     );
     check("and the wake put back what it captured", cfg?.snapshot().agentConfig?.options[0]?.value, "sonnet");
 
+    await own.shutdown();
+  }
+
+  // claude's effort `default` is resolved by the patched adapter, and only claude is asked (Q6.121).
+  {
+    const rig = rigWith({ resume: true, config: true, effortDefault: "answers" });
+    const store = storeOf([{ ...interruptedRow("s_eff", "daemon_restarted", "a_eff"), agent: "claude" }]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const session = own.get("s_eff");
+    const effort = () => session?.snapshot().agentConfig?.options.find((option) => option.id === "effort");
+    check("a resumed claude says what its default effort is", [effort()?.value, effort()?.resolvedDefault], ["default", "medium"]);
+
+    await session?.setConfigOption("model", "sonnet");
+    check("a model change asks again, and the level follows the model", effort()?.resolvedDefault, "high");
+
+    const asked = rig.effortAsks();
+    const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+    rig.holdEffort(200);
+    rig.notify("a_eff", {
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        { id: "model", name: "Model", description: null, category: "model", type: "select", currentValue: "opus", options: [{ value: "opus", name: "Opus" }, { value: "sonnet", name: "Sonnet" }] },
+        { id: "effort", name: "Effort", description: null, category: "thought_level", type: "select", currentValue: "default", options: [{ value: "default", name: "Default" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }] },
+      ],
+    });
+    const modelOf = () => session?.snapshot().agentConfig?.options.find((option) => option.id === "model")?.value;
+    for (let waited = 0; modelOf() !== "opus" && waited < 1_000; waited += 5) await settle(5);
+    // The stub still holds sonnet, so the adapter will answer "high"; what is drawn meanwhile is opus's remembered "medium".
+    check("an update the agent sends by itself carries the level it last had for that model", [modelOf(), effort()?.resolvedDefault], ["opus", "medium"]);
+    await settle(300);
+    rig.holdEffort(0);
+    check("and is asked about in the background, over the options it read", [rig.effortAsks() - asked, effort()?.resolvedDefault], [1, "high"]);
+
+    await session?.setConfigOption("effort", "medium");
+    check("a level chosen outright carries no resolution", [effort()?.value, effort()?.resolvedDefault], ["medium", undefined]);
+    await own.shutdown();
+  }
+
+  {
+    const rig = rigWith({ resume: true, config: true, effortDefault: "refuses" });
+    const store = storeOf([{ ...interruptedRow("s_old", "daemon_restarted", "a_old"), agent: "claude" }]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const session = own.get("s_old");
+    await session?.setConfigOption("model", "sonnet");
+    await session?.setConfigOption("model", "opus");
+    const effort = session?.snapshot().agentConfig?.options.find((option) => option.id === "effort");
+    check("an adapter without the patch leaves the default unresolved", [effort?.value, effort?.resolvedDefault], ["default", undefined]);
+    check("and is asked once, not on every change", rig.effortAsks(), 1);
+    await own.shutdown();
+  }
+
+  {
+    const rig = rigWith({ resume: true, config: true, effortDefault: "answers" });
+    const own = new SessionRegistry(new MemoryEventStore(), storeOf([interruptedRow("s_kimi", "daemon_restarted", "a_kimi")]), undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    await own.get("s_kimi")?.setConfigOption("model", "sonnet");
+    check("no other agent is ever sent the request", rig.effortAsks(), 0);
     await own.shutdown();
   }
 

@@ -20,13 +20,16 @@ overrides:
   '@openai/codex-win32-arm64': '-'
   '@openai/codex-win32-x64': '-'
 
+patchedDependencies:
+  '@agentclientprotocol/claude-agent-acp@0.73.0': 2ee645759c1219cc6b768846a85e0c9817e8e50fc90036bcb596876fa5d3d192
+
 importers:
 
   .:
     dependencies:
       '@agentclientprotocol/claude-agent-acp':
         specifier: 0.73.0
-        version: 0.73.0(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
+        version: 0.73.0(patch_hash=2ee645759c1219cc6b768846a85e0c9817e8e50fc90036bcb596876fa5d3d192)(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
       '@agentclientprotocol/codex-acp':
         specifier: 1.8.0
         version: 1.8.0
@@ -1801,7 +1804,7 @@ packages:
 
 snapshots:
 
-  '@agentclientprotocol/claude-agent-acp@0.73.0(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))':
+  '@agentclientprotocol/claude-agent-acp@0.73.0(patch_hash=2ee645759c1219cc6b768846a85e0c9817e8e50fc90036bcb596876fa5d3d192)(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))':
     dependencies:
       '@agentclientprotocol/sdk': 1.4.0(zod@4.4.3)
       '@anthropic-ai/claude-agent-sdk': 0.3.257(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)

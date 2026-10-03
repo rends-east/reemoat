@@ -215,11 +215,13 @@ const FOREIGN = new Set([
   "canUseTool",
   // claude-agent-acp's hold on a turn while its subagents run, cited in Q6.119 for where it holds and where it does not.
   "turnAwaitingSubagents",
+  // claude-agent-acp 0.85.1's effort mode, cited in Q6.121 for being medium on every model rather than the CLI's level.
+  "recommendedValue",
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.
 const CITED_BUT_UNRESOLVED = [
-  "PrefixPattern", "SPINNER_AFTER_MS", "checkAndFail", "completeCommandExecutionEvent",
+  "PrefixPattern", "SPINNER_AFTER_MS", "adaptiveLabel", "checkAndFail", "completeCommandExecutionEvent",
   "detectSlashIntent", "elapsedTimeSeconds", "formatUserCode", "looksBinary", "nextStep",
   "remainingText", "scheduleAvailableCommandsUpdate", "sessionDir", "subagentRetry",
   "supportsEffort", "toolDetail", "totalDurationMs", "workDir",
