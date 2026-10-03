@@ -25,6 +25,15 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **An agent can send you a file.** Ask for a file and the agent puts it in the conversation as a card with its name and size; a tap saves it, and an image is shown in place. It works for a file anywhere on the machine, not only one inside the session's folder, and the agent may send one unasked when what it made for you is a file. The copy is taken when it is sent, so it still opens after the agent changes or deletes the original. Up to 100 MB each; a session keeps the newest hundred. Claude Code, Codex and Grok send without asking permission first, as does Cursor; opencode sends too. Update the app before the machines, or the file is sent and an older app shows only the tool's name.
+
+### Changed
+
+- **Agents are no longer handed tools that only work in their own terminal.** Claude Code loses the ones that address its other sessions and its remote control, its feedback and onboarding cards, switching to a worktree of its own (the session's folder is the one Reemoat gave it), and publishing to claude.ai. Codex loses its plugin-install prompt. What each can do here is unchanged, and its context is a little smaller. Scheduling tools are left as they were.
+- **Switching agent messaging off no longer takes the Reemoat tools away entirely**: sending you a file is not a message to another agent, so it stays.
+
 ## [0.12.0] - 2026-10-01
 
 ### Added

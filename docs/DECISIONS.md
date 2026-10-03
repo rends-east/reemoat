@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 109 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 110 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 444 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 77 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 78 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1115** | |
+| | | **1117** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1115 rather than the 555
+dividers. So the count is over **both** depths, and it says 1117 rather than the 557
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9252,6 +9252,99 @@ elicitation id) and is not drawn either: the card above already shows it.
 with the answer; it is told to write nothing, which it may not honour. Held longer
 would need a client that passes a timeout, or a loop of calls each under 60 s, which
 spends a model request a minute on nobody answering — not built.
+
+**Status.** Current.
+
+### Q2.252 — A file the agent hands over on purpose
+
+**Question.** Q3.690 ended *"A way for an agent to hand a file over on purpose would
+be a tool of its own"*. Until now a file reached its person only where a tool call
+had read or written it inside the workspace; a PDF made by a shell command, or
+anything in `/tmp`, was a path printed at somebody who may be on a phone.
+
+**Decision. `send_file`, on the `reemoat` MCP server, for every agent that takes the
+server.** One argument, `path`: absolute, from `~`, or relative to the session's
+working folder. The daemon **copies the file as it stands** into the session's upload
+store and appends one event, `file_sent`, carrying a `StoredFileRef` and nothing
+else; the app draws a card, an image previewed through `previewable` like every
+other, and a press saves it through `GET /sessions/:id/uploads/:uploadId`. No bytes
+cross the MCP call, whose body is 256 KiB, and no route was added.
+
+**A copy, never a path.** The log outlives the disk, which is `StoredFileRef`'s own
+reason; `/files` serves only under `workspace.root`, and what somebody asks for is
+as often outside it; and the card has to open after the agent overwrites the
+original. So a file is sent again after it changes, and the tool says so.
+
+**Nothing is contained, and that is the honest reading of what is.** The agent runs
+as the user and can read the file already, so the path is refused only for what it
+is: missing, not a regular file, over `MAX_SENT_FILE_BYTES`, or on a filesystem that
+does not answer. Each is a sentence to the model (`sendFileRefusal`), never a 4xx.
+
+**The copy, in the order that has to hold** (`Uploads.keepAgentFile`): the rate
+window, `probeRealpath`, `probeFile`, an open with `O_NONBLOCK` so a pipe swapped in
+after the probe cannot park it, `fstat` on the handle, the copy under a running
+byte counter and the call's own abort signal, then the row — the commit point,
+inserted already consumed — and only then the eviction. A refusal before the copy
+leaves nothing; one inside it removes the directory; a crash before the row is
+`reconcile`'s. Calls from one session run one after another, so each is charged and
+bounded in the order it came. **45 s for the whole call**, its wait behind another
+included, which is under the 60 s an MCP client gives one (Q2.251): a copy that
+outlived its call would put a file in the chat the model saw fail, and the model
+would send it again. `sendFile` asks whether the session is still running a second
+time, after the copy, for a Stop that landed inside it. ⚠ A read that stalls after
+the probes is given up on and still holds its thread, as the download route's does.
+
+**A third budget.** Sent files are `f_` rows: 100 of them or 1 GiB, oldest first
+out, with a rate window of their own. `sentFiles` counts a person's files alone, so
+an agent's loop can neither fill a person's budget, nor be evicted by their upload,
+nor answer it with 429 — the argument `keepAgentImage`'s budget already made.
+
+**The name is the agent's, which no upload's ever was.** `sentFileName` drops
+controls, bidi and zero-width characters rather than refusing: a right-to-left
+override in front of `fdp.exe` reads as a PDF in a save panel.
+
+**No messaging switch withdraws it**, for Q2.250's reason: a file goes to the
+session's own person. So `mcpServersFor` now hands the server to every http-capable
+agent wherever there is an upload store, with messaging off too, and `callTool`
+answers it before `callRefusal`. `REEMOAT_PEER_MESSAGES=off` removes the messaging
+tools, no longer the server.
+
+**The permission in front of it is answered by the daemon, the owner's call
+2026-10-02** — the agent is meant to send a file when it judges one wanted, and a
+card for each would undo that. How, per harness, measured the same day on a daemon
+running this tree:
+
+| Harness | The call as announced | The permission |
+|---|---|---|
+| claude 2.1.287 | `tool_call` with `_meta.claudeCode.toolName` `mcp__reemoat__send_file` | none: `allowedTools` in `sessionMetaFor`, which the SDK applies before `canUseTool` |
+| codex 0.160.0 | `rawInput` `{server, tool, arguments}` | none reached the client: its Guardian approved, *"Risk: low"* |
+| grok 1.0.40 | `use_tool`, `rawInput` `{tool_name: "reemoat__send_file", tool_input}`, then the request on the same id | answered `allow-once` here |
+| cursor | `rawInput` `{providerIdentifier, toolName, args}` (Q6.114) | answered `allow-once` here; not run live, its keychain being locked in the shell that measured |
+| opencode 1.18.34 | titled `reemoat_send_file`, `rawInput` `{path}` | none arrived |
+
+`ownToolCall` reads each shape **for its own harness only**: on another, the same
+keys are whatever a model typed. grok's is the one a model does type — they are
+`use_tool`'s arguments — so there the call is answered only once grok itself has
+vouched for it: the `variant: "UseTool"` it adds to those arguments after parsing
+them, which the request carries and the first announcement does not. A call
+carrying any other key is not one, and a call that later says it is something else
+is forgotten. The answer is only ever `allow_once`: the fallback to `allow_always`
+that `ask_question` may take would write a rule into the person's own harness
+config. An unrecognised call falls to the person's card, and so does a subagent's.
+
+**The card stands for the call.** `file_sent.toolCallId` is the harness's own call
+where `claimSentFileCall` could tell — by the path it named, else the oldest
+unclaimed — and the app then draws neither that call's row nor the daemon's answer
+to its permission, as it does for a question. opencode names the tool only in a
+title, which nothing here reads, so there the row and the card are both drawn.
+
+**Compatibility.** An app that predates the event draws nothing for it and still
+shows the harness's own tool row, while the model is told the file was sent: so the
+app ships first, then the daemons. A daemon older than this cannot weigh a stored
+`file_sent`, so it is not rolled back under a log that holds one.
+
+**Not built.** A switch that withholds the tool; several files in one call; a
+folder; a bridge that would give an older app a button.
 
 **Status.** Current.
 
@@ -28032,7 +28125,15 @@ array's six; `nativecheck` refuses `InvokeBody::Raw` in any command.
 
 **Not built.** A file made only by a shell command, and never read or written by a
 tool, is still no button; the agent in that session read its PDF to make it one. A
-way for an agent to hand a file over on purpose would be a tool of its own.
+way for an agent to hand a file over on purpose would be a tool of its own — and is
+one now, `send_file` (Q2.252).
+
+**Switched off 2026-10-03, on the owner's word, not removed.** With `send_file` in
+place the inline offer drew a second, live copy of a file under its card, and on an
+older daemon a name in prose looked like a promise the rule could not keep — a file
+outside the workspace, or one only a shell command had touched, stayed text.
+`INLINE_DOWNLOADS` is false and the session view asks it before `downloadablePath`,
+which is kept and still asserted whole; turning it back on is that one constant.
 
 **Measured.** `cargo check` for `aarch64-linux-android` and the host, `clippy -D
 warnings`, the 131 Rust tests. What first failed the `ipc://` call on that page is
@@ -35454,6 +35555,89 @@ does not (Q6.4). Its todo updates are ignored, a permission it asks on its own i
 routed home, and a frame on an id nobody announced is dropped as any unknown one is.
 
 **Status.** Current. Shapes read from source; the live capture is Q7.154's.
+
+### Q6.118 — Which tools each harness hands its model, and which this daemon withdraws
+
+**Question.** Every harness ships tools written for its own terminal or its vendor's
+cloud. Under this daemon some do nothing and some do the wrong thing, and all of
+them cost context. Two were withdrawn: claude's `ListAgents` (Q2.242) and grok's
+question tool with questions off (Q6.113). Nothing listed the rest.
+
+**Measured 2026-10-02**, each list as the model is given it on this machine.
+claude's is the SDK's `system/init` message under the options the adapter builds;
+the others answered a prompt asking for their tool names through `pnpm harness`.
+
+| Harness | Tools | Withdrawn here | By |
+|---|---|---|---|
+| claude 2.1.287 | 27, with `ListAgents` already gone | `DesignSync`, `EnterWorktree`, `ExitWorktree`, `PushNotification`, `ReportFindings`: 22 left | `disallowedTools` |
+| codex 0.160.0 | 25 | `request_plugin_install`: 24 left, and about 350 tokens of context | `CODEX_CONFIG`, `features.tool_suggest` |
+| grok 1.0.40 | 33 | none: `send_feedback` survives every door tried | — |
+| opencode 1.18.34 | 11 | none wanted: its question and plan-exit tools are already off under ACP | — |
+| cursor 2026.10.01 | not measured: its keychain was locked in the measuring shell | none possible: the list is its server's (Q2.250) | — |
+| kimi 0.29.2 | not measured: every turn ended empty, as in Q6.114 | none possible under ACP | — |
+
+**claude's list is by what a tool is, never by whether this build has it.**
+`CLAUDE_WITHDRAWN_TOOLS` names twenty-nine; five were on the measured list and the
+rest sit behind flags evaluated on Anthropic's side, where one may be switched on
+tomorrow. A name the CLI lacks is ignored — the session opened and listed 22 with
+all twenty-nine sent. Four reasons:
+
+- **Another Claude Code session, or its remote control**: `ListAgents`, `SendFile`,
+  `SendUserFile`, `SendUserMessage`, `FetchInboxMessage`, `ReadNotifications`,
+  `Poll`, `PushNotification`. `SendUserFile` is the one with a replacement, Q2.252.
+- **Claude Code's own terminal**: `SendFeedback`, `ReportFindings`, `ProposeGoal`,
+  `ProposeSkills`, `ShowOnboardingRolePicker`, `ShareOnboardingGuide`,
+  `SuggestPluginInstall`, `SuggestSkills`, `ListConnectors`, `SearchMcpRegistry`,
+  `SuggestConnectors`, `EndConversation`. Each draws into a surface this app has not got.
+- **The worktree this daemon owns**: `EnterWorktree`, `ExitWorktree`. A session's
+  changes, diffs and downloads are all computed from `workspace.root`.
+- **claude.ai, the owner's call**: `Artifact`, `ArtifactComments`, `ArtifactData`,
+  `AppifactRepl`, `DesignSync`, `ClaudeDesign`, `Projects`. They work, and what
+  they make lands in an account rather than in the chat.
+
+**What stays, and why each is named in `daemoncheck`.** `SendMessage`, which is how
+claude continues a subagent (Q2.242); `Workflow` and `Monitor`, whose background
+work this daemon already tracks (Q2.228) and which ultracode needs; the question
+and plan-mode tools; and **scheduling, untouched on the owner's word** —
+`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `RemoteTrigger`, grok's
+`scheduler_*`, kimi's `Cron*`. It is not sound here: the adapter reports shell,
+workflow and monitor tasks and no pending schedule, so `parkable` releases an agent
+holding one after thirty quiet minutes. Making it work is a scheduler this daemon
+owns, which is planned separately; withdrawing it meanwhile was declined.
+
+⚠ **Canonical names only.** The CLI resolves aliases before it reads the list —
+`Task` to `Agent`, `KillShell` to `TaskStop`, `RunWorkflow` to `Workflow`, `Brief`
+to `SendUserMessage` — so listing an alias withdraws the tool it stands for.
+`daemoncheck` holds both lists apart, element by element: `SendUserMessage`
+contains `SendMessage`, which is what its substring test used to read.
+
+**codex is told through `CODEX_CONFIG`**, which codex-acp parses and spreads into
+every session's config. `codexConfigEnv` merges into a value somebody already
+exports, their keys winning, and leaves alone one that is not a JSON object:
+codex-acp parses the variable bare at startup, so a broken one is its own failure
+to show, and rewriting it would hide whose it was. The merge is over nested keys
+only: with a dotted `features.tool_suggest: false` beside a nested `true`, the tool
+was there. Nothing is written to `~/.codex`.
+
+**grok: three doors, none of which is one.** `GROK_FEEDBACK_ENABLED=false`, the
+`GROK_CONFIG` overlay's `features.feedback: false`, and `_meta.agentProfile` with
+`disallowedTools` on `session/new` each left all 33 tools listed, `send_feedback`
+among them. grok's reference says the first two switch *feedback* without saying
+whether that is the command or the tool; measured, it is not the tool. Why the third
+does nothing over ACP is not known. So nothing is sent, and no `GROK_CONFIG` is set
+— which also leaves a person's `GROK_CONFIG_PATH` overlay read, since by that
+reference the inline one wins.
+
+**Not this entry's subject, and seen on the way.** A claude session carries the
+account's claude.ai connectors as MCP tools (eight `Claude Docs` tools here), and a
+codex one its `codex_apps` tools. They are the person's own connectors rather than
+the harness's tools, and are left as they are.
+
+**The list ages.** `deploy/agents.sh` moves claude to `latest` daily (Q4.115), so a
+tool that belongs here can arrive unannounced. The measurement is two commands and
+is worth repeating at a release; nothing automates it, a census needing a login.
+
+**Status.** Current.
 
 ## Open questions and deliberate non-goals
 

@@ -308,6 +308,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     ],
     [[ASK_TOOL_NAME], false],
   );
+  // This registry holds no upload store, so send_file is not offered either (Q2.252); `daemoncheck.sent-files` has the other half.
   check("and a claude session gets nothing at all", agentOf(claQuiet).mcpServers, []);
   const refusedQuiet = await quiet.ask(curQuiet, one);
   check("no messaging switch refuses a question", [refusedQuiet?.isError ?? false, refusedQuiet?.content[0]?.text], [false, ASK_PENDING]);

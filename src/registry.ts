@@ -69,7 +69,8 @@ import {
   type PendingPermission,
   type SessionOptions,
 } from "./session.js";
-import { inlinesImage, type UploadRow } from "./uploads.js";
+import { sendFileRefusal, sendFileSource, type SendFileResult } from "./peers/files.js";
+import { inlinesImage, type KeepFileOptions, type KeepFileResult, type UploadRow } from "./uploads.js";
 import {
   createWorkspace,
   resolveWorktreeRoot,
@@ -895,6 +896,7 @@ export interface UploadsPort {
   markConsumed(sessionId: string, uploadIds: readonly string[]): void;
   /** Synchronous by contract — see {@link SessionOptions.keepImage}. */
   keepAgentImage(sessionId: string, mime: string, data: string): StoredFileRef | null;
+  keepAgentFile(sessionId: string, sourcePath: string, options?: KeepFileOptions): Promise<KeepFileResult>;
 }
 
 export class ManagedSession {
@@ -2845,6 +2847,31 @@ export class ManagedSession {
   /** Whether this session's agent is served ask_question: its harness has no question tool of its own, and questions are on. */
   get takesPosedQuestions(): boolean {
     return QUESTION_TOOL_HARNESSES.includes(this.agent) && this.elicitationAllowed();
+  }
+
+  /** Whether this session's agent is served send_file: wherever there is an upload store to keep the copy in. */
+  get sendsFiles(): boolean {
+    return this.uploads !== null;
+  }
+
+  /** send_file: the file is copied as it stands and one event puts it in the transcript, as a card its person can open (Q2.252). */
+  async sendFile(args: Record<string, unknown>, signal: AbortSignal | null = null): Promise<SendFileResult> {
+    const uploads = this.uploads;
+    if (uploads === null) return { ok: false, message: "sending files is not available on this machine" };
+    if (this.terminal || this.stopRequested) return { ok: false, message: "this session is not running" };
+    const source = sendFileSource(args, this.cwd);
+    if (typeof source === "string") return { ok: false, message: source };
+    const asked = String(args["path"]);
+    // Before the copy: the harness announced its call first, and a second call may announce itself while this one copies.
+    const toolCallId = this.session?.claimSentFileCall(asked) ?? null;
+    const kept = await uploads.keepAgentFile(this.id, source.path, { signal });
+    if (kept.kind !== "ok") return { ok: false, message: sendFileRefusal(kept, asked) };
+    // Asked again after the await: a Stop may have landed while the copy ran, and a session that is going takes no new row.
+    if (this.terminal || this.stopRequested) return { ok: false, message: "this session is not running" };
+    const file: StoredFileRef = { uploadId: kept.row.uploadId, name: kept.row.name, mime: kept.row.mime, bytes: kept.row.bytes };
+    this.safeAppend({ type: "file_sent", file, toolCallId });
+    this.touchSafe();
+    return { ok: true, file };
   }
 
   /**

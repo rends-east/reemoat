@@ -285,6 +285,13 @@ export interface ContextClearedEvent {
   previousAgentSessionId: string;
 }
 
+/** A file the agent sent through send_file; `toolCallId` names the harness's own call where the daemon could tell. */
+export interface FileSentEvent {
+  type: "file_sent";
+  file: StoredFileRef;
+  toolCallId: string | null;
+}
+
 export interface AgentLogEvent {
   type: "agent_log";
   line: string;
@@ -320,6 +327,7 @@ export type SessionEvent =
   | TurnEndEvent
   | AgentLogEvent
   | ContextClearedEvent
+  | FileSentEvent
   | OtherUpdateEvent
   | ErrorEvent;
 

@@ -1,9 +1,12 @@
 ---
 paths:
   - src/peers/**
+  - src/session.ts
   - packages/web/src/peer.ts
   - packages/web/src/ui/PeerMessage.tsx
+  - packages/web/src/ui/SentFile.tsx
   - scripts/daemoncheck.peer-messages.ts
+  - scripts/daemoncheck.sent-files.ts
   - scripts/relaycheck.peer-e2e.ts
   - packages/web/scripts/webcheck.peer-messages.ts
   - packages/web/src/agentLinks.ts
@@ -50,14 +53,49 @@ listener at all. Hand-written Streamable HTTP, JSON answers only, no SDK (zod).
   adapter's own model settings — and each tool carries `anthropic/alwaysLoad`, or
   claude defers it behind its tool search and reaches for its own first. Its
   `SendMessage` stays: it is how claude continues its own subagents (Q2.242).
-- `REEMOAT_PEER_MESSAGES=off` injects no messaging tools, refuses every send, takes no
+- `REEMOAT_PEER_MESSAGES=off` injects no messaging tools (`send_file` stays), refuses every send, takes no
   notice and pumps no outbox: what was held before the switch stays in `peer_outbox`,
   unsent. No switch below can lift it.
-- ⚠ **The same server carries one tool that is not messaging**: `ask_question`, for the
-  harnesses in `QUESTION_TOOL_HARNESSES`, whose model gets no question tool over ACP.
-  So the endpoint always listens, a cursor session is injected the server with
-  messaging off (holding that tool alone), and `callTool` answers it *before*
-  `callRefusal`. `tools/list` and the instructions are per caller. Q2.250.
+- ⚠ **The same server carries two tools that are not messaging**: `ask_question`, for the
+  harnesses in `QUESTION_TOOL_HARNESSES`, whose model gets no question tool over ACP
+  (Q2.250), and `send_file`, for every agent wherever the daemon has an upload store
+  (`sendsFiles`). Each is for the session's own person, so no messaging switch
+  withdraws it: the endpoint always listens, the server is injected with messaging
+  off holding those tools alone, and `callTool` answers both *before* `callRefusal`.
+  `tools/list` and the instructions are per caller.
+
+## A file sent on purpose (Q2.252)
+
+`send_file` takes a path and the daemon **copies the file as it stands** into the
+session's upload store, then appends `file_sent` with a `StoredFileRef`. Never a
+path in the log, which outlives the disk; never contained, since the agent can read
+the file anyway — a refusal is about what the path *is*, in words to the model.
+
+- **The copy is `Uploads.keepAgentFile`, and its order is the rule**: probes, an
+  `O_NONBLOCK` open, the copy under a byte counter and the call's abort signal,
+  then the row, then the eviction. One call at a time per session, and **45 s for
+  the whole call, its wait behind another included**: under the 60 s an MCP client
+  gives one, past which a file would land in the chat after the model saw it fail.
+  `sendFile` re-takes `terminal`/`stopRequested` after the copy, for a Stop inside it.
+- **`f_` rows are a third budget**, beside a person's files and the agent's images,
+  with a rate window of their own. `files-paths-git.md` has the numbers.
+- ⚠ **The name is the agent's.** `sentFileName` strips controls, bidi and zero-width
+  characters; `sanitizeUploadName` alone lets a reversed extension through.
+- **The permission in front of it is the daemon's to answer** — claude through
+  `allowedTools` in `sessionMetaFor`, cursor and grok by `allow_once` on the call
+  `ownToolCall` recognised. ⚠ Never `allow_always`, which writes a rule into the
+  person's own harness config, and each shape is read **for its own harness only**.
+  ⚠ **Only a call the harness itself vouched for is answered** (`vouched`): grok's
+  `rawInput` is `use_tool`'s arguments, typed by the model, and what vouches is the
+  `variant: "UseTool"` grok adds once it has parsed them — on the request itself,
+  which is why `onPermission` reads the request too. A call that later says it is
+  something else is forgotten. An unrecognised call falls to the person's card.
+- **The card stands for the call** where `claimSentFileCall` could name it
+  (`file_sent.toolCallId`): `tail.ts` then drops that call's row and the daemon's
+  answer to its permission, through `askedThrough`. Its own slot — sharing
+  `unclaimedPosedCall` would lend a file's call to the next question card.
+- **The app ships before the daemons.** An older app draws nothing for `file_sent`
+  while the model is told the file was sent.
 
 ## One verb, and every message is acted on (Q2.243)
 

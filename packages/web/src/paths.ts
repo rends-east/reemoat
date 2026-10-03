@@ -85,6 +85,9 @@ export function filenameFor(rel: string): string | null {
   return name.length === 0 ? null : name;
 }
 
+/** Off, on the owner's word, while send_file proves itself: a file name in prose stays text. The rule below is kept whole (Q3.690). */
+export const INLINE_DOWNLOADS = false;
+
 /** A download offer only for a whitespace-free span inside the workspace that this session touched. */
 export function downloadablePath(span: string, root: string, touched: ReadonlySet<string>): string | null {
   const text = span.trim();

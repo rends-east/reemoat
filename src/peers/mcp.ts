@@ -3,6 +3,7 @@ import { DAEMON_VERSION } from "../version.js";
 import type { PeerHub, PeerListing, SendResult } from "./hub.js";
 import { ASK_INSTRUCTIONS, ASK_PENDING, ASK_TOOL, ASK_TOOL_NAME, type PoseResult } from "./ask.js";
 import { PEER_SERVER_NAME } from "./envelope.js";
+import { SEND_FILE_INSTRUCTIONS, SEND_FILE_TOOL, SEND_FILE_TOOL_NAME, sentFileText, type SendFileResult } from "./files.js";
 
 export const PEER_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 256 * 1024;
@@ -150,7 +151,11 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
           protocolVersion: typeof asked === "string" && PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: PEER_SERVER_NAME, version: DAEMON_VERSION },
-          instructions: [hub.listsMessaging(caller) ? INSTRUCTIONS : null, hub.listsQuestions(caller) ? ASK_INSTRUCTIONS : null]
+          instructions: [
+            hub.listsMessaging(caller) ? INSTRUCTIONS : null,
+            hub.listsQuestions(caller) ? ASK_INSTRUCTIONS : null,
+            hub.listsFiles(caller) ? SEND_FILE_INSTRUCTIONS : null,
+          ]
             .filter((part): part is string => part !== null)
             .join(" "),
         },
@@ -162,11 +167,17 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
       return;
     case "tools/list":
       reply(res, id, {
-        result: { tools: [...(hub.listsMessaging(caller) ? TOOLS : []), ...(hub.listsQuestions(caller) ? [ASK_TOOL] : [])] },
+        result: {
+          tools: [
+            ...(hub.listsMessaging(caller) ? TOOLS : []),
+            ...(hub.listsQuestions(caller) ? [ASK_TOOL] : []),
+            ...(hub.listsFiles(caller) ? [{ ...SEND_FILE_TOOL, _meta: ALWAYS_LOAD }] : []),
+          ],
+        },
       });
       return;
     case "tools/call": {
-      // ask_question holds its POST open for the answer; a client that gives up on it leaves the card to a message.
+      // ask_question holds its POST open for the answer; a client that gives up on it leaves the card to a message, and stops a send_file copy.
       const gone = new AbortController();
       res.once("close", () => gone.abort());
       reply(res, id, { result: await callTool(hub, caller, params, gone.signal) });
@@ -187,6 +198,8 @@ async function callTool(
   const args = isRecord(params["arguments"]) ? params["arguments"] : {};
   // Before the messaging refusal: a question is not a message, and no messaging switch withdraws it (Q2.250).
   if (params["name"] === ASK_TOOL_NAME) return poseResult(await hub.pose(caller, args, signal));
+  // Likewise: a file goes to the caller's own person, never to another agent (Q2.252).
+  if (params["name"] === SEND_FILE_TOOL_NAME) return fileResult(await hub.sendFile(caller, args, signal));
   // An agent launched before a switch went off still holds the tools; every call is refused in words (Q2.244).
   const refusal = hub.callRefusal(caller);
   if (refusal !== null) return toolError(refusal, { code: "messaging_off" });
@@ -261,6 +274,14 @@ function poseResult(result: PoseResult): unknown {
   if (!result.ok) return toolError(result.message);
   if (result.answer !== null) return { content: [{ type: "text", text: result.answer }], structuredContent: { status: "answered" } };
   return { content: [{ type: "text", text: ASK_PENDING }], structuredContent: { status: "shown" } };
+}
+
+function fileResult(result: SendFileResult): unknown {
+  if (!result.ok) return toolError(result.message);
+  return {
+    content: [{ type: "text", text: sentFileText(result.file) }],
+    structuredContent: { status: "sent", name: result.file.name, bytes: result.file.bytes },
+  };
 }
 
 function toolError(message: string, structured: Record<string, unknown> = {}): unknown {

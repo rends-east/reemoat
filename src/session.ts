@@ -21,7 +21,7 @@ import {
   readAsyncTaskEdge,
   readBackgroundedMarker,
 } from "./acp/asynctasks.js";
-import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
+import { claudeToolName, MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import {
   mergeTodos,
   planPermission as cursorPlanPermission,
@@ -55,6 +55,7 @@ import {
 import { QUESTION_TOOL_HARNESSES, sessionMetaFor } from "./acp/agents.js";
 import { ASK_TOOL_NAME } from "./peers/ask.js";
 import { PEER_SERVER_NAME } from "./peers/envelope.js";
+import { SEND_FILE_TOOL_NAME } from "./peers/files.js";
 import type { AgentRouting } from "./acp/systems.js";
 import {
   BUILTIN_CATALOGUE,
@@ -281,6 +282,10 @@ export class Session {
   private readonly posedCalls = new Set<string>();
   /** The newest of them whose card is not drawn yet; the card takes its id, so the transcript folds the call into it. */
   private unclaimedPosedCall: string | null = null;
+  /** Calls to this daemon's own send_file: the path each named once its arguments arrived, and whether the harness itself vouched for it (Q2.252). */
+  private readonly sentFileCalls = new Map<string, { path: string | null; vouched: boolean }>();
+  /** Those whose file is not in the transcript yet, oldest first. Its own list: a question card must never take a file's call. */
+  private unclaimedSentFileCalls: string[] = [];
 
   private cwd = "";
 
@@ -1168,18 +1173,53 @@ export class Session {
     return claimed;
   }
 
-  /** Read off the update, never the permission: cursor names the MCP server and tool only in the rawInput it puts there first. */
-  private notePosedCall(toolCallId: string, rawInput: unknown): void {
-    if (!QUESTION_TOOL_HARNESSES.includes(this.agent)) return;
-    const call = readMcpToolCall(rawInput);
-    if (call === null || call.server !== PEER_SERVER_NAME || call.tool !== ASK_TOOL_NAME) return;
+  /** The send_file call now reaching this daemon's server: the one that named this path, else the oldest that named none yet. */
+  claimSentFileCall(path: string): string | null {
+    const waiting = this.unclaimedSentFileCalls;
+    // The newest that named it: an older one is a call that never arrived, left by a turn somebody stopped.
+    let at = waiting.findLastIndex((id) => this.sentFileCalls.get(id)?.path === path);
+    if (at === -1) at = waiting.findIndex((id) => this.sentFileCalls.get(id)?.path === null);
+    if (at === -1) return null;
+    const [claimed] = waiting.splice(at, 1);
+    return claimed ?? null;
+  }
+
+  /** Read off the update, never the permission: a harness names the MCP server and tool on the call it announces first. */
+  private noteOwnCall(toolCallId: string, update: { rawInput?: unknown; _meta?: unknown }): void {
+    const call = ownToolCall(this.agent, update);
+    if (call === null) return;
     const bound = boundToolCallId(toolCallId);
-    this.unclaimedPosedCall = bound;
-    this.posedCalls.add(bound);
-    if (this.posedCalls.size > MAX_POSED_CALLS) {
-      const oldest = this.posedCalls.values().next().value;
-      if (oldest !== undefined) this.posedCalls.delete(oldest);
+    // The same id now naming something else: what was learned about it no longer holds.
+    if (call === "other") {
+      this.forgetSentFileCall(bound, true);
+      return;
     }
+    if (call.tool === ASK_TOOL_NAME && QUESTION_TOOL_HARNESSES.includes(this.agent)) {
+      this.unclaimedPosedCall = bound;
+      this.posedCalls.add(bound);
+      if (this.posedCalls.size > MAX_POSED_CALLS) {
+        const oldest = this.posedCalls.values().next().value;
+        if (oldest !== undefined) this.posedCalls.delete(oldest);
+      }
+      return;
+    }
+    if (call.tool !== SEND_FILE_TOOL_NAME) return;
+    const path = typeof call.args?.["path"] === "string" ? call.args["path"] : null;
+    const known = this.sentFileCalls.get(bound);
+    // An update refines the arguments; one that carries none must not erase the path an earlier one named.
+    this.sentFileCalls.set(bound, { path: path ?? known?.path ?? null, vouched: call.vouched || known?.vouched === true });
+    if (known !== undefined) return;
+    this.unclaimedSentFileCalls.push(bound);
+    if (this.sentFileCalls.size > MAX_POSED_CALLS) {
+      const oldest = this.sentFileCalls.keys().next().value;
+      if (oldest !== undefined) this.forgetSentFileCall(oldest, true);
+    }
+  }
+
+  private forgetSentFileCall(toolCallId: string, entirely: boolean): void {
+    if (!this.sentFileCalls.has(toolCallId)) return;
+    this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== toolCallId);
+    if (entirely) this.sentFileCalls.delete(toolCallId);
   }
 
   private noteDelegatedCall(toolCallId: string): void {
@@ -1380,7 +1420,7 @@ export class Session {
             ? toolCallLineage(update)
             : { parentToolCallId: delegatedBy === update.toolCallId ? null : delegatedBy, subagent: false };
         if (delegatedBy !== null) this.noteDelegatedCall(update.toolCallId);
-        else this.notePosedCall(update.toolCallId, update.rawInput);
+        else this.noteOwnCall(update.toolCallId, update);
         // A subagent's steps are a delegation the foot already counts, not the agent's own cycle.
         if (lineage.parentToolCallId === null) this.noteAgentWork();
         this.queue.push({
@@ -1403,10 +1443,11 @@ export class Session {
         const content =
           toolOutput(update.content, this.keepImage, images) ?? rawToolOutput(update.rawOutput);
         const toolCallId = boundToolCallId(update.toolCallId);
-        if (delegatedBy === null) this.notePosedCall(update.toolCallId, update.rawInput);
+        if (delegatedBy === null) this.noteOwnCall(update.toolCallId, update);
         // A call that ended without reaching this daemon's server must not lend its id to the next card.
-        if ((update.status === "completed" || update.status === "failed") && toolCallId === this.unclaimedPosedCall) {
-          this.unclaimedPosedCall = null;
+        if (update.status === "completed" || update.status === "failed") {
+          if (toolCallId === this.unclaimedPosedCall) this.unclaimedPosedCall = null;
+          this.forgetSentFileCall(toolCallId, false);
         }
         const event: Extract<SessionEvent, { type: "tool_call_update" }> = {
           type: "tool_call_update",
@@ -1509,8 +1550,13 @@ export class Session {
 
     this.noteAgentWork();
     // Answered here and logged as decided, the path a machine with no resolver takes.
-    const posed = this.posedCalls.has(boundToolCallId(request.toolCall.toolCallId));
-    if (this.permissions && choice && !posed) {
+    const asked = boundToolCallId(request.toolCall.toolCallId);
+    // The request names its own call too, and grok may vouch for it nowhere earlier. Never a subagent's, which asks its person.
+    if (!this.delegatedCalls.has(asked)) this.noteOwnCall(request.toolCall.toolCallId, request.toolCall);
+    // send_file only ever once: allow_always would write a rule into the person's own harness config (Q2.252).
+    const own =
+      this.posedCalls.has(asked) || (choice?.kind === "allow_once" && this.sentFileCalls.get(asked)?.vouched === true);
+    if (this.permissions && choice && !own) {
       return this.permissions(
         {
           toolCallId: request.toolCall.toolCallId,
@@ -1790,6 +1836,59 @@ function mcpServersOf(options: SessionOptions, client: AcpClient, bearer: McpBea
 function mcpBearerOf(options: SessionOptions, config: AgentLaunchConfig): McpBearer | null {
   if (options.mcpServers == null || config.mcpBearerEnv === undefined) return null;
   return { env: config.mcpBearerEnv, token: randomBytes(32).toString("base64url") };
+}
+
+/** `vouched` is whether the harness itself, not the model's arguments, says which tool this is. */
+interface OwnToolCall {
+  tool: string;
+  args: Record<string, unknown> | null;
+  vouched: boolean;
+}
+
+/**
+ * Which of this daemon's own MCP tools a harness's tool call is, read where that harness was measured to name it (Q6.114,
+ * Q2.252) and for that harness alone. `"other"` is a call that says it is something else; `null` says nothing either way.
+ */
+function ownToolCall(agent: string, update: { rawInput?: unknown; _meta?: unknown }): OwnToolCall | "other" | null {
+  const raw = recordOf(update.rawInput);
+  switch (agent) {
+    case "cursor": {
+      const call = readMcpToolCall(update.rawInput);
+      if (call === null) return null;
+      if (call.server !== PEER_SERVER_NAME) return "other";
+      return { tool: call.tool, args: recordOf(raw?.["args"]), vouched: true };
+    }
+    case "codex": {
+      const server = raw?.["server"];
+      const tool = raw?.["tool"];
+      if (raw === null || typeof server !== "string" || typeof tool !== "string") return null;
+      if (server !== PEER_SERVER_NAME) return "other";
+      return { tool, args: recordOf(raw["arguments"]), vouched: true };
+    }
+    case "claude": {
+      const name = claudeToolName(update);
+      if (name === null) return null;
+      const prefix = `mcp__${PEER_SERVER_NAME}__`;
+      if (!name.startsWith(prefix)) return "other";
+      return { tool: name.slice(prefix.length), args: raw, vouched: true };
+    }
+    case "grok": {
+      // use_tool's arguments are the model's own typing; only the `variant` grok adds once it has parsed them vouches for the tool.
+      if (raw === null) return null;
+      const name = raw["tool_name"];
+      const prefix = `${PEER_SERVER_NAME}__`;
+      if (typeof name !== "string" || !name.startsWith(prefix)) return "other";
+      if (Object.keys(raw).some((key) => key !== "tool_name" && key !== "tool_input" && key !== "variant")) return "other";
+      if (raw["variant"] !== undefined && raw["variant"] !== "UseTool") return "other";
+      return { tool: name.slice(prefix.length), args: recordOf(raw["tool_input"]), vouched: raw["variant"] === "UseTool" };
+    }
+    default:
+      return null;
+  }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {

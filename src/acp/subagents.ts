@@ -34,3 +34,13 @@ export function toolCallLineage(update: {
     subagent: (claudeCode as { subagent?: unknown }).subagent === true,
   };
 }
+
+/** claude's own name for the tool behind a call, as its adapter declares it; read only to recognise this daemon's MCP tools. */
+export function claudeToolName(update: { _meta?: unknown }): string | null {
+  const meta = update._meta;
+  if (typeof meta !== "object" || meta === null) return null;
+  const claudeCode = (meta as { claudeCode?: unknown }).claudeCode;
+  if (typeof claudeCode !== "object" || claudeCode === null) return null;
+  const name = (claudeCode as { toolName?: unknown }).toolName;
+  return typeof name === "string" ? name : null;
+}

@@ -569,6 +569,59 @@ process.stdout.write("\nthe question an agent asked\n");
       0,
     );
     check("while a permission the daemon answered on a call that asked nothing keeps its row", parked.rows.map((row: any) => row.kind), ["tool", "event"]);
+
+    // Q2.252: a file the agent sent is its own row, and stands for the call that sent it where the daemon could name that call.
+    const ref = { uploadId: "f_0123456789abcdef", name: "report.pdf", mime: null, bytes: 2048 };
+    const drawnAs = (rows: readonly any[]): string[] => rows.map((row) => (row.kind === "event" ? row.stored.event.type : row.kind));
+    const cursorSend = [
+      ev(1, { type: "tool_call", toolCallId: "c2", title: "MCP: tool", kind: "other", status: "pending", locations: [], rawInput: {} }),
+      ev(2, { type: "tool_call_update", toolCallId: "c2", title: "reemoat: send_file", status: null, locations: [], rawInput: { providerIdentifier: "reemoat", toolName: "send_file", args: { path: "report.pdf" } } }),
+      ev(3, { type: "permission_request", permissionId: null, toolCallId: "c2", title: "reemoat-send_file: send_file", options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }], decision: "allow-once" }),
+      ev(4, { type: "file_sent", file: ref, toolCallId: "c2" }),
+      ev(5, { type: "tool_call_update", toolCallId: "c2", title: null, status: "completed", locations: [], rawInput: null }),
+      ev(6, { type: "text", role: "agent", thought: false, text: "Sent.", messageId: null }),
+    ];
+    check(
+      "a sent file draws as its card alone: no tool row, no daemon-answered permission",
+      drawnAs(buildTail(cursorSend, [], 0).rows),
+      ["file_sent", "text"],
+    );
+    const untied = cursorSend.map((stored) => (stored.event.type === "file_sent" ? ev(stored.seq, { ...stored.event, toolCallId: null }) : stored));
+    check(
+      "tied to no call, the card is drawn beside whatever the harness said about its own",
+      drawnAs(buildTail(untied, [], 0).rows),
+      ["tool", "permission_request", "file_sent", "text"],
+    );
+    const between = buildTail(
+      [
+        ev(1, { type: "tool_call", toolCallId: "a", title: "Read", kind: "read", status: "completed", locations: [], rawInput: null }),
+        ev(2, { type: "tool_call", toolCallId: "b", title: "Read", kind: "read", status: "completed", locations: [], rawInput: null }),
+        ev(3, { type: "file_sent", file: ref, toolCallId: null }),
+        ev(4, { type: "tool_call", toolCallId: "c", title: "Read", kind: "read", status: "completed", locations: [], rawInput: null }),
+        ev(5, { type: "tool_call", toolCallId: "d", title: "Read", kind: "read", status: "completed", locations: [], rawInput: null }),
+      ],
+      [],
+      0,
+    );
+    check("and it is never folded into a run of tool calls: it is what the person was waiting for", drawnAs(between.rows), ["group", "file_sent", "group"]);
+    const sentFile = stripComments(readFileSync(new URL("../src/ui/SentFile.tsx", import.meta.url), "utf8"));
+    check(
+      "the card saves through the session's own download, by upload id, and opens nothing in a tab",
+      [/files\.downloadUpload\(file\.uploadId, file\.name\)/.test(sentFile), /<a\b|window\.open|createObjectURL|href=/.test(sentFile)],
+      [true, false],
+    );
+    check(
+      "and an image is previewed only through the allowlist every other image goes through",
+      /previewable\(file\.mime, file\.bytes\) && \(\s*<ImagePreview/.test(sentFile),
+      true,
+    );
+    check(
+      "the transcript draws it from its own arm, never the unknown-event fallthrough",
+      /case "file_sent":\s*return <SentFileRow file=\{event\.file\} files=\{files\} \/>;/.test(
+        stripComments(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8")),
+      ),
+      true,
+    );
   }
 
   const errorOf = (status: number, body: unknown, code = "http_409"): unknown =>

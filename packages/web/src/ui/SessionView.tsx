@@ -16,7 +16,7 @@ import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
 import { ApiError } from "../http";
 import { describe, missingRowReason } from "../machine";
-import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths";
+import { displayCwd, downloadablePath, folderLabel, INLINE_DOWNLOADS, relativeTo } from "../paths";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
@@ -451,7 +451,7 @@ function Transcript({
     if (daemon === undefined) return null;
     return {
       relFor: (absPath: string) => relativeTo(root, absPath),
-      spanTarget: (span: string) => downloadablePath(span, root, touched.current),
+      spanTarget: (span: string) => (INLINE_DOWNLOADS ? downloadablePath(span, root, touched.current) : null),
       download: async (rel, name) => {
         try {
           await saveBlob(await daemon.downloadFile(sessionRef.sessionId, rel), name);

@@ -209,6 +209,10 @@ const FOREIGN = new Set([
   "CURSOR_CONFIG_DIR",
   "AGENT_CLI_CREDENTIAL_STORE",
   "CreatePlan",
+  // grok's own overlay variables and the claude SDK's permission callback, cited in Q6.118 and Q2.252 for what each does not do here.
+  "GROK_CONFIG",
+  "GROK_CONFIG_PATH",
+  "canUseTool",
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.

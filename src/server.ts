@@ -157,7 +157,8 @@ const CAPABILITY_READ_BUDGET_MS = 60_000;
 const MAX_DIR_NAME_CHARS = 255;
 const MAX_PATH_CHARS = 4_096;
 
-const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+/** Exported for one assertion: a file send_file keeps must never be larger than this route will serve (Q2.252). */
+export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
 // Every route but the streaming ones (isStreamingRoute), which count their own bytes.
 const MAX_BODY_BYTES = 1024 * 1024;

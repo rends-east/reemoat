@@ -85,9 +85,10 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
       "permission_resolved",
       "plan",
       "context_cleared",
+      "file_sent",
       "error",
     ].map((type) => drawn({ type })),
-    [true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
   );
   check("an ordinary turn ending is not news", drawn({ type: "turn_end", stopReason: "end_turn" }), false);
   // `abandoned` draws a row: an unanswered turn leaves nothing else to account for the gap (Q2.231).
@@ -1222,7 +1223,16 @@ process.stdout.write("\nwhether a message can be sent at all\n");
 
 process.stdout.write("\na path inside the workspace, and one outside it\n");
 {
-  const { downloadablePath, filenameFor, formatBytes, relativeTo } = await import("../src/paths.js");
+  const { downloadablePath, filenameFor, formatBytes, INLINE_DOWNLOADS, relativeTo } = await import("../src/paths.js");
+  // Switched off, not removed: the rule below is still asserted whole, and the session view is what consults the switch (Q3.690).
+  check("a file name in prose is not offered as a download while the switch is off", INLINE_DOWNLOADS, false);
+  check(
+    "and the session view asks the switch before the rule",
+    /spanTarget: \(span: string\) => \(INLINE_DOWNLOADS \? downloadablePath\(span, root, touched\.current\) : null\)/.test(
+      readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"),
+    ),
+    true,
+  );
 
   check("an ordinary path", relativeTo("/w", "/w/a/b.ts"), "a/b.ts");
   check("a trailing slash on the root is the same answer", relativeTo("/w/", "/w/a.ts"), "a.ts");

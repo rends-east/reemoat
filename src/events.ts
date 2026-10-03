@@ -29,6 +29,7 @@ export type SessionEvent =
   | TurnEndEvent
   | AgentLogEvent
   | ContextClearedEvent
+  | FileSentEvent
   | OtherUpdateEvent
   | ErrorEvent;
 
@@ -312,6 +313,13 @@ export interface ContextClearedEvent {
   type: "context_cleared";
   agentSessionId: string;
   previousAgentSessionId: string;
+}
+
+/** A file the agent handed its person through send_file; `toolCallId` is the harness's own call when this daemon could tell (Q2.252). */
+export interface FileSentEvent {
+  type: "file_sent";
+  file: StoredFileRef;
+  toolCallId: string | null;
 }
 
 export interface AgentLogEvent {
@@ -819,6 +827,8 @@ export function estimateBytes(event: SessionEvent): number {
       return 64 + event.line.length;
     case "context_cleared":
       return 64 + event.agentSessionId.length + event.previousAgentSessionId.length;
+    case "file_sent":
+      return 64 + refBytes([event.file]) + (event.toolCallId?.length ?? 0);
     case "file_change":
       return 128 + event.path.length + event.newText.length + (event.oldText?.length ?? 0);
     case "tool_call":
@@ -995,6 +1005,8 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "permission_resolved":
       return { ...event, title: clip(event.title, maxBytes) };
     case "context_cleared":
+    // A ref is bounded where it is made (200 bytes of name), and a clipped one names no file.
+    case "file_sent":
     case "session_started":
     case "status":
     case "turn_end":

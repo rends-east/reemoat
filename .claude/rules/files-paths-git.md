@@ -46,6 +46,11 @@ type, or only bytes, takes one read off its first bytes, and the web client send
 file's own type over the relay: an image arriving as `application/octet-stream`
 reached the agent as a path, never as a picture.
 
+**Out, on the agent's own word: `send_file`.** A file anywhere the agent can read,
+copied into the upload store as an `f_` row and put in the transcript as
+`file_sent` — the one way a file outside the workspace reaches its person.
+`agent-messaging.md` has the tool; Q2.252.
+
 **Out: any regular file under `workspace.root`, plus the session's own uploads.**
 `GET /sessions/:id/files?path=` widens no authority — the agent can `cat` anything
 under that root already — and `GET /sessions/:id/uploads/:uploadId` is not optional,
@@ -178,7 +183,7 @@ refused before it is resident. Q2.38.
 |---|---|
 | `src/git.ts` | The git vocabulary: argv arrays, an env allowlist about determinism rather than confinement, timeouts, honest truncation. Installs **no** config — your hooks and LFS filters run |
 | `src/worktree.ts` | Per-session worktrees: probe, create, list, inspect, remove |
-| `src/uploads.ts` | Files staged for a prompt: the root, the streaming write, the sanitizer, the TTL sweep, the content blocks they become, the two rolling budgets and the type read off a file's first bytes (`sniffImageMime`). Declares `UploadRow`/`UploadIndex` |
+| `src/uploads.ts` | Files staged for a prompt: the root, the streaming write, the sanitizer, the TTL sweep, the content blocks they become, the three rolling budgets (a person's files, an agent's images, the files it sent) and the type read off a file's first bytes (`sniffImageMime`). Declares `UploadRow`/`UploadIndex` |
 | `src/changes.ts` | What a session changed, and the diff for one file of it. Paths come out **relative to `workspace.root`**: git speaks repo-root-relative on both commands, `-z` is what makes `status` agree with `diff` (so `--relative` is the bug rather than the fix), and `repoPrefix`/`toWorkspaceRelative` translate once on the way out (Q7.90). Containment is the two halves above, `probeRequestable` answering `"ok" \| "escapes_tree" \| "git_dir" \| null` and `probeContained` being the two-answer form over it. `markBinary` runs after the file cap through `probeBinary`'s deadline, never as syscalls inside the parser (Q7.88) |
 | `src/browse.ts` | Directory listing so a remote client can pick a `cwd`. `REEMOAT_ROOTS` narrows what is *listed* and nothing else; `resolveCwd` is deliberately unconfined |
 | `src/stall.ts` | Asking the filesystem something that may never be answered: the bounded probe, the permit gate, the memory of which paths do not reply. `probeBinary` is git's own NUL heuristic through that deadline — git having listed a path says nothing about whether the next syscall returns (Q7.88). `probeRealpath` is the third answer beside `probeExists`/`probeFile` and the bounded form of `paths.ts`'s synchronous `resolved()`, reached everywhere a path somebody *else* named is resolved. `probeBuild` is `probeRealpath` plus a `stat` of the target: which *file* a CLI's path names, compared by `LocalRuntime.agentCli` on every use (Q6.112) |
@@ -193,8 +198,8 @@ refused before it is resident. Q2.38.
 |---|---|
 | Changes API | 2000 files, 512 KiB per diff, both reported as `truncated` rather than silently short |
 | git calls | 5s structural, 10s list, 15s status/diff, **120s** `worktree add` (hooks and LFS smudge are live on this path) |
-| Uploads | **100 MiB per file**, 10 per message; a session keeps **1 GiB** *and* 100 of the files sent to it (a byte cap cannot see a hundred thousand one-byte uploads, each a directory), dropping the oldest already sent — never one still waiting to be sent, which alone can refuse — and an agent's images roll on their own **200 / 256 MiB** (`roomFor`, Q2.247). Plus a **300 MiB / 5 min** window per session — `429 upload_rate_limited` with `Retry-After`, the one refusal here that expires on its own. 200 bytes of filename, 128 of mime. Inline images 5 MiB raw *to* the agent; 25 MiB *from* one (`MAX_AGENT_IMAGE_BYTES`, its own constant since the per-file cap moved — sharing one made the base64 pre-check ~133 MiB). Unconsumed uploads expire at 24h |
-| Downloads | 100 MiB, and it **equals** the upload cap by coincidence rather than by coupling — neither may be set by reading the other. That one bounds what a client pushes onto your disk, against budgets that outlive the request; this bounds a token-readable read of a whole workspace, where the cost is one of 256 tunnel streams held open. The client refuses at the same number from `content-length` |
+| Uploads | **100 MiB per file**, 10 per message; a session keeps **1 GiB** *and* 100 of the files sent to it (a byte cap cannot see a hundred thousand one-byte uploads, each a directory), dropping the oldest already sent — never one still waiting to be sent, which alone can refuse — and an agent's images roll on their own **200 / 256 MiB** (`roomFor`, Q2.247), as do the files it sent: **100 / 1 GiB**, 100 MiB each, with a rate window of their own (Q2.252). Plus a **300 MiB / 5 min** window per session — `429 upload_rate_limited` with `Retry-After`, the one refusal here that expires on its own. 200 bytes of filename, 128 of mime. Inline images 5 MiB raw *to* the agent; 25 MiB *from* one (`MAX_AGENT_IMAGE_BYTES`, its own constant since the per-file cap moved — sharing one made the base64 pre-check ~133 MiB). Unconsumed uploads expire at 24h |
+| Downloads | 100 MiB, and it **equals** the upload cap by coincidence rather than by coupling — neither may be set by reading the other. ⚠ `MAX_SENT_FILE_BYTES` is the one that *is* coupled: a sent file larger than this could never be opened, so `daemoncheck` holds it at or under. That one bounds what a client pushes onto your disk, against budgets that outlive the request; this bounds a token-readable read of a whole workspace, where the cost is one of 256 tunnel streams held open. The client refuses at the same number from `content-length` |
 
 **A body limit outside this repository is the one nobody sees.** `deploy/` ships no
 reverse proxy and `install.sh` tells operators to put one in front; nginx defaults

@@ -958,6 +958,8 @@ export function buildTail(
     ) {
       askedThrough.add(event.toolCallId);
     }
+    // A sent file's card stands for the call that sent it, as a question's does (Q2.252).
+    if (event.type === "file_sent" && event.toolCallId !== null) askedThrough.add(event.toolCallId);
 
     // Silent events must not split a text run into two Markdown blocks; `turn_end` still does.
     if (!TRANSCRIPT_SILENT.has(event.type)) flush();
@@ -1204,7 +1206,7 @@ function nodeFor(
   // An ask_question answer the card already draws, sent as a message only because the call could not wait (Q2.251).
   if (event.type === "prompt" && event.answers !== undefined) return null;
 
-  // The daemon's own yes to a call that asked a question: the card is the consent it stood for (Q2.250).
+  // The daemon's own yes to a call that asked a question or sent a file: the card is the consent it stood for (Q2.250, Q2.252).
   if (
     event.type === "permission_request" &&
     event.permissionId === null &&

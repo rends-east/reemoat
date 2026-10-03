@@ -30,6 +30,7 @@ import { TASK_NOUNS, taskTokens, type BackgroundReporting } from "../tasks";
 import type { PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { PeerMessageRow } from "./PeerMessage";
+import { SentFileRow } from "./SentFile";
 import { Markdown } from "./Markdown";
 import { COLUMN, Dot, Empty, Icon, Badge, shortDuration, TAP_GROW_Y, TranscriptSkeleton } from "./bits";
 import { WorkingMark } from "./Mark";
@@ -641,6 +642,9 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
           </div>
         </>
       );
+
+    case "file_sent":
+      return <SentFileRow file={event.file} files={files} />;
 
     default:
       // An event type from a newer daemon: draw nothing rather than crash.

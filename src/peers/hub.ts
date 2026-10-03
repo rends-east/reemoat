@@ -6,6 +6,7 @@ import type { ManagedSession, MentionNote, PeerMidTurnResult, SessionRegistry, S
 import type { McpLaunch } from "../session.js";
 import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore, SqlitePeerSeenStore } from "../store/sqlite.js";
 import { ASK_WAIT_MS, parseAskArguments, type PoseResult } from "./ask.js";
+import type { SendFileResult } from "./files.js";
 import type { PeerAnswer } from "./channel.js";
 import {
   address,
@@ -345,8 +346,8 @@ export class PeerHub {
     if (this.endpoint === null || capabilities.http !== true) return [];
     const session = this.registry.get(sessionId);
     const messaging = this.allowed && session?.peerMessages !== false;
-    // Also served with messaging off: ask_question is a question to its own person, which no messaging switch is about (Q2.250).
-    if (!messaging && session?.takesPosedQuestions !== true) return [];
+    // Also served with messaging off: a question or a file is for the session's own person, which no messaging switch is about (Q2.250, Q2.252).
+    if (!messaging && session?.takesPosedQuestions !== true && session?.sendsFiles !== true) return [];
     const bearer = launch?.bearer ?? null;
     const token = bearer?.token ?? randomBytes(32).toString("base64url");
     this.tokenBySession.set(sessionId, token);
@@ -388,6 +389,17 @@ export class PeerHub {
 
   listsQuestions(callerId: string): boolean {
     return this.registry.get(callerId)?.takesPosedQuestions === true;
+  }
+
+  listsFiles(callerId: string): boolean {
+    return this.registry.get(callerId)?.sendsFiles === true;
+  }
+
+  /** send_file: a file from this machine, put in the caller's own transcript (Q2.252). */
+  async sendFile(callerId: string, args: Record<string, unknown>, signal: AbortSignal | null = null): Promise<SendFileResult> {
+    const session = this.registry.get(callerId);
+    if (session === undefined) return { ok: false, message: "this session no longer exists" };
+    return await session.sendFile(args, signal);
   }
 
   /** ask_question: shown to the caller's own person as a card, answered in the call or later as their message (Q2.250, Q2.251). */
