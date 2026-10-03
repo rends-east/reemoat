@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1117 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1123 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -516,6 +516,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `cp-mail.md` | `packages/control-plane/src/mail/`, `emails.ts` | Why a mail outage must never become a sign-in outage · what sits in the outbox and for how long · what a mailed link may carry |
 | `web-shell.md` | `packages/web/src/ui/AppShell.tsx`, `SessionBrowser.tsx`, `groups.ts`, `overlay.ts`, `settings/`, `packages/web/src/store.ts` | The one question this screen is shaped around, and the rules that keep it answerable · who owns Escape · what a folder is · what a client may not draw optimistically |
 | `web-transcript.md` | `packages/web/src/ui/tail.ts`, `EventList.tsx`, `DiffView.tsx`, `packages/web/src/diff.ts` | What a conversation may leave out and what it must say instead · what folds into a run and what may never · how a diff is drawn, and what refuses to draw one · what a `/clear` leaves behind |
+| `background-work.md` | `packages/web/src/ui/TaskPanel.tsx`, `tasks.ts`, `finishedTasks.ts`, `tail.ts`, `EventList.tsx` | Where background work is drawn and the two ways in · when the working line is a door · why a subagent is a task, and the four things that end one the wire never does · what the finished band holds and what a clear destroys · what an empty panel may claim, by agent |
 | `ask-card.md` | `packages/web/src/ui/AskCard.tsx`, `PermissionCard.tsx`, `ElicitationCard.tsx`, `packages/web/src/permission.ts`, `ask.ts`, `elicitation.ts` | The one card for "the agent is waiting on you" · where it sits and what it may cover · which plan-mode requests are curated and which are drawn as sent · what may be picked, how many, and why nothing you typed is ever erased |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |

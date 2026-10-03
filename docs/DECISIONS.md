@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 110 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 444 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 111 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 447 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 78 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 80 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1117** | |
+| | | **1123** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1117 rather than the 557
+dividers. So the count is over **both** depths, and it says 1123 rather than the 560
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9346,7 +9346,87 @@ app ships first, then the daemons. A daemon older than this cannot weigh a store
 **Not built.** A switch that withholds the tool; several files in one call; a
 folder; a bridge that would give an older app a button.
 
-**Status.** Current.
+**Status.** Current. Amended by Q2.253.
+
+### Q2.253 — send_file, checked again: what a Stop, a stall, a closed folder and a typed tag could do
+
+**Question.** Q2.252 was built in a day and the owner asked for it to be read again
+properly. Two independent reviews on 2026-10-03, one of the copy and one of the
+recognition and the permission, each reproduced what it claimed with a script.
+
+**A Stop during the copy kept a file nobody could see and dropped one somebody
+could.** `keepAgentFile` inserted the row and evicted the oldest before it returned,
+and `sendFile` asked whether the session was still running only afterwards — so at
+the 100-file budget a Stop landing mid-copy answered *not running*, kept the row and
+its bytes with no `file_sent`, and had already thrown away a file the transcript
+still drew. **Decision:** `KeepFileOptions.kept`, called in the insert's own
+synchronous block — after the insert, so what it records names a row that exists,
+and before the eviction, so a no evicts nothing. `sendFile` answers there: a session
+that went keeps nothing (`withdrawn`), and the event lands with its row or not at
+all. A crash can no longer fall between the two.
+
+**A copy that stalled was forgotten, so the next one stalled too.** The probes feed
+`stall.ts`'s memory; the open and the reads, raced against the deadline, did not —
+and a mount that answers metadata from a cache and stalls on data passes the probes
+every time, so each retry pinned another threadpool slot. **Decision:** a source call
+still out at the deadline, and out since before `DESCRIBE_TIMEOUT_MS`, is remembered
+(`noteStalled`) and answered `unresponsive`; one that was merely slow stays
+`timed_out`, which is a different sentence.
+
+**Every realpath error said there was no file.** A file under a mode-000 folder came
+back *there is no file at …*. **Decision:** `PathResolution` carries the errno;
+ENOENT and ENOTDIR are missing, EACCES and EPERM are `denied`, a link loop and an
+over-long path say so.
+
+**Waiting in line ignored the call's own abort and deadline.** A call behind a long
+copy answered its abort only once that copy finished. **Decision:** the wait is
+raced against both (`settledOrStopped`), and the next call still queues behind
+**both** the copy ahead and the one that gave up, or two copies would run at once.
+The probes and the mount table are raced too.
+
+**Smaller, each reproduced or read off the code.** A long name cut through a
+surrogate pair, which SQLite stores as U+FFFD while the event held the half: names
+are cut by code point, and a lone surrogate the agent sent is dropped. A relative
+path read from the wrong folder sent the wrong file silently: every answer names
+the path that was read — in the structured result too, since claude shows its model
+that half alone (measured on 2.1.288) — and the tool says which folder a relative
+path is taken from. Only ASCII whitespace is trimmed, a no-break space being part of
+a real name. A short write is finished. `/proc/<daemon pid>` is refused by name on
+Linux, its `environ` holding the machine's token. Old rate charges are swept.
+
+**What a permission answer trusted.** grok's `variant: "UseTool"` was believed
+wherever it appeared, including the first announcement — whose `rawInput` is the
+model's own typing — and once believed it stayed: a model typing the tag made a bare
+request on that id an `allow-once`. **Decision:** on grok only the request's own
+`toolCall` vouches (`noteOwnCall`'s `fromRequest`). A call that completed or failed
+is ended, and nothing later said about its id is believed; another tool of this
+server on the same id is forgotten; `/clear` empties both maps.
+
+**claude's request is its person's.** `allowedTools` lets the SDK run send_file
+before `canUseTool`; the adapter's own comment says a request that still reaches
+the client is *bypass-immune* — a safety check, or an explicit ask rule somebody
+wrote. So the daemon no longer answers claude's, and a subagent's asks its person
+on every harness, which Q2.252 said and only cursor did.
+
+**Which call a file stands for.** `claimSentFileCall` took the *newest* call naming
+the path, so two in flight on one path swapped ids and the first card hid the
+second call's row, failure included. It takes the oldest now, and a call announced
+and never claimed is dropped at its turn's end and at a `/clear`, which is what the
+newest-first rule had been standing in for. `ask_question`'s auto-answer now
+requires `allow_once` as send_file's does: falling back to `allow_always` wrote
+`Mcp(reemoat:ask_question)` into cursor's own config.
+
+**Checked and sound**, so nobody re-derives it: the download route's headers and
+type, the three budgets kept apart, descriptors closed on every path, a FIFO or a
+device refused twice, `reconcile` after a crash, look-alike server names, codex's
+shape being unforgeable by a model, and none of the 29 withdrawn claude names being
+an alias (the three MCP-resource aliases joined the driver's guard).
+
+**Not done.** A per-session lock around `forgetSession`, which runs only for
+sessions pruned at startup; codex's MCP approvals arriving as elicitations, which
+nothing answers for it.
+
+**Status.** Current. Amends Q2.252.
 
 ## The web client
 
@@ -22784,7 +22864,7 @@ the life of a turn.
 which has none either. What ends a wait is the turn ending, and what discards it
 is stopping the session, which says so in the transcript (Q2.226).
 
-**Status.** Current
+**Status.** Current. Amended by Q3.700.
 
 #### Q3.603 — Where is background work drawn, and what does this app refuse to draw about it?
 
@@ -22887,7 +22967,7 @@ retired-colour sweep does not catch them: its pattern ends `warn\b`, and `\b` fa
 against the `i` of `warning`. They are `add-ink` and `offer-ink` now. [⚠ `offer-ink`
 is `caution` since Q1.650, which deleted the control it was named for; same value.]
 
-**Status.** Current
+**Status.** Current. Amended by Q3.699.
 
 #### Q3.604 — When may the transcript join two pieces of agent text, and what does ACP give it to decide with?
 
@@ -24272,7 +24352,7 @@ whose body is empty is a control that lies about having something behind it*. On
 condition covers the cleared session and the one that never backgrounded anything,
 and there is no clear control beside a zero: an act with no object.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.698.
 
 
 #### Q3.632 — a disclosure fold is the height of its own words, and the finished band is a tone quieter
@@ -26306,7 +26386,7 @@ brief described.
   because the count keeps rising while the clicks keep coming. The hazard predates
   this entry: the sending spinner covers the round trip, and nothing here widens it.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.700.
 
 #### Q3.655 — swiping between machines turns a page, as Telegram's folders do
 
@@ -28128,16 +28208,23 @@ tool, is still no button; the agent in that session read its PDF to make it one.
 way for an agent to hand a file over on purpose would be a tool of its own — and is
 one now, `send_file` (Q2.252).
 
-**Switched off 2026-10-03, on the owner's word, not removed.** With `send_file` in
-place the inline offer drew a second, live copy of a file under its card, and on an
-older daemon a name in prose looked like a promise the rule could not keep — a file
-outside the workspace, or one only a shell command had touched, stayed text.
-`INLINE_DOWNLOADS` is false and the session view asks it before `downloadablePath`,
-which is kept and still asserted whole; turning it back on is that one constant.
+**Switched off, back on and off again, all on 2026-10-03 and all on the owner's
+word.** With `send_file` in place the inline offer drew a second, live copy of a file
+under its card, and on an older daemon a name in prose looked like a promise the rule
+could not keep — a file outside the workspace, or one only a shell command had
+touched, stayed text. So `INLINE_DOWNLOADS` holds the offer off while `send_file`
+proves itself; the rule is kept whole and `webcheck` pins that the session view asks
+the switch before it. It was briefly taken out on the belief that switching the offer
+off had broken the card's button too. It had not: the switch reaches `spanTarget` and
+nothing else, and the card was a relayed download stalling (Q6.120).
 
 **Measured.** `cargo check` for `aarch64-linux-android` and the host, `clippy -D
-warnings`, the 131 Rust tests. What first failed the `ipc://` call on that page is
-not known, and a save on a real phone is not measured.
+warnings`, the 131 Rust tests. **What first failed the `ipc://` call is the shell's
+own CSP**, measured 2026-10-03 in a WKWebView under it: `connect-src` names no `ipc:`
+source and Tauri adds none, so the first call's fetch fails with *Load failed* and
+the page uses `postMessage` for good. Both channels carried 12 MB whole there, and a
+copy of `host_save_file` under the same CSP opened its panel for 2.6 MB in two
+seconds. A save on a real phone is not measured.
 
 **Status.** Current.
 
@@ -28415,6 +28502,103 @@ Every target table now sits below `[dependencies]`, where the rewrite stops at t
 plain line and leaves them alone, and `nativecheck` asserts the order.
 
 **Status.** Current. Amends Q6.108.
+
+#### Q3.698 — The working line is a button only while something runs
+
+**Question.** `working…` had become a button into the background panel in sessions
+with nothing running in the background — reported by the owner as a regression.
+
+**Decision.** `WaitingFoot` is pressable exactly while `outstanding > 0`: a live
+background task or a running subagent. The finished record keeps its door in the
+session menu at every width (Q3.631).
+
+**Why it was pressable.** `retained`, the count of rows the panel holds finished
+ones included, was what decided the button. It was the right rule while the foot
+was the panel's only door — a reader who watched a build go into the background
+could otherwise never see how it ended — and Q3.631 gave the record a door of its
+own. From then on it drew a chevron on the working line of every session that had
+ever backgrounded anything, opening a panel with nothing running in it.
+
+**Status.** Current. Amends Q3.631.
+
+#### Q3.699 — A subagent is background work, and the panel says so
+
+**Question.** Subagents were drawn in the conversation and not in the background
+panel, which the owner reported as wrong: *they essentially are background tasks*.
+The panel did have an `Agents` band, fed by `outstandingTasks` — and claude's
+subagents never reached it, because they now run in the background: the spawn
+answers `Async agent launched` in seconds and the agent goes on under a call that
+has completed. Measured on the owner's own log, every subagent of the last week was
+one (`run_in_background: true`, the model's choice), so the band was dead on the
+harness it was built for.
+
+**Decision.** `agentTasks` reads every delegation in the window as a task —
+running, or finished in one of four states — and the panel draws it as a card:
+`AgentCard` shares `TaskCard`'s bands, names its kind from the call's own
+`subagent_type` (`Explore agent`), counts its steps as tool calls, says what it is
+doing while it runs, and offers no Stop, since nothing on the wire reaches one. A
+running subagent is in `Agents`; a finished one is in the finished band beside the
+finished tasks, newest first, hidden by the same clear under an id no adapter mints
+(`agentRowId`). The foot counts running subagents as `N agents` and opens the panel
+over them. The conversation's card reads the same answer through `TasksContext`, so
+a detached subagent's row says *Running in the background* rather than a check mark
+and the eight seconds its launch took.
+
+**When a detached subagent has ended, which nothing on the wire says.** The adapter
+drops every `local_agent` task before publishing (Q3.603, Q7.113), so the answer is
+assembled, in this order:
+
+1. Its own closing step — claude's `SubagentHandback`, which by its own contract
+   ends the run (`endsDelegation`, Q6.119) — ends it there.
+2. A step of its own still running, or one that detached while the daemon reports
+   its task live, keeps it running past anything else. claude ended a turn with its
+   subagent waiting on such a shell and woke it later (Q6.119).
+3. A turn end or an agent start after its newest step ends it: `completed` for
+   `end_turn`, `stopped` for anything else. claude holds the turn that spawned it
+   open until it has finished, so this is usually exact.
+4. Otherwise it runs while the session is engaged — a turn, work nobody prompted,
+   a parked request — and is over the moment none is: woken after its turn, it works
+   with no turn around it.
+
+A finished one is timed to its last step's end, not to the turn's. `detached` is
+the daemon's `backgrounded`, or — on a daemon older than that — a step that began
+after the call reported its end.
+
+**Measured against both logs**, the rule reproduces what happened: the owner's
+Explore agent of 2026-09-30, 33 steps, 154 s and done at its hand-back; and a
+throwaway daemon's subagent through every state — running before its first step,
+running at the turn's end with its shell still live, done once the session went
+idle.
+
+**What is still wrong, stated.** Without a hand-back (any mode but auto) a subagent
+that finished reads as running until the turn it was spawned in ends, while the
+main agent works on. And a subagent that thinks for a long stretch with the session
+idle reads as done until its next step.
+
+**Status.** Current. Amends Q3.603 and closes the subagent half of Q7.113.
+
+#### Q3.700 — Stop takes the slot the moment a message leaves the box
+
+**Question.** Sending to a session whose agent had been released for idleness kept
+Send on screen — the spinner over it — for the seconds the daemon took to bring an
+agent back, and only then turned into Stop. A person is never told about the
+release, and this was the one place it showed.
+
+**Decision.** A message on its way is work from the moment it leaves the box:
+`stoppable` reads `echo !== null` beside `canCancelTurn`, the echo being what the
+transcript already draws as the working line over the same wait, so the slot and
+that line agree. The spinner is kept for the cases Stop is not offered — a draft
+typed meanwhile, a plan being answered, a typed control applying. The box says the
+agent is working over the same wait.
+
+**A Stop pressed before the daemon has the message waits for it.** Until the prompt
+route answers there is no turn to cancel — the daemon answers `not_ready` while it
+brings the agent up — so `cancelTurn` waits on the send (`sendsInFlight`, per
+session, since the composer outlives a switch) and cancels once the daemon has it;
+a send it refused leaves nothing to stop. The spinner says *stopping* meanwhile,
+which is true: nothing is drawn as stopped before the daemon says so (Q3.222).
+
+**Status.** Current. Amends Q3.601 and Q3.654.
 
 ## Deployment, packaging and code layout
 
@@ -34718,8 +34902,10 @@ whole time with nothing large enough to reach it.
 
 **Known limitation.** This closes the route, not the defect.
 `GET /sessions/:id/files` and `/uploads/:uploadId` stream arbitrary bytes and are
-excluded from compression by `compressible`, so a download past 1 MiB can still wedge
-— now ending as a visible failure and a retry rather than a spinner, per Q6.103.
+excluded from compression by `compressible`, so a download past 1 MiB could still wedge
+— ending as a visible failure and a retry rather than a spinner, per Q6.103. Closed
+the same way on 2026-10-03, after it did exactly that to a sent file: over the relay a
+download now comes in pieces that each fit one window (Q6.120).
 ⚠ `nodejs/node#64623` raises the default stream window 65535 → 4 MiB (merged
 2026-08-04, unreleased). It moves the threshold and not the mechanism: a later "it
 stopped happening" is not evidence this was fixed.
@@ -35636,6 +35822,94 @@ the harness's tools, and are left as they are.
 **The list ages.** `deploy/agents.sh` moves claude to `latest` daily (Q4.115), so a
 tool that belongs here can arrive unannounced. The measurement is two commands and
 is worth repeating at a release; nothing automates it, a census needing a login.
+
+**Status.** Current.
+
+### Q6.119 — How a backgrounded subagent looks on claude's wire, and where it ends
+
+**Measured 2026-10-03**, claude 2.1.288 under claude-agent-acp 0.73.0, on a
+throwaway daemon and against the owner's own log.
+
+**The launch.** An `Agent` call with `run_in_background: true` completes in about
+a second, its content *"Async agent launched successfully …"*, and its PostToolUse
+update carries `_meta.claudeCode.toolResponse.status: "async_launched"` — the CLI's
+own response, which `Workflow` shares. `launchedInBackground` projects it onto the
+update's `backgrounded`, the field that already means *the call is done and its work
+is not*. The subagent's steps then arrive parented to the spawn exactly as a
+foreground one's do.
+
+**Its end is nowhere a client is told.** The adapter marks every `local_agent` task
+`ignored` (Q7.113), and its native-subagent lifecycle (`subagent_spawned`,
+`subagent_state_update`) is behind an AIR capability this daemon does not declare,
+which would also move every child update onto a session id of its own.
+
+**Two things stand in for it.**
+
+- **The hand-back.** In auto mode the CLI gives an async subagent `SubagentHandback`
+  — *"The call ends your run, so make it your last step"* — gated on the
+  `tengu_lively_waffle` flag (default on). It arrives as an ordinary step under the
+  spawn, and `endsDelegation` marks it on the `tool_call`, read off
+  `_meta.claudeCode.toolName` and never a title, and only under a parent.
+- **The turn.** The adapter holds the turn that spawned a subagent open until it
+  has finished (`turnAwaitingSubagents`): on the owner's log the main agent made no
+  call of its own for 500 s, then answered within 4 s of the hand-back, in the same
+  turn.
+
+⚠ **The hold is not a guarantee.** In the throwaway run the subagent ran its
+`sleep` as a background shell of its own and finished its turn with an interim
+report; the task settled, the main turn ended 11 s in, and 23 s later the shell's
+end woke the subagent, which read the output under the spawn — outside any turn —
+and the main agent relayed it as work nobody prompted. Q3.699's order exists for
+that run.
+
+**Status.** Current.
+
+### Q6.120 — A relayed download past one stream window, and why it now comes in pieces
+
+**Reported 2026-10-03 by the owner**: a `send_file` card for a 2.6 MB PDF did nothing
+when pressed in the macOS app, and nothing again after the agent sent it twice more.
+The app reached that machine through the dev stand's relay.
+
+**What it was not.** Not the inline switch (Q3.690), which reaches `spanTarget` and
+nothing else. Not the shell's save: a copy of `host_save_file` under the shell's own
+CSP took 2.6 MB and opened its panel within two seconds, and a WKWebView harness
+carried 12 MB whole down both of Tauri's IPC channels. Not the daemon's store: every
+row and its copy were on disk.
+
+**What the stand's logs show.** Traefik records every relay channel with how long it
+lived. A channel to that machine opened at 12:32:55 UTC and lived 123 s, which is the
+client's `TRANSFER_TIMEOUT_MS`, and the app minted and dialled again eight seconds
+later: Q6.104's stall, on the route that entry names as still exposed. While the owner
+was pressing, every channel the app held to that machine also closed at once three
+times. That is `forgetRoute` disposing the whole pool, and a download in flight goes
+with it. The card drew nothing while it waited, so a press still running looked like a
+press that had done nothing.
+
+**Decision.** What Q6.104 did for transcript pages, done for downloads. Over the relay
+`MachineConnection` asks for `DOWNLOAD_PIECE_BYTES` (768 KiB) at a time with a Range
+header, each piece on a connection dialled for it and closed after it. Every piece
+starts on a fresh 1 MiB stream window and never waits on a window update, and a
+teardown costs one piece, which is replayed like any GET.
+
+- `serveFile` answers one `bytes=a-b` with a 206 and its content range, and every
+  answer carries an etag. A piece whose total or etag differs from the first is
+  refused (`409 file_changed`) rather than spliced.
+- A range starting past the end is `416 range_not_satisfiable`.
+- A 200 is the whole file whenever it comes. An older daemon ignores the header, and
+  loopback asks for the whole file: it has no relay window to fit, and a range header
+  would need a CORS allowance the daemon does not give.
+- The card shows a spinner until the save settles.
+
+**Rejected.** Changing the relay's pipe. Q6.104 could not reproduce the stall off the
+fleet in ~290 runs, and an isolated h2 stream with a 1 MiB window piped into a slow
+writer completed 2.6 MB every time on Node 24.21 and 26.3. A change there could not be
+shown to help, and the relay ships with the control plane.
+
+**Compatibility.** The app ships first, and against an older daemon it gets a 200 and
+behaves as before. Only a daemon that answers ranges closes the exposure.
+
+**Not measured.** The fix on the stand itself, which needs a capability for an account
+there; the owner's next press is that measurement.
 
 **Status.** Current.
 
@@ -39559,6 +39833,11 @@ bought for it (`CEILING_PARK_FLOOR_MS`, the drain's clock) are not spent.
 
 **Status.** Deliberate non-goal
 
+⚠ **The subagent half is drawn now, and not by counting a flag.** Q3.699 reads a
+backgrounded subagent off the log: running from its launch, ended by its own
+hand-back, by a turn end after its newest step, or by a session with nothing left
+running; every one of those bounds is a signal rather than a guess about time, and
+what each still gets wrong is written there. Q6.119 is what the wire carries.
 
 ### Q7.114 — How does a harness reach a model its own vendor does not serve?
 

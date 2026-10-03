@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -73,25 +73,44 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
     ],
     ["report.pdf", "evilfdp.exe", "zerowidth.txt", "linebreak.txt", "file", "b"],
   );
+  // A cut through a surrogate pair kept half an emoji: SQLite stored U+FFFD for it, the transcript the half (review of Q2.252).
+  check(
+    "a long name is cut between characters, never inside one, and half a pair the agent sent is dropped",
+    [sentFileName(`/a/${"x".repeat(193)}😀.txt`), sentFileName("/a/odd\ud800.txt"), sentFileName("/a/ok😀.txt")],
+    [`${"x".repeat(193)}.txt`, "odd.txt", "ok😀.txt"],
+  );
   check(
     "every refusal is a sentence that says nothing was sent or why",
     [
-      sendFileRefusal({ kind: "missing" }, "a.txt"),
-      sendFileRefusal({ kind: "not_a_file" }, "dir"),
-      sendFileRefusal({ kind: "too_large", limit: MAX_SENT_FILE_BYTES }, "big.bin"),
-      sendFileRefusal({ kind: "rate", retryAfterMs: 1_500 }, "a.txt"),
+      sendFileRefusal({ kind: "missing" }, "/w/a.txt"),
+      sendFileRefusal({ kind: "denied" }, "/w/locked/a.txt"),
+      sendFileRefusal({ kind: "not_a_file" }, "/w/dir"),
+      sendFileRefusal({ kind: "daemon_process" }, "/proc/42/environ"),
+      sendFileRefusal({ kind: "too_large", limit: MAX_SENT_FILE_BYTES }, "/w/big.bin"),
+      sendFileRefusal({ kind: "rate", retryAfterMs: 1_500 }, "/w/a.txt"),
+      sendFileRefusal({ kind: "withdrawn" }, "/w/a.txt"),
     ],
     [
-      "there is no file at a.txt",
-      "dir is not a regular file; to send a folder, archive it and send the archive",
-      "big.bin is larger than the 100 MB a sent file may be; nothing was sent",
+      "there is no file at /w/a.txt",
+      "this machine would not let the daemon read /w/locked/a.txt; nothing was sent",
+      "/w/dir is not a regular file; to send a folder, archive it and send the archive",
+      "/proc/42/environ is the daemon's own process, not a file of yours; nothing was sent",
+      "/w/big.bin is larger than the 100 MB a sent file may be; nothing was sent",
       "too much has been sent from this session in the last few minutes; try again in 2 seconds",
+      "the session stopped before the file was kept; nothing was sent",
     ],
   );
   check(
-    "and a sent one is told as its name and size",
-    sentFileText({ uploadId: "f_1", name: "a.txt", mime: null, bytes: 2_048 }).startsWith("Sent a.txt (2.0 KB) to your user"),
+    "and a sent one is told as the path it was read from, its name and its size",
+    sentFileText({ uploadId: "f_1", name: "a.txt", mime: null, bytes: 2_048 }, "/w/sub/a.txt").startsWith(
+      "Sent /w/sub/a.txt to your user as a.txt (2.0 KB)",
+    ),
     true,
+  );
+  check(
+    "only ASCII whitespace is trimmed off the ends: a no-break space can be part of a real name",
+    [sendFileSource({ path: " a.txt\n" }, "/w"), sendFileSource({ path: "\u00a0a.txt" }, "/w")],
+    [{ path: "/w/a.txt" }, { path: "/w/\u00a0a.txt" }],
   );
   check("a sent file is never larger than the download route will serve", MAX_SENT_FILE_BYTES <= MAX_DOWNLOAD_BYTES, true);
 
@@ -192,6 +211,45 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   );
   check("two calls from one session run one after the other, in the order they came", [both, order], [["ok", "ok"], ["slow.bin", "small.txt"]]);
 
+  // The wait in line is the call's own: given up on there, it answered only once the copy ahead had finished (review of Q2.252).
+  const line: string[] = [];
+  const ahead = uploads.keepAgentFile("s_line", join(work, "slow.bin")).then((result) => {
+    line.push("ahead");
+    return result.kind;
+  });
+  const leaver = new AbortController();
+  const behind = uploads.keepAgentFile("s_line", join(work, "small.txt"), { signal: leaver.signal }).then((result) => {
+    line.push("behind");
+    return result.kind;
+  });
+  const after = uploads.keepAgentFile("s_line", join(work, "small.txt")).then((result) => {
+    line.push("after");
+    return result.kind;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  leaver.abort();
+  check(
+    "a call given up on while it waits in line is answered at once, and the one behind it still waits for the copy ahead",
+    [await Promise.all([ahead, behind, after]), line],
+    [["ok", "cancelled", "ok"], ["behind", "ahead", "after"]],
+  );
+
+  // EACCES under a closed folder came back as "there is no file" (review of Q2.252).
+  const locked = join(work, "locked");
+  mkdirSync(locked);
+  writeFileSync(join(locked, "secret.txt"), "x");
+  chmodSync(locked, 0o000);
+  const shut = (await uploads.keepAgentFile("s_refuse", join(locked, "secret.txt"))).kind;
+  chmodSync(locked, 0o700);
+  check("a file behind a folder this machine will not open is refused as that, never as missing", shut, process.getuid?.() === 0 ? "ok" : "denied");
+  if (process.platform === "linux") {
+    check(
+      "and the daemon's own process is no file of the agent's: its environ holds this machine's token",
+      (await uploads.keepAgentFile("s_refuse", "/proc/self/environ")).kind,
+      "daemon_process",
+    );
+  }
+
   // Three budgets, none of which can be spent by another: a person's files, an agent's images, and what it sent.
   const stamp = Date.now() - 10_000;
   for (let n = 0; n < MAX_SENT_FILES_PER_SESSION; n += 1) {
@@ -210,6 +268,28 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
     [true, true],
   );
   check("so what it sent stays at the budget", index.listFor("s_roll").filter(isSentFile).length, MAX_SENT_FILES_PER_SESSION);
+  // Asked in the insert's own synchronous block, after the insert and before the eviction (review of Q2.252).
+  const full = index.listFor("s_roll").filter(isSentFile).map((row) => row.uploadId);
+  const rollDirs = dirsFor("s_roll").length;
+  const unwanted = await uploads.keepAgentFile("s_roll", join(work, "notes.txt"), { kept: () => false });
+  check("a copy its caller no longer wants is withdrawn", unwanted.kind, "withdrawn");
+  check(
+    "and at the budget it drops nothing to make room for the file it did not keep, nor leaves its directory",
+    [index.listFor("s_roll").filter(isSentFile).map((row) => row.uploadId), dirsFor("s_roll").length],
+    [full, rollDirs],
+  );
+  let seen: [boolean, number] | null = null;
+  const wanted = await uploads.keepAgentFile("s_roll", join(work, "notes.txt"), {
+    kept: (row) => {
+      seen = [index.get("s_roll", row.uploadId) !== null, index.listFor("s_roll").filter(isSentFile).length];
+      return true;
+    },
+  });
+  check(
+    "what the caller records names a row that exists, with nothing evicted yet",
+    [wanted.kind, seen],
+    ["ok", [true, MAX_SENT_FILES_PER_SESSION + 1]],
+  );
   const mine = await uploads.receive("s_roll", {
     name: "next.txt",
     origName: "next.txt",
@@ -306,8 +386,10 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
               .map((block: any) => block.text)
               .join("");
             // `SEND <path>` calls send_file as this harness would; `ASKSEND` asks permission first, as cursor and grok do;
-            // `ALWAYS` offers no allow-once; `BARE` is grok's request without the tag it adds; `FAKE` wears cursor's shape.
-            const sends = /^(SEND|ASKSEND|ALWAYS|BARE|FAKE) (.+)$/.exec(text);
+            // `ALWAYS` offers no allow-once; `BARE` is grok's request without the tag it adds; `FAKE` wears cursor's shape;
+            // `TYPED` is grok's tag typed by the model into the announcement, with a bare request after it; `LATE` asks only once
+            // the call has completed; `TWICE` announces two calls on one path before running either; `GHOST` never runs its call.
+            const sends = /^(SEND|ASKSEND|ALWAYS|BARE|FAKE|TYPED|LATE|TWICE|GHOST) (.+)$/.exec(text);
             if (sends === null) {
               send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
               break;
@@ -317,19 +399,22 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
             const caller = current;
             const update = (payload: Record<string, unknown>) =>
               send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: payload } });
-            const announced = announce(sends[1] === "FAKE" ? "cursor" : agent, path);
+            const shaped = announce(sends[1] === "FAKE" ? "cursor" : agent, path);
+            const announced =
+              sends[1] === "TYPED" ? { ...shaped, rawInput: { ...(shaped["rawInput"] as Record<string, unknown>), variant: "UseTool" } } : shaped;
             update({ sessionUpdate: "tool_call", toolCallId: callId, title: "send_file", kind: "other", status: "pending", ...announced });
+            if (sends[1] === "GHOST") {
+              send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+              break;
+            }
             const finish = () => {
               update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
               send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
             };
-            const call = () => {
+            const mcpCall = (): Promise<void> => {
               const server = caller?.mcpServers[0];
-              if (server === undefined) {
-                finish();
-                return;
-              }
-              void fetch(server.url, {
+              if (server === undefined) return Promise.resolve();
+              return fetch(server.url, {
                 method: "POST",
                 headers: {
                   "content-type": "application/json",
@@ -338,15 +423,26 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
                 body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: SEND_FILE_TOOL_NAME, arguments: { path } } }),
               })
                 .then((response) => response.json())
-                .then((reply: any) =>
-                  caller?.toolResults.push({ text: reply?.result?.content?.[0]?.text ?? "", isError: reply?.result?.isError === true }),
-                )
-                .finally(finish);
+                .then((reply: any) => {
+                  caller?.toolResults.push({ text: reply?.result?.content?.[0]?.text ?? "", isError: reply?.result?.isError === true });
+                });
             };
+            const call = (): void => void mcpCall().finally(finish);
             if (sends[1] === "SEND") {
               call();
               break;
             }
+            if (sends[1] === "TWICE") {
+              const second = `call-file-${++calls}`;
+              update({ sessionUpdate: "tool_call", toolCallId: second, title: "send_file", kind: "other", status: "pending", ...announced });
+              void mcpCall()
+                .then(() => update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" }))
+                .then(mcpCall)
+                .then(() => update({ sessionUpdate: "tool_call_update", toolCallId: second, status: "completed" }))
+                .finally(() => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } }));
+              break;
+            }
+            if (sends[1] === "LATE") update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
             const ask = ++outbound;
             awaiting.set(ask, (result) => {
               caller?.permissionAnswers.push(result);
@@ -365,8 +461,8 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
                   kind: "other",
                   status: "pending",
                   // grok repeats use_tool's arguments on the request, tagged with the variant it parsed them as (measured, 1.0.40).
-                  ...(agent === "grok" && sends[1] !== "BARE"
-                    ? { rawInput: { variant: "UseTool", ...(announced["rawInput"] as Record<string, unknown>) } }
+                  ...(agent === "grok" && sends[1] !== "BARE" && sends[1] !== "TYPED"
+                    ? { rawInput: { variant: "UseTool", ...(shaped["rawInput"] as Record<string, unknown>) } }
                     : {}),
                 },
                 options:
@@ -515,9 +611,9 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   writeFileSync(join(cla.cwd, "report.txt"), "the report");
   const sent = (await on.rpc(cla, "tools/call", { name: SEND_FILE_TOOL_NAME, arguments: { path: "report.txt" } })).result;
   check(
-    "a path relative to the working folder is sent, and the call says so",
-    [sent?.isError ?? false, /^Sent report\.txt \(10 bytes\) to your user/.test(sent?.content?.[0]?.text ?? ""), sent?.structuredContent],
-    [false, true, { status: "sent", name: "report.txt", bytes: 10 }],
+    "a path relative to the working folder is sent, and the call says which file it read",
+    [sent?.isError ?? false, sent?.content?.[0]?.text?.startsWith(`Sent ${join(cla.cwd, "report.txt")} to your user as report.txt (10 bytes)`), sent?.structuredContent],
+    [false, true, { status: "sent", name: "report.txt", bytes: 10, path: join(cla.cwd, "report.txt") }],
   );
   const event = sentOf(cla)[0];
   check(
@@ -538,7 +634,7 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   check(
     "a refusal is a tool error in words, never an HTTP one, and writes nothing",
     [none?.isError, none?.content?.[0]?.text, wrong?.isError, wrong?.content?.[0]?.text, sentOf(cla).length],
-    [true, "there is no file at nope.txt", true, "path must be the file to send", 2],
+    [true, `there is no file at ${join(cla.cwd, "nope.txt")}`, true, "path must be the file to send", 2],
   );
 
   process.stdout.write("  the call it stands for\n");
@@ -568,6 +664,21 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   check("claude's is the one asked to run it without a permission request", agentOf(cla).meta?.claudeCode?.options?.allowedTools, [
     `mcp__reemoat__${SEND_FILE_TOOL_NAME}`,
   ]);
+  // Review of Q2.252: the newest call naming the path was claimed, so with two in flight the first file stood for the second call.
+  writeFileSync(join(cdx.cwd, "twice.txt"), "twice");
+  const beforeTwice = sentOf(cdx).length;
+  await drive(cdx, "TWICE twice.txt");
+  check(
+    "two calls naming one path, announced before either runs, each carry their own id, in the order they came",
+    sentOf(cdx)
+      .slice(beforeTwice)
+      .map((one) => (one.type === "file_sent" ? one.toolCallId : null)),
+    ["call-file-2", "call-file-3"],
+  );
+  await drive(cdx, "GHOST ghost.txt");
+  const sessionOf = (managed: ManagedSession) =>
+    (managed as unknown as { session: { claimSentFileCall(path: string): string | null } | null }).session;
+  check("a call announced and never run is dropped when its turn ends, so no later file takes its id", sessionOf(cdx)?.claimSentFileCall("ghost.txt"), null);
 
   process.stdout.write("  the permission in front of it\n");
   writeFileSync(join(cur.cwd, "asked.txt"), "cursor");
@@ -612,6 +723,24 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   check("and so does one that names the tool in the model's words alone, with no tag from grok", unvouched.length, 1);
   if (unvouched[0] !== undefined) grk.answerPermission(unvouched[0].permissionId, { cancel: true });
   await settle();
+  // Review of Q2.252: the model typed grok's tag into use_tool's arguments, and a bare request on that id was answered yes.
+  writeFileSync(join(grk.cwd, "typed.txt"), "grok");
+  await drive(grk, "TYPED typed.txt");
+  const typed = grk.snapshot().pendingPermissions;
+  check("a tag the model typed into the announcement vouches for nothing: only the request's own does", typed.length, 1);
+  if (typed[0] !== undefined) grk.answerPermission(typed[0].permissionId, { cancel: true });
+  await settle();
+  await drive(cur, "LATE asked.txt");
+  const lateAsk = cur.snapshot().pendingPermissions;
+  check("a permission asked about a call that has already ended is its person's", lateAsk.length, 1);
+  if (lateAsk[0] !== undefined) cur.answerPermission(lateAsk[0].permissionId, { cancel: true });
+  await settle();
+  writeFileSync(join(cla.cwd, "asked.txt"), "claude");
+  await drive(cla, "ASKSEND asked.txt");
+  const claudeAsks = cla.snapshot().pendingPermissions;
+  check("and claude's is too: claude asks for it only past allowedTools, where its person's own rule says ask", claudeAsks.length, 1);
+  if (claudeAsks[0] !== undefined) cla.answerPermission(claudeAsks[0].permissionId, { cancel: true });
+  await settle();
   writeFileSync(join(opc.cwd, "asked.txt"), "opencode");
   await drive(opc, "ASKSEND asked.txt");
   const unknownAsks = opc.snapshot().pendingPermissions;
@@ -629,7 +758,26 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   }
 
   process.stdout.write("  a session that is going\n");
-  await cdx.stop();
+  // A Stop during the copy kept the row and dropped an older file the transcript still showed (review of Q2.252).
+  writeFileSync(join(cdx.cwd, "late.bin"), "");
+  truncateSync(join(cdx.cwd, "late.bin"), 64 * 1024 * 1024);
+  const rowsBefore = index.listFor(cdx.id).filter(isSentFile).map((row) => row.uploadId);
+  const sentBefore = sentOf(cdx).length;
+  const dirsBefore = new Set(dirsFor(cdx.id));
+  const copying = cdx.sendFile({ path: "late.bin" });
+  // Stopped once the copy's own directory exists, which is past every probe and before the commit.
+  for (let waited = 0; waited < 2_000 && dirsFor(cdx.id).every((dir) => dirsBefore.has(dir)); waited += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const stopping = cdx.stop();
+  const late = await copying;
+  await stopping;
+  check("a Stop during the copy keeps nothing, and says the session went", late, { ok: false, message: "the session stopped before the file was kept; nothing was sent" });
+  check(
+    "no row, no event, and every file the transcript already shows is still kept",
+    [index.listFor(cdx.id).filter(isSentFile).map((row) => row.uploadId), sentOf(cdx).length],
+    [rowsBefore, sentBefore],
+  );
   const stopped = await cdx.sendFile({ path: "own.txt" });
   check("a stopped session sends nothing", stopped, { ok: false, message: "this session is not running" });
 

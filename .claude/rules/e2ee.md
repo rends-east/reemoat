@@ -129,7 +129,9 @@ would put every request behind one h2 window — a paused download would stall t
 live event socket — and the only fix is per-stream credit accounting, which is
 reimplementing the half of HTTP/2 already underneath. A live event stream takes a
 connection of its own and keeps it. Q4.122's sibling argument is in
-`packages/protocol/src/frames.ts`.
+`packages/protocol/src/frames.ts`. **A download piece takes one of its own and closes
+it** (`alone`): an idle connection carries whatever stream window its earlier answers
+left it, and a piece must start on a whole one (Q6.120).
 
 **The daemon parses; the browser does not.** The relay's own docblock made this
 argument about itself: `http.request({createConnection})` lets Node serialize a

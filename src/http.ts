@@ -60,7 +60,7 @@ export function errorEnvelope(code: string, message: string, detail: unknown = n
 }
 
 /** 413 and 429 are distinct on purpose: too big is not wrong state, and a throttle expires (it carries Retry-After). */
-export type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 502 | 503 | 504;
+export type ErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 416 | 429 | 502 | 503 | 504;
 
 export function jsonError(
   c: Context,

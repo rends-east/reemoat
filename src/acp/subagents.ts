@@ -1,4 +1,5 @@
-// Tool-call lineage, which ACP does not define, read from the claudeCode _meta; if it disappears the transcript renders flat, as before.
+// Tool-call lineage and when a delegation ends, which ACP does not define, read from the claudeCode _meta; if it disappears the
+// transcript renders flat and a backgrounded subagent reads as finished, as before.
 
 export interface ToolCallLineage {
   parentToolCallId: string | null;
@@ -35,12 +36,32 @@ export function toolCallLineage(update: {
   };
 }
 
-/** claude's own name for the tool behind a call, as its adapter declares it; read only to recognise this daemon's MCP tools. */
+/**
+ * claude's own name for the tool behind a call, as its adapter declares it; read to recognise this daemon's MCP tools and the
+ * one call that ends a backgrounded subagent.
+ */
 export function claudeToolName(update: { _meta?: unknown }): string | null {
+  const name = claudeCodeMeta(update)?.["toolName"];
+  return typeof name === "string" ? name : null;
+}
+
+/** The call answered that its work runs on after it: claude's Agent and Workflow say `async_launched` (Q6.119). */
+export function launchedInBackground(update: { _meta?: unknown }): boolean {
+  const response = claudeCodeMeta(update)?.["toolResponse"];
+  return typeof response === "object" && response !== null && (response as { status?: unknown }).status === "async_launched";
+}
+
+/** "The call ends your run": how a backgrounded subagent hands its report back, in auto mode (Q6.119). */
+const SUBAGENT_HANDBACK = "SubagentHandback";
+
+/** A delegated step that is its delegation's last, by the tool's own contract; only ever true under a parent. */
+export function endsDelegation(update: { _meta?: unknown }, lineage: ToolCallLineage): boolean {
+  return lineage.parentToolCallId !== null && claudeToolName(update) === SUBAGENT_HANDBACK;
+}
+
+function claudeCodeMeta(update: { _meta?: unknown }): Record<string, unknown> | null {
   const meta = update._meta;
   if (typeof meta !== "object" || meta === null) return null;
   const claudeCode = (meta as { claudeCode?: unknown }).claudeCode;
-  if (typeof claudeCode !== "object" || claudeCode === null) return null;
-  const name = (claudeCode as { toolName?: unknown }).toolName;
-  return typeof name === "string" ? name : null;
+  return typeof claudeCode === "object" && claudeCode !== null ? (claudeCode as Record<string, unknown>) : null;
 }

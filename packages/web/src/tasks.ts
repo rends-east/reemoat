@@ -1,3 +1,4 @@
+import type { AgentTask } from "./ui/tail";
 import { hasLiveAgent, taskFinished, type AsyncTaskState, type BackgroundTask, type SessionSnapshot } from "./wire";
 
 /** Keyed by the adapter's already-humanised `taskType`; an unknown word falls through to the caller's fallback. */
@@ -24,6 +25,22 @@ export function taskTitle(task: BackgroundTask): string {
 export function taskElapsedMs(task: BackgroundTask, now: number): number {
   const end = task.endedAt ?? now;
   return Math.max(0, end - task.startedAt);
+}
+
+/** `Explore agent`, from the call's own arguments; a harness that names no kind is just an agent. */
+export function agentKindLabel(agentType: string | null): string {
+  return agentType === null ? "Agent" : `${taskKindLabel(agentType)} agent`;
+}
+
+/** The log's stamps; null for a subagent that ended where nothing says when. */
+export function agentElapsedMs(agent: AgentTask, now: number): number | null {
+  if (agent.state === "running") return Math.max(0, now - agent.startedAt);
+  return agent.endedAt === null ? null : Math.max(0, agent.endedAt - agent.startedAt);
+}
+
+/** A subagent's id in the hidden set, apart from every id an adapter mints for a background task. */
+export function agentRowId(agent: AgentTask): string {
+  return `agent:${agent.toolCallId}`;
 }
 
 /** Claude Code's spaced form (`8s`, `1m 27s`, `1d 4h 30m`); seconds round above a minute and carry upward. */

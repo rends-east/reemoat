@@ -115,6 +115,7 @@ export const {
   supersedes,
   toolSummary,
   outstandingTasks,
+  agentTasks,
   streamedSinceTool,
   stillRunning,
   isDelegation,

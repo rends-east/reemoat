@@ -108,6 +108,8 @@ export interface ToolCallEvent {
   parentToolCallId?: string | null;
   // Read only from the tool_call: claude drops it on the completing update.
   subagent?: boolean;
+  // Absent on an older daemon and on every call but a delegation's last step (Q6.119).
+  endsDelegation?: boolean;
 }
 
 export interface ToolCallUpdateEvent {

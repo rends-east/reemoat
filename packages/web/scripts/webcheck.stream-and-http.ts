@@ -247,6 +247,102 @@ process.stdout.write("\na machine that moved to another relay\n");
   cp.clearSession();
 }
 
+process.stdout.write("\na relayed download, a piece at a time\n");
+{
+  const cp = await import("../src/cp.js");
+  const { MachineConnection, DOWNLOAD_PIECE_BYTES, contentRange } = await import("../src/machine.js");
+  const { ApiError } = await import("../src/http.js");
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+    if (String(input) !== "/v1/tokens") throw new TypeError("nothing but the mint goes over fetch here");
+    const now = Date.now();
+    return new Response(
+      JSON.stringify({
+        token: "jws-pieces",
+        expiresAt: now + 300_000,
+        serverTime: now,
+        machine: { relayUrl: "https://r1.example", relayOnline: true, key: "A".repeat(43) },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+  cp.setSession("rs_pieces");
+
+  // Two whole pieces and a short third, so both the boundary and the tail are crossed.
+  const file = new Uint8Array(2 * DOWNLOAD_PIECE_BYTES + 12_345).map((_, at) => at % 251);
+  let honoursRanges = true;
+  let tagAfterFirst = '"v1"';
+  const asked: { path: string; range: string | undefined; alone: boolean | undefined }[] = [];
+  const channel = (() => ({
+    async request(wanted: { path: string; headers?: Record<string, string>; alone?: boolean }) {
+      if (wanted.path === "/health") {
+        return { status: 200, statusText: "OK", headers: { "content-type": "application/json" }, body: new TextEncoder().encode('{"ok":true}') };
+      }
+      asked.push({ path: wanted.path, range: wanted.headers?.["range"], alone: wanted.alone });
+      const match = /^bytes=(\d+)-(\d+)$/.exec(wanted.headers?.["range"] ?? "");
+      if (!honoursRanges || match === null) {
+        return { status: 200, statusText: "OK", headers: { "content-type": "application/octet-stream" }, body: file };
+      }
+      const start = Number(match[1]);
+      const end = Math.min(Number(match[2]), file.length - 1);
+      return {
+        status: 206,
+        statusText: "Partial Content",
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-range": `bytes ${String(start)}-${String(end)}/${String(file.length)}`,
+          etag: start === 0 ? '"v1"' : tagAfterFirst,
+        },
+        body: file.slice(start, end + 1),
+      };
+    },
+    openSocket(): unknown {
+      throw new Error("no socket in this section");
+    },
+    dispose(): void {},
+  })) as never;
+  const connection = new MachineConnection(
+    { id: "m_pieces", name: "laptop", relayUrl: "https://r1.example", relayOnline: true, enrolled: true, owned: true, scopes: [] } as never,
+    () => {},
+    channel,
+  );
+  const bytesOf = async (blob: Blob): Promise<Uint8Array> => new Uint8Array(await blob.arrayBuffer());
+
+  const whole = await bytesOf(await connection.download("/sessions/s_one/uploads/f_big"));
+  check("a file three pieces long arrives whole", whole.length, file.length);
+  check("byte for byte, in order", whole.every((byte, at) => byte === file[at]), true);
+  check(
+    "asked for as consecutive ranges, none longer than a piece",
+    asked.map((entry) => entry.range),
+    [0, 1, 2].map((n) => `bytes=${String(n * DOWNLOAD_PIECE_BYTES)}-${String((n + 1) * DOWNLOAD_PIECE_BYTES - 1)}`),
+  );
+  // A pooled connection carries whatever window its earlier answers left it (Q6.120).
+  check("and each piece on a connection of its own", asked.map((entry) => entry.alone), [true, true, true]);
+
+  asked.length = 0;
+  honoursRanges = false;
+  const older = await bytesOf(await connection.download("/sessions/s_one/uploads/f_big"));
+  check("a daemon that ignores the range answers 200, and that is the whole file", [older.length, asked.length], [file.length, 1]);
+
+  honoursRanges = true;
+  tagAfterFirst = '"v2"';
+  const changed = await connection.download("/sessions/s_one/files?path=notes.md").then(
+    () => "spliced",
+    (error: unknown) => (ApiError.isApiError(error) ? error.code : String(error)),
+  );
+  check("a file rewritten between two pieces is refused rather than spliced", changed, "file_changed");
+
+  check("a range header is read as serveFile writes it", contentRange("bytes 0-9/10"), { start: 0, end: 9, total: 10 });
+  check("and one that runs past its own total is nothing", contentRange("bytes 0-10/10"), null);
+  check("as is the unsatisfiable form", contentRange("bytes */10"), null);
+  check("and a missing one", contentRange(undefined), null);
+  check("a piece leaves room in a 1 MiB stream window for the frames around it", DOWNLOAD_PIECE_BYTES <= 768 * 1024, true);
+
+  globalThis.fetch = realFetch;
+  cp.clearSession();
+}
+
 process.stdout.write("\nwhat a failed call puts on screen\n");
 {
   const { ApiError, errorText } = await import("../src/http.js");

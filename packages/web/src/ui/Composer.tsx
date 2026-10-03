@@ -27,7 +27,7 @@ import {
   type PendingAttachment,
 } from "../attach";
 import type { DaemonClient } from "../daemon";
-import { clearEcho, sendFloor, setEcho, type PendingEcho } from "../echo";
+import { clearEcho, echoFor, echoVersion, sendFloor, setEcho, subscribeEchoes, type PendingEcho } from "../echo";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
@@ -87,6 +87,9 @@ import { toast } from "./Toast";
 // Outside the store: a draft outlives an unmount without waking every subscriber per keystroke.
 const drafts = new Map<string, string>();
 
+// A prompt the daemon has not answered, by session: a Stop pressed meanwhile waits for it, since until then there is no turn to cancel.
+const sendsInFlight = new Map<string, Promise<void>>();
+
 // Stable identity, so memos over the event window survive each keystroke.
 const EMPTY_EVENTS: readonly StoredEvent[] = [];
 const EMPTY_COMMANDS: AgentCommandList = { commands: [], dropped: 0 };
@@ -137,6 +140,8 @@ export function Composer({
 
   useSyncExternalStore(subscribeAttachments, attachmentsVersion);
   const attachments = attachmentsFor(key);
+  useSyncExternalStore(subscribeEchoes, echoVersion);
+  const echo = echoFor(key);
   const slotsFull =
     attachments.filter((item) => item.state !== "failed").length >= MAX_PROMPT_ATTACHMENTS;
 
@@ -397,7 +402,8 @@ export function Composer({
   const slotSends = sendable(text, attachments, sendRefused);
   // A refusal about the draft keeps a disabled Send rather than putting Stop under a thumb aimed at Send.
   const draftAnswerable = !sessionRefused && !slotSends && (text.trim().length > 0 || attachments.length > 0);
-  const stoppable = canCancelTurn(session) && !revising && !slotSends && !draftAnswerable;
+  // A message on its way is work from the moment it leaves the box, however long the daemon takes to bring an agent up (Q3.700).
+  const stoppable = (canCancelTurn(session) || echo !== null) && !revising && !slotSends && !draftAnswerable;
   // Computed once, so the drawn line and Send's label cannot disagree.
   const sendRefusal = sendRefused
     ? session.status === "stopping"
@@ -409,7 +415,8 @@ export function Composer({
       ? "An attachment did not upload — retry it or remove it"
       : null;
   const pendingCancel = cancelInFlight(session);
-  const occupant = slotOccupant({ sending: busy, stopping: stopping || pendingCancel, sends: slotSends, stoppable });
+  // The spinner only where Stop is not offered: a draft typed meanwhile, a plan being answered, a typed control applying.
+  const occupant = slotOccupant({ sending: busy && !stoppable, stopping: stopping || pendingCancel, sends: slotSends, stoppable });
   // The refusal line is about Send, so it shows only while Send holds the slot.
   const sendDrawn = occupant === "send";
 
@@ -551,7 +558,7 @@ export function Composer({
         })
       : Promise.resolve();
 
-    void settled
+    const flight: Promise<void> = settled
       .then(() => daemon.prompt(sessionRef.sessionId, body, sending))
       .then((result) => {
         // `promptLanded` also settles the echo, since the prompt event often beats this answer.
@@ -573,8 +580,10 @@ export function Composer({
         toast("error", errorText(cause));
       })
       .finally(() => {
+        if (sendsInFlight.get(key) === flight) sendsInFlight.delete(key);
         if (onScreen()) setBusy(false);
       });
+    sendsInFlight.set(key, flight);
   };
 
   // Nothing optimistic: the pending state comes only from the daemon's snapshot.
@@ -582,9 +591,13 @@ export function Composer({
     const daemon = store.daemonFor(sessionRef.machineId);
     if (daemon === undefined || stopping) return;
     setStopping(true);
-    void daemon
-      .cancelTurn(sessionRef.sessionId)
-      .then((result) => {
+    // A message still on its way is stopped once the daemon has it; one it refused leaves nothing to stop (Q3.700).
+    const landing = sendsInFlight.get(key);
+    void (landing ?? Promise.resolve())
+      .then(async () => {
+        const now = store.getSnapshot().rowsByKey.get(key)?.snapshot;
+        if (landing !== undefined && (now === undefined || !canCancelTurn(now))) return;
+        const result = await daemon.cancelTurn(sessionRef.sessionId);
         store.applySnapshot(sessionRef, result.session);
       })
       .catch((cause: unknown) => {
@@ -760,7 +773,7 @@ export function Composer({
           placeholder={composerPlaceholder({
             blocked,
             reconnecting: busy && reconnecting,
-            working,
+            working: working || echo !== null,
             revising,
             hasCommands: entries.length > 0,
           })}

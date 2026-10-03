@@ -213,6 +213,8 @@ const FOREIGN = new Set([
   "GROK_CONFIG",
   "GROK_CONFIG_PATH",
   "canUseTool",
+  // claude-agent-acp's hold on a turn while its subagents run, cited in Q6.119 for where it holds and where it does not.
+  "turnAwaitingSubagents",
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.

@@ -51,9 +51,10 @@ import {
   headlineWorthDrawing,
   clipTitle,
   toolSummary,
-  outstandingTasks,
+  agentTasks,
   streamedSinceTool,
   SUMMARY_CHARS,
+  type AgentTask,
   type AnsweredQuestion,
   type ChangeNode,
   type EventNode,
@@ -76,6 +77,7 @@ export function EventList({
   files,
   working,
   reporting,
+  engaged,
   workElapsedMs,
   stale,
   echo,
@@ -96,6 +98,8 @@ export function EventList({
   files: FileAccess | null;
   working: boolean;
   reporting: boolean;
+  /** A turn, work nobody prompted or a parked request right now: what keeps a detached subagent counted as running (Q3.699). */
+  engaged: boolean;
   /** Elapsed time of the turn or of unprompted work, from the store's skew-corrected clock; null for neither. */
   workElapsedMs: number | null;
   /** Nothing is streaming; working cannot tell, since it reflects the last snapshot that arrived. */
@@ -115,7 +119,7 @@ export function EventList({
   const cut = transcript.clearedAt ?? 0;
   // Over every loaded event, not only drawn rows: a request above the fold decides how its answer reads.
   const decisions = useMemo(() => permissionDecisions(transcript.events), [transcript.events]);
-  const { rows, taskFloor } = useMemo(
+  const { rows, taskFloor, turnEdges } = useMemo(
     () => buildTail(transcript.events, transcript.gaps, cut, decisions),
     [transcript.events, transcript.gaps, cut, decisions],
   );
@@ -131,27 +135,33 @@ export function EventList({
   });
   // One string for the visible line and the live region, so the two cannot disagree.
   const noticeSays = noticeText(notice);
-  // reporting asks whether the session can still report; taskFloor drops delegations of a previous agent.
-  const tasks = useMemo(
-    () => (reporting ? outstandingTasks(rows, taskFloor) : []),
-    [reporting, rows, taskFloor],
-  );
-  // Keyed on task ids and states, not on background, which is a new array per token; taskStates feeds a context.
+  // Keyed on task ids and states, not on background or agents, which are new arrays per token; taskStates feeds a context.
   const taskKey = background.map((task) => `${task.id}:${task.state}:${task.toolCallId ?? ""}`).join(",");
+  const liveCalls = useMemo(
+    () => new Set(background.flatMap((task) => (task.toolCallId !== null && !taskFinished(task.state) ? [task.toolCallId] : []))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [taskKey],
+  );
+  // reporting asks whether the session can still report; taskFloor drops delegations of a previous agent.
+  const agents = useMemo(
+    () => agentTasks(rows, { edges: turnEdges, floor: taskFloor, live: reporting, engaged, liveCalls }),
+    [rows, turnEdges, taskFloor, reporting, engaged, liveCalls],
+  );
+  const runningAgents = agents.reduce((count, agent) => (agent.state === "running" ? count + 1 : count), 0);
+  const agentKey = agents.map((agent) => (agent.detached ? `${agent.toolCallId}:${agent.state}` : "")).join(",");
   const liveBackground = useMemo(
     () => background.reduce((live, task) => (taskFinished(task.state) ? live : live + 1), 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
     [taskKey],
   );
   const taskStates = useMemo(
-    () => callStates(background),
+    () => callStates(background, agents),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
-    [taskKey],
+    [taskKey, agentKey],
   );
   // Only the foot reads it, and the memo inside makes a token one step; no row re-renders for it (Q3.644).
   const streamed = working ? streamedSinceTool(transcript.events) : 0;
-  const foot = footSays(working, tasks.length, elapsedSays(workElapsedMs), stale, background, streamedSays(streamed));
-  const retained = background.length;
+  const foot = footSays(working, runningAgents, elapsedSays(workElapsedMs), stale, background, streamedSays(streamed));
   const footLine = foot?.line ?? null;
   const footSpoken = foot?.spoken ?? null;
 
@@ -209,8 +219,7 @@ export function EventList({
               line={footLine}
               working={working}
               stale={stale}
-              outstanding={tasks.length + liveBackground}
-              retained={retained}
+              outstanding={runningAgents + liveBackground}
               onOpenTasks={onOpenTasks}
             />
           ) : (
@@ -224,7 +233,7 @@ export function EventList({
             onStopTask={onStopTask}
             open={tasksOpen}
             reporting={reportsTasks}
-            tasks={tasks}
+            agents={agents}
           />
         </div>
       </ResizedContext.Provider>
@@ -253,14 +262,17 @@ const NO_TASK_STATES: ReadonlyMap<string, AsyncTaskState> = new Map();
 /** By toolCallId: the log alone cannot say whether a backgrounded call's work is still running. */
 const TasksContext = createContext<ReadonlyMap<string, AsyncTaskState>>(NO_TASK_STATES);
 
-/** A live row outranks a terminal one on the same call id. */
-function callStates(background: readonly BackgroundTask[]): ReadonlyMap<string, AsyncTaskState> {
+/** A live row outranks a terminal one on the same call id; a detached subagent has no row on the wire, so the log answers for it. */
+function callStates(background: readonly BackgroundTask[], agents: readonly AgentTask[]): ReadonlyMap<string, AsyncTaskState> {
   const out = new Map<string, AsyncTaskState>();
   for (const task of background) {
     if (task.toolCallId === null) continue;
     const held = out.get(task.toolCallId);
     if (held !== undefined && !taskFinished(held)) continue;
     out.set(task.toolCallId, task.state);
+  }
+  for (const agent of agents) {
+    if (agent.detached && !out.has(agent.toolCallId)) out.set(agent.toolCallId, agent.state);
   }
   return out.size === 0 ? NO_TASK_STATES : out;
 }
@@ -314,7 +326,7 @@ export function streamedSays(chars: number): string | null {
   return `↓ ${taskTokens(tokens)} ${tokens === 1 ? "token" : "tokens"}`;
 }
 
-/** The two sources are disjoint, so counts add without dedup; terminal rows are skipped here, not by callers. */
+/** The two sources are disjoint, so counts add without dedup; terminal rows are skipped here, not by callers. `tasks` is subagents. */
 export function outstandingSays(tasks: number, background: readonly BackgroundTask[]): string {
   let live = 0;
   let only: string | undefined;
@@ -326,7 +338,7 @@ export function outstandingSays(tasks: number, background: readonly BackgroundTa
     else if (only !== task.taskType) mixed = true;
   }
   const total = tasks + live;
-  if (live === 0) return `${tasks} task${tasks === 1 ? "" : "s"}`;
+  if (live === 0) return `${tasks} agent${tasks === 1 ? "" : "s"}`;
   if (tasks === 0 && !mixed) {
     const noun = only === undefined ? undefined : TASK_NOUNS[only];
     if (noun !== undefined) return `${live} ${live === 1 ? noun[0] : noun[1]}`;
@@ -368,18 +380,16 @@ function WaitingFoot({
   working,
   stale,
   outstanding,
-  retained,
   onOpenTasks,
 }: {
   line: string;
   working: boolean;
   stale: boolean;
+  /** Pressable only while something runs: finished work is the session menu's door (Q3.631, Q3.698). */
   outstanding: number;
-  /** Task rows the panel holds, finished ones included; any makes the row pressable, but only while footSays draws the row at all. */
-  retained: number;
   onOpenTasks: () => void;
 }): ReactNode {
-  if (outstanding === 0 && retained === 0) {
+  if (outstanding === 0) {
     return (
       <p aria-hidden={true} className="flex h-5 items-center gap-2 text-2xs text-faint">
         <WorkingMark still={stale} />
@@ -394,7 +404,7 @@ function WaitingFoot({
       // Grows downward only, into the bottom padding, and only for coarse pointers so hover does not light from below.
       className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:top-0 [@media(pointer:coarse)]:after:-bottom-6 [@media(pointer:coarse)]:after:content-[''] hover:bg-raised hover:text-fg"
     >
-      {working ? <WorkingMark still={stale} /> : outstanding > 0 ? <Dot tone="pending" /> : <Dot tone="off" />}
+      {working ? <WorkingMark still={stale} /> : <Dot tone="pending" />}
       <span className="min-w-0 flex-1 truncate">{line}</span>
       <span className="shrink-0">
         <Icon as={ChevronRight} size={11} />
@@ -770,11 +780,14 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
   const onResized = useContext(ResizedContext);
   const { summary, detail } = toolSummary(rawInput, locations, (path) => files?.relFor(path) ?? null);
   const isSubagent = node.subagent || node.steps > 0;
+  const backgroundState = useContext(TasksContext).get(node.toolCallId);
+  // A shell the daemon reports detached, or a subagent the log says outlived its call (Q3.699).
+  const detached = node.backgrounded || (isSubagent && backgroundState !== undefined);
+  // A detached call's own duration is how long the launch took, not the work.
   const headline = isSubagent
-    ? node.elapsedMs !== null
+    ? node.elapsedMs !== null && !detached
       ? shortDuration(node.elapsedMs)
-      :
-        (node.latest ?? summary)
+      : (node.latest ?? summary)
     : summary;
   // Clipped here rather than by truncate, so the card knows whether anything was cut.
   const shownTitle = clipTitle(title);
@@ -787,10 +800,9 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
     changes: node.changes.length,
     titleClipped: shownTitle.clipped,
   });
-  // A backgrounded completed call is running only while the snapshot has a live task for it; no match means not running.
-  const backgroundState = useContext(TasksContext).get(node.toolCallId);
+  // A detached completed call is running only while its task is live; no match means not running.
   const running =
-    node.backgrounded &&
+    detached &&
     status === "completed" &&
     backgroundState !== undefined &&
     !taskFinished(backgroundState);
@@ -817,7 +829,9 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
               status === "failed"
                 ? X
                 : running
-                  ? Terminal
+                  ? isSubagent
+                    ? Download
+                    : Terminal
                   : status === "completed"
                     ? Check
                     : status === "in_progress"

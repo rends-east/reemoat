@@ -371,7 +371,9 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   to attribute, which is why `PlanEvent` has no parent field. One `TodoWrite` emits
   a `plan` per streaming refinement, each a full replacement. Q6.6.
 - **A subagent emits no heartbeat**: a running spawn sits at `pending` until it
-  completes. Q6.7.
+  completes. Q6.7. A *backgrounded* one completes in a second (`async_launched`,
+  read as `backgrounded`) and works on under it; only auto mode's `SubagentHandback`
+  marks its end (`endsDelegation`). Q6.119.
 - **Nested delegation exists but is flat** — every other call comes back parented to
   the **outermost** spawn, so no third level is reachable. Q6.8.
 - **`usage_update` fires on every output token, and `turn_end.usage` is a different

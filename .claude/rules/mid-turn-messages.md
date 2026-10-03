@@ -170,10 +170,18 @@ a clause rather than a bet on timing.
 
 **The send slot follows the draft, not the turn.** `slotSends` is
 `sendable(text, attachments, sendRefused)` and `stoppable` is
-`canCancelTurn(session) && !revising && !slotSends`: Stop while the box holds
-nothing that would send, Send the moment it holds something that would. Whitespace
-is not worth sending — `canSend` trims — so a stray space or tab leaves Stop where
-it was.
+`(canCancelTurn(session) || echo !== null) && !revising && !slotSends && !draftAnswerable`:
+Stop while the box holds nothing that would send, Send the moment it holds something
+that would. Whitespace is not worth sending — `canSend` trims — so a stray space or
+tab leaves Stop where it was.
+
+⚠ **A message on its way is work from the moment it leaves the box** (Q3.700). The
+daemon may take seconds to bring a released agent back before there is a turn, and
+Send's spinner over that wait was the one place a person could see the release. So
+the echo counts, the same echo the transcript draws its working line over; the
+spinner is left for what Stop is not offered over. **A Stop pressed before the
+daemon answered waits for that answer** (`sendsInFlight`): until then there is no
+turn, and the daemon says `not_ready` while it starts the agent.
 
 ⚠ **One predicate decides the slot, and it is `sendable` rather than a separate
 "is there anything in the box".** A `draftPresent` was written first and taken back

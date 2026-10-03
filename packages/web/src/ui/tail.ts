@@ -78,6 +78,19 @@ export interface ToolNode {
   omitted: number;
   latest: string | null;
   elapsedMs: number | null;
+  /** The daemon's stamp on the call, and on the update that made it terminal (null until one did); `endedSeq` is that update's seq. */
+  startedAt: number;
+  endedAt: number | null;
+  endedSeq: number | null;
+  /** The last step of the delegation it sits in, by that tool's own contract (Q6.119). */
+  endsDelegation: boolean;
+  /** Under a delegation, over every depth: its newest step's call seq, the newest moment a step started or ended, and its closing step's end. */
+  lastStepSeq: number;
+  lastStepAt: number | null;
+  closedAt: number | null;
+  /** Under a delegation: the newest still-running step's seq (0 for none), and the detached steps only a background task answers for. */
+  runningStepSeq: number;
+  detachedSteps: readonly string[];
 }
 
 export interface UpdateNode {
@@ -179,6 +192,12 @@ export function sameNode(a: TailNode, b: TailNode): boolean {
         a.omitted === other.omitted &&
         a.latest === other.latest &&
         a.elapsedMs === other.elapsedMs &&
+        a.endedAt === other.endedAt &&
+        a.lastStepSeq === other.lastStepSeq &&
+        a.lastStepAt === other.lastStepAt &&
+        a.closedAt === other.closedAt &&
+        a.runningStepSeq === other.runningStepSeq &&
+        sameList(a.detachedSteps, other.detachedSteps) &&
         sameList(a.locations, other.locations) &&
         sameList(a.output, other.output) &&
         sameList(a.images, other.images) &&
@@ -231,10 +250,21 @@ export interface Tail {
   hidden: number;
   /** Seq at or below which a `pending` call is stranded (after `session_started` or an abnormal `turn_end`); 0 if none. */
   taskFloor: number;
+  /** Every turn end and agent start in the window, oldest first: the only end a backgrounded subagent has on the wire (Q3.699). */
+  turnEdges: readonly TurnEdge[];
+}
+
+/** `restart` for a `session_started`, a new agent; otherwise the turn's stop reason. */
+export interface TurnEdge {
+  seq: number;
+  at: number;
+  stopReason: string;
 }
 
 export interface PendingUpdate {
   ts: number;
+  /** Optional for the drivers' hand-built lists; buildTail always sets it. */
+  seq?: number;
   status: ToolCallStatus | null;
   title: string | null;
   rawInput: unknown;
@@ -257,6 +287,7 @@ export interface MergedUpdate {
   backgrounded: boolean;
   /** From the update carrying the newest status: claude sends all-null updates after a terminal one. */
   statusTs: number | null;
+  statusSeq: number | null;
 }
 
 /** Models stream arguments as cumulative blocks, so a strict extension replaces its draft; exact repeats stay. */
@@ -293,11 +324,13 @@ export function mergeUpdates(
     parentToolCallId: null,
     backgrounded: false,
     statusTs: null,
+    statusSeq: null,
   };
   for (const update of updates) {
     if (update.status !== null) {
       merged.status = update.status;
       merged.statusTs = update.ts;
+      merged.statusSeq = update.seq ?? null;
     }
     if (update.title !== null) merged.title = update.title;
     if (update.locations.length > 0) merged.locations = update.locations;
@@ -452,13 +485,21 @@ export function placeNodes(collected: readonly TailNode[]): TailNode[] {
     // The same quantity as claude's `totalToolUseCount`: tool calls at every depth, evicted ones included.
     if (node.kind === "tool") {
       const seen = new Set<string>([node.toolCallId]);
+      const moment = node.endedAt ?? node.startedAt;
       for (let ancestor: ToolNode | undefined = parent; ancestor !== undefined; ) {
         if (seen.has(ancestor.toolCallId)) break;
         seen.add(ancestor.toolCallId);
         ancestor.steps += 1;
+        ancestor.lastStepSeq = Math.max(ancestor.lastStepSeq, node.seq);
+        ancestor.lastStepAt = Math.max(ancestor.lastStepAt ?? moment, moment);
+        if (stillRunning(node)) ancestor.runningStepSeq = Math.max(ancestor.runningStepSeq, node.seq);
+        if (node.backgrounded) ancestor.detachedSteps = [...ancestor.detachedSteps, node.toolCallId];
         const nextId: string | null = ancestor.parentId;
         ancestor = nextId === null ? undefined : byId.get(nextId);
       }
+      // The parent it names, not the one the indent clamp climbed to: the contract is between a subagent and its own spawn.
+      const closes = node.endsDelegation && node.endedAt !== null && node.parentId !== null ? byId.get(node.parentId) : undefined;
+      if (closes !== undefined && node.endedAt !== null) closes.closedAt = Math.max(closes.closedAt ?? node.endedAt, node.endedAt);
     }
 
     if (parent.children.length >= MAX_CHILDREN) {
@@ -654,17 +695,47 @@ export function isDelegation(node: ToolNode): boolean {
   return node.subagent || node.steps > 0;
 }
 
-export interface OutstandingTask {
+/** A subagent drawn as background work; `paused` is a background task's alone (Q3.699). */
+export type AgentTaskState = "running" | "completed" | "failed" | "stopped";
+
+export interface AgentTask {
   key: string;
+  toolCallId: string;
   seq: number;
   title: string;
+  /** What kind of agent, where the call's arguments name one: claude's `subagent_type`. */
+  agentType: string | null;
   latest: string | null;
   steps: number;
+  state: AgentTaskState;
+  /** Its call completed and its work did not, so the call's own end is not the agent's. */
+  detached: boolean;
+  startedAt: number;
+  endedAt: number | null;
 }
 
-/** Running delegations above `floor`, read from the log, not the snapshot; blind to work behind an already-completed call (Q7.113, Q2.228). */
-export function outstandingTasks(rows: readonly TailNode[], floor = 0): OutstandingTask[] {
-  const out: OutstandingTask[] = [];
+/** What decides a subagent's state beyond its own rows. */
+export interface AgentContext {
+  /** Every turn end and agent start in the window, oldest first (`Tail.turnEdges`). */
+  edges: readonly TurnEdge[];
+  floor: number;
+  /** The session can still report: neither ended nor being stopped. */
+  live: boolean;
+  /** A turn, work nobody prompted or a parked request right now, any of which a detached subagent may be what keeps going. */
+  engaged: boolean;
+  /** Calls whose background task the daemon reports live. */
+  liveCalls: ReadonlySet<string>;
+}
+
+const NO_CALLS: ReadonlySet<string> = new Set();
+
+/**
+ * Every delegation in the window, running or finished, read from the log. A detached one has no end on the wire, so it runs
+ * until its own closing step, a turn end or agent start after its newest step, or a moment when neither the session nor any
+ * step of its own is doing anything (Q3.699, Q6.119).
+ */
+export function agentTasks(rows: readonly TailNode[], context: AgentContext): AgentTask[] {
+  const out: AgentTask[] = [];
   const seen = new Set<string>();
   const walk = (nodes: readonly TailNode[]): void => {
     for (const node of nodes) {
@@ -675,24 +746,78 @@ export function outstandingTasks(rows: readonly TailNode[], floor = 0): Outstand
         continue;
       }
       if (node.kind !== "tool") continue;
-      if (node.seq <= floor) {
+      if (!isDelegation(node)) {
+        walk(node.children);
         continue;
       }
-      if (isDelegation(node) && stillRunning(node)) {
-        out.push({
-          key: node.key,
-          seq: node.seq,
-          title: node.title,
-          latest: node.latest,
-          steps: node.steps,
-        });
-        continue;
-      }
-      walk(node.children);
+      const task = agentTask(node, context);
+      out.push(task);
+      // A delegation inside a running one is one thing to wait for.
+      if (task.state !== "running") walk(node.children);
     }
   };
   walk(rows);
   return out;
+}
+
+/** The running half of `agentTasks`, read as a session still at work: what the transcript's foot waits for. */
+export function outstandingTasks(rows: readonly TailNode[], floor = 0, edges: readonly TurnEdge[] = []): AgentTask[] {
+  return agentTasks(rows, { edges, floor, live: true, engaged: true, liveCalls: NO_CALLS }).filter(
+    (task) => task.state === "running",
+  );
+}
+
+function agentTask(node: ToolNode, context: AgentContext): AgentTask {
+  // Declared by the daemon, or seen: a step that began after the call reported its end.
+  const detached =
+    node.status === "completed" && (node.backgrounded || (node.endedSeq !== null && node.lastStepSeq > node.endedSeq));
+  const end = detached ? detachedEnd(node, context) : attachedEnd(node, context);
+  return {
+    key: node.key,
+    toolCallId: node.toolCallId,
+    seq: node.seq,
+    title: node.title,
+    agentType: agentTypeOf(node.rawInput),
+    latest: node.latest,
+    steps: node.steps,
+    state: end.state,
+    detached,
+    startedAt: node.startedAt,
+    endedAt: end.endedAt,
+  };
+}
+
+function attachedEnd(node: ToolNode, context: AgentContext): { state: AgentTaskState; endedAt: number | null } {
+  if (node.status === "failed") return { state: "failed", endedAt: node.endedAt };
+  if (node.status === "completed") return { state: "completed", endedAt: node.endedAt };
+  if (node.seq > context.floor && context.live) return { state: "running", endedAt: null };
+  // Stranded: a restart or an abandoned turn below it, or a session that stopped.
+  return { state: "stopped", endedAt: context.edges.find((edge) => edge.seq > node.seq)?.at ?? node.lastStepAt };
+}
+
+function detachedEnd(node: ToolNode, context: AgentContext): { state: AgentTaskState; endedAt: number | null } {
+  const endedAt = node.lastStepAt ?? node.endedAt;
+  if (node.closedAt !== null) return { state: "completed", endedAt: node.closedAt };
+  if (!context.live) return { state: "stopped", endedAt };
+  // A step of its own still at work outranks a turn's end: claude ended a turn with its subagent waiting on one (Q6.119). Above
+  // the floor only, since a step a restart or a cancel stranded never reports its end.
+  const stepAtWork =
+    node.runningStepSeq > context.floor || node.detachedSteps.some((id) => context.liveCalls.has(id));
+  if (stepAtWork) return { state: "running", endedAt: null };
+  // After its newest step, so a subagent seen working past a cancel is not ended by it.
+  const since = Math.max(node.lastStepSeq, node.endedSeq ?? node.seq);
+  const edge = context.edges.find((one) => one.seq > since);
+  if (edge !== undefined) return { state: edge.stopReason === "end_turn" ? "completed" : "stopped", endedAt };
+  // Woken later, it works with no turn around it: while the session is at work it may be what keeps it so.
+  return context.engaged ? { state: "running", endedAt: null } : { state: "completed", endedAt };
+}
+
+const AGENT_TYPE_CHARS = 64;
+
+function agentTypeOf(rawInput: unknown): string | null {
+  if (typeof rawInput !== "object" || rawInput === null) return null;
+  const kind = (rawInput as Record<string, unknown>)["subagent_type"];
+  return typeof kind === "string" && kind.length > 0 && kind.length <= AGENT_TYPE_CHARS ? kind : null;
 }
 
 /** Where the working line's count starts again: a tool call, and the edges of a turn or a conversation (Q3.644). */
@@ -821,6 +946,8 @@ export function buildTail(
 ): Tail {
   const collected: TailNode[] = [];
   let taskFloor = 0;
+  // Newest first while walking back; reversed on the way out.
+  const turnEdges: TurnEdge[] = [];
   // Collapses consecutive plan events to the newest; -1 so a leading plan is kept.
   let planFloor = -1;
   let run: {
@@ -879,6 +1006,8 @@ export function buildTail(
     ) {
       taskFloor = stored.seq;
     }
+    if (event.type === "turn_end") turnEdges.push({ seq: stored.seq, at: stored.ts, stopReason: event.stopReason });
+    if (event.type === "session_started") turnEdges.push({ seq: stored.seq, at: stored.ts, stopReason: "restart" });
 
     if (event.type === "text") {
       // Flushed, not skipped: parts join with no separator.
@@ -912,6 +1041,7 @@ export function buildTail(
       }
       list.unshift({
         ts: stored.ts,
+        seq: stored.seq,
         status: event.status,
         title: event.title,
         rawInput: event.rawInput,
@@ -1007,7 +1137,7 @@ export function buildTail(
   }
 
   rows.sort((a, b) => a.seq - b.seq);
-  return { rows: foldRuns(rows, decisions), hidden: index + 1, taskFloor };
+  return { rows: foldRuns(rows, decisions), hidden: index + 1, taskFloor, turnEdges: turnEdges.reverse() };
 }
 
 /** Event types that never draw a row; `workspace` warnings are deliberately drawn nowhere. */
@@ -1155,6 +1285,7 @@ function nodeFor(
     changesByCall.delete(event.toolCallId);
     const merged = list === undefined ? null : mergeUpdates(list);
     const parentId = event.parentToolCallId ?? merged?.parentToolCallId ?? null;
+    const endedAt = merged !== null && (merged.status === "completed" || merged.status === "failed") ? merged.statusTs : null;
     return {
       kind: "tool",
       key: `e${stored.seq}`,
@@ -1169,12 +1300,16 @@ function nodeFor(
       steps: 0,
       omitted: 0,
       latest: null,
-      elapsedMs:
-        merged !== null &&
-        merged.statusTs !== null &&
-        (merged.status === "completed" || merged.status === "failed")
-          ? merged.statusTs - stored.ts
-          : null,
+      elapsedMs: endedAt === null ? null : endedAt - stored.ts,
+      startedAt: stored.ts,
+      endedAt,
+      endedSeq: endedAt === null ? null : (merged?.statusSeq ?? null),
+      endsDelegation: event.endsDelegation === true,
+      lastStepSeq: 0,
+      lastStepAt: null,
+      closedAt: null,
+      runningStepSeq: 0,
+      detachedSteps: [],
     };
   }
 

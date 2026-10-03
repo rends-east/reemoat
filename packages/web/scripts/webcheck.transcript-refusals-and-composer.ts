@@ -595,10 +595,32 @@ process.stdout.write("\nwho is working, and what the box says\n");
     true,
   );
   check(
-    "and Stop holds it the rest of the time",
-    /const stoppable = canCancelTurn\(session\) && !revising && !slotSends && !draftAnswerable;/.test(
+    "and Stop holds it the rest of the time, from the moment a message leaves the box",
+    /const stoppable = \(canCancelTurn\(session\) \|\| echo !== null\) && !revising && !slotSends && !draftAnswerable;/.test(
       composerSrc,
     ),
+    true,
+  );
+  // Q3.700: a parked agent takes seconds to come back, and Send's spinner over that wait was the one sign of it.
+  check(
+    "the message on its way is the echo the transcript draws, so the slot and the working line agree",
+    [/const echo = echoFor\(key\);/.test(composerSrc), /useSyncExternalStore\(subscribeEchoes, echoVersion\);/.test(composerSrc)],
+    [true, true],
+  );
+  check(
+    "and a Stop pressed before the daemon answered waits for that answer rather than finding no turn",
+    [
+      /const landing = sendsInFlight\.get\(key\);/.test(composerSrc),
+      /void \(landing \?\? Promise\.resolve\(\)\)/.test(composerSrc),
+      /if \(landing !== undefined && \(now === undefined \|\| !canCancelTurn\(now\)\)\) return;/.test(composerSrc),
+      /sendsInFlight\.set\(key, flight\);/.test(composerSrc),
+      /if \(sendsInFlight\.get\(key\) === flight\) sendsInFlight\.delete\(key\);/.test(composerSrc),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "and the box says the agent is working over the same wait",
+    /working: working \|\| echo !== null,/.test(composerSrc),
     true,
   );
   check(
@@ -619,8 +641,10 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "send",
   );
   check(
-    "which is asked with a cancel in flight counted as stopping",
-    /slotOccupant\(\{ sending: busy, stopping: stopping \|\| pendingCancel, sends: slotSends, stoppable \}\)/.test(composerSrc),
+    "which is asked with a cancel in flight counted as stopping, and the send spinner only where Stop is not offered",
+    /slotOccupant\(\{ sending: busy && !stoppable, stopping: stopping \|\| pendingCancel, sends: slotSends, stoppable \}\)/.test(
+      composerSrc,
+    ),
     true,
   );
   // Rejecting a plan does not end the turn, so a send from that state cancels first.

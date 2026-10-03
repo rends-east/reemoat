@@ -352,8 +352,10 @@ transcript are gone, and `webcheck` asserts them absent by name. Q3.659.
   and neither may be tuned alone. Node withholds the *stream* window (never the
   connection window) while a stream is not being read, and the resume that would
   grant it back is wired to nothing; the sender then stops at exactly `W` or
-  `W + W/2` and nowhere else. Downloads are still exposed, because they are not
-  compressed and not bounded. Q6.104.
+  `W + W/2` and nowhere else. Q6.104. **Downloads are bounded the same way**: over
+  the relay a file comes in `DOWNLOAD_PIECE_BYTES` ranges, each on a connection
+  dialled for it and closed after it (`ChannelRequest.alone`), so a stall or a
+  `forgetRoute` costs one piece. Loopback stays one request. Q6.120.
 - **`ClientRequest.destroy()` emits no `'error'`, so after `writeHead` the idle
   bound reaches nobody.** `pipe` forwards `end` and never a premature close, so
   every mid-body upstream death — the bound, a tunnel drop — left the browser

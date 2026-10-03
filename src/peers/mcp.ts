@@ -276,11 +276,12 @@ function poseResult(result: PoseResult): unknown {
   return { content: [{ type: "text", text: ASK_PENDING }], structuredContent: { status: "shown" } };
 }
 
+/** `path` rides the structured half too: claude shows its model that half alone, measured on 2.1.288. */
 function fileResult(result: SendFileResult): unknown {
   if (!result.ok) return toolError(result.message);
   return {
-    content: [{ type: "text", text: sentFileText(result.file) }],
-    structuredContent: { status: "sent", name: result.file.name, bytes: result.file.bytes },
+    content: [{ type: "text", text: sentFileText(result.file, result.path) }],
+    structuredContent: { status: "sent", name: result.file.name, bytes: result.file.bytes, path: result.path },
   };
 }
 

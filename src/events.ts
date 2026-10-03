@@ -157,6 +157,8 @@ export interface ToolCallEvent {
   parentToolCallId: string | null;
   /** Read from the call only, never merged from an update. */
   subagent: boolean;
+  /** Written only when true: the last step of the delegation it is parented to, by that tool's own contract (Q6.119). */
+  endsDelegation?: boolean;
 }
 
 export interface ToolCallUpdateEvent {
@@ -170,7 +172,7 @@ export interface ToolCallUpdateEvent {
   content: string[] | null;
   /** Null means this update did not say, never top level: take lineage first-non-null. */
   parentToolCallId: string | null;
-  /** Set only by claude, and only with `asyncTasks` declared (Q3.592). */
+  /** Set only by claude: with `asyncTasks` declared (Q3.592), or by a call answering `async_launched` (Q6.119). */
   backgrounded: boolean;
 }
 

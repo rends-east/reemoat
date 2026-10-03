@@ -8,7 +8,16 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { containedIn, expandHome, resolveStateRoot } from "./paths.js";
 import { describeError } from "./http.js";
-import { probeFile, probeRealpath, type ProbeOptions } from "./stall.js";
+import {
+  DESCRIBE_TIMEOUT_MS,
+  noteStalled,
+  probeContext,
+  probeFile,
+  probeRealpath,
+  stallKeyFor,
+  type ProbeOptions,
+  type StallTarget,
+} from "./stall.js";
 
 // Bytes live only on this machine (the relay holds nothing: sendNoTunnel answers rather than queues), in a root disjoint from worktrees.
 
@@ -201,12 +210,15 @@ export function sanitizeUploadName(input: string): UploadName {
   return { ok: true, name: clipped };
 }
 
+/** Half a surrogate pair is no character: SQLite stores U+FFFD for it, so the transcript's name and the stored one would differ. */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
 /**
  * The label of a file an agent sent. The agent chose it, so what could disguise an extension in the transcript or the
  * save panel (bidi and zero-width characters) or end a header (controls) is dropped rather than refused.
  */
 export function sentFileName(path: string): string {
-  const base = path.split(/[/\\]/).filter((part) => part.length > 0).at(-1) ?? "";
+  const base = (path.split(/[/\\]/).filter((part) => part.length > 0).at(-1) ?? "").replace(LONE_SURROGATE, "");
   // eslint-disable-next-line no-control-regex -- stripping them is the job.
   const visible = base.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, "");
   const safe = sanitizeUploadName(visible);
@@ -220,9 +232,11 @@ function clipName(name: string): string {
   const ext = dot > 0 && name.length - dot <= 17 ? name.slice(dot) : "";
   const budget = MAX_UPLOAD_NAME_BYTES - Buffer.byteLength(ext, "utf8");
 
-  let stem = name.slice(0, dot > 0 ? dot : name.length);
-  while (stem.length > 0 && Buffer.byteLength(stem, "utf8") > budget) stem = stem.slice(0, -1);
-  return `${stem}${ext}`;
+  // By code point: a cut through a surrogate pair left half an emoji, which SQLite stores as U+FFFD and a header refuses.
+  const points = Array.from(name.slice(0, dot > 0 ? dot : name.length));
+  let bytes = Buffer.byteLength(points.join(""), "utf8");
+  while (points.length > 0 && bytes > budget) bytes -= Buffer.byteLength(points.pop() ?? "", "utf8");
+  return `${points.join("")}${ext}`;
 }
 
 /** Always `attachment`, never `inline`; the ASCII fallback drops quotes, backslashes and controls (a CR ends the header). */
@@ -292,23 +306,36 @@ export type ResolveResult = { ok: true; rows: UploadRow[] } | { ok: false; missi
 export type KeepFileResult =
   | { kind: "ok"; row: UploadRow }
   | { kind: "missing" }
+  | { kind: "denied" }
   | { kind: "not_a_file" }
+  /** The daemon's own `/proc` entry: its environment holds this machine's token. */
+  | { kind: "daemon_process" }
   /** The filesystem did not answer: a stalled mount, never a missing file. */
   | { kind: "unresponsive" }
   | { kind: "too_large"; limit: number }
   | { kind: "rate"; retryAfterMs: number }
   | { kind: "cancelled" }
+  /** `kept` said no: the session went while the copy ran, so nothing was kept. */
+  | { kind: "withdrawn" }
   | { kind: "timed_out" }
   | { kind: "failed"; detail: string };
 
 export interface KeepFileOptions extends ProbeOptions {
   signal?: AbortSignal | null;
   deadlineMs?: number;
+  /**
+   * Called once the copy is whole, in the same synchronous block as the row's insert: false keeps nothing, and whatever true
+   * records (the transcript's event) lands with the row or not at all, ahead of any eviction (Q2.253).
+   */
+  kept?: (row: UploadRow) => boolean;
 }
 
 const COPY_CHUNK_BYTES = 1024 * 1024;
 
 type CopyStop = "cancelled" | "timed_out";
+
+/** A source call still out this long at the deadline is a stall rather than a slow copy: remembered, and answered as one. */
+const STALLED_CALL_MS = DESCRIBE_TIMEOUT_MS;
 
 export interface UploadsOptions {
   root: string;
@@ -572,11 +599,12 @@ export class Uploads {
     if (!safeSegment(sessionId)) return { kind: "failed", detail: "unusable session id" };
     const deadlineAt = Date.now() + (options.deadlineMs ?? SENT_FILE_DEADLINE_MS);
     const previous = this.sending.get(sessionId) ?? Promise.resolve();
-    const run = previous.then(() => this.copyAgentFile(sessionId, sourcePath, options, deadlineAt));
-    const tail = run.then(
-      () => undefined,
-      () => undefined,
+    // The wait in line counts against this call's own deadline and signal; giving up there copies nothing.
+    const run = settledOrStopped(previous, options.signal ?? null, deadlineAt).then((stopped) =>
+      stopped === null ? this.copyAgentFile(sessionId, sourcePath, options, deadlineAt) : { kind: stopped },
     );
+    // Behind both: a call that gave up in line must not let the next one start beside the copy ahead of it.
+    const tail = Promise.allSettled([previous, run]).then(() => undefined);
     this.sending.set(sessionId, tail);
     try {
       return await run;
@@ -596,24 +624,11 @@ export class Uploads {
     const signal = options.signal ?? null;
     // Functions, so the compiler does not carry a first answer past the awaits below.
     const aborted = (): boolean => signal?.aborted === true;
-    const late = (): boolean => Date.now() >= deadlineAt;
     if (aborted()) return { kind: "cancelled" };
-    if (late()) return { kind: "timed_out" };
+    if (Date.now() >= deadlineAt) return { kind: "timed_out" };
 
     const wait = this.rateWait(sessionId, Date.now(), this.recentSent);
     if (wait > 0) return { kind: "rate", retryAfterMs: wait };
-
-    // Probes first: a path the agent named may sit on a mount that never answers.
-    const resolved = await probeRealpath(sourcePath, options);
-    if (resolved === null) return { kind: "unresponsive" };
-    if (resolved.kind === "missing") return { kind: "missing" };
-    const probed = await probeFile(resolved.value, options);
-    if (probed === null) return { kind: "unresponsive" };
-    if (probed.kind !== "file") return { kind: "not_a_file" };
-    if (probed.size > MAX_SENT_FILE_BYTES) return { kind: "too_large", limit: MAX_SENT_FILE_BYTES };
-    // Asked again: a listener added to a signal that fired during the probes would never run.
-    if (aborted()) return { kind: "cancelled" };
-    if (late()) return { kind: "timed_out" };
 
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
@@ -621,11 +636,23 @@ export class Uploads {
       timer = setTimeout(() => resolve("timed_out"), Math.max(1, deadlineAt - Date.now()));
       timer.unref();
       onAbort = () => resolve("cancelled");
+      // Added straight after the check above, so no abort falls between the two.
       signal?.addEventListener("abort", onAbort, { once: true });
     });
-    // A read on a mount that stalled after the probe never returns: the race gives the caller back, never the thread.
-    const within = <T>(work: Promise<T>): Promise<{ value: T } | CopyStop> =>
-      Promise.race([work.then((value) => ({ value })), stop]);
+    // The call still out on the agent's path, so a lost race can tell a stall from a slow copy.
+    let outstanding: { call: Promise<unknown>; since: number } | null = null;
+    // A call on a mount that stalls never returns: the race gives the caller back, never the thread.
+    const within = <T>(work: Promise<T>): Promise<{ value: T } | CopyStop> => {
+      const call = { call: work, since: Date.now() };
+      outstanding = call;
+      return Promise.race([
+        work.then((value) => {
+          if (outstanding === call) outstanding = null;
+          return { value };
+        }),
+        stop,
+      ]);
+    };
 
     const uploadId = `${SENT_FILE_PREFIX}${randomBytes(8).toString("hex")}`;
     const dir = join(this.root, sessionId, uploadId);
@@ -635,14 +662,33 @@ export class Uploads {
     let made = false;
     let written = 0;
     const head = new Uint8Array(SNIFF_BYTES);
+    let stallAt: StallTarget | null = null;
 
     const outcome = await (async (): Promise<KeepFileResult | null> => {
+      // Probes first, raced like every call below: a path the agent named may sit on a mount that never answers.
+      const context = await within(probeContext(options));
+      if (typeof context === "string") return { kind: context };
+      const probing = { ...options, mounts: context.value.mounts };
+      const resolved = await within(probeRealpath(sourcePath, probing));
+      if (typeof resolved === "string") return { kind: resolved };
+      if (resolved.value === null) return { kind: "unresponsive" };
+      if (resolved.value.kind === "missing") return realpathRefusal(resolved.value.code);
+      const real = resolved.value.value;
+      if (daemonProcessPath(real)) return { kind: "daemon_process" };
+      stallAt = stallKeyFor(real, context.value.mounts);
+      const probed = await within(probeFile(real, probing));
+      if (typeof probed === "string") return { kind: probed };
+      if (probed.value === null) return { kind: "unresponsive" };
+      if (probed.value.kind !== "file") return { kind: "not_a_file" };
+      if (probed.value.size > MAX_SENT_FILE_BYTES) return { kind: "too_large", limit: MAX_SENT_FILE_BYTES };
+
       // O_NONBLOCK: a FIFO swapped in after the probe would park this open for ever. O_NOFOLLOW: the path is already resolved.
-      const opening = open(resolved.value, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(
+      const opening = open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(
         (error: unknown): KeepFileResult => {
           // Only here is a missing path the agent's: past this line ENOENT is about this daemon's own store.
           const code = (error as NodeJS.ErrnoException).code;
           if (code === "ENOENT") return { kind: "missing" };
+          if (code === "EACCES" || code === "EPERM") return { kind: "denied" };
           if (code === "ELOOP" || code === "EISDIR") return { kind: "not_a_file" };
           return { kind: "failed", detail: describeError(error) };
         },
@@ -681,7 +727,7 @@ export class Uploads {
         written += count;
         // Counted, not trusted from the stat: the file may still be growing.
         if (written > MAX_SENT_FILE_BYTES) return { kind: "too_large", limit: MAX_SENT_FILE_BYTES };
-        await target.write(buffer.subarray(0, count));
+        await writeAll(target, buffer.subarray(0, count));
       }
     })().catch((error: unknown): KeepFileResult => ({ kind: "failed", detail: describeError(error) }));
 
@@ -696,13 +742,20 @@ export class Uploads {
     });
     if (written > 0) this.charge(sessionId, written, Date.now(), this.recentSent);
 
-    const refused: KeepFileResult | null = outcome ?? (aborted() ? { kind: "cancelled" } : null);
+    let refused: KeepFileResult | null = outcome ?? (aborted() ? { kind: "cancelled" } : null);
+    // Out since before the probe's own bound: the mount is not answering, and the next call there is refused without a thread.
+    const still = outstanding as { call: Promise<unknown>; since: number } | null;
+    const stalledOn = stallAt as StallTarget | null;
+    if (refused?.kind === "timed_out" && still !== null && Date.now() - still.since >= STALLED_CALL_MS) {
+      if (stalledOn !== null) noteStalled(stalledOn, still.call);
+      refused = { kind: "unresponsive" };
+    }
     if (refused !== null) {
       if (made) await this.discard(dir);
       return refused;
     }
 
-    // Synchronous from the plan to the insert, so no other caller's row can come between them.
+    // Synchronous from the plan to the insert and `kept`, so no other caller's row comes between them and nothing is half kept.
     const now = Date.now();
     const row: UploadRow = {
       sessionId,
@@ -716,12 +769,28 @@ export class Uploads {
       consumedAt: now,
     };
     let room: Room;
+    let inserted = false;
+    let wanted = true;
     try {
       room = roomFor(this.index.listFor(sessionId).filter(isSentFile), written, SENT_BUDGET);
-      if (room.ok) this.index.insert(row);
+      if (room.ok) {
+        this.index.insert(row);
+        inserted = true;
+        // After the insert, so whatever `kept` records names a row that exists; before the eviction, so a no evicts nothing.
+        wanted = options.kept?.(row) ?? true;
+        if (!wanted) {
+          this.index.remove(sessionId, uploadId);
+          inserted = false;
+        }
+      }
     } catch (error) {
+      if (inserted) this.forgetRow(row);
       await this.discard(dir);
       return { kind: "failed", detail: describeError(error) };
+    }
+    if (!wanted) {
+      await this.discard(dir);
+      return { kind: "withdrawn" };
     }
     if (!room.ok) {
       await this.discard(dir);
@@ -917,6 +986,11 @@ export class Uploads {
 
   private async sweep(): Promise<void> {
     if (this.stopped) return;
+    // A session that stopped sending is asked no more, so its old charges would otherwise stay until a restart.
+    const now = Date.now();
+    for (const charges of [this.recent, this.recentSent]) {
+      for (const sessionId of [...charges.keys()]) this.rateWait(sessionId, now, charges);
+    }
     let expired: UploadRow[];
     try {
       expired = this.index.expired(Date.now() - UNCONSUMED_TTL_MS);
@@ -933,6 +1007,51 @@ export class Uploads {
         this.onWarning(`could not drop an expired upload row: ${describeError(error)}`);
       }
     }
+  }
+}
+
+/** Null once `previous` settles, else whichever stop comes first; never rejects, `previous` being the queue's own tail. */
+function settledOrStopped(previous: Promise<unknown>, signal: AbortSignal | null, deadlineAt: number): Promise<CopyStop | null> {
+  if (signal?.aborted === true) return Promise.resolve("cancelled");
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | undefined = undefined;
+    const finish = (stopped: CopyStop | null): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(stopped);
+    };
+    const onAbort = (): void => finish("cancelled");
+    timer = setTimeout(() => finish("timed_out"), Math.max(1, deadlineAt - Date.now()));
+    timer.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void previous.then(
+      () => finish(null),
+      () => finish(null),
+    );
+  });
+}
+
+/** Only ENOENT and ENOTDIR are a missing file: EACCES under a closed folder told the model there was nothing there. */
+function realpathRefusal(code: string | undefined): KeepFileResult {
+  if (code === undefined || code === "ENOENT" || code === "ENOTDIR") return { kind: "missing" };
+  if (code === "EACCES" || code === "EPERM") return { kind: "denied" };
+  if (code === "ELOOP") return { kind: "failed", detail: "its symbolic links go round in a loop" };
+  if (code === "ENAMETOOLONG") return { kind: "failed", detail: "the path is longer than this system allows" };
+  return { kind: "failed", detail: code };
+}
+
+/** Linux's view of this process, which `/proc/self` resolves to: its `environ` holds the daemon's own token. */
+function daemonProcessPath(real: string): boolean {
+  const own = `/proc/${process.pid}`;
+  return real === own || real.startsWith(`${own}/`);
+}
+
+/** A write may take fewer bytes than it was offered. */
+async function writeAll(handle: FileHandle, chunk: Uint8Array): Promise<void> {
+  for (let offset = 0; offset < chunk.length; ) {
+    const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset);
+    if (bytesWritten === 0) throw new Error("the store took no bytes");
+    offset += bytesWritten;
   }
 }
 

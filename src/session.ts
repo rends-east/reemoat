@@ -21,7 +21,7 @@ import {
   readAsyncTaskEdge,
   readBackgroundedMarker,
 } from "./acp/asynctasks.js";
-import { claudeToolName, MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
+import { claudeToolName, endsDelegation, launchedInBackground, MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import {
   mergeTodos,
   planPermission as cursorPlanPermission,
@@ -282,8 +282,11 @@ export class Session {
   private readonly posedCalls = new Set<string>();
   /** The newest of them whose card is not drawn yet; the card takes its id, so the transcript folds the call into it. */
   private unclaimedPosedCall: string | null = null;
-  /** Calls to this daemon's own send_file: the path each named once its arguments arrived, and whether the harness itself vouched for it (Q2.252). */
-  private readonly sentFileCalls = new Map<string, { path: string | null; vouched: boolean }>();
+  /**
+   * Calls to this daemon's own send_file: the path each named once its arguments arrived, whether the harness itself vouched for
+   * it, and whether it has ended, after which nothing more said about its id is believed (Q2.252, Q2.253).
+   */
+  private readonly sentFileCalls = new Map<string, { path: string | null; vouched: boolean; ended: boolean }>();
   /** Those whose file is not in the transcript yet, oldest first. Its own list: a question card must never take a file's call. */
   private unclaimedSentFileCalls: string[] = [];
 
@@ -333,6 +336,10 @@ export class Session {
     this.setUnprompted(null);
     // A merge in the new conversation must not land on the old one's list.
     this.cursorTodos = [];
+    // Nor may a call of the old one lend its id to a card in the new.
+    this.dropUnclaimedCalls();
+    this.posedCalls.clear();
+    this.sentFileCalls.clear();
 
     const wanted = this.config;
     this.config = {
@@ -943,6 +950,7 @@ export class Session {
           this.flushToolDraft();
           // The agent runs its input in order, so every cycle begun before this prompt has ended by now.
           this.setUnprompted(null);
+          this.dropUnclaimedCalls();
           this.queue.push({
             type: "turn_end",
             stopReason: response.stopReason,
@@ -953,6 +961,7 @@ export class Session {
           if (this.promptEpoch !== epoch) return;
           this.flushToolDraft();
           this.setUnprompted(null);
+          this.dropUnclaimedCalls();
           this.queue.push({
             type: "error",
             message: describeError(error),
@@ -1173,28 +1182,38 @@ export class Session {
     return claimed;
   }
 
-  /** The send_file call now reaching this daemon's server: the one that named this path, else the oldest that named none yet. */
+  /** The send_file call now reaching this daemon's server: the oldest that named this path, else the oldest that named none yet. */
   claimSentFileCall(path: string): string | null {
     const waiting = this.unclaimedSentFileCalls;
-    // The newest that named it: an older one is a call that never arrived, left by a turn somebody stopped.
-    let at = waiting.findLastIndex((id) => this.sentFileCalls.get(id)?.path === path);
+    // Oldest first: two calls naming one path reach the server in the order they were announced, and a turn's end drops the rest.
+    let at = waiting.findIndex((id) => this.sentFileCalls.get(id)?.path === path);
     if (at === -1) at = waiting.findIndex((id) => this.sentFileCalls.get(id)?.path === null);
     if (at === -1) return null;
     const [claimed] = waiting.splice(at, 1);
     return claimed ?? null;
   }
 
-  /** Read off the update, never the permission: a harness names the MCP server and tool on the call it announces first. */
-  private noteOwnCall(toolCallId: string, update: { rawInput?: unknown; _meta?: unknown }): void {
+  /**
+   * What a harness says its call is. `fromRequest` is the permission request's own toolCall: on grok only that one carries a tag
+   * of grok's own, every announcement before it being `use_tool`'s arguments as the model typed them.
+   */
+  private noteOwnCall(toolCallId: string, update: { rawInput?: unknown; _meta?: unknown }, fromRequest = false): void {
     const call = ownToolCall(this.agent, update);
     if (call === null) return;
     const bound = boundToolCallId(toolCallId);
-    // The same id now naming something else: what was learned about it no longer holds.
-    if (call === "other") {
-      this.forgetSentFileCall(bound, true);
+    // Over: a later update for the id, claude's trailing ones included, says nothing that may revive it.
+    if (this.sentFileCalls.get(bound)?.ended === true) return;
+    // The same id now naming something else, any other tool of this server included: what was learned about it no longer holds.
+    if (call === "other" || (call.tool !== SEND_FILE_TOOL_NAME && call.tool !== ASK_TOOL_NAME)) {
+      this.forgetOwnCall(bound);
       return;
     }
-    if (call.tool === ASK_TOOL_NAME && QUESTION_TOOL_HARNESSES.includes(this.agent)) {
+    if (call.tool === ASK_TOOL_NAME) {
+      if (!QUESTION_TOOL_HARNESSES.includes(this.agent)) {
+        this.forgetOwnCall(bound);
+        return;
+      }
+      this.forgetSentFileCall(bound);
       this.unclaimedPosedCall = bound;
       this.posedCalls.add(bound);
       if (this.posedCalls.size > MAX_POSED_CALLS) {
@@ -1203,23 +1222,49 @@ export class Session {
       }
       return;
     }
-    if (call.tool !== SEND_FILE_TOOL_NAME) return;
+    this.posedCalls.delete(bound);
     const path = typeof call.args?.["path"] === "string" ? call.args["path"] : null;
     const known = this.sentFileCalls.get(bound);
+    const vouched = call.vouched && (this.agent !== "grok" || fromRequest);
     // An update refines the arguments; one that carries none must not erase the path an earlier one named.
-    this.sentFileCalls.set(bound, { path: path ?? known?.path ?? null, vouched: call.vouched || known?.vouched === true });
+    this.sentFileCalls.set(bound, { path: path ?? known?.path ?? null, vouched: vouched || known?.vouched === true, ended: false });
     if (known !== undefined) return;
     this.unclaimedSentFileCalls.push(bound);
     if (this.sentFileCalls.size > MAX_POSED_CALLS) {
       const oldest = this.sentFileCalls.keys().next().value;
-      if (oldest !== undefined) this.forgetSentFileCall(oldest, true);
+      if (oldest !== undefined) {
+        this.sentFileCalls.delete(oldest);
+        this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== oldest);
+      }
     }
   }
 
-  private forgetSentFileCall(toolCallId: string, entirely: boolean): void {
-    if (!this.sentFileCalls.has(toolCallId)) return;
+  private forgetOwnCall(toolCallId: string): void {
+    this.forgetSentFileCall(toolCallId);
+    this.posedCalls.delete(toolCallId);
+    if (this.unclaimedPosedCall === toolCallId) this.unclaimedPosedCall = null;
+  }
+
+  private forgetSentFileCall(toolCallId: string): void {
+    if (!this.sentFileCalls.delete(toolCallId)) return;
     this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== toolCallId);
-    if (entirely) this.sentFileCalls.delete(toolCallId);
+  }
+
+  /** A call that completed or failed: claimable by nothing, vouching for nothing, and remembered only so nothing later revives it. */
+  private endOwnCall(toolCallId: string): void {
+    if (toolCallId === this.unclaimedPosedCall) this.unclaimedPosedCall = null;
+    this.posedCalls.delete(toolCallId);
+    const known = this.sentFileCalls.get(toolCallId);
+    if (known === undefined) return;
+    this.sentFileCalls.set(toolCallId, { ...known, vouched: false, ended: true });
+    this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== toolCallId);
+  }
+
+  /** At a turn's end and a /clear: a call announced and never claimed by now will not reach this daemon's server. */
+  private dropUnclaimedCalls(): void {
+    for (const id of this.unclaimedSentFileCalls) this.sentFileCalls.delete(id);
+    this.unclaimedSentFileCalls = [];
+    this.unclaimedPosedCall = null;
   }
 
   private noteDelegatedCall(toolCallId: string): void {
@@ -1432,6 +1477,7 @@ export class Session {
           locations: toLocations(update.locations),
           rawInput: update.rawInput ?? null,
           ...lineage,
+          ...(delegatedBy === null && endsDelegation(update, lineage) ? { endsDelegation: true } : {}),
         });
         this.emitDiffs(toolCallId, update.content);
         return;
@@ -1445,10 +1491,7 @@ export class Session {
         const toolCallId = boundToolCallId(update.toolCallId);
         if (delegatedBy === null) this.noteOwnCall(update.toolCallId, update);
         // A call that ended without reaching this daemon's server must not lend its id to the next card.
-        if (update.status === "completed" || update.status === "failed") {
-          if (toolCallId === this.unclaimedPosedCall) this.unclaimedPosedCall = null;
-          this.forgetSentFileCall(toolCallId, false);
-        }
+        if (update.status === "completed" || update.status === "failed") this.endOwnCall(toolCallId);
         const event: Extract<SessionEvent, { type: "tool_call_update" }> = {
           type: "tool_call_update",
           toolCallId,
@@ -1463,7 +1506,7 @@ export class Session {
             delegatedBy !== null && delegatedBy !== update.toolCallId
               ? delegatedBy
               : toolCallLineage(update).parentToolCallId,
-          backgrounded: readBackgroundedMarker(update._meta),
+          backgrounded: readBackgroundedMarker(update._meta) || launchedInBackground(update),
         };
         if (event.parentToolCallId === null) this.noteAgentWork();
         // Raw one-block guard: a rendered single string may hide a diff block, which must not be held.
@@ -1551,11 +1594,16 @@ export class Session {
     this.noteAgentWork();
     // Answered here and logged as decided, the path a machine with no resolver takes.
     const asked = boundToolCallId(request.toolCall.toolCallId);
-    // The request names its own call too, and grok may vouch for it nowhere earlier. Never a subagent's, which asks its person.
-    if (!this.delegatedCalls.has(asked)) this.noteOwnCall(request.toolCall.toolCallId, request.toolCall);
-    // send_file only ever once: allow_always would write a rule into the person's own harness config (Q2.252).
+    const delegated = this.delegatedCalls.has(asked);
+    // The request names its own call too, and on grok it is the only place grok vouches for it. Never a subagent's.
+    if (!delegated) this.noteOwnCall(request.toolCall.toolCallId, request.toolCall, true);
+    const file = this.sentFileCalls.get(asked);
+    // Only ever once: allow_always would write a rule into the person's own harness config. claude asks for send_file only past
+    // `allowedTools`, which is its person's own ask rule, and a subagent's call asks its person (Q2.253).
     const own =
-      this.posedCalls.has(asked) || (choice?.kind === "allow_once" && this.sentFileCalls.get(asked)?.vouched === true);
+      choice?.kind === "allow_once" &&
+      !delegated &&
+      (this.posedCalls.has(asked) || (this.agent !== "claude" && file?.vouched === true && !file.ended));
     if (this.permissions && choice && !own) {
       return this.permissions(
         {
@@ -1572,7 +1620,8 @@ export class Session {
     this.queue.push({
       type: "permission_request",
       permissionId: null,
-      toolCallId: request.toolCall.toolCallId,
+      // Bounded as the call's own events are, or the card that stands for it could not fold this row.
+      toolCallId: asked,
       title,
       options,
       decision: choice?.optionId ?? null,

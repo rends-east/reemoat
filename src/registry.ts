@@ -2864,14 +2864,18 @@ export class ManagedSession {
     const asked = String(args["path"]);
     // Before the copy: the harness announced its call first, and a second call may announce itself while this one copies.
     const toolCallId = this.session?.claimSentFileCall(asked) ?? null;
-    const kept = await uploads.keepAgentFile(this.id, source.path, { signal });
-    if (kept.kind !== "ok") return { ok: false, message: sendFileRefusal(kept, asked) };
-    // Asked again after the await: a Stop may have landed while the copy ran, and a session that is going takes no new row.
-    if (this.terminal || this.stopRequested) return { ok: false, message: "this session is not running" };
-    const file: StoredFileRef = { uploadId: kept.row.uploadId, name: kept.row.name, mime: kept.row.mime, bytes: kept.row.bytes };
-    this.safeAppend({ type: "file_sent", file, toolCallId });
+    const kept = await uploads.keepAgentFile(this.id, source.path, {
+      signal,
+      // In the insert's own synchronous block: a session that went during the copy keeps nothing, and the card lands with its row.
+      kept: (row) => {
+        if (this.terminal || this.stopRequested) return false;
+        this.safeAppend({ type: "file_sent", file: sentRef(row), toolCallId });
+        return true;
+      },
+    });
+    if (kept.kind !== "ok") return { ok: false, message: sendFileRefusal(kept, source.path) };
     this.touchSafe();
-    return { ok: true, file };
+    return { ok: true, file: sentRef(kept.row), path: source.path };
   }
 
   /**
@@ -4194,4 +4198,9 @@ function delay(ms: number): Promise<void> {
 /** After the attachments, so the person's own words stay the first block an agent reads. */
 function noteBlocks(note: string | null): acp.ContentBlock[] {
   return note === null ? [] : [{ type: "text", text: note }];
+}
+
+/** What the transcript and the agent are told about a kept file: the row's own fields, never a path. */
+function sentRef(row: UploadRow): StoredFileRef {
+  return { uploadId: row.uploadId, name: row.name, mime: row.mime, bytes: row.bytes };
 }

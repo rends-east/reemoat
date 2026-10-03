@@ -1760,6 +1760,11 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       ["the marker in the wrong namespace is not this one", { claudeCode: { asyncTasks: { backgrounded: true } } }, false],
       ["nor is an `air` that is an array", { jetbrains: { air: [{ asyncTasks: { backgrounded: true } }] } }, false],
       ["nor an `air` holding no `asyncTasks`", { jetbrains: { air: { version: 1 } } }, false],
+      // Q6.119: a call that answered it runs on, which is how claude's Agent and Workflow launch in the background.
+      ["a call that answered `async_launched` is backgrounded", { claudeCode: { toolName: "Agent", toolResponse: { status: "async_launched", agentId: "a1" } } }, true],
+      ["and one that answered `completed` is not", { claudeCode: { toolName: "Agent", toolResponse: { status: "completed" } } }, false],
+      ["nor a response that is a string", { claudeCode: { toolResponse: "async_launched" } }, false],
+      ["nor the status anywhere but on claude's own response", { claudeCode: { status: "async_launched" } }, false],
     ];
 
     let at = 0;
@@ -1786,6 +1791,30 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
         .map((event) => (event as { backgrounded?: boolean }).backgrounded);
       check(what, drawn, [want]);
     }
+
+    // Q6.119: the step a backgrounded subagent hands its report back with ends it, and only under the spawn it names.
+    const closing: readonly (readonly [string, Record<string, unknown>, string, boolean])[] = [
+      ["the hand-back under its spawn is that delegation's last step", { claudeCode: { toolName: "SubagentHandback", parentToolUseId: "toolu_spawn" } }, "SubagentHandback", true],
+      ["the same tool with no parent ends nothing", { claudeCode: { toolName: "SubagentHandback" } }, "SubagentHandback", false],
+      ["an ordinary step under the spawn is not its last", { claudeCode: { toolName: "Bash", parentToolUseId: "toolu_spawn" } }, "Bash", false],
+      ["and a title is never read for it, only the adapter's own tool name", { claudeCode: { parentToolUseId: "toolu_spawn" } }, "SubagentHandback", false],
+    ];
+    for (const [what, meta, title, want] of closing) {
+      at += 1;
+      const toolCallId = `call_${at}`;
+      rig.notify("a_bgm", { sessionUpdate: "tool_call", toolCallId, title, kind: "other", status: "pending", _meta: meta });
+      rig.notify("a_bgm", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "." } });
+      await settle();
+      const calls = (own.get("s_bgm")?.log.read(0, 2000, 1024 * 1024) ?? [])
+        .map((stored) => stored.event)
+        .filter((event) => event.type === "tool_call" && event.toolCallId === toolCallId)
+        .map((event) => (event as { endsDelegation?: boolean }).endsDelegation === true);
+      check(what, calls, [want]);
+    }
+    const written = (own.get("s_bgm")?.log.read(0, 2000, 1024 * 1024) ?? [])
+      .map((stored) => stored.event)
+      .filter((event) => event.type === "tool_call" && event.toolCallId === `call_${at - 1}`);
+    check("and a call that ends nothing carries no key at all, so old and new logs read alike", written.map((event) => "endsDelegation" in event), [false]);
     await own.shutdown();
   }
 

@@ -45,6 +45,11 @@ const TRANSFER_TIMEOUT_MS = 120_000;
 /** Checked on content-length, which is CORS-safelisted; content-disposition is not, so the name comes from the path. */
 export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
+/** One piece of a relayed download: under one relay stream window with room for the frames around it, as a transcript page is (Q6.104). */
+export const DOWNLOAD_PIECE_BYTES = 768 * 1024;
+
+type DownloadAnswer = { status: number; statusText: string; headers: Record<string, string>; bytes: Uint8Array };
+
 const UPLOAD_STALL_MS = 30_000;
 
 const UPLOAD_FLOOR_BYTES_PER_MS = 50;
@@ -140,6 +145,19 @@ function isReplayable(method: string | undefined): boolean {
 function asAnsweredRefusal(error: unknown, machine: string): unknown {
   if (!ChannelRefused.is(error)) return error;
   return new ApiError(error.status, error.reason, `${machine} refused this connection: ${error.reason}`);
+}
+
+/** `bytes a-b/total` as `serveFile` writes it, or `null` for anything else. */
+export function contentRange(header: string | undefined): { start: number; end: number; total: number } | null {
+  const match = /^bytes (\d{1,15})-(\d{1,15})\/(\d{1,15})$/.exec(header?.trim() ?? "");
+  if (match === null) return null;
+  const [start, end, total] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  return start <= end && end < total ? { start, end, total } : null;
+}
+
+function refuseOversized(bytes: number): void {
+  if (!Number.isFinite(bytes) || bytes <= MAX_DOWNLOAD_BYTES) return;
+  throw new ApiError(413, "file_too_large", "that file is too large to download here", { bytes, limit: MAX_DOWNLOAD_BYTES });
 }
 
 export class MachineConnection {
@@ -683,21 +701,53 @@ export class MachineConnection {
     return this.settleAnswer<T>(answer.status, answer.statusText, answer.text, firstAttempt, retry);
   }
 
-  async download(path: string, firstAttempt = true): Promise<Blob> {
-    const { route, token } = await this.prepare();
-    const retry = (): Promise<Blob> => this.download(path, false);
+  /** Over the relay a piece at a time, each on a connection of its own, so a stalled window or a dropped route costs one piece (Q6.120). */
+  async download(path: string): Promise<Blob> {
+    const parts: Uint8Array[] = [];
+    let whole: { total: number; tag: string | undefined } | null = null;
+    let next = 0;
+    for (;;) {
+      const answer = await this.downloadPiece(path, next);
+      const type = answer.headers["content-type"];
+      // A 200 is the whole file whenever it comes: loopback, an older daemon, or an empty file.
+      if (answer.status !== 206) {
+        refuseOversized(Number(answer.headers["content-length"] ?? ""));
+        return new Blob([answer.bytes as Uint8Array<ArrayBuffer>], type === undefined ? {} : { type });
+      }
+      const piece = contentRange(answer.headers["content-range"]);
+      const tag = answer.headers["etag"];
+      if (piece === null || piece.start !== next || answer.bytes.length !== piece.end - piece.start + 1) {
+        throw new Error("the pieces of that download did not fit together");
+      }
+      if (whole === null) {
+        refuseOversized(piece.total);
+        whole = { total: piece.total, tag };
+      } else if (piece.total !== whole.total || tag !== whole.tag) {
+        throw new ApiError(409, "file_changed", "that file changed while it was downloading", null);
+      }
+      parts.push(answer.bytes);
+      next = piece.end + 1;
+      if (next >= whole.total) return new Blob(parts as Uint8Array<ArrayBuffer>[], type === undefined ? {} : { type });
+    }
+  }
 
-    let answer: { status: number; statusText: string; headers: Record<string, string>; bytes: Uint8Array };
+  private async downloadPiece(path: string, start: number, firstAttempt = true): Promise<DownloadAnswer> {
+    const { route, token } = await this.prepare();
+    const retry = (): Promise<DownloadAnswer> => this.downloadPiece(path, start, false);
+
+    let answer: DownloadAnswer;
     try {
       if (route.kind === "relay") {
         const got = await this.overChannel(route, {
           method: "GET",
           path,
-          headers: { authorization: `Bearer ${token}` },
+          headers: { authorization: `Bearer ${token}`, range: `bytes=${String(start)}-${String(start + DOWNLOAD_PIECE_BYTES - 1)}` },
           timeoutMs: TRANSFER_TIMEOUT_MS,
+          alone: true,
         });
         answer = { status: got.status, statusText: got.statusText, headers: got.headers, bytes: got.body };
       } else {
+        // Whole over loopback: no relay window to fit, and a range would need a CORS allowance the daemon does not give.
         const response = await fetch(new URL(path, route.base), {
           headers: { authorization: `Bearer ${token}` },
           signal: withTimeout(TRANSFER_TIMEOUT_MS),
@@ -719,15 +769,7 @@ export class MachineConnection {
 
     if (answer.status < 200 || answer.status > 299) {
       // Always throws: parseBody refuses every non-2xx.
-      return this.settleAnswer<Blob>(answer.status, answer.statusText, bodyText(answer.bytes), firstAttempt, retry);
-    }
-
-    const declared = Number(answer.headers["content-length"] ?? "");
-    if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
-      throw new ApiError(413, "file_too_large", "that file is too large to download here", {
-        bytes: declared,
-        limit: MAX_DOWNLOAD_BYTES,
-      });
+      return this.settleAnswer<DownloadAnswer>(answer.status, answer.statusText, bodyText(answer.bytes), firstAttempt, retry);
     }
 
     if (this.reach !== "online") {
@@ -735,8 +777,7 @@ export class MachineConnection {
       this.offlineReason = null;
       this.onChange();
     }
-    const type = answer.headers["content-type"];
-    return new Blob([answer.bytes as Uint8Array<ArrayBuffer>], type === undefined ? {} : { type });
+    return answer;
   }
 
   // The token rides in the query only because a browser cannot set WebSocket headers; do not extend this to downloads.

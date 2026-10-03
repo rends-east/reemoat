@@ -29,6 +29,7 @@ import {
   queuedSeqs,
   showsWorking,
   deliversQueued,
+  turnInFlight,
   waitingCount,
   workStartedAt,
   type BackgroundTask,
@@ -404,6 +405,7 @@ function Transcript({
   // Optimistic: an echo in flight counts as working, bounded by the echo's own lifetime; `showsWorking` itself stays pure.
   const working = echo !== null || (snapshot !== null && (showsWorking(snapshot) || deliversQueued(snapshot)));
   const reporting = snapshot !== null && mayStillReport(snapshot);
+  const engaged = snapshot !== null && turnInFlight(snapshot);
   const startedAt = snapshot === null ? null : workStartedAt(snapshot);
   // `elapsedSince` corrects for the device clock; never subtract the local time from a daemon stamp.
   const workElapsedMs = row === null || startedAt === null ? null : elapsedSince(row, startedAt);
@@ -490,6 +492,7 @@ function Transcript({
                 askHeight={askHeight}
                 working={working}
                 reporting={reporting}
+                engaged={engaged}
                 stale={stale}
                 workElapsedMs={workElapsedMs}
                 background={background}

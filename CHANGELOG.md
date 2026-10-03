@@ -33,6 +33,19 @@ it — so a citation here would be the one kind nothing checks.
 
 - **Agents are no longer handed tools that only work in their own terminal.** Claude Code loses the ones that address its other sessions and its remote control, its feedback and onboarding cards, switching to a worktree of its own (the session's folder is the one Reemoat gave it), and publishing to claude.ai. Codex loses its plugin-install prompt. What each can do here is unchanged, and its context is a little smaller. Scheduling tools are left as they were.
 - **Switching agent messaging off no longer takes the Reemoat tools away entirely**: sending you a file is not a message to another agent, so it stays.
+- **Subagents are listed under Background tasks**, as Claude Code lists them: a running one in Agents with its kind, its time, its steps and what it is doing now, and a finished one under Completed beside finished shells. Claude now runs most subagents in the background, so they had never appeared there. Its card in the conversation says it is running in the background rather than showing a check mark the moment it started. The line at the foot counts them.
+- **Stop appears the moment you send.** A session that had been quiet for a while kept Send on screen, with a spinner, while its agent was brought back, and only then turned into Stop; pressing Stop during that wait now stops the message once the machine has it.
+- **An agent's file sends say which file they read**, so a relative path taken from the wrong folder shows where it went, and a file behind a folder the machine will not open is reported as that rather than as missing. Claude Code's permission prompt for sending a file, which appears only where your own Claude settings ask for one, is now left to you.
+- **File names in an agent's reply are plain text again**, rather than download buttons. To get a file, ask the agent to send it: it arrives as a card that saves the copy it sent.
+
+### Fixed
+
+- **A file larger than about a megabyte could not be downloaded from a machine reached through the relay.** Pressing a sent file's card, or a changed file's download, did nothing for two minutes and then failed. The file now arrives in pieces, and the card shows a spinner while it does. This needs the machine updated; against an older one the app downloads as before.
+
+- **"working…" was a button into Background tasks in sessions with nothing running in the background.** It is a button only while something is.
+- **Stopping a session while it was copying a file the agent sent kept an invisible copy**, and in a session already holding a hundred sent files it could drop one the conversation still showed. Nothing is kept now unless the card appears with it.
+- **A file the agent sent from a network folder that stopped answering** was tried again on every request, each one holding a thread; the folder is now remembered as not answering. A request waiting behind another file gives up when it is cancelled, rather than when the other finishes.
+- **A long file name could be cut through the middle of an emoji**, leaving the conversation and the stored copy with different names.
 
 ## [0.12.0] - 2026-10-01
 

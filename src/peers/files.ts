@@ -5,8 +5,8 @@ import type { KeepFileResult } from "../uploads.js";
 
 export const SEND_FILE_TOOL_NAME = "send_file";
 
-/** `file` is what the transcript now shows; a refusal is a sentence for the model, never an HTTP error. */
-export type SendFileResult = { ok: true; file: StoredFileRef } | { ok: false; message: string };
+/** `file` is what the transcript now shows, `path` where it was read; a refusal is a sentence for the model, never an HTTP error. */
+export type SendFileResult = { ok: true; file: StoredFileRef; path: string } | { ok: false; message: string };
 
 /** No shorter than the longest path the platforms this runs on will open. */
 export const MAX_SEND_FILE_PATH_BYTES = 4096;
@@ -29,7 +29,9 @@ export const SEND_FILE_TOOL = {
     properties: {
       path: {
         type: "string",
-        description: "The file to send: an absolute path, one starting with ~, or one relative to your working folder.",
+        description:
+          "The file to send: an absolute path is best. One starting with ~ is from your home folder, and any other is taken " +
+          "from the session's working folder, not from wherever your shell has moved to.",
       },
     },
     required: ["path"],
@@ -37,22 +39,31 @@ export const SEND_FILE_TOOL = {
   },
 };
 
+/** ASCII only: a no-break or ideographic space at an end can be part of a real name, where a stray newline from the model is not. */
+const EDGE_WHITESPACE = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;
+
 /** The path as the daemon will read it, or the refusal, worded for the model. */
 export function sendFileSource(args: Record<string, unknown>, cwd: string): { path: string } | string {
   const path = args["path"];
-  if (typeof path !== "string" || path.trim().length === 0) return "path must be the file to send";
-  if (path.includes("\0")) return "path may not hold a NUL byte";
-  if (Buffer.byteLength(path, "utf8") > MAX_SEND_FILE_PATH_BYTES) return `path may be at most ${MAX_SEND_FILE_PATH_BYTES} bytes`;
-  const expanded = expandHome(path.trim());
+  const trimmed = typeof path === "string" ? path.replace(EDGE_WHITESPACE, "") : "";
+  if (trimmed.length === 0) return "path must be the file to send";
+  if (trimmed.includes("\0")) return "path may not hold a NUL byte";
+  if (Buffer.byteLength(trimmed, "utf8") > MAX_SEND_FILE_PATH_BYTES) return `path may be at most ${MAX_SEND_FILE_PATH_BYTES} bytes`;
+  const expanded = expandHome(trimmed);
   return { path: isAbsolute(expanded) ? expanded : resolve(cwd, expanded) };
 }
 
+/** `path` is the one read, so a relative path taken from the wrong folder shows where it went. */
 export function sendFileRefusal(result: Exclude<KeepFileResult, { kind: "ok" }>, path: string): string {
   switch (result.kind) {
     case "missing":
       return `there is no file at ${path}`;
+    case "denied":
+      return `this machine would not let the daemon read ${path}; nothing was sent`;
     case "not_a_file":
       return `${path} is not a regular file; to send a folder, archive it and send the archive`;
+    case "daemon_process":
+      return `${path} is the daemon's own process, not a file of yours; nothing was sent`;
     case "unresponsive":
       return `the filesystem under ${path} is not answering; nothing was sent`;
     case "too_large":
@@ -61,6 +72,8 @@ export function sendFileRefusal(result: Exclude<KeepFileResult, { kind: "ok" }>,
       return `too much has been sent from this session in the last few minutes; try again in ${Math.ceil(result.retryAfterMs / 1000)} seconds`;
     case "cancelled":
       return "the call was cancelled before the file was copied; nothing was sent";
+    case "withdrawn":
+      return "the session stopped before the file was kept; nothing was sent";
     case "timed_out":
       return `copying ${path} took too long; nothing was sent`;
     case "failed":
@@ -68,8 +81,11 @@ export function sendFileRefusal(result: Exclude<KeepFileResult, { kind: "ok" }>,
   }
 }
 
-export function sentFileText(file: StoredFileRef): string {
-  return `Sent ${file.name} (${sizeText(file.bytes)}) to your user: it is in the chat now. Do not print its contents or its path again.`;
+export function sentFileText(file: StoredFileRef, path: string): string {
+  return (
+    `Sent ${path} to your user as ${file.name} (${sizeText(file.bytes)}): it is in the chat now. ` +
+    "Do not print its contents or its path again."
+  );
 }
 
 function megabytes(bytes: number): number {

@@ -49,7 +49,9 @@ reached the agent as a path, never as a picture.
 **Out, on the agent's own word: `send_file`.** A file anywhere the agent can read,
 copied into the upload store as an `f_` row and put in the transcript as
 `file_sent` — the one way a file outside the workspace reaches its person.
-`agent-messaging.md` has the tool; Q2.252.
+`agent-messaging.md` has the tool; Q2.252. `probeRealpath` carries the errno, so a
+closed folder is refused as that and never as a missing file, and the daemon's own
+`/proc/<pid>` is refused by name: its `environ` holds the machine's token. Q2.253.
 
 **Out: any regular file under `workspace.root`, plus the session's own uploads.**
 `GET /sessions/:id/files?path=` widens no authority — the agent can `cat` anything

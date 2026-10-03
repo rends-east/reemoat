@@ -69,14 +69,19 @@ listener at all. Hand-written Streamable HTTP, JSON answers only, no SDK (zod).
 `send_file` takes a path and the daemon **copies the file as it stands** into the
 session's upload store, then appends `file_sent` with a `StoredFileRef`. Never a
 path in the log, which outlives the disk; never contained, since the agent can read
-the file anyway — a refusal is about what the path *is*, in words to the model.
+the file anyway — a refusal is about what the path *is*, in words to the model, and
+every answer names the path that was read, in the structured half too, which is the
+half claude shows its model.
 
 - **The copy is `Uploads.keepAgentFile`, and its order is the rule**: probes, an
   `O_NONBLOCK` open, the copy under a byte counter and the call's abort signal,
-  then the row, then the eviction. One call at a time per session, and **45 s for
-  the whole call, its wait behind another included**: under the 60 s an MCP client
-  gives one, past which a file would land in the chat after the model saw it fail.
-  `sendFile` re-takes `terminal`/`stopRequested` after the copy, for a Stop inside it.
+  then **the row and `kept` in one synchronous block**, then the eviction. `kept` is
+  where `sendFile` asks whether the session is still running and appends `file_sent`,
+  so a Stop mid-copy keeps nothing and evicts nothing (Q2.253). One call at a time
+  per session, and **45 s for the whole call, its wait behind another included and
+  raced**: under the 60 s an MCP client gives one, past which a file would land in
+  the chat after the model saw it fail. A source call still out at the deadline is a
+  stall, remembered (`noteStalled`) and answered as one.
 - **`f_` rows are a third budget**, beside a person's files and the agent's images,
   with a rate window of their own. `files-paths-git.md` has the numbers.
 - ⚠ **The name is the agent's.** `sentFileName` strips controls, bidi and zero-width
@@ -84,16 +89,20 @@ the file anyway — a refusal is about what the path *is*, in words to the model
 - **The permission in front of it is the daemon's to answer** — claude through
   `allowedTools` in `sessionMetaFor`, cursor and grok by `allow_once` on the call
   `ownToolCall` recognised. ⚠ Never `allow_always`, which writes a rule into the
-  person's own harness config, and each shape is read **for its own harness only**.
-  ⚠ **Only a call the harness itself vouched for is answered** (`vouched`): grok's
-  `rawInput` is `use_tool`'s arguments, typed by the model, and what vouches is the
-  `variant: "UseTool"` grok adds once it has parsed them — on the request itself,
-  which is why `onPermission` reads the request too. A call that later says it is
-  something else is forgotten. An unrecognised call falls to the person's card.
+  person's own harness config — `ask_question`'s answer included — and each shape is
+  read **for its own harness only**. ⚠ **Only a call the harness itself vouched for
+  is answered** (`vouched`): grok's `rawInput` is `use_tool`'s arguments, typed by the
+  model, so what vouches is the `variant: "UseTool"` grok adds **on the request
+  itself** and nowhere earlier (`fromRequest`). ⚠ **A claude request that arrives
+  anyway is its person's**: past `allowedTools` only an explicit ask rule reaches the
+  client. A call that ended, or later says it is something else, vouches for nothing;
+  a subagent's, or an unrecognised one, falls to the person's card. Q2.253.
 - **The card stands for the call** where `claimSentFileCall` could name it
   (`file_sent.toolCallId`): `tail.ts` then drops that call's row and the daemon's
   answer to its permission, through `askedThrough`. Its own slot — sharing
-  `unclaimedPosedCall` would lend a file's call to the next question card.
+  `unclaimedPosedCall` would lend a file's call to the next question card. **Oldest
+  first**, by path, and a call never claimed is dropped at its turn's end and at a
+  `/clear`: newest-first swapped two calls on one path, hiding the second's failure.
 - **The app ships before the daemons.** An older app draws nothing for `file_sent`
   while the model is told the file was sent.
 

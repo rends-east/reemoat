@@ -129,4 +129,5 @@ pnpm client plugin view <id> [screen|settings]
 
 | | |
 |---|---|
-| Compression | **gzip over 8 KiB, in both services, keyed on the content type** (`gzipResponses` in `src/http.ts`, first middleware in each app). The relay compresses nothing on purpose — it carries h2 frames. A **download is excluded**, because the client's own 100 MiB guard reads `content-length` before the body is resident. Q3.115 |
+| Compression | **gzip over 8 KiB, in both services, keyed on the content type** (`gzipResponses` in `src/http.ts`, first middleware in each app). The relay compresses nothing on purpose — it carries h2 frames. A **download is excluded**, because the client's own 100 MiB guard reads `content-length` — or, for a relayed download in pieces, the total in the first piece's `content-range` — before the body is resident. Q3.115, Q6.120 |
+| Ranges | `serveFile` answers one `bytes=a-b` with 206, a past-the-end start with `416 range_not_satisfiable`, and anything else with the whole file; every answer carries `accept-ranges` and an `etag`. Only the relay arm asks: `range` is not in `CORS_ALLOW_HEADERS` and `content-range` is not exposed, so loopback stays one request. Q6.120 |

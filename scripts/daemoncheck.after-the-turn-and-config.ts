@@ -677,7 +677,8 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   ];
   check("claude keeps what works here, SendMessage and its own scheduling included", KEPT.filter((tool) => CLAUDE_WITHDRAWN_TOOLS.includes(tool)), []);
   // The CLI resolves these before it reads the list, so naming one would withdraw the tool it stands for.
-  const ALIASES = ["Task", "KillShell", "KillBash", "RunWorkflow", "ListPeers", "Brief"];
+  // Read off claude 2.1.288's own alias table, the three MCP-resource names included.
+  const ALIASES = ["Task", "KillShell", "KillBash", "RunWorkflow", "ListPeers", "Brief", "ListMcpResources", "ReadMcpResource", "ReadMcpResourceDir"];
   check("and no alias is listed, since one of them names a tool that stays", ALIASES.filter((tool) => CLAUDE_WITHDRAWN_TOOLS.includes(tool)), []);
   check("send_file is allowed under the name claude gives an MCP tool", [...CLAUDE_ALLOWED_TOOLS], [
     `mcp__${PEER_SERVER_NAME}__${SEND_FILE_TOOL_NAME}`,

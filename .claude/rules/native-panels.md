@@ -165,8 +165,9 @@ convert the handle into.
 
 **`<a download>` is a request to a browser.** A webview under a custom scheme is
 not obliged to honour it, so `saveBlob` hands the bytes to the shell and the shell
-shows the platform's save panel. Raw IPC bytes, never JSON: the download bound is
-100 MiB and that as a JSON number array is roughly 600 MB of string. The filename
-rides in a header because a header is the only other field a raw request has, and
-it is percent-encoded — a header value is ASCII and a filename is the one field
-somebody definitely did not type in ASCII.
+shows the platform's save panel. **Base64 in JSON arguments, never a raw body**: a
+raw body exists only over `ipc://`, and the shell's CSP names no `ipc:` source, so
+every call from this page travels by `postMessage`, where raw bytes arrive as a JSON
+number array the raw-only arm refused — a save that did nothing, silently (Q3.690).
+Base64 rides both channels at 1.33 times the bytes; `nativecheck` refuses
+`InvokeBody::Raw`.
