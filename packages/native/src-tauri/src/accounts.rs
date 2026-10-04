@@ -262,7 +262,10 @@ impl Token<'_> {
 pub enum Binding {
     Bound(Slot),
     /// Not `adopted`: the caller revokes the token, a second session nobody holds.
-    Existing { key: String, adopted: bool },
+    Existing {
+        key: String,
+        adopted: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]

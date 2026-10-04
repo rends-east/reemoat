@@ -178,7 +178,6 @@ pub fn erase(scope: &str) -> Result<(), String> {
     PlatformStore.erase(CREDENTIAL, scope)
 }
 
-
 pub fn read_device_key(scope: &str) -> Option<String> {
     PlatformStore.read(DEVICE_KEY, scope)
 }
