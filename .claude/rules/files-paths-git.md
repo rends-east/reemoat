@@ -13,208 +13,136 @@ paths:
   - packages/web/src/ui/files.ts
 ---
 
-## Files
+## Files in and out
 
-**A message may be text, files, or both.** The prompt route validates
-`attachments` *before* `text`; empty with nothing attached is still refused, and
-`session.ts` drops the text block entirely when there is no text. The client may
-**not** synthesize "here is a file" to paper over the gap — that puts words in the
-operator's mouth inside the model's context. Two consequences: `deriveSessionTitle`
-reads the text alone, so a files-only first prompt leaves the session unnamed; and
-`canSend` has to agree with the route or Send is enabled onto a `400`. Q2.29.
-
-**In: a file is staged, then named by a prompt.**
-`POST /sessions/:id/uploads?name=` streams a raw body to
-`~/.reemoat/uploads/<sessionId>/<uploadId>/<name>`; `POST /sessions/:id/prompt`
-then takes `{text, attachments: [uploadId, …]}`. Uploading happens **on select
-rather than on send**, because the id has to exist before a prompt can name it.
-Q2.30. Every attachment becomes a `resource_link` block with a `file://` URI — the
-block that is never wrong, which is why **the paperclip needs no capability gate** —
-with an `image` block of base64 bytes *on top* where the agent advertised
-`promptCapabilities.image`, on top rather than instead so the agent can re-read the
-file with its own tools. The upload root is outside the workspace, so claude asks
-permission to read an attachment and nothing here suppresses it. Q2.31, Q2.33.
-`acceptsImages` is deliberately **not** on `SessionSnapshot`; the honest home is
-`inlined` on the recorded attachment. Q2.34.
-
-**A session keeps its newest files, not every file** (Q2.247). Both budgets roll:
-past a bound the oldest file already sent goes, and an agent's returned images roll
-on a budget of their own, so a screenshot loop cannot lock a person out of attaching.
-A dropped file answers 404 `upload_not_found`, which the transcript and a download
-turn into *"… is no longer kept."* rather than a blank. An upload that declared no
-type, or only bytes, takes one read off its first bytes, and the web client sends a
-file's own type over the relay: an image arriving as `application/octet-stream`
-reached the agent as a path, never as a picture.
-
-**Out: any regular file under `workspace.root`, plus the session's own uploads.**
-`GET /sessions/:id/files?path=` widens no authority — the agent can `cat` anything
-under that root already — and `GET /sessions/:id/uploads/:uploadId` is not optional,
-uploads living outside the workspace. Q2.35. The upload index is SQLite, because an
-in-memory total resets on a restart and would defeat the per-session byte budget.
-Q2.36.
-
-**A name is sanitized where a path is refused.** An upload's name is a **label, not
-a location** — the file is created inside a directory named by 64 fresh random bits,
-so containment comes from the path and never from the name. What is still refused is
-what is *dangerous*: control characters above all, because that string is echoed into
-a `Content-Disposition` where a CR is response splitting. Q2.37.
-
-**A download is `fetch` with the header into a `Blob`, never `<a href="…&token=">`** —
-which would widen the `?token=` exception `readCredential` narrows to a request
-carrying `upgrade: websocket`. Sending no `Access-Control-Expose-Headers` decides two
-things: `Content-Disposition` is unreadable cross-origin, so the filename comes from
-the requested path, and `Content-Length` **is** safelisted, so an oversized file is
-refused before it is resident. Q2.38.
+- **A message may be text, files, or both.** The prompt route validates `attachments`
+  before `text`; empty with nothing attached is refused; `session.ts` drops an empty text
+  block. The client never synthesizes "here is a file". A files-only first prompt leaves
+  the session unnamed (`deriveSessionTitle`), and `canSend` must agree with the route.
+  Q2.29.
+- **In: staged on select, then named by a prompt.** `POST /sessions/:id/uploads?name=`
+  streams to `~/.reemoat/uploads/<sessionId>/<uploadId>/<name>`;
+  `POST /sessions/:id/prompt` takes `{text, attachments: [uploadId, …]}`. Each attachment is a
+  `resource_link` with a `file://` URI, so the paperclip needs no capability gate, plus an
+  `image` block on top where the agent advertised `promptCapabilities.image`. claude asks
+  permission to read the upload root and nothing suppresses it. `acceptsImages` is not on
+  `SessionSnapshot`; it is `inlined` on the attachment. Q2.30, Q2.31, Q2.33, Q2.34.
+- **A session keeps its newest files**: budgets roll, dropping the oldest already sent;
+  an agent's images roll on their own. A dropped file answers 404 `upload_not_found`,
+  drawn as *"… is no longer kept."* An untyped upload takes one read off its first bytes,
+  and the web client sends a file's own type over the relay. Q2.247.
+- **`send_file`** copies any file the agent can read into the upload store as an `f_` row
+  and puts `file_sent` in the transcript (`agent-messaging.md`, Q2.252). `probeRealpath`
+  carries the errno, so a closed folder is never "missing"; all of `/proc` is refused, by
+  path and again by the opened descriptor's device (a thread's or the parent's `environ`
+  holds the token too). Q2.253.
+- **Out: any regular file under `workspace.root`** (`GET /sessions/:id/files?path=`,
+  widening no authority) **and the session's uploads**
+  (`GET /sessions/:id/uploads/:uploadId`; they live outside it). Q2.35. The upload index
+  is SQLite so the per-session byte budget survives a restart. Q2.36.
+- **An upload's name is a label, not a location**: the directory is 64 fresh random bits.
+  Control characters are still refused; the name is echoed into `Content-Disposition`.
+  Q2.37.
+- **A download is `fetch` into a `Blob`, never `<a href="…&token=">`**: `readCredential`
+  allows `?token=` only with `upgrade: websocket`. No `Access-Control-Expose-Headers`, so
+  the filename comes from the requested path, and the safelisted `Content-Length` refuses
+  an oversized file before it is resident. Q2.38.
 
 ## Invariants
 
-**Files, paths and the database**
-
 - **No synchronous filesystem call on a path this daemon did not create.** A stalled
-  network mount blocks inside the kernel: synchronously that stops the event loop —
-  every session, every socket and `/health` — and asynchronously it costs a libuv
-  threadpool slot for the life of the process. This is not about browsing: for a
-  `plain` session `workspace.root` **is** the caller's own `cwd`, and `workspaceReady`
-  saves nothing, since it probes the *root* while the stall is on a mount underneath.
-  `stall.ts` owns the mechanism; what stays synchronous is either a path we made or
-  sits behind a probe. `safeRelPath` is purely syntactic, `probeRequestable` is the
-  async half, and `requestedPath` answers `503 path_unresponsive` on its `null` and
-  `400 invalid_path` otherwise. In `GET /worktrees` an entry that does not answer is
-  dropped from the listing. Q5.29, Q5.93.
-  **A syntactic refusal about a path is only ever about the string somebody typed.**
-  `safeRelPath` refuses a `.git` segment because `.git/config` carries remote URLs and
-  the credential helper configuration, and one `g -> .git` link makes `?path=g/config`
-  a request with no such segment, which containment then accepts. The test is re-run
-  on the **resolved** path, in `probeRequestable`, that being the only function
-  holding one. `O_NOFOLLOW` cannot help: it governs the leaf. Q7.85.
-- **Containment has two forms, and using the lenient one for a trust decision is a
-  hole.** `atOrUnder` compares the path *as written* when `realpath` throws — which it
-  does for every file about to be created — so it is correct only where the path is
-  *ours* and merely not created yet. Nothing else may use it to decide about a path
-  somebody else chose, and there is exactly one containment primitive file. Q5.31,
-  Q5.32.
-- **Worktree creation is containment-checked, like removal always was**, and what it
-  guards is the one `rmSync` in the codebase. Checked before the add and again after
-  it, with the `repoKey` component `lstat`ed so a link is refused rather than
-  followed, and the check must agree with `createWorkspace` about which root that is.
-  **The two sides must also be in the same namespace** — it resolves the deepest
-  component that *exists* and rebuilds the not-yet-created leaves onto that answer, or
-  every `POST /sessions` throws `outside_worktree_root` wherever the worktree root
-  traverses a symlink. Q5.36.
-- **Two remover trees, and they must not nest.** If either root sat at or under the
-  other, one remover could reach into the other's tree and neither guard would mean
-  what it says. `daemon.ts` refuses to start on it; the upload sweep additionally
-  `lstat`s each session directory, since an upload id is guessable from a transcript.
-  Q5.74.
+  network mount stops the event loop and `/health` (synchronously) or holds a libuv
+  threadpool slot forever (asynchronously). Not only browsing: a `plain` session's `workspace.root` is the
+  caller's `cwd`, and `workspaceReady` probes only the root. `stall.ts` owns the
+  mechanism. `safeRelPath` is syntactic, `probeRequestable` the async half;
+  `requestedPath` answers `503 path_unresponsive` on `null`, else `400 invalid_path`.
+  `GET /worktrees` drops an entry that does not answer. Q5.29, Q5.93.
+- **A syntactic refusal is only about the typed string**: `safeRelPath` refuses a `.git`
+  segment, and `probeRequestable` re-runs the test on the resolved path (a `g -> .git`
+  link). `O_NOFOLLOW` governs only the leaf. Q7.85.
+- **Containment has two forms.** `atOrUnder` compares as written when `realpath` throws,
+  so it is only for paths that are ours and not yet created, never a trust decision about
+  one somebody else chose. One containment primitive file. Q5.31, Q5.32.
+- **Worktree creation is containment-checked like removal**, guarding the one `rmSync`:
+  before and after the add, with the `repoKey` component `lstat`ed (a link refused),
+  agreeing with `createWorkspace` about the root. Both sides in one namespace: resolve the
+  deepest existing component and rebuild the uncreated leaves onto it, or a symlinked
+  root makes every `POST /sessions` throw `outside_worktree_root`. Q5.36.
+- **Remover trees must not nest** (`plugins.md` adds a third); `daemon.ts` refuses to
+  start on it. The upload sweep also `lstat`s each session directory, upload ids being
+  guessable. Q5.74.
 - **An oversized upload is refused on the header first, and the body is always
-  cancelled** — unlink, then rmdir, then cancel. The running counter in
-  `Uploads.receive` is the only bound on a request body anywhere in this system.
-  **Cancelling matters more than the order**: the relay's window is granted on
-  consumption, so a reader that stops parks the sender at 256 KiB, and the next valve
-  is the tunnel's 8 MiB socket check — which closes the **whole tunnel for that
-  machine**. Q5.72, Q5.73.
-- **A downloaded file is never rendered, and two things enforce that.** The daemon
-  sends `application/octet-stream` — always, never sniffed — plus `attachment`,
-  `nosniff` and `no-store`; the client re-types the `Blob` before creating an object
-  URL. Both halves are needed: a `blob:` URL carries the *client's* type and inherits
-  the *creating* origin, whose `localStorage` holds `reemoat.credential`, and this
-  route serves **any regular file under a session's workspace**, so a rendered HTML or
-  SVG executes on the daemon's own origin. Never `window.open(blobUrl)`, never
-  a `blob:` URL behind `target="_blank"` (an object URL reaches an anchor only with
-  `download`; `webcheck` pins every `_blank` anchor), never an `<iframe src=blobUrl>`. `daemoncheck`
-  pins the pair the query credential rests on: the 401 on `/files?…&token=` and the
+  cancelled** — unlink, rmdir, cancel. `Uploads.receive`'s counter is the only
+  request-body bound in the system. Cancelling matters most: a stopped reader parks the
+  sender at 256 KiB, and the 8 MiB socket check then closes the machine's whole tunnel.
+  Q5.72, Q5.73.
+- **A downloaded file is never rendered.** The daemon always sends
+  `application/octet-stream` (never sniffed), `attachment`, `nosniff`, `no-store`; the
+  client re-types the `Blob` before creating an object URL, which inherits the origin
+  holding `reemoat.credential`. Never `window.open(blobUrl)`, never a `blob:` URL behind
+  `target="_blank"` (only with `download`; `webcheck` pins every `_blank` anchor), never
+  an `<iframe src=blobUrl>`. `daemoncheck` pins the 401 on `/files?…&token=` and the
   still-working handshake. Q5.71.
-- **Symlinks are never content-diffed.** `git diff --no-index` follows the link, so
-  `ln -s ~/.ssh/id_rsa x` would serve the target's bytes to anyone holding the token.
-  `lstat` first, always. **`FileChange.symlink` is a hint and `diffFile`'s own `lstat`
-  is the guarantee** — an untracked path is a `?` record carrying no mode, so a
-  symlink the agent just created is reported `symlink: false`. Q5.88, Q5.89.
-- **The `--no-index` header rewrite replaces with a function, never a string.**
-  `String.replace` expands `$&`, `` $` ``, `$'` and `$$`, and the replacement is a
-  path the *agent* chose — spliced back into the one header that has to be right for
-  `client diff … | git apply`. Q5.90.
-- **Worktree removal refuses by default and prunes unconditionally.** `git worktree
-  remove` says nothing about unpushed commits; that check is ours, and `@{upstream}`
-  is the wrong tool because it throws when unset. `prune --expire=now` runs on *every*
-  path including the failed ones, and **the unpushed-commits refusal does not depend
-  on the directory existing** — a directory somebody already `rm`ed is exactly when
-  the branch is the only copy. `null` from `count()`/`countStatus` means "could not
-  tell" and must never read as zero: a timeout, a 128 off a stale gitfile, oversized
-  output and a parse failure all collapse into it. Both are `counts_unknown` refusals
-  (`about: "dirty" | "commits"`), and `--force` is the only way past. Q5.86, Q5.87,
-  Q2.41.
-- **A refused `git worktree remove` is not a licence to `rm` what it refused.** It
-  matches git's **own words** (`contains modified or untracked files|use --force`, the
-  technique `classifyAddFailure` already uses) rather than "the call failed", because
-  the guarded `rm` still has a real job — a stale gitfile, an unregistered directory,
-  half-written admin metadata. The refusal is `remove_refused` and carries git's
-  stderr; the prune is skipped on that one path alone, safe because a worktree git
-  just refused is still registered and still present. Q2.41.
-- **The refusal's *sentence* is derived**, because one fixed sentence lied about the
-  refusal that exists to say "I could not tell". `removalRefusalAnswer` keeps the 409
-  and `--force` for every refusal and splits the code: `workspace_dirty` for a
-  definite one — the string `scripts/client.ts` keys its hint on — and
-  `workspace_uncertain` when only `counts_unknown` refusals are present. Q2.41.
-- **The daemon lock is claimed before the schema is touched.** `migrate()` and
-  `checkSchemaVersion` are permanent, so running them first upgrades the file under
-  the daemon still running, which then cannot restart and has no down migration.
-  Q5.35.
-- **The database directory is chmodded, not just the file.** SQLite writes `-wal` and
-  `-shm` beside it carrying the same transcript bytes; chasing those files loses
-  because they are recreated, and `mkdirSync(mode)` applies its mode only to
-  directories it created. Q5.91.
-- **Identity is absent from the upsert's `DO UPDATE`, and that is the property.**
-  `agent`, `created_at` and `custom_agent` are what a session *is*, and an upsert
-  that can rewrite them can corrupt a row it was only meant to touch. What the
-  clause carries is the record's mutable preferences — `title`, `pinned`,
-  `ultracode`, `rank`, `nickname` — plus derived runtime state. ⚠ **This read "`title` and
-  `pinned` are the only columns" and had been false since `ultracode`**: a rule
-  stated as a list goes stale the first time the list grows, where the same rule
-  stated as a property does not. Q5.28.
+- **Symlinks are never content-diffed** (`git diff --no-index` follows them, so
+  `ln -s ~/.ssh/id_rsa x` would serve the key); `lstat` first. `FileChange.symlink` is a hint and `diffFile`'s own `lstat` the guarantee: an
+  untracked `?` record carries no mode. Q5.88, Q5.89.
+- **The `--no-index` header rewrite replaces with a function, never a string**:
+  `String.replace` expands `$&`, `` $` ``, `$'`, `$$` in an agent-chosen path. Q5.90.
+- **Worktree removal refuses by default and prunes unconditionally.** The
+  unpushed-commits check is ours (`@{upstream}` throws when unset) and does not need the
+  directory to exist. `prune --expire=now` runs on every path but `remove_refused`.
+  `null` from `count()`/`countStatus` means "could not tell", never zero; both are
+  `counts_unknown` refusals (`about: "dirty" | "commits"`), `--force` the only way past.
+  Q5.86, Q5.87, Q2.41.
+- **A refused `git worktree remove` is not a licence to `rm`.** Match git's own words
+  (`contains modified or untracked files|use --force`, as `classifyAddFailure` does);
+  answer `remove_refused` with git's stderr. `removalRefusalAnswer` keeps the 409 and
+  `--force` and splits the code: `workspace_dirty` for a definite refusal (what
+  `scripts/client.ts` keys on), `workspace_uncertain` when only `counts_unknown`. Q2.41.
+- **The daemon lock is claimed before the schema is touched**: `migrate()` and
+  `checkSchemaVersion` are permanent. Q5.35.
+- **The database directory is chmodded, not just the file** (`-wal`/`-shm` are recreated;
+  `mkdirSync(mode)` applies only to directories it creates). Q5.91.
+- **Identity is absent from the upsert's `DO UPDATE`**: never `agent`, `created_at`,
+  `custom_agent`. It carries mutable preferences (`title`, `pinned`, `ultracode`, `rank`,
+  `nickname`) and derived runtime state; state it as that property, not a list. Q5.28.
 
 ## Layout
 
 | File | Holds |
 |---|---|
-| `src/git.ts` | The git vocabulary: argv arrays, an env allowlist about determinism rather than confinement, timeouts, honest truncation. Installs **no** config — your hooks and LFS filters run |
+| `src/git.ts` | Argv arrays, an env allowlist for determinism (not confinement), timeouts, honest truncation. Installs **no** config |
 | `src/worktree.ts` | Per-session worktrees: probe, create, list, inspect, remove |
-| `src/uploads.ts` | Files staged for a prompt: the root, the streaming write, the sanitizer, the TTL sweep, the content blocks they become, the two rolling budgets and the type read off a file's first bytes (`sniffImageMime`). Declares `UploadRow`/`UploadIndex` |
-| `src/changes.ts` | What a session changed, and the diff for one file of it. Paths come out **relative to `workspace.root`**: git speaks repo-root-relative on both commands, `-z` is what makes `status` agree with `diff` (so `--relative` is the bug rather than the fix), and `repoPrefix`/`toWorkspaceRelative` translate once on the way out (Q7.90). Containment is the two halves above, `probeRequestable` answering `"ok" \| "escapes_tree" \| "git_dir" \| null` and `probeContained` being the two-answer form over it. `markBinary` runs after the file cap through `probeBinary`'s deadline, never as syscalls inside the parser (Q7.88) |
-| `src/browse.ts` | Directory listing so a remote client can pick a `cwd`. `REEMOAT_ROOTS` narrows what is *listed* and nothing else; `resolveCwd` is deliberately unconfined |
-| `src/stall.ts` | Asking the filesystem something that may never be answered: the bounded probe, the permit gate, the memory of which paths do not reply. `probeBinary` is git's own NUL heuristic through that deadline — git having listed a path says nothing about whether the next syscall returns (Q7.88). `probeRealpath` is the third answer beside `probeExists`/`probeFile` and the bounded form of `paths.ts`'s synchronous `resolved()`, reached everywhere a path somebody *else* named is resolved. `probeBuild` is `probeRealpath` plus a `stat` of the target: which *file* a CLI's path names, compared by `LocalRuntime.agentCli` on every use (Q6.112) |
-| `src/mounts.ts` | The kernel's mount table, and which filesystems answer over a network. Read from `/proc/self/mounts` or `mount(8)` — never `statfs`, which asks the server the question it is hanging on |
-| `src/paths.ts` | `containedIn` / `atOrUnder`: realpath first, then compare segment-wise. The one containment primitive — and `containedInResolved` / `atOrUnderResolved`, the same segment-wise rule with the resolving already done, which is what an async caller compares two `probeRealpath` answers with rather than writing a second prefix test (Q5.100) |
-| `packages/web/src/paths.ts` | `relativeTo` and `filenameFor`: the join between absolute agent paths and the workspace-relative path the download route takes |
+| `src/uploads.ts` | The root, streaming write, sanitizer, TTL sweep, content blocks, the three rolling budgets, `sniffImageMime`, `UploadRow`/`UploadIndex` |
+| `src/changes.ts` | Changes and one file's diff, relative to `workspace.root`: `-z` makes `status` agree with `diff` (`--relative` is the bug); `repoPrefix`/`toWorkspaceRelative` translate once (Q7.90). `probeRequestable` answers `"ok" \| "escapes_tree" \| "git_dir" \| null`, `probeContained` is its two-answer form. `markBinary` runs after the file cap via `probeBinary`, never in the parser (Q7.88) |
+| `src/browse.ts` | Listing for picking a `cwd`. `REEMOAT_ROOTS` narrows the listing only; `resolveCwd` is unconfined |
+| `src/stall.ts` | The bounded probe, permit gate, memory of silent paths. `probeBinary` is git's NUL heuristic under the deadline (Q7.88). `probeRealpath` (beside `probeExists`/`probeFile`) is the bounded `resolved()` for any path somebody else named; `probeBuild` adds a `stat`, compared by `LocalRuntime.agentCli` on every use (Q6.112) |
+| `src/mounts.ts` | Which filesystems are network ones, from `/proc/self/mounts` or `mount(8)`, never `statfs` |
+| `src/paths.ts` | `containedIn` / `atOrUnder` (realpath, then segment-wise) and `containedInResolved` / `atOrUnderResolved` for two `probeRealpath` answers (Q5.100) |
+| `packages/web/src/paths.ts` | `relativeTo`, `filenameFor`: agent paths to the download route's relative path |
 | `packages/web/src/ui/download.ts` | `saveBlob`, and the one line in it that must never change |
 
 ## Bounds
 
 | | |
 |---|---|
-| Changes API | 2000 files, 512 KiB per diff, both reported as `truncated` rather than silently short |
-| git calls | 5s structural, 10s list, 15s status/diff, **120s** `worktree add` (hooks and LFS smudge are live on this path) |
-| Uploads | **100 MiB per file**, 10 per message; a session keeps **1 GiB** *and* 100 of the files sent to it (a byte cap cannot see a hundred thousand one-byte uploads, each a directory), dropping the oldest already sent — never one still waiting to be sent, which alone can refuse — and an agent's images roll on their own **200 / 256 MiB** (`roomFor`, Q2.247). Plus a **300 MiB / 5 min** window per session — `429 upload_rate_limited` with `Retry-After`, the one refusal here that expires on its own. 200 bytes of filename, 128 of mime. Inline images 5 MiB raw *to* the agent; 25 MiB *from* one (`MAX_AGENT_IMAGE_BYTES`, its own constant since the per-file cap moved — sharing one made the base64 pre-check ~133 MiB). Unconsumed uploads expire at 24h |
-| Downloads | 100 MiB, and it **equals** the upload cap by coincidence rather than by coupling — neither may be set by reading the other. That one bounds what a client pushes onto your disk, against budgets that outlive the request; this bounds a token-readable read of a whole workspace, where the cost is one of 256 tunnel streams held open. The client refuses at the same number from `content-length` |
+| Changes API | 2000 files, 512 KiB per diff, both reported `truncated` |
+| git calls | 5 s structural, 10 s list, 15 s status/diff, **120 s** `worktree add` |
+| Uploads | **100 MiB per file**, 10 per message. A session keeps **1 GiB** *and* 100 files, dropping the oldest sent, never one still waiting. Agent images **200 / 256 MiB** (`roomFor`, Q2.247); sent files **100 / 1 GiB**, 100 MiB each, own rate window (Q2.252). **300 MiB / 5 min** per session: `429 upload_rate_limited` with `Retry-After`. 200 bytes of filename, 128 of mime. Inline images 5 MiB to the agent, 25 MiB from one (`MAX_AGENT_IMAGE_BYTES`). Unconsumed uploads expire at 24 h |
+| Downloads | 100 MiB, equal to the upload cap by coincidence; neither is set from the other. `MAX_SENT_FILE_BYTES` is coupled: `daemoncheck` holds it at or under this. The client refuses at the same number from `content-length` |
 
-**A body limit outside this repository is the one nobody sees.** `deploy/` ships no
-reverse proxy and `install.sh` tells operators to put one in front; nginx defaults
-`client_max_body_size` to **1 MB**, which refuses an upload with a 413 the daemon
-never receives and cannot report. `deploy/README.md` names the value to set.
+nginx's default `client_max_body_size` (1 MB) answers a 413 the daemon never sees;
+`deploy/` ships no proxy and `deploy/README.md` names the value.
 
-## Known gotchas
+## Git gotchas
 
-- **Rename field order is opposite between the two git commands we parse.**
-  `status --porcelain=v2` emits `<newPath>` then `<origPath>`; `diff --raw -z` and
-  `--numstat -z` emit `<srcPath>` then `<dstPath>`. A shared "read two path tokens"
-  helper would invert every rename. Q6.30.
-- **A porcelain-v2 `2` record spans two NUL-separated tokens** under `-z`. Consume the
-  extra token or every later record shifts by one. Q6.31.
-- **`git diff --no-index` exits 1 when the files differ** — the *success* case, and the
-  path every newly created file takes. Q6.32.
-- **`--ignored=matching`, never `traditional`.** Measured in this repo with `-uall`:
-  6408 records against 2. Q6.33.
-- **`rev-parse --show-toplevel` dies in a bare repo**, so the repo probe needs two
-  calls. And `--git-common-dir` returns a *relative* `.git` without
-  `--path-format=absolute`. Q6.34.
-- **Even `-uall` collapses a nested repo** — git stops at any directory holding its own
-  `.git` and emits one `? dir/` record. Those are flagged `collapsed`. Q6.35.
+- **Rename order is opposite**: `status --porcelain=v2` emits `<newPath>` then
+  `<origPath>`; `diff --raw -z` and `--numstat -z` emit `<srcPath>` then `<dstPath>`.
+  Q6.30.
+- **A porcelain-v2 `2` record spans two NUL-separated tokens** under `-z`. Q6.31.
+- **`git diff --no-index` exits 1 when the files differ**, the success case. Q6.32.
+- **`--ignored=matching`, never `traditional`.** Q6.33.
+- **`rev-parse --show-toplevel` dies in a bare repo**; `--git-common-dir` is relative
+  without `--path-format=absolute`. Q6.34.
+- **Even `-uall` collapses a nested repo** into one `? dir/` record, flagged `collapsed`.
+  Q6.35.

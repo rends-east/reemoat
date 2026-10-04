@@ -1,14 +1,5 @@
-//! Closing the window puts Reemoat away instead of quitting it, on macOS and Windows, so a
-//! stray click never stops the agents or the daemons the app started; quitting is its own
-//! act (Q3.697).
-//!
-//! - macOS: the window hides and the Dock icon brings it back (`RunEvent::Reopen`). The app
-//!   menu's Quit, ⌘Q and the Dock's Quit end it.
-//! - Windows: the window hides to the notification area. The tray icon brings it back, its
-//!   menu's Quit ends it, and launching the app again shows the running one.
-//! - Linux and the mobile shells keep the platform's own close.
-//!
-//! Every quit still ends in `RunEvent::Exit`, where `lib.rs` stops every daemon.
+//! On macOS and Windows closing the window hides it and the daemons run on; only a Quit
+//! reaches `RunEvent::Exit`, where `lib.rs` stops them (Q3.697).
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::{AppHandle, Manager};
@@ -16,10 +7,8 @@ use tauri::{CloseRequestApi, Runtime, Window};
 
 use crate::seats::MAIN;
 
-/// Whether the close button hides the window rather than closing it.
 pub const PUTS_AWAY: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// The close button, ⌘W and Alt+F4 on the one window.
 pub fn on_close_requested<R: Runtime>(window: &Window<R>, api: &CloseRequestApi) {
     if !PUTS_AWAY || window.label() != MAIN {
         return;
@@ -34,7 +23,6 @@ pub fn on_close_requested<R: Runtime>(window: &Window<R>, api: &CloseRequestApi)
     let _ = window.hide();
 }
 
-/// The Dock icon, the tray icon or a second launch: the window back, in front.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn bring_back<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = main_window(app) else {
@@ -59,7 +47,6 @@ fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Window<R>> {
         .map(|window| window.as_ref().window())
 }
 
-/// The notification-area icon: a click shows the window, the menu shows it or quits.
 #[cfg(target_os = "windows")]
 pub fn tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};

@@ -57,6 +57,9 @@
   --color-chip: #f3f1ed;
   --color-link: #1d5bc6;
 
+  /* A person's message: a step off the page as Claude Code's is, softer than raised (Q3.706). */
+  --color-bubble: #f2f1ee;
+
   /* The one brand colour: lake teal off the landing's painting, on what asks for a press or says something waits on you (Q3.694). */
   --color-brand: #1d6b67;
   --color-on-brand: #ffffff;
@@ -252,6 +255,7 @@
   --color-caution: #d5ba86;
   --color-code: #e8956a;
   --color-chip: #211f1c;
+  --color-bubble: #23211e;
   --color-link: #8ab4f8;
   --color-brand: #5fc2b5;
   --color-on-brand: #11100e;
@@ -345,6 +349,13 @@ kbd {
 .wrap-anywhere {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* Both reset: either one inherited makes a cell's min-content one character, and auto layout crushes a short column to a letter a line (Q3.704). */
+.wrap-anywhere td,
+.wrap-anywhere th {
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 @media (pointer: fine) {

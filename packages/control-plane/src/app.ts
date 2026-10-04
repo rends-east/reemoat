@@ -169,7 +169,7 @@ import {
 
 // AGPL section 13 source offer: change SOURCE_URL if you run a modified copy. relaycheck pins VERSION to package.json.
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.12.0";
+const VERSION = "0.13.0";
 
 // Work answered before it is done. Every deferred body must stay synchronous: main.ts drains the set on SIGTERM before closing the store.
 const deferred = new Set<() => void>();

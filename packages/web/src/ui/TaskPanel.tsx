@@ -1,8 +1,11 @@
-import { Bot, ChevronRight, Square, Trash2, X } from "lucide-react";
+import { ChevronRight, Square, Trash2, X } from "lucide-react";
 import { memo, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
 import {
+  agentElapsedMs,
+  agentKindLabel,
+  agentRowId,
   BACKGROUND_EMPTY,
   dotCells,
   FINISHED_LABEL,
@@ -16,7 +19,7 @@ import {
   type BackgroundReporting,
 } from "../tasks";
 import { taskFinished, type BackgroundTask } from "../wire";
-import type { OutstandingTask } from "./tail";
+import type { AgentTask } from "./tail";
 import { Icon, IconButton, SETTINGS_HEADING } from "./bits";
 import { useLeaving } from "./leaving";
 import { PaneHandle } from "./PaneHandle";
@@ -35,7 +38,7 @@ export const TASK_PANEL_GUTTER = "md:pr-[calc(var(--task-fit)+0.75rem)]";
 export function TaskPanel({
   open,
   onClose,
-  tasks,
+  agents,
   background,
   reporting,
   onStopTask,
@@ -44,7 +47,8 @@ export function TaskPanel({
 }: {
   open: boolean;
   onClose: () => void;
-  tasks: readonly OutstandingTask[];
+  /** Subagents, running and finished, read from the log: they are background work the wire carries no row for (Q3.699). */
+  agents: readonly AgentTask[];
   background: readonly BackgroundTask[];
   /** Tells an empty list from an unasked question; see tasks.ts. */
   reporting: BackgroundReporting;
@@ -96,7 +100,7 @@ export function TaskPanel({
             onClearFinished={onClearFinished}
             onStopTask={onStopTask}
             reporting={reporting}
-            tasks={tasks}
+            agents={agents}
           />
         </div>
       </aside>
@@ -136,14 +140,14 @@ function PanelHead({
 }
 
 function PanelBody({
-  tasks,
+  agents,
   background,
   hiddenFinished,
   onClearFinished,
   reporting,
   onStopTask,
 }: {
-  tasks: readonly OutstandingTask[];
+  agents: readonly AgentTask[];
   background: readonly BackgroundTask[];
   hiddenFinished: ReadonlySet<string>;
   onClearFinished: (ids: readonly string[]) => void;
@@ -152,41 +156,29 @@ function PanelBody({
 }): ReactNode {
   // Memoised: EventList re-renders per streamed token, and the daemon sends a fresh array only on change.
   const sections = useMemo(() => taskSections(background), [background]);
+  // Newest first, as the daemon orders its own rows.
+  const running = useMemo(() => newestFirst(agents.filter((agent) => agent.state === "running")), [agents]);
   // Drawn even when empty, but only for an agent that reports a lifecycle; elsewhere a zero would be a false answer.
-  const finished = useMemo(() => background.filter((task) => taskFinished(task.state)), [background]);
+  const finished = useMemo(() => finishedRows(background, agents), [background, agents]);
   const showFinished = reporting === "reports" || finished.length > 0;
-  const bands = (tasks.length > 0 ? 1 : 0) + sections.length + (showFinished ? 1 : 0);
+  const bands = (running.length > 0 ? 1 : 0) + sections.length + (showFinished ? 1 : 0);
   // One interval for the whole panel, and only while something runs.
-  const now = useTick(background.some((task) => !taskFinished(task.state)));
+  const now = useTick(running.length > 0 || background.some((task) => !taskFinished(task.state)));
   const headings = useId();
-  if (tasks.length === 0 && sections.length === 0 && !showFinished) {
+  if (running.length === 0 && sections.length === 0 && !showFinished) {
     return <p className="text-2xs text-faint">{BACKGROUND_EMPTY[reporting]}</p>;
   }
   return (
     <div className="space-y-5">
-      {tasks.length > 0 && (
+      {running.length > 0 && (
         <section
           aria-labelledby={bands > 1 ? `${headings}-agents` : undefined}
           className="space-y-1.5"
         >
-          {bands > 1 && <PanelHeading count={tasks.length} id={`${headings}-agents`} label="Agents" />}
-          {tasks.map((task) => (
-            <p className="flex items-center gap-2 text-2xs" key={task.key}>
-              <span className="shrink-0 text-muted">
-                <Icon as={Bot} size={11} />
-              </span>
-              <span className="min-w-0 flex-1 truncate text-fg/85">
-                {task.title}
-                {task.latest !== null && <span className="ml-1.5 text-faint">{task.latest}</span>}
-              </span>
-              {task.steps > 0 && (
-                <span className="shrink-0 text-faint">
-                  {task.steps} step{task.steps === 1 ? "" : "s"}
-                </span>
-              )}
-            </p>
+          {bands > 1 && <PanelHeading count={running.length} id={`${headings}-agents`} label="Agents" />}
+          {running.map((agent) => (
+            <AgentCard agent={agent} key={agent.key} now={now} />
           ))}
-          <p className="text-2xs text-faint">started, and not reported finished</p>
         </section>
       )}
       {sections.map((section, index) => {
@@ -215,11 +207,33 @@ function PanelBody({
           now={now}
           onClear={onClearFinished}
           onStop={onStopTask}
-          tasks={finished}
+          rows={finished}
         />
       )}
     </div>
   );
+}
+
+/** A finished row is either kind; `id` is what the hidden set holds. */
+type FinishedRow = { id: string; startedAt: number } & (
+  | { kind: "task"; task: BackgroundTask }
+  | { kind: "agent"; agent: AgentTask }
+);
+
+function newestFirst(agents: readonly AgentTask[]): readonly AgentTask[] {
+  return [...agents].sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** Both kinds in one band, newest started first, which is the daemon's order for its own finished rows. */
+function finishedRows(background: readonly BackgroundTask[], agents: readonly AgentTask[]): readonly FinishedRow[] {
+  const rows: FinishedRow[] = [];
+  for (const task of background) {
+    if (taskFinished(task.state)) rows.push({ kind: "task", id: task.id, startedAt: task.startedAt, task });
+  }
+  for (const agent of agents) {
+    if (agent.state !== "running") rows.push({ kind: "agent", id: agentRowId(agent), startedAt: agent.startedAt, agent });
+  }
+  return rows.sort((a, b) => b.startedAt - a.startedAt);
 }
 
 /** Written out: SETTINGS_HEADING plus a tone is a silent no-op. Both arms of the band use it. */
@@ -233,7 +247,7 @@ function FinishedSection({
   now,
   onClear,
   onStop,
-  tasks,
+  rows,
 }: {
   headingId: string;
   hidden: ReadonlySet<string>;
@@ -241,10 +255,10 @@ function FinishedSection({
   now: number;
   onClear: (ids: readonly string[]) => void;
   onStop: ((task: BackgroundTask) => Promise<void>) | null;
-  tasks: readonly BackgroundTask[];
+  rows: readonly FinishedRow[];
 }): ReactNode {
   const [open, setOpen] = useState(false);
-  const shown = tasks.filter((task) => !hidden.has(task.id));
+  const shown = rows.filter((row) => !hidden.has(row.id));
   // Nothing to show is a heading, not a fold: an empty disclosure claims a body it lacks.
   if (shown.length === 0) {
     return (
@@ -275,11 +289,18 @@ function FinishedSection({
         <IconButton
           icon={Trash2}
           label="Clear the finished list"
-          onClick={() => onClear(tasks.map((task) => task.id))}
+          onClick={() => onClear(rows.map((row) => row.id))}
           size="sm"
         />
       </div>
-      {open && shown.map((task) => <TaskCard key={task.id} now={now} onStop={onStop} task={task} />)}
+      {open &&
+        shown.map((row) =>
+          row.kind === "task" ? (
+            <TaskCard key={row.id} now={now} onStop={onStop} task={row.task} />
+          ) : (
+            <AgentCard agent={row.agent} key={row.id} now={now} />
+          ),
+        )}
     </section>
   );
 }
@@ -391,6 +412,31 @@ const TaskCard = memo(function TaskCard({
       )}
       {task.taskType === "workflow" && <Phases running={!finished} />}
       {failure !== null && <p className="mt-2 text-2xs text-danger">Couldn&apos;t stop it: {failure}</p>}
+    </div>
+  );
+});
+
+/** TaskCard's bands for a subagent: a name rather than a command, its kind, its time, its steps, and what it is doing now. No Stop: nothing on the wire reaches one. */
+const AgentCard = memo(function AgentCard({ agent, now }: { agent: AgentTask; now: number }): ReactNode {
+  const chip = TASK_CHIPS[agent.state];
+  const elapsed = agentElapsedMs(agent, now);
+  return (
+    <div className="rounded-lg bg-raised/50 px-3 py-2.5">
+      <p className="min-w-0 break-words text-xs font-medium text-fg">{agent.title}</p>
+      <p className="mt-1 flex flex-wrap items-baseline gap-x-2 text-2xs">
+        <span className="text-muted">{agentKindLabel(agent.agentType)}</span>
+        {elapsed !== null && <span className="text-faint">{taskDuration(elapsed)}</span>}
+        <span className={chip[1]}>{chip[0]}</span>
+      </p>
+      {agent.steps > 0 && (
+        <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1 text-2xs text-faint">
+          <span className="text-muted">{agent.steps}</span>
+          <span>tool {agent.steps === 1 ? "call" : "calls"}</span>
+        </p>
+      )}
+      {agent.state === "running" && agent.latest !== null && (
+        <p className="mt-2 text-2xs break-words text-faint">{agent.latest}</p>
+      )}
     </div>
   );
 });

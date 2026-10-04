@@ -14,490 +14,225 @@ paths:
 
 ## Surviving a restart
 
-**Nothing takes the message box off the screen, and a conversation you cannot
-type into does not exist in this app.** `Composer.tsx` has no early return;
-sending into an ended one revives it per the table below. What is gated is Send,
-never the box. Q7.103.
+- **The message box never leaves the screen.** `Composer.tsx` has no early return; Send
+  is gated, never the box; sending into an ended session revives it per the table. Q7.103.
+- **An agent that cannot authenticate is replaced.** `onAuthFailure` records it and calls
+  `restartAgent`, which stops with `config_changed` (a new `ExitReason` reads as
+  `showsAsEnded` on older clients). Armed once per prompt. Only the
+  `POST /agent-auth/:agent/logout` sweep writes `agent_signed_out`. What goes stale is
+  the process, not the credential. Q7.99, Q7.103.
+- **Stopped only when somebody stopped it.** Anything else the daemon ended comes back at
+  the next boot over ACP `session/resume` (restores context, replays nothing); cursor has
+  only `session/load`. Q2.1, Q2.106, Q2.248.
 
-**An agent that cannot authenticate is replaced, not buried.** `onAuthFailure`
-records the failure — `record` has already appended it, so it is in the transcript
-— and calls `restartAgent`, which stops with `config_changed` because it *is* "the
-daemon took the agent away and is bringing it straight back" and because a new
-`ExitReason` reads as `showsAsEnded` on every older client. **Armed once per
-prompt**: a credential that really has gone fails the fresh agent too, the second
-failure sits beside the first, and the person's next message drives the next
-attempt. `agent_signed_out` is now written by **one** call site, the explicit
-`POST /agent-auth/:agent/logout` sweep. Q7.99 measured why: what goes stale is the
-process, not the credential — a session idle 5h36m failed while its token had 1.4h
-left, and a fresh agent worked four minutes later. Q7.103.
+**Idle parking.** Quiet for `REEMOAT_IDLE_PARK_MINUTES`, a session is stopped `parked`:
+process released, all else kept. Not compiler-enforced:
 
-**A session reads as stopped only when somebody stopped it.** Everything else the
-daemon ended it brings back by itself, on the same conversation, at the next boot,
-over ACP's `session/resume` — which restores the agent's own context without
-replaying anything, and which five of the six agents advertise; cursor has only
-`session/load` (Q2.248). Q2.1, Q2.106. opencode's
-is read off `initialize` (Q6.105) rather than driven with a real login, which is
-the same standing this claim had for codex before it was exercised.
+- precondition: `status === "idle"` and no `/clear`, queued message or live background
+  work (Q2.228);
+- `parked` is not a `DAEMON_EXIT_REASON` (the boot pass leaves it) and has its own
+  `SessionStatus`, or `status`'s `default:` says `exited`;
+- the prune reads the wider `keepsItsConversation`;
+- only a message brings it back — an exclusion, as `canResume` passes on both clauses;
+- it draws as plain `idle`; Stop stays offered via an override (`stop()` memoises);
+- controls and `/` stay live: a tap is recorded for `doResume` (a wake only for cursor's
+  model, Q2.249); `revivableByPrompt` gates keeping it, `agent_state_json` and finished
+  background rows, for every such stop. Q2.224, Q2.229,
+  Q2.234.
 
-**A restart is no longer the only way an agent goes with nobody deciding.** A session
-quiet for `REEMOAT_IDLE_PARK_MINUTES` is stopped `parked`, its process released and
-all else it can keep; the next **message** brings one back. Four invariants, no
-compiler behind any: the precondition is `status === "idle"` plus what derivation
-cannot see — a `/clear`, a queued message, live background work (Q2.228); `parked` is
-**not** a `DAEMON_EXIT_REASON`, so the boot pass leaves it — and it therefore needs
-its own `SessionStatus`, or `status`'s `default:` answers `exited`; the prune reads
-the wider `keepsItsConversation`, since the narrow one made every parked row
-deletable; and **a message is the only way back**, an exclusion rather than an
-omission, `canResume` being satisfied by both its clauses. It draws as an ordinary `idle`
-session and says nothing — explicitly, since the fallthrough says `ended` — but
-**Stop stays offered**: `stop()` memoises, so without an override a person
-pressing it got `200` and no change. Its **controls and its `/` menu stay live**, so
-a tap is *recorded* and applied by `doResume` — a wake only for cursor's model (Q2.249). ⚠ **And not only a
-parked one**: `revivableByPrompt` gates the keeping, the tap and
-`agent_state_json`, so every such stop keeps both across a restart — and the
-finished background rows with them. Q2.224, Q2.229, Q2.234.
-
-**The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
-arm**, so adding a reason is a compile error rather than a silent `false`:
+**`autoResumable` is a `switch` over `ExitReason` with no `default` arm**:
 
 | reason | at boot | on a prompt |
 |---|---|---|
 | `daemon_shutdown`, `daemon_restarted`, `config_changed` | yes | yes |
-| `agent_exited`, **`stopped`**, **`agent_signed_out`**, **`parked`** | no | **yes** |
+| `agent_exited`, `stopped`, `agent_signed_out`, `parked` | no | yes |
 | `start_failed`, `start_timeout`, `agent_kill_failed` | no | no |
 
-⚠ `parked` is in that row for the opposite reason to the other three: theirs is that a
-prompt may overrule a decision; its `no` at boot is the load-bearing half.
+A prompt is the person asking now; a boot pass is nobody asking and has no recency
+fence, so it revives neither a long-crashed agent nor one that cannot authenticate.
+`parked`'s boot `no` is load-bearing. Unrevivable: no conversation yet (the
+`agentSessionId` guard answers anyway), or `agentConfirmedDead: false`. Q2.2, Q7.103.
 
-**Everything splits on the same rule: a prompt is a person asking for this
-conversation *now*, and a boot pass is nobody asking.** The boot pass has no
-recency fence — an agent that crashed on Tuesday would otherwise be handed a fresh
-process by Friday's deploy — and starting an agent that cannot authenticate at 4am
-is how a fleet spends a morning on it. Q2.2, Q7.103.
-
-⚠ **`stopped` and `agent_signed_out` were `no`/`no` and the middle row is a
-reversal.** Refusing a prompt was how the daemon avoided overruling a person — and
-a prompt is not the daemon deciding anything, it is that same person typing into
-the conversation again. What forced it is that the composer is unconditional now: a
-box whose only possible answer is `409 session_terminal` is worse than no box. The
-last row is what is genuinely unrevivable — the first two never had a conversation
-to return to (the `agentSessionId` guard answers them anyway), and
-`agent_kill_failed` carries `agentConfirmedDead: false`, so the old agent may still
-hold the conversation file.
-
-`status` derives through `endedWithDaemon`, so **`interrupted` means exactly "the
-daemon ended this and it is coming back"** and a client can render it without
-learning exit reasons. `doStop` keeps the caller's reason; `agentConfirmedDead:
-false` carries a failed SIGKILL *beside* the reason rather than instead of it.
-Q2.3.
-
-**The boot pass is `SessionRegistry.autoResume`, deliberately not part of
-`restore()`** — that must stay synchronous, so this is the async half, started with
-`void` after the listener is up and *outside* its callback, because `wait_healthy`
-polls `/health` for 30s and a boot behind two ACP handshakes reports a healthy
-daemon as a failed update. Most-recently-active first. Two at a time. Three
-attempts, full jitter 2s→60s. `supportsSessionResume` can only be asked *after* an
-agent has started, so one wasted spawn per agent binary is unavoidable and an agent
-that refuses once is not asked again in that pass. Q2.4. **No CLI costs no
-attempt** (`agent_missing`): the installer is nudged, the pass repeats after it,
-and passes queue, never overlap. Q4.114.
-
-**A launch identifies itself to its own callbacks.** `launch()` passes the launch
-promise to `onStarted(starting, session)` / `onStartFailed(starting, error)` and
-both return early when `this.startPromise !== launch`; `onStarted` **disposes** the
-session it declines, before assigning `this.session`. `startPromise` is written in
-exactly two places (`launch`, `armForStart`), which is what makes the identity the
-launch — code that reassigns it without meaning to supersede has its agent disposed
-rather than adopted. Q2.40.
-
-**The workspace is probed before the spawn, with three answers.** `false` means the
-worktree is gone: settled, costs no attempt, never retried. `null` means a mount did
-not answer, which is neither — spending the budget on it abandons work over a
-sleeping NAS, and treating it as present parks an agent in an uninterruptible
-kernel wait. Q2.5.
-
-**Retry state is in memory and resets on every restart, with one exception.** A
-restart is *new information*, and refusing to try would make the deploy that fixes
-the bug fix nothing. The exception is **`resourceNotFound` (-32002) on a resume** —
-`SessionForgottenError`, persisted in `sessions.resume_gave_up`: a fact about the
-*agent's* disk, costing no retry budget and gating both automatic paths. The caveat
-is written at the constant — `claude-agent-acp` maps *two* SDK failures onto this
-code and one is a transport hiccup, so a recoverable session can be stranded and the
-way back is one manual `resume`, until the startup prune takes the row (Q2.222). Q2.6.
-
-⚠ **Q2.7 says `/clear` breaks resume and reads as current; it describes the daemon
-*forwarding* the command, which `clearContext` no longer does.** It performs the
-clear itself and stores the id `session/new` handed back, so the stored id names the
-live conversation rather than a fork's parent. Rows written before that still carry
-a forked id and are what `resume_gave_up` is for. Q2.7 is stale, not re-measured.
-
-**A clear is exclusive, and `clearing` is the marker that says so.** A `/clear` is a
-`session/new` followed by a `session/close` — ~600ms to 15s in which the session
-holds **no turn**, so every guard written as `this.turn !== null` waves everything
-through. Five methods talk to the agent and all five test the marker: `prompt` and
-`clearContext` answer `busy` → `409 turn_in_flight`, and `setConfigOption`,
-`setMode` and `cancelTurn` answer `busy` too → `409 session_busy`. `cancelTurn`
-tests the marker **before** it tests `turn`, because a clear holds no turn and the
-other order answers `no_turn` — "nothing is running, you have what you asked for" —
-about a session mid-ACP-round-trip. The marker is deliberately **not** a turn, so
-`status` still reads `idle` beside the 409; `daemoncheck` pins that pair because it
-looks like a bug. Q2.39.
-
-**A cleared conversation the agent never wrote down is opened, not resumed.** claude
-writes its transcript lazily with the first turn, so a restart landing between a
-clear and the next message finds an id naming nothing on disk. Gated on
-`conversationKnownEmpty`, which has **two arms that do not subsume each other**:
-`turnCounter === 0`, or the tail of the log holding a `context_cleared` with no
-`prompt` after it — because `clearContext` moves the id and leaves the counter
-alone. The log arm walks the window and lets whichever came **last** decide. Q2.9.
-
-**kimi will not resume a session left in plan mode while `fs` is declared.**
-`session/resume` answers `-32603` when `clientCapabilities.fs` is declared and the
-session was left in `plan`. `Session.resume` retries **once** without file IO, via
-`LaunchOptions.fileIo`. Narrow twice over: only `-32603`, and only on resume. Q2.8.
-
-**Sending a message resumes first**, in `POST /sessions/:id/prompt` and not in
-`ManagedSession.prompt`, which is synchronous by contract. `resume()` is memoised
-like `stopping`, so two prompts join one launch instead of the second losing with
-`409 session_not_ready`; a failure falls through to `409 session_terminal`. Q2.11.
-
-**The interrupted turn is not re-run.** The agent comes back *idle*, holding
-everything that was said: it may have half-applied its edits and cannot tell how far
-it got. A pending approval is gone — it holds a live `resolve` closure that cannot
-be serialized. Q2.12.
-
-`REEMOAT_AUTO_RESUME=0` turns off both paths.
+- `status` derives through `endedWithDaemon`: `interrupted` means exactly "the daemon
+  ended this and it is coming back". `doStop` keeps the caller's reason. Q2.3.
+- **The boot pass is `SessionRegistry.autoResume`, never in `restore()`** (synchronous),
+  started with `void` after the listener and outside its callback (`wait_healthy` polls
+  `/health` for 30s). Most-recently-active first; numbers in `daemon-bounds.md`.
+  `supportsSessionResume` is known only after a start: one wasted spawn per binary, and
+  a refusing agent is not asked again that pass. Q2.4. No CLI (`agent_missing`) costs no
+  attempt; the installer is nudged, the pass repeats; passes queue. Q4.114.
+- **A launch identifies itself**: `launch()` hands its promise to
+  `onStarted(starting, session)`/`onStartFailed(starting, error)`, which return when
+  `this.startPromise !== launch`; `onStarted` disposes a declined session before
+  assigning `this.session`. Only `launch` and `armForStart` write `startPromise`. Q2.40.
+- **Workspace probe before spawn**: `false` (gone) settles, costs no attempt, never
+  retried; `null` (mount silent) is neither spent nor treated as present. Q2.5.
+- **Retry state is in memory; every restart resets it**, except `resourceNotFound`
+  (-32002) on resume: `SessionForgottenError`, persisted in `sessions.resume_gave_up`,
+  free, gating both automatic paths. It covers old forked ids and a transport hiccup
+  `claude-agent-acp` maps there too: one manual `resume` until the prune (Q2.222). Q2.6.
+- **Q2.7 is stale**: `clearContext` performs `/clear` and stores `session/new`'s id.
+- **`clearing` makes a clear exclusive** (`session/new` + `session/close`, ~600ms–15s, no
+  turn held). All five agent-facing methods test it: `prompt`, `clearContext` →
+  `409 turn_in_flight`; `setConfigOption`, `setMode`, `cancelTurn` → `409 session_busy`,
+  `cancelTurn` testing it before `turn`. `status` stays `idle` beside the 409
+  (`daemoncheck` pins it). Q2.39.
+- **A cleared conversation never written down is opened, not resumed.**
+  `conversationKnownEmpty`: `turnCounter === 0`, or the log tail holds a
+  `context_cleared` with no `prompt` after (last decides); neither arm subsumes the
+  other. Q2.9.
+- **kimi will not resume a session left in `plan` with `clientCapabilities.fs`
+  declared** (`-32603`): `Session.resume` retries once without file IO
+  (`LaunchOptions.fileIo`), only then. Q2.8.
+- **Sending resumes first**, in `POST /sessions/:id/prompt`, not `ManagedSession.prompt`
+  (synchronous). `resume()` is memoised like `stopping`: two prompts join one launch,
+  not `409 session_not_ready`; failure → `409 session_terminal`. Q2.11.
+- **The interrupted turn is not re-run**; a pending approval is gone (its `resolve`
+  closure cannot be serialized). Q2.12.
+- `REEMOAT_AUTO_RESUME=0` turns off both paths.
 
 ## Stopping a turn
 
-**Stopping the agent and stopping the session are two verbs, and the whole feature
-is that they are different.** `DELETE /sessions/:id` kills the process, writes an
-`exitRecord` and makes the session terminal; `POST /sessions/:id/cancel` sends one
-ACP notification and changes nothing else — the agent stays up, the conversation
-stays loaded, and the next message is an ordinary prompt rather than a resume. The
-word is **cancel** rather than interrupt throughout, because `interrupted` is
-already a session status meaning "the daemon ended this and it is coming back".
-Q2.42.
-
-**It asks, and nothing here can make an agent stop.** ACP defines cancellation as a
-notification, so `Session.cancelTurn` returns `void` — that is the promise being
-made — and whether the turn ended is a *separate* observation, `awaitTurnEnd`,
-reported as `settled` and bounded by `CANCEL_SETTLE_MS`. `settled: false` means "the
-agent had not finished by the time anybody stopped watching", never "it refused":
-the turn ends into the transcript whenever the agent gets there, with nobody
-attached. What forces is `stop`.
-
-**The order is send, then sweep, then watch, and the middle step is ACP's
-requirement rather than this daemon's tidiness.** A client that has cancelled MUST
-answer any pending `session/request_permission` with `cancelled` — and until it
-does, an agent parked on one is not executing anything that could notice the
-notification: the message sits in its pipe behind a reverse-RPC it is still waiting
-on. `daemoncheck` drives an agent that answers only once the client settles the
-permission, which is the shape that fails under either other order. Q2.42.
-
-**The sweep is `sweepPending("turn_cancelled")`, and the reason is its own member.**
-`session_stopped` says the session is over while this one is idle and still holding
-its conversation; `turn_ended` was what the *pump* wrote once the agent had
-answered, and the pump sweeps nothing now (Q2.232). It runs in a `finally`, so a send
-that throws on a pipe nobody is reading cannot leave the agent holding a promise
-this daemon will never settle, and it is fenced on the turn the call was about:
-`cancelTurn` can be in flight while that turn ends and a *new* prompt starts, whose
-parked permission this sweep would otherwise cancel.
-
-**Nothing new is written to the log.** The record is the agent's own
-`turn_end{stopReason: "cancelled"}` plus a `permission_resolved` for anything
-parked; a dedicated event would put a second row on screen for one act.
-`cancelRequestedAt` rides the **snapshot** instead and covers the one case the log
-cannot — an agent that has not answered yet. It is cleared where `turn` is, in
-`pump`'s `finally` and inside the same identity test, so the pair cannot disagree,
-and it is in memory rather than SQLite because after a restart there is no turn to
-have cancelled.
-
-**`no_turn` is a 200 carrying `cancelled: false`, not a 409.** Nothing was stopped
-and nothing is wrong, and the state is reachable by losing an ordinary race, where a
-red error makes the control look broken at the moment it got what it wanted. It is
-`no_turn` only with nothing left to stop: work nobody prompted, or a request parked
-with no turn, gets the same send, sweep, watch and `turn: null` (Q2.232, Q2.233).
-`terminal` and `not_ready` stay 409s, because those say something the caller does
-not know: there is no agent at all. A cancel beside an in-flight `/clear` is `409
-session_busy`.
-
-**A cancel that arrives before the prompt does is honoured rather than overtaken.**
-`prompt()` sets `turn` synchronously, but `Session.turnActive` is not set until
-`pump` first pulls the generator — and reading an inlined image's bytes is a real
-`readFile` between the two. So `pump` tests the marker after the read and writes its
-own `turn_end{cancelled}`, because the agent never gets to send one and a prompt
-with no turn end at all is a message that reached no model. Q2.103.
+- **Two verbs.** `DELETE /sessions/:id` kills, writes `exitRecord`, terminal.
+  `POST /sessions/:id/cancel` sends one ACP notification, nothing else. Say **cancel**,
+  never interrupt. Q2.42.
+- **It asks.** `Session.cancelTurn` returns `void`; `awaitTurnEnd` reports `settled`
+  within `CANCEL_SETTLE_MS`; `false` never means "refused". `stop` forces.
+- **Send, sweep, watch**: ACP makes a cancelling client answer pending
+  `session/request_permission` with `cancelled`, and a parked agent sees nothing till
+  then; `daemoncheck` drives that shape. Q2.42.
+- **`sweepPending("turn_cancelled")`**, its own reason (not `session_stopped`), runs in a
+  `finally`, fenced on the turn the call was about. The pump sweeps nothing (Q2.232).
+- **Nothing new is logged**: the agent's `turn_end{stopReason: "cancelled"}` plus
+  `permission_resolved`. `cancelRequestedAt` rides the snapshot, cleared where `turn` is
+  (`pump`'s `finally`, same identity test), memory only.
+- **`no_turn` is a 200 with `cancelled: false`.** Unprompted work or a parked request
+  without a turn gets send/sweep/watch and `turn: null` (`mid-turn-messages.md`; Q2.232,
+  Q2.233). `terminal`, `not_ready` stay 409; beside a `/clear`, `409 session_busy`.
+- **A cancel before the prompt wins**: `turn` is set synchronously, `Session.turnActive`
+  at `pump`'s first pull (after an image `readFile`), so `pump` re-tests and writes its
+  own `turn_end{cancelled}`. Q2.103.
 
 ## After the turn ends
 
-**A session pinned to a system is offered that system's models and no others.**
-opencode is the native side of *two* systems and publishes **one** model control
-holding both catalogues, so an OpenRouter session's own picker carried six
-OpenCode Zen rows at the bottom — and choosing one leaves the session running a
-model its preset does not name, with the chip, the tile and the glyph all still
-saying OpenRouter. `narrowToSystem` filters the **snapshot's** model choices to
-`modelNamespace`, which comes from `assembled` and therefore from the *pairing*
-rather than from whatever model is selected right now: deriving it from the
-current value would trap a session already switched to the wrong system into being
-offered only that one. ⚠ **The selected choice is never removed**, whatever
-namespace it is in — a list missing the value the control is set to makes the chip
-fall back to a raw id and makes `pinNativeModel` refuse the next resume. The
-**log** keeps what the agent said; only the snapshot narrows. Q2.219.
-
-**A turn that ends in an error still ends, and for four releases it did not say
-so.** `Session.prompt` turns a rejected `session/prompt` into an `error` event and
-returns on it exactly as it returns on a `turn_end` — so the turn was over and
-nothing marked the boundary: four prompts, three `turn_end`s, in a log anybody
-could read. `pump` writes one now, `stopReason: "agent_error"`, which is
-`TurnStopReason` widening ACP's closed five (`refusal` is the *model* declining and
-`cancelled` is something a person did — either would be a lie in the row a reader
-trusts). The argument is Q2.103's, made for the cancel path and applying word for
-word. ⚠ **Not every `error` is one**: the turn generator yields `CLOSED` when the
-queue closes under it, which is this daemon disposing the agent, so the predicate
-is `isSessionClosed` by **identity** — blaming the agent for our own teardown is
-the failure the exported guard exists to prevent. What it cost while missing:
-`Tail.taskFloor` counted a failed turn's delegations for ever, the `turn.ended`
-plugin hook never fanned, and the turn's origin claim was never spent, so the
-plugin that started it had the *next* turn's hook suppressed instead. Q2.218.
-
-**A turn nobody answers ends anyway.** `running` is `turn !== null`, and `turn` is
-cleared only by a `turn_end` the unbounded `session/prompt` produces — so an adapter
-that stops answering pinned a session at *working* for the daemon's life, invisible
-to `cancel` and to every sweep. `wedged` decides, `abandonWedgedTurns` runs on
-`idlepark.ts`'s clock, `Session.abandonTurn` writes `turn_end{abandoned}`
-**locally**: the agent is not stopped, not told, and what it says later still lands
-through the drain. ⚠ Three traps, all of them easy to leave out and each a worse bug
-than the one fixed: `turnActive` must be cleared by hand or every later message
-throws *"already in flight"*; the outstanding request's callbacks must be fenced on
-`promptEpoch` or a late answer ends the turn running by then; and
-`withAbandonableDeadline` may not be used — it reclaims nothing from a silent peer
-and `session/prompt` is the one method whose `ctx.signal` an adapter honours, so it
-would abort the agent's work. Q2.231.
-
-**The turn ending is not the agent stopping.** `session/prompt` resolves while claude
-drives work it has spawned and `Session.prompt`'s generator returns on `turn_end`, so
-everything the agent emits afterwards goes into an `EventQueue` with no consumer —
-neither delivered nor, past `MAX_BUFFERED_EVENTS`, kept.
-`ManagedSession.startIdleDrain` is what reads it between turns; `Session` does not
-wire this up, which is what keeps a bare `Session` — and therefore `harness` — a
-regression test for the untouched default paths. Q2.44.
-
-**Ownership of the queue is checked rather than assumed.** A claim is a monotonic
-number: taking one wakes the previous holder with `null`, and `next()` answers `null`
-for a claim that is no longer current, so a reader already resumed cannot take one
-more event on its way out. A turn outranks a drain (`claimForIdle` refuses while a
-turn holds it) and nothing displaces a turn (`claimForTurn` refuses rather than
-displacing). `release` is identity-checked. Q2.102.
-
-**The claim is taken before the RPC is fired**, with no await between, which is what
-makes "a turn's own `turn_end` can never reach the drain" a property of the ordering
-rather than a hope.
-
-**`agent_log` and `other` are dropped out of turn, and that is today's behaviour
-preserved rather than a new loss** — they are exactly what the queue evicted first.
-Recording them would put an unbounded stderr stream into a per-session log that is
-deliberately `Infinity`/`Infinity`, make `REEMOAT_LOG_EVENTS` actively harmful, charge
-against the tab's 16 MiB ceiling and bury a reattaching phone behind
-`ATTACH_REPLAY_MAX`. Neither is drawn anywhere, and the last 20 stderr lines are
-already on `Session.recentLogs()`. ⚠ Dropped from the log, **not from the
-clock**: both move `lastEventAt`, the only defence agents that cannot report
-background work have. Q2.44, Q2.228.
-
-**What is deliberately not done.** No `SessionStatus` member is added: a clock in
-`status` would break *"Status is derived, never stored"*. ⚠ Its second argument —
-*"a new member falls silently through `statusTone`'s `default`"* — is **spent**:
-`parked` was added anyway (Q2.224) and forced the mirror, partition and tone
-assertions that make it false. The turn is **not** held open — that would make
-`canCancelTurn` true for a turn that has ended and answer `409 busy` for ever.
-⚠ **The rest of what this refused is done now, on a state rather than a clock**
-(Q2.233): claude marks where each cycle ends, so its work between turns is
-`unpromptedSince`, `status` reads `running` over it and `showsWorking` is widened to
-it — which no longer takes Send away, a daemon sending the field being one that takes
-a message mid-work. `mid-turn-messages.md` has the rest.
-
-**What says so on screen is `outstandingTasks`**, drawn at the transcript's foot from
-the tail rather than the snapshot, since the delegations outlive the turn. `pending` counts, because a Task spawn sits there for 13–14s
-and reaches `completed` without ever being `in_progress`; `mayStillReport` excludes
-terminal and `stopping`, the two states where a spawn can never complete.
-⚠ **Shell, workflow and monitor work is on the wire now** — three `async_task_*`
-variants behind a declared `_meta.jetbrains.air` capability, held on the snapshot,
-and what `parkable` refuses to release an agent over. The published SDK rejects all
-three at two parse sites, so `splitAsyncTaskUpdates` takes them off the byte
-stream below it and forwards the rest untouched. **A backgrounded
-subagent is still invisible**, which was the measured case: the adapter marks it
-`ignored`, the spawn reaches `completed` **at launch** and no later event ever
-names it. So `outstandingTasks` still reads 0 for that, and every margin bought
-for it stays. Q7.113, Q2.228.
-
-**A task list belongs to the conversation, not to the process.** Ultracode on or
-off, a credential restart, a park and a clean daemon restart each replace the
-agent, and the new one knows nothing of the old one's work. So
-`doStop` keeps the rows as `earlierTasks` on the `revivableByPrompt` gate, with
-anything still live marked `stopped` — its agent is gone, and a row left
-`running` would refuse parking for ever — and `applyBackgroundTasks` merges the
-live agent's list over them. A `/clear` or a stop nothing revives drops them.
-Only finished rows are written, and only at such a stop — a live session's row
-carries none — so a crash loses them. Q2.234.
+- **A system-pinned session is offered its system's models only**: `narrowToSystem`
+  filters snapshot choices to `modelNamespace`, from `assembled`, never the current
+  selection. The selected choice is never removed (else a raw-id chip and
+  `pinNativeModel` refusing resume). Q2.219.
+- **An error ends the turn**: `pump` writes `turn_end{stopReason: "agent_error"}`
+  (`TurnStopReason` widens ACP's five) — not on `CLOSED`, our own dispose
+  (`isSessionClosed`, by identity). `Tail.taskFloor`, the `turn.ended` hook and the
+  origin claim need it. Q2.218, Q2.103.
+- **A turn nobody answers ends anyway** (`running` is `turn !== null`). `wedged`
+  decides, `abandonWedgedTurns` runs on `idlepark.ts`'s clock, `Session.abandonTurn`
+  writes `turn_end{abandoned}` locally; the agent is not stopped or told. Traps: clear `turnActive` by hand (else *"already in
+  flight"*); fence the request's callbacks on `promptEpoch`; never
+  `withAbandonableDeadline` (an adapter honours `session/prompt`'s `ctx.signal`, so it
+  aborts the work). Q2.231.
+- **After `turn_end`** events go to an unconsumed `EventQueue` (lost past
+  `MAX_BUFFERED_EVENTS`); `ManagedSession.startIdleDrain` reads them. `Session` does
+  not, so bare `Session`/`harness` stays a regression test. Q2.44.
+- **Queue claims are monotonic**: a new claim wakes the old holder with `null`, `next()`
+  answers `null` to a stale one, `claimForIdle` refuses under a turn, `claimForTurn`
+  never displaces, `release` is identity-checked. Claimed before the RPC fires, no await
+  between. Q2.102.
+- **Out of turn, `agent_log`/`other` leave the log** (last 20 stderr lines on
+  `Session.recentLogs()`) but still move `lastEventAt`. Q2.44, Q2.228.
+- **Not done**: no `SessionStatus` clock; the turn is never held open (`canCancelTurn`
+  would stay true, `409 busy` for ever). `unpromptedSince`: `mid-turn-messages.md`.
+- **`outstandingTasks`** (transcript foot, from the tail) counts `pending` (a spawn
+  skips `in_progress`); `mayStillReport` excludes terminal and `stopping`. Shell,
+  workflow and monitor work: three `async_task_*` variants behind `_meta.jetbrains.air`,
+  on the snapshot, refused by `parkable`, lifted off the byte stream below the SDK by
+  `splitAsyncTaskUpdates`. A backgrounded subagent stays invisible (`ignored`,
+  `completed` at launch). Q7.113, Q2.228.
+- **A task list belongs to the conversation**: `doStop` keeps rows as `earlierTasks` on
+  the `revivableByPrompt` gate, live ones marked `stopped`; `applyBackgroundTasks`
+  merges the live list over them. A `/clear` or unrevivable stop drops them. Finished
+  rows only, written only at such a stop; a crash loses them. Q2.234.
 
 ## Invariants
 
 **The log**
 
-- **A session's log is never truncated.** `DEFAULT_MAX_EVENTS` and
-  `DEFAULT_MAX_BYTES` are `Infinity`. **There is no number that makes prefix
-  eviction acceptable** — the part that says what the work *is* is at the top, and
-  the top is what a prefix takes first. `REEMOAT_LOG_EVENTS`/`REEMOAT_LOG_BYTES`
-  still bound it for an operator who wants that, and `daemoncheck` drives eviction
-  with `maxEventsPerSession: 8` so the path stays exercised. Two bounds survive and
-  neither is this one: `truncateEvent` shortens a single oversized event *visibly*,
-  and `prune` removes a session **entire** — kept whole or not at all, never
-  trimmed to a suffix. Q5.46.
-- **The *attach* is bounded where the history is not.** `ATTACH_REPLAY_MAX` replays
-  the newest 2000 and sends `lagged{reason: "backlog"}`, the one lagged reason that
-  is **not** a loss — a client must never draw it as a hole. **2000 is under the
-  *event* bound only** and the byte bound bites first, so `emit`/`enqueue` take a
-  `replaying` flag and `collapse` takes the reason as an argument: an overflow during
-  the attach's own synchronous drain reports `backlog` too, and is not recorded in
-  the window that closes the socket `4003`. `slow_consumer` there is a lie about a
-  client whose first `send` callback has not run, and `gapPlan` files it as a
-  permanent hole. Q5.48.
-- **The emit path never awaits.** `SessionLog.append` and `EventStore` are
-  synchronous; that path runs inside the agent's RPC handler, and a connection's
-  listener is a synchronous array push. **`EventStore` stays synchronous, `read`
-  included** — Node's SQLite bindings are synchronous, so async buys nothing and
-  costs the correctness argument above. An async store goes behind a write-behind
-  buffer.
-- **Fan-out guards every listener.** `append` wraps each call in `try/catch` and
-  evicts the thrower; unguarded, one broken connection makes every *later* listener
-  silently miss that seq.
-- **The store cannot append to itself.** `SessionLog.append` fans out only what its
-  own `store.append` returned. Degradation is reported through the placeholder and
-  `onDegraded`, never by logging an extra event.
-- **A failed insert becomes a placeholder at the same seq, never a hole.** `read` is
-  `WHERE seq > ?` and `lagged` derives from `firstSeq`/`lastSeq`, so a gap in the
-  *middle* is invisible on the wire. The placeholder is also what `append` returns —
-  a live client holding the real text at seq 412 while a reconnecting one gets a
-  placeholder makes the two disagree about what 412 *is*, undetectably.
-- **`lastSeq`/`dropped` are floors on the session row, raised at load.** Otherwise a
-  session whose events were pruned restarts at seq 1 and a resuming client receives
-  *different events under numbers it has already seen*.
-- **`gap` is derived from `oldestAvailable()`, never `firstSeq` alone.** `firstSeq`
-  is 0 when the table holds no row, so `since < firstSeq - 1` is false for every
-  cursor on the one path where *everything* was lost.
-  `count > 0 ? firstSeq : lastSeq + 1` is the only honest form, and both `attach` and
-  `GET /sessions/:id/events` must use it or they disagree.
-- **Size accounting is null-safe on `FileChangeEvent.oldText`.** It is `null` for
-  every file the agent *creates* — the common case.
+- **Never truncated**: `DEFAULT_MAX_EVENTS`/`DEFAULT_MAX_BYTES` are `Infinity`.
+  `REEMOAT_LOG_EVENTS`/`REEMOAT_LOG_BYTES` bound it for an operator; `daemoncheck`
+  drives eviction at `maxEventsPerSession: 8`. `truncateEvent` shortens one event
+  visibly; `prune` removes a session whole. Q5.46.
+- **The attach is bounded**: `ATTACH_REPLAY_MAX` replays the newest 2000 and sends
+  `lagged{reason: "backlog"}`, never a loss nor drawn as a hole. Bytes bite first, so
+  `emit`/`enqueue` take `replaying` and `collapse` takes the reason: overflow in the
+  attach's drain reports `backlog`, not counted toward the `4003` close (`gapPlan` would
+  file `slow_consumer` as a hole). Q5.48.
+- **The emit path never awaits.** `SessionLog.append` and `EventStore`, `read` included,
+  stay synchronous; an async store goes behind a write-behind buffer.
+- **Fan-out guards every listener** (`try/catch`, evict the thrower), and fans out only
+  what `store.append` returned; degradation goes via the placeholder and `onDegraded`.
+- **A failed insert is a placeholder at the same seq**, returned by `append`
+  (`WHERE seq > ?` hides a middle gap).
+- **`lastSeq`/`dropped` are floors on the session row, raised at load.**
+- **`gap` derives from `oldestAvailable()`**: `count > 0 ? firstSeq : lastSeq + 1`, in
+  both `attach` and `GET /sessions/:id/events`; `firstSeq` is 0 when empty.
+- **Size accounting is null-safe on `FileChangeEvent.oldText`** (`null` on create).
 
 **Permissions and the registry**
 
-- **A request is settled by an answer, a cancel, the agent withdrawing it or the
-  agent going — never by a turn boundary, never by a timer.** claude asks between
-  turns, and refusing that (`no_turn`) or sweeping at a turn's end (`turn_ended`)
-  cancelled questions nobody had seen. Both stay in `AnswerResolvedBy` for the logs
-  that hold them and are written by nothing. Q2.232. ⚠ An `ask_question` outlives its agent (Q2.250).
-- **`settle()` resolves the agent before it logs.** Order: `pending.delete` (the
-  compare-and-swap) → record in `resolved` → **resolve the agent's promise** →
-  append → fan out. Appending first means a throw leaves the permission recorded as
-  answered while the reverse-RPC is never answered — a permanent hang that also
-  switches off `status: "blocked"`, the one signal that would reveal it. Q5.54.
-- **The permission promise executor holds exactly one statement**, the resolve
-  capture. A throw inside an executor rejects the promise, answering the agent with
-  an error while leaving the entry in `pending` — `blocked` for ever on something
-  already refused.
-- **The registry appends permission events, not `session.ts`.** `settle()` appends
-  **synchronously**, in the statement after the agent's own promise is resolved, so
-  routing a `permission_request` through the queue would put a microtask between the
-  two and a client answering inside it could beat its own request into the log.
-  Q2.105.
-- **Status is derived, never stored.** `ManagedSession.status` is computed on every
-  read, so it cannot drift from the pending map. `snapshot()` returns a frozen plain
-  object with copied arrays — a frame built now and serialized later must describe
-  now.
-- **`create` refuses a harness that just would not start, *before* `createWorkspace`.**
-  The same fence the `available` check above it already carries, on the axis it did
-  not cover: an `auth_required` at `session/new` lands after the spawn, so the
-  worktree, the branch and the session row are all made first — the growth inside
-  somebody's own repository that check exists to stop. It fires for a bare or native
-  start always, and for a routed one only when the remembered refusal was itself
-  measured while routed, since `applySystem` runs first and a bare refusal has told
-  nobody anything about a start on another system's key. A plain `Error` carrying the
-  recorded message, so it lands on the same `agent_auth_required` arm the first press
-  did. Q2.221.
-- **`doStop` uses `exitRecord ??=`.** Stopping a restored session must not rewrite
-  `daemon_restarted` as `stopped`.
-- **Orphan reaping is fenced by `os.uptime()`.** Pids wrap and a reboot resets them,
-  so an older row names a number that now belongs to somebody else.
-- **A liveness probe has three answers, not two.** `"alive" | "dead" | "unknown"` —
-  `process.kill(pid, 0)` throws `EPERM` as readily as `ESRCH`, and they mean opposite
-  things. Anything not `"dead"` is still worth signalling; a boolean `isAlive` makes
-  the third answer unreachable *below* the type, which the reaper reaches whenever a
-  recorded pid has been recycled.
-- **A path probe has three answers**, and the third is not a placeholder.
-  `probeExists` returns `true | false | null`; `removeWorkspace` **refuses to `rm` on
-  `null`**, because the one `rmSync` here must never run against a path we could not
-  even stat. `409 workspace_missing` vs `503 workspace_unresponsive`.
-- **Agents spawn `detached` and are killed by process group.** `claude-agent-acp`
-  runs the CLI as its own child and cleans up only via `process.on("exit")`, which
-  does not run under SIGKILL. This applies to the **login pty** as well.
-- **Every RPC that writes to agent stdin is bounded.** The SDK puts no timeout on
-  those writes, and in `doDispose` they sit upstream of `client.close()`, the only
-  code that ever sends SIGTERM/SIGKILL.
-- **An agent handle is a union whose second arm is read-only legacy.** Kept as a
-  union rather than flattened to `number` because `toHandle` must answer **no handle
-  at all**, which is different from "pid 0". The reaper reports a container handle as
-  one it will not signal.
-- **Resume is `session/resume` wherever it exists; `session/load` only where it does
-  not.** Load replays the history we already hold, and it is safe only because the
-  replay precedes its answer while `adopt` registers after it — so the router drops
-  it. An agent that sent a frame after answering would break that. Q5.85, Q2.248.
+- **A request is settled by an answer, a cancel, the agent withdrawing it or the agent
+  going — never a turn boundary or a timer.** `no_turn`/`turn_ended` stay in
+  `AnswerResolvedBy` for old logs. An `ask_question` outlives its agent. Q2.232, Q2.250.
+- **`settle()` resolves the agent before logging**: `pending.delete` (the CAS) →
+  `resolved` → resolve the agent's promise → append → fan out; else a throw hangs the
+  agent and switches off `status: "blocked"`. Q5.54.
+- **The permission promise executor holds one statement**, the resolve capture (a throw
+  leaves the entry `blocked`).
+- **The registry appends permission events**: a `permission_request` through the queue
+  lets a client's answer beat its request into the log. Q2.105.
+- **Status is derived**: `ManagedSession.status` per read; `snapshot()` is frozen, arrays
+  copied.
+- **`create` refuses a harness that just would not start, before `createWorkspace`**
+  (the `available` fence; `auth_required` lands after worktree, branch and row). Always
+  bare or native; routed only if the refusal was measured routed (`applySystem` runs
+  first). A plain `Error`, on the `agent_auth_required` arm. Q2.221.
+- **`doStop` uses `exitRecord ??=`** (a restored session keeps `daemon_restarted`).
+- **Orphan reaping is fenced by `os.uptime()`** (pids wrap, reboots reset).
+- **Liveness is `"alive" | "dead" | "unknown"`**, never a boolean `isAlive`:
+  `process.kill(pid, 0)` throws `EPERM` and `ESRCH`. Not `"dead"` is still signalled.
+- **A path probe is `true | false | null`** (`probeExists`); `removeWorkspace` never runs
+  the one `rmSync` on `null`. `409 workspace_missing` / `503 workspace_unresponsive`.
+- **Agents spawn `detached`, die by process group** (`claude-agent-acp` cleans up only on
+  `process.on("exit")`); a crashed daemon strands them for the reaper. The login pty too.
+- **Every RPC writing agent stdin is bounded**: in `doDispose` they precede
+  `client.close()`, the only SIGTERM/SIGKILL.
+- **An agent handle is a union, second arm read-only legacy**; `toHandle` can answer no
+  handle (not pid 0). A container handle is never signalled.
+- **`session/resume` where it exists, else `session/load`**, safe only because the replay
+  precedes the answer and `adopt` registers after. Q5.85, Q2.248.
 
 ## Layout
 
-| File | Holds |
-|---|---|
-| `src/events.ts` | The `SessionEvent` union (the wire vocabulary), `SessionWorkspace`, `StoredEvent`, `EventStore`, `SessionStore`, `MemoryEventStore`, `SessionLog`, size accounting |
-| `src/store/schema.sql` | Tables for sessions, events, agent credentials, the single-row daemon lock. v4: the agent handle is four columns. v5: `title`/`pinned`. v6: `forge_accounts` dropped, `agent_credentials` rekeyed, `owner_subject` left dead. `peer_messages_off` is `migrate()`'s alone |
-| `src/store/sqlite.ts` | `openStores`, `SqliteEventStore`, `SqliteSessionStore`, `SqliteAgentCredentialStore` — durability behind the same synchronous interfaces |
-| `src/session.ts` | One ACP session: spawn, prompt, cancel a turn, normalized events, clean shutdown |
-| `src/registry.ts` | Session lifecycle, derived status, the permission state machine, the turn pump and how a turn is stopped |
-| `scripts/daemon.ts` | Entry point: env, signals, logging |
-| `src/agentupdate.ts` | Runs `deploy/agents.sh` five minutes after start, then daily; drops the cached CLI choice after; nudged when a resume finds no CLI. `REEMOAT_AGENT_UPDATES=off` arms nothing |
-| `src/idlepark.ts` | The idle sweep: a clock and nothing else. Which sessions may be released is `ManagedSession.parkable`, in what order is `parkIdleSessions`. `REEMOAT_IDLE_PARK_MINUTES=0` arms nothing |
-| `scripts/harness.ts` | Pre-daemon CLI that drives `Session` directly. Keep it working: the regression test for the untouched default paths |
-| `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state. The runner only — the assertions are in the twenty `daemoncheck.<subject>.ts` beside it, and what they share is in `daemoncheck.env`/`.fixtures`/`.bodies` |
-
-## Bounds
-
-Every number this daemon holds — the log, the prune, the live ceiling, the idle
-sweep, the timeouts, a silent turn — is `daemon-bounds.md`, which arrives on the
-same globs as this file. It is a file of its own because this one reached
-`MAX_RULE_CHARS`, and that constant's docblock says what to do about it.
+`src/events.ts`: `SessionEvent`, `SessionWorkspace`, `StoredEvent`, `EventStore`,
+`SessionStore`, `MemoryEventStore`, `SessionLog`, size accounting. `src/store/schema.sql`
+(handle in four columns, `agent_credentials` rekeyed, `owner_subject` dead;
+`peer_messages_off` only in `migrate()`). `src/store/sqlite.ts`: `openStores`,
+`SqliteEventStore`, `SqliteSessionStore`, `SqliteAgentCredentialStore`. `src/agentupdate.ts` runs
+`deploy/agents.sh` five minutes after start, daily, and when a resume finds no CLI
+(`REEMOAT_AGENT_UPDATES=off`). `src/idlepark.ts` is the clock only (which:
+`ManagedSession.parkable`; order: `parkIdleSessions`; `REEMOAT_IDLE_PARK_MINUTES=0` arms
+nothing). `scripts/daemoncheck.ts` is the runner; assertions in
+`daemoncheck.<subject>.ts`.
 
 ## Known gotchas
 
-- **A crashed daemon *does* strand its agents.** A `detached` child survives its
-  parent, which is what the reap path and the `os.uptime()` fence are for.
-- **`pkill -f "tsx scripts/daemon.ts"` matches nothing.** The real command line is
-  `…/tsx/dist/cli.mjs scripts/daemon.ts`, so that pattern kills no daemon and the next
-  one refuses to start on the database lock. Kill by pid.
-- **`DEFAULT_PORT` and the client's `REEMOAT_URL` fallback are both 7887**, not 7777.
-- **The slow-consumer collapse path is untested on the daemon side** — producing it
-  needs real TCP backpressure. The eviction path is verified, and `webcheck` covers the
-  client's half: a 4003 close backs off and does **not** mark the machine unreachable.
-- **`@hono/node-ws` peers on `@hono/node-server` ^1.x**, not 2.x.
-- **`ADD COLUMN ... NOT NULL` needs a `DEFAULT`, and `owner_subject` deliberately has
-  none.** `pinned` has `DEFAULT 0`, which is also the honest value; for an owner there
-  is no honest default, so that column is nullable.
-- **Adding a column to `sessions` needs `migrate()`, not `schema.sql`** — that file is
-  re-applied on every open and is all `CREATE ... IF NOT EXISTS`, idempotent for whole
-  tables and useless for a new column. `migrate()` decides from `PRAGMA table_info`.
-  New *tables* need nothing.
-- **`node:sqlite` needs `--experimental-sqlite` on Node 22**, which is why `engines` is
-  `>=24`.
-- **Two daemons on one database file** is refused by the single-row `daemon` table,
-  checked before restore — otherwise each would reap the other's agents. Two on one
-  *account* are ordinary: one per state root (`REEMOAT_HOME`), which is how the
-  desktop app runs one per account it holds — Q7.148, Q7.149.
-- **The daemon crashes with a raw `EADDRINUSE` stack** if the port is taken. Not fixed.
+- `pkill -f "tsx scripts/daemon.ts"` matches nothing; the command line is
+  `…/tsx/dist/cli.mjs scripts/daemon.ts`. Kill by pid, or the lock refuses the next.
+- `DEFAULT_PORT` and the `REEMOAT_URL` fallback are 7887.
+- The slow-consumer collapse is untested daemon-side; `webcheck` pins that a 4003 backs
+  off without marking the machine unreachable.
+- `@hono/node-ws` peers on `@hono/node-server` ^1.x.
+- `ADD COLUMN ... NOT NULL` needs a `DEFAULT`; `owner_subject` has no honest one, so is
+  nullable.
+- A new `sessions` column needs `migrate()` (`PRAGMA table_info`), not `schema.sql`.
+- `node:sqlite` needs `--experimental-sqlite` on Node 22, hence `engines` `>=24`.
+- Two daemons on one database: refused by the single-row `daemon` table before restore.
+  One per `REEMOAT_HOME` is fine. Q7.148, Q7.149.
+- A taken port crashes with a raw `EADDRINUSE` stack. Not fixed.

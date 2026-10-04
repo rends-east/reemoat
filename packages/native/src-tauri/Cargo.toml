@@ -6,14 +6,7 @@ description = "The Reemoat native shell."
 license = "AGPL-3.0-only"
 publish = false
 
-# **Inert, and asserted inert by `pnpm nativecheck`.**
-#
-# This release is written down in six places and `tauri.conf.json` names a *path*
-# to the root manifest rather than a number, so this crate adds no seventh. Cargo
-# requires the field to exist, so it exists and says nothing: a bump here in
-# sympathy with a release would create exactly the site that was avoided, which is
-# why `nativecheck` asserts both that it is `0.0.0` and that it differs from the
-# version the root manifest carries.
+# Inert: the release lives in the root manifest, and `nativecheck` asserts this stays 0.0.0.
 version = "0.0.0"
 
 [lib]
@@ -28,32 +21,13 @@ tauri = { version = "2.11.5", features = [] }
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-dialog = "2.7.3"
 tauri-plugin-clipboard-manager = "2.3.3"
-# host_save_file's writer: Android's save panel answers a content:// URI, which only
-# the platform's ContentResolver can open. Already in the tree under the dialog plugin.
+# host_save_file's writer: Android's save panel answers a content:// URI only ContentResolver opens.
 tauri-plugin-fs = "2.5.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 url = "2.5.8"
-# `default-tls` means the **operating system's** trust store, and that is the
-# right default here rather than a bundled root set: a self-hosted control plane
-# behind a private CA is an ordinary deployment for this software, and with
-# webpki roots alone it would be refused here while the same URL worked in a
-# browser — a failure that reads as the server being down.
-#
-# ⚠ **It is not native-tls, and this line said it was.** In `reqwest` 0.13 the
-# feature is literally `default-tls = ["rustls"]` and `rustls` pulls
-# `dep:rustls-platform-verifier` — read out of the published manifest rather than
-# inferred — so the OS store is reached by *that* crate on every platform:
-# Security.framework on macOS, CryptoAPI on Windows, the system CA bundle through
-# `rustls-native-certs` on Linux, and Android's own `X509TrustManager` over JNI.
-# The conclusion survived the correction; one consequence did not, and it is the
-# reason this was worth chasing. That crate is the only backend here that **has
-# to be initialised by hand**, and nothing in the tree does it for you — the
-# Android dependency block at the end of this file and `credential.rs`'s JNI
-# export are the two halves of the repair.
-#
-# `gzip` because `gzipResponses` is the first middleware in both services and
-# answers gzip over 8 KiB. No `json`: this client carries a body it never parses.
+# `default-tls` is rustls with `rustls-platform-verifier`, the OS trust store on every platform, so a
+# private CA works; on Android it must be initialised by hand (`credential.rs`). `gzip`: both services gzip over 8 KiB.
 reqwest = { version = "0.13.5", default-features = false, features = [
   "default-tls",
   "charset",
@@ -66,134 +40,44 @@ getrandom = "0.3"
 base64 = "0.22"
 
 [features]
-# Consumed by `tauri build` to switch the asset protocol on. Nothing else reads it.
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
-# Every `[target.…]` table sits below `[dependencies]`: `tauri build` rewrites tauri's
-# features in the first dependency table it meets, and across target tables it pools
-# them, which wrote macOS's `unstable` into Windows' line (tauri-cli 2.11.4, Q3.697).
+# Every `[target.…]` table sits below `[dependencies]` and at the end of the file: `tauri build` rewrites
+# tauri's features in the first dependency table it meets (Q3.697), and a target header swallows every key below it.
 
-# **Unix only, and for exactly one call.** `scripts/daemon.ts` implements a real
-# graceful stop — a 20 s budget to close sessions, a hard exit at 25 — and it is
-# reached by SIGTERM. `std::process::Child::kill` is SIGKILL, which skips it and
-# interrupts every turn in flight. There is no portable SIGTERM in std, so the one
-# signal this app sends comes from here.
-#
-# ⚠ Windows has no SIGTERM at all, so `Supervisor::stop` is ungraceful there and
-# says so at the call site. That is a real gap on a real target platform, not a
-# platform this project does not have.
+# SIGTERM for the daemon's graceful stop; `Child::kill` is SIGKILL. Windows has none, so its stop is ungraceful.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.180"
 
-# **One window, a webview per account — on macOS only, and only by this line.**
-# `seats.rs`'s multi-webview arm needs `Window::add_child`, `WindowBuilder`,
-# `WebviewBuilder` and `Manager::get_window`/`get_webview`, which Tauri 2 puts
-# behind its `unstable` feature. A **target** table rather than the plain
-# dependency line above, so every other platform's runtime is untouched: with the
-# feature on, even a plain `WebviewWindow` is built as a window child with its own
-# bounds (`tauri-runtime-wry`), which is a behaviour change nobody has measured on
-# Windows, Linux or Android. The resolver (edition 2021's v2) applies a
-# target-specific feature only when building for that target —
-# `cargo tree -e features -i tauri --target <triple>` shows it absent elsewhere.
-#
-# ⚠ **An unstable API can change in a minor release, and `2.11.5` is a caret
-# requirement**, so `nativecheck` pins `Cargo.lock`'s `tauri` and
-# `tauri-runtime-wry` to the pair this arm was built against. Moving either is a
-# re-run of the multi-webview checks `seats.rs` lists, not a routine bump.
+# `unstable` is the multi-webview arm's (`seats.rs`), on macOS alone; it changes window building elsewhere.
+# An unstable API moves in minor releases, so `nativecheck` pins the locked tauri and tauri-runtime-wry.
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2.11.5", features = ["unstable"] }
-# Already in the tree through wry; named here for two things nothing in Tauri's API
-# reaches: the one message `seats.rs` sends a closing account's WKWebView (`_close`),
-# and `lib.rs` registering WebKit's typing substitutions off (Q3.647).
+# For `seats.rs`'s `_close` and `lib.rs`'s typing substitutions (Q3.647), which Tauri's API does not reach.
 objc2 = "0.6.4"
 
-# Windows puts the app away to the notification area (`away.rs`, Q3.697): the tray needs
-# Tauri's `tray-icon`, and a second launch has to reach the running app, not start another.
-# `~2.4`: 2.5 asks for tauri 2.12, past the pair `nativecheck` pins.
+# The tray and single-instance for `away.rs` (Q3.697). `~2.4`: 2.5 asks for tauri 2.12, past the pinned pair.
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "~2.4.5"
 
-# ⚠ **Both blocks sit at the end of this file, and that is not aesthetic.**
-# A `[target.…]` section swallows every key below it until the next header, so
-# these living among the plain dependencies silently moved `reqwest`,
-# `x25519-dalek`, `getrandom` and `base64` into the Android-only set — measured,
-# as twelve `E0432`s on a macOS build that had compiled a minute earlier.
-
-# **The default feature is named rather than taken**, because the whole value of
-# this dependency is *which* backend it picks and the default set has moved
-# between majors. `v1` is macOS Keychain, Windows Credential Manager and the
-# freedesktop Secret Service — and a default that silently became a memory store
-# would compile, run, and forget, which is the failure that reads as working.
-# `credential::probe` is the second half of that guard and the one that catches a
-# backend that accepts a write and loses it.
-#
-# ⚠ **Desktop only, and the cfg is the second half of what that comment says.**
-# `v1`'s `set_credential_store` refuses iOS and Android at *run time* while
-# compiling — the failure `credential.rs` turns into a compile error for iOS and
-# replaces outright for Android — so building it for those targets would pull a
-# tree that can only answer `Err`.
+# The default feature is named: a default that became a memory store would compile and forget.
+# Desktop only: `v1` refuses iOS and Android at run time.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 
-# **Android's store, named rather than defaulted, for `keyring`'s own reason one
-# platform over.** `keyring-core` is the layer under that façade and takes the
-# store as an argument; `android-native-keyring-store` is SharedPreferences with
-# the key held in the Android Keystore, and it reaches the application context
-# through `ndk-context` — which **nothing in this tree initialises on its own**,
-# which is why the JNI plumbing below is here rather than absent. `jni` and
-# `ndk-context` are named for that reason; `credential.rs` says what it cost.
-#
-# ⚠ **No `openssl`, and that was a plan this measurement took back out.** The
-# intent was `openssl` with `vendored`, on the reasoning that `reqwest`'s
-# `default-tls` is native-tls and native-tls is OpenSSL away from Apple and
-# Windows. Measured on this checkout: `cargo tree --target aarch64-linux-android`
-# has no `openssl-sys` in it at all — `reqwest` 0.13 resolves to `rustls` with
-# `rustls-platform-verifier`, which calls Android's own trust manager over JNI.
-# That is *better* than the plan: the `/v1` leg then honours the same
-# `network_security_config` the webview legs do, user-installed CAs included,
-# rather than being blind to them. What it costs instead is a Gradle dependency —
-# the verifier's Kotlin half has to be in the APK — which belongs in
-# `gen/android` and is recorded in `.claude/rules/native-packaging.md`.
+# No openssl: on Android `reqwest` resolves to rustls with the platform verifier, which honours
+# user-installed CAs and needs its Kotlin half in the APK (native-packaging.md).
 [target.'cfg(target_os = "android")'.dependencies]
 keyring-core = "1"
 android-native-keyring-store = "1"
-# Both are already in the tree under the store above; named directly because
-# `credential.rs` hands the application context to `ndk-context` itself. Nothing
-# else in this dependency tree does — not Tauri, not tao, not wry — and the store
-# panics rather than answering `Err` when nobody has.
+# `credential.rs` initialises `ndk-context` itself; nothing else in the tree does, and the store panics without it.
 jni = "0.21"
 ndk-context = "0.1"
 
-# ⚠ **Already in the tree under `reqwest`, and named here because the crate does
-# not work until somebody calls it.** `rustls-platform-verifier`'s
-# `src/android.rs` opens *"On Android, initialization must be done before any
-# verification is attempted"*, and the `global()` every verification goes through
-# is `.expect("Expect rustls-platform-verifier to be initialized")`. `reqwest`
-# builds the `Verifier` and never initialises it — the crate's documented
-# contract, not a reqwest bug — so with no call this app compiles, links,
-# installs, launches, draws, and panics on the **first** `/v1` request. A
-# transitive dependency cannot be named in Rust, which is the whole reason this
-# line exists; `credential.rs`'s JNI export is where the call is.
-#
-# ⚠ **The version must be the copy `reqwest` resolved to, not merely a compatible
-# one.** The handle lives in a private `OnceCell` *inside* the crate, so two
-# copies in the graph would mean initialising a static the verifier doing the
-# work never reads — a green build, a green clippy, the identical panic. Measured
-# on this checkout: `reqwest` 0.13.5 asks for `>=0.6.0, <0.8.0`, and pinning
-# `"0.6"` here resolves 0.6.2 **beside** its 0.7.0 rather than instead of it —
-# two entries in `Cargo.lock`. `nativecheck` asserts there is exactly one and
-# that this pin names it.
+# Named so `credential.rs` can initialise it; without that the first `/v1` request panics. Must be the copy
+# `reqwest` resolved to, or the initialised static is not the one read; `nativecheck` asserts one copy.
 rustls-platform-verifier = "0.7.0"
-# ⚠ **A second `jni`, renamed, and it is not a duplicate to be tidied away.**
-# `rustls-platform-verifier` 0.7.0 declares `jni = "0.22"` and its
-# `init_with_env` takes a `&mut jni::Env` — a type 0.21 does not have, where the
-# same thing is `JNIEnv` in a different crate. Tauri, tao, wry and
-# `android-native-keyring-store` are all on 0.21, so **both are in this build
-# whatever this file pins**: bumping the line above would move the store's JNI
-# glue onto a new API for no gain and would not take 0.21 out of the graph. The
-# two meet only through raw pointers, and `jni-sys` 0.3 aliases `_jobject` to
-# `jni-sys` 0.4's own type, so a `jobject` needs no conversion between them at
-# all — only the `JNIEnv` interface pointer, which each declares for itself.
+# The verifier's `init_with_env` takes 0.22's `Env`; everything else is on 0.21, so both are in the build.
 jni22 = { package = "jni", version = "0.22.4", default-features = false }

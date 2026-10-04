@@ -1,43 +1,17 @@
 use std::path::{Path, PathBuf};
 
-/// The helper app the runtime lives in on macOS.
-///
-/// Written down in `build-daemon.mjs`, `tauri.conf.json`'s `bundle.macOS.files` and
-/// `daemon.rs` as well; `nativecheck` compares all four.
+/// Also in `build-daemon.mjs`, `tauri.conf.json` and `daemon.rs`; `nativecheck` compares all four.
 const RUNTIME_HELPER: &str = "Reemoat Runtime.app";
 
 fn main() {
-    /*
-     * ⚠ **`option_env!` is baked into a cached object file, and this is what makes
-     * a changed value rebuild.** `config.rs` reads `REEMOAT_DEFAULT_SERVER` at
-     * compile time — the only moment a fork can say which fleet its build joins,
-     * a bundle having no environment to read when Finder or a desktop entry
-     * launches it. Without this line cargo has no reason to recompile when the
-     * variable moves, so a fork that corrects its address gets a binary that
-     * silently keeps the previous one, with nothing anywhere saying why.
-     */
+    // `config.rs` bakes this in with `option_env!`; without the line a changed value never rebuilds.
     println!("cargo:rerun-if-env-changed=REEMOAT_DEFAULT_SERVER");
     runtime_helper();
     tauri_build::build()
 }
 
-/// The staged runtime helper: refused if it is missing or built for the other
-/// architecture, and put where the executable looks for it.
-///
-/// ⚠ **This is the check the runtime's file name used to make.** While the runtime
-/// was an `externalBin`, `tauri-build` resolved `binaries/node-<target-triple>`, so a
-/// build for one architecture staged for the other failed here with *"resource path
-/// `binaries/node-x86_64-apple-darwin` doesn't exist"*. `bundle.macOS.files` names a
-/// fixed path and the bundler copies whatever is there, so without this an Intel
-/// build staged on an Apple-silicon machine would ship an arm64 `node` and start no
-/// daemon on the machines it was built for. The binary is asked, not a marker file:
-/// the Mach-O header's CPU type, which is what the kernel will ask.
-///
-/// ⚠ **And the copy is what `tauri-build` did for an `externalBin`.** A development
-/// build finds the runtime at `<exe>/../../Helpers`, which is the staged helper
-/// itself when the target directory is `src-tauri/target` — so nothing is copied in
-/// the ordinary case — and a copy beside the profile directory when it is not: a
-/// `--target` build, or `CARGO_TARGET_DIR` set elsewhere.
+/// Refuses a missing or wrong-architecture runtime by its Mach-O CPU type, since the bundler
+/// copies whatever sits at the fixed path; copies it beside the profile dir when that is not `target`.
 fn runtime_helper() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -74,18 +48,11 @@ fn runtime_helper() {
     }
 
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
-    // `<target>/<profile>/build/<crate>-<hash>/out`, which is how `tauri-build` finds
-    // the profile directory too; cargo offers nothing better (rust-lang/cargo#5457).
+    // `<target>/<profile>/build/<crate>-<hash>/out`; cargo offers nothing better (rust-lang/cargo#5457).
     let Some(target) = out.ancestors().nth(4) else {
         return;
     };
-    /*
-     * ⚠ **Compared canonically, because the copy starts by deleting its
-     * destination.** The two spellings of one directory — a symlinked
-     * `CARGO_TARGET_DIR`, `/tmp` against `/private/tmp` — would otherwise read as
-     * two places, and removing the "old copy" would remove the staged helper it was
-     * about to copy from.
-     */
+    // Canonical, because the copy deletes its destination: a symlinked spelling would delete the source.
     let same = match (
         std::fs::canonicalize(target),
         std::fs::canonicalize(manifest.join("target")),
@@ -105,7 +72,6 @@ fn runtime_helper() {
         .expect("the runtime helper can be copied beside the profile directory");
 }
 
-/// The CPU type of a thin 64-bit Mach-O, which is what every Node build for macOS is.
 fn cpu_type(path: &Path) -> std::io::Result<u32> {
     use std::io::Read;
     let mut header = [0_u8; 8];
@@ -118,7 +84,7 @@ fn cpu_type(path: &Path) -> std::io::Result<u32> {
     ]))
 }
 
-/// A byte-for-byte copy, which is what keeps the helper's signature valid.
+/// Byte-for-byte, which keeps the helper's signature valid.
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {

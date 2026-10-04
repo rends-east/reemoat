@@ -20,6 +20,7 @@ await import("./daemoncheck.peer-messages.js");
 await import("./daemoncheck.grok-extensions.js");
 await import("./daemoncheck.cursor-extensions.js");
 await import("./daemoncheck.posed-questions.js");
+await import("./daemoncheck.sent-files.js");
 await import("./daemoncheck.plugin-manifest-and-store.js");
 await import("./daemoncheck.plugin-surfaces.js");
 await import("./daemoncheck.plugin-install-and-rollback.js");

@@ -157,7 +157,8 @@ const CAPABILITY_READ_BUDGET_MS = 60_000;
 const MAX_DIR_NAME_CHARS = 255;
 const MAX_PATH_CHARS = 4_096;
 
-const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+/** Exported for one assertion: a file send_file keeps must never be larger than this route will serve (Q2.252). */
+export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
 // Every route but the streaming ones (isStreamingRoute), which count their own bytes.
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -2802,6 +2803,7 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
   }
 
   let size: number;
+  let modifiedMs: number;
   try {
     const info = await handle.stat();
     if (!info.isFile()) {
@@ -2811,6 +2813,7 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
       return jsonError(c, 404, "not_a_regular_file", "that path is not a regular file");
     }
     size = info.size;
+    modifiedMs = info.mtimeMs;
   } catch (error) {
     await handle.close().catch(() => {
       // As above.
@@ -2830,20 +2833,44 @@ async function serveFile(c: Context, full: string, name: string): Promise<Respon
     });
   }
 
-  const stream = handle.createReadStream();
+  // The client asks a relayed download for one piece at a time, each inside one stream window (Q6.120).
+  const range = byteRange(c.req.header("range"), size);
+  if (range === "unsatisfiable") {
+    await handle.close().catch(() => {
+      // As above.
+    });
+    return jsonError(c, 416, "range_not_satisfiable", "that range starts past the end of the file", { bytes: size });
+  }
+
+  const stream = handle.createReadStream(range === null ? {} : { start: range.start, end: range.end });
   // The error listener first: an unhandled stream error is an uncaught exception.
   stream.on("error", () => stream.destroy());
 
   return new Response(Readable.toWeb(stream) as ReadableStream, {
-    status: 200,
+    status: range === null ? 200 : 206,
     headers: {
       "content-type": "application/octet-stream",
       "content-disposition": contentDispositionFor(name),
-      "content-length": String(size),
+      "content-length": String(range === null ? size : range.end - range.start + 1),
+      ...(range === null ? {} : { "content-range": `bytes ${range.start}-${range.end}/${size}` }),
+      "accept-ranges": "bytes",
+      // Compared across the pieces of one download, so a file rewritten between two of them is refused rather than spliced.
+      etag: `"${size.toString(16)}-${Math.trunc(modifiedMs).toString(16)}"`,
       "x-content-type-options": "nosniff",
       "cache-control": "no-store",
     },
   });
+}
+
+/** One `bytes=a-b` or `bytes=a-`; any other form, or an empty file, is the whole file, which RFC 9110 allows a server to answer. */
+export function byteRange(header: string | undefined, size: number): { start: number; end: number } | "unsatisfiable" | null {
+  if (header === undefined || size === 0) return null;
+  const match = /^bytes=(\d{1,15})-(\d{0,15})$/.exec(header.trim());
+  if (match === null) return null;
+  const start = Number(match[1]);
+  if (start >= size) return "unsatisfiable";
+  const end = match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1);
+  return end < start ? null : { start, end };
 }
 
 async function workspaceReady(c: Context, managed: ManagedSession): Promise<Response | null> {

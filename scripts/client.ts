@@ -433,6 +433,8 @@ function describeEvent(event: SessionEvent): string {
       return `log  ${clip(event.line, 160)}`;
     case "context_cleared":
       return "context cleared — the agent has forgotten everything above";
+    case "file_sent":
+      return `sent file  ${event.file.name}  ${event.file.bytes} bytes  ${event.file.uploadId}`;
     case "other":
       return `other  ${event.sessionUpdate}`;
     case "error":

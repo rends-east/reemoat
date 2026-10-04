@@ -510,6 +510,22 @@ const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 }
 
 {
+  // A download piece must start on a fresh stream window, so it neither takes the idle connection nor is left idle itself (Q6.120).
+  channelsOpened = 0;
+  const channel = channelFor();
+  await channel.request({ method: "GET", path: "/health", timeoutMs: 5_000 });
+  const closedBefore = channelsClosed;
+  const piece = await channel.request({ method: "GET", path: "/bytes", timeoutMs: 10_000, alone: true });
+  check("a request alone is still answered whole", piece.body.length, 200_000);
+  check("on a connection dialled for it, past the idle one", channelsOpened, 2);
+  for (let waited = 0; channelsClosed === closedBefore && waited < 2_000; waited += 20) await sleep(20);
+  check("and closed once it has answered", channelsClosed - closedBefore, 1);
+  await channel.request({ method: "GET", path: "/health", timeoutMs: 5_000 });
+  check("while the idle one is still there for the next request", channelsOpened, 2);
+  channel.dispose();
+}
+
+{
   // A pooled connection past its capability's exp earns a 401; this decides only what the pool hands back (Q5.24).
   channelsOpened = 0;
   // Inside REUSE_MARGIN_MS from minting, so the connection is stale the moment it is idle.

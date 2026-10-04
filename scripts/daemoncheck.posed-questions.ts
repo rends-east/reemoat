@@ -137,8 +137,9 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
               .map((block: any) => block.text)
               .join("");
             current?.prompts.push(text);
-            // `CALL <tool>` is a tool on the reemoat server; `CALL <server>/<tool>` names another server.
-            const asks = /^CALL (?:(\S+)\/)?(\S+)$/.exec(text);
+            // `CALL <tool>` is a tool on the reemoat server; `CALL <server>/<tool>` names another server; `ALWAYS` offers no allow-once.
+            const always = text.startsWith("ALWAYS ");
+            const asks = /^(?:CALL|ALWAYS) (?:(\S+)\/)?(\S+)$/.exec(text);
             if (asks === null) {
               send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
               break;
@@ -190,11 +191,16 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
               params: {
                 sessionId,
                 toolCall: { toolCallId: callId, title: `${provider}-${tool}: ${tool}`, kind: "other", status: "pending" },
-                options: [
-                  { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
-                  { optionId: "allow-always", name: "Allow always", kind: "allow_always" },
-                  { optionId: "reject-once", name: "Reject", kind: "reject_once" },
-                ],
+                options: always
+                  ? [
+                      { optionId: "allow-always", name: "Allow always", kind: "allow_always" },
+                      { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+                    ]
+                  : [
+                      { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+                      { optionId: "allow-always", name: "Allow always", kind: "allow_always" },
+                      { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+                    ],
               },
             });
             break;
@@ -308,6 +314,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     ],
     [[ASK_TOOL_NAME], false],
   );
+  // This registry holds no upload store, so send_file is not offered either (Q2.252); `daemoncheck.sent-files` has the other half.
   check("and a claude session gets nothing at all", agentOf(claQuiet).mcpServers, []);
   const refusedQuiet = await quiet.ask(curQuiet, one);
   check("no messaging switch refuses a question", [refusedQuiet?.isError ?? false, refusedQuiet?.content[0]?.text], [false, ASK_PENDING]);
@@ -434,6 +441,18 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     [["call-elsewhere-ask_question"], false],
   );
   if (foreign[0] !== undefined) cur.answerPermission(foreign[0].permissionId, { cancel: true });
+  await settle();
+  // Allow always would write `Mcp(reemoat:ask_question)` into the person's own cli-config.json (review of Q2.252).
+  await cur.prompt("ALWAYS ask_question");
+  await settle();
+  const always = cur.snapshot().pendingPermissions;
+  check(
+    "a request for it offering no allow-once is left to its person rather than allowed for good",
+    [always.map((one) => one.toolCallId), agentOf(cur).permissionAnswers.get(ASK_TOOL_NAME)],
+    [["call-ask_question"], { outcome: { outcome: "selected", optionId: "allow-once" } }],
+  );
+  if (always[0] !== undefined) cur.answerPermission(always[0].permissionId, { cancel: true });
+  await settle();
   await cla.prompt("CALL ask_question");
   await settle();
   const claudeAsks = cla.snapshot().pendingPermissions;

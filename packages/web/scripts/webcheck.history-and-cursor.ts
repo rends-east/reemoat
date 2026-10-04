@@ -719,6 +719,13 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   );
   const markdown = strip(readFileSync(new URL("../src/ui/Markdown.tsx", import.meta.url), "utf8"));
   check("every markdown body is one", /className=\{`sel-root text-sm wrap-anywhere/.test(markdown), true);
+  // Q3.704: that body's wrap-anywhere made each cell's min-content one character, and a table crushed its short columns to a letter a line.
+  const cellRule = /\.wrap-anywhere td,\s*\.wrap-anywhere th\s*\{([^}]*)\}/.exec(strip(css))?.[1] ?? "";
+  check(
+    "and a table cell inside it keeps its words whole, with both properties reset",
+    [/overflow-wrap:\s*break-word/.test(cellRule), /word-break:\s*normal/.test(cellRule)],
+    [true, true],
+  );
   check("so is the bubble, which hangs in a flex row", /\bsel-root\b/.test(bubbleBox), true);
   check("and so is the column, which owns the space between messages", /className=\{`sel-root \$\{COLUMN\}/.test(eventList), true);
   check("and the zero-width space it replaced is not still there", /content: "\\200B"/.test(strip(css)), false);

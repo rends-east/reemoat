@@ -80,6 +80,8 @@ export interface ChannelRequest {
   onProgress?: ((fraction: number) => void) | undefined;
   signal?: AbortSignal | undefined;
   timeoutMs: number;
+  /** Dialled for this request and closed after it, so its answer starts on a fresh stream window (Q6.120). */
+  alone?: boolean;
 }
 
 export interface ChannelResponse {
@@ -535,7 +537,7 @@ export class MachineChannel implements Channel {
 
   /** Timeout and abort end the connection, since there is no cancel frame, and an abort rejects with an AbortError at once. */
   async request(wanted: ChannelRequest): Promise<ChannelResponse> {
-    const connection = await this.acquire();
+    const connection = wanted.alone === true ? await this.connect() : await this.acquire();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancel: ((error: Error) => void) | null = null;
     const abort = (): void => {
@@ -554,7 +556,8 @@ export class MachineChannel implements Channel {
       // A signal that fired during acquire never calls a listener added after it.
       if (wanted.signal?.aborted === true) abort();
       const answer = await Promise.race([connection.request(wanted), raced]);
-      this.release(connection);
+      if (wanted.alone === true) connection.close();
+      else this.release(connection);
       return answer;
     } catch (error) {
       connection.close();

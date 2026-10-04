@@ -16,7 +16,7 @@ import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
 import { ApiError } from "../http";
 import { describe, missingRowReason } from "../machine";
-import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths";
+import { displayCwd, downloadablePath, folderLabel, INLINE_DOWNLOADS, relativeTo } from "../paths";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
@@ -29,6 +29,7 @@ import {
   queuedSeqs,
   showsWorking,
   deliversQueued,
+  turnInFlight,
   waitingCount,
   workStartedAt,
   type BackgroundTask,
@@ -404,6 +405,7 @@ function Transcript({
   // Optimistic: an echo in flight counts as working, bounded by the echo's own lifetime; `showsWorking` itself stays pure.
   const working = echo !== null || (snapshot !== null && (showsWorking(snapshot) || deliversQueued(snapshot)));
   const reporting = snapshot !== null && mayStillReport(snapshot);
+  const engaged = snapshot !== null && turnInFlight(snapshot);
   const startedAt = snapshot === null ? null : workStartedAt(snapshot);
   // `elapsedSince` corrects for the device clock; never subtract the local time from a daemon stamp.
   const workElapsedMs = row === null || startedAt === null ? null : elapsedSince(row, startedAt);
@@ -451,7 +453,7 @@ function Transcript({
     if (daemon === undefined) return null;
     return {
       relFor: (absPath: string) => relativeTo(root, absPath),
-      spanTarget: (span: string) => downloadablePath(span, root, touched.current),
+      spanTarget: (span: string) => (INLINE_DOWNLOADS ? downloadablePath(span, root, touched.current) : null),
       download: async (rel, name) => {
         try {
           await saveBlob(await daemon.downloadFile(sessionRef.sessionId, rel), name);
@@ -490,6 +492,7 @@ function Transcript({
                 askHeight={askHeight}
                 working={working}
                 reporting={reporting}
+                engaged={engaged}
                 stale={stale}
                 workElapsedMs={workElapsedMs}
                 background={background}

@@ -64,6 +64,8 @@ export interface AgentConfigOption {
   value: string | boolean;
   choices: AgentConfigChoice[];
   truncated?: boolean;
+  /** While `default` is selected, the choice it resolves to now; claude's effort alone says (Q6.121). */
+  resolvedDefault?: string;
 }
 
 export interface AgentModes {
@@ -108,6 +110,8 @@ export interface ToolCallEvent {
   parentToolCallId?: string | null;
   // Read only from the tool_call: claude drops it on the completing update.
   subagent?: boolean;
+  // Absent on an older daemon and on every call but a delegation's last step (Q6.119).
+  endsDelegation?: boolean;
 }
 
 export interface ToolCallUpdateEvent {
@@ -285,6 +289,13 @@ export interface ContextClearedEvent {
   previousAgentSessionId: string;
 }
 
+/** A file the agent sent through send_file; `toolCallId` names the harness's own call where the daemon could tell. */
+export interface FileSentEvent {
+  type: "file_sent";
+  file: StoredFileRef;
+  toolCallId: string | null;
+}
+
 export interface AgentLogEvent {
   type: "agent_log";
   line: string;
@@ -320,6 +331,7 @@ export type SessionEvent =
   | TurnEndEvent
   | AgentLogEvent
   | ContextClearedEvent
+  | FileSentEvent
   | OtherUpdateEvent
   | ErrorEvent;
 

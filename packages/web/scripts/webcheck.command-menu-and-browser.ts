@@ -414,21 +414,34 @@ process.stdout.write("\nthe composer's command menu\n");
   check("a control mid-token clears all of it", at("/model", 3, model), { text: "", caret: 0 });
   check("and keeps what genuinely followed it", at("/model sonnet", 3, model).text, "sonnet");
 
-  // Effort labels are read through adaptiveLabel, so the menu names them the way the chip does.
+  // Effort labels are read through choiceOverride, so the menu names them the way the chip does.
   const effort = option("effort", "thought_level", {
     choices: [
       { value: "default", name: "Default", description: null, group: null },
       { value: "high", name: "High", description: "Think hard", group: null },
     ],
   });
-  check("the menu names adaptive effort the way the chip does", configChoices(effort as never).map((row) => row.label), [
-    "Adaptive",
+  check("the menu names the default effort the way the chip does", configChoices(effort as never).map((row) => row.label), [
+    "Auto",
     "High",
   ]);
   check(
     "and explains it where there is room",
     configChoices(effort as never)[0]?.description,
-    "The model decides how much to think, per turn",
+    "The model's own default level",
+  );
+  const reported = option("effort", "thought_level", {
+    value: "default",
+    resolvedDefault: "high",
+    choices: [
+      { value: "default", name: "Default", description: null, group: null },
+      { value: "high", name: "High", description: "Think hard", group: null },
+    ],
+  });
+  check(
+    "with the level the agent reports, in the row and its explanation",
+    [configChoices(reported as never)[0]?.label, configChoices(reported as never)[0]?.description],
+    ["Auto · High", "The model's own default level: high for this model"],
   );
 
   const claudeMode = option("mode", "mode", {

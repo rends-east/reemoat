@@ -277,7 +277,11 @@ process.stdout.write("\nmessages between agents\n");
     "127.0.0.1",
   ]);
   check("with a bearer of its own, different from every other session's", new Set([bearerOf(lead), bearerOf(worker), bearerOf(plain)]).size, 3);
-  check("and claude loses its own ListAgents on the same session/new", agentOf(lead).meta?.claudeCode?.options?.disallowedTools, ["ListAgents"]);
+  check(
+    "and claude loses its own ListAgents on the same session/new",
+    (agentOf(lead).meta?.claudeCode?.options?.disallowedTools as string[] | undefined)?.includes("ListAgents"),
+    true,
+  );
   check("which is claude's alone: kimi is asked nothing", agentOf(plain).meta, null);
   check(
     "and nothing for an agent with no http MCP client",
@@ -977,6 +981,7 @@ process.stdout.write("\nmessages between agents\n");
     MACHINE_MESSAGING_OFF,
   );
   check("the bearer still answers rather than 401, which a client would read as a sign-in", await pingGuarded(leadBearer), 200);
+  // No upload store behind this registry, so no send_file keeps the server in place (Q2.252).
   check("a launch while off is handed no tools", guarded.mcpServersFor(worker.id, { http: true }), []);
   check("and the process it replaced loses its bearer all the same", await pingGuarded(workerBearer), 401);
   check("nothing here is listed, to this machine's agents or anybody's", guarded.localRows(), []);

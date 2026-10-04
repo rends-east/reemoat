@@ -257,12 +257,16 @@ export interface ChoiceOverride {
 }
 
 export function choiceOverride(
-  option: Pick<AgentConfigOption, "category">,
+  option: Pick<AgentConfigOption, "category" | "choices" | "resolvedDefault">,
   selected: string | boolean,
 ): ChoiceOverride | null {
   if (selected !== "default") return null;
   if (option.category === "thought_level") {
-    return { label: "Adaptive", description: "The model decides how much to think, per turn" };
+    // Claude Code's word for an unset effort; the level beside it is the CLI's own, where the agent reports it (Q6.121).
+    const level = option.choices.find((choice) => choice.value === option.resolvedDefault)?.name;
+    return level === undefined
+      ? { label: "Auto", description: "The model's own default level" }
+      : { label: `Auto · ${level}`, description: `The model's own default level: ${level.toLowerCase()} for this model` };
   }
   if (option.category === "mode") {
     return { label: null, description: "The agent asks before running each tool" };
@@ -272,7 +276,7 @@ export function choiceOverride(
 
 /** The one place a choice is named; the value is never touched. */
 export function choiceLabel(
-  option: Pick<AgentConfigOption, "category">,
+  option: Pick<AgentConfigOption, "category" | "choices" | "resolvedDefault">,
   choice: Pick<AgentConfigChoice, "value" | "name">,
 ): string {
   const override = choiceOverride(option, choice.value)?.label ?? null;

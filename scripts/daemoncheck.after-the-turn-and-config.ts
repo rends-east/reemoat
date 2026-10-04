@@ -1,4 +1,6 @@
+import { chmodSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { MAX_SOCKET_MESSAGE_BYTES } from "@reemoat/protocol";
 import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
@@ -11,7 +13,18 @@ import {
   ultracodeOptionId,
   withUltracode,
 } from "../src/registry.js";
-import { sessionMetaFor } from "../src/acp/agents.js";
+import {
+  CLAUDE_ALLOWED_TOOLS,
+  CLAUDE_WITHDRAWN_PEER_TOOLS,
+  CLAUDE_WITHDRAWN_TOOLS,
+  CODEX_WITHDRAWN_FEATURES,
+  codexConfigEnv,
+  forgetPathHits,
+  resolveAgent,
+  sessionMetaFor,
+} from "../src/acp/agents.js";
+import { PEER_SERVER_NAME } from "../src/peers/envelope.js";
+import { SEND_FILE_TOOL_NAME } from "../src/peers/files.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
@@ -612,8 +625,8 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   const claude = effort(["default", "low", "medium", "high", "xhigh", "max"]);
 
   const asked = { ultracode: false, elicitation: true };
-  // Q2.242: Claude Code's own ListAgents never lists what this daemon runs, so no claude session is handed it.
-  const withdrawn = { disallowedTools: ["ListAgents"] };
+  // Q2.242, Q6.118: no claude session is handed a tool that answers to Claude Code's own terminal or cloud, and send_file runs unasked (Q2.252).
+  const withdrawn = { disallowedTools: [...CLAUDE_WITHDRAWN_TOOLS], allowedTools: [...CLAUDE_ALLOWED_TOOLS] };
   check("claude is asked for it in the one shape its adapter reads", sessionMetaFor("claude", { ...asked, ultracode: true }), {
     claudeCode: { options: { settings: { ultracode: true }, ...withdrawn } },
   });
@@ -621,15 +634,99 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   check("kimi is never asked, whatever the session says", sessionMetaFor("kimi", { ...asked, ultracode: true }), undefined);
   check("nor codex", sessionMetaFor("codex", { ...asked, ultracode: true }), undefined);
   check(
-    "claude keeps SendMessage, which is also how it talks to its own subagents",
-    JSON.stringify(sessionMetaFor("claude", asked)).includes("SendMessage"),
-    false,
+    "and the withdrawal never rides settings, which would drop the adapter's own model settings",
+    Object.keys((sessionMetaFor("claude", asked) as { claudeCode: { options: object } }).claudeCode.options).sort(),
+    ["allowedTools", "disallowedTools"],
+  );
+
+  // What is withdrawn, measured 2026-10-02 on claude 2.1.287: 27 tools with ListAgents alone gone, 22 with this list.
+  check("Claude Code's own session listing is still the first of them", CLAUDE_WITHDRAWN_TOOLS.slice(0, CLAUDE_WITHDRAWN_PEER_TOOLS.length), [
+    ...CLAUDE_WITHDRAWN_PEER_TOOLS,
+  ]);
+  check("no name is listed twice", new Set(CLAUDE_WITHDRAWN_TOOLS).size, CLAUDE_WITHDRAWN_TOOLS.length);
+  check(
+    "the five this build really offered are all on it",
+    ["DesignSync", "EnterWorktree", "ExitWorktree", "PushNotification", "ReportFindings"].filter(
+      (tool) => !CLAUDE_WITHDRAWN_TOOLS.includes(tool),
+    ),
+    [],
+  );
+  // Element by element: `SendUserMessage` holds `SendMessage` as a substring.
+  const KEPT = [
+    // How claude continues its own subagents (Q2.242), and the work this daemon already tracks (Q2.228).
+    "SendMessage",
+    "Agent",
+    "Workflow",
+    "Monitor",
+    "Skill",
+    "ToolSearch",
+    "TaskStop",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+    // Scheduling is left exactly as the harness ships it, on the owner's word.
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "RemoteTrigger",
+  ];
+  check("claude keeps what works here, SendMessage and its own scheduling included", KEPT.filter((tool) => CLAUDE_WITHDRAWN_TOOLS.includes(tool)), []);
+  // The CLI resolves these before it reads the list, so naming one would withdraw the tool it stands for.
+  // Read off claude 2.1.288's own alias table, the three MCP-resource names included.
+  const ALIASES = ["Task", "KillShell", "KillBash", "RunWorkflow", "ListPeers", "Brief", "ListMcpResources", "ReadMcpResource", "ReadMcpResourceDir"];
+  check("and no alias is listed, since one of them names a tool that stays", ALIASES.filter((tool) => CLAUDE_WITHDRAWN_TOOLS.includes(tool)), []);
+  check("send_file is allowed under the name claude gives an MCP tool", [...CLAUDE_ALLOWED_TOOLS], [
+    `mcp__${PEER_SERVER_NAME}__${SEND_FILE_TOOL_NAME}`,
+  ]);
+
+  // codex: one feature, measured 2026-10-02 on 0.160.0 to take request_plugin_install and nothing else off the list.
+  const featuresOff = Object.fromEntries(CODEX_WITHDRAWN_FEATURES.map((feature) => [feature, false]));
+  check("codex is told through CODEX_CONFIG, with nothing set by anybody", JSON.parse(codexConfigEnv(undefined) ?? "null"), {
+    features: featuresOff,
+  });
+  check("an empty value is nobody's", JSON.parse(codexConfigEnv("  ") ?? "null"), { features: featuresOff });
+  check(
+    "a person's own config keeps every key it sets, the feature included",
+    JSON.parse(codexConfigEnv(JSON.stringify({ model: "m", features: { tool_suggest: true, goals: false } })) ?? "null"),
+    { model: "m", features: { tool_suggest: true, goals: false } },
   );
   check(
-    "and the withdrawal never rides settings, which would drop the adapter's own model settings",
-    sessionMetaFor("claude", asked),
-    { claudeCode: { options: { disallowedTools: ["ListAgents"] } } },
+    "and gains the feature where it says nothing about it",
+    JSON.parse(codexConfigEnv(JSON.stringify({ features: { goals: false } })) ?? "null"),
+    { features: { ...featuresOff, goals: false } },
   );
+  check(
+    "a value that is not a JSON object is left exactly as it was",
+    [codexConfigEnv("{not json"), codexConfigEnv("[1]"), codexConfigEnv('"x"'), codexConfigEnv('{"features":[]}')],
+    [undefined, undefined, undefined, undefined],
+  );
+  {
+    // A stand-in on PATH, so the real resolver runs with or without codex installed.
+    const bin = tmp("codexbin-");
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, "codex"), 0o755);
+    const saved = { path: process.env["PATH"], config: process.env["CODEX_CONFIG"], cli: process.env["CODEX_PATH"] };
+    process.env["PATH"] = `${bin}:${saved.path ?? ""}`;
+    delete process.env["CODEX_PATH"];
+    forgetPathHits();
+    try {
+      delete process.env["CODEX_CONFIG"];
+      check("and it is in what the resolver hands a codex spawn", JSON.parse(resolveAgent("codex").env["CODEX_CONFIG"] ?? "null"), { features: featuresOff });
+      process.env["CODEX_CONFIG"] = "{not json";
+      check("where a value this daemon will not rewrite is handed over untouched", resolveAgent("codex").env["CODEX_CONFIG"], "{not json");
+    } finally {
+      process.env["PATH"] = saved.path;
+      if (saved.config === undefined) delete process.env["CODEX_CONFIG"];
+      else process.env["CODEX_CONFIG"] = saved.config;
+      if (saved.cli !== undefined) process.env["CODEX_PATH"] = saved.cli;
+      forgetPathHits();
+    }
+  }
 
   // Which control the extra row belongs on — by category, never by id.
   check("the row goes on claude's effort control", ultracodeOptionId(claude, "claude"), "effort");
@@ -731,7 +828,9 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   });
   await asking.dispose().catch(() => {});
   check("the flag reaches session/new in the shape claude's adapter reads", opened[0]?._meta, {
-    claudeCode: { options: { settings: { ultracode: true }, disallowedTools: ["ListAgents"] } },
+    claudeCode: {
+      options: { settings: { ultracode: true }, disallowedTools: [...CLAUDE_WITHDRAWN_TOOLS], allowedTools: [...CLAUDE_ALLOWED_TOOLS] },
+    },
   });
   check("beside the parameters that were always there", [opened[0]?.cwd === process.cwd(), opened[0]?.mcpServers], [
     true,
@@ -1589,6 +1688,8 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
     // Agent session ids are bounded nowhere: they are the routing key in `AcpClient`, and a clipped one names no conversation.
     context_cleared: { type: "context_cleared", agentSessionId: "a".repeat(600_000), previousAgentSessionId: "b".repeat(600_000) },
     session_started: { type: "session_started", agent: "claude", sessionId: BIG, agentInfo: null, modes: null },
+    // A ref is made by this daemon alone: 200 bytes of name, a 64-character id, a sniffed type.
+    file_sent: { type: "file_sent", file: { uploadId: "f_0123456789abcdef", name: "n".repeat(200), mime: "image/png", bytes: 1 }, toolCallId: "t".repeat(256) },
     // The per-item budget floors at 64 bytes, so the arm bounds an entry and never the count.
     plan: {
       type: "plan",

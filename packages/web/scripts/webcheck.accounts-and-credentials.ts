@@ -363,6 +363,14 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
   check("a machine arriving later is still connected", internals.connections.has("m_cp"), true);
   check("and the phase does not move back", store.getSnapshot().phase, "ready");
 
+  // Q3.703: with a machine known, a listing that failed at a wake stayed failed, and "Connecting…" with it, until the next wake.
+  routes = (path) => (path === "/v1/me" ? me : null);
+  await store.resume("cp-retry");
+  report("a listing that fails with a machine known is the pill's cause", store.getSnapshot().cpError !== null, `cpError: ${String(store.getSnapshot().cpError)}`);
+  routes = (path) => (path === "/v1/machines" ? { machines: [record] } : path === "/v1/me" ? me : null);
+  await store.poll();
+  check("and the next poll asks again and clears it, with no wake", store.getSnapshot().cpError, null);
+
   internals.stopPolling();
   internals.connections.delete("m_cp");
   globalThis.fetch = realFetch;

@@ -1,126 +1,16 @@
-//! Everything the webview may ask this process to do, and nothing else.
+//! Everything the webview may ask this process to do. An app-defined command is not ACL-gated,
+//! so this file is the capability surface; `nativecheck` holds it to what `native.ts` calls.
 //!
-//! The list is short on purpose: an app-defined command is not
-//! ACL-gated, so this file *is* the capability surface. `pnpm nativecheck` holds
-//! it to the set `packages/web/src/native.ts` actually calls, in both directions —
-//! a command nobody calls is a door nobody is watching, and a call with no command
-//! behind it is a runtime failure no offline check would otherwise see.
+//! The host decides which account a command is about, from the calling webview's label and the
+//! generation its document presents (Q1.651, Q5.120); a stale document is refused
+//! `stale_document`. Hidden webviews are refused `not_shown` for anything that surfaces.
 //!
-//! ⚠ **There was a count here and it is gone, having been wrong three times.**
-//! It read *twelve* while thirteen were registered — `host_daemon_log` arrived and
-//! the sentence did not move — then *fifteen* while seventeen were, then
-//! *seventeen* while eighteen were. Three corrections is the point at which the
-//! number stops being orientation and starts being the kind of claim
-//! `docs/DECISIONS.md` records this repository learning not to keep. What the
-//! driver compares is the two *lists*, which is the property that matters, and
-//! `generate_handler!` in `lib.rs` is the answer to "how many".
+//! Lock rule: no `Host` mutex but `changing` is held across a `Window` or `Webview` call, and the
+//! main thread never takes `changing` (it runs `on_page_load`, which takes `seats`).
 //!
-//! ## Which account a command is about
-//!
-//! **The host decides, from the webview that asked — never from an argument.** A
-//! seat-scoped command takes the calling `tauri::Webview` and the
-//! `tauri::ipc::Request` it arrived on, and `Host::seat` resolves the account
-//! from the webview's **label** and the **generation** the page presents in the
-//! `reemoat-generation` header. No credential, device, daemon or `host_cp`
-//! command takes an account, an origin or a scope; the one command that names an
-//! account is `host_account_switch`, choosing among the keys `host_accounts`
-//! listed. Q1.651.
-//!
-//! ⚠ **The generation is what binds a command to a *document* rather than to a
-//! label.** One webview can hold two accounts over its life — the single-webview
-//! arm rebinds it, and so does forgetting the last account — and a label alone
-//! would let the previous account's document, still alive between the rebind and
-//! its reload, or revived by Android's Back or a back/forward-cache restore, send
-//! its bearer to the next account's origin or erase the next account's
-//! credential. So `host_boot` issues a random generation per page load,
-//! `lib.rs`'s `on_page_load(Started)` and every rebind rotate it, and a command
-//! presenting any other is refused as `stale_document` — which the page answers
-//! with `location.replace("/")`. Q5.120.
-//!
-//! **Hidden webviews cannot reach the screen.** Where every account has a webview
-//! of its own, every page runs, shown or not — so switching accounts, adding one,
-//! and the five commands that surface something (`host_copy_text`,
-//! `host_open_external`, `host_save_file`, `host_pick_folder`, `host_set_theme`)
-//! are refused with `not_shown` from any webview but the one on screen.
-//!
-//! ⚠ **The lock rule.** No `Host` mutex but `changing` is ever held across a
-//! `Window` or `Webview` call, and nothing on the main thread takes `changing`.
-//! Creating, showing, hiding and closing a webview all run on the main thread and
-//! are waited for; the main thread runs `on_page_load`, which takes `seats`. So
-//! an account change holds `changing` for its whole length, copies what it needs
-//! out of `seats` and `shown`, and releases them before any webview call.
-//!
-//! ## Which of these may hold the main thread
-//!
-//! **`#[tauri::command]` runs the body on the main thread — the one the webview
-//! paints on — and `#[tauri::command(async)]` runs it on the async runtime.** A
-//! bare attribute is the right shape for a `PathBuf` join, a keyring write or a
-//! clipboard call, and the wrong one for anything that *waits*, because a command
-//! that waits on the main thread is a command that stops the app drawing for
-//! exactly as long as it waits.
-//!
-//! **The rule: a command that waits on a socket, on a disk flush, on a platform
-//! panel or on a child process carries `(async)`; so does one on a path hot enough
-//! that even a keyring round trip is too much.** Each carries the measurement at
-//! its own docblock, and `nativecheck` now asserts the platform-panel half of this
-//! rule rather than leaving it to a reader — a command whose body reaches
-//! `app.dialog()` or a `blocking_` call must carry the argument form:
-//!
-//! - `host_daemon_state` and `host_local_daemon` — a loopback `/health` probe
-//!   worth three `PROBE_TIMEOUT`s in the bad case; `host_local_daemon` can make
-//!   two, this account's announcement and then `~/.reemoat`'s.
-//! - `host_device_dh` — an OS keyring round trip **twice per Noise handshake**,
-//!   which is the hot-path clause rather than the waiting one.
-//! - `host_save_file` — a platform panel, and then up to `MAX_DOWNLOAD_BYTES`.
-//! - `host_pick_folder` — a platform panel, and nothing after it.
-//! - `host_set_server`, `host_credential_clear`, `host_set_theme`,
-//!   `host_device_set`, `host_device_clear`, `host_device_key_reset` — a
-//!   `server.json` write, which `config.rs` makes durable by flushing the file
-//!   **and** its directory entry: two `sync_all`s. The first, on a regular file,
-//!   is `fcntl(F_FULLFSYNC)` on macOS — a full device cache flush. ⚠ The second
-//!   is that same call on a **directory** descriptor, which is measured only as
-//!   far as being reached and
-//!   answering success; `config::sync_dir` carries the numbers, and the platform
-//!   where it does nothing at all. `host_credential_clear` was bare while it was
-//!   one keyring erase; it also records the account signed out now, so the drawer
-//!   can say so without a keyring read. The last also does a keyring erase, a
-//!   keyring write and a read-back to verify it.
-//! - `host_daemon_start` — an env file written the same durable way, and then a
-//!   child process spawned.
-//! - `host_daemon_stop` — a SIGTERM and then a **bounded wait** on this account's
-//!   child, up to `STOP_DEADLINE`. Waiting is the point rather than politeness
-//!   (`daemon.rs` has the argument), which is exactly why it may not be waited for
-//!   here.
-//! - `host_daemon_log` — an in-memory ring, but it now has to ask the disk which
-//!   root the account has before it knows which ring, and it sits on a two-second
-//!   poll.
-//! - `host_boot` — ⚠ **bare until accounts, and the judgement reversed.** It
-//!   stayed on the main thread because it is the call a page makes before it draws
-//!   anything, so there was no frame for it to hold. With a webview per account,
-//!   every one of them boots at launch — each a keyring read or two and sometimes a
-//!   key generation — and on the main thread they queue in front of the shown
-//!   page's first paint.
-//! - `host_accounts`, `host_account_switch`, `host_account_add`,
-//!   `host_account_forget` — `server.json` reads and writes, and every one but the
-//!   first creates, shows, hides or closes a webview: work the main thread does and
-//!   the command waits for, which is a deadlock from the main thread itself
-//!   (`WebviewBuilder`'s own docblock names Windows' case). `host_account_forget`
-//!   also stops the account's daemon, which is `host_daemon_stop`'s wait.
-//!
-//! `host_cp`, `host_credential_set` and `host_account_confirm` are `async fn`s —
-//! the last two ask the control plane who a token belongs to before they bind
-//! anything — and the macro gives them the same treatment without being asked.
-//!
-//! ⚠ **And the remainder, so this is a closed statement rather than a list with an
-//! unspoken tail.** `host_copy_text` and `host_open_external` are the whole of
-//! the bare set: a clipboard call and a URL parse, behind one read of which
-//! webview is on screen.
-//!
-//! ⚠ **The attribute is the whole fix, and it is easy to lose in a refactor** —
-//! `(async)` on a synchronous function is not decoration, it is the difference
-//! between `tauri::async_runtime::spawn` and running inline on the event loop.
-//! Nothing the compiler does will tell you it went missing; the symptom is a
-//! beachball on somebody else's machine.
+//! A bare `#[tauri::command]` runs on the main thread. Anything that waits (a socket, a disk
+//! flush, a platform panel, a child process, a webview change) or sits on a hot path carries
+//! `(async)`; only `host_copy_text` and `host_open_external` are bare. Nothing flags a lost `(async)`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -143,17 +33,13 @@ use crate::local::{self, LocalDaemon};
 use crate::proxy::{self, CpAnswer, CpRequest};
 use crate::seats;
 
-/// The invoke header a page presents its generation in, on every command after
-/// `host_boot`.
 const GENERATION_HEADER: &str = "reemoat-generation";
 
-/// A document the host no longer recognises — see the module docblock. The page
-/// matches the prefix and reloads.
+/// The page matches the prefix and reloads.
 fn stale() -> String {
     "stale_document: this page was opened for another account, or before this app last changed accounts".into()
 }
 
-/// A seat with no account yet, asked for something only an account has.
 fn pending_seat(why: &str) -> String {
     format!("pending_seat: {why}")
 }
@@ -162,63 +48,30 @@ pub struct Host {
     pub client: reqwest::Client,
     pub config_dir: std::path::PathBuf,
     pub durable: bool,
-    /// The daemons this app started, one per state root, keyed by the root's
-    /// directory. See `daemon.rs`.
-    ///
-    /// ⚠ **Keyed by root rather than by account, and that is what makes a legacy
-    /// seat and the account it becomes one daemon.** An owner's root is its
-    /// server's own, which is also the legacy seat's; every other account's is a
-    /// folder of its own, so no two accounts share an entry unless they share a
-    /// database.
-    ///
-    /// ⚠ **A lock per root inside the lock on the map, and the second layer is not
-    /// decoration.** `host_daemon_stop` holds its supervisor for up to
-    /// `STOP_DEADLINE` — twenty-six seconds — and under one lock over the whole map
-    /// that would stall `host_daemon_state` and `host_daemon_log` for *every*
-    /// account, including the one on screen. The map lock is held only long enough
-    /// to find or make an entry; the wait happens on that root's own.
-    ///
-    /// Filled lazily and never emptied: an entry nobody started a daemon for is an
-    /// empty supervisor, which answers `absent` exactly as no entry would. Q7.148.
+    /// Keyed by root, so a legacy seat and the account it becomes share one. A lock per root, because
+    /// a stop holds its supervisor up to `STOP_DEADLINE` and must not stall every account (Q7.148).
     pub supervisors: Mutex<BTreeMap<String, Arc<Mutex<daemon::Supervisor>>>>,
-    /// Webview label → what that webview is, for this page load.
     seats: Mutex<BTreeMap<String, Seat>>,
-    /// The label on screen. A hidden webview's page runs, and may not surface.
     shown: Mutex<Option<String>>,
-    /// One account change at a time: a bind, a switch, an add, a forget.
-    ///
-    /// ⚠ **The only `Host` lock held across a webview call**, and never taken on
-    /// the main thread — the module docblock's lock rule.
+    /// One account change at a time; the only lock held across a webview call, never on the main thread.
     changing: Mutex<()>,
-    /// What the keyring said at launch about each origin a pre-accounts file was
-    /// derived from, so the list can be derived again without asking it again.
+    /// The launch's keyring answer per origin of a pre-accounts file, so it is not asked again.
     evidence: Mutex<BTreeMap<String, bool>>,
-    /// `server.json`'s `legacy_root_holder`, read at launch and kept current.
     holder: Mutex<Option<String>>,
-    /// The next `seat-<n>` label.
-    ///
-    /// ⚠ **This and the three methods marked beside it serve the multi-webview
-    /// arm alone**, which compiles on macOS only — the single arm has one webview,
-    /// `main`, and never names another. So off macOS they are unread, and
-    /// `clippy -D warnings` on the Android target says so; allowed there rather
-    /// than `cfg`'d away, so every target compiles the same `Host`.
+    /// This and the methods marked alike serve the macOS multi-webview arm; allowed rather than
+    /// `cfg`'d away, so every target compiles the same `Host`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     next_seat: AtomicU64,
 }
 
-/// One webview's binding, and what its current page load has been given.
 #[derive(Clone, Debug)]
 struct Seat {
     slot: Slot,
-    /// Issued by `host_boot`, rotated by every page load and every rebind.
     generation: Option<String>,
-    /// Whether this page load was already handed the credential.
     handed: bool,
-    /// Rebound, and its new page load not seen yet.
     rebinding: bool,
 }
 
-/// What `host_boot` is told about its caller, in one lock.
 struct BootSeat {
     slot: Slot,
     generation: Option<String>,
@@ -251,15 +104,12 @@ impl Host {
         }
     }
 
-    /// A label for a new webview. Tauri's label alphabet is `a-zA-Z0-9-/:_`, and
-    /// an account key carries `#` and `.`, so the key cannot be the label.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn next_label(&self) -> String {
         format!("seat-{}", self.next_seat.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Bind a label that is about to exist. Registered *before* the webview is
-    /// built, so its first `host_boot` always finds a seat.
+    /// Before the webview is built, so its first `host_boot` finds a seat.
     pub fn register(&self, label: &str, slot: Slot) {
         if let Ok(mut seats) = self.seats.lock() {
             seats.insert(
@@ -274,7 +124,6 @@ impl Host {
         }
     }
 
-    /// Forget a label whose webview is gone — or never came to be.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn unregister(&self, label: &str) {
         if let Ok(mut seats) = self.seats.lock() {
@@ -297,8 +146,7 @@ impl Host {
         self.shown.lock().ok().and_then(|held| held.clone())
     }
 
-    /// Every seat, copied out — for a caller about to make webview calls, which
-    /// may not hold `seats` while it does.
+    /// Copied out, for callers about to make webview calls.
     pub fn labels(&self) -> Vec<(String, Slot)> {
         self.seats
             .lock()
@@ -311,7 +159,6 @@ impl Host {
             .unwrap_or_default()
     }
 
-    /// The webview an account is open in, where it has one.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn label_of(&self, key: &str) -> Option<String> {
         self.labels()
@@ -320,11 +167,7 @@ impl Host {
             .map(|(label, _)| label)
     }
 
-    /// A new page load in `label`: the previous document's generation is dead,
-    /// nothing has been handed to the new one, and a rebind is complete.
-    ///
-    /// ⚠ **On the main thread** (`lib.rs`'s `on_page_load`), so it takes `seats`
-    /// for three assignments and nothing else — and never `changing`.
+    /// On the main thread (`on_page_load`): takes `seats` briefly and never `changing`.
     pub fn page_loaded(&self, label: &str) {
         if let Ok(mut seats) = self.seats.lock() {
             if let Some(seat) = seats.get_mut(label) {
@@ -335,16 +178,7 @@ impl Host {
         }
     }
 
-    /// The account a seat-scoped command is about: the calling webview's label,
-    /// and the generation its document presents.
-    ///
-    /// ⚠ **Refused as `stale_document`, never answered about the wrong account.**
-    /// No generation, the wrong one, a label mid-rebind and a label that was
-    /// closed are one refusal, because each is a document that is not the one the
-    /// seat now belongs to. The comparison is plain equality: the generation is
-    /// not a secret from the page — it holds it — so it binds a document rather
-    /// than authenticating one, and there is nothing a timing difference between
-    /// two documents of one webview could leak.
+    /// Plain equality is enough: the generation binds a document, it does not authenticate one.
     fn seat(
         &self,
         webview: &tauri::Webview,
@@ -365,8 +199,7 @@ impl Host {
         }
     }
 
-    /// `host_boot`'s view of its caller: a generation issued where the page load
-    /// has none, and the credential handed at most once per page load.
+    /// The credential is handed at most once per page load.
     fn boot(&self, label: &str) -> Option<BootSeat> {
         let mut seats = self.seats.lock().ok()?;
         let seat = seats.get_mut(label)?;
@@ -389,9 +222,7 @@ impl Host {
         })
     }
 
-    /// The same page, and the same person, becoming more of an account: a pending
-    /// seat gaining a server or binding, a legacy seat being confirmed. The
-    /// document keeps its generation.
+    /// The same document becoming more of an account; it keeps its generation.
     fn seat_as(&self, label: &str, slot: Slot) {
         if let Ok(mut seats) = self.seats.lock() {
             if let Some(seat) = seats.get_mut(label) {
@@ -401,9 +232,7 @@ impl Host {
         }
     }
 
-    /// A different account on this webview. Its document is stale from this
-    /// instant — the generation is gone and `host_boot` answers `rebinding` until
-    /// the new page load starts.
+    /// A different account: the document is stale from this instant.
     pub fn move_seat(&self, label: &str, slot: Slot) {
         if let Ok(mut seats) = self.seats.lock() {
             if let Some(seat) = seats.get_mut(label) {
@@ -415,8 +244,7 @@ impl Host {
         }
     }
 
-    /// That `label` is still `slot` — checked again once `changing` is held,
-    /// since the first check was made before it.
+    /// Re-checked once `changing` is held.
     fn still(&self, label: &str, slot: &Slot) -> Result<(), String> {
         let seats = self.seats.lock().map_err(|_| stale())?;
         match seats.get(label) {
@@ -425,7 +253,6 @@ impl Host {
         }
     }
 
-    /// Refused unless `label` is the webview on screen.
     fn require_shown(&self, label: &str) -> Result<(), String> {
         if self.shown().as_deref() == Some(label) {
             Ok(())
@@ -440,8 +267,6 @@ impl Host {
             .unwrap_or_else(|held| held.into_inner())
     }
 
-    /// Every account, with the launch's keyring evidence standing in for a
-    /// keyring read where the file is still from before accounts.
     pub fn roster(&self) -> config::Roster {
         config::read_accounts(&self.config_dir, &|origin| self.known(origin))
     }
@@ -453,14 +278,11 @@ impl Host {
             .unwrap_or(false)
     }
 
-    /// Write a derived list down before the first act that changes it, with the
-    /// evidence it was derived from.
+    /// A derived list is written down before the first act that changes it.
     fn materialize(&self) -> Result<(), String> {
         config::materialize_accounts(&self.config_dir, &|origin| self.known(origin))
     }
 
-    /// Recompute every open account's `owner` from `server.json`'s `roots`, after
-    /// a bind or a proof moved one.
     fn refresh_owners(&self) {
         let roots = self.roster().roots;
         if let Ok(mut seats) = self.seats.lock() {
@@ -487,7 +309,6 @@ impl Host {
         }
     }
 
-    /// This root's supervisor, made on first use.
     pub fn supervisor_for(
         &self,
         root: &daemon::StateRoot,
@@ -502,7 +323,6 @@ impl Host {
         ))
     }
 
-    /// This root's supervisor, if anything has ever asked for one.
     fn supervisor_if(&self, root: &daemon::StateRoot) -> Option<Arc<Mutex<daemon::Supervisor>>> {
         self.supervisors.lock().ok().and_then(|held| {
             held.get(root.dir.to_string_lossy().as_ref())
@@ -510,7 +330,6 @@ impl Host {
         })
     }
 
-    /// Every account's root with its origin, for `daemon::start_configured_at_launch`.
     pub fn launch_roots(
         &self,
         home: &std::path::Path,
@@ -527,8 +346,7 @@ impl Host {
             .collect()
     }
 
-    /// Whether an account on this computer still maps to `root`. Asked under
-    /// `daemon::lock_roots` before every spawn, which a forget also takes to remove its entry.
+    /// Asked under `daemon::lock_roots` before every spawn, which a forget also takes.
     pub fn lists_root(&self, home: &std::path::Path, root: &daemon::StateRoot) -> bool {
         let roster = self.roster();
         let holder = self.holder();
@@ -540,9 +358,7 @@ impl Host {
     }
 }
 
-/// Sixteen random bytes, hex. A failure of the system's randomness is not a
-/// reason to refuse to boot, so it falls back to a counter and the clock: the
-/// generation binds a document, and uniqueness is all that is asked of it.
+/// Falls back to the clock and a counter rather than refuse to boot: only uniqueness is asked of it.
 fn new_generation() -> String {
     static FALLBACK: AtomicU64 = AtomicU64::new(0);
     let mut bytes = [0u8; 16];
@@ -557,47 +373,10 @@ fn new_generation() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/* ── the daemon on this computer, when this app is the one running it ────── */
-
-/// Where the daemon is and how it is doing.
-///
-/// ⚠ **The second question about a local daemon, and deliberately not merged into
-/// `host_local_daemon`.** That one answers `None` to every failure because its
-/// caller has exactly one question — *is there a daemon here worth showing a token
-/// to?* — and a diagnostic on that path would be noise. This one exists because
-/// the app is now sometimes *responsible* for the daemon, and reporting "none" for
-/// a process that exited two seconds ago would be the app hiding its own failure.
-///
-/// **About the calling webview's account, and the root it gets** — its server's
-/// own where it is that server's owner or a legacy seat, a folder of its own
-/// otherwise (`accounts::Slot::root`). A pending seat has no account, so no root,
-/// and is answered `absent`.
-///
-/// The states, and each names a different thing to do about it:
-///
-/// - `unsupported` — no payload in this build. Nothing to offer; the relay is the
-///   only route, as it was before any of this.
-/// - `foreign` — a daemon is announced in this account's root that this app did
-///   not start. Adopted, never raced: `claimDaemonLock` would refuse a second process
-///   against one database, and creating a second control-plane machine for one
-///   computer would burn a quota slot permanently.
-/// - `running` — this app started it and it has announced itself.
-/// - `starting` — this app started it and it has not announced itself yet.
-/// - `exited` — it was started and is gone. `detail` carries the tail of what it
-///   printed, which is the whole reason this command exists.
-/// - `absent` — nothing here, and nothing has been tried.
-///
-/// ⚠ **`(async)`, because this one is a *poll*.** Four `read_to_string`s is
-/// already more than the painting thread should be asked for once a second, but
-/// the cost that mattered is the `is_alive` probe below and it is paid only on
-/// the branch nobody developing this app ever takes. On a `deploy/install.sh`
-/// machine `ours` is false for ever, so every tick does a synchronous loopback
-/// connect, write and read — three `PROBE_TIMEOUT`s, three quarters of a second,
-/// whenever the announced port is stale and *filtered* rather than refused, which
-/// is the case the timeout exists for. `store.ts` asks at `SETUP_POLL_MS` while a
-/// computer is being set up and `LogsSection` every two seconds afterwards. An app
-/// running its own child answers from a process handle and pays none of it, which
-/// is why a whole release of this was invisible.
+/// Separate from `host_local_daemon`, which answers `None` to every failure; this one must not
+/// hide a daemon this app started that exited. About the calling account's root; a pending seat
+/// is `absent`. `foreign` is adopted, never raced. `(async)`: a poll, and the `foreign` branch
+/// probes `/health` on every tick.
 #[tauri::command(async)]
 pub fn host_daemon_state(
     app: AppHandle,
@@ -609,7 +388,6 @@ pub fn host_daemon_state(
     Ok(daemon_state(&app, &host, &slot))
 }
 
-/// `host_daemon_state`'s answer, once the seat is known.
 fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonState {
     let unknown = |status: &str| daemon::DaemonState {
         status: status.to_string(),
@@ -621,14 +399,6 @@ fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonStat
     if daemon::Payload::locate(&resource_dir(app), &exe_path()).is_none() {
         return unknown("unsupported");
     }
-    /*
-     * ⚠ **Everything below is about this account, and the root it gets.** This
-     * read `~/.reemoat` whoever it belonged to, so a computer whose launchd daemon
-     * served the dev stand answered `elsewhere` to production and could not be set
-     * up there at all — and a live daemon for *another* server in that folder read
-     * as `foreign`, which the store took to mean "somebody has this covered" and
-     * said nothing. With no account there is nothing to ask about.
-     */
     let (Some(origin), Some(scope)) = (slot.origin().map(str::to_string), slot.scope()) else {
         return unknown("absent");
     };
@@ -637,19 +407,9 @@ fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonStat
     };
 
     let announced = local::read_announced(&root.dir);
-    /*
-     * What this app already spent a machine on, for *this* account. Read here
-     * rather than left to the page, because the page would have to be told the
-     * account to ask the question and the account is deliberately something only
-     * the host decides — the same rule `host_cp` keeps.
-     */
+    // Read here: only the host knows the account.
     let claimed = daemon::read_claim(&host.config_dir, &scope);
-    /*
-     * ⚠ **Answered on every state read, because the caller's *first* decision
-     * depends on it.** A store that cannot see an existing env file creates a
-     * machine for a computer that already had one — a quota slot spent on a
-     * machine nobody asked for, and one only a person who notices it can return. `daemon::config_state` carries the measurement.
-     */
+    // On every read: a store that cannot see an existing env file buys a second machine.
     let config = daemon::config_state(&root.dir, Some(&origin)).to_string();
     let Ok(handle) = host.supervisor_for(&root) else {
         return daemon::DaemonState {
@@ -668,37 +428,11 @@ fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonStat
         };
     };
     let ours = supervisor.owns_running();
-    /*
-     * ⚠ **A daemon this app did not start has to be *there*, not merely announced.**
-     * `src/announce.ts` removes its file on a clean stop and cannot on an unclean
-     * one, so a force quit, a crash or a power cut leaves one naming a port nobody
-     * is on. Believing it answers `foreign`, which is the one status the setup flow
-     * treats as "somebody else has this covered" — and then nothing starts a daemon
-     * ever again, on a computer whose daemon dies with the app by design.
-     * ⚠ **And it is `/health` rather than a bare connect, because the port is not
-     * the daemon.** `REEMOAT_PORT` is fixed in the legacy root's env file and the
-     * kernel's choice on a root of its own, so either way a stale announce names
-     * an ordinary port that anything may hold afterwards. The
-     * answer carries the same `instanceId` the file does, so this proves the
-     * daemon rather than the socket.
-     * Not asked when this app owns the child: the handle is better evidence than a
-     * probe, and it keeps a round trip off the one-second polling path.
-     * ⚠ **The `foreign` branch has always paid it, every tick.** That is not a
-     * thing this filter can fix — a daemon this app did not start is exactly the
-     * one that has to be proved — so the fix is the `(async)` on this command:
-     * the round trip is off the *main thread* now rather than off the poll.
-     */
+    // An announce survives an unclean stop, and its port may be anybody's: `/health` proves the
+    // daemon by `instanceId`. Believing a stale one answers `foreign`, and nothing starts again.
     let announced = announced
         .filter(|found| ours || daemon::is_alive(&found.daemon.base, &found.daemon.instance_id));
-    /*
-     * ⚠ **"This server's root" is not "this server's daemon" on the legacy root.**
-     * `~/.reemoat` is every daemon's root that was started without `REEMOAT_HOME`,
-     * and the file there is last-writer-wins — so a `pnpm daemon` from a checkout,
-     * enrolled to another control plane, answers `/health` as itself and reads as
-     * `foreign` with a machine id no list here holds. The announcement says which
-     * control plane it enrolled with, and a different one is a flag rather than
-     * another status: `DaemonState.stranger` has why it may not be `absent`.
-     */
+    // `~/.reemoat` is last-writer-wins, so another fleet's daemon may answer there.
     let stranger = announced
         .as_ref()
         .is_some_and(|found| found.for_another_server(&origin));
@@ -710,9 +444,6 @@ fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonStat
             claimed,
             ..Default::default()
         },
-        // Announced by somebody else's daemon — the shell installer's, one left
-        // from a previous run of this app that outlived it, or, on the legacy
-        // root, another fleet's.
         (Some(found), false) => daemon::DaemonState {
             status: "foreign".to_string(),
             machine_id: Some(found.daemon.machine_id),
@@ -728,10 +459,7 @@ fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonStat
             let exit_code = supervisor.exit_code();
             daemon::DaemonState {
                 exit_code,
-                // A ring with something in it and no live child means one was
-                // started and is gone; an empty one, that nothing was ever tried
-                // here. The lines themselves are `host_daemon_log`'s — this poll
-                // asks the ring for a bit and never for its contents (Q7.140).
+                // This poll asks the ring for a bit, never its contents (Q7.140).
                 status: if supervisor.printed_anything() {
                     "exited"
                 } else {
@@ -749,52 +477,10 @@ fn daemon_state(app: &AppHandle, host: &Host, slot: &Slot) -> daemon::DaemonStat
     state
 }
 
-/// Bring the daemon up, provisioning this computer first if it is being asked to.
-///
-/// **Three cases, decided by what the caller brought and by what is already on
-/// disk**, and the docblock that used to be here described none of them: it
-/// claimed this "refuses rather than overwrites when an env file already exists",
-/// while the code silently skipped the write and started the daemon on whatever
-/// the file said. That is how a machine created at 15:15:54 was followed one
-/// second later by a daemon enrolling with a *different* machine's hour-old code
-/// and dying on `409 code_unusable`, with nothing on screen — measured on a real
-/// machine 2026-09-15.
-///
-/// - **A code** — provisioning, whether this is the first time or a fresh code for
-///   a machine whose last one expired. Writes the file, preserving every key this
-///   app does not own (`daemon::env_rewritten`), and writes **this host's own
-///   origin** as the control plane rather than anything the page supplied.
-/// - **No code, and a file that names this server** — adoption. Start what is
-///   already configured and create nothing. This is a `deploy/install.sh` machine,
-///   or this app's own after a restart.
-/// - **A file naming another server** — refused outright, both above. Overwriting
-///   it would point somebody's working daemon at a fleet they did not choose.
-///
-/// **"The file" is this account's, in the root `accounts::Slot::root` gives it**:
-/// for a server's owner, `~/.reemoat/daemon.env` where that file names the
-/// server and `~/.reemoat/servers/<server>/daemon.env` otherwise; for every other
-/// account, `~/.reemoat/servers/<server>@<user id>/daemon.env`. So the third case
-/// no longer means *another server's launchd daemon lives here* — that one keeps
-/// its folder and this account gets its own — and is reached only by a file in
-/// this account's own folder that was edited by hand or cannot be read. Q7.148,
-/// Q7.149.
-///
-/// ⚠ **`daemon::lock_roots()` is held from the root's choice to the start.** At
-/// launch every account's page sets itself up at once, and two owners of two
-/// servers could otherwise both read an empty `~/.reemoat` as theirs, both write
-/// an env file into it, and leave the next launch to hand the folder to whichever
-/// wrote last. Under the lock the second sees the first's file; and where rule 3
-/// hands the empty folder out, `server.json` records which origin it went to
-/// before the env file is written, so no other origin is answered it again.
-///
-/// ⚠ **`(async)`, because everything this does waits.** `write_private` below is
-/// durable now — the bytes and then the directory entry, two `sync_all`s, the
-/// first of them a full device cache flush on macOS and the second the same call
-/// on a directory descriptor, which `config::sync_dir` measures rather than
-/// assumes — and then this spawns a child process. On the main thread that is a
-/// window that
-/// stops drawing at exactly the moment somebody has pressed the button that sets
-/// their computer up, which is the one moment they are watching it.
+/// A code provisions, writing this host's own origin and keeping keys it does not own; no code
+/// adopts a file naming this server; a file naming another is refused (Q7.148, Q7.149).
+/// `lock_roots` is held from the root's choice to the start, so two servers cannot both take an
+/// empty `~/.reemoat`.
 #[tauri::command(async)]
 pub fn host_daemon_start(
     enroll_code: String,
@@ -812,13 +498,7 @@ pub fn host_daemon_start(
     let payload = daemon::Payload::locate(&resource_dir(&app), &exe_path())
         .ok_or_else(|| "this build carries no daemon".to_string())?;
 
-    /*
-     * ⚠ **Required up front, rather than only on the provisioning arm.** Which
-     * root an account's daemon lives in is a function of the account, so with none
-     * there is no file to adopt either — and adopting whatever `~/.reemoat` held,
-     * for an account nobody had signed in to, is the one-slot assumption this
-     * replaced.
-     */
+    // No account, no root: nothing to adopt either.
     let (Some(origin), Some(scope)) = (slot.origin().map(str::to_string), slot.scope()) else {
         return Err(pending_seat("no account has been signed in to yet"));
     };
@@ -844,32 +524,13 @@ pub fn host_daemon_start(
         return Err("that machine id is not a shape this can write down".into());
     }
 
-    /*
-     * ⚠ **Before the env file, not after.** The claim is what stops the next launch
-     * buying a second machine for this computer, and a machine row is never given
-     * back — so if writing the file fails on a full disk or a bad permission, the
-     * `?` must not carry away the record that a machine was already bought. Cheap
-     * and idempotent, which is what makes ordering it first free.
-     */
+    // Before the env file: a machine row is never given back, so a failed write must not lose the claim.
     if !machine_id.is_empty() {
         daemon::write_claim(&host.config_dir, &scope, &machine_id)?;
     }
 
-    /*
-     * ⚠ **A rewrite is refused while a background service owns the same file.** It
-     * would respawn within its throttle interval, source the new file and race this
-     * app's child for a single-use code, the database lock and the port — and
-     * whichever loses, the code is spent. Only the rewrite: adoption below is
-     * exactly the right thing to do with a machine somebody else set up.
-     *
-     * **And only on the legacy root**, because that is the only file a unit can
-     * source: `deploy/` renders one per account, pointed at `~/.reemoat/daemon.env`.
-     * A server with a folder of its own under `servers/` is one no service knows
-     * about, and refusing it over somebody else's plist would lock every second
-     * server out of a computer that happens to have one. A leftover unit beside an
-     * *empty* `~/.reemoat` is `state_root`'s to refuse, and it sends that server to
-     * a folder of its own rather than handing the unit a file to race for.
-     */
+    // A unit would respawn on the rewritten file and race this child for the single-use code.
+    // Only the legacy root: it is the only file a unit can source.
     if root.legacy && !enroll_code.is_empty() && env_file.exists() {
         if let Some(unit) = daemon::managed_unit(&home) {
             return Err(daemon::managed_unit_detail(&unit));
@@ -877,45 +538,16 @@ pub fn host_daemon_start(
     }
 
     if !enroll_code.is_empty() {
-        /*
-         * ⚠ **The origin this app is signed in to, never a URL from the page.**
-         * `native-shell.md` already states the rule — *a path crosses the bridge,
-         * never a URL* — and the first version of this broke it by writing
-         * whatever `POST /v1/machines` answered in `controlPlaneUrl`. That value is
-         * `installOrigin`, which is the *request's* origin with `x-forwarded-proto`
-         * applied, so behind a proxy declaring `http` it is a different spelling
-         * from the one this app uses — and a different spelling makes
-         * `config_state` answer `elsewhere` on the next launch, which is this app
-         * refusing a file it wrote itself, for ever. Writing the origin the host
-         * already holds makes `CONFIG_HERE` true by construction rather than by
-         * agreement between two services.
-         */
+        // The host's own origin, never the server's `controlPlaneUrl`: another spelling would
+        // make `config_state` refuse this file as `elsewhere` on the next launch.
         let control_plane = origin.clone();
-        /*
-         * ⚠ **Recorded before the env file, which is what makes it decided.** Where
-         * `~/.reemoat` is being handed out for being empty, `server.json` notes
-         * which origin it went to, so a second server set up at the same launch —
-         * or after this one's start failed with the folder still empty — is sent
-         * to a folder of its own (`daemon::owner_root`) rather than answered the
-         * same root.
-         */
+        // Before the env file, so no other origin is handed the same empty root.
         if root.legacy && daemon::config_state(&root.dir, Some(&origin)) != daemon::CONFIG_HERE {
             config::set_legacy_root_holder(&host.config_dir, &origin)?;
             host.set_holder(&origin);
         }
-        /*
-         * Every level of the root at `0700`, not only the last: a writable
-         * `servers/` is a folder another account could name for a server before
-         * this app does. `ensure_root` has the argument.
-         */
         daemon::ensure_root(&home, &root)?;
-        /*
-         * ⚠ **A rewrite, not a replacement, when there is already a file.** The one
-         * measured here carried a private CA path its owner had added by hand —
-         * without which the daemon cannot reach that control plane at all. Writing
-         * `env_contents` over it would have deleted the line and turned a refused
-         * enrollment code into a TLS failure.
-         */
+        // A rewrite: a replacement would delete hand-added lines such as a private CA path.
         let text = match std::fs::read_to_string(&env_file) {
             Ok(existing) => daemon::env_rewritten(&existing, &control_plane, &enroll_code),
             Err(_) => daemon::env_contents(&control_plane, &enroll_code),
@@ -930,12 +562,7 @@ pub fn host_daemon_start(
     let text = std::fs::read_to_string(&env_file)
         .map_err(|e| format!("could not read {}: {e}", env_file.display()))?;
     let env = daemon::parse_env(&text);
-    /*
-     * ⚠ **The root, the server and the port go on the spawn and never into the
-     * file** — `daemon::Spawn` has why, and why the legacy root keeps its port.
-     * This root's own supervisor, so a daemon already running for another account
-     * is neither the one "already running" here nor touched by starting this one.
-     */
+    // Root, server and port go on the spawn, never into the file (`daemon::Spawn`).
     let spawn = daemon::Spawn {
         root: root.dir.clone(),
         control_plane: origin.clone(),
@@ -952,29 +579,12 @@ pub fn host_daemon_start(
         } else {
             Some(machine_id)
         },
-        // True by construction: every path that reaches here either wrote a file
-        // naming this server or adopted one that already did.
         config: daemon::CONFIG_HERE.to_string(),
         ..Default::default()
     })
 }
 
-/// Stop the daemon this app started for the calling webview's account, and only
-/// that one.
-///
-/// Another account's daemon is not this command's: it keeps running until the app
-/// quits, where `daemon::stop_all` takes every one of them together — or until
-/// that account is forgotten, which stops its own.
-///
-/// ⚠ **`(async)`, and this is the longest wait in the file by an order of
-/// magnitude.** `Supervisor::stop` signals and then **waits** — bounded by
-/// `STOP_DEADLINE`, and waiting is the point rather than politeness: a stop that
-/// returned early would let a relaunch start a second daemon while the first still
-/// held `reemoat.db`, which the setup flow reads as a daemon that will not start.
-/// That argument is about the *quit* path, where holding the main loop is
-/// unavoidable because the loop is on its way out. Here it is avoidable, and bare
-/// it was a window frozen for up to that whole deadline because somebody pressed
-/// Stop.
+/// This account's daemon only. `(async)`: the stop waits up to `STOP_DEADLINE`.
 #[tauri::command(async)]
 pub fn host_daemon_stop(
     app: AppHandle,
@@ -983,8 +593,6 @@ pub fn host_daemon_stop(
     host: State<'_, Host>,
 ) -> Result<(), String> {
     let (_, slot) = host.seat(&webview, &request)?;
-    // No account, or a root this app never asked about: nothing of ours to stop,
-    // and stopping nothing has already succeeded.
     let Ok(home) = app.path().home_dir() else {
         return Ok(());
     };
@@ -1001,30 +609,8 @@ pub fn host_daemon_stop(
     Ok(())
 }
 
-/// What the daemon this app started has printed, newest last.
-///
-/// ⚠ **Its own command rather than a field on `host_daemon_state`, and that is
-/// about what each is asked.** `host_daemon_state` answers a word on a one-second
-/// poll while a computer is being set up; this answers two hundred lines to one
-/// screen that somebody opened on purpose. Folding the second into the first would
-/// put the log on the poll, and `DaemonState.detail` — which means *what explains
-/// this failure* and is `None` wherever nothing needs explaining — would become a
-/// log field by accident.
-///
-/// **Never `Err`.** A screen whose subject is "what did it say" has no use for a
-/// refusal it would have to render instead; every reason there is nothing to show
-/// — no daemon started here, a daemon somebody else's installer started, a daemon
-/// that has printed nothing yet — is an empty list, and the screen says which of
-/// those it is from the state it already has.
-///
-/// **The calling webview's account**, like every daemon command here: another
-/// account's ring is kept, and shown in that account's own webview. A document
-/// the host no longer recognises is answered an empty list rather than a
-/// refusal, for the same reason.
-///
-/// ⚠ **`(async)` now**, having been bare: which ring is a question about which
-/// root the account has, and that is asked of the disk (`daemon::owner_root`), on
-/// a two-second poll.
+/// Its own command, so the log never rides `host_daemon_state`'s poll. Never `Err`: every reason
+/// there is nothing to show is an empty list. `(async)`: which ring is asked of the disk.
 #[tauri::command(async)]
 pub fn host_daemon_log(
     app: AppHandle,
@@ -1044,62 +630,19 @@ pub fn host_daemon_log(
     else {
         return Vec::new();
     };
-    // See `log_lines`: a poisoned lock costs the evidence, never the app.
+    // A poisoned lock costs the evidence, never the app.
     let Ok(supervisor) = handle.lock() else {
         return Vec::new();
     };
     supervisor.log_lines()
 }
 
-/// `0600` inside a `0700` directory, on the platforms that have modes.
-///
-/// The enrollment code is a full machine identity until it is redeemed, so this
-/// is the same discipline `src/announce.ts` applies to `daemon.json` and
-/// `deploy/install.sh` to this very file. A filesystem with no POSIX modes is not
-/// a reason to refuse — it is the same judgement `store/sqlite.ts` already makes.
-///
-/// ⚠ **The temporary name comes from `config::temp_name`, and that stopped being
-/// cosmetic when this function's caller became `(async)`.** It used to be the pid
-/// alone, which was modelled on `write_stored`'s name *minus* the counter that
-/// name carries — survivable only while `host_daemon_start` ran on the main
-/// thread and could not overlap itself. `temp_name`'s docblock has what two
-/// writers sharing one temporary path cost, which for this file is the truncated
-/// `daemon.env` the block below exists to prevent rather than an untidy
-/// directory.
-///
-/// ⚠ **The lost update on `daemon.env` that this paragraph recorded as open is
-/// closed by `daemon::lock_roots()`.** `host_daemon_start` does `read_to_string`
-/// → `daemon::env_rewritten` → this function, and two concurrent starts used to
-/// be able to each write a file built from bytes the other had already replaced.
-/// Every account's page setting itself up at launch made that the ordinary case
-/// rather than a rare one, so the whole of `host_daemon_start` from the root's
-/// choice to the spawn now runs under one process-wide lock — and the machine
-/// claim, the other half this used to wait on, has a lock of its own
-/// (`daemon::write_claim`). A shared temporary name was the half that produced a
-/// *torn* file, and it stays closed by `config::temp_name`.
+/// `0600` in a `0700` directory: the enrollment code is a machine identity until redeemed.
+/// `config::temp_name` because concurrent starts must not share a temporary path.
 fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
     use std::io::Write;
-    /*
-     * ⚠ **`std::fs::write` was wrong here twice over, and this is the one file
-     * that can afford neither.** It truncates before it writes, so a crash in
-     * between leaves an env file with no `REEMOAT_CONTROL_PLANE` — which
-     * `config_state` reads as `elsewhere`, and the app then refuses to touch a
-     * file it corrupted itself, telling the person their computer is set up for
-     * another server. Being locked out is bad; being locked out by a sentence that
-     * is not true is worse. And the `chmod` landed *after* the bytes, so the
-     * enrollment code and the certificate path sat at the umask's mode for the
-     * length of a write.
-     *
-     * A temporary file created at `0600`, filled, flushed and renamed over the
-     * target closes both: the mode is never wrong because it is set at creation,
-     * and every reader sees either the whole old file or the whole new one.
-     *
-     * ⚠ **And the rename is flushed too, which for a long time it was not.** That
-     * sentence above described a crash *during* a write and stopped at the last
-     * statement: `sync_all` promises the temporary's bytes, and the directory
-     * entry naming them is a separate write that nothing waited on. See the call
-     * at the foot of this function.
-     */
+    // A temporary created at `0600`, flushed and renamed: `fs::write` truncates first (a crash
+    // leaves no `REEMOAT_CONTROL_PLANE`, read as `elsewhere`) and its mode lands after the bytes.
     let dir = path
         .parent()
         .ok_or_else(|| format!("{} has no directory", path.display()))?;
@@ -1112,10 +655,6 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("daemon.env");
-    // The pid **and** a counter, through the one function that builds both. Two
-    // `host_daemon_start`s can be in flight in one process — it carries `(async)`
-    // — and both opens below carry `truncate(true)`, so a temporary path they
-    // share is the second one emptying bytes the first has already flushed.
     let tmp = dir.join(config::temp_name(name));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -1127,8 +666,6 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
     let mut file = options
         .open(&tmp)
         .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    // `sync_all` rather than a plain close: a rename that beats its own contents to
-    // disk is the failure this shape exists to prevent.
     if let Err(e) = file
         .write_all(contents.as_bytes())
         .and_then(|()| file.sync_all())
@@ -1141,259 +678,72 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         format!("could not write {}: {e}", path.display())
     })?;
-    /*
-     * ⚠ **The flush above is the bytes; this is the name.** `sync_all` promises
-     * the temporary's *contents* are on the device and says nothing about the
-     * directory entry that gives them a path — a separate write, and an un-synced
-     * one can leave neither the new name nor the old after a crash or a power cut.
-     * For this file that state is an env file with no `REEMOAT_CONTROL_PLANE`,
-     * which `config_state` reads as `elsewhere`: exactly the failure the block
-     * above exists to prevent, where the app refuses to touch a file it corrupted
-     * itself while telling the person their computer belongs to another server.
-     *
-     * The same gap was in `config.rs`'s `write_stored`, which this shape was
-     * modelled on, so the fix is one function called from both — two copies that
-     * drift apart is how one of them stops being a fix, and the temporary name
-     * above now goes through that same door. Best effort for `sync_dir`'s own
-     * reason: a platform with no openable directory handle may not turn a write
-     * that landed into a refusal. It answers an `io::Result` rather than
-     * swallowing one, so the discard is stated here and its docblock can carry
-     * what each platform actually does with the call.
-     */
+    // `sync_all` covered the bytes; this is the directory entry. Best effort (`config::sync_dir`).
     let _ = config::sync_dir(dir);
     Ok(())
 }
 
-/// Where `bundle.resources` landed, in a bundle and in `tauri dev` alike.
 pub(crate) fn resource_dir(app: &AppHandle) -> std::path::PathBuf {
     app.path()
         .resource_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-/// This process's own executable, from which `daemon::runtime_beside` finds the
-/// runtime — on macOS the helper app in `Contents/Helpers`, not a file beside it.
 pub(crate) fn exe_path() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-/// Whether this build has a folder panel to open at all.
-///
-/// ⚠ **One spelling, two mechanisms, and `nativecheck` holds them to each other.**
-/// A `cfg!` macro and a `#[cfg]` attribute cannot share a token, so the condition
-/// exists twice — here and on `pick_folder` — and a build where they disagree is a
-/// page that draws a control the shell will refuse. The driver compares the two
-/// strings for exactly that reason.
+/// The same condition as `pick_folder`'s `#[cfg]`, written twice; `nativecheck` compares them.
 pub const PICKS_FOLDER: bool = cfg!(not(any(target_os = "android", target_os = "ios")));
 
-/// Whether a daemon could be on *this* computer at all.
-///
-/// ⚠ **A declared capability rather than an accident, and the accident is what
-/// it replaces.** `mod daemon` and `mod local` compile for Android, so all five of
-/// the daemon commands exist there, are registered, and answer `"unsupported"` or
-/// `None` — `Payload::locate` finds nothing staged and `~/.reemoat/daemon.json` is
-/// not on a phone. Both are true today and both are luck: the first is a property
-/// of the *bundle* rather than of the platform, and the second is the very
-/// inference {@link Boot::picks_folder}'s own docblock refuses in so many words.
-///
-/// ⚠ **No `#[cfg]` counterpart, unlike {@link PICKS_FOLDER}, and the asymmetry
-/// is the whole reason this had to be written down rather than discovered.** The
-/// folder panel got its constant for free: `blocking_pick_folder` does not exist
-/// on Android, so an APK failed to compile and somebody had to decide something.
-/// Nothing here fails to compile — there is no desktop-only call in these five
-/// — so the page went on asking a phone to set itself up as a machine and
-/// reading a plausible answer.
-///
-/// The condition is the same string as {@link PICKS_FOLDER}'s and they are
-/// deliberately two constants: they answer different questions, and the day
-/// Android grows a Storage Access Framework folder picker that one becomes `true`
-/// while this one cannot.
+/// Declared rather than inferred from `"unsupported"`, which is about the bundle, not the platform.
+/// A separate constant from `PICKS_FOLDER`: they answer different questions.
 pub const CAN_HOST_DAEMON: bool = cfg!(not(any(target_os = "android", target_os = "ios")));
 
-/// What the first paint needs, in one round trip.
-///
-/// One call rather than four, because the webview cannot draw anything honest
-/// until it knows all of it: which account this webview is, whether there is a
-/// sign-in for it, and whether a sign-in will survive a restart.
+/// No `rename_all`: every camelCase field carries its own `rename`, which `nativecheck` compares.
 #[derive(Serialize)]
 pub struct Boot {
-    /// This webview's server: the account's origin, or the server a pending
-    /// sign-in has chosen so far — `None` only before one has been chosen.
     pub server: Option<String>,
-    /// **The credential, handed over once per page load.**
-    ///
-    /// It lives in the webview's memory from here, exactly as it does in a
-    /// browser, and in the OS keyring at rest — never in `localStorage`. Keeping
-    /// the value in this process instead was considered and refused: `cpFetch`
-    /// attributes a 401 by comparing `credential === sent` by identity, and a
-    /// handle it cannot compare would silently lose the rule that stops a late
-    /// 401 signing you out of a session you just started.
-    ///
-    /// ⚠ **Once per page load, and only this webview's account's.** A second
-    /// `host_boot` from the same document answers `None`, so a script that got
-    /// into one page cannot keep asking; and the keyring entry read is the
-    /// seat's own scope, so no webview can be handed another account's.
+    /// Once per page load, and only this seat's. Not kept in Rust alone: `cpFetch` compares it by identity.
     pub credential: Option<String>,
     pub platform: String,
-    /// What this computer is called, for naming the machine it becomes.
-    ///
-    /// ⚠ **Not `platform`, and the difference is the whole reason this field
-    /// exists.** `platform` is `std::env::consts::OS` — the literal string
-    /// `"macos"` on every Mac ever made. Naming a control-plane machine from it
-    /// succeeds once and then collides for ever, and the collision is checked
-    /// case-insensitively against every machine the account can see, so the second
-    /// computer gets a `409` for a name nobody typed.
-    ///
-    /// `None` where the host name cannot be read, which is a real state on a
-    /// locked-down box: the caller then has to ask rather than guess.
+    /// Names the machine; `platform` is `"macos"` on every Mac and would collide.
     #[serde(rename = "hostName")]
     pub host_name: Option<String>,
     #[serde(rename = "appVersion")]
     pub app_version: String,
-    /// `false` where this machine's keyring took a canary and lost it — see
-    /// `credential::probe`.
     pub durable: bool,
-    /// The device this installation is registered as for this account, or `None`.
-    ///
-    /// ⚠ **The `rename` is load-bearing and its absence is invisible.** This
-    /// struct carries no `rename_all` — every camelCase field names itself, which
-    /// is `local.rs`'s convention too — so `device_id` without this line
-    /// serializes as `device_id`, `boot.deviceId` reads `undefined` for ever, and
-    /// `tsc`, `cargo`, `nativecheck`, `webcheck` and `cargo test` all stay green.
-    /// The app would then decide on every launch that it has no device, register
-    /// one, and walk into the account's device limit. `nativecheck` compares this
-    /// struct's serialized keys against `NativeBoot`'s for exactly that reason.
-    ///
-    /// It comes from `config.rs` rather than the keyring, and that is what makes
-    /// it survive a machine whose credential store silently discards writes.
+    /// Without its `rename` the page would register a new device on every launch.
     #[serde(rename = "deviceId")]
     pub device_id: Option<String>,
-    /// This installation's X25519 public key for this account, base64url.
-    ///
-    /// ⚠ **Two flat fields rather than one nested `deviceKey` object, and that is
-    /// forced rather than chosen.** `nativecheck`'s census reads `^\s{4}pub (\w+): `
-    /// — the **top-level** fields of this struct and nothing deeper. A nested
-    /// struct's members are invisible to it, so a missing `rename` inside one
-    /// would be the failure the `device_id` block above describes, repeating one
-    /// level down where the census that was built to catch it cannot look.
-    ///
-    /// `None` before the first launch that generates one, and on a failure to
-    /// reach any store at all — the page then has no encrypted route to a remote
-    /// machine and says so, rather than opening an unencrypted one.
+    /// Flat rather than a nested `deviceKey`: the census reads top-level fields only.
     #[serde(rename = "devicePublicKey")]
     pub device_public_key: Option<String>,
-    /// `"keyring"` or `"file"` — where that key is actually kept.
-    ///
-    /// Carried to the page because a person on a machine whose credential store
-    /// keeps nothing should be **told** their key is in a file, on the screen that
-    /// lists their devices. The alternative to the file is that installation
-    /// having no remote access at all, so this is a disclosure rather than a
-    /// setting.
     #[serde(rename = "deviceKeyAtRest")]
     pub device_key_at_rest: Option<String>,
-    /// Whether this shell can open a folder panel — see {@link PICKS_FOLDER}.
-    ///
-    /// **A declared capability rather than something the page infers.** The page
-    /// could have keyed the panel on `platform`, but `HostPlatform` narrows
-    /// `"android"` to `"other"` along with every future desktop target, so that
-    /// would be a guess that reads as a fact. It could also have relied on the
-    /// accident that a phone has no local daemon and therefore never matches
-    /// `localMachineId` — which is true today and is luck, not a rule.
-    ///
-    /// ⚠ **This field and these paragraphs were spliced into the middle of
-    /// `device_id`'s docblock**, so the ⚠ about the load-bearing `rename` read as
-    /// documentation for the folder panel and `device_id` — the field that
-    /// `rename` protects and that the census below exists for — carried no
-    /// docblock at all. Nothing can catch that: a doc comment binds to whatever
-    /// follows it, both fields kept their attributes, and every driver stayed
-    /// green. Moved rather than reworded, and the two declared capabilities sit
-    /// together now so the next one has an obvious home.
     #[serde(rename = "picksFolder")]
     pub picks_folder: bool,
-    /// Whether a daemon could be on *this* computer at all — see
-    /// {@link CAN_HOST_DAEMON}.
-    ///
-    /// **What the page does with it is refuse to ask.** The five wrappers in
-    /// `native.ts` answer `null`, `[]` or a sentence without reaching the bridge,
-    /// so the setup flow, the log screen and `localRoute.ts`'s probe are all off
-    /// on a platform where none of them can end anywhere.
-    ///
-    /// ⚠ **The host's `"unsupported"` is still underneath and is not what this
-    /// replaces.** That one is a fact about the *bundle* — `Payload::locate`
-    /// finding nothing staged — so it is per build and per overlay and could
-    /// never be a compile-time constant. This one is a fact about the *platform*.
-    /// A desktop client build keeps answering `true` here and `"unsupported"`
-    /// there, which is what leaves `host_local_daemon` reaching a daemon
-    /// `deploy/install.sh` put on a Linux box.
     #[serde(rename = "canHostDaemon")]
     pub can_host_daemon: bool,
-    /// The address this build suggests, for the setup screen's field to open on.
-    ///
-    /// ⚠ **A suggestion, and never `server`.** They are different questions —
-    /// *what shall I put in the box* against *which fleet is this installation
-    /// on* — and the first draft answered them with one field by seeding the
-    /// default into `server.json` on first run. That skipped the setup screen
-    /// entirely, so the app chose somebody's fleet and told them afterwards, and
-    /// it made a `credential#<origin>` keyring account for an origin nobody had
-    /// confirmed. Two fields, and only the second one is ever written down.
-    ///
-    /// `None` in this repository: nothing here compiles a default in, which
-    /// `nativecheck` asserts the way it asserts `signingIdentity: null`.
+    /// A suggestion for the field, never `server`, and never written down (Q4.121).
     #[serde(rename = "defaultServer")]
     pub default_server: Option<String>,
-    /// The machine this app created for this account, if it created one — the
-    /// same `daemon::read_claim` that `host_daemon_state` answers `claimed` from.
-    ///
-    /// **What the page seeds `localMachineId` with, and it needs no daemon.**
-    /// Which machine this computer is, is identity, not reachability (Q7.139), and
-    /// the one read that answered it could not answer on a cold launch: the app
-    /// stops its own daemon at quit, `src/announce.ts` removes the announce file
-    /// on that clean stop, and the page starts the daemon again only after it has
-    /// drawn the machine list — so `host_local_daemon` said `None` on every
-    /// launch and the rail renamed and reordered itself a moment later. The claim
-    /// survives the quit. One small file read and no `/health` probe, which is
-    /// why it rides this call rather than `host_daemon_state`'s.
-    ///
-    /// No `rename`: one lowercase word serializes as itself.
+    /// Seeds `localMachineId` on a cold launch, when no daemon has announced yet (Q7.139).
     pub claimed: Option<String>,
-    /// This webview's account key, `<origin>#<user id>` — or `None` while it is a
-    /// pending sign-in or a legacy seat nothing has attributed yet.
-    ///
-    /// The page reads `None` as "a new sign-in" (Cancel, `‹ Server`) and a key as
-    /// "an account" (Remove account). It never sends it back except to name a
-    /// switch target, and the host never believes it for anything else. Q1.651.
+    /// Sent back only to name a switch target; the host believes it for nothing else (Q1.651).
     pub account: Option<String>,
-    /// The name the control plane last answered for this account, cached.
     pub name: Option<String>,
-    /// A legacy seat — or an account whose server still has bare, pre-accounts
-    /// items waiting on a proof that could not be reached. Either way the page
-    /// calls `host_account_confirm` at bootstrap.
+    /// Also an account whose bare items wait on an unreachable proof; the page confirms either way.
     pub legacy: bool,
-    /// Whether this account's device id is bound to its current sign-in. `false`
-    /// is the page's cue to register one: a sign-in now sends no device, so the
-    /// first bootstrap after one always registers.
     #[serde(rename = "deviceBound")]
     pub device_bound: bool,
-    /// This document's generation — the `reemoat-generation` header every later
-    /// command must carry. `None` only while `rebinding`.
     pub generation: Option<String>,
-    /// This webview was rebound to another account and its new page load has not
-    /// started yet. The page retries `host_boot` for a moment rather than deciding
-    /// it is signed out: on Android the page-load event is posted asynchronously
-    /// and can trail the new document's first call.
+    /// The page retries: on Android the page-load event can trail the new document's first call.
     pub rebinding: bool,
 }
 
-/// What a sign-in or a confirm came to — `NativeBound` on the page.
-///
-/// `outcome` is one of `bound` (this webview is that account now), `adopted`
-/// (the account was already here, signed out, and has this sign-in now — switch
-/// to it), `existing` (already here and signed in; this sign-in was revoked —
-/// switch to it), `refused` (a different person on a signed-out account's seat;
-/// revoked) or `unchanged` (a confirm that changed nothing). The device fields
-/// are this webview's account's, for the page to update its boot snapshot after
-/// a legacy seat became an account; `None` for every outcome that moves the page
-/// elsewhere.
+/// `outcome`: `bound`, `adopted`, `existing`, `refused` or `unchanged`. Device fields are `None`
+/// for every outcome that moves the page elsewhere.
 #[derive(Serialize)]
 pub struct Bound {
     pub outcome: String,
@@ -1420,67 +770,45 @@ impl Bound {
     }
 }
 
-/// One account in the drawer — `NativeAccountSummary`. Never a credential.
+/// Never a credential.
 #[derive(Serialize)]
 pub struct AccountSummary {
     pub key: String,
     pub origin: String,
     pub name: Option<String>,
-    /// The calling webview's own account.
     pub current: bool,
-    /// From `server.json`'s persisted flag — `host_accounts` reads no keyring.
+    /// The persisted flag: `host_accounts` reads no keyring.
     #[serde(rename = "signedIn")]
     pub signed_in: bool,
 }
 
-/// Every account on this computer — `NativeAccountList`.
 #[derive(Serialize)]
 pub struct AccountList {
     pub accounts: Vec<AccountSummary>,
-    /// Fewer than `accounts::MAX_ACCOUNTS`.
     #[serde(rename = "canAdd")]
     pub can_add: bool,
-    /// The most recently shown account other than the caller: where Cancel and
-    /// "Use another account" go. Read live, because a desktop webview's boot
-    /// snapshot outlives every add and remove that happens after it.
+    /// Read live: a desktop webview's boot snapshot outlives later adds and removes.
     pub back: Option<String>,
 }
 
-/// Whether an account move needs the page to reload — `NativeAccountMove`.
-///
-/// ⚠ **`reload_page` renamed to `reload`**, so this one-field struct has a
-/// `rename` for `nativecheck`'s payload census to be non-vacuous about.
+/// Renamed so the payload census has a rename to read here.
 #[derive(Serialize)]
 pub struct AccountMove {
     #[serde(rename = "reload")]
     pub reload_page: bool,
 }
 
-/// What the first paint needs.
-///
-/// ⚠ **The one command a page may call without a generation, and the one that
-/// issues it.** It hands the credential at most once per page load, and nothing
-/// but this reads the keyring for a credential to give the page.
-///
-/// ⚠ **`(async)`** — see the module docblock: every account's webview boots at
-/// launch.
+/// The one command without a generation, and the one that issues it. `(async)`: every webview boots at launch.
 #[tauri::command(async)]
 pub fn host_boot(app: AppHandle, webview: tauri::Webview, host: State<'_, Host>) -> Boot {
     let seat = host.boot(webview.label()).unwrap_or(BootSeat {
-        // A label with no seat is one being built; asking again in a moment is
-        // the answer that ends somewhere.
+        // A label with no seat is one being built.
         slot: Slot::Pending { origin: None },
         generation: None,
         hand: false,
         rebinding: true,
     });
-    /*
-     * ⚠ **While a rebind is pending only two answers change: there is no
-     * generation and no credential.** Everything else describes the seat as it
-     * now is, which is what the page is about to boot as once its reload starts;
-     * none of it is a secret, and the page is retrying rather than drawing it.
-     * `hand` is `false` while rebinding, so the credential read below cannot run.
-     */
+    // While rebinding there is no generation and no credential (`hand` is false).
     let server = seat.slot.origin().map(str::to_string);
     let scope = seat.slot.scope();
     let credential = scope
@@ -1492,13 +820,7 @@ pub fn host_boot(app: AppHandle, webview: tauri::Webview, host: State<'_, Host>)
         .as_deref()
         .and_then(|scope| roster.find(scope))
         .cloned();
-    /*
-     * ⚠ **Keeping the drawer honest, once per page load.** `host_accounts` reads
-     * no keyring, so what it says about signed in and out is what this read found
-     * last: a sign-in the keyring lost — a store that accepts writes and keeps
-     * nothing, `credential::probe`'s case — is recorded here as signed out, where
-     * the drawer can say so.
-     */
+    // Corrects the drawer's persisted flag where the keyring lost a sign-in.
     if seat.hand && !roster.derived {
         if let (Some(scope), Some(entry)) = (scope.as_deref(), entry.as_ref()) {
             if entry.signed_in != credential.is_some() {
@@ -1506,16 +828,10 @@ pub fn host_boot(app: AppHandle, webview: tauri::Webview, host: State<'_, Host>)
             }
         }
     }
-    // Read for the same scope the credential was, and in the same breath, so the
-    // two cannot answer about different accounts.
     let device_id = scope
         .as_deref()
         .and_then(|scope| config::read_device(&host.config_dir, scope));
-    // The same scope again, for the reason the device id is read here: three
-    // answers about three different accounts is the shape this function exists
-    // to make impossible. ⚠ A legacy seat's key is only ever *read*: minting a
-    // bare key nobody can prove is theirs would leave it behind for the account
-    // the seat becomes (`device::existing_key`).
+    // A legacy seat's key is only read (`device::existing_key`).
     let device_key = match &seat.slot {
         Slot::Account { .. } => scope
             .as_deref()
@@ -1525,10 +841,7 @@ pub fn host_boot(app: AppHandle, webview: tauri::Webview, host: State<'_, Host>)
             .and_then(|scope| device::existing_key(&host.config_dir, scope)),
         Slot::Pending { .. } => None,
     };
-    // And the claim, for that same scope: a machine id bought for one account
-    // names nothing — or somebody else's machine — for another. A file read and
-    // never a probe, because it is identity the page wants here, not a daemon to
-    // talk to.
+    // A file read, never a probe: identity, not reachability.
     let claimed = scope
         .as_deref()
         .and_then(|scope| daemon::read_claim(&host.config_dir, scope));
@@ -1561,41 +874,9 @@ pub fn host_boot(app: AppHandle, webview: tauri::Webview, host: State<'_, Host>)
     }
 }
 
-/// One Diffie-Hellman with this installation's device key.
-///
-/// The page runs the Noise handshake — `native-shell.md` gives four reasons the
-/// daemon leg may not leave the webview, and one of them is that an encrypted
-/// stream with two decryptors is not a design — so the two operations in the IK
-/// pattern that need the *static* key come back here. Every other operation uses
-/// an ephemeral the page generated and holds itself.
-///
-/// ⚠ **This is a Diffie-Hellman oracle scoped to the page, and naming it as one
-/// is the point.** Anything running in the webview can ask for `DH(device, X)` for
-/// an `X` it chooses — with *this webview's account's* key, and no other. That is
-/// strictly less than holding the key — it cannot be exported, survives no copy,
-/// and is gone when the document is — and it is the same trust boundary
-/// `host_boot` already sits on, which hands over the account's credential
-/// outright.
-///
-/// ⚠ **`(async)`, and on this command that is the hot path itself.** The work
-/// here is an OS keyring read — on macOS a `securityd` IPC round trip rather than
-/// a memory lookup — plus an X25519 scalar multiplication, and the IK handshake
-/// crosses this bridge **twice**: `ss` in message 1 and `se` in message 2.
-/// `e2ee.ts` holds a pool rather than a multiplexer with `MAX_IDLE_CONNECTIONS`
-/// of 2, so any burst — the four-second poll fanning out across a fleet, or a
-/// wake — dials fresh connections and pays two blocking keychain reads *each*.
-/// Every byte of remote traffic now sits behind this call, which makes it the
-/// last thing in this file that may hold the thread the webview paints on.
-///
-/// **The two reads are still two, and that is a file-ownership fact rather than a
-/// judgement.** Caching the decoded static in `Host` after the first successful
-/// read would make a handshake one keyring hit; the process holds the key in
-/// memory for the length of the DH anyway, so it costs no exposure that is not
-/// already taken. But `device::read_secret` is private and the at-rest policy it
-/// implements — keyring first on *every* read, file fallback second, a keyring
-/// answer retiring the file — is deliberately in one place. A cache here would be
-/// a second copy of that policy in a module that has no other reason to know it,
-/// so it belongs in `device.rs`, beside the only reader.
+/// A DH oracle scoped to the page and this account's key: less than holding the key, and the same
+/// boundary `host_boot` already sits on. `(async)`: a keyring read, twice per Noise handshake. A
+/// cache of the static would belong in `device.rs`, beside the at-rest policy.
 #[tauri::command(async)]
 pub fn host_device_dh(
     peer: String,
@@ -1610,20 +891,7 @@ pub fn host_device_dh(
     device::diffie_hellman(&host.config_dir, &scope, &peer)
 }
 
-/// Start this installation over with a fresh device key for this account.
-///
-/// Two cases, one act: a credential store that was reset out from under the app,
-/// and somebody deliberately re-keying from Settings → Devices. The old key is
-/// given up first, so a failure part-way leaves no installation holding a key the
-/// server has never heard of.
-///
-/// ⚠ **`(async)`, because re-keying is three stores in a row.** A keyring erase, a
-/// `server.json` write to drop any fallback copy, and then `ensure_key`: fresh
-/// randomness, a keyring write **verified by reading it back** (`device.rs` says
-/// why the `Ok` cannot be trusted), and on a machine where that read-back fails, a
-/// second durable `server.json` write. Each of those writes flushes the file and
-/// its directory entry, so on macOS this is several `F_FULLFSYNC`s and two or more
-/// `securityd` round trips in one command.
+/// The old key is given up first. `(async)`: a keyring erase, durable writes and a verified write.
 #[tauri::command(async)]
 pub fn host_device_key_reset(
     webview: tauri::Webview,
@@ -1637,55 +905,10 @@ pub fn host_device_key_reset(
     device::reset_key(&host.config_dir, &scope)
 }
 
-/// Is there a daemon on *this computer*, and which machine is it?
-///
-/// A separate call rather than a field on {@link Boot}, because a daemon can start
-/// after the app does — and usually has, on a laptop where both come up at login.
-/// The client re-asks; a boot payload would be a one-shot answer to a question
-/// whose answer changes.
-///
-/// `None` for every failure, including the ordinary one of there being no daemon
-/// here. `local::read` is where the refusals are, and loopback is enforced inside
-/// it so the page never sees the parts an address was built from.
-///
-/// ⚠ **`is_alive` before the base leaves this process, because the caller spends a
-/// machine token on it.** `machine.ts`'s `proveLocal` sends `Authorization: Bearer`
-/// to whatever this answers, and `.claude/rules/relay.md` states what that costs
-/// if the listener is not the daemon: a 300-second bearer, spendable **through the
-/// relay from anywhere**. The file being unplantable by another uid closes only
-/// half of it — `src/announce.ts` cannot remove its file on a SIGKILL, a crash or a
-/// power cut, `REEMOAT_PORT` is a fixed 7887 on the legacy root by decision and the
-/// kernel's choice everywhere else, and anything may hold an ordinary port
-/// afterwards. `host_daemon_state` already applies exactly this
-/// filter, with a ⚠ saying exactly this; it was the *status* path that had the
-/// proof and the token-bearing path that did not.
-///
-/// **Two files, in order: this account's root, then `~/.reemoat`**
-/// (`daemon::announce_roots`). The first is the daemon this app runs for the
-/// account. The second is what keeps a client build reaching a daemon
-/// `deploy/install.sh` set up — `native-packaging.md`'s promise that a build with
-/// no payload still *finds* one — and a daemon for this server started by hand
-/// with its env file somewhere else, which the store adopts rather than buying a
-/// second machine for. A legacy daemon for another fleet is harmless here: the
-/// page checks the machine id against the one it wants and declines.
-///
-/// ⚠ **A guest is answered its own root alone.** `~/.reemoat` belongs to its
-/// server's owner or to install.sh, and adopting that machine as this account's
-/// own is the one thing a second account on a server must never do — see
-/// `daemon::announce_roots`.
-///
-/// It costs one `/health` round trip against `PROBE_TIMEOUT` per file found, and
-/// `localRoute.ts` asks this once per route resolution — a wake or a
-/// fifteen-second retry, never the four-second poll. ⚠ **It also does not memoise, on purpose**, so a fleet of
-/// N machines resolving after a wake is N of these one after another, each worth a
-/// connect, a write and a read against that timeout: three quarters of a second
-/// apiece against a port that is stale and filtered rather than refused.
-///
-/// This docblock used to end *"it is paid on **this** thread, which is the main
-/// one until this command is `#[tauri::command(async)]`"* — a standing TODO
-/// written as prose, which is the shape of comment this repository keeps finding
-/// on the wrong side of the code it describes. It is the attribute now, so the
-/// probe is paid on the async runtime and the webview goes on painting through it.
+/// Not on `Boot`: a daemon may start after the app. `None` for every failure. `is_alive` before
+/// the base leaves this process, because the page spends a 300-second machine token on it and an
+/// announce can outlive its daemon. This account's root, then `~/.reemoat`, which keeps a client
+/// build finding an `install.sh` daemon; a guest gets its own root alone. Not memoised.
 #[tauri::command(async)]
 pub fn host_local_daemon(
     app: AppHandle,
@@ -1703,30 +926,8 @@ pub fn host_local_daemon(
         .find(|found| daemon::is_alive(&found.base, &found.instance_id))
 }
 
-/// Choose the server a **pending** sign-in is for — and only that.
-///
-/// ⚠ **An account's server cannot be changed, and the host is where that is
-/// enforced.** An account *is* its origin and a user id; "changing its server"
-/// would be a different account wearing this one's name, key, device and daemon.
-/// Another server is another account, added from the menu. So this is refused
-/// with `pending_seat` for every seat but a pending one. Q3.643, Q5.120.
-///
-/// ⚠ **It used to erase `credential#<previous>` here, and that was reversed
-/// (Q7.148)** — and now nothing it could erase exists: a pending seat has no
-/// credential and no device. It writes `server.json` only on a first run, when
-/// there is no account at all, so a relaunch opens on the server chosen; a
-/// pending seat beside accounts is remembered by the seat alone, and Cancel
-/// returns to the account before it with nothing to undo.
-///
-/// ⚠ **`(async)`, because the act waits on a store.** The write is a durable
-/// `server.json` — the bytes and the directory entry, the first of which is a
-/// full device cache flush on macOS and the second of which `config::sync_dir`
-/// states the measured limits of.
-///
-/// ⚠ **And no daemon is touched, deliberately.** A pending seat has none, and
-/// every account's keeps running — its turns go on, its approvals stay pending and
-/// a phone on that fleet still reaches this computer — until the app quits or that
-/// account is forgotten. `nativecheck` pins the absence in this body.
+/// A pending seat only: an account is its origin and user id (Q3.643, Q5.120). Writes
+/// `server.json` only on a first run, and touches no credential and no daemon (Q7.148).
 #[tauri::command(async)]
 pub fn host_set_server(
     url: String,
@@ -1758,32 +959,9 @@ pub fn host_set_server(
     Ok(origin)
 }
 
-/// Keep a sign-in — **after the host has asked the control plane whose it is.**
-///
-/// The page hands over the token `POST /v1/login` answered, and nothing else: no
-/// user id, no name. This process sends `GET /v1/me` with it to the seat's own
-/// origin and keys the account on the answer, so a page that is wrong — or
-/// hostile — cannot file one person's token under another person's account.
-/// Q1.651.
-///
-/// What it answers, and who revokes:
-///
-/// - **`bound`** — a new account, or this account signed in again. The page
-///   adopts the token.
-/// - **`adopted`** — the account is already on this computer and was signed out;
-///   the token is written into it. The page switches there; nothing is revoked.
-/// - **`existing`** — already here and signed in. **This host revokes the new
-///   session** with the token it holds, and the page switches.
-/// - **`refused`** — a signed-out account's seat, and a *different* person signed
-///   in on it. **This host revokes**, and the page says so. Taking the token
-///   there would put one person's session in another's place, device key and
-///   daemon included.
-///
-/// ⚠ **A failed `GET /v1/me` — unreachable, or anything but a 2xx — is an `Err`,
-/// and the page adopts nothing.** Every refusal the page could see is either a
-/// session the host kept or one it revoked; none leaves a bearer in the page that
-/// the host did not bind. A keyring write that does not land is not a refusal: it
-/// is `durable: false`, and the account is bound for this run.
+/// The host asks `GET /v1/me` whose token it is and keys the account on that (Q1.651). It revokes
+/// the new session itself on `existing` and `refused`. A failed `/v1/me` is an `Err` and nothing is
+/// adopted; a keyring write that does not land is `durable: false`, not a refusal.
 #[tauri::command]
 pub async fn host_credential_set(
     value: String,
@@ -1818,7 +996,6 @@ pub async fn host_credential_set(
     Ok(settle(&app, &host, &origin, &value, &me, outcome).await)
 }
 
-/// What a verified sign-in came to, before anything is sent back to anybody.
 enum Signed {
     Bound(Slot),
     Adopted(String),
@@ -1826,8 +1003,7 @@ enum Signed {
     Refused,
 }
 
-/// `host_credential_set`'s writes, under `changing` — synchronous, so no lock is
-/// ever held across the requests on either side of it.
+/// Synchronous, so no lock is held across the requests on either side.
 fn bind_signin(
     host: &Host,
     label: &str,
@@ -1843,8 +1019,7 @@ fn bind_signin(
         Decision::Refused => Ok(Signed::Refused),
         Decision::Same => {
             let scope = slot.scope().ok_or_else(stale)?;
-            // Ignored for the reason `accounts::bind`'s fresh write is: a store
-            // that keeps nothing is `durable: false`, not a failed sign-in.
+            // A store that keeps nothing is `durable: false`, not a failed sign-in.
             let _ = credential::write(&scope, value);
             config::set_signed_in(&host.config_dir, &scope, true)?;
             config::set_bound(&host.config_dir, &scope, false)?;
@@ -1876,9 +1051,6 @@ fn bind_signin(
     }
 }
 
-/// The half of a sign-in that happens after the lock: revoking what was not
-/// kept, refreshing an account that was adopted, and describing this webview's
-/// device for the page.
 async fn settle(
     app: &AppHandle,
     host: &Host,
@@ -1904,7 +1076,6 @@ async fn settle(
     }
 }
 
-/// A `Bound` for this webview's own account, with its device.
 fn described(host: &Host, outcome: &str, slot: &Slot, name: Option<String>) -> Bound {
     let scope = slot.scope();
     let device_key = scope
@@ -1924,16 +1095,7 @@ fn described(host: &Host, outcome: &str, slot: &Slot, name: Option<String>) -> B
     }
 }
 
-/// Sign this webview's account out on this computer: its keyring entry, and the
-/// flag the drawer reads.
-///
-/// ⚠ **Seat-scoped, and that closes a race Q7.148 recorded.** A late sign-out
-/// from a document that was already about another account used to erase that
-/// account's entry, because the host only knew "the current server". The
-/// generation refuses that document now.
-///
-/// ⚠ **`(async)`, having been bare**: the flag is a `server.json` write, durable
-/// the way every one is. A pending seat has nothing to erase and answers `Ok`.
+/// Seat-scoped, so a stale document cannot erase the next account's entry (Q7.148).
 #[tauri::command(async)]
 pub fn host_credential_clear(
     webview: tauri::Webview,
@@ -1945,32 +1107,14 @@ pub fn host_credential_clear(
         return Ok(());
     };
     credential::erase(&scope)?;
-    // The erase is the act; the flag is what the drawer says about it, and a
-    // failure to write it is not a failure to sign out.
+    // The erase is the act; failing to write the drawer's flag is not a failed sign-out.
     let _ = host.materialize();
     let _ = config::set_signed_in(&host.config_dir, &scope, false);
     Ok(())
 }
 
-/// Remember which device this account registered as — which is also what binds it
-/// to the account's current sign-in, so `Boot.deviceBound` reads true after it.
-///
-/// Scoped to the calling webview's account, like the credential beside it, so an
-/// id issued by one control plane can never be offered to another, nor one
-/// person's to another person on the same server — which matters more than it
-/// looks: that id names a row in *that* server's table, owned by *that* user, and
-/// presenting it elsewhere would at best register a stranger's-looking device and
-/// at worst be a value from a fleet this person does not administer.
-///
-/// Like the credential since Q7.148, this is **not** erased when an account is
-/// forgotten. See `config.rs`: the row on the server still exists, so forgetting
-/// the id leaves an installation nobody can recognise in their own list and
-/// spends a second slot the next time they sign in as that person again.
-///
-/// ⚠ **`(async)`, for the durable write.** `config.rs` flushes the file *and* the
-/// directory entry that names it, because an `fsync` on the bytes alone leaves the
-/// rename unguaranteed — and this is the one call on the sign-in path, so a device
-/// registration is not a thing to stop the window drawing for.
+/// Also binds the device to the current sign-in. Per account, and not erased when an account is
+/// forgotten: the server's row still exists (Q7.148).
 #[tauri::command(async)]
 pub fn host_device_set(
     value: String,
@@ -1985,17 +1129,7 @@ pub fn host_device_set(
     config::write_device(&host.config_dir, &scope, &value)
 }
 
-/// Give up the device recorded for this account.
-///
-/// Called when the control plane answers `device_revoked` — the one refusal that
-/// means this installation's id is finished rather than its session. Without it
-/// the next sign-in would offer the retired id again; the server declines to bind
-/// it and registers a fresh device, so the loop terminates either way, but the app
-/// would go on presenting something it has been told is dead.
-///
-/// ⚠ **`(async)` for the same durable write as `host_device_set`**, and left bare
-/// it would have been the odder of the two: this one fires on a `device_revoked`
-/// answer, which arrives mid-session while somebody is looking at the app.
+/// On `device_revoked`, so the retired id is not offered again.
 #[tauri::command(async)]
 pub fn host_device_clear(
     webview: tauri::Webview,
@@ -2009,18 +1143,7 @@ pub fn host_device_clear(
     config::erase_device(&host.config_dir, &scope)
 }
 
-/* ── the accounts on this computer ────────────────────────────────────────── */
-
-/// Every account on this computer, for the drawer — and never a credential.
-///
-/// ⚠ **Reads no keyring.** `signedIn` is `server.json`'s persisted flag, kept by
-/// every command that signs an account in or out and corrected by `host_boot`
-/// when the keyring disagrees. A keychain read per row, on an ad-hoc-signed build,
-/// is a prompt per row every time the drawer opens.
-///
-/// `back` is read here, live, rather than carried on `Boot`: a desktop webview
-/// lives for the whole session and its boot snapshot knows nothing of an account
-/// added or removed after it.
+/// Reads no keyring: a keychain read per row is a prompt per row on an ad-hoc-signed build.
 #[tauri::command(async)]
 pub fn host_accounts(
     webview: tauri::Webview,
@@ -2048,19 +1171,8 @@ pub fn host_accounts(
     })
 }
 
-/// Show another account — `account` a key `host_accounts` listed, or `null` for
-/// the most recently shown other one (`back`).
-///
-/// ⚠ **From the webview on screen only**, or a page running hidden — agent output
-/// in a background account's transcript — could flip the account under
-/// somebody's cursor, so that what they type lands in another account's composer.
-///
-/// **Where every account has a webview, this is hide-then-show and nothing
-/// reloads**: work in the account left keeps running, state and all, and a
-/// pending caller — an Add account that was cancelled — is closed. Where there is
-/// one webview, it is rebound to the target and the page is told to reload;
-/// its document is stale from this instant (the module docblock). Either way no
-/// daemon is touched: every account's runs until the app quits (D2).
+/// `account` is a key `host_accounts` listed, or `null` for `back`. Shown webview only, or a
+/// hidden page could flip the account under somebody's cursor. Stops no daemon.
 #[tauri::command(async)]
 pub fn host_account_switch(
     account: Option<String>,
@@ -2090,23 +1202,15 @@ pub fn host_account_switch(
         .ok_or_else(|| "that account is not on this computer".to_string())?;
     let target = Slot::from_account(target, &roster.roots);
     let reload = seats::switch_to(&app, &host, &label, &slot, target)?;
-    // After the switch, never before: the file decides only which account opens
-    // next time, so a failure here is not a failed switch.
+    // After the switch: the file decides only which account opens next time.
     let _ = config::show_account(&host.config_dir, &key);
     Ok(AccountMove {
         reload_page: reload,
     })
 }
 
-/// Open a sign-in for another account.
-///
-/// ⚠ **Refused at `MAX_ACCOUNTS`** (`account_limit`), and from any webview but the
-/// one on screen. Nothing is written: the pending seat is not an account until a
-/// sign-in binds it, so Cancel — and a relaunch — go back to the account before.
-///
-/// ⚠ **`(async)`, and it could not be bare.** Building a webview runs on the main
-/// thread and is waited for; `WebviewBuilder`'s own docblock says a synchronous
-/// command doing it deadlocks on Windows.
+/// Refused at `MAX_ACCOUNTS`. Writes nothing until a sign-in binds the seat. `(async)`: building a
+/// webview from a synchronous command deadlocks on Windows.
 #[tauri::command(async)]
 pub fn host_account_add(
     app: AppHandle,
@@ -2130,30 +1234,9 @@ pub fn host_account_add(
     })
 }
 
-/// Take the calling webview's account off this computer: Sign out, and Remove
-/// account.
-///
-/// **The caller only** — there is no argument, so no webview can take another
-/// account's credential away. In order:
-///
-/// 1. The account's keyring credential is erased.
-/// 2. The entry goes, under `daemon::lock_roots`; the device id, the key and the
-///    root record stay, so signing in as the same person again reuses the device
-///    row and the root.
-/// 3. **Its daemon is stopped**, unless another account still on this computer
-///    shares its root — a legacy seat and the account it became do. Removal is
-///    not a switch: a removed account's daemon would otherwise go on serving that
-///    account's phones and grantees, running agents as this person, until quit,
-///    under a screen that says the account is gone. Every spawn asks
-///    `Host::lists_root` under the same lock, so neither the launch thread nor a
-///    setup already in flight starts it again after step 2. Q7.149.
-/// 4. The most recently shown other account is shown — a hidden caller is closed
-///    and leaves the screen alone — or, with none left, this webview becomes a
-///    sign-in on the same server and reloads.
-///
-/// A pending caller forgets nothing — it has nothing — and goes back to the most
-/// recent account; with no account at all it is a first run, which stays
-/// uncancellable.
+/// Sign out and Remove account, for the caller only. Keeps the device id, key and root record;
+/// stops the account's daemon unless another listed account shares its root (Q7.149). A pending
+/// caller with no account anywhere is refused: a first run stays uncancellable.
 #[tauri::command(async)]
 pub fn host_account_forget(
     app: AppHandle,
@@ -2194,8 +1277,7 @@ pub fn host_account_forget(
         });
         (!shared).then_some(root)
     });
-    // Removed under the root lock and stopped after it: a start that won the lock first
-    // has spawned and is stopped below, and one after it finds no account (`lists_root`).
+    // Under the root lock, then stopped: a start that won the lock is stopped below, a later one finds no account.
     let next_key = {
         let _roots = daemon::lock_roots();
         host.materialize()?;
@@ -2225,24 +1307,9 @@ pub fn host_account_forget(
     })
 }
 
-/// Settle who this webview's sign-in belongs to, where that is still open.
-///
-/// - **A legacy seat**: its bare, pre-accounts credential is read *here*, sent to
-///   `GET /v1/me` at its own origin, and moved to the account the answer names —
-///   written, read back, then erased. Its device, its machine claim and the
-///   server's own root follow only by proof (`accounts::gather`); without one the
-///   account gets its own and the bare items wait for whoever can prove them.
-///   Where that account is already here, it is `existing`: what is proved is
-///   handed to it, the bare sign-in is adopted into it if it was signed out and
-///   revoked otherwise, and the page forgets this seat.
-/// - **An account**: `GET /v1/me` with its own credential refreshes the cached
-///   name (`bound` where that changed anything, `unchanged` otherwise), and a
-///   proof that could not be reached when it was bound is asked again.
-///
-/// ⚠ **This reads a credential and returns none.** It is the one command besides
-/// `host_boot` whose body reads the keyring for a sign-in — to present it to the
-/// control plane from this process — and `Bound` carries no field that could
-/// hold one; `nativecheck` pins both.
+/// A legacy seat's bare credential is moved to the account `/v1/me` names, and its device, claim
+/// and root follow only by proof (`accounts::gather`). An account refreshes its name and retries
+/// an unreached proof. Reads a credential and returns none; `nativecheck` pins both.
 #[tauri::command]
 pub async fn host_account_confirm(
     app: AppHandle,
@@ -2292,14 +1359,12 @@ pub async fn host_account_confirm(
     })
 }
 
-/// What a confirm came to.
 enum Confirmed {
     Bound(Slot),
     Unchanged,
     Existing { key: String, adopted: bool },
 }
 
-/// `host_account_confirm`'s writes, under `changing`.
 fn confirm_signin(
     host: &Host,
     label: &str,
@@ -2327,7 +1392,7 @@ fn confirm_signin(
             }
             Binding::Existing { key, adopted } => {
                 host.refresh_owners();
-                // The page forgets this seat next, and what it lands on is this.
+                // The page forgets this seat next and lands here.
                 let _ = config::show_account(&host.config_dir, &key);
                 Ok(Confirmed::Existing { key, adopted })
             }
@@ -2369,23 +1434,9 @@ fn confirm_signin(
     }
 }
 
-/// The `/v1/*` leg. See `proxy.rs` for why it is the only one here.
-///
-/// ⚠ **The base is the calling webview's own server**, resolved from its seat;
-/// the page names a path, never an address. Two refusals keep a bearer where it
-/// belongs, and both read the headers exactly as `proxy::send` forwards them
-/// (`proxy::carries_credential`):
-///
-/// - a request naming a candidate `origin` — the server picker's probe — carries
-///   no credential, since a probe asks nothing a credential is needed for;
-/// - a **pending** seat sends none either, because it has no account a bearer
-///   could belong to. A sign-in in progress sends its password in a body to
-///   `POST /v1/login` and nothing else.
-///
-/// ⚠ **Defence in depth, and not structural.** The CSP lets the page `fetch`
-/// anywhere, so these guard against a page that is *wrong* — a late poll from a
-/// document the generation now refuses, a stale bearer — rather than against one
-/// that is hostile. Q5.116's ordering is still the page's to keep.
+/// The base is the calling seat's own server; the page names a path, never an address. A probe
+/// of a candidate `origin`, and a pending seat, may send no credential. Defence in depth against a
+/// page that is wrong, not one that is hostile (Q5.116).
 #[tauri::command]
 pub async fn host_cp(
     req: CpRequest,
@@ -2394,10 +1445,7 @@ pub async fn host_cp(
     host: State<'_, Host>,
 ) -> Result<CpAnswer, String> {
     let (_, slot) = host.seat(&webview, &request)?;
-    // A candidate origin is accepted **only** from the server picker, which is
-    // asking "is there a Reemoat at this address" before anything is stored. It is
-    // normalized here rather than trusted, so the probe cannot reach a shape
-    // `host_set_server` would have refused.
+    // Normalized rather than trusted, so a probe cannot reach a shape `host_set_server` refuses.
     let base = match &req.origin {
         Some(candidate) => {
             if proxy::carries_credential(&req.headers) {
@@ -2419,8 +1467,6 @@ pub async fn host_cp(
     proxy::send(&host.client, &base, &req).await
 }
 
-/// ⚠ **From the webview on screen only**, like every command that surfaces
-/// something: a hidden account's page runs, and may be rendering agent output.
 #[tauri::command]
 pub fn host_copy_text(
     app: AppHandle,
@@ -2432,18 +1478,9 @@ pub fn host_copy_text(
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
-/// The schemes a link may open, and this list is a **second copy on purpose**.
-///
-/// The policy is `OPENABLE` in `packages/web/src/ui/links.ts`, which is where the
-/// argument lives — everything outside it is *"launching a program named by an
-/// agent-chosen string"*, on a page that renders agent output. The webview
-/// already applies it; this is the half that holds if the page is ever wrong, and
-/// `pnpm nativecheck` reads both lists off disk and asserts they are the same set,
-/// which is what stops a second copy from becoming a second policy.
+/// A second copy of `links.ts`'s `OPENABLE`, holding if the page is wrong; `nativecheck` compares them.
 const OPENABLE_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 
-/// Open a link in the real browser — from the webview on screen only, since a
-/// browser window over the app is surfacing something.
 #[tauri::command]
 pub fn host_open_external(
     app: AppHandle,
@@ -2461,39 +1498,9 @@ pub fn host_open_external(
         .map_err(|e| e.to_string())
 }
 
-/// Hand a file to the person who asked for it, through the platform's own panel.
-///
-/// **Base64 in JSON, never a raw body.** A raw body exists only over Tauri's
-/// `ipc://` protocol, which Android never uses and a desktop page abandons for good
-/// after any one call over it fails; `postMessage` then carries the bytes as a JSON
-/// array of numbers, which the raw-only arm refused, so a press saved nothing and
-/// said nothing (Q3.690). Base64 rides both channels at 1.33 times the bytes, where
-/// a number array would be six at the 100 MiB bound (`MAX_DOWNLOAD_BYTES`).
-///
-/// Answers `false` where the panel was dismissed, which is not a failure and must
-/// not be drawn as one.
-///
-/// ⚠ **`(async)`, and `tauri-plugin-dialog` documents this as the only correct
-/// way to call it.** `blocking_save_file` carries *"this is a blocking operation,
-/// and should **NOT** be used when running on the main thread"*, for a mechanical
-/// reason rather than a stylistic one: the panel's result is delivered *by* the
-/// main event loop, so a main-thread command that blocks waiting for it is waiting
-/// on the loop it is itself holding — a frozen window while the panel is open at
-/// best, and a deadlock at worst. The plugin's own `save` command is an `async fn`
-/// wrapped around exactly this call, which is the shape being copied here.
-///
-/// The `std::fs::write` underneath is the second reason and stands on its own:
-/// `MAX_DOWNLOAD_BYTES` is 100 MiB, and 100 MiB to a spinning disk or a network
-/// volume is not something to do between two paints even if the panel were free.
-///
-/// ⚠ **From the webview on screen only**: a panel opened by a hidden account's
-/// page would sit over the account somebody is looking at.
-///
-/// ⚠ **Written through `tauri-plugin-fs`, never `std::fs`.** Android's panel is
-/// `ACTION_CREATE_DOCUMENT` and answers a `content://` URI, which names no path:
-/// `into_path` refused every one, and the page dropped the refusal, so a save on
-/// a phone did nothing at all (Q3.690). The plugin opens that URI through the
-/// ContentResolver and a desktop path through `std::fs`, one call for both.
+/// Base64 in JSON, never a raw body, which only `ipc://` carries (Q3.690). `false` for a dismissed
+/// panel, which is not a failure. `(async)`: `blocking_save_file` deadlocks on the main thread.
+/// Written through `tauri-plugin-fs`: Android's `ACTION_CREATE_DOCUMENT` answers a `content://` URI with no path.
 #[tauri::command(async)]
 pub fn host_save_file(
     app: AppHandle,
@@ -2526,32 +1533,8 @@ pub fn host_save_file(
     Ok(true)
 }
 
-/// Ask this computer for a folder, through the platform's own panel.
-///
-/// Called for exactly one machine: the one this app is running on. That is
-/// **not** enforced here and could not be — the shell has no idea which daemon a
-/// page is talking to — it is `NewSession.tsx`'s predicate, and
-/// `webcheck.local-route.ts` is what holds it there. What this side guarantees is
-/// narrower and is the honest half: the panel shows *this* computer's disk, and
-/// so a path it answers is only ever meaningful about this computer.
-///
-/// Answers `None` where the panel was dismissed. **A cancel is not a failure**,
-/// and drawing it as one is a lie about what the person just did —
-/// `host_save_file`'s `Ok(false)` is the same distinction one command up.
-///
-/// `start` is a **hint and never a boundary.** A panel can be walked anywhere, so
-/// checking it is about landing somewhere useful rather than about safety — which
-/// is the opposite of `host_cp`'s origin, where the comparison is the only thing
-/// standing between the page and a credential going somewhere nobody chose. A
-/// seed that is relative, gone, or not a directory is ignored rather than
-/// refused: a seed that cannot be honoured must not stop a panel opening.
-///
-/// ⚠ **`(async)`, for `host_save_file`'s reason exactly.**
-/// `blocking_pick_folder` carries the same *"should **NOT** be used when running
-/// on the main thread"* as its sibling, because the panel's result is delivered
-/// *by* the main event loop — so a main-thread command blocking on it waits on the
-/// loop it is itself holding. And from the webview on screen only, for that
-/// sibling's other reason.
+/// For this computer's own daemon only, which `NewSession.tsx` decides. `None` for a dismissed
+/// panel. `start` is a hint, never a boundary. `(async)`: `blocking_pick_folder` deadlocks on the main thread.
 #[tauri::command(async)]
 pub fn host_pick_folder(
     app: AppHandle,
@@ -2563,18 +1546,7 @@ pub fn host_pick_folder(
     pick_folder(app, start)
 }
 
-/// The real one, on the platforms that have a folder panel to open.
-///
-/// ⚠ **Split into two functions rather than gated at the declaration**, and both
-/// halves of that are deliberate. The *body* is what is platform-specific —
-/// `blocking_pick_folder` does not exist on mobile — while the **command must go
-/// on existing everywhere**: three separate censuses read this file and `lib.rs`
-/// as text (`nativecheck`'s declared-against-registered, and
-/// `webcheck.native-bridge.ts`'s two), and a `#[cfg]` on the declaration or on the
-/// `generate_handler!` line would leave all three asserting a surface that is not
-/// the one a mobile build actually has. `credential.rs` aliases its two `Entry`
-/// types the same way and for the same reason: one body at the call site, the
-/// platform difference resolved above it.
+/// Only the body is gated: the command must exist everywhere for the three text censuses.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
     let mut panel = app.dialog().file();
@@ -2590,46 +1562,21 @@ fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, 
     let path = chosen
         .into_path()
         .map_err(|e| format!("could not use that folder: {e}"))?;
-    // `to_str().unwrap()` is the one line that turns a mounted volume into a
-    // panic. APFS enforces UTF-8 so this arm is unreachable on the platform this
-    // ships on, and it is written for the ones it does not — the same shape as
-    // `host_save_file`'s "that filename is not text".
     path.into_os_string()
         .into_string()
         .map(Some)
         .map_err(|_| "that folder's name is not text".to_string())
 }
 
-/// ⚠ **Android and iOS have no folder panel, and this is what that cost.**
-///
-/// `tauri-plugin-dialog` 2.7.3 offers `blocking_pick_file` on mobile and **not**
-/// `blocking_pick_folder`: Android's equivalent is `ACTION_OPEN_DOCUMENT_TREE`
-/// through the Storage Access Framework, which hands back a tree *URI* rather than
-/// a filesystem path, and the plugin does not wrap it. `host_save_file` survives
-/// beside this only because a *file* panel does have a mobile arm.
-///
-/// Found by an APK build failing to compile, after `pnpm check`, `cargo clippy`
-/// and 74 `cargo test`s were all green — **none of them compiles for
-/// `aarch64-linux-android`**, so every one of them was honest and beside the
-/// point. `nativecheck` now carries the static half of that lesson; the whole of
-/// it is that a second target is not covered until something builds for it.
-///
-/// Unreachable in practice: {@link Boot::picks_folder} is `false` on this arm, so
-/// `NewSession.tsx` never draws the control that would call it. It answers rather
-/// than panicking because "the page should never ask" is not a reason to make
-/// asking fatal.
+/// `tauri-plugin-dialog` has no mobile `blocking_pick_folder` (Android's `ACTION_OPEN_DOCUMENT_TREE`
+/// is a tree URI). Unreachable, since `picks_folder` is false here; an error rather than a panic.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn pick_folder(_app: AppHandle, _start: Option<String>) -> Result<Option<String>, String> {
     Err("this platform has no folder panel".to_string())
 }
 
-/// Put the window in the switch's theme: the title bar and every page's
-/// `prefers-color-scheme` follow the window (Q3.671). From the webview on screen only, since
-/// it changes what is on it.
-///
-/// The page says its theme at every boot and every show, so only a change is written or
-/// applied — and a write that fails is applied anyway. `(async)` for the durable
-/// `server.json` write a change is.
+/// The page says its theme at every boot and show, so only a change is written or applied, and a
+/// failed write is applied anyway (Q3.671).
 #[tauri::command(async)]
 pub fn host_set_theme(
     webview: tauri::Webview,

@@ -10,6 +10,7 @@ import { openableHref } from "./links";
 import { remarkMentions } from "../mentionLinks";
 import { MentionLink } from "./MentionLink";
 import { PAREN_LIST, remarkListDelimiter, remarkListItemBlocks } from "./mdlist";
+import { remarkShortColumns, SHORT_COLUMN } from "./mdtable";
 
 /** No rehype-raw: agent output is untrusted, and react-markdown's HTML escaping is the security boundary. */
 
@@ -97,9 +98,15 @@ function useSettledText(text: string): string {
   return settled;
 }
 
+/** A short column's cells stay on one line (`remarkShortColumns`); a class beside `${…}` is invisible to Tailwind's scan, hence the space. */
+function shortCell(className: unknown): string {
+  return typeof className === "string" && className.includes(SHORT_COLUMN) ? "whitespace-nowrap" : "";
+}
+
 /** Hoisted: a fresh plugin array per render would defeat MarkdownBody's memo. */
 const REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
   remarkGfm,
+  remarkShortColumns,
   remarkListDelimiter,
   remarkListItemBlocks,
   remarkMentions,
@@ -119,8 +126,8 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
           ol: ({ children, className, start }) => (
             <ol
               start={start}
-              className={`my-1.5 ml-4 list-decimal space-y-0.5${
-                typeof className === "string" && className.includes(PAREN_LIST) ? ` ${PAREN_LIST}` : ""
+              className={`my-1.5 ml-4 list-decimal space-y-0.5 ${
+                typeof className === "string" && className.includes(PAREN_LIST) ? PAREN_LIST : ""
               }`}
             >
               {children}
@@ -154,8 +161,12 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
             </div>
           ),
           thead: ({ children }) => <thead className="bg-raised">{children}</thead>,
-          th: ({ children }) => <th className="px-2 py-1.5 font-semibold">{children}</th>,
-          td: ({ children }) => <td className="border-t border-edge/60 px-2 py-1.5 align-top">{children}</td>,
+          th: ({ children, className }) => (
+            <th className={`px-2 py-1.5 font-semibold ${shortCell(className)}`}>{children}</th>
+          ),
+          td: ({ children, className }) => (
+            <td className={`border-t border-edge/60 px-2 py-1.5 align-top ${shortCell(className)}`}>{children}</td>
+          ),
   code: ({ className, children }) => {
     const text = String(children ?? "");
     const language = /language-(\w+)/.exec(className ?? "")?.[1] ?? null;

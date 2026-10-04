@@ -95,6 +95,11 @@ export async function attempt<T>(
   });
 }
 
+/** A call that outlived its caller's deadline on a path somebody else named: the next probe there is refused until it answers. */
+export function noteStalled(target: StallTarget, pending: Promise<unknown>): void {
+  markStalled(target.key, pending);
+}
+
 function markStalled(path: string, probe: Promise<unknown>): void {
   if (stalled.size >= MAX_STALLED_PATHS) {
     const oldest = stalled.keys().next();
@@ -142,14 +147,18 @@ export async function probeExists(path: string, options: ProbeOptions = {}): Pro
   return answer.answered ? answer.value : null;
 }
 
-export type PathResolution = { kind: "path"; value: string } | { kind: "missing" };
+/** `code` is the errno that made it unresolvable: every caller reads `missing`, and one tells ENOENT from EACCES. */
+export type PathResolution = { kind: "path"; value: string } | { kind: "missing"; code?: string };
 
 export async function probeRealpath(path: string, options: ProbeOptions = {}): Promise<PathResolution | null> {
   const ctx = await probeContext(options);
   const answer = await attempt(stallKeyFor(resolve(path), ctx.mounts), ctx, () =>
     realpath(path).then(
       (value): PathResolution => ({ kind: "path", value }),
-      (): PathResolution => ({ kind: "missing" }),
+      (error: unknown): PathResolution => {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        return typeof code === "string" ? { kind: "missing", code } : { kind: "missing" };
+      },
     ),
   );
   return answer.answered ? answer.value : null;

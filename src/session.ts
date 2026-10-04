@@ -21,7 +21,7 @@ import {
   readAsyncTaskEdge,
   readBackgroundedMarker,
 } from "./acp/asynctasks.js";
-import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
+import { claudeToolName, endsDelegation, launchedInBackground, MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import {
   mergeTodos,
   planPermission as cursorPlanPermission,
@@ -55,6 +55,7 @@ import {
 import { QUESTION_TOOL_HARNESSES, sessionMetaFor } from "./acp/agents.js";
 import { ASK_TOOL_NAME } from "./peers/ask.js";
 import { PEER_SERVER_NAME } from "./peers/envelope.js";
+import { SEND_FILE_TOOL_NAME } from "./peers/files.js";
 import type { AgentRouting } from "./acp/systems.js";
 import {
   BUILTIN_CATALOGUE,
@@ -91,12 +92,17 @@ const AUTH_REQUIRED = -32000;
 // On resume: the agent no longer has the conversation. Matched by code, not message.
 const RESOURCE_NOT_FOUND = -32002;
 const INTERNAL_ERROR = -32603;
+const METHOD_NOT_FOUND = -32601;
 const CANCEL_GRACE_MS = 5_000;
 const CANCEL_SEND_TIMEOUT_MS = 1_000;
 const CANCEL_SETTLE_MS = 1_500;
 const CLOSE_TIMEOUT_MS = 2_000;
 // ACP extension injecting into the running turn; the original session/prompt still resolves exactly once.
 const STEER_METHOD = "_session/steering";
+
+/** Served only by this repository's patch to claude-agent-acp: what claude's effort `default` resolves to (Q6.121). */
+const EFFORT_METHOD = "_reemoat/effort";
+const EFFORT_TIMEOUT_MS = 2_000;
 
 // Stops one background task without cancelling the turn; `{stopped: false}` means it already finished.
 const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
@@ -258,6 +264,12 @@ export class Session {
   private disposed: Promise<void> | null = null;
   private config: AgentConfig = { modes: null, options: [] };
   private readonly configListeners = new Set<(config: AgentConfig) => void>();
+  // Off for every agent but claude, and for claude once its adapter refuses the request (Q6.121).
+  private asksEffort = false;
+  // Per model value, so an update that drops the level can carry it until the adapter answers again.
+  private readonly effortByModel = new Map<string, string>();
+  private effortAsking = false;
+  private effortAgain = false;
   private usage: ContextUsage | null = null;
   private readonly usageListeners = new Set<(usage: ContextUsage) => void>();
   private agentNumbersMessages = false;
@@ -281,6 +293,13 @@ export class Session {
   private readonly posedCalls = new Set<string>();
   /** The newest of them whose card is not drawn yet; the card takes its id, so the transcript folds the call into it. */
   private unclaimedPosedCall: string | null = null;
+  /**
+   * Calls to this daemon's own send_file: the path each named once its arguments arrived, whether the harness itself vouched for
+   * it, and whether it has ended, after which nothing more said about its id is believed (Q2.252, Q2.253).
+   */
+  private readonly sentFileCalls = new Map<string, { path: string | null; vouched: boolean; ended: boolean }>();
+  /** Those whose file is not in the transcript yet, oldest first. Its own list: a question card must never take a file's call. */
+  private unclaimedSentFileCalls: string[] = [];
 
   private cwd = "";
 
@@ -328,12 +347,17 @@ export class Session {
     this.setUnprompted(null);
     // A merge in the new conversation must not land on the old one's list.
     this.cursorTodos = [];
+    // Nor may a call of the old one lend its id to a card in the new.
+    this.dropUnclaimedCalls();
+    this.posedCalls.clear();
+    this.sentFileCalls.clear();
 
     const wanted = this.config;
     this.config = {
       modes: toModes(opened.modes),
       options: toConfigOptions(opened.configOptions),
     };
+    await this.settleEffort();
 
     if (this.client.supportsSessionClose()) {
       await withDeadline(
@@ -526,6 +550,7 @@ export class Session {
       await session.dispose();
       throw error;
     }
+    await session.settleEffort();
     return session;
   }
 
@@ -633,6 +658,7 @@ export class Session {
         data: { code: "model_not_pinned", model: options.model ?? null },
       });
     }
+    await session.settleEffort();
     return session;
   }
 
@@ -652,6 +678,7 @@ export class Session {
       options.keepImage,
     );
     session.cwd = options.cwd;
+    session.asksEffort = options.agent === "claude";
     // Kept as sent: /clear opens its new conversation with exactly these.
     session.mcpServers = mcpServers;
     session.sessionMeta = sessionMetaOf(options);
@@ -695,8 +722,79 @@ export class Session {
       SET_CONFIG_TIMEOUT_MS,
       `session/set_config_option (${configId})`,
     );
-    this.updateConfig({ options: toConfigOptions(response.configOptions) });
+    // Asked before the update, so a model change never shows its effort unresolved first.
+    this.updateConfig({ options: await this.withResolvedEffort(toConfigOptions(response.configOptions)) });
     return this.config;
+  }
+
+  /** For a conversation just opened, before anybody listens: no notification. */
+  private async settleEffort(): Promise<void> {
+    const options = await this.withResolvedEffort(this.config.options);
+    if (options !== this.config.options) this.config = { ...this.config, options };
+  }
+
+  /** The same options with claude's effort `default` resolved where it is selected, or the very same array (Q6.121). */
+  private async withResolvedEffort(options: AgentConfigOption[]): Promise<AgentConfigOption[]> {
+    const carried = this.carryEffort(options);
+    const effort = selectedDefaultEffort(carried);
+    if (!this.asksEffort || effort === undefined) return carried;
+
+    let answer: unknown;
+    try {
+      answer = await withAbandonableDeadline(
+        (sendOptions) =>
+          this.client.agent.request<unknown, unknown>(EFFORT_METHOD, { sessionId: this.sessionId }, sendOptions),
+        EFFORT_TIMEOUT_MS,
+        `${this.client.config.displayName} reporting its effort`,
+      );
+    } catch (error) {
+      // An adapter without the patch answers -32601 and is not asked again; a timeout is asked again next change.
+      if (hasRpcCode(error, METHOD_NOT_FOUND)) this.asksEffort = false;
+      return carried;
+    }
+
+    const level = answer !== null && typeof answer === "object" ? (answer as Record<string, unknown>)["effort"] : undefined;
+    const model = modelValueOf(carried);
+    if (typeof level !== "string" || !effort.choices.some((choice) => choice.value === level)) {
+      if (model !== null) this.effortByModel.delete(model);
+      if (effort.resolvedDefault === undefined) return carried;
+      return carried.map((option) => (option === effort ? withoutResolvedDefault(option) : option));
+    }
+    if (model !== null) this.effortByModel.set(model, level);
+    if (effort.resolvedDefault === level) return carried;
+    return carried.map((option) => (option === effort ? { ...option, resolvedDefault: level } : option));
+  }
+
+  /** What this model resolved to last time, held over an update that dropped it until the adapter answers again. */
+  private carryEffort(options: AgentConfigOption[]): AgentConfigOption[] {
+    const effort = selectedDefaultEffort(options);
+    const model = modelValueOf(options);
+    if (effort === undefined || effort.resolvedDefault !== undefined || model === null) return options;
+    const known = this.effortByModel.get(model);
+    if (known === undefined || !effort.choices.some((choice) => choice.value === known)) return options;
+    return options.map((option) => (option === effort ? { ...option, resolvedDefault: known } : option));
+  }
+
+  /** For an update the agent sent by itself: asked in the background, applied only over the options it read. */
+  private refreshEffort(): void {
+    if (!this.asksEffort) return;
+    if (this.effortAsking) {
+      this.effortAgain = true;
+      return;
+    }
+    this.effortAsking = true;
+    void (async () => {
+      try {
+        do {
+          this.effortAgain = false;
+          const read = this.config.options;
+          const next = await this.withResolvedEffort(read);
+          if (next !== read && this.config.options === read) this.updateConfig({ options: next });
+        } while (this.effortAgain && this.asksEffort);
+      } finally {
+        this.effortAsking = false;
+      }
+    })();
   }
 
   async setMode(modeId: string): Promise<AgentConfig> {
@@ -938,6 +1036,7 @@ export class Session {
           this.flushToolDraft();
           // The agent runs its input in order, so every cycle begun before this prompt has ended by now.
           this.setUnprompted(null);
+          this.dropUnclaimedCalls();
           this.queue.push({
             type: "turn_end",
             stopReason: response.stopReason,
@@ -948,6 +1047,7 @@ export class Session {
           if (this.promptEpoch !== epoch) return;
           this.flushToolDraft();
           this.setUnprompted(null);
+          this.dropUnclaimedCalls();
           this.queue.push({
             type: "error",
             message: describeError(error),
@@ -1063,13 +1163,13 @@ export class Session {
     );
   }
 
-  /** Ends this daemon's claim of a turn without telling the agent (Q2.42). */
-  abandonTurn(): boolean {
+  /** Ends this daemon's claim of a turn without telling the agent (Q2.42); `cancelled` when a person's Stop is what it ends (Q2.255). */
+  abandonTurn(stopReason: "abandoned" | "cancelled" = "abandoned"): boolean {
     if (!this.turnActive) return false;
     this.promptEpoch += 1;
     this.turnActive = false;
     this.flushToolDraft();
-    this.queue.push({ type: "turn_end", stopReason: "abandoned", usage: null });
+    this.queue.push({ type: "turn_end", stopReason, usage: null });
     return true;
   }
 
@@ -1168,18 +1268,89 @@ export class Session {
     return claimed;
   }
 
-  /** Read off the update, never the permission: cursor names the MCP server and tool only in the rawInput it puts there first. */
-  private notePosedCall(toolCallId: string, rawInput: unknown): void {
-    if (!QUESTION_TOOL_HARNESSES.includes(this.agent)) return;
-    const call = readMcpToolCall(rawInput);
-    if (call === null || call.server !== PEER_SERVER_NAME || call.tool !== ASK_TOOL_NAME) return;
+  /** The send_file call now reaching this daemon's server: the oldest that named this path, else the oldest that named none yet. */
+  claimSentFileCall(path: string): string | null {
+    const waiting = this.unclaimedSentFileCalls;
+    // Oldest first: two calls naming one path reach the server in the order they were announced, and a turn's end drops the rest.
+    let at = waiting.findIndex((id) => this.sentFileCalls.get(id)?.path === path);
+    if (at === -1) at = waiting.findIndex((id) => this.sentFileCalls.get(id)?.path === null);
+    if (at === -1) return null;
+    const [claimed] = waiting.splice(at, 1);
+    return claimed ?? null;
+  }
+
+  /**
+   * What a harness says its call is. `fromRequest` is the permission request's own toolCall: on grok only that one carries a tag
+   * of grok's own, every announcement before it being `use_tool`'s arguments as the model typed them.
+   */
+  private noteOwnCall(toolCallId: string, update: { rawInput?: unknown; _meta?: unknown }, fromRequest = false): void {
+    const call = ownToolCall(this.agent, update);
+    if (call === null) return;
     const bound = boundToolCallId(toolCallId);
-    this.unclaimedPosedCall = bound;
-    this.posedCalls.add(bound);
-    if (this.posedCalls.size > MAX_POSED_CALLS) {
-      const oldest = this.posedCalls.values().next().value;
-      if (oldest !== undefined) this.posedCalls.delete(oldest);
+    // Over: a later update for the id, claude's trailing ones included, says nothing that may revive it.
+    if (this.sentFileCalls.get(bound)?.ended === true) return;
+    // The same id now naming something else, any other tool of this server included: what was learned about it no longer holds.
+    if (call === "other" || (call.tool !== SEND_FILE_TOOL_NAME && call.tool !== ASK_TOOL_NAME)) {
+      this.forgetOwnCall(bound);
+      return;
     }
+    if (call.tool === ASK_TOOL_NAME) {
+      if (!QUESTION_TOOL_HARNESSES.includes(this.agent)) {
+        this.forgetOwnCall(bound);
+        return;
+      }
+      this.forgetSentFileCall(bound);
+      this.unclaimedPosedCall = bound;
+      this.posedCalls.add(bound);
+      if (this.posedCalls.size > MAX_POSED_CALLS) {
+        const oldest = this.posedCalls.values().next().value;
+        if (oldest !== undefined) this.posedCalls.delete(oldest);
+      }
+      return;
+    }
+    this.posedCalls.delete(bound);
+    const path = typeof call.args?.["path"] === "string" ? call.args["path"] : null;
+    const known = this.sentFileCalls.get(bound);
+    const vouched = call.vouched && (this.agent !== "grok" || fromRequest);
+    // An update refines the arguments; one that carries none must not erase the path an earlier one named.
+    this.sentFileCalls.set(bound, { path: path ?? known?.path ?? null, vouched: vouched || known?.vouched === true, ended: false });
+    if (known !== undefined) return;
+    this.unclaimedSentFileCalls.push(bound);
+    if (this.sentFileCalls.size > MAX_POSED_CALLS) {
+      const oldest = this.sentFileCalls.keys().next().value;
+      if (oldest !== undefined) {
+        this.sentFileCalls.delete(oldest);
+        this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== oldest);
+      }
+    }
+  }
+
+  private forgetOwnCall(toolCallId: string): void {
+    this.forgetSentFileCall(toolCallId);
+    this.posedCalls.delete(toolCallId);
+    if (this.unclaimedPosedCall === toolCallId) this.unclaimedPosedCall = null;
+  }
+
+  private forgetSentFileCall(toolCallId: string): void {
+    if (!this.sentFileCalls.delete(toolCallId)) return;
+    this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== toolCallId);
+  }
+
+  /** A call that completed or failed: claimable by nothing, vouching for nothing, and remembered only so nothing later revives it. */
+  private endOwnCall(toolCallId: string): void {
+    if (toolCallId === this.unclaimedPosedCall) this.unclaimedPosedCall = null;
+    this.posedCalls.delete(toolCallId);
+    const known = this.sentFileCalls.get(toolCallId);
+    if (known === undefined) return;
+    this.sentFileCalls.set(toolCallId, { ...known, vouched: false, ended: true });
+    this.unclaimedSentFileCalls = this.unclaimedSentFileCalls.filter((id) => id !== toolCallId);
+  }
+
+  /** At a turn's end and a /clear: a call announced and never claimed by now will not reach this daemon's server. */
+  private dropUnclaimedCalls(): void {
+    for (const id of this.unclaimedSentFileCalls) this.sentFileCalls.delete(id);
+    this.unclaimedSentFileCalls = [];
+    this.unclaimedPosedCall = null;
   }
 
   private noteDelegatedCall(toolCallId: string): void {
@@ -1380,7 +1551,7 @@ export class Session {
             ? toolCallLineage(update)
             : { parentToolCallId: delegatedBy === update.toolCallId ? null : delegatedBy, subagent: false };
         if (delegatedBy !== null) this.noteDelegatedCall(update.toolCallId);
-        else this.notePosedCall(update.toolCallId, update.rawInput);
+        else this.noteOwnCall(update.toolCallId, update);
         // A subagent's steps are a delegation the foot already counts, not the agent's own cycle.
         if (lineage.parentToolCallId === null) this.noteAgentWork();
         this.queue.push({
@@ -1392,6 +1563,7 @@ export class Session {
           locations: toLocations(update.locations),
           rawInput: update.rawInput ?? null,
           ...lineage,
+          ...(delegatedBy === null && endsDelegation(update, lineage) ? { endsDelegation: true } : {}),
         });
         this.emitDiffs(toolCallId, update.content);
         return;
@@ -1403,11 +1575,9 @@ export class Session {
         const content =
           toolOutput(update.content, this.keepImage, images) ?? rawToolOutput(update.rawOutput);
         const toolCallId = boundToolCallId(update.toolCallId);
-        if (delegatedBy === null) this.notePosedCall(update.toolCallId, update.rawInput);
+        if (delegatedBy === null) this.noteOwnCall(update.toolCallId, update);
         // A call that ended without reaching this daemon's server must not lend its id to the next card.
-        if ((update.status === "completed" || update.status === "failed") && toolCallId === this.unclaimedPosedCall) {
-          this.unclaimedPosedCall = null;
-        }
+        if (update.status === "completed" || update.status === "failed") this.endOwnCall(toolCallId);
         const event: Extract<SessionEvent, { type: "tool_call_update" }> = {
           type: "tool_call_update",
           toolCallId,
@@ -1422,7 +1592,7 @@ export class Session {
             delegatedBy !== null && delegatedBy !== update.toolCallId
               ? delegatedBy
               : toolCallLineage(update).parentToolCallId,
-          backgrounded: readBackgroundedMarker(update._meta),
+          backgrounded: readBackgroundedMarker(update._meta) || launchedInBackground(update),
         };
         if (event.parentToolCallId === null) this.noteAgentWork();
         // Raw one-block guard: a rendered single string may hide a diff block, which must not be held.
@@ -1449,7 +1619,8 @@ export class Session {
         return;
 
       case "config_option_update":
-        this.updateConfig({ options: toConfigOptions(update.configOptions) });
+        this.updateConfig({ options: this.carryEffort(toConfigOptions(update.configOptions)) });
+        this.refreshEffort();
         return;
 
       case "available_commands_update":
@@ -1509,8 +1680,18 @@ export class Session {
 
     this.noteAgentWork();
     // Answered here and logged as decided, the path a machine with no resolver takes.
-    const posed = this.posedCalls.has(boundToolCallId(request.toolCall.toolCallId));
-    if (this.permissions && choice && !posed) {
+    const asked = boundToolCallId(request.toolCall.toolCallId);
+    const delegated = this.delegatedCalls.has(asked);
+    // The request names its own call too, and on grok it is the only place grok vouches for it. Never a subagent's.
+    if (!delegated) this.noteOwnCall(request.toolCall.toolCallId, request.toolCall, true);
+    const file = this.sentFileCalls.get(asked);
+    // Only ever once: allow_always would write a rule into the person's own harness config. claude asks for send_file only past
+    // `allowedTools`, which is its person's own ask rule, and a subagent's call asks its person (Q2.253).
+    const own =
+      choice?.kind === "allow_once" &&
+      !delegated &&
+      (this.posedCalls.has(asked) || (this.agent !== "claude" && file?.vouched === true && !file.ended));
+    if (this.permissions && choice && !own) {
       return this.permissions(
         {
           toolCallId: request.toolCall.toolCallId,
@@ -1526,7 +1707,8 @@ export class Session {
     this.queue.push({
       type: "permission_request",
       permissionId: null,
-      toolCallId: request.toolCall.toolCallId,
+      // Bounded as the call's own events are, or the card that stands for it could not fold this row.
+      toolCallId: asked,
       title,
       options,
       decision: choice?.optionId ?? null,
@@ -1792,6 +1974,59 @@ function mcpBearerOf(options: SessionOptions, config: AgentLaunchConfig): McpBea
   return { env: config.mcpBearerEnv, token: randomBytes(32).toString("base64url") };
 }
 
+/** `vouched` is whether the harness itself, not the model's arguments, says which tool this is. */
+interface OwnToolCall {
+  tool: string;
+  args: Record<string, unknown> | null;
+  vouched: boolean;
+}
+
+/**
+ * Which of this daemon's own MCP tools a harness's tool call is, read where that harness was measured to name it (Q6.114,
+ * Q2.252) and for that harness alone. `"other"` is a call that says it is something else; `null` says nothing either way.
+ */
+function ownToolCall(agent: string, update: { rawInput?: unknown; _meta?: unknown }): OwnToolCall | "other" | null {
+  const raw = recordOf(update.rawInput);
+  switch (agent) {
+    case "cursor": {
+      const call = readMcpToolCall(update.rawInput);
+      if (call === null) return null;
+      if (call.server !== PEER_SERVER_NAME) return "other";
+      return { tool: call.tool, args: recordOf(raw?.["args"]), vouched: true };
+    }
+    case "codex": {
+      const server = raw?.["server"];
+      const tool = raw?.["tool"];
+      if (raw === null || typeof server !== "string" || typeof tool !== "string") return null;
+      if (server !== PEER_SERVER_NAME) return "other";
+      return { tool, args: recordOf(raw["arguments"]), vouched: true };
+    }
+    case "claude": {
+      const name = claudeToolName(update);
+      if (name === null) return null;
+      const prefix = `mcp__${PEER_SERVER_NAME}__`;
+      if (!name.startsWith(prefix)) return "other";
+      return { tool: name.slice(prefix.length), args: raw, vouched: true };
+    }
+    case "grok": {
+      // use_tool's arguments are the model's own typing; only the `variant` grok adds once it has parsed them vouches for the tool.
+      if (raw === null) return null;
+      const name = raw["tool_name"];
+      const prefix = `${PEER_SERVER_NAME}__`;
+      if (typeof name !== "string" || !name.startsWith(prefix)) return "other";
+      if (Object.keys(raw).some((key) => key !== "tool_name" && key !== "tool_input" && key !== "variant")) return "other";
+      if (raw["variant"] !== undefined && raw["variant"] !== "UseTool") return "other";
+      return { tool: name.slice(prefix.length), args: recordOf(raw["tool_input"]), vouched: raw["variant"] === "UseTool" };
+    }
+    default:
+      return null;
+  }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
 function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undefined {
   return sessionMetaFor(options.agent, { ultracode: options.ultracode === true, elicitation: options.elicitations != null });
 }
@@ -1951,6 +2186,21 @@ function toModes(modes: acp.SessionModeState | null | undefined): AgentModes | n
         description: mode.description == null ? null : clip(mode.description, MAX_CONFIG_DESCRIPTION_CHARS),
       })),
   };
+}
+
+/** The effort control while its `default` is selected: claude-agent-acp's spelling, read by category (Q6.121). */
+function selectedDefaultEffort(options: readonly AgentConfigOption[]): AgentConfigOption | undefined {
+  return options.find((option) => option.category === "thought_level" && option.kind === "select" && option.value === "default");
+}
+
+function modelValueOf(options: readonly AgentConfigOption[]): string | null {
+  const model = options.find((option) => option.category === "model");
+  return typeof model?.value === "string" ? model.value : null;
+}
+
+function withoutResolvedDefault(option: AgentConfigOption): AgentConfigOption {
+  const { resolvedDefault: _dropped, ...rest } = option;
+  return rest;
 }
 
 function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined): AgentConfigOption[] {

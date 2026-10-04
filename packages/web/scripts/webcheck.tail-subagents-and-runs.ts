@@ -4,6 +4,7 @@ import { stripComments } from "./webcheck.source.js";
 import { type BuiltRows, drawn } from "./webcheck.rows.js";
 import {
   MAX_CHILDREN,
+  agentTasks,
   buildTail,
   foldRuns,
   isDelegation,
@@ -178,6 +179,106 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     );
   }
 
+  // Q3.699: a subagent is background work, running while it runs and finished once it has, wherever its own call says it ended.
+  {
+    const spawn = (id: string, title: string, input: unknown = null): never =>
+      ev({ type: "tool_call", toolCallId: id, title, kind: "think", status: "pending", locations: [], rawInput: input, parentToolCallId: null, subagent: true });
+    const step = (id: string, parent: string, over: Record<string, unknown> = {}): never =>
+      ev({ type: "tool_call", toolCallId: id, title: id, kind: "execute", status: "pending", locations: [], rawInput: null, parentToolCallId: parent, ...over });
+    const said = (id: string, over: Record<string, unknown>): never =>
+      ev({ type: "tool_call_update", toolCallId: id, title: null, status: null, locations: [], rawInput: null, content: null, parentToolCallId: null, ...over });
+    const turnEnd = (stopReason: string): never => ev({ type: "turn_end", stopReason, usage: null });
+    const context = (tail: { turnEdges: never[] | readonly unknown[]; taskFloor: number }, over: Record<string, unknown> = {}): never =>
+      ({ edges: tail.turnEdges, floor: tail.taskFloor, live: true, engaged: true, liveCalls: new Set<string>(), ...over }) as never;
+    const states = (events: never[], over: Record<string, unknown> = {}): unknown[] => {
+      const tail = buildTail(events, []);
+      return agentTasks(tail.rows, context(tail, over)).map((task) => [task.title, task.state, task.detached]);
+    };
+
+    seq = 0;
+    const foreground = [spawn("a", "Explore", { subagent_type: "Explore" }), step("s1", "a"), said("s1", { status: "completed" }), said("a", { status: "completed" })];
+    const fg = buildTail(foreground, []);
+    const fgTask = agentTasks(fg.rows, context(fg))[0];
+    check("a subagent whose call ran until it finished is finished when that call says so", states(foreground), [["Explore", "completed", false]]);
+    check("timed by its own call, and named by the kind its arguments give", [fgTask?.startedAt, fgTask?.endedAt, fgTask?.agentType], [1000, 4000, "Explore"]);
+
+    // The daemon marks claude's launch, which completes in seconds while the agent works on (Q6.119).
+    seq = 0;
+    const launched = [spawn("b", "Research"), said("b", { backgrounded: true }), said("b", { status: "completed" })];
+    check("one whose call answered that it runs on is running before its first step lands", states(launched), [["Research", "running", true]]);
+    const working = [...launched, step("s1", "b"), said("s1", { status: "completed" })];
+    check("and while its steps arrive under a call that has completed", states(working), [["Research", "running", true]]);
+    const workingTail = buildTail(working, []);
+    check(
+      "so the foot waits for it, which the old walk could not see",
+      outstandingTasks(workingTail.rows, workingTail.taskFloor, workingTail.turnEdges).length,
+      1,
+    );
+    const turnDone = [...working, turnEnd("end_turn")];
+    check("a turn ending after its newest step ends it: claude holds that turn open until it has", states(turnDone), [["Research", "completed", true]]);
+    const doneTail = buildTail(turnDone, []);
+    check(
+      "and it ended when its last step did, not when the turn did",
+      agentTasks(doneTail.rows, context(doneTail))[0]?.endedAt,
+      5000,
+    );
+    check("a cancel ending it says it was stopped, not that it finished", states([...working, turnEnd("cancelled")]), [["Research", "stopped", true]]);
+    check(
+      "but a step after the cancel is the agent seen working past it",
+      states([...working, turnEnd("cancelled"), step("s2", "b")]),
+      [["Research", "running", true]],
+    );
+    check("and a session that can no longer report runs nothing", states(working, { live: false }), [["Research", "stopped", true]]);
+    // Measured on claude 2.1.288: a turn ended with the subagent waiting on a shell of its own, which woke it outside any turn.
+    check(
+      "past every turn, it runs while the session is at work, and is over once neither the session nor a step of its own is",
+      [states(working), states(working, { engaged: false })],
+      [[["Research", "running", true]], [["Research", "completed", true]]],
+    );
+    check(
+      "but a step of its own still running keeps it running with the session idle",
+      states([...working, step("s3", "b")], { engaged: false }),
+      [["Research", "running", true]],
+    );
+    const shell = [...working, step("bg", "b"), said("bg", { backgrounded: true }), said("bg", { status: "completed" })];
+    check(
+      "and so does a step that detached, for as long as the daemon reports its task live",
+      [states(shell, { engaged: false, liveCalls: new Set(["bg"]) }), states(shell, { engaged: false })],
+      [[["Research", "running", true]], [["Research", "completed", true]]],
+    );
+
+    // The hand-back is the run's own end, ahead of the turn's (Q6.119).
+    seq = 0;
+    const handedBack = [
+      spawn("c", "Audit"),
+      said("c", { backgrounded: true }),
+      said("c", { status: "completed" }),
+      step("s1", "c"),
+      step("back", "c", { endsDelegation: true }),
+      said("back", { status: "completed" }),
+    ];
+    const handTail = buildTail(handedBack, []);
+    check("its closing step ends it at that step, with the turn still running", states(handedBack), [["Audit", "completed", true]]);
+    check("timed to the closing step's end", agentTasks(handTail.rows, context(handTail))[0]?.endedAt, 6000);
+    check("while a closing step still in flight ends nothing yet", states(handedBack.slice(0, 5)), [["Audit", "running", true]]);
+
+    // An older daemon marks nothing; a step that began after the call reported its end is the same fact, seen.
+    seq = 0;
+    const unmarked = [spawn("d", "Survey"), said("d", { status: "completed" }), step("s1", "d")];
+    check("a step begun after its call completed reads as detached with no marker at all", states(unmarked), [["Survey", "running", true]]);
+
+    const { agentElapsedMs, agentKindLabel, agentRowId } = await import("../src/tasks.js");
+    const task = (over: Record<string, unknown>): never =>
+      ({ toolCallId: "t1", state: "completed", startedAt: 1000, endedAt: 4000, ...over }) as never;
+    check("a kind it names is that kind of agent, and none is just an agent", [agentKindLabel("Explore"), agentKindLabel(null)], ["Explore agent", "Agent"]);
+    check(
+      "a running one counts on the panel's clock, a finished one its own two stamps, and one with no end says no time",
+      [agentElapsedMs(task({ state: "running" }), 9000), agentElapsedMs(task({}), 9000), agentElapsedMs(task({ state: "stopped", endedAt: null }), 9000)],
+      [8000, 3000, null],
+    );
+    check("and its row in the hidden set cannot be an adapter's task id", agentRowId(task({})), "agent:t1");
+  }
+
   {
     const { mayStillReport } = await import("../src/wire.js");
     const snap = (status: string): never => ({ status, turn: null }) as never;
@@ -257,13 +358,13 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check("an idle conversation with nothing outstanding says nothing", footSays(false, 0), null);
     check("a running turn says so", footSays(true, 0), { line: "working…", spoken: "agent is working" });
     check("a turn that ended with work outstanding still speaks", footSays(false, 1), {
-      line: "waiting for 1 task",
-      spoken: "waiting for 1 task",
+      line: "waiting for 1 agent",
+      spoken: "waiting for 1 agent",
     });
-    check("and it counts in the plural", footSays(false, 3)?.line, "waiting for 3 tasks");
+    check("and it counts in the plural", footSays(false, 3)?.line, "waiting for 3 agents");
     check("both facts share one line", footSays(true, 2), {
-      line: "working… · waiting for 2 tasks",
-      spoken: "agent is working, waiting for 2 tasks",
+      line: "working… · waiting for 2 agents",
+      spoken: "agent is working, waiting for 2 agents",
     });
 
     check("a turn long enough to say so says it beside the working line", footSays(true, 0, "3m"), {
@@ -272,20 +373,20 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     });
     check("and one that is not says nothing extra", footSays(true, 0, null), { line: "working…", spoken: "agent is working" });
     check("but never beside work that outlived the turn", footSays(false, 2, "3m"), {
-      line: "waiting for 2 tasks",
-      spoken: "waiting for 2 tasks",
+      line: "waiting for 2 agents",
+      spoken: "waiting for 2 agents",
     });
     check("and both facts plus the duration still share one line", footSays(true, 2, "3m"), {
-      line: "working… · 3m · waiting for 2 tasks",
-      spoken: "agent is working, 3m, waiting for 2 tasks",
+      line: "working… · 3m · waiting for 2 agents",
+      spoken: "agent is working, 3m, waiting for 2 agents",
     });
     check("with nothing streaming it says what was last true, and drops the number", footSays(true, 0, "3m", true), {
       line: "last seen working",
       spoken: "last seen working, not connected",
     });
     check("and carries the delegations under the same tense", footSays(true, 2, "3m", true), {
-      line: "last seen working · waiting for 2 tasks",
-      spoken: "last seen working, not connected, waiting for 2 tasks",
+      line: "last seen working · waiting for 2 agents",
+      spoken: "last seen working, not connected, waiting for 2 agents",
     });
 
     // Q3.644: Claude Code's `(1m 12s · ↓ 1.2k tokens)`, in this line's own separators.
@@ -301,7 +402,7 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check(
       "and ahead of what is outstanding, which is a different fact",
       footSays(true, 2, null, false, [], "↓ 12 tokens")?.line,
-      "working… · ↓ 12 tokens · waiting for 2 tasks",
+      "working… · ↓ 12 tokens · waiting for 2 agents",
     );
 
     const task = (id: string, taskType: string, state: string): unknown => ({
@@ -597,7 +698,37 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       [
         /function FinishedSection\(/.test(panelSrc),
         /aria-expanded=\{open\}/.test(panelSrc),
-        /const finished = useMemo\(\(\) => background\.filter\(\(task\) => taskFinished\(task\.state\)\)/.test(panelSrc),
+        /const finished = useMemo\(\(\) => finishedRows\(background, agents\), \[background, agents\]\);/.test(panelSrc),
+      ],
+      [true, true, true],
+    );
+    // Q3.699: a subagent is a card like any background task, in the Agents band while it runs and in the finished band after.
+    const agentCardAt = panelSrc.indexOf("const AgentCard = memo(");
+    const agentCard = agentCardAt < 0 ? "" : panelSrc.slice(agentCardAt, panelSrc.indexOf("\n});\n", agentCardAt));
+    check(
+      "a running subagent is drawn as a card, and a finished one beside the finished tasks",
+      [
+        /running\.map\(\(agent\) => \(\s*<AgentCard agent=\{agent\} key=\{agent\.key\} now=\{now\} \/>/.test(panelSrc),
+        /<AgentCard agent=\{row\.agent\} key=\{row\.id\} now=\{now\} \/>/.test(panelSrc),
+        /if \(agent\.state !== "running"\) rows\.push\(\{ kind: "agent", id: agentRowId\(agent\)/.test(panelSrc),
+      ],
+      [true, true, true],
+    );
+    check(
+      "with no Stop, since nothing on the wire reaches a subagent, and the clock running while one does",
+      [
+        agentCard.length > 0,
+        /IconButton|onStop/.test(agentCard),
+        /const now = useTick\(running\.length > 0 \|\| background\.some/.test(panelSrc),
+      ],
+      [true, false, true],
+    );
+    check(
+      "and its card in the conversation reads the same answer, so the row and the panel agree",
+      [
+        /if \(agent\.detached && !out\.has\(agent\.toolCallId\)\) out\.set\(agent\.toolCallId, agent\.state\);/.test(eventListSrc),
+        /const detached = node\.backgrounded \|\| \(isSubagent && backgroundState !== undefined\);/.test(eventListSrc),
+        /node\.elapsedMs !== null && !detached/.test(eventListSrc),
       ],
       [true, true, true],
     );
@@ -625,7 +756,7 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     report("the finished section's own body was isolated", finishedBody.length > 0 && finishedBody.length < 3000, `${String(finishedBody.length)} chars`);
     check("it seeds itself closed, in the component the panel unmounts", /useState\(false\)/.test(finishedBody), true);
     check("and it claims no region it does not render", /aria-controls/.test(finishedBody), false);
-    check("the clear names every finished row rather than the visible ones", /onClear\(tasks\.map\(\(task\) => task\.id\)\)/.test(finishedBody), true);
+    check("the clear names every finished row rather than the visible ones", /onClear\(rows\.map\(\(row\) => row\.id\)\)/.test(finishedBody), true);
     const tasksSrc = stripComments(readFileSync(new URL("../src/tasks.ts", import.meta.url), "utf8"));
     check(
       "and the hidden set never reaches the partition, so the band stands at zero",
@@ -809,6 +940,12 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     );
     check("the foot's own component was found", footAt >= 0 && footBody.length > 0, true);
     check("the foot opens the panel", /aria-haspopup="dialog"/.test(footBody), true);
+    // Q3.698: finished rows made `working…` a button over nothing running; the session menu is that record's door.
+    check(
+      "and is a button only while something is outstanding, never for rows that have finished",
+      [/if \(outstanding === 0\) \{/.test(footBody), /retained/.test(footBody), /retained=/.test(eventListSrc)],
+      [true, false, false],
+    );
     const menuSrc = stripComments(readFileSync(new URL("../src/ui/SessionMenu.tsx", import.meta.url), "utf8"));
     check(
       "the panel has a second door in the session's own menu",
@@ -864,8 +1001,8 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check("and the panel draws the table rather than a shape of its own", /BACKGROUND_EMPTY\[reporting\]/.test(panelSrc), true);
     check("and it never claims a reconnection it cannot know about", footSays(true, 0, null, true)?.spoken.includes("reconnect"), false);
     check("a stale session with work outstanding reads exactly as a live one", footSays(false, 2, null, true), {
-      line: "waiting for 2 tasks",
-      spoken: "waiting for 2 tasks",
+      line: "waiting for 2 agents",
+      spoken: "waiting for 2 agents",
     });
     check("and one with nothing outstanding still says nothing at all", footSays(false, 0, null, true), null);
 
@@ -938,7 +1075,7 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check(
       "the caller threads all six arguments, and both of its arms stop the mark",
       [
-        /footSays\(working, tasks\.length, elapsedSays\(workElapsedMs\), stale, background, streamedSays\(streamed\)\)/.test(
+        /footSays\(working, runningAgents, elapsedSays\(workElapsedMs\), stale, background, streamedSays\(streamed\)\)/.test(
           footSrc,
         ),
         (waitingFoot.match(/WorkingMark still=\{stale\}/g) ?? []).length,
@@ -1464,6 +1601,40 @@ process.stdout.write("\na run of tool calls, folded into one row\n");
     check("a folded run starts collapsed, whatever it is doing", derived, "false");
 
     check("and liveness still inks the row it no longer opens", /node\.live/.test(footSrc), true);
+
+    // Q3.702: the call a wedged turn left pending stopped with it; a call after the end is still news.
+    const ended = (reason: string, after: unknown[] = []) => {
+      seq = 0;
+      return buildTail(
+        [
+          toolCall("a", "grep", "other", "failed"),
+          toolCall("b", "ls", "other", "pending"),
+          toolCall("c", "bash", "other", "in_progress"),
+          ev({ type: "turn_end", stopReason: reason, usage: null }),
+          ...after,
+        ] as never[],
+        [],
+      );
+    };
+    const cancelled = ended("cancelled");
+    check("a run its turn outlived is not live", [group(cancelled.rows).live, group(cancelled.rows).failed], [false, 1]);
+    check(
+      "and each call it left unfinished says its turn ended, the failed one keeping its own word",
+      group(cancelled.rows).children.map((node) => (node.kind === "tool" ? [node.status, node.turnEnded] : null)),
+      [["failed", false], ["pending", true], ["in_progress", true]],
+    );
+    check("an ordinary end, silent in the transcript, ends it the same way", group(ended("end_turn").rows).live, false);
+    const later = ended("cancelled", [toolCall("d", "cat", "other", "in_progress")]);
+    check(
+      "a call after the end is the only one still running",
+      later.rows.flatMap((row) => (row.kind === "tool" ? [row.turnEnded] : row.kind === "group" ? row.children.map((c) => c.kind === "tool" && c.turnEnded) : [])),
+      [false, true, true, false],
+    );
+    check(
+      "and the row draws the stop rather than a spinner",
+      /stopped\s*\?\s*Minus/.test(footSrc) && /status === "in_progress" && !stopped/.test(footSrc),
+      true,
+    );
   }
 
   {

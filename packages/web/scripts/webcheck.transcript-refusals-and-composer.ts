@@ -85,9 +85,10 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
       "permission_resolved",
       "plan",
       "context_cleared",
+      "file_sent",
       "error",
     ].map((type) => drawn({ type })),
-    [true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
   );
   check("an ordinary turn ending is not news", drawn({ type: "turn_end", stopReason: "end_turn" }), false);
   // `abandoned` draws a row: an unanswered turn leaves nothing else to account for the gap (Q2.231).
@@ -594,10 +595,54 @@ process.stdout.write("\nwho is working, and what the box says\n");
     true,
   );
   check(
-    "and Stop holds it the rest of the time",
-    /const stoppable = canCancelTurn\(session\) && !revising && !slotSends && !draftAnswerable;/.test(
+    "and Stop holds it the rest of the time, from the moment a message leaves the box",
+    /const stoppable = \(canCancelTurn\(session\) \|\| echo !== null\) && !revising && !slotSends && !draftAnswerable;/.test(
       composerSrc,
     ),
+    true,
+  );
+  // Q3.700: a parked agent takes seconds to come back, and Send's spinner over that wait was the one sign of it.
+  check(
+    "the message on its way is the echo the transcript draws, so the slot and the working line agree",
+    [/const echo = echoFor\(key\);/.test(composerSrc), /useSyncExternalStore\(subscribeEchoes, echoVersion\);/.test(composerSrc)],
+    [true, true],
+  );
+  check(
+    "and a Stop pressed before the daemon answered waits for that answer rather than finding no turn",
+    [
+      /const landing = sendsInFlight\.get\(key\);/.test(composerSrc),
+      /const stop: Promise<void> = \(landing \?\? Promise\.resolve\(\)\)/.test(composerSrc),
+      /if \(landing !== undefined && \(now === undefined \|\| !canCancelTurn\(now\)\)\) return;/.test(composerSrc),
+      /sendsInFlight\.set\(key, flight\);/.test(composerSrc),
+      /if \(sendsInFlight\.get\(key\) === flight\) sendsInFlight\.delete\(key\);/.test(composerSrc),
+    ],
+    [true, true, true, true, true],
+  );
+  // Q3.701: the mirror. A message sent after Stop goes after the stop, or it lands above `cancelled` and in a wedged agent's queue.
+  check(
+    "and a message sent after Stop waits for the stop and for the daemon to say the cancel landed",
+    [
+      /stopsInFlight\.set\(key, stop\);/.test(composerSrc),
+      /if \(stopsInFlight\.get\(key\) === stop\) stopsInFlight\.delete\(key\);/.test(composerSrc),
+      /\(stopsInFlight\.get\(key\) \?\? Promise\.resolve\(\)\)\.then\(/.test(composerSrc),
+      /return now === undefined \|\| !cancelInFlight\(now\);/.test(composerSrc),
+      /: afterStop\(key\);/.test(composerSrc),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "held no longer than the daemon's own bound on a cancel nobody honours, plus a start",
+    (() => {
+      const hold = Number(/export const STOP_HOLD_MS = ([\d_]+);/.exec(composerSrc)?.[1]?.replace(/_/g, "") ?? NaN);
+      const daemonSrc = readFileSync(new URL("../../../src/registry.ts", import.meta.url), "utf8");
+      const wedged = Number(/export const WEDGED_CANCEL_MS = ([\d_]+);/.exec(daemonSrc)?.[1]?.replace(/_/g, "") ?? NaN);
+      return hold > wedged && hold <= wedged + 10_000;
+    })(),
+    true,
+  );
+  check(
+    "and the box says the agent is working over the same wait",
+    /working: working \|\| echo !== null,/.test(composerSrc),
     true,
   );
   check(
@@ -618,8 +663,10 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "send",
   );
   check(
-    "which is asked with a cancel in flight counted as stopping",
-    /slotOccupant\(\{ sending: busy, stopping: stopping \|\| pendingCancel, sends: slotSends, stoppable \}\)/.test(composerSrc),
+    "which is asked with a cancel in flight counted as stopping, and the send spinner only where Stop is not offered",
+    /slotOccupant\(\{ sending: busy && !stoppable, stopping: stopping \|\| pendingCancel, sends: slotSends, stoppable \}\)/.test(
+      composerSrc,
+    ),
     true,
   );
   // Rejecting a plan does not end the turn, so a send from that state cancels first.
@@ -1222,7 +1269,16 @@ process.stdout.write("\nwhether a message can be sent at all\n");
 
 process.stdout.write("\na path inside the workspace, and one outside it\n");
 {
-  const { downloadablePath, filenameFor, formatBytes, relativeTo } = await import("../src/paths.js");
+  const { downloadablePath, filenameFor, formatBytes, INLINE_DOWNLOADS, relativeTo } = await import("../src/paths.js");
+  // Switched off, not removed: the rule below is still asserted whole, and the session view is what consults the switch (Q3.690).
+  check("a file name in prose is not offered as a download while the switch is off", INLINE_DOWNLOADS, false);
+  check(
+    "and the session view asks the switch before the rule",
+    /spanTarget: \(span: string\) => \(INLINE_DOWNLOADS \? downloadablePath\(span, root, touched\.current\) : null\)/.test(
+      readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"),
+    ),
+    true,
+  );
 
   check("an ordinary path", relativeTo("/w", "/w/a/b.ts"), "a/b.ts");
   check("a trailing slash on the root is the same answer", relativeTo("/w/", "/w/a.ts"), "a.ts");

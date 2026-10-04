@@ -1,21 +1,5 @@
-//! The Reemoat native shell.
-//!
-//! It draws nothing. The whole user interface is `packages/web`, built once and
-//! **embedded in this binary** — which is the point of the exercise: the server
-//! this app talks to cannot replace the code running in it.
-//!
-//! What this process adds is four things the webview cannot do for itself: reach
-//! a control plane that answers no CORS, keep a sign-in in the operating system's
-//! credential store, open a link in the real browser, and write a file through a
-//! save panel. Everything else — the relay, the daemons, the WebSocket, every
-//! retry rule — stays in the webview and is the same code the browser client runs.
-//!
-//! **One window, and a webview per account in it** where the platform allows
-//! (`seats.rs`): each account's page is a single-account app, exactly as a browser
-//! tab is, and switching is showing another one. **The host decides which account
-//! a command is about, by the webview that asked** — its label and the generation
-//! its document presents — and never by anything the page sends (`commands.rs`,
-//! `accounts.rs`). Q1.651, Q7.149.
+//! The native shell around the embedded `packages/web`. The host decides which account a
+//! command is about by the webview that asked, never by what the page sends (Q1.651, Q7.149).
 
 mod accounts;
 mod away;
@@ -32,43 +16,15 @@ use tauri::Manager;
 
 use commands::Host;
 
-/// Where every account's webview is allowed to *navigate*, which is not the same
-/// question as where a link may open.
-///
-/// Only this app's own document. A link in agent output is opened by
-/// `host_open_external`, in the browser, with its own allowlist; this refuses the
-/// other shape — a script assigning `location.href`, or a form posting away —
-/// which would otherwise replace the running app with somebody else's page inside
-/// a webview holding an account's credential. `seats.rs` puts it on every webview
-/// it builds, and it builds every one.
-///
-/// The dev server is here because `tauri dev` loads the frontend from Vite, and a
-/// rule that only worked in a packaged build is a rule nobody develops against —
-/// but it is here *only* in a development build, and that is load-bearing rather
-/// than tidy.
-///
-/// ⚠ **`localhost` and `127.0.0.1` were allowed unconditionally and that was a
-/// hole.** A Reemoat control plane on loopback is the ordinary self-hosted shape —
-/// `pnpm cp`, a dev stand, a single-box install — and it serves `index.html` at
-/// `/`. Unconditionally allowed, a script assigning `location.href` could
-/// therefore replace the running app with the *backend's* page, inside the window
-/// holding the fleet's credential: the one thing bundling the frontend exists to
-/// make impossible. The CSP cannot help — there is no `navigate-to` directive, and
-/// neither `form-action` nor `base-uri` constrains a navigation. A local daemon at
-/// `127.0.0.1:7887` falls under the same rule; it serves only JSON today, which is
-/// luck rather than a boundary.
-///
-/// `tauri.localhost` stays in every build: it is the *bundle's* own origin on
-/// Windows and Android, not a server's.
+/// Where a webview may navigate: only this app's own document. Loopback is the Vite dev
+/// server only in debug; in a packaged build it is a self-hosted control plane's page.
 pub(crate) fn is_our_own(url: &url::Url) -> bool {
     match url.scheme() {
         // macOS and Linux serve the bundle from `tauri://localhost`.
         "tauri" => true,
         "http" | "https" => match url.host_str() {
-            // Windows and Android serve the bundle from here. Always this app.
+            // Windows and Android serve the bundle from here.
             Some("tauri.localhost") => true,
-            // The Vite dev server — and, in a packaged build, somebody else's
-            // service. See above.
             Some("localhost") | Some("127.0.0.1") => cfg!(debug_assertions),
             _ => false,
         },
@@ -114,20 +70,7 @@ fn leave_typing_alone() {
     });
 }
 
-/// ⚠ **The attribute is what makes a mobile build a build rather than a library
-/// nobody can start, and it was missing for as long as `main.rs` has claimed the
-/// layout was ready.**
-///
-/// `main.rs` says *"a mobile target does not use this file at all: `tauri ios` /
-/// `tauri android` build the library and call `run()` from a generated shim"* —
-/// true, and incomplete. The shim reaches this function through symbols the macro
-/// emits, and without it the `.so` links, `cargo build` is green, and the APK
-/// assembly stops with *"does not include required runtime symbols"*. Measured
-/// 2026-09-19: that is exactly where the first Android build in this project's
-/// history stopped.
-///
-/// `mobile` is `tauri-build`'s own cfg alias — `target_os` is `android` or `ios`
-/// — so there is nothing to declare and nothing that can disagree with it.
+/// Without the attribute the mobile `.so` still links and the APK fails on missing runtime symbols.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "macos")]
@@ -169,19 +112,8 @@ pub fn run() {
             commands::host_pick_folder,
             commands::host_set_theme,
         ])
-        /*
-         * ⚠ **A new page load is a new document, and the one place the host can
-         * see one start.** `Host::page_loaded` retires the previous document's
-         * generation, clears what was handed to it and ends a rebind — so a
-         * document from before, revived by Android's Back or a back/forward-cache
-         * restore, is refused rather than answered about whichever account the
-         * webview holds now (Q5.120).
-         *
-         * The global hook looks the webview up by label and silently skips one not
-         * registered yet (`tauri`'s `manager/webview.rs`), so a webview's very first
-         * load may not be seen here. That is safe: a label that has never loaded
-         * has never been issued a generation or handed a credential.
-         */
+        // A page load retires the previous document's generation, so a revived one is refused (Q5.120).
+        // A webview's first load may be missed here, which is safe: it holds no generation yet.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 away::on_close_requested(window, api);
@@ -195,35 +127,15 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            /*
-             * The configuration directory, from Tauri rather than hand-built.
-             *
-             * ⚠ Never `~/.reemoat`. That is the *daemon's* directory — it holds
-             * `reemoat.db`, whose `identity.tunnel_key` is a live secret — and a
-             * client writing into it would be a second writer on a tree with an
-             * owner.
-             */
+            // Never `~/.reemoat`, which is the daemon's.
             let dir = app.path().app_config_dir()?;
-            /*
-             * ⚠ **Three reads and no write.** `read_server` is the server a first run
-             * chose, which is the pending seat's when there is no account at all;
-             * `read_accounts` is every account; `read_theme` is the switch's theme,
-             * which the window is built in. A file from before accounts has its
-             * list derived rather than written: the evidence for its server is one
-             * keyring read here, once, and the list reaches the disk only with the
-             * first act that changes it.
-             */
+            // Reads only; nothing is written at startup.
             let server = config::read_server(&dir);
             let roster = config::read_accounts(&dir, &|origin| credential::read(origin).is_some());
             let theme = config::read_theme(&dir);
             app.manage(Host::new(dir, credential::probe(), &roster));
 
-            /*
-             * The window is declared in `tauri.conf.json` with `create: false` and
-             * built by `seats.rs`, so every setting stays in the configuration file
-             * and that module adds only what a configuration cannot express: a
-             * webview per account, and the navigation guard on every one.
-             */
+            // `create: false` in `tauri.conf.json`; `seats.rs` builds it to add the navigation guard.
             let config = seats::main_config(app.handle())
                 .map(|config| seats::themed(&config, theme))
                 .ok_or("tauri.conf.json declares no window labelled main")?;
@@ -231,12 +143,7 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             away::tray(app)?;
 
-            /*
-             * ⚠ **Every account's daemon, from launch, whether or not its page is
-             * alive** (D2). On a thread of its own: starting one runs a login shell
-             * for its `PATH`, which is seconds, per root, before a first paint that
-             * should not wait for any of it.
-             */
+            // Every account's daemon, page alive or not; off-thread, since a login shell takes seconds per root.
             if commands::CAN_HOST_DAEMON {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -265,38 +172,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("the Reemoat shell could not start")
         .run(|handle, event| {
-            /*
-             * ⚠ **The daemon dies with the app, and this is the only thing that
-             * makes that true.** `Child` does not kill on drop — it detaches — so
-             * without this the daemon is orphaned on every quit and keeps running
-             * with nothing able to stop it. Measured 2026-09-15: two seconds after
-             * the parent exits the child is alive on `ppid 1`, answering `/health`,
-             * and it stays that way indefinitely.
-             *
-             * It is not merely untidy. The orphan keeps its *own* bundle's runtime
-             * and sources, so replacing Reemoat.app leaves the old daemon running
-             * and announced — the new app finds it alive with a matching
-             * `instanceId`, reads `foreign`, and never starts the version it
-             * shipped with. Emptying the Trash makes it worse rather than better:
-             * the process survives on its inodes while `tsx` still resolves
-             * plugin, agent and upload paths lazily, so the first one needed is an
-             * `ENOENT` inside a daemon that goes on answering 200.
-             *
-             * `RunEvent::Exit` rather than a window-close handler: it is the
-             * single point every quit passes through, whether it came from the
-             * menu, the Dock, the tray, `AppHandle::exit`, or a window close on
-             * Linux, where destroying the last window still quits (Q6.108). On
-             * macOS and Windows the close button only puts the app away (Q3.697).
-             *
-             * ⚠ **Every daemon it started, signalled together and waited on once.**
-             * There is one per account (D2, Q7.149), every one runs from launch, and
-             * a switch leaves each running — so this is the only place they stop
-             * together, and stopping them in turn would make a quit worth one
-             * `STOP_DEADLINE` per account. `daemon::stop_all` signals all, then
-             * reaps all against one deadline. A root whose supervisor is poisoned
-             * is skipped rather than blocking the rest; its child is orphaned, which
-             * is the failure this block exists to prevent, for that one only.
-             */
+            // `Child` detaches on drop, so this is the only thing that stops the daemons; `Exit` is
+            // the one point every quit passes through (Q6.108, Q3.697). Signalled together, one deadline.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
@@ -337,19 +214,12 @@ mod tests {
         assert!(at("http://tauri.localhost/settings"));
     }
 
-    /// The dev server, and the rule stated so it holds in **both** profiles.
-    ///
-    /// Written as an equality against `cfg!` rather than as two `#[cfg]` tests,
-    /// because CI runs `cargo test` in debug only (`.github/workflows/check.yml`)
-    /// and a release-only test there would assert nothing. This one fails in debug
-    /// if the arm is deleted and in release if the `cfg!` is dropped, from one run.
+    /// An equality against `cfg!` rather than two `#[cfg]` tests, because CI tests debug only.
     #[test]
     fn loopback_navigates_only_in_a_development_build() {
         let dev = cfg!(debug_assertions);
         assert_eq!(at("http://localhost:5173/"), dev);
         assert_eq!(at("http://127.0.0.1:5173/"), dev);
-        // A control plane and a daemon are the two loopback services this app
-        // actually meets, and a packaged build may navigate to neither.
         assert_eq!(at("http://127.0.0.1:7888/"), dev);
         assert_eq!(at("http://127.0.0.1:7887/sessions"), dev);
     }

@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 109 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 444 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 113 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 453 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 77 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 81 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1115** | |
+| | | **1133** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1115 rather than the 555
+dividers. So the count is over **both** depths, and it says 1133 rather than the 564
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9255,6 +9255,253 @@ spends a model request a minute on nobody answering — not built.
 
 **Status.** Current.
 
+### Q2.252 — A file the agent hands over on purpose
+
+**Question.** Q3.690 ended *"A way for an agent to hand a file over on purpose would
+be a tool of its own"*. Until now a file reached its person only where a tool call
+had read or written it inside the workspace; a PDF made by a shell command, or
+anything in `/tmp`, was a path printed at somebody who may be on a phone.
+
+**Decision. `send_file`, on the `reemoat` MCP server, for every agent that takes the
+server.** One argument, `path`: absolute, from `~`, or relative to the session's
+working folder. The daemon **copies the file as it stands** into the session's upload
+store and appends one event, `file_sent`, carrying a `StoredFileRef` and nothing
+else; the app draws a card, an image previewed through `previewable` like every
+other, and a press saves it through `GET /sessions/:id/uploads/:uploadId`. No bytes
+cross the MCP call, whose body is 256 KiB, and no route was added.
+
+**A copy, never a path.** The log outlives the disk, which is `StoredFileRef`'s own
+reason; `/files` serves only under `workspace.root`, and what somebody asks for is
+as often outside it; and the card has to open after the agent overwrites the
+original. So a file is sent again after it changes, and the tool says so.
+
+**Nothing is contained, and that is the honest reading of what is.** The agent runs
+as the user and can read the file already, so the path is refused only for what it
+is: missing, not a regular file, over `MAX_SENT_FILE_BYTES`, or on a filesystem that
+does not answer. Each is a sentence to the model (`sendFileRefusal`), never a 4xx.
+
+**The copy, in the order that has to hold** (`Uploads.keepAgentFile`): the rate
+window, `probeRealpath`, `probeFile`, an open with `O_NONBLOCK` so a pipe swapped in
+after the probe cannot park it, `fstat` on the handle, the copy under a running
+byte counter and the call's own abort signal, then the row — the commit point,
+inserted already consumed — and only then the eviction. A refusal before the copy
+leaves nothing; one inside it removes the directory; a crash before the row is
+`reconcile`'s. Calls from one session run one after another, so each is charged and
+bounded in the order it came. **45 s for the whole call**, its wait behind another
+included, which is under the 60 s an MCP client gives one (Q2.251): a copy that
+outlived its call would put a file in the chat the model saw fail, and the model
+would send it again. `sendFile` asks whether the session is still running a second
+time, after the copy, for a Stop that landed inside it. ⚠ A read that stalls after
+the probes is given up on and still holds its thread, as the download route's does.
+
+**A third budget.** Sent files are `f_` rows: 100 of them or 1 GiB, oldest first
+out, with a rate window of their own. `sentFiles` counts a person's files alone, so
+an agent's loop can neither fill a person's budget, nor be evicted by their upload,
+nor answer it with 429 — the argument `keepAgentImage`'s budget already made.
+
+**The name is the agent's, which no upload's ever was.** `sentFileName` drops
+controls, bidi and zero-width characters rather than refusing: a right-to-left
+override in front of `fdp.exe` reads as a PDF in a save panel.
+
+**No messaging switch withdraws it**, for Q2.250's reason: a file goes to the
+session's own person. So `mcpServersFor` now hands the server to every http-capable
+agent wherever there is an upload store, with messaging off too, and `callTool`
+answers it before `callRefusal`. `REEMOAT_PEER_MESSAGES=off` removes the messaging
+tools, no longer the server.
+
+**The permission in front of it is answered by the daemon, the owner's call
+2026-10-02** — the agent is meant to send a file when it judges one wanted, and a
+card for each would undo that. How, per harness, measured the same day on a daemon
+running this tree:
+
+| Harness | The call as announced | The permission |
+|---|---|---|
+| claude 2.1.287 | `tool_call` with `_meta.claudeCode.toolName` `mcp__reemoat__send_file` | none: `allowedTools` in `sessionMetaFor`, which the SDK applies before `canUseTool` |
+| codex 0.160.0 | `rawInput` `{server, tool, arguments}` | none reached the client: its Guardian approved, *"Risk: low"* |
+| grok 1.0.40 | `use_tool`, `rawInput` `{tool_name: "reemoat__send_file", tool_input}`, then the request on the same id | answered `allow-once` here |
+| cursor | `rawInput` `{providerIdentifier, toolName, args}` (Q6.114) | answered `allow-once` here; not run live, its keychain being locked in the shell that measured |
+| opencode 1.18.34 | titled `reemoat_send_file`, `rawInput` `{path}` | none arrived |
+
+`ownToolCall` reads each shape **for its own harness only**: on another, the same
+keys are whatever a model typed. grok's is the one a model does type — they are
+`use_tool`'s arguments — so there the call is answered only once grok itself has
+vouched for it: the `variant: "UseTool"` it adds to those arguments after parsing
+them, which the request carries and the first announcement does not. A call
+carrying any other key is not one, and a call that later says it is something else
+is forgotten. The answer is only ever `allow_once`: the fallback to `allow_always`
+that `ask_question` may take would write a rule into the person's own harness
+config. An unrecognised call falls to the person's card, and so does a subagent's.
+
+**The card stands for the call.** `file_sent.toolCallId` is the harness's own call
+where `claimSentFileCall` could tell — by the path it named, else the oldest
+unclaimed — and the app then draws neither that call's row nor the daemon's answer
+to its permission, as it does for a question. opencode names the tool only in a
+title, which nothing here reads, so there the row and the card are both drawn.
+
+**Compatibility.** An app that predates the event draws nothing for it and still
+shows the harness's own tool row, while the model is told the file was sent: so the
+app ships first, then the daemons. A daemon older than this cannot weigh a stored
+`file_sent`, so it is not rolled back under a log that holds one.
+
+**Not built.** A switch that withholds the tool; several files in one call; a
+folder; a bridge that would give an older app a button.
+
+**Status.** Current. Amended by Q2.253.
+
+### Q2.253 — send_file, checked again: what a Stop, a stall, a closed folder and a typed tag could do
+
+**Question.** Q2.252 was built in a day and the owner asked for it to be read again
+properly. Two independent reviews on 2026-10-03, one of the copy and one of the
+recognition and the permission, each reproduced what it claimed with a script.
+
+**A Stop during the copy kept a file nobody could see and dropped one somebody
+could.** `keepAgentFile` inserted the row and evicted the oldest before it returned,
+and `sendFile` asked whether the session was still running only afterwards — so at
+the 100-file budget a Stop landing mid-copy answered *not running*, kept the row and
+its bytes with no `file_sent`, and had already thrown away a file the transcript
+still drew. **Decision:** `KeepFileOptions.kept`, called in the insert's own
+synchronous block — after the insert, so what it records names a row that exists,
+and before the eviction, so a no evicts nothing. `sendFile` answers there: a session
+that went keeps nothing (`withdrawn`), and the event lands with its row or not at
+all. A crash can no longer fall between the two.
+
+**A copy that stalled was forgotten, so the next one stalled too.** The probes feed
+`stall.ts`'s memory; the open and the reads, raced against the deadline, did not —
+and a mount that answers metadata from a cache and stalls on data passes the probes
+every time, so each retry pinned another threadpool slot. **Decision:** a source call
+still out at the deadline, and out since before `DESCRIBE_TIMEOUT_MS`, is remembered
+(`noteStalled`) and answered `unresponsive`; one that was merely slow stays
+`timed_out`, which is a different sentence.
+
+**Every realpath error said there was no file.** A file under a mode-000 folder came
+back *there is no file at …*. **Decision:** `PathResolution` carries the errno;
+ENOENT and ENOTDIR are missing, EACCES and EPERM are `denied`, a link loop and an
+over-long path say so.
+
+**Waiting in line ignored the call's own abort and deadline.** A call behind a long
+copy answered its abort only once that copy finished. **Decision:** the wait is
+raced against both (`settledOrStopped`), and the next call still queues behind
+**both** the copy ahead and the one that gave up, or two copies would run at once.
+The probes and the mount table are raced too.
+
+**Smaller, each reproduced or read off the code.** A long name cut through a
+surrogate pair, which SQLite stores as U+FFFD while the event held the half: names
+are cut by code point, and a lone surrogate the agent sent is dropped. A relative
+path read from the wrong folder sent the wrong file silently: every answer names
+the path that was read — in the structured result too, since claude shows its model
+that half alone (measured on 2.1.288) — and the tool says which folder a relative
+path is taken from. Only ASCII whitespace is trimmed, a no-break space being part of
+a real name. A short write is finished. All of `/proc` is refused on Linux: a
+process's `environ` holds the machine's token, and the daemon's own pid was not the
+only way to it — every thread is `/proc/<tid>` by name though never listed, and the
+`tsx` parent carries the same environment (review, 2026-10-04). Decided twice, on the
+resolved path and on the opened descriptor's device, since a folder on the way can be
+swapped for a link after the probe. Old rate charges are swept.
+
+**What a permission answer trusted.** grok's `variant: "UseTool"` was believed
+wherever it appeared, including the first announcement — whose `rawInput` is the
+model's own typing — and once believed it stayed: a model typing the tag made a bare
+request on that id an `allow-once`. **Decision:** on grok only the request's own
+`toolCall` vouches (`noteOwnCall`'s `fromRequest`). A call that completed or failed
+is ended, and nothing later said about its id is believed; another tool of this
+server on the same id is forgotten; `/clear` empties both maps.
+
+**claude's request is its person's.** `allowedTools` lets the SDK run send_file
+before `canUseTool`; the adapter's own comment says a request that still reaches
+the client is *bypass-immune* — a safety check, or an explicit ask rule somebody
+wrote. So the daemon no longer answers claude's, and a subagent's asks its person
+on every harness, which Q2.252 said and only cursor did.
+
+**Which call a file stands for.** `claimSentFileCall` took the *newest* call naming
+the path, so two in flight on one path swapped ids and the first card hid the
+second call's row, failure included. It takes the oldest now, and a call announced
+and never claimed is dropped at its turn's end and at a `/clear`, which is what the
+newest-first rule had been standing in for. `ask_question`'s auto-answer now
+requires `allow_once` as send_file's does: falling back to `allow_always` wrote
+`Mcp(reemoat:ask_question)` into cursor's own config.
+
+**Checked and sound**, so nobody re-derives it: the download route's headers and
+type, the three budgets kept apart, descriptors closed on every path, a FIFO or a
+device refused twice, `reconcile` after a crash, look-alike server names, codex's
+shape being unforgeable by a model, and none of the 29 withdrawn claude names being
+an alias (the three MCP-resource aliases joined the driver's guard).
+
+**Not done.** A per-session lock around `forgetSession`, which runs only for
+sessions pruned at startup; codex's MCP approvals arriving as elicitations, which
+nothing answers for it.
+
+**Status.** Current. Amends Q2.252.
+
+### Q2.254 — What the controls show while a released agent comes back
+
+**Reported 2026-10-03 by the owner**: on a wake the strip under the message box
+twitched, *"as if for a moment the effort switched to the default"*.
+
+**Measured on that session's own log.** A wake opens a fresh agent on its own
+defaults and `restoreConfig` then walks the session's choices back, one call each.
+Every step was written and fanned out. 18963 `mode=default, effort=default` at
+16:26:06.074, then `mode=auto` twice at .084, then `effort=xhigh` at .107: four
+snapshots in 33 ms, and the person saw the first three, which are not their session.
+`restartAgent` had always held its captured config over that window
+(`snapshotConfigSource`); a wake held nothing.
+
+**Decision.** `doResume` holds the config it captured, `wakeConfig`, from before the
+spawn until the restore settles. The snapshot serves it over the agent's defaults,
+and `applyAgentConfig` writes no event while it is held. When the restore settles,
+one `agent_config` is written for where it landed. That is the held set unless the
+agent refused or withdrew part of it, so a value that did not come back still shows
+as it really is. A tap in the window was already refused as busy (`resuming`), so
+nothing needed holding against a person.
+
+Covers every wake: a message to a parked session, a daemon restart's pass and
+Resume. `daemoncheck` samples the snapshot at the moment the fresh agent, still on
+its default, receives the replay; without the hold it read the default, and the log
+held three events where it now holds one.
+
+**Status.** Current.
+
+### Q2.255 — A cancel the agent never honours
+
+**Reported 2026-10-03 by the owner** on session lyra, measured on its log and processes.
+claude CLI 2.1.288 stopped mid-response at 22:16:19: a Bash `tool_call` complete, a
+`ToolSearch` begun, neither run. The CLI and adapter were alive at 0% CPU with no
+children, every socket to the API `CLOSED`, and its own transcript ended before that
+response. Stop sent `session/cancel`; the adapter's floor (`forceCancelGraceMs`, 30 s)
+resolved the prompt `cancelled` and logged *"the underlying query may still be wedged"*.
+A message sent during those 30 s was queued, and when the turn ended the daemon handed it
+to the same CLI, which wedged that turn too. Even SIGTERM left both processes standing;
+SIGKILL ended them. Only the 3 h silence bound (Q2.231) would have ended either turn.
+
+**Decision.** The first cancel of a turn arms `WEDGED_CANCEL_MS` (15 s, under claude's
+floor). If the turn is still open then, the daemon ends it in the log as `cancelled`
+(`Session.abandonTurn("cancelled")`, through the pump, so it is written once) and
+replaces the process with `restartAgent`: a stop as `config_changed`, which keeps the
+queue and kills past the dispose grace, then a resume of the same conversation. The
+queue is handed to the new agent, never the old one. A turn ending sooner disarms it; a
+repeated Stop does not push it out.
+
+**Why the daemon and not the adapter.** We patch claude's adapter (Q6.121), but a wedge
+is not claude's alone. The daemon's own clock covers every harness, and replacing a
+process is what `onAgentUnusable` already does for a rejected prompt (Q7.99). An agent
+that takes longer than 15 s to honour a cancel is replaced unnecessarily, at the cost of
+a resume; claude's interrupt takes well under the 1.5 s `CANCEL_SETTLE_MS`.
+
+**Two holds, from the review (2026-10-04).** A session reporting live background work is
+not replaced: the restart kills the process group, and with it a dev server the agent
+left running, so the turn stays open as before and End session is the escalation (the
+owner's call). And a person's stop that lands while the replacement is stopping the old
+agent joined that stop, whose resume then brought the agent back with the queue: `stop`
+records the reason (`stopDuringRestart`), and `restartAgent` records it as the exit and
+resumes nothing. Both are older than this entry for ultracode and credential restarts;
+this made them reachable seconds after a Stop.
+
+**Not changed.** A silent turn (Q2.231) still only abandons, so the next message after it
+may meet the same agent; a Stop then replaces it. `daemoncheck` drives a stub that never
+answers a cancel, with a message sent while the cancel is pending: one `turn_end`, a
+second launch that resumes, and the message delivered to it.
+
+**Status.** Current.
+
 ## The web client
 
 ### What the client is
@@ -10789,7 +11036,13 @@ effort parameter is sent**, and the documented behaviour with none sent is
 choosing per turn. The narrowing matters because kimi's equivalent is `off` and
 means something else.
 
-**Status.** Current
+**Reversed 2026-10-03 (Q6.121).** The premise did not survive claude 2.1.288: an
+unset effort is the model's own *level*, which the CLI keeps per model and calls
+`auto`, and adaptive thinking is a separate thing beside it. The control says
+`Auto` now, and `Auto · Medium` where the agent reports the level. The narrowing
+to `thought_level` and the literal `default` stands.
+
+**Status.** Reversed by Q6.121
 
 #### Q3.68 — What happens when a placeholder choice duplicates a real one?
 
@@ -22691,7 +22944,7 @@ the life of a turn.
 which has none either. What ends a wait is the turn ending, and what discards it
 is stopping the session, which says so in the transcript (Q2.226).
 
-**Status.** Current
+**Status.** Current. Amended by Q3.700.
 
 #### Q3.603 — Where is background work drawn, and what does this app refuse to draw about it?
 
@@ -22794,7 +23047,7 @@ retired-colour sweep does not catch them: its pattern ends `warn\b`, and `\b` fa
 against the `i` of `warning`. They are `add-ink` and `offer-ink` now. [⚠ `offer-ink`
 is `caution` since Q1.650, which deleted the control it was named for; same value.]
 
-**Status.** Current
+**Status.** Current. Amended by Q3.699.
 
 #### Q3.604 — When may the transcript join two pieces of agent text, and what does ACP give it to decide with?
 
@@ -24179,7 +24432,7 @@ whose body is empty is a control that lies about having something behind it*. On
 condition covers the cleared session and the one that never backgrounded anything,
 and there is no clear control beside a zero: an act with no object.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.698.
 
 
 #### Q3.632 — a disclosure fold is the height of its own words, and the finished band is a tone quieter
@@ -26213,7 +26466,7 @@ brief described.
   because the count keeps rising while the clicks keep coming. The hazard predates
   this entry: the sending spinner covers the round trip, and nothing here widens it.
 
-**Status.** Current.
+**Status.** Current. Amended by Q3.700.
 
 #### Q3.655 — swiping between machines turns a page, as Telegram's folders do
 
@@ -28032,11 +28285,26 @@ array's six; `nativecheck` refuses `InvokeBody::Raw` in any command.
 
 **Not built.** A file made only by a shell command, and never read or written by a
 tool, is still no button; the agent in that session read its PDF to make it one. A
-way for an agent to hand a file over on purpose would be a tool of its own.
+way for an agent to hand a file over on purpose would be a tool of its own — and is
+one now, `send_file` (Q2.252).
+
+**Switched off, back on and off again, all on 2026-10-03 and all on the owner's
+word.** With `send_file` in place the inline offer drew a second, live copy of a file
+under its card, and on an older daemon a name in prose looked like a promise the rule
+could not keep — a file outside the workspace, or one only a shell command had
+touched, stayed text. So `INLINE_DOWNLOADS` holds the offer off while `send_file`
+proves itself; the rule is kept whole and `webcheck` pins that the session view asks
+the switch before it. It was briefly taken out on the belief that switching the offer
+off had broken the card's button too. It had not: the switch reaches `spanTarget` and
+nothing else, and the card was a relayed download stalling (Q6.120).
 
 **Measured.** `cargo check` for `aarch64-linux-android` and the host, `clippy -D
-warnings`, the 131 Rust tests. What first failed the `ipc://` call on that page is
-not known, and a save on a real phone is not measured.
+warnings`, the 131 Rust tests. **What first failed the `ipc://` call is the shell's
+own CSP**, measured 2026-10-03 in a WKWebView under it: `connect-src` names no `ipc:`
+source and Tauri adds none, so the first call's fetch fails with *Load failed* and
+the page uses `postMessage` for good. Both channels carried 12 MB whole there, and a
+copy of `host_save_file` under the same CSP opened its panel for 2.6 MB in two
+seconds. A save on a real phone is not measured.
 
 **Status.** Current.
 
@@ -28314,6 +28582,248 @@ Every target table now sits below `[dependencies]`, where the rewrite stops at t
 plain line and leaves them alone, and `nativecheck` asserts the order.
 
 **Status.** Current. Amends Q6.108.
+
+#### Q3.698 — The working line is a button only while something runs
+
+**Question.** `working…` had become a button into the background panel in sessions
+with nothing running in the background — reported by the owner as a regression.
+
+**Decision.** `WaitingFoot` is pressable exactly while `outstanding > 0`: a live
+background task or a running subagent. The finished record keeps its door in the
+session menu at every width (Q3.631).
+
+**Why it was pressable.** `retained`, the count of rows the panel holds finished
+ones included, was what decided the button. It was the right rule while the foot
+was the panel's only door — a reader who watched a build go into the background
+could otherwise never see how it ended — and Q3.631 gave the record a door of its
+own. From then on it drew a chevron on the working line of every session that had
+ever backgrounded anything, opening a panel with nothing running in it.
+
+**Status.** Current. Amends Q3.631.
+
+#### Q3.699 — A subagent is background work, and the panel says so
+
+**Question.** Subagents were drawn in the conversation and not in the background
+panel, which the owner reported as wrong: *they essentially are background tasks*.
+The panel did have an `Agents` band, fed by `outstandingTasks` — and claude's
+subagents never reached it, because they now run in the background: the spawn
+answers `Async agent launched` in seconds and the agent goes on under a call that
+has completed. Measured on the owner's own log, every subagent of the last week was
+one (`run_in_background: true`, the model's choice), so the band was dead on the
+harness it was built for.
+
+**Decision.** `agentTasks` reads every delegation in the window as a task —
+running, or finished in one of four states — and the panel draws it as a card:
+`AgentCard` shares `TaskCard`'s bands, names its kind from the call's own
+`subagent_type` (`Explore agent`), counts its steps as tool calls, says what it is
+doing while it runs, and offers no Stop, since nothing on the wire reaches one. A
+running subagent is in `Agents`; a finished one is in the finished band beside the
+finished tasks, newest first, hidden by the same clear under an id no adapter mints
+(`agentRowId`). The foot counts running subagents as `N agents` and opens the panel
+over them. The conversation's card reads the same answer through `TasksContext`, so
+a detached subagent's row says *Running in the background* rather than a check mark
+and the eight seconds its launch took.
+
+**When a detached subagent has ended, which nothing on the wire says.** The adapter
+drops every `local_agent` task before publishing (Q3.603, Q7.113), so the answer is
+assembled, in this order:
+
+1. Its own closing step — claude's `SubagentHandback`, which by its own contract
+   ends the run (`endsDelegation`, Q6.119) — ends it there.
+2. A step of its own still running, or one that detached while the daemon reports
+   its task live, keeps it running past anything else. claude ended a turn with its
+   subagent waiting on such a shell and woke it later (Q6.119).
+3. A turn end or an agent start after its newest step ends it: `completed` for
+   `end_turn`, `stopped` for anything else. claude holds the turn that spawned it
+   open until it has finished, so this is usually exact.
+4. Otherwise it runs while the session is engaged — a turn, work nobody prompted,
+   a parked request — and is over the moment none is: woken after its turn, it works
+   with no turn around it.
+
+A finished one is timed to its last step's end, not to the turn's. `detached` is
+the daemon's `backgrounded`, or — on a daemon older than that — a step that began
+after the call reported its end.
+
+**Measured against both logs**, the rule reproduces what happened: the owner's
+Explore agent of 2026-09-30, 33 steps, 154 s and done at its hand-back; and a
+throwaway daemon's subagent through every state — running before its first step,
+running at the turn's end with its shell still live, done once the session went
+idle.
+
+**What is still wrong, stated.** Without a hand-back (any mode but auto) a subagent
+that finished reads as running until the turn it was spawned in ends, while the
+main agent works on. And a subagent that thinks for a long stretch with the session
+idle reads as done until its next step.
+
+**Status.** Current. Amends Q3.603 and closes the subagent half of Q7.113.
+
+#### Q3.700 — Stop takes the slot the moment a message leaves the box
+
+**Question.** Sending to a session whose agent had been released for idleness kept
+Send on screen — the spinner over it — for the seconds the daemon took to bring an
+agent back, and only then turned into Stop. A person is never told about the
+release, and this was the one place it showed.
+
+**Decision.** A message on its way is work from the moment it leaves the box:
+`stoppable` reads `echo !== null` beside `canCancelTurn`, the echo being what the
+transcript already draws as the working line over the same wait, so the slot and
+that line agree. The spinner is kept for the cases Stop is not offered — a draft
+typed meanwhile, a plan being answered, a typed control applying. The box says the
+agent is working over the same wait.
+
+**A Stop pressed before the daemon has the message waits for it.** Until the prompt
+route answers there is no turn to cancel — the daemon answers `not_ready` while it
+brings the agent up — so `cancelTurn` waits on the send (`sendsInFlight`, per
+session, since the composer outlives a switch) and cancels once the daemon has it;
+a send it refused leaves nothing to stop. The spinner says *stopping* meanwhile,
+which is true: nothing is drawn as stopped before the daemon says so (Q3.222).
+
+**Status.** Current. Amends Q3.601 and Q3.654.
+
+#### Q3.701 — A message sent after Stop goes after the stop
+
+**Reported 2026-10-03 by the owner**: *"I pressed cancel first, then sent the message"*,
+and the transcript drew the message, *Waiting for the agent to finish*, then
+`cancelled`, then a turn that hung (Q2.255). The daemon was right about the order it
+saw: the cancel had not landed, so the message was queued into the turn being torn down
+and logged at acceptance, above that turn's end.
+
+**Decision.** The composer holds a message sent while a Stop is unanswered
+(`stopsInFlight`, the mirror of `sendsInFlight`) or while the snapshot still says a
+cancel is pending (`cancelInFlight`). The echo is drawn at once, at the foot, so nothing
+looks lost; the prompt is sent when the cancel has landed, as a new turn, so it is
+logged after `cancelled`. The hold ends at `STOP_HOLD_MS` (20 s, past
+`WEDGED_CANCEL_MS` plus a start) whatever the daemon says, so an older daemon queues it
+as before. The daemon keeps queueing a message that arrives mid-cancel from anywhere
+else, a peer or a plugin.
+
+**Status.** Current.
+
+#### Q3.702 — A call its turn outlived is not running
+
+**Question.** The run row from Q2.255's session read `Ran 4 commands, used ToolSearch ·
+1 failed ○` after the turn was cancelled: the two calls the wedged CLI never ran kept
+`pending` and `in_progress`, and `stillRunning` read the status alone.
+
+**Decision.** `buildTail` marks a top-level call `turnEnded` when it never finished and a
+turn end or agent start comes after it. `stillRunning` is false for it, so a run holding
+it is not live, and `ToolCall` draws `Minus` in `text-muted`, not a spinner. A failed
+call keeps its own word. Top level only: a detached subagent's steps may outlive the
+turn (`detachedEnd`'s rule 2), and a backgrounded call is the snapshot's to answer.
+
+**Status.** Current.
+
+#### Q3.703 — Waking from sleep: what kept "Connecting…" up
+
+**Reported 2026-10-04 by the owner**: after the laptop wakes, or on coming back to the
+app, connecting is slow, and the pill said *Connecting…* while the agent was visibly
+working. Read off the code (the relay logs carry no timestamps), three causes:
+
+- **A failed listing stuck.** The watchdog fires about a second after wake, often before
+  the network is back, and `cp.machines()` fails. `cpError` is the pill's first cause, and
+  only a successful listing in `runResume` cleared it; `tick` re-lists only with no
+  machine known. So one failure at wake held the pill until the next wake, over live
+  streams.
+- **A second pass redialled what the first rebuilt.** One wake fires several triggers
+  (`slept`, then `online` when the network associates); the second runs as a queued
+  `coalesced` pass and dropped every route and stream again.
+- **One pass dialled a live stream twice.** The dispose makes each stream retry and come
+  back live within a second, and the pass's last step then `reconnect()`ed it.
+
+**Decision.** `tick` re-reads the listing while `cpError` is set (`listMachines`,
+single-flight), at most every `OFFLINE_RETRY_MS` and without waiting for it: awaited at
+the poll's own 4 s, a control-plane outage held every reachable machine's session poll
+behind a 10 s timeout and had every open tab ask the control plane every 4 s (review,
+2026-10-04). A failed listing writes `cpError` only on its own epoch. `resumeMachine` drops
+a route only if it was proved before the absence began (`MachineConnection.routeSince`)
+and redials a stream only if it has not gone live since (`SessionStream.liveAfter`).
+
+**When the absence began, not when it was noticed (review, 2026-10-04).** The first cut
+counted a queued pass from the previous pass's start, so a second sleep while that pass
+still ran left its rebuilt, now dead, sockets trusted: the stuck pill again. Now
+`resume.ts` reports the start of each absence through `WakeClock` — the watchdog's tick
+before the gap, the moment the tab hid, the first `offline` — and the store keeps the
+latest (`suspectSince`, raised even when the call only joins a pass in flight). One
+wake's duplicate events report the same start and redial nothing that wake rebuilt; a
+sleep during the pass moves it, and the queued pass redials. An `online` with no
+`offline` seen reports nothing, being that duplicate. Other callers report "now", as
+before this entry. Stamps are `performance.now()` (`monotonicNow`), so a wall clock set
+back after sleep cannot make an old socket newer than the sleep; the watchdog still
+detects on the wall clock, the one that moves across a sleep.
+
+**Not changed, written down.** The browser leg of a stream has no liveness check: the
+daemon's ping is on its loopback leg and the relay splices, so a socket that died without
+a close is found only by a wake or a rotation. A pooled channel is reused on its token's
+margin alone. The listing and the mint still run before the probes. The native host's
+`reqwest` client sends no HTTP/2 keepalive, and its idle clock does not advance during
+sleep, so a control-plane call right after wake may ride a dead connection. Each wants a
+measurement on the laptop before code.
+
+**Status.** Current.
+
+#### Q3.704 — A table crushed its short columns to a letter a line
+
+**Reported 2026-10-04 by the owner**, two tables in a reply: a `ГБ` column drawn `Г`/`Б`,
+`≈ 61` as three lines, `Вариант` and `Navidrome` a letter or two a line.
+
+**Cause.** Every markdown body is `wrap-anywhere` (`overflow-wrap: anywhere;
+word-break: break-word`), and cells inherit it. Both values let a line break anywhere
+*for min-content*, so each cell's min-content was one character. The table is `w-full`;
+auto layout gives each column its min-content plus a share of what is left in proportion
+to max minus min, so beside a column of long prose a short column got almost none.
+
+**Decision.** `.wrap-anywhere td, .wrap-anywhere th` reset both, to `overflow-wrap:
+break-word` and `word-break: normal`: a cell still breaks a word that does not fit, but
+its min-content is its longest word. Measured in a `WKWebView` (swiftc snapshot of the
+two tables): every short column whole, prose wrapping at spaces. The cost: a token longer
+than the column, a bare URL, now widens the table, and the wrapper's `overflow-x-auto`
+scrolls it rather than breaking the token, as GitHub's tables do.
+
+**Status.** Current. Followed by Q3.705.
+
+#### Q3.705 — A short column still wrapped at its space
+
+**Reported 2026-10-04 by the owner** on build 0237: no letter-a-line any more, but every
+`≈ 61` in the `ГБ` column was two lines. Q3.704 made a column's minimum its longest word,
+and auto layout gives a column little beyond its minimum when another column holds prose,
+so `≈` and `61` split at the space between them.
+
+**Decision.** `remarkShortColumns` (`ui/mdtable.ts`, beside `mdlist.ts` for the same
+offline-testing reason) marks every cell of a column whose longest cell, header
+included, is at most `SHORT_CELL_CHARS` (12) characters, counted as code points over text,
+code and emphasis alike; `Markdown.tsx`'s `th` and `td` draw a marked cell
+`whitespace-nowrap`. A column of numbers, units, short names or dates keeps each value on
+one line; a column with any longer cell wraps as before. 12 rather than more so that a few
+such columns still fit a phone; a table that does not scrolls (Q3.704).
+
+**And a regression it nearly shipped.** Passing the class through a template literal put
+`align-top` against `${…}`, which Tailwind's scan does not read as a class: the build lost
+`.align-top` and every cell centred vertically. Caught on the WebKit snapshot, not by a
+check. `webcheck` now sweeps every `className` template in `packages/web/src` for a class
+against a substitution (with a floor), and `Markdown.tsx`'s ordered list, which had the
+same shape but a class used elsewhere, was straightened too.
+
+**Status.** Current.
+
+#### Q3.706 — A softer bubble for a person's message
+
+**Asked 2026-10-04 by the owner**, with Claude Code's bubble as the reference. Measured off
+the two screenshots: ours was `raised` (`#eae8e4`, 1.22:1 from `surface`) with 20px corners
+and a 10px tail; Claude Code's is `#f0f0ef` on `#fcfcfb`, 1.11:1, with even corners about
+7px on a bubble the same height as ours, and the same padding.
+
+**Decision.** A token of its own, `bubble`: `#f2f1ee` (1.13:1 from `surface`) and
+`#23211e` in the dark (1.13:1 from its `surface`), a step off the page and below `raised`,
+which `webcheck.theme.ts` holds in both palettes with `fg` readable on it. Spent in
+`Bubble.tsx` alone. Corners `rounded-md` (10px), even, with no tail: the nearest step of
+the radius scale. Not `chip` (`#f3f1ed`), whose three tokens are held to the markdown
+(Q3.691).
+
+**What it amends.** Q3.682 drew an `@name` pill in `edge` because `raised` was the bubble;
+`edge` still reads on `bubble`. Q7.72's "the one you wrote louder than the one the agent
+ran" still holds: `bubble` sits above a tool card's `ink`.
+
+**Status.** Current.
 
 ## Deployment, packaging and code layout
 
@@ -31038,6 +31548,35 @@ there; from the daemon's own launchd domain it is not.
 **How it is checked offline.** `deploycheck` puts a fake `cursor-agent` on every real
 run's PATH, since an absent cursor downloads its installer, and asserts the absent
 path only under `--check`, which fetches nothing.
+
+**Status.** Current.
+
+### Q4.130 — How long may a rule file be, and what is it for?
+
+**Rule.** A `.claude/rules/*.md` file holds at most **15,000 characters** (the per-rule
+ceiling in `scripts/docscheck.ts`, down from 34,000). It states each rule, the
+symbol that enforces it and the Q-citation; the measurement, the alternatives and the
+history stay here. A rule at the wall gets cut, not the ceiling raised.
+
+**Why.** Claude Code loads every rule whose `paths:` match a file the moment that file is
+read, and again after every `/compact`. Measured from this repository's session transcripts
+on 2026-10-03, a large task (440–660K tokens) spent 7–15% of its context on rules and about
+5% on code comments: the 2026-09-24 comment cut (d7cda6a) had held at 18–19%, but it
+touched neither the rules nor `packages/native`. One read of `packages/web/src/wire.ts`
+pulled 142K characters of rules, `src/session.ts` 117K, the average source file 35K; 45
+rules held 896K characters, eight of them at the old ceiling, which had been raised by
+small steps and worked as a target.
+
+**What changed.** Every rule rewritten to the statement: 896K → 462K characters, the largest
+14,982. Per read: `wire.ts` 67K, `session.ts` 59K, the average source file 18K. Duplicates
+between rules that load together were kept in the most specific one. `packages/native`'s
+comments went from 367K characters (62%) to 55K (19%), the code proven identical by
+stripping comments from both versions. Measurements that had lived only in
+`native-packaging.md` moved to `docs/NATIVE.md`.
+
+**The rest of the cost is not in the repository.** The same transcripts put 28–51% of a
+task in the model's own retained reasoning (about 1.6× per step after the move from Opus 5
+to Opus 5.5 on 2026-09-22) and 25–33% in reading code piecemeal in the main context.
 
 **Status.** Current.
 
@@ -34617,8 +35156,10 @@ whole time with nothing large enough to reach it.
 
 **Known limitation.** This closes the route, not the defect.
 `GET /sessions/:id/files` and `/uploads/:uploadId` stream arbitrary bytes and are
-excluded from compression by `compressible`, so a download past 1 MiB can still wedge
-— now ending as a visible failure and a retry rather than a spinner, per Q6.103.
+excluded from compression by `compressible`, so a download past 1 MiB could still wedge
+— ending as a visible failure and a retry rather than a spinner, per Q6.103. Closed
+the same way on 2026-10-03, after it did exactly that to a sent file: over the relay a
+download now comes in pieces that each fit one window (Q6.120).
 ⚠ `nodejs/node#64623` raises the default stream window 65535 → 4 MiB (merged
 2026-08-04, unreleased). It moves the threshold and not the mechanism: a later "it
 stopped happening" is not evidence this was fixed.
@@ -35454,6 +35995,247 @@ does not (Q6.4). Its todo updates are ignored, a permission it asks on its own i
 routed home, and a frame on an id nobody announced is dropped as any unknown one is.
 
 **Status.** Current. Shapes read from source; the live capture is Q7.154's.
+
+### Q6.118 — Which tools each harness hands its model, and which this daemon withdraws
+
+**Question.** Every harness ships tools written for its own terminal or its vendor's
+cloud. Under this daemon some do nothing and some do the wrong thing, and all of
+them cost context. Two were withdrawn: claude's `ListAgents` (Q2.242) and grok's
+question tool with questions off (Q6.113). Nothing listed the rest.
+
+**Measured 2026-10-02**, each list as the model is given it on this machine.
+claude's is the SDK's `system/init` message under the options the adapter builds;
+the others answered a prompt asking for their tool names through `pnpm harness`.
+
+| Harness | Tools | Withdrawn here | By |
+|---|---|---|---|
+| claude 2.1.287 | 27, with `ListAgents` already gone | `DesignSync`, `EnterWorktree`, `ExitWorktree`, `PushNotification`, `ReportFindings`: 22 left | `disallowedTools` |
+| codex 0.160.0 | 25 | `request_plugin_install`: 24 left, and about 350 tokens of context | `CODEX_CONFIG`, `features.tool_suggest` |
+| grok 1.0.40 | 33 | none: `send_feedback` survives every door tried | — |
+| opencode 1.18.34 | 11 | none wanted: its question and plan-exit tools are already off under ACP | — |
+| cursor 2026.10.01 | not measured: its keychain was locked in the measuring shell | none possible: the list is its server's (Q2.250) | — |
+| kimi 0.29.2 | not measured: every turn ended empty, as in Q6.114 | none possible under ACP | — |
+
+**claude's list is by what a tool is, never by whether this build has it.**
+`CLAUDE_WITHDRAWN_TOOLS` names twenty-nine; five were on the measured list and the
+rest sit behind flags evaluated on Anthropic's side, where one may be switched on
+tomorrow. A name the CLI lacks is ignored — the session opened and listed 22 with
+all twenty-nine sent. Four reasons:
+
+- **Another Claude Code session, or its remote control**: `ListAgents`, `SendFile`,
+  `SendUserFile`, `SendUserMessage`, `FetchInboxMessage`, `ReadNotifications`,
+  `Poll`, `PushNotification`. `SendUserFile` is the one with a replacement, Q2.252.
+- **Claude Code's own terminal**: `SendFeedback`, `ReportFindings`, `ProposeGoal`,
+  `ProposeSkills`, `ShowOnboardingRolePicker`, `ShareOnboardingGuide`,
+  `SuggestPluginInstall`, `SuggestSkills`, `ListConnectors`, `SearchMcpRegistry`,
+  `SuggestConnectors`, `EndConversation`. Each draws into a surface this app has not got.
+- **The worktree this daemon owns**: `EnterWorktree`, `ExitWorktree`. A session's
+  changes, diffs and downloads are all computed from `workspace.root`.
+- **claude.ai, the owner's call**: `Artifact`, `ArtifactComments`, `ArtifactData`,
+  `AppifactRepl`, `DesignSync`, `ClaudeDesign`, `Projects`. They work, and what
+  they make lands in an account rather than in the chat.
+
+**What stays, and why each is named in `daemoncheck`.** `SendMessage`, which is how
+claude continues a subagent (Q2.242); `Workflow` and `Monitor`, whose background
+work this daemon already tracks (Q2.228) and which ultracode needs; the question
+and plan-mode tools; and **scheduling, untouched on the owner's word** —
+`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `RemoteTrigger`, grok's
+`scheduler_*`, kimi's `Cron*`. It is not sound here: the adapter reports shell,
+workflow and monitor tasks and no pending schedule, so `parkable` releases an agent
+holding one after thirty quiet minutes. Making it work is a scheduler this daemon
+owns, which is planned separately; withdrawing it meanwhile was declined.
+
+⚠ **Canonical names only.** The CLI resolves aliases before it reads the list —
+`Task` to `Agent`, `KillShell` to `TaskStop`, `RunWorkflow` to `Workflow`, `Brief`
+to `SendUserMessage` — so listing an alias withdraws the tool it stands for.
+`daemoncheck` holds both lists apart, element by element: `SendUserMessage`
+contains `SendMessage`, which is what its substring test used to read.
+
+**codex is told through `CODEX_CONFIG`**, which codex-acp parses and spreads into
+every session's config. `codexConfigEnv` merges into a value somebody already
+exports, their keys winning, and leaves alone one that is not a JSON object:
+codex-acp parses the variable bare at startup, so a broken one is its own failure
+to show, and rewriting it would hide whose it was. The merge is over nested keys
+only: with a dotted `features.tool_suggest: false` beside a nested `true`, the tool
+was there. Nothing is written to `~/.codex`.
+
+**grok: three doors, none of which is one.** `GROK_FEEDBACK_ENABLED=false`, the
+`GROK_CONFIG` overlay's `features.feedback: false`, and `_meta.agentProfile` with
+`disallowedTools` on `session/new` each left all 33 tools listed, `send_feedback`
+among them. grok's reference says the first two switch *feedback* without saying
+whether that is the command or the tool; measured, it is not the tool. Why the third
+does nothing over ACP is not known. So nothing is sent, and no `GROK_CONFIG` is set
+— which also leaves a person's `GROK_CONFIG_PATH` overlay read, since by that
+reference the inline one wins.
+
+**Not this entry's subject, and seen on the way.** A claude session carries the
+account's claude.ai connectors as MCP tools (eight `Claude Docs` tools here), and a
+codex one its `codex_apps` tools. They are the person's own connectors rather than
+the harness's tools, and are left as they are.
+
+**The list ages.** `deploy/agents.sh` moves claude to `latest` daily (Q4.115), so a
+tool that belongs here can arrive unannounced. The measurement is two commands and
+is worth repeating at a release; nothing automates it, a census needing a login.
+
+**Status.** Current.
+
+### Q6.119 — How a backgrounded subagent looks on claude's wire, and where it ends
+
+**Measured 2026-10-03**, claude 2.1.288 under claude-agent-acp 0.73.0, on a
+throwaway daemon and against the owner's own log.
+
+**The launch.** An `Agent` call with `run_in_background: true` completes in about
+a second, its content *"Async agent launched successfully …"*, and its PostToolUse
+update carries `_meta.claudeCode.toolResponse.status: "async_launched"` — the CLI's
+own response, which `Workflow` shares. `launchedInBackground` projects it onto the
+update's `backgrounded`, the field that already means *the call is done and its work
+is not*. The subagent's steps then arrive parented to the spawn exactly as a
+foreground one's do.
+
+**Its end is nowhere a client is told.** The adapter marks every `local_agent` task
+`ignored` (Q7.113), and its native-subagent lifecycle (`subagent_spawned`,
+`subagent_state_update`) is behind an AIR capability this daemon does not declare,
+which would also move every child update onto a session id of its own.
+
+**Two things stand in for it.**
+
+- **The hand-back.** In auto mode the CLI gives an async subagent `SubagentHandback`
+  — *"The call ends your run, so make it your last step"* — gated on the
+  `tengu_lively_waffle` flag (default on). It arrives as an ordinary step under the
+  spawn, and `endsDelegation` marks it on the `tool_call`, read off
+  `_meta.claudeCode.toolName` and never a title, and only under a parent.
+- **The turn.** The adapter holds the turn that spawned a subagent open until it
+  has finished (`turnAwaitingSubagents`): on the owner's log the main agent made no
+  call of its own for 500 s, then answered within 4 s of the hand-back, in the same
+  turn.
+
+⚠ **The hold is not a guarantee.** In the throwaway run the subagent ran its
+`sleep` as a background shell of its own and finished its turn with an interim
+report; the task settled, the main turn ended 11 s in, and 23 s later the shell's
+end woke the subagent, which read the output under the spawn — outside any turn —
+and the main agent relayed it as work nobody prompted. Q3.699's order exists for
+that run.
+
+**Status.** Current.
+
+### Q6.120 — A relayed download past one stream window, and why it now comes in pieces
+
+**Reported 2026-10-03 by the owner**: a `send_file` card for a 2.6 MB PDF did nothing
+when pressed in the macOS app, and nothing again after the agent sent it twice more.
+The app reached that machine through the dev stand's relay.
+
+**What it was not.** Not the inline switch (Q3.690), which reaches `spanTarget` and
+nothing else. Not the shell's save: a copy of `host_save_file` under the shell's own
+CSP took 2.6 MB and opened its panel within two seconds, and a WKWebView harness
+carried 12 MB whole down both of Tauri's IPC channels. Not the daemon's store: every
+row and its copy were on disk.
+
+**What the stand's logs show.** Traefik records every relay channel with how long it
+lived. A channel to that machine opened at 12:32:55 UTC and lived 123 s, which is the
+client's `TRANSFER_TIMEOUT_MS`, and the app minted and dialled again eight seconds
+later: Q6.104's stall, on the route that entry names as still exposed. While the owner
+was pressing, every channel the app held to that machine also closed at once three
+times. That is `forgetRoute` disposing the whole pool, and a download in flight goes
+with it. The card drew nothing while it waited, so a press still running looked like a
+press that had done nothing.
+
+**Decision.** What Q6.104 did for transcript pages, done for downloads. Over the relay
+`MachineConnection` asks for `DOWNLOAD_PIECE_BYTES` (768 KiB) at a time with a Range
+header, each piece on a connection dialled for it and closed after it. Every piece
+starts on a fresh 1 MiB stream window and never waits on a window update, and a
+teardown costs one piece, which is replayed like any GET.
+
+- `serveFile` answers one `bytes=a-b` with a 206 and its content range, and every
+  answer carries an etag. A piece whose total or etag differs from the first is
+  refused (`409 file_changed`) rather than spliced.
+- A range starting past the end is `416 range_not_satisfiable`.
+- A 200 is the whole file whenever it comes. An older daemon ignores the header, and
+  loopback asks for the whole file: it has no relay window to fit, and a range header
+  would need a CORS allowance the daemon does not give.
+- The card shows a spinner until the save settles.
+
+**Rejected.** Changing the relay's pipe. Q6.104 could not reproduce the stall off the
+fleet in ~290 runs, and an isolated h2 stream with a 1 MiB window piped into a slow
+writer completed 2.6 MB every time on Node 24.21 and 26.3. A change there could not be
+shown to help, and the relay ships with the control plane.
+
+**Compatibility.** The app ships first, and against an older daemon it gets a 200 and
+behaves as before. Only a daemon that answers ranges closes the exposure.
+
+**Not measured.** The fix on the stand itself, which needs a capability for an account
+there; the owner's next press is that measurement.
+
+**Status.** Current.
+
+### Q6.121 — What claude's effort `default` resolves to, and the one patch that asks
+
+**Asked 2026-10-03 by the owner**: *"can we learn the model's default from auto and
+show it? Claude Code does."* Q3.67 had named the choice `Adaptive`, and Claude Code
+names it nothing of the kind.
+
+**What `default` is, measured on claude 2.1.288.** Claude Code calls it `auto`:
+*"Use the default effort level for your model"*. The CLI keeps a level per model in
+its own table, with organization settings from its server able to override it, and
+it pins nothing. Choosing a model moves the level. Its `get_settings` control
+request answers `applied.effort`, *"the effort level the session will send on its
+next request — after env overrides, session state, org caps and model-support
+downgrades"*. That is the one number worth showing. Asked through the SDK's
+`getSettings()` on a fresh query, before any turn, in 0.5 s:
+
+| Model | `applied.effort` |
+|---|---|
+| opus (Opus 5.5) | medium |
+| sonnet (Sonnet 5.5) | medium |
+| fable (Fable 5.1) | high |
+| claude-opus-4-7 | xhigh |
+| haiku | `null`, no effort |
+
+A level set outright answers that level, and clearing it answers the model's again.
+
+**Why it needed a patch.** `claude-agent-acp` 0.73.0 never calls `getSettings()`,
+and its effort option says `Default` and nothing more. 0.85.1 does not either: its
+`recommendedValue` mode drops the `default` row for `medium` on every model, which is
+not the CLI's answer for Fable or Opus 4.7. The only way through ACP is the adapter.
+
+**Decision.**
+
+- **One request, in a pnpm patch.** `patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch`
+  adds `_reemoat/effort` and nothing else. It reads `applied.effort` for a session.
+- **Asked only of claude.** The session asks it after a conversation opens, after a
+  `/clear`, after every change it makes, and in the background after a change the
+  agent makes itself. The answer lands on the effort option as `resolvedDefault`,
+  and only while `default` is selected and only when it names one of the choices.
+- **No flicker.** Each model's last answer is carried over an update until the
+  adapter answers again. A change of ours waits for the answer before it is applied,
+  so the strip never shows a level-less row first. An adapter without the patch
+  answers -32601 and is not asked again.
+- **The strip says `Auto`**, Claude Code's word, and `Auto · Medium` once the level
+  is known.
+- **Shown, never pinned.** Pinning the level would stop it following the model, which
+  is the half of `auto` that matters.
+
+**What the patch costs, every part of it measured or enforced.**
+
+- **The image.** pnpm opens every patch file before it installs, filter or not, and
+  fails with ENOENT on a missing one; the control plane's image installs the root
+  importer, which depends on the adapter. So `patches` is in `.dockerignore` and in
+  the Dockerfile's `manifests` stage.
+- **The app.** It installs its daemon with npm, which knows no patches, so
+  `build-daemon.mjs` applies them itself. Measured there: inside the checkout,
+  `git apply` exits 0 and changes nothing; `GIT_CEILING_DIRECTORIES` makes it apply.
+- **The fleet.** A bump of the pin is a re-patch: pnpm refuses an install whose
+  patch does not apply, and `pincheck` holds the key to the pinned version.
+- **The relay.** The lockfile records the patch's hash, and `RELAY_INPUTS` matches
+  the lockfile, so the next control-plane deploy recreates the relay once.
+
+**Measured end to end** on a throwaway daemon with the real CLI and the patched
+adapter, without a prompt. A fresh session read `opus · default → medium`; sonnet
+medium, fable high, claude-opus-4-7 xhigh, back to opus medium; `high` set outright
+carried no resolution, and `default` again read medium. A stop and resume on fable
+came back `high` in one `agent_config` event, and every change wrote one event that
+already carried its level.
+
+**Status.** Current. Reverses Q3.67's label.
 
 ## Open questions and deliberate non-goals
 
@@ -39375,6 +40157,11 @@ bought for it (`CEILING_PARK_FLOOR_MS`, the drain's clock) are not spent.
 
 **Status.** Deliberate non-goal
 
+⚠ **The subagent half is drawn now, and not by counting a flag.** Q3.699 reads a
+backgrounded subagent off the log: running from its launch, ended by its own
+hand-back, by a turn end after its newest step, or by a session with nothing left
+running; every one of those bounds is a signal rather than a guess about time, and
+what each still gets wrong is written there. Q6.119 is what the wire carries.
 
 ### Q7.114 — How does a harness reach a model its own vendor does not serve?
 

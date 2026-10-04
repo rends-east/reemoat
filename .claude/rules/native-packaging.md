@@ -36,479 +36,195 @@ paths:
 
 # Packaging the native app
 
-`native-shell.md` is the document for changing what the app *is*. This one is for
-what comes out of a build: which platforms get a daemon inside them, which get a
-client, how that is expressed, and what a release publishes.
-
-It is a separate file rather than a section there for a reason that is itself a
-rule: `docscheck` holds every rule to `MAX_RULE_CHARS`, and `native-shell.md` sits
-within a few hundred bytes of it. A ceiling reached is a signal to split a
-subject, never to compress somebody else's paragraph.
+What a build produces and a release publishes (Q4.123); what the app *is* is `native-shell.md`.
 
 ## Two profiles, and the difference is one JSON file
 
-**`full` carries a Node runtime and a copy of `src/`, so the app can run a daemon
-on the computer it is installed on. `client` carries neither.** macOS is the only
-full profile; Windows, Linux, Android and iOS are clients.
+**`full` carries a Node runtime and a copy of `src/`; `client` carries neither.** macOS is
+the only full profile.
 
 | | Client | Daemon host |
 |---|---|---|
 | macOS | shipping | shipping |
-| Linux | profile declared; no CI leg and no asset yet | **not in the bundle** — `deploy/install.sh` is how a Linux box gets a daemon, and it is how the whole fleet already gets one |
-| Windows | profile declared; no CI leg and no asset yet | refused, and the refusal predates packaging: there is no way to stop a bundled daemon cleanly there |
-| Android | profile declared, `gen/android` committed; no CI leg and no asset yet | impossible |
-| iOS | **refused at compile time** — `credential.rs` has no store arm, and `gen/apple` is not generated | impossible |
+| Linux | declared; no CI leg or asset | not bundled: `deploy/install.sh` |
+| Windows | declared; no CI leg or asset | refused: it cannot be stopped cleanly |
+| Android | declared, `gen/android` committed; no CI leg or asset | impossible |
+| iOS | **refused at compile time** (no store arm, no `gen/apple`) | impossible |
 
-**A client build is expressed as `tauri.<platform>.conf.json` and nothing else.**
-Tauri merges those over the base — `linux`, `windows`, `macos`, `android`, `ios` —
-through `json_patch::merge`, which is **RFC 7386**: an array replaces, and a
-`null` deletes the key. So a client profile is `externalBin: null` and
-`resources: null`, and the payload is gone. The runtime was never there on those
-platforms: it is `bundle.macOS.files`, which only the macOS bundler reads, and the
-base names no `externalBin` at all since the runtime became a helper (below).
-`externalBin: null` stays in each overlay anyway — `ci-release.sh`'s `app_profile`
-reads it as the client marker, and it is the guard if the base ever names one again.
+**A client build is `tauri.<platform>.conf.json` and nothing else.** Tauri merges overlays
+over the base through `json_patch::merge` (RFC 7386: an array replaces, `null` deletes), so a
+client is `externalBin: null` and `resources: null`. The runtime is `bundle.macOS.files`,
+read only by the macOS bundler; `externalBin: null` stays in each overlay because
+`ci-release.sh`'s `app_profile` reads it as the client marker. `tauri-build` reads overlays
+at **compile** time (measured 2026-09-19), which is why a profile is a config file and not a
+cargo feature.
 
-⚠ **Measured, 2026-09-19, because the alternative was a cargo feature.** With
-`target/daemon` and `binaries/` both moved aside, `cargo check` fails inside
-`build.rs` with no overlay present and **succeeds** with a `tauri.macos.conf.json`
-carrying those two deletions. `tauri-build` therefore reads the overlays at
-**compile time**, not only at bundle time — which is what makes a client build a
-configuration file with no Rust in it. A feature gate would have been the answer
-if it did not.
-
-**On the desktop a client build needs no code change at all**, and that is a
-property rather than luck: `Payload::locate` answers `None` when nothing is
-staged, `host_daemon_state` answers `"unsupported"`, and `store.ts` answers it
-with the same early return it gives a missing bridge (`packages/web/src/store.ts`,
-`state === null || state.status === "unsupported"`). The degraded path was written for a developer who forgot
-`pnpm native:stage` and it is the same path.
-
-⚠ **And `host_local_daemon` is not part of it.** It reads the calling account's
-`daemon.json` and then `~/.reemoat/daemon.json` — what `src/announce.ts` wrote —
-and has never depended on the payload. The second read is this promise: a client
-build starts no daemon for a second server, so `~/.reemoat` is the one it finds
-(Q7.148) — for a server's first account; another account on it is answered its own
-root alone, that daemon not being its machine (Q7.149). So a
-client build on Linux still reaches a daemon installed by `install.sh`, over
-loopback, exactly as before. What a client build gives up is *starting* one, not
-*finding* one.
+A desktop client needs no code change: `Payload::locate` answers `None`, `host_daemon_state`
+answers `"unsupported"`, and `store.ts` takes its missing-bridge return. `host_local_daemon` is not part of it: it reads the calling
+account's `daemon.json`, then `~/.reemoat/daemon.json` (what `src/announce.ts` wrote; a
+server's first account only), so a client still reaches an `install.sh` daemon over loopback
+(Q7.148, Q7.149). A client gives up *starting* a daemon, not *finding* one.
 
 ## What an overlay may say
 
-**Only `bundle.targets`, `bundle.externalBin`, `bundle.resources` and `$schema`.**
-`nativecheck` asserts it as an exact allowlist over the flattened key set, and the
-reason is the whole shape of that driver: it reads **one** configuration file and
-Tauri reads five. Without this rule, the first overlay silently turns every
-assertion there — the CSP, the empty permission set, `signingIdentity: null`,
-`dragDropEnabled: false`, `createUpdaterArtifacts`, the licence path — into a
-claim about the base file alone. Re-running all of them against five merged
-configs is the other answer; this one is stronger, because there is nothing an
-overlay *can* say that any of those is about.
-
-**There is no `tauri.macos.conf.json`, and `nativecheck` asserts its absence.**
-The base file *is* the macOS shape. A macOS overlay would leave every assertion
-above describing a configuration no build ever uses, while staying green.
-
-**The two desktop overlays name a bundler and the two mobile ones do not.**
-`tauri android build` and `tauri ios build` take the artifact kind on the command
-line and read `bundle.targets` for nothing, so a value there would be a setting
-with no reader.
+**Only `bundle.targets`, `bundle.externalBin`, `bundle.resources` and `$schema`**, an exact
+allowlist over the flattened keys: `nativecheck` reads one config where Tauri reads five, and
+this keeps its other assertions (CSP, permissions, `signingIdentity: null`,
+`dragDropEnabled: false`, `createUpdaterArtifacts`, the licence) true of every build. **No
+`tauri.macos.conf.json`**, asserted: the base is the macOS shape. Only desktop overlays name a
+bundler; the mobile builds read no `bundle.targets`.
 
 ## The staging script
 
-**`build-daemon.mjs` refuses a Windows triple by name, and that refusal is a
-decision rather than an unfinished job.** Nothing in a Windows bundle would read a
-payload staged for it. The three differences a Windows payload would have to
-answer — a `zip`, `node.exe` at the archive root, an `.exe` suffix — are still
-written into the refusal, so they survive the day somebody changes the decision.
-`nativecheck` asserts the refusal names a file that exists, because a refusal
-pointing at nothing reads as authoritative and is not.
-
-**Every desktop triple stays in `TARGETS` even where nothing ships from it.**
-`nativecheck` counts the table and asserts every row names an esbuild binary — an
-assertion that goes vacuous the moment the table describes one platform, which is
-how a cross-platform project quietly becomes a single-platform one.
-
-⚠ **The shim in `node_modules/.bin/node` ends in a refusal, never a PATH lookup.**
-It used to end `exec node "$@"`, with a comment calling PATH *"the honest last
-word"*. It is not one: `daemon.rs`'s `daemon_path` puts that very directory
-**first** on the daemon's `PATH` — deliberately, so `deploy/agents.sh` resolves
-the node beside npm — so the fallback found the shim and re-execed it, for ever,
-on any layout where both relative probes miss. A payload that cannot find its
-runtime is a staging bug; it says so and exits 127. `nativecheck` asserts the
-absence of the old line as well as the presence of the new one, and compares
-against the file's **code** rather than its text, because the docblock explaining
-this quotes the line it replaced.
+- **`build-daemon.mjs` refuses a Windows triple by name**, a decision: no Windows bundle reads
+  a payload. The refusal keeps the three differences (a `zip`, `node.exe` at the archive root,
+  an `.exe` suffix); `nativecheck` asserts the file it names exists.
+- `applyPatches` applies pnpm's `patchedDependencies` to npm's tree by hand, refuses a
+  version other than the patched one, and runs `git apply` under `GIT_CEILING_DIRECTORIES` (in the checkout git
+  skips every path, exit 0); else the daemon loses `_reemoat/effort` (Q6.121).
+- Every desktop triple stays in `TARGETS`; `nativecheck` counts it and asserts each row names
+  an esbuild binary.
+- **The shim in `node_modules/.bin/node` ends in a refusal (exit 127), never a PATH lookup**:
+  `daemon.rs`'s `daemon_path` puts that directory first on PATH (so `deploy/agents.sh` finds
+  the node beside npm), and a PATH fallback re-execs the shim for ever. `nativecheck` asserts
+  the old line absent and the new present, against code rather than text.
 
 ## The runtime is a helper app, and the Dock is why
 
-**On macOS the runtime is `Contents/Helpers/Reemoat Runtime.app`, a bundle of its
-own whose `Info.plist` carries `LSUIElement`** — `src-tauri/runtime/Info.plist`,
-identifier `com.reemoat.app.runtime`. It used to be `Contents/MacOS/node`, an
-`externalBin`. libuv registers a process with LaunchServices when `process.title`
-is set, npm sets one for every MCP server an agent starts through `npx`, and a
-binary in `Contents/MacOS` belongs to Reemoat.app — so each became a Foreground
-application of `com.reemoat.app` and drew a blank "exec" tile in the Dock.
-Measured with `lsappinfo` on 0.10.1: `Foreground` from `Contents/MacOS`,
-`UIElement` from the helper, same bytes; `docs/NATIVE.md` has the table and the
-one-line check.
+On macOS the runtime is `Contents/Helpers/Reemoat Runtime.app`, its `Info.plist`
+(`src-tauri/runtime/Info.plist`, `com.reemoat.app.runtime`) carrying `LSUIElement`: a node in
+`Contents/MacOS` setting `process.title` (npm does, per `npx` MCP server) drew a blank Dock
+tile (`docs/NATIVE.md`).
 
-**One copy, one relative path.** `pnpm native:stage` puts the helper at
-`src-tauri/target/Helpers`, because `target/` stands where `Contents/` stands: the
-payload is `daemon` directly under `Contents/Resources` and under
-`target/<profile>`, so the shim's `../../../../Helpers/…` from `.bin` and
-`daemon.rs`'s `<exe>/../../Helpers/…` land on the helper in a bundle and in
-`tauri dev` alike. `bundle.macOS.files` copies it into the bundle and
-`externalBin` is gone, so nothing lands in `Contents/MacOS` but the app.
-
-⚠ **`build.rs` makes the check the file name used to make.** `binaries/node-<triple>`
-failed a build staged for the other architecture on a missing file; a fixed path
-copies whatever is there, so `build.rs` reads the staged binary's Mach-O CPU type
-and refuses a mismatch, or a missing helper, on any macOS target. It also copies
-the helper beside a profile directory that is not `src-tauri/target` (`--target`,
-`CARGO_TARGET_DIR`), which is what `tauri-build` did for an `externalBin`.
-
-⚠ **Signed by staging, inside out, because the bundler will not.** tauri-bundler
-2.11 signs the app, its frameworks and its `externalBin` entries — all with the
-*app's* entitlements — and copies `bundle.macOS.files` unsigned before sealing.
-An unsigned helper then fails `codesign --verify --deep --strict` on the whole
-app (*"In subcomponent: …/Helpers/Reemoat Runtime.app"*), measured. So
-`build-daemon.mjs` signs it with `entitlements-node.plist` under the hardened
-runtime — `APPLE_SIGNING_IDENTITY` with a timestamp, else ad-hoc — and refuses
-`APPLE_CERTIFICATE` alone, which the bundler imports only during `tauri build`.
-That is the nested pass `entitlements-node.plist` was written for, and it now runs
-on every build.
-
-⚠ **Which found a file that could not have signed anything.** Its comment quoted
-the measuring `codesign` command, flags and all; XML forbids a double hyphen in a
-comment, codesign refused the file (*"AMFIUnserializeXML: syntax error"*) and
-`plutil -lint` passed it. `nativecheck` sweeps every plist here for the rule.
-
-**Rejected:** `LSUIElement` on the app (Reemoat's own Dock icon and menu bar go
-too); the runtime in `Contents/Resources` (not nested code, not reliably signed);
-the payload's `.bin` off the front of the daemon's `PATH` (`deploy/agents.sh` finds
-the node beside npm); and changing somebody else's MCP server. `nativecheck` pins
-the layout, the four copies of the helper's name, the four plist keys that decide
-how LaunchServices files the process, the signing step and `build.rs`'s CPU table.
+- `pnpm native:stage` puts it at `src-tauri/target/Helpers`, so the shim's
+  `../../../../Helpers/…` and `daemon.rs`'s `<exe>/../../Helpers/…` resolve in a bundle and in
+  `tauri dev`. `bundle.macOS.files` copies it; only the app is in `Contents/MacOS`.
+- `build.rs` refuses a missing helper or the wrong Mach-O CPU type on any macOS target, and
+  copies it beside a profile directory outside `src-tauri/target` (`--target`, `CARGO_TARGET_DIR`).
+- **Staging signs it**, because tauri-bundler 2.11 copies `bundle.macOS.files` unsigned and
+  `codesign --verify --deep --strict` then fails the app. `build-daemon.mjs` signs with
+  `entitlements-node.plist` under the hardened runtime (`APPLE_SIGNING_IDENTITY` with a
+  timestamp, else ad-hoc) and refuses `APPLE_CERTIFICATE` alone.
+- No double hyphen in a plist comment: codesign refuses it (*"AMFIUnserializeXML"*) while
+  `plutil -lint` passes. `nativecheck` sweeps every plist, and pins the layout, the four copies
+  of the helper's name, the four LaunchServices keys, the signing step and the CPU table.
 
 ## The two mobile platforms are in different states
 
-⚠ **`keyring`'s `v1` feature has no credential store on either iOS or Android: it
-refuses at *run time* having compiled perfectly** (`keyring-4.2.0/src/v1.rs:109-128`).
-Everything else a mobile build is missing — the generated project, the NDK, a
-signing key — fails loudly at build or install time. This one passes every gate
-and arrives at a person, who then retypes their password on every launch while the
-app tells them their store is not durable.
+**`keyring`'s `v1` feature has no store on iOS or Android and refuses at run time, having
+compiled** (`keyring-4.2.0/src/v1.rs:109-128`): the one gap no build gate catches.
 
-**Android has a store.** `credential.rs` reaches past the `v1` façade to
-`keyring-core` and names `android-native-keyring-store` — SharedPreferences with
-the key held in the Android Keystore, reaching the application context through
-`ndk-context`, which **nothing in this dependency tree initialises** — not Tauri,
-not tao, not wry. `credential.rs` exports
-`Java_com_reemoat_app_MainActivity_initNdkContext` and `gen/android`'s
-`MainActivity.kt` calls it in `onCreate`, before Tauri's `setup`; without it the
-first Android build panicked on launch. `Store::new()` is a JNI round trip and
-the alternative is paying one on every credential read and **twice per Noise
-handshake**, so it is still behind a `OnceLock` — but the cell holds the
-*success* only, with a `Mutex` behind it for the retry. ⚠ **It held the whole
-`Result` once, and that made one bad moment permanent**: an `Err` cached before
-the context was adopted answered every later `read`, `write` and `probe` until
-the app was force-stopped, while the cost argument was only ever an argument for
-caching a success.
-
-⚠ **Two things exported from that one `.so` may set `ndk-context`'s slot, and it
-may be set once.** `initialize_android_context` ends in
-`assert!(previous.is_none())`, and measured on this checkout the `.dynsym` of
-`target/aarch64-linux-android/release/libreemoat_native_lib.so` carries
-`Java_io_crates_keyring_Keyring_00024Companion_initializeNdkContext` beside our
-own — the store crate's own initialiser, which its documentation tells authors to
-declare from Kotlin. Nothing calls it today, the built APK's `classes.dex`
-holding no such class. A panic crossing an `extern "system"` boundary aborts, so
-the JNI body is a `catch_unwind` and a null `context` is refused before it is
-cached: `jni` 0.21's `new_global_ref` answers `Ok` for a null `jobject`, and the
-first call on that null is a JVM-side abort no `catch_unwind` can see.
-
-**"Before Tauri's `setup`" is the invariant; "the earliest moment in the
-process" is an assumption.** Android instantiates this package's two providers —
-the manifest's `FileProvider` and `lifecycle-process`'s `InitializationProvider`
-— before any activity, and neither loads the `.so`: the only two
-`System.loadLibrary` calls are `MainActivity`'s companion and the generated
-`Rust` object's, and that same `.dynsym` carries no `JNI_OnLoad`. `nativecheck`
-compares the two indices in `MainActivity.kt`. A `Service`, a receiver or a
-provider of this app's own would end it, and the repair is to **move** the call
-rather than add a second one.
-
-**iOS is refused at compile time**, and that is a tripwire on the way to its arm
-rather than a decision against one. Nothing on this checkout can compile iOS —
-that needs full Xcode — so the refusal is the only place the gap can be caught.
-Whoever installs the toolchain writes the `apple-native-keyring-store` arm and
-deletes the refusal in the same change. `nativecheck` asserts the two as a pair,
-so narrowing one without writing the other is caught either way.
-
-`probe()` is unchanged on every platform and is what says whether any of it
-actually works: it writes a canary, reads it back, compares and erases.
+- **Android**: `credential.rs` names `keyring-core` with `android-native-keyring-store`
+  (SharedPreferences, key in the Keystore), which needs `ndk-context`, initialised by nothing
+  in the tree but `credential.rs`'s `Java_com_reemoat_app_MainActivity_initNdkContext`, called
+  in `MainActivity.kt`'s `onCreate`. `Store::new()` is a JNI round trip, so a `OnceLock`
+  caches the **success only**, a `Mutex` behind it for the retry; a cached `Err` is permanent.
+- The slot may be set once (`initialize_android_context` asserts it), and the `.so` also
+  exports the store crate's `Java_io_crates_keyring_Keyring_00024Companion_initializeNdkContext`
+  (uncalled). The JNI body is a `catch_unwind`, and a null `context` is refused before caching
+  (`jni` 0.21's `new_global_ref` answers `Ok` for null).
+- **"Before Tauri's `setup`" is the invariant.** Only `MainActivity`'s companion and the
+  generated `Rust` object call `System.loadLibrary`, and there is no `JNI_OnLoad`;
+  `nativecheck` compares the two indices in `MainActivity.kt`. A `Service`, receiver or
+  provider of our own breaks that: **move** the call, never add a second.
+- **iOS is refused at compile time**, a tripwire: the `apple-native-keyring-store` arm and the
+  refusal's deletion land in one change, asserted as a pair. `probe()` says whether it works.
 
 ## Android's TLS is not what the plan said it was
 
-⚠ **There is no vendored OpenSSL, and the absence is asserted.** The plan was
-`openssl` with `vendored`, reasoning that `reqwest`'s `default-tls` is native-tls
-and native-tls is OpenSSL away from Apple and Windows. Measured instead:
-`cargo tree --target aarch64-linux-android` carries **no `openssl-sys` at all**.
-`reqwest` 0.13 resolves to `rustls` with `rustls-platform-verifier`, which calls
-Android's own `X509TrustManager` over JNI.
+**No vendored OpenSSL, asserted.** `reqwest` 0.13 resolves to `rustls` with
+`rustls-platform-verifier` (Android's `X509TrustManager` over JNI), so `/v1` honours
+`network_security_config`, user CAs included (Q7.144). It costs:
 
-That is better than the plan rather than merely different: the `/v1` leg then
-honours the same `network_security_config` the webview legs do — **user-installed
-CAs included** — instead of being blind to them. A self-hosted control plane
-behind a private CA is the ordinary deployment for this software, and that is the
-property `reqwest`'s feature list was chosen for in the first place.
-
-⚠ **What it costs instead is a Gradle dependency.** `rustls-platform-verifier`'s
-Kotlin half — `org.rustls.platformverifier.CertificateVerifier` — has to be in the
-APK, or the verifier finds no class to call and every TLS connection fails at run
-time. It belongs in `gen/android`'s `build.gradle.kts`, and it is the kind of
-thing that compiles, links and ships before anybody notices.
-
-⚠ **And a call, which is the half nothing in the tree makes for you.** The
-crate's own `src/android.rs` opens *"On Android, initialization must be done
-before any verification is attempted"*, and its `global()` is
-`.expect("Expect rustls-platform-verifier to be initialized")`. `reqwest` builds
-the `Verifier` and never initialises it — the crate's documented contract, not a
-reqwest bug — so with no call the build compiles, links, installs, launches and
-draws, and panics on the **first** `/v1` request. `credential.rs`'s JNI export is
-where `init_with_env` goes, beside the `ndk-context` one, because
-`MainActivity.onCreate` is where the JVM hands over a context and is still before
-Tauri's `setup`; the only `reqwest` caller is `host_cp`, invoked by a webview
-that does not exist yet. The two handles are **different things** — the verifier
-reads nothing `ndk-context` holds — so *"the context is already initialised"* is
-the reasonable and wrong answer to why TLS still fails. `nativecheck` asserts
-both calls out of that one function body, and asserts the lock carries exactly
-one copy of the crate: two would mean initialising a static the verifier doing
-the work never reads.
-
-⚠ **And a second `jni`, renamed rather than merged.** The verifier declares
-`jni = "0.22"`, where the type `init_with_env` takes is `Env`; Tauri, tao, wry
-and `android-native-keyring-store` are all on 0.21, where the same thing is
-`JNIEnv` in a different crate. Both are in the build whatever the manifest pins,
-so `jni22 = { package = "jni", … }` sits beside `jni` instead of replacing it —
-and `nativecheck` reads the version it should name out of `Cargo.lock`'s own
-`rustls-platform-verifier` block rather than restating a number.
+- The Kotlin half, `org.rustls.platformverifier.CertificateVerifier`, in the APK through
+  `gen/android`'s `build.gradle.kts`, or TLS fails at run time.
+- **A call**: `reqwest` never initialises the verifier, which panics on the first `/v1`
+  request. `init_with_env` sits in `credential.rs`'s JNI export beside the `ndk-context` one
+  (a different handle; `host_cp` is the only `reqwest` caller). `nativecheck` asserts both calls there and one copy of the crate.
+- A second `jni`: the verifier is on `jni = "0.22"` (`Env`), Tauri, tao, wry and
+  `android-native-keyring-store` on 0.21 (`JNIEnv`). `jni22 = { package = "jni", … }` sits
+  beside `jni`; `nativecheck` reads its version off `Cargo.lock`'s `rustls-platform-verifier`
+  block.
 
 ## `tauri android init` does not use this project's icons
 
-⚠ **It writes Tauri's own defaults into
-`gen/android/app/src/main/res/mipmap-*` and never looks at
-`src-tauri/icons/android/`.** Three builds shipped the Tauri logo before anybody
-looked at the bytes rather than at the source tree — `#ffc131` and `#24c8db`,
-which is a colourful mark this repository does not contain a single pixel of.
-
-The symptom pointed somewhere else twice. With no `mipmap-anydpi-v26/ic_launcher.xml`
-— which `init` also declines to copy — Android wraps the 73%-transparent legacy
-PNG on a **white** plate, so it read as "our icon on a white circle" rather than
-as "somebody else's icon". Restoring the adaptive icon and correcting its
-background were both real repairs and neither touched the cause.
-
-**What a correct adaptive foreground is, since `tauri icon` does not produce
-one either.** Its `ic_launcher_foreground.png` is the whole badge, opaque edge to
-edge — so it hides the background layer entirely and the launcher masks a square.
-A foreground is the **mark alone on transparency**. The background layer carries
-`#1c1a16`, the badge colour `packages/web/public/favicon.svg` already knocks the
-mark out of, and `<monochrome>` reuses the foreground for Android 13's themed icons.
-
-⚠ **Inside the safe zone is not the right size.** The mark sat at 58% of the 108dp
-frame, its corners on the 66dp safe circle — **87% of the 72dp a launcher shows**,
-against 70.6% of the Dock's tile, so it all but touched its circle (Q4.128).
-`icons.mjs` now treats the 72dp viewport as the badge, which makes the share the
-Dock's by construction: 51dp tall, reaching 26dp of the 33dp safe radius.
-
-Both trees are written by it, byte for byte: `gen/android` because that is what
-builds — `tauri android build` copies nothing into `res/`, measured by the 0.11.0
-APK carrying the committed bytes — and `src-tauri/icons/android` so a diff never
-finds them disagreeing. **A future `tauri android init` overwrites the first**;
-`pnpm --dir packages/native icon` puts it back.
+It writes Tauri's own into `gen/android/app/src/main/res/mipmap-*`, ignoring
+`src-tauri/icons/android/`, and drops `mipmap-anydpi-v26/ic_launcher.xml`. An adaptive foreground is **the mark alone on transparency**, the 72dp
+viewport treated as the badge, so its share is the Dock's (51dp tall, ~26dp of the 33dp safe
+radius; inside the safe zone is a ceiling, not a size). Background `#1c1a16`, the colour
+`packages/web/public/favicon.svg` knocks the mark out of; `<monochrome>` reuses the
+foreground. Both trees are written byte for byte: `gen/android` builds (`tauri android build`
+copies nothing into `res/`), `src-tauri/icons/android` is diffed against. **A `tauri android
+init` overwrites the first**; `pnpm --dir packages/native icon` restores it. Q4.128.
 
 ## The macOS inset, and which surfaces carry it
 
-⚠ **The badge was 100% of its canvas on every macOS raster in this tree**, opaque
-corner to corner, and that is why the tile read about a quarter larger in linear
-terms than everything beside it in the Dock. Apple's grid is an **824×824
-squircle in a 1024×1024 canvas** — a 9.77% transparent margin per side — and the
-difference between those two numbers was the whole of the defect.
+Apple's grid is an **824×824 squircle in a 1024×1024 canvas**. Re-measuring a system icon,
+threshold past its drop shadow (854 otherwise); this icon has none, deliberately. Q4.124.
 
-⚠ **Verified against Apple's own icons, and the naive reading disagrees.** Pages,
-Numbers, Keynote and GarageBand all measure **854** of 1024 at an alpha threshold of
-8, which would say this icon is 30px too small. They carry a **soft drop shadow**:
-across Pages' middle row alpha runs `75:1 80:4 85:9 90:16 95:29` and then jumps to
-`100:201`. Past the ramp all four measure **824**, the same as this icon. So anybody
-re-measuring a system icon to check this number must threshold past the shadow —
-and this icon deliberately has none, a cosmetic difference left alone because the
-defect was size and a shadow would move the bounding box the assertions read.
+| Surface | Geometry |
+|---|---|
+| `icons/icon.icns`, `icon.png`, the sized PNGs, `icon.ico` | **inset** to 824/1024 |
+| `icons/android/`, `gen/android/` foreground | the mark alone, the 72dp viewport as the badge |
+| `icons/android/`, `gen/android/` legacy rasters | the Dock's tile, `_round` a circle (unmasked on API 24–25) |
+| `icons/ios/*`, `packages/web/public/apple-touch-icon.png` | full bleed: iOS masks its own |
+| `packages/web/public/favicon.svg` | full bleed, and the **source** |
+| `Square*Logo.png`, `StoreLogo.png` | unchanged and **unmeasured**, a stated gap |
 
-**The inset is macOS's, not the artwork's**, and the per-platform table is the
-section rather than a footnote to it:
+**`tauri icon` is retired; `packages/native/scripts/icons.mjs` replaced it**, writing the
+macOS, Windows and Android rasters and **no XML** (the launcher XMLs are hand-authored), which
+`nativecheck` asserts by reading the script. Platform numbers: `MARGIN` `100 / 1024`,
+`RADIUS` `185.4 / 824`, `ADAPTIVE_MARGIN` `(108 - 72) / 2 / 108`; the mark's six numbers are
+parsed from `favicon.svg`, so the icon is a transform of it. `rx` does not scale (25% against
+22.5%), and the corner is a circular arc, not a continuous-curvature squircle.
 
-| Surface | Geometry | Why |
-|---|---|---|
-| `icons/icon.icns`, `icon.png`, the sized PNGs, `icon.ico` | **inset** to 824/1024 | macOS masks and expects the margin |
-| `icons/android/`, `gen/android/` foreground | the mark alone, the 72dp viewport as the badge | the launcher's mask is the tile; the Dock's share of it, above |
-| `icons/android/`, `gen/android/` legacy rasters | the Dock's tile; `_round` as a circle | API 24–25 draws them unmasked, as the Dock does |
-| `icons/ios/*`, `packages/web/public/apple-touch-icon.png` | full bleed | iOS masks its own; this inset would double. That PNG is colour type 2 and has no alpha to inset *with* |
-| `packages/web/public/favicon.svg` | full bleed | a tab strip does not mask, so a margin there is a smaller mark for nothing. It stays the **source** |
-| `Square*Logo.png`, `StoreLogo.png` | unchanged, and **unmeasured** | a Windows tile sits on a coloured plate and wants a third geometry. No CI leg, no asset, no measurement — a stated gap rather than a guess |
-
-**`tauri icon` is retired rather than re-run, and `packages/native/scripts/icons.mjs`
-is what replaced it.** The reason is the section above: that command overwrites
-`ic_launcher_foreground.png` with the whole badge and rewrites both launcher XMLs
-back to `@mipmap/…` and `#fff`, so every run has to be followed by a hand-restore
-of three files — which is the same shape as the `git checkout -- gen/android` that
-already gets forgotten. The generator writes the macOS, Windows and Android
-rasters and **no XML** — the launcher XMLs stay hand-authored — which `nativecheck`
-asserts from the other side by reading the script.
-
-It also replaced a script that could not run: `package.json` said `tauri icon
-icon.png` and `packages/native/icon.png` **has never existed**. Nothing noticed,
-because nothing looked at icons at all.
-
-**Three numbers in that file are the platforms' and the rest is read off
-`favicon.svg`.** `MARGIN` is `100 / 1024`, `RADIUS` is `185.4 / 824` and
-`ADAPTIVE_MARGIN` is Android's `(108 - 72) / 2 / 108`; the mark's six numbers are
-parsed out of the SVG rather than retyped, so the app icon is a stated *transform*
-of the favicon rather than a fourth copy of the drawing. `rx` is the one thing
-that does not scale — the favicon's corner is 25% of its side and Apple's is 22.5%
-of the squircle. The corner is still a **circular arc** rather than a
-continuous-curvature squircle: the defect being fixed was size, and changing the
-curvature in the same commit would make the before and after unreadable against
-each other.
-
-⚠ **Nothing in this repository asserted anything about an icon before this**, in
-any of the twelve drivers — which is how both of the above shipped. `nativecheck`
-now carries a PNG decoder (all five filter types, so it still bites on a raster
-somebody replaces by hand) and pins: every path in `bundle.icon` exists; the
-`.icns` member list is the eight PNG types a macOS 13 floor reads, with no legacy
-RGB+mask members; `ic10` is 824×824 at (100,100) and is the same bytes as
-`icon.png`; every generated raster is inset to the same grid; the mark is the
-favicon's `scale` of the visible shape in the Dock, in the adaptive foreground's
-72dp and in both legacy rasters, inside the safe circle, and the two Android trees
-are the same bytes; the mark agrees between `favicon.svg` and `Mark.tsx`; the favicon and
-`apple-touch-icon.png` are still full bleed; and **every file a script in
-`packages/native/package.json` names exists**, which is the line that would have
-caught `tauri icon icon.png` years ago.
-
-⚠ It also **writes the assertion two committed comments already claimed.**
-`mipmap-anydpi-v26/ic_launcher.xml` and `values/ic_launcher_background.xml` each
-say in their banner that `nativecheck` pins the `@color` form and the colour;
-a grep for `ic_launcher` in that driver returned nothing. It is comment-stripped,
-because both files quote the strings being looked for.
+`nativecheck` decodes PNG and pins: every `bundle.icon` path; the `.icns` members (the eight
+PNG types a macOS 13 floor reads); `ic10` 824×824 at (100,100), equal to `icon.png`; each
+raster's inset and the mark's favicon `scale`; identical Android trees; `favicon.svg` against
+`Mark.tsx`; the full-bleed rows; the `@color` in `mipmap-anydpi-v26/ic_launcher.xml` and
+`values/ic_launcher_background.xml`, comment-stripped; and **every file a
+`packages/native/package.json` script names exists**.
 
 ## The release APK carries v1 beside v2, and the v1 half is not for Android
 
-**`enableV1Signing = true` and `enableV2Signing = true` sit in
-`app/build.gradle.kts`'s release signing config, and AGP makes neither decision
-by itself.** Left unset, it signs with the JAR scheme only when `minSdk` is below
-24 — so 0.10.1, at 24, shipped an APK with no JAR signature at all: no
-`MANIFEST.MF`, `.SF` or `.RSA` in `META-INF`, and a signing block holding v2,
-AGP's dependency metadata and verity padding. Nothing else about it was
-off-spec: `targetSdk` 36, native libraries stored uncompressed and 16 KB-aligned
-under `extractNativeLibs="false"`, and no v3 block, which AGP leaves off unless
-asked.
+**`enableV1Signing = true` and `enableV2Signing = true`** in `app/build.gradle.kts`'s release
+signing config: AGP adds v1 itself only below `minSdk` 24, and a v2-only 0.10.1 was refused by
+OxygenOS's tapped installer (*"package appears to be invalid"*) while `adb install` took it.
+That v1 fixes it is **a weak hypothesis** (AOSP's `install_failed_invalid_apk` words); the test
+is one APK signed with and without v1, tapped on that phone, under `adb logcat`. **v3 stays
+off** (Android 9+ would verify it instead of v2, confounding the test); v4 is a separate `.idsig`.
 
-⚠ **Android accepts that APK, and one installer did not.** It installed on a
-Pixel on Android 16 and over `adb install` on a OnePlus 13; tapped on that same
-OnePlus, the phone's own installer — OxygenOS, Android 16 — refused it as
-*"package appears to be invalid"*, with no earlier `com.reemoat.app` present to
-conflict with. `adb install` hands the file to the package manager directly; a
-tapped APK goes through the OEM's installer app, which parses it first. **That
-this parse wants a JAR signature is a hypothesis and not a measurement, and a
-weak one**: the words are AOSP's `install_failed_invalid_apk`, which the stock
-installer shows when the *platform's* install session refuses the package, and
-the platform never reads a JAR signature beside a v2 one. The next release
-installing would not settle it — the download and the build change with it.
-What does is the published APK signed twice with one key, with and without v1,
-tapped on that phone: the v2-only copy has to reproduce the refusal. If the v1
-copy is refused too, the pair has cost nothing, and `adb logcat` across the
-refused install is what names the real reason.
-
-**v3 is left off on purpose.** Android 9 and later verify v3 in place of v2
-wherever both are present, so enabling it here would change what every current
-phone checks, the Pixel that already worked included, and an install that then
-succeeded would not say which half fixed it. v4 is a separate `.idsig` file for
-incremental `adb` installs and is not in the APK.
-
-⚠ **`apksigner verify --verbose` prints `v1 … false` for an APK with a valid v1
-signature, so the obvious gate refuses every correct release.** apksig consults
-the JAR signature only below API 24 or when no v2-or-newer block exists — the
-rule Android 7 applies, written out in `ApkVerifier` — and it checks from the
-manifest's `minSdk`, which is 24. So `ci-release.sh` asks again at
-`--min-sdk-version 23`, where a missing JAR signature is an error rather than
-something skipped; 23 rather than lower, because a lower floor also holds the
-signature to algorithms older platforms lack. The plain `verify` before it is
-unchanged and still answers *signed, as this app's devices check it*.
-`deploycheck`'s stub answers `false` for v1 unless it is asked below 24, which
-is what makes dropping the flag a red there rather than a pass on a stub that
-said what the script wanted. `nativecheck` pins the pair against the Gradle
-script's code.
+`apksigner verify --verbose` prints `v1 … false` for a valid v1 at `minSdk` 24, so
+`ci-release.sh` verifies again at `--min-sdk-version 23` after the plain `verify`.
+`deploycheck`'s stub answers `false` for v1 unless asked below 24; `nativecheck` pins the pair.
 
 ## What a clone cannot build, and the one file that is this machine's
 
-**`gen/android` is committed and a clone still cannot build it.** Exactly one
-file is why. `gen/android/tauri.settings.gradle` names the Tauri crates' Android
-projects by **absolute path** — four of them, each a
-`new File("<CARGO_HOME>/registry/src/…/tauri-2.11.5/mobile/android")` — so it is
-one computer's cargo home and one lock file's versions written into a build
-script. `gen/android/.gitignore` ignores it, and has to: committed, it points
-every other machine's Gradle at a directory only the committer has.
+**`gen/android/tauri.settings.gradle`** names the Tauri crates by absolute cargo-home path, so
+`gen/android/.gitignore` ignores it and a clone fails at `settings.gradle`'s `apply from`.
+`app/tauri.build.gradle.kts`, `app/tauri.properties`, `app/proguard-tauri.pro` stay ignored;
+`tauri.properties` would be a seventh, unchecked version site.
 
-`settings.gradle`'s third line is `apply from: 'tauri.settings.gradle'`, and
-Gradle reads `settings.gradle` during **settings evaluation** — before any
-project is configured. So a clone's first failure is there, on a missing script,
-and nothing under `app/` is ever reached. The three portable files behind it —
-`app/tauri.build.gradle.kts`, `app/tauri.properties`, `app/proguard-tauri.pro` —
-are ignored too, and committing them would buy nothing, because the build never
-gets that far. `tauri.properties` would cost something: it carries a
-`versionName` and a `versionCode`, which is a seventh version site nothing
-compares, and Tauri's own schema says to un-ignore it only for
-`autoIncrementVersionCode`, which this project does not use.
-
-⚠ **So `tauri android init` is a step every new machine takes, and it is the
-step that reverts every hand-edit in this tree.** Measured against the templates
-embedded in `@tauri-apps/cli`, read out of the binary on 2026-09-19:
+**So every new machine runs `tauri android init`, which reverts every hand-edit here:**
 
 | File | What a re-run takes out |
 |---|---|
-| `app/src/main/java/com/reemoat/app/MainActivity.kt` | the `Context` import, the `System.loadLibrary` companion, the `external fun initNdkContext`, and the call to it **before** `super.onCreate` |
-| `app/build.gradle.kts` | `signingConfigs` and the conditional `signingConfig`, the `enableV1Signing`/`enableV2Signing` pair in that signing config, the `repositories { maven … }` block that asks cargo for the `rustls-platform-verifier` `.aar`, and the dependency on it |
+| `app/src/main/java/com/reemoat/app/MainActivity.kt` | the `Context` import, the `System.loadLibrary` companion, `external fun initNdkContext`, its call **before** `super.onCreate` |
+| `app/build.gradle.kts` | `signingConfigs`, the conditional `signingConfig`, the v1/v2 pair, the `repositories { maven … }` block for the verifier's `.aar`, that dependency |
 | `app/proguard-rules.pro` | the `-keep` rule for `org.rustls.platformverifier.**` |
 | `app/src/main/AndroidManifest.xml` | `networkSecurityConfig`, `dataExtractionRules`, `allowBackup="false"`, `fullBackupContent="false"` |
-| `app/src/main/res/mipmap-*` | this project's rasters, replaced by Tauri's own — the section above is the whole story |
+| `app/src/main/res/mipmap-*` | this project's rasters |
 
-Two more are `tauri icon`'s rather than `init`'s: `res/mipmap-anydpi-v26/ic_launcher.xml`,
-whose background it points back at a mipmap, and `res/values/ic_launcher_background.xml`,
-which it writes as `#fff`. And two are in no template at all —
-`res/xml/network_security_config.xml` and `res/xml/data_extraction_rules.xml`.
-Those two are the quietest shape of the four: an `init` does not touch them, it
-removes the manifest attributes that are the only route to them, so they stay on
-disk doing nothing.
-
-**The recipe is two commands, and the second is the one that gets forgotten:**
+`tauri icon` also rewrites `res/mipmap-anydpi-v26/ic_launcher.xml` and
+`res/values/ic_launcher_background.xml` (`#fff`); `init` strips the manifest attributes that
+reach `res/xml/network_security_config.xml` and `res/xml/data_extraction_rules.xml`.
 
 ```bash
 pnpm --dir packages/native exec tauri android init
-git checkout -- packages/native/src-tauri/gen/android
+git checkout -- packages/native/src-tauri/gen/android   # only with no other changes there
 ```
 
-`init` writes both halves; the checkout puts the committed half back and leaves
-the ignored half — the machine-specific one — which is exactly what was missing.
-Run it on a tree with no other changes under `gen/android`, because the second
-command does not ask.
-
-**Every file in that table carries a banner saying so at its top**, and
-`nativecheck` asserts each edit against **comment-stripped** source. That is not
-tidiness: the banners name the very lines being asserted on, and measured on a
-pristine `MainActivity.kt` carrying nothing but its banner, all three patterns
-matched the prose and the driver said `ok` three times about a file with none of
-them in it. It also sweeps every committed file under `gen/android` for an
-absolute path — the rule `tauri.settings.gradle` is exempt from only by being
-ignored, and the one the `maven` block already follows by asking `cargo
-metadata` instead of writing a path down. A banner may not quote a measured path
-either, and that sweep is what says so.
+Every file in that table carries a banner, so `nativecheck` asserts each edit against
+**comment-stripped** source (the banners quote the asserted lines). It also sweeps committed
+`gen/android` files, banners included, for an absolute path; the `maven` block asks `cargo
+metadata` instead.

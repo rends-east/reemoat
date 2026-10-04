@@ -11,191 +11,121 @@ paths:
 ## Commands
 
 ```bash
-pnpm cpctl devices                   # the apps signed in to this account, live and recently retired
-pnpm cpctl devices --revoke <id>     # retire one; its sign-ins end and no other device is touched
-#   ⚠ There is no `cpctl` verb that *registers* one, deliberately: the route refuses an
-#     API key, because a device is a signed-in installation and a key has no session for
-#     one to hang off. This command is the thing that holds keys
+pnpm cpctl devices                   # apps signed in to this account, live and recently retired
+pnpm cpctl devices --revoke <id>     # retire one; its sign-ins end, no other device is touched
+# No cpctl verb registers one: the route refuses an API key, which has no session to hang a device off
 ```
 
 ## What a device is
 
-**Not a session and not a credential.** A session is a bearer token with an
-expiry; a device is the computer or phone that keeps producing them, and it
-outlives every one of them. That is the whole feature — *sign this laptop out and
-leave my phone alone* had nothing to act on before, because the only per-sign-in
-record there was is `user_session_origins`, whose two fields are a caller's own
-claim about itself and are documented as **recognition, never identification**.
+**Not a session and not a credential**: the computer or phone that keeps producing
+sessions and outlives them, so *sign this laptop out, leave my phone* has something to
+act on. (`user_session_origins` is a caller's claim: recognition, never identification.)
 
-**Holding a device id authorizes nothing.** It is an identifier this service hands
-back, stored unhashed and returned in full — unlike everything in `keys.ts` —
-because every request still carries the session token and the id is read only
-*after* that token has resolved, and only to ask whether the installation has been
-retired. That is why the client keeps it in ordinary configuration rather than an
-OS keyring.
+**Holding a device id authorizes nothing.** It is stored unhashed and returned in full,
+unlike everything in `keys.ts`, because every request still carries the session token and
+the id is read only after it resolves, only to ask whether the installation is retired.
+Hence ordinary configuration on the client, not a keyring.
 
-**Not an authorization subject.** A grant is `(user_id, machine_id)` and stays
-that way, so two devices of one person reach exactly the same fleet;
-`relay/authorize.ts` reads no device row and must not learn to. Permissions belong
-to the person.
+**Not an authorization subject**: a grant stays `(user_id, machine_id)`, so one person's
+devices reach the same fleet; `relay/authorize.ts` reads no device row and must not learn
+to.
 
 ## Invariants
 
-- **An id we will not bind is *ignored*, never refused — on both doors.** This is
-  what stops a sign-in loop. A client keeps the id it was given, so a retired id
-  answered with an error means: sign in, be refused on the very next request, sign
-  out, sign in again with the same id, for ever, with no exit but deleting a file
-  by hand. `adoptDevice` registers a fresh row instead, which terminates and gives
-  up nothing — the retired row stays retired and its sessions stay ended.
-  Revocation retires *that installation's access*, not the computer's right to ask
-  again with a password.
-- **Every lookup carries `user_id`, on both statements of both routes.** A device
-  id is a short opaque string a client chooses to send. Without the owner clause,
-  `DELETE /v1/me/devices/:id` is a cross-account revocation primitive and a
-  device-existence oracle, and `POST /v1/login`'s device block lets one account
-  bind to another's row — after which the victim's Revoke signs the attacker out
-  (harmless) and the attacker's session inherits the victim's `revoked_at`, so the
-  victim can be signed out at will by a stranger.
-- **`404 device_not_found` covers "no such device" and "not yours" alike**, which
-  is `DELETE /v1/machines/:id/grants/me`'s anti-mapping rule.
-- **The cap refuses; it does not evict.** `MAX_SESSIONS_PER_USER` evicts because
-  *"being unable to sign in on a new device because of an old one is the wrong
-  failure"* — right about sessions, because a session *is* the thing you are
-  trying to get. It does not transfer: a sign-in succeeds with no device bound, so
-  refusing the registration costs a sentence rather than the sign-in. And eviction
-  here would be a weapon — anybody holding **one** live session could register
-  twenty times and evict, revoke and sign out every real device the owner has,
-  while their own newest session survived.
-- **The two caps are different numbers and the relationship is stated**: 20
-  devices against 10 sessions. At most ten devices hold a live session at once;
-  the eleventh sign-in retires the oldest *session* and leaves its device
-  registered, which is right — that installation asks for a password again and
-  keeps its identity.
-- **The device is checked *before* the session's own refusals**, and asking last
-  made `device_revoked` unreachable. `revokeDevice` retires the device and its
-  sessions in one transaction, so by the time anything reads the row `revoked_at`
-  is already set — a check below that one answers `revoked` every time, for a code
-  nothing could then produce. The session's revocation is the *consequence*; the
-  device is the *cause*, and reporting the consequence leaves the client holding a
-  dead id. The cost is that an expired session on a retired device reports the
-  device, which is the better of the two answers.
-- **`device_revoked` and `session_revoked` are separate codes and the client does
-  different things with them.** A session retired by the per-user cap leaves the
-  device valid, so the app signs in again and re-binds the same row; a retired
-  device means the stored id is finished. Folding them picks one behaviour and is
-  wrong about the other half the time. `handleSignedOut` clears the id on the
-  first and **must not** on the second.
-- **`mintSession` takes `deviceId` as a required argument.** Three routes mint a
-  session and only one can carry a device; an optional parameter would let the
-  other two — and every sign-in path added later — silently produce sessions
-  outside per-device revocation. Two call sites legitimately pass `null`; the
-  point is that they say so.
+- **An id we will not bind is *ignored*, never refused, on both doors** — refusing loops
+  sign-in for ever, since the client keeps its id. `adoptDevice` registers a fresh row;
+  the retired row and its sessions stay ended.
+- **Every lookup carries `user_id`, on both statements of both routes.** Without it,
+  `DELETE /v1/me/devices/:id` is a cross-account revocation primitive and oracle, and
+  `POST /v1/login`'s device block can bind to a victim's row.
+- **`404 device_not_found` for "no such device" and "not yours" alike** (the anti-mapping
+  rule of `DELETE /v1/machines/:id/grants/me`).
+- **The cap refuses; it does not evict**, unlike `MAX_SESSIONS_PER_USER`. A sign-in succeeds with no device bound, so a
+  refusal costs a sentence; eviction would let one live session retire every real device.
+  **20 devices against 10 sessions**: the eleventh sign-in retires the oldest *session*
+  and leaves its device registered.
+- **The device is checked *before* the session's own refusals**: `revokeDevice` retires
+  device and sessions in one transaction, so a later check would always answer revoked
+  and `device_revoked` would be unreachable. An expired session on a retired device
+  reports the device.
+- **`device_revoked` and `session_revoked` are separate codes**: a cap-retired session
+  leaves the device valid (sign in again, re-bind the row); a retired device ends the
+  stored id. `handleSignedOut` clears the id on the first and **must not** on the second.
+- **`mintSession` takes `deviceId` as a required argument**, so no sign-in path silently
+  mints sessions outside per-device revocation; the two that cannot carry one pass `null`.
 
 ## The join that is not there
 
-⚠ **`resolveSession`'s cached statement stays single-table, and this is the
-sharpest trap in the feature.** `devices` shares `id` and `revoked_at` with
-`user_sessions`, and that query selects unqualified and reads the row by **bare
-key**. Joined, `row["revoked_at"]` becomes the *device's* — NULL for a live device
-and NULL for a session with no device at all — and **session revocation silently
-stops working for everybody**: signing out, sign-out-everywhere, a password change
-and both admin sweeps keep answering 200 while the revoked token goes on
-authenticating. Written with bare names instead it throws at `prepare`, which is
-lazy, so the service starts green and then 500s every signed-in request.
-
-`deviceRevoked` is a **second statement**, run only when the row carries a
-`device_id`: nothing for a browser, an API key or a pre-migration session, one
-primary-key lookup for a native one. Cheaper than the join it replaces, and the
-trap is structurally impossible rather than something to remember.
-
-`relaycheck` asserts **session revocation still bites on a session that has a live
-device**, which is the case a join would break while every other assertion in the
-file stayed green.
+**`resolveSession`'s cached statement stays single-table.** `devices` shares `id` and
+`revoked_at` with `user_sessions`, and that query selects unqualified and reads by **bare
+key**: joined, `row["revoked_at"]` becomes the device's and **session revocation silently
+stops for everybody** (sign-out, password change and admin sweeps answer 200 while the
+token authenticates); a join with bare column names throws at the lazy `prepare` and 500s
+every signed-in request. `deviceRevoked` is a **second statement**, run only when the row has a
+`device_id` (one primary-key lookup). `relaycheck` asserts **session revocation still
+bites on a session with a live device**.
 
 ## Where the id is kept on the client
 
-⚠ **Not the keyring**, and `config.rs`'s own header is the argument: *"Not a
-secret, and deliberately not in the keyring. A server address and an account list
-are preferences; the credential for each account is the secret."* A device id is
-an identifier, not a secret, and the cost of getting this wrong lands exactly on the
-machines `credential::probe` exists to detect — a Linux box with no unlocked collection silently discards every
-keyring write, so that installation would register a new device on **every launch**
-and burn the account's limit without ever reading one back. It would also put a
-second keychain read on the first-paint path.
+**Not the keyring** (`config.rs`'s header: an identifier, not a secret). A Linux box with
+no unlocked collection silently discards keyring writes (`credential::probe`), so it would
+register a new device every launch and burn the limit; it would also add a keychain read
+to first paint. **`config.rs`'s `Stored.devices`, a `BTreeMap` keyed on the account**
+(`<origin>#<user id>`, the credential's scope), **per account** because of the owner
+clause (shared entries overwrote each other and spent the cap). A map because **nothing
+but `device_revoked` forgets an id** — not a switch, a sign-out, or removing the account:
+the server row still exists. Q1.651.
 
-So: `config.rs`'s `Stored.devices`, a `BTreeMap` keyed on the **account** —
-`<origin>#<user id>`, the scope the credential is keyed on — beside the account
-list. **Per account because of the owner clause above**: two accounts on one server
-sharing an entry overwrote each other's id at every sign-in, and every re-login then
-registered a fresh row against the cap. A map rather than one current value because
-**nothing but `device_revoked` forgets an id** — not a switch, not a sign-out, not
-removing the account from this computer: the row on the server still exists, so
-forgetting the id leaves an installation nobody can recognise in their own list and
-spends a second slot on the way back. Q1.651.
+**In the shell a sign-in offers no device**: the stored id belongs to an account the
+sign-in has not yet identified, and offering it would copy the last person's public key
+onto the next person's fresh row. `login` sends `{name, password}`; the bootstrap then
+registers the account's id and key through `POST /v1/me/devices` (`ensureDevice`), and
+`Boot.deviceBound` (false from the moment a credential is written) retries a failed
+registration. A browser registers none.
 
-**In the shell a sign-in offers no device.** The stored id belongs to an account,
-and the sign-in is what finds out which — so offering it would hand the last
-person's public key to whoever signs in next, and the owner clause, which makes a
-foreign *id* harmless, copies the offered *key* onto the fresh row and links the
-two. `login` sends `{name, password}`; the bootstrap that follows registers the
-account's own id and key through `POST /v1/me/devices` (`ensureDevice`), and
-`Boot.deviceBound` — false from the moment a credential is written — makes the next
-bootstrap retry a registration that failed. A browser registers none, as before.
+`credential.rs` gained a scope and nothing else: `CREDENTIAL` is a set of one,
+`read`/`write` carry a `String`, no `list()` (`server.json` says which accounts exist).
+**Q7.136 is reversed only in its narrowest half** (*"no first-run generated device id"*);
+the keyring seam stays reserved for the device **key**. `webcheck.devices.ts` asserts all
+of it off disk.
 
-`credential.rs` gained a scope and nothing else: `CREDENTIAL` stays a set of one,
-`read`/`write` keep carrying a `String`, there is still no `list()` — which accounts
-exist is `server.json`'s to say. **Q7.136 is reversed only in its
-narrowest half** — *"no first-run generated device id"* — and the keyring seam
-stays reserved for the device **key**, which cannot use a `String` interface at
-all. `webcheck.devices.ts` asserts all of it off disk.
+## Two things called "device"
 
-## Two things called "device", and neither is renamed away
+`packages/web/src/device.ts` reads a `User-Agent` into "Chrome on macOS": recognition,
+the fallback on a sign-in row. `devices.ts` on the control plane is a registered entity.
+The sign-in list in `AccountSection.tsx` is `SignIns`, headed *"Signed in"* (Decision 1B
+stands; only the name moved); Settings → Devices is the device section.
 
-- `packages/web/src/device.ts` reads a `User-Agent` into "Chrome on macOS". It is
-  **recognition of a browser string** and is the fallback on a sign-in row.
-- `devices.ts` on the control plane is **an entity somebody registered**.
+## Limits
 
-The sign-in list in `AccountSection.tsx` was called `Devices` and is `SignIns`
-now, headed *"Signed in"*. **Decision 1B stands and only the name moved**: that
-argument is about a session list whose only verb is sign-out, while a device
-survives a sign-out and carries retired rows and a limit. Settings → Devices is
-the new section.
+Neither is stated on the screen at rest (Q3.686): the second is said in Retire's
+confirmation, the first is the API keys screen's.
 
-## Two honest limits, and where each is said
-
-The screen states neither at rest any more (Q3.686). The second is said in Retire's
-confirmation, where it is true at the moment it matters; the first is the API keys
-screen's to answer, and a sentence here explaining another screen was meta text.
-
-1. **An API-key caller has no device.** A key is not a sign-in, so nothing holding
-   one appears in the list and nothing in the list revokes one. The remedy is the
-   API keys screen.
-2. **A machine token already minted keeps working.** Nothing in the token-verifying
-   half of the system reads a device, deliberately, so per-device revocation is a
-   grouping key over sessions plus a bind refusal — which is genuinely useful and
-   is not a new boundary.
+1. **An API-key caller has no device**; nothing in the list revokes one.
+2. **A minted machine token keeps working**: nothing on the token-verifying side reads a
+   device. Per-device revocation is a grouping key over sessions plus a bind refusal, not
+   a new boundary.
 
 | Path | When a retired device stops |
 |---|---|
-| Any control-plane request | **Next request** |
-| Minting a machine token | Next request |
+| Any control-plane request, minting a machine token | **Next request** |
 | A machine token already minted | ≤ 300 s + 60 s leeway, from the last mint |
-| A WebSocket already open | + one 20 s ping tick on top of that |
-| Loopback to a local daemon | The same ≤ 360 s, with no control-plane hop at all |
+| A WebSocket already open | + one 20 s ping tick |
+| Loopback to a local daemon | The same ≤ 360 s, no control-plane hop |
 
 ## Layout
 
 | File | Holds |
 |---|---|
-| `packages/control-plane/src/devices.ts` | The entity and every rule about it: `adoptDevice`'s ignore-rather-than-refuse, the owner clause, the cap that refuses, `deviceRevoked` and why it is a second statement |
-| `packages/control-plane/src/sessions.ts` | `mintSession`'s required `deviceId`, the device check placed *first*, and the docblock refusing the join |
-| `packages/web/src/cp.ts` | `currentDevice`/`rememberDevice`/`forgetDevice`, and the rule that `clearSession` keeps the device while `device_revoked` gives it up |
-| `packages/web/src/ui/settings/DevicesSection.tsx` | The list, the retired rows, and the open-work delay in Retire's confirmation. The one `TwoStep` in this app offered on your **own** row |
-| `packages/native/src-tauri/src/config.rs` | Where the id lives, the argument for it not being in the keyring, and why it is per account |
+| `packages/control-plane/src/devices.ts` | `adoptDevice`'s ignore-not-refuse, the owner clause, the refusing cap, `deviceRevoked` |
+| `packages/control-plane/src/sessions.ts` | `mintSession`'s required `deviceId`, the device check first, the docblock refusing the join |
+| `packages/web/src/cp.ts` | `currentDevice`/`rememberDevice`/`forgetDevice`; `clearSession` keeps the device, `device_revoked` gives it up |
+| `packages/web/src/ui/settings/DevicesSection.tsx` | The list, retired rows, the open-work delay in Retire's confirmation; the one `TwoStep` offered on your **own** row |
 
 ## Bounds
 
 | | |
 |---|---|
-| Devices | **20 live per account**, and the cap **refuses** rather than evicting. A retired row is kept 30 days — longer than a session's seven, because the list is read *after* something went wrong rather than as a live inventory — then swept by `pruneDevices` at startup |
-| Names | 128 chars for a name, 32 for a platform, clamped at ingest. `POST /v1/login` is above THE LINE with a 64 KiB body, so an unclamped name is 64 KiB into the file that holds the fleet's signing key |
+| Devices | **20 live per account**, refusing. A retired row is kept 30 days (read after something went wrong), then swept by `pruneDevices` at startup |
+| Names | 128 chars for a name, 32 for a platform, clamped at ingest (`POST /v1/login` takes a 64 KiB body above THE LINE) |

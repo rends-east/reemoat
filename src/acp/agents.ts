@@ -109,6 +109,74 @@ export const ULTRACODE_SETTING = "ultracode";
 /** Claude Code's own way to find other sessions, withdrawn from every claude session: it never lists what this daemon runs (Q2.242). */
 export const CLAUDE_WITHDRAWN_PEER_TOOLS: readonly string[] = ["ListAgents"];
 
+/**
+ * Tools that answer to Claude Code's own terminal, remote control or cloud, or that move the worktree this daemon owns (Q6.118).
+ * Canonical names only: the CLI resolves aliases first, and some name a tool that stays (Task, KillShell, RunWorkflow).
+ */
+export const CLAUDE_WITHDRAWN_TOOLS: readonly string[] = [
+  ...CLAUDE_WITHDRAWN_PEER_TOOLS,
+  "SendFile",
+  "SendUserFile",
+  "SendUserMessage",
+  "FetchInboxMessage",
+  "ReadNotifications",
+  "Poll",
+  "PushNotification",
+  "SendFeedback",
+  "ReportFindings",
+  "ProposeGoal",
+  "ProposeSkills",
+  "ShowOnboardingRolePicker",
+  "ShareOnboardingGuide",
+  "SuggestPluginInstall",
+  "SuggestSkills",
+  "ListConnectors",
+  "SearchMcpRegistry",
+  "SuggestConnectors",
+  "EndConversation",
+  "EnterWorktree",
+  "ExitWorktree",
+  "Artifact",
+  "ArtifactComments",
+  "ArtifactData",
+  "AppifactRepl",
+  "DesignSync",
+  "ClaudeDesign",
+  "Projects",
+];
+
+/** claude's name for this daemon's send_file, run without a permission request: the card in the chat is the whole effect (Q2.252). */
+export const CLAUDE_ALLOWED_TOOLS: readonly string[] = ["mcp__reemoat__send_file"];
+
+/** codex features switched off in every session: what they add is drawn only by codex's own terminal (Q6.118). */
+export const CODEX_WITHDRAWN_FEATURES: readonly string[] = ["tool_suggest"];
+
+/**
+ * CODEX_CONFIG for a codex spawn, which codex-acp spreads into every session's config. A key the person's own value sets
+ * is kept; undefined leaves the variable alone, for a value that is not a JSON object.
+ */
+export function codexConfigEnv(ambient: string | undefined): string | undefined {
+  let config: Record<string, unknown> = {};
+  if (ambient !== undefined && ambient.trim().length > 0) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(ambient);
+    } catch {
+      // Not this daemon's to repair: a rewritten value would hide whose mistake it was.
+      return undefined;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    config = parsed as Record<string, unknown>;
+  }
+  const theirs = config["features"];
+  if (theirs !== undefined && (typeof theirs !== "object" || theirs === null || Array.isArray(theirs))) return undefined;
+  const features = {
+    ...Object.fromEntries(CODEX_WITHDRAWN_FEATURES.map((feature) => [feature, false])),
+    ...(theirs as Record<string, unknown> | undefined),
+  };
+  return JSON.stringify({ ...config, features });
+}
+
 /** undefined rather than an empty object, so the request carries no _meta key at all. */
 export function sessionMetaFor(
   agent: string,
@@ -122,7 +190,8 @@ export function sessionMetaFor(
     claudeCode: {
       options: {
         ...(flags.ultracode ? { settings: { [ULTRACODE_SETTING]: true } } : {}),
-        disallowedTools: [...CLAUDE_WITHDRAWN_PEER_TOOLS],
+        disallowedTools: [...CLAUDE_WITHDRAWN_TOOLS],
+        allowedTools: [...CLAUDE_ALLOWED_TOOLS],
       },
     },
   };
@@ -405,12 +474,15 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
         );
       }
       if (cliFor("codex") === null) throw new AgentUnavailableError(noCli("codex"), { installable: true });
+      const env = agentEnv();
+      const codexConfig = codexConfigEnv(env["CODEX_CONFIG"]);
+      if (codexConfig !== undefined) env["CODEX_CONFIG"] = codexConfig;
       return {
         id,
         displayName: "Codex (codex-acp)",
         command,
         args: [],
-        env: agentEnv(),
+        env,
         inSessionCwd: false,
         authHint:
           "The Codex adapter uses the credentials of the `codex` CLI, and it is not signed in. " +

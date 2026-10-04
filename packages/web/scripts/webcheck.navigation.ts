@@ -70,6 +70,82 @@ process.stdout.write("\nwhich lists keep their delimiter\n");
   check("a node with no position is left alone", classOf(run("1) a", { type: "list", ordered: true })), undefined);
 }
 
+// Q3.705: a short column beside prose wrapped `≈ 61` onto two lines, since auto layout gives it only its longest word.
+process.stdout.write("\nwhich table columns never wrap\n");
+{
+  const { remarkShortColumns, SHORT_COLUMN, SHORT_CELL_CHARS } = await import("../src/ui/mdtable.js");
+  type Cell = { type: string; children: unknown[]; data?: { hProperties?: { className?: unknown } } };
+  const text = (value: string) => ({ type: "text", value });
+  const cell = (...children: unknown[]): Cell => ({ type: "tableCell", children });
+  const table = (...rows: Cell[][]) => ({
+    type: "root",
+    children: [{ type: "table", children: rows.map((cells) => ({ type: "tableRow", children: cells })) }],
+  });
+  const marked = (rows: Cell[][]): boolean[][] => {
+    remarkShortColumns()(table(...rows));
+    return rows.map((cells) => cells.map((one) => JSON.stringify(one.data?.hProperties?.className) === JSON.stringify([SHORT_COLUMN])));
+  };
+
+  check(
+    "a column of short values is marked, header included, and a column of prose beside it is not",
+    marked([
+      [cell(text("Что")), cell(text("ГБ")), cell(text("Главное внутри"))],
+      [cell(text("Проекты в домашней папке")), cell(text("≈ 61")), cell({ type: "inlineCode", value: "reemoat-prod" }, text(" 19,9; and more"))],
+      [cell(text("Музыка")), cell(text("2,5")), cell(text("скачанный плейлист"))],
+    ]),
+    [
+      [false, true, false],
+      [false, true, false],
+      [false, true, false],
+    ],
+  );
+  check(
+    "a long header unmarks a column of short values",
+    marked([[cell(text("Количество файлов"))], [cell(text("3"))]]),
+    [[false], [false]],
+  );
+  check("the bound counts characters, not bytes, and is inclusive", [SHORT_CELL_CHARS, marked([[cell(text("я".repeat(12)))]])[0]?.[0], marked([[cell(text("я".repeat(13)))]])[0]?.[0]], [12, true, false]);
+  check(
+    "text inside emphasis and code counts",
+    marked([[cell({ type: "strong", children: [text("a".repeat(13))] })]]),
+    [[false]],
+  );
+
+  const markdown = stripComments(readFileSync(new URL("../src/ui/Markdown.tsx", import.meta.url), "utf8"));
+  check(
+    "the body runs it, and both cell kinds draw it",
+    [
+      /remarkGfm,\s*remarkShortColumns,/.test(markdown),
+      /<th className=\{`[^`]*\$\{shortCell\(className\)\}`\}/.test(markdown),
+      /<td className=\{`[^`]*\$\{shortCell\(className\)\}`\}/.test(markdown),
+      /\? "whitespace-nowrap" : ""/.test(markdown),
+    ],
+    [true, true, true, true],
+  );
+
+  // A class glued to `${…}` is not a token to Tailwind's scan; `align-top` vanished from the build that way.
+  const { readdirSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = new URL("../src/", import.meta.url).pathname;
+  const glued: string[] = [];
+  let scanned = 0;
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (path.endsWith(".tsx")) {
+        for (const literal of stripComments(readFileSync(path, "utf8")).matchAll(/className=\{`([^`]*)`\}/g)) {
+          scanned += 1;
+          if (/[A-Za-z0-9\]]\$\{/.test(literal[1] ?? "")) glued.push(path.slice(root.length));
+        }
+      }
+    }
+  };
+  walk(root);
+  check("no class in a className template sits against a substitution", glued, []);
+  check("over enough templates that the sweep is not silently empty", scanned > 50, true);
+}
+
 process.stdout.write("\nwhat a navigation moves\n");
 {
   const { depthOf, isSheet, navMove, sheetKind } = await import("../src/nav.js");

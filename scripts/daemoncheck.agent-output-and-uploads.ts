@@ -23,6 +23,7 @@ import {
   type UploadRow,
 } from "../src/uploads.js";
 import { probeContained, probeRequestable, safeRelPath } from "../src/changes.js";
+import { byteRange } from "../src/server.js";
 import { atOrUnder, resolveStateRoot } from "../src/paths.js";
 import { resolveWorktreeRoot } from "../src/worktree.js";
 import { tmp } from "./tmp.js";
@@ -1024,6 +1025,44 @@ process.stdout.write("\nserving one file out of a session\n");
   check("a download a client would take gzipped is not gzipped", big.headers.get("content-encoding"), null);
   check("and its length is the file's own", big.headers.get("content-length"), String(40 * 1024));
   check("which is the number the client's own cap reads", (await big.arrayBuffer()).byteLength, 40 * 1024);
+
+  // A relayed download asks for one piece at a time, each inside one stream window (Q6.120); /uploads/:id is the same serveFile.
+  const ranged = async (range: string): Promise<Response> =>
+    app.fetch(
+      new Request("http://d/sessions/s_one/files?path=notes.txt", {
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, range },
+      }),
+    );
+  check("a whole file says it takes ranges", ok.headers.get("accept-ranges"), "bytes");
+  const piece = await ranged("bytes=0-1");
+  check("a range is answered with those bytes and no others", [piece.status, await piece.text()], [206, "hi"]);
+  check("named against the whole file", piece.headers.get("content-range"), "bytes 0-1/3");
+  check("with its own length", piece.headers.get("content-length"), "2");
+  check(
+    "and the whole file's validator, so a client can tell a rewrite between two pieces",
+    [piece.headers.get("etag") !== null, piece.headers.get("etag") === ok.headers.get("etag")],
+    [true, true],
+  );
+  check("still never a type a browser will render", piece.headers.get("content-type"), "application/octet-stream");
+  const tail = await ranged("bytes=1-");
+  check("an open range runs to the end", [tail.status, tail.headers.get("content-range"), await tail.text()], [206, "bytes 1-2/3", "i\n"]);
+  const past = await ranged("bytes=0-99");
+  check("a range running past the end stops at it", [past.headers.get("content-range"), await past.text()], ["bytes 0-2/3", "hi\n"]);
+  const beyond = await ranged("bytes=3-");
+  const beyondBody = (await beyond.json()) as { error?: { code?: string } };
+  check("a range starting past the end is refused", [beyond.status, beyondBody.error?.code], [416, "range_not_satisfiable"]);
+  const several = await ranged("bytes=0-0,2-2");
+  check("several ranges at once are answered with the whole file", [several.status, await several.text()], [200, "hi\n"]);
+
+  check("no header is the whole file", byteRange(undefined, 10), null);
+  check("an empty file is always whole, whatever was asked", byteRange("bytes=0-99", 0), null);
+  check("a closed range", byteRange("bytes=2-5", 10), { start: 2, end: 5 });
+  check("an open one", byteRange("bytes=2-", 10), { start: 2, end: 9 });
+  check("one past the end is cut to it", byteRange("bytes=8-99", 10), { start: 8, end: 9 });
+  check("one starting at the end is unsatisfiable", byteRange("bytes=10-", 10), "unsatisfiable");
+  check("a backwards range is ignored rather than refused", byteRange("bytes=5-2", 10), null);
+  check("so is a suffix range, which nothing here asks for", byteRange("bytes=-5", 10), null);
+  check("and another unit", byteRange("items=0-1", 10), null);
 
   const refusal = async (path: string): Promise<string> => {
     const answer = await raw(path);

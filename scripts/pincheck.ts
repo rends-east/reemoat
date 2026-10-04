@@ -81,6 +81,24 @@ for (const adapter of ADAPTERS) {
   }
 }
 
+// A patch is keyed on a version, so it is one more place a pin is written; the claude adapter's carries `_reemoat/effort` (Q6.121).
+const patchBlock = (workspaceYaml.split(/^patchedDependencies:\s*$/m)[1] ?? "").split(/^(?=[^\s#])/m)[0] ?? "";
+const patches = [...patchBlock.matchAll(/^\s+'((?:@[^/\s']+\/)?[^@\s']+)@([^']+)':\s*(\S+)\s*$/gm)].map((match) => ({
+  name: match[1] ?? "",
+  version: match[2] ?? "",
+  file: match[3] ?? "",
+}));
+check(
+  "the claude adapter is patched",
+  patches.some((patch) => patch.name === "@agentclientprotocol/claude-agent-acp"),
+  true,
+);
+for (const patch of patches) {
+  const inPackage = capture(packageJson, new RegExp(`"${escapeForRegex(patch.name)}":\\s*"([^"]+)"`));
+  check(`the patch for ${patch.name} names the pinned version`, patch.version, inPackage);
+  check(`and ${patch.file} is in the repository`, existsSync(new URL(patch.file, root)), true);
+}
+
 // minimumReleaseAgeExclude is inert without minimumReleaseAge, so the state is reported rather than implied by a passing check.
 process.stdout.write(
   /^\s*minimumReleaseAge\s*:/m.test(workspaceYaml)
