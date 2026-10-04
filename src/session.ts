@@ -92,6 +92,7 @@ const AUTH_REQUIRED = -32000;
 // On resume: the agent no longer has the conversation. Matched by code, not message.
 const RESOURCE_NOT_FOUND = -32002;
 const INTERNAL_ERROR = -32603;
+const METHOD_NOT_FOUND = -32601;
 const CANCEL_GRACE_MS = 5_000;
 const CANCEL_SEND_TIMEOUT_MS = 1_000;
 const CANCEL_SETTLE_MS = 1_500;
@@ -748,7 +749,7 @@ export class Session {
       );
     } catch (error) {
       // An adapter without the patch answers -32601 and is not asked again; a timeout is asked again next change.
-      if (hasRpcCode(error, -32601)) this.asksEffort = false;
+      if (hasRpcCode(error, METHOD_NOT_FOUND)) this.asksEffort = false;
       return carried;
     }
 
@@ -1162,13 +1163,13 @@ export class Session {
     );
   }
 
-  /** Ends this daemon's claim of a turn without telling the agent (Q2.42). */
-  abandonTurn(): boolean {
+  /** Ends this daemon's claim of a turn without telling the agent (Q2.42); `cancelled` when a person's Stop is what it ends (Q2.255). */
+  abandonTurn(stopReason: "abandoned" | "cancelled" = "abandoned"): boolean {
     if (!this.turnActive) return false;
     this.promptEpoch += 1;
     this.turnActive = false;
     this.flushToolDraft();
-    this.queue.push({ type: "turn_end", stopReason: "abandoned", usage: null });
+    this.queue.push({ type: "turn_end", stopReason, usage: null });
     return true;
   }
 

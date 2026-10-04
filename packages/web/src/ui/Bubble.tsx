@@ -34,7 +34,7 @@ export function UserBubble({
       <div
         ref={box}
         // Keep the `lg` cap below `85%` so crossing `lg` never widens the bubble.
-        className="sel-root ml-auto w-fit min-w-0 max-w-[85%] select-none rounded-xl rounded-br-md bg-raised px-3.5 py-2.5 lg:max-w-[26rem]"
+        className="sel-root ml-auto w-fit min-w-0 max-w-[85%] select-none rounded-md bg-bubble px-3.5 py-2.5 lg:max-w-[26rem]"
       >
         {/* `sel-root` on the box is what stops WebKit's gap fill (Q3.638). */}
         {/* The words as typed, each `@name` a link (Q3.682); `hug.ts` joins a line's text nodes. `pre-wrap` keeps every space and break, `wrap-anywhere` breaks a long token. */}

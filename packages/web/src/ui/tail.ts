@@ -72,6 +72,8 @@ export interface ToolNode {
   subagent: boolean;
   /** Sticky-true off the updates; a later update never resets it. */
   backgrounded: boolean;
+  /** Top level, never finished, and a turn end or agent start came after it: its turn ended without it (Q3.702). */
+  turnEnded: boolean;
   changes: readonly FileChangeEvent[];
   children: TailNode[];
   steps: number;
@@ -188,6 +190,7 @@ export function sameNode(a: TailNode, b: TailNode): boolean {
         a.subagent === other.subagent &&
         // Compared: an update can flip it without moving any other field.
         a.backgrounded === other.backgrounded &&
+        a.turnEnded === other.turnEnded &&
         a.steps === other.steps &&
         a.omitted === other.omitted &&
         a.latest === other.latest &&
@@ -686,9 +689,9 @@ function sameTally(a: RunTally, b: RunTally): boolean {
   return sameList(a.changes, b.changes);
 }
 
-/** `pending` counts (a spawn may skip `in_progress`); a backgrounded call is not running here, only the snapshot knows (Q7.113). */
+/** `pending` counts (a spawn may skip `in_progress`); a call its turn outlived does not (Q3.702); a backgrounded call is the snapshot's (Q7.113). */
 export function stillRunning(node: ToolNode): boolean {
-  return node.status === "pending" || node.status === "in_progress";
+  return !node.turnEnded && (node.status === "pending" || node.status === "in_progress");
 }
 
 export function isDelegation(node: ToolNode): boolean {
@@ -1137,6 +1140,11 @@ export function buildTail(
   }
 
   rows.sort((a, b) => a.seq - b.seq);
+  // Top level only: a detached subagent's steps may outlive the turn (`detachedEnd`'s rule 2). Newest edge first, before the reverse.
+  const lastEdge = turnEdges[0]?.seq ?? 0;
+  for (const node of rows) {
+    if (node.kind === "tool" && !node.backgrounded && node.seq < lastEdge && stillRunning(node)) node.turnEnded = true;
+  }
   return { rows: foldRuns(rows, decisions), hidden: index + 1, taskFloor, turnEdges: turnEdges.reverse() };
 }
 
@@ -1295,6 +1303,7 @@ function nodeFor(
       ...resolveTool(event, merged),
       subagent: event.subagent === true,
       backgrounded: merged?.backgrounded === true,
+      turnEnded: false,
       changes: claimedChanges ?? [],
       children: [],
       steps: 0,

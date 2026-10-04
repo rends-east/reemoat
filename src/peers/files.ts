@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import type { StoredFileRef } from "../events.js";
 import { expandHome } from "../paths.js";
-import type { KeepFileResult } from "../uploads.js";
+import { MAX_SENT_FILE_BYTES, type KeepFileResult } from "../uploads.js";
 
 export const SEND_FILE_TOOL_NAME = "send_file";
 
@@ -23,7 +23,7 @@ export const SEND_FILE_TOOL = {
     "an image is shown inline. Use it when your user asks for a file, and when what you produced for them is a file they " +
     "will want to open: a report, an export, an archive, a build, a screenshot. Your user may be on another device, where a " +
     "path you print opens nothing. The file is copied as it is now, so send it again after changing it. One file per call, " +
-    "up to 100 MB. Not for source you edited in the working folder: your user already sees those changes.",
+    `up to ${megabytes(MAX_SENT_FILE_BYTES)} MB. Not for source you edited in the working folder: your user already sees those changes.`,
   inputSchema: {
     type: "object",
     properties: {
@@ -62,8 +62,8 @@ export function sendFileRefusal(result: Exclude<KeepFileResult, { kind: "ok" }>,
       return `this machine would not let the daemon read ${path}; nothing was sent`;
     case "not_a_file":
       return `${path} is not a regular file; to send a folder, archive it and send the archive`;
-    case "daemon_process":
-      return `${path} is the daemon's own process, not a file of yours; nothing was sent`;
+    case "process_file":
+      return `${path} is a view of a running process, not a file; nothing was sent`;
     case "unresponsive":
       return `the filesystem under ${path} is not answering; nothing was sent`;
     case "too_large":

@@ -29,7 +29,7 @@ import {
 import type { DaemonClient } from "../daemon";
 import { clearEcho, echoFor, echoVersion, sendFloor, setEcho, subscribeEchoes, type PendingEcho } from "../echo";
 import { errorText } from "../http";
-import { keyOf, type SessionRef } from "../ids";
+import { keyOf, type SessionKey, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
 import {
   ensureMentions,
@@ -89,6 +89,38 @@ const drafts = new Map<string, string>();
 
 // A prompt the daemon has not answered, by session: a Stop pressed meanwhile waits for it, since until then there is no turn to cancel.
 const sendsInFlight = new Map<string, Promise<void>>();
+
+// The mirror: a Stop the daemon has not answered, by session. A message sent meanwhile waits for it (Q3.701).
+const stopsInFlight = new Map<string, Promise<void>>();
+
+/** Past the daemon's own bound on a cancel nobody honours (WEDGED_CANCEL_MS), plus the replacement's start. */
+export const STOP_HOLD_MS = 20_000;
+
+/** A message sent after Stop goes after the stop: held until the daemon's cancel has landed, or STOP_HOLD_MS (Q3.701). */
+function afterStop(key: SessionKey): Promise<void> {
+  return (stopsInFlight.get(key) ?? Promise.resolve()).then(
+    () =>
+      new Promise<void>((resolve) => {
+        const landed = (): boolean => {
+          const now = store.getSnapshot().rowsByKey.get(key)?.snapshot;
+          return now === undefined || !cancelInFlight(now);
+        };
+        if (landed()) {
+          resolve();
+          return;
+        }
+        const done = (): void => {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
+        };
+        const timer = setTimeout(done, STOP_HOLD_MS);
+        const unsubscribe = store.subscribe(() => {
+          if (landed()) done();
+        });
+      }),
+  );
+}
 
 // Stable identity, so memos over the event window survive each keystroke.
 const EMPTY_EVENTS: readonly StoredEvent[] = [];
@@ -556,7 +588,7 @@ export function Composer({
       ? daemon.cancelTurn(sessionRef.sessionId).then((result) => {
           store.applySnapshot(sessionRef, result.session);
         })
-      : Promise.resolve();
+      : afterStop(key);
 
     const flight: Promise<void> = settled
       .then(() => daemon.prompt(sessionRef.sessionId, body, sending))
@@ -593,7 +625,7 @@ export function Composer({
     setStopping(true);
     // A message still on its way is stopped once the daemon has it; one it refused leaves nothing to stop (Q3.700).
     const landing = sendsInFlight.get(key);
-    void (landing ?? Promise.resolve())
+    const stop: Promise<void> = (landing ?? Promise.resolve())
       .then(async () => {
         const now = store.getSnapshot().rowsByKey.get(key)?.snapshot;
         if (landing !== undefined && (now === undefined || !canCancelTurn(now))) return;
@@ -604,8 +636,10 @@ export function Composer({
         toast("error", errorText(cause));
       })
       .finally(() => {
+        if (stopsInFlight.get(key) === stop) stopsInFlight.delete(key);
         if (onScreen()) setStopping(false);
       });
+    stopsInFlight.set(key, stop);
   };
 
   return (

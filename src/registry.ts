@@ -105,6 +105,9 @@ export const IDLE_PARK_SWEEP_MS = 60_000;
 /** Agent silence after which a turn is abandoned locally; errs large, since ending a live turn is unrecoverable. REEMOAT_TURN_SILENCE_MINUTES moves it; 0 disables. */
 export const TURN_SILENCE_MS = 3 * 60 * 60_000;
 
+/** A cancel the agent has not honoured by then is one it never will: the turn ends here and the process is replaced (Q2.255). Under claude's own 30 s floor. */
+export const WEDGED_CANCEL_MS = 15_000;
+
 export const MAX_IDLE_RELEASE_MINUTES = 7 * 24 * 60;
 
 export interface MachineSettingsPort {
@@ -878,6 +881,8 @@ export interface ManagedSessionOptions {
   /** A thunk: daemon.ts restores sessions before it reads the environment, so a captured value would be stale. */
   elicitationAllowed?: () => boolean;
   ultracodeDefault?: () => boolean;
+  /** 0 never replaces an agent over a cancel. */
+  wedgedCancelMs?: () => number;
   customAgent?: string | null;
   /** Read at launch; null falls back to the bare harness. The harness is returned only to be compared, since agent is immutable. */
   resolveCustomAgent?: (id: string) => { harness: AgentId; system: SystemId; model: string } | null;
@@ -923,6 +928,7 @@ export class ManagedSession {
   private turnCounter: number;
   private turnStartedAt: number | null = null;
   private cancelRequestedAt: number | null = null;
+  private cancelWatch: ReturnType<typeof setTimeout> | null = null;
   // Read by parkable: the queue outlives the turn, so an idle session may still owe a delivery.
   private queuedPrompts: QueuedEntry[] = [];
   private acceptOrder = 0;
@@ -973,6 +979,7 @@ export class ManagedSession {
   }
 
   private restart: { readonly config: AgentConfig; readonly done: Promise<void> } | null = null;
+  private stopDuringRestart: ExitReason | null = null;
 
   // A wake's captured choices, served while the agent comes back on its own defaults and restoreConfig walks them back (Q2.254).
   private wakeConfig: AgentConfig | null = null;
@@ -1034,6 +1041,7 @@ export class ManagedSession {
   private readonly runtime: SessionRuntime;
   private readonly uploads: UploadsPort | null;
   private readonly elicitationAllowed: () => boolean;
+  private readonly wedgedCancelMs: () => number;
 
   // Called from the agent's emit path, so it must stay synchronous.
   private readonly keepAgentImage = (mime: string, data: string): StoredFileRef | null =>
@@ -1070,6 +1078,7 @@ export class ManagedSession {
     this.runtime = options.runtime ?? new LocalRuntime();
     this.uploads = options.uploads ?? null;
     this.elicitationAllowed = options.elicitationAllowed ?? (() => true);
+    this.wedgedCancelMs = options.wedgedCancelMs ?? (() => WEDGED_CANCEL_MS);
     this.peerMcpServers = options.peerMcpServers ?? null;
     this.onPeerMessagesOff = options.onPeerMessagesOff ?? null;
     this.deliverAnswer = options.deliverAnswer ?? null;
@@ -1911,6 +1920,14 @@ export class ManagedSession {
     };
     try {
       await this.stop("config_changed");
+      const stoppedBy = this.stopDuringRestart;
+      this.stopDuringRestart = null;
+      if (stoppedBy !== null && this.exitRecord !== null) {
+        // The stop that arrived meanwhile is the one recorded; the finally drops the queue, as for any stop.
+        this.exitRecord = { ...this.exitRecord, reason: stoppedBy, at: Date.now() };
+        this.safeAppend({ type: "status", status: this.status, exit: this.exitRecord });
+        return;
+      }
       await this.resume();
 
       // Awaited so the caller's response snapshot never shows the agent's defaults.
@@ -2017,6 +2034,8 @@ export class ManagedSession {
       this.touchSafe();
       return Promise.resolve();
     }
+    // Joining a restart's stop would otherwise be undone by its resume (Q2.255): restartAgent reads this after its stop.
+    if (this.stopping && this.restart !== null && reason !== "config_changed") this.stopDuringRestart ??= reason;
     if (this.stopping) return this.stopping;
     // Set before the first await so status and the permission guards see it at once.
     this.stopRequested = true;
@@ -2036,6 +2055,7 @@ export class ManagedSession {
   }
 
   private async doStop(reason: ExitReason): Promise<void> {
+    this.disarmCancelWatch();
     this.touchSafe();
 
     // A start in flight owns a subprocess not yet handed over; wait so it gets disposed.
@@ -2491,6 +2511,7 @@ export class ManagedSession {
     // Recorded before the await so a snapshot already shows the cancel.
     this.cancelRequestedAt = Date.now();
     this.touchSafe();
+    this.watchCancel(turn);
 
     try {
       await session.cancelTurn();
@@ -2505,6 +2526,34 @@ export class ManagedSession {
     // After the sweep: an agent blocked on a permission cannot end its turn until answered.
     const settled = await session.awaitTurnEnd();
     return { kind: "cancelled", turn, settled };
+  }
+
+  /** Armed by the first cancel of a turn, so a repeated Stop cannot push it out; the turn's end disarms it. */
+  private watchCancel(turn: number): void {
+    const ms = this.wedgedCancelMs();
+    if (ms <= 0 || this.cancelWatch !== null) return;
+    this.cancelWatch = setTimeout(() => {
+      this.cancelWatch = null;
+      if (this.turn === turn && this.cancelRequestedAt !== null) this.replaceWedgedAgent(ms);
+    }, ms);
+    this.cancelWatch.unref?.();
+  }
+
+  private disarmCancelWatch(): void {
+    if (this.cancelWatch === null) return;
+    clearTimeout(this.cancelWatch);
+    this.cancelWatch = null;
+  }
+
+  /** Ends the turn as the cancel asked, then replaces the process before the queue can reach it: a wedged agent takes the next prompt and wedges again (Q2.255). */
+  private replaceWedgedAgent(ms: number): void {
+    const session = this.session;
+    if (session === null || this.terminal || this.stopRequested || this.restarting) return;
+    // A restart kills the process group, and with it a dev server or shell the agent left running.
+    if (this.hasLiveBackgroundWork) return;
+    if (!session.abandonTurn("cancelled")) return;
+    this.warn?.(`${this.id}: the agent kept a cancelled turn open for ${ms} ms; replacing it`);
+    void this.restartAgent().catch(() => undefined);
   }
 
   /** The same send, sweep, watch, for an agent working unprompted or waiting on a request no turn holds (Q2.232, Q2.233). */
@@ -2592,6 +2641,7 @@ export class ManagedSession {
         this.turnStartedAt = null;
         // Inside the identity test: a late pump must not erase a cancel on the current turn.
         this.cancelRequestedAt = null;
+        this.disarmCancelWatch();
         // Restart the idle drain on this.session, so a replaced agent's pump does not attach to the old one.
         const live = this.session;
         // Not when queued: deliverQueued below claims the queue for a turn.
@@ -3320,6 +3370,7 @@ export class SessionRegistry {
   private idleParkMs = IDLE_PARK_MS;
   /** Env only, with no stored override: a backstop for an adapter that stopped answering. See TURN_SILENCE_MS. */
   private turnSilenceMs = TURN_SILENCE_MS;
+  private wedgedCancelMs = WEDGED_CANCEL_MS;
   /** See CEILING_PARK_FLOOR_MS; injectable so drivers can fake it. */
   private ceilingParkFloorMs = CEILING_PARK_FLOOR_MS;
   /** What somebody set on the settings screen, or `null` if nobody has. */
@@ -3410,6 +3461,7 @@ export class SessionRegistry {
     idleParkMs?: number;
     ceilingFloorMs?: number;
     turnSilenceMs?: number;
+    wedgedCancelMs?: number;
   }): void {
     if (limits.live !== undefined) this.maxLiveSessions = Math.max(1, limits.live);
     // 0 switches parking off, so clamp at zero, not one.
@@ -3418,6 +3470,7 @@ export class SessionRegistry {
     if (limits.ceilingFloorMs !== undefined) this.ceilingParkFloorMs = Math.max(0, limits.ceilingFloorMs);
     // 0 switches it off; a floor would turn a typo into ending every turn at once.
     if (limits.turnSilenceMs !== undefined) this.turnSilenceMs = Math.max(0, limits.turnSilenceMs);
+    if (limits.wedgedCancelMs !== undefined) this.wedgedCancelMs = Math.max(0, limits.wedgedCancelMs);
     if (limits.burst !== undefined) {
       const previous = this.createBurst;
       this.createBurst = Math.max(1, limits.burst);
@@ -3754,6 +3807,7 @@ export class SessionRegistry {
       uploads: this.uploads,
       elicitationAllowed: () => this.elicitationAllowed,
       ultracodeDefault: () => this.ultracodeByDefault,
+      wedgedCancelMs: () => this.wedgedCancelMs,
       onWarning: this.onWarning,
       peerMcpServers: (sessionId, capabilities, launch) => this.peerMcpServersBy?.(sessionId, capabilities, launch) ?? [],
       onPeerMessagesOff: (sessionId) => this.peerMessagesOffBy?.(sessionId),
@@ -3792,6 +3846,7 @@ export class SessionRegistry {
         // Thunks: restore runs before daemon.ts reads the environment.
         elicitationAllowed: () => this.elicitationAllowed,
         ultracodeDefault: () => this.ultracodeByDefault,
+        wedgedCancelMs: () => this.wedgedCancelMs,
         resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
         machineCatalogue: () => this.machine,
         onWarning: this.onWarning,

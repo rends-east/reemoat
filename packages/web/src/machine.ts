@@ -22,6 +22,7 @@ import {
 } from "./http";
 import { localBaseFor } from "./localRoute";
 import type { MachineId } from "./ids";
+import { monotonicNow } from "./wake";
 import type { DaemonHealth, MachineRecord, Scope } from "./wire";
 
 /** Renew this far ahead of expiry. Larger than the daemon's 60s clock leeway. */
@@ -184,6 +185,7 @@ export class MachineConnection {
   private channelBase: string | null = null;
   private chosen: Route | null = null;
   private resolving: Promise<Route | null> | null = null;
+  private chosenAt = 0;
   // Set on a loopback wrong_machine and cleared in update on every wake.
   private localDenied = false;
 
@@ -371,6 +373,11 @@ export class MachineConnection {
     return this.chosen;
   }
 
+  /** When the held route was proved, on `monotonicNow`'s clock; null with none held. */
+  routeSince(): number | null {
+    return this.chosen === null ? null : this.chosenAt;
+  }
+
   async resolveRoute(): Promise<Route | null> {
     if (this.chosen !== null) return this.chosen;
     this.resolving ??= this.probeRoute().finally(() => {
@@ -425,6 +432,7 @@ export class MachineConnection {
 
   private settleRoute(route: Route | null, reason: OfflineReason): Route | null {
     this.chosen = route;
+    this.chosenAt = monotonicNow();
     this.reach = route === null ? "offline" : "online";
     this.offlineReason = route === null ? reason : null;
     if (route !== null) this.lastError = null;

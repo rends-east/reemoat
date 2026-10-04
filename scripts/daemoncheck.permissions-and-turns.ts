@@ -692,9 +692,14 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
   /** Every `session/cancel` this daemon sent, by the session id it named. */
   const cancelsSeen: string[] = [];
   const answered: { outcome?: { outcome?: string; optionId?: string } }[] = [];
+  /** Every request and prompt the stub saw, by which launch of it saw them. */
+  const methodsSeen: { launch: number; method: string }[] = [];
+  const promptsSeen: { launch: number; text: string }[] = [];
+  let launches = 0;
 
-  const spawnAgent = (): AgentProcess => {
+  const spawnAgent = (resumable = false): AgentProcess => {
     const sessionId = "s_cancel_1";
+    const launch = ++launches;
     const toAgent = new PassThrough();
     const toClient = new PassThrough();
     const send = (m: unknown) => toClient.write(`${JSON.stringify(m)}\n`);
@@ -728,12 +733,17 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
           continue;
         }
 
+        if (typeof message["method"] === "string") methodsSeen.push({ launch, method: message["method"] });
         switch (message["method"]) {
           case acp.methods.agent.initialize:
             send({
               jsonrpc: "2.0",
               id,
-              result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] },
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: resumable ? { sessionCapabilities: { resume: {} } } : {},
+                authMethods: [],
+              },
             });
             break;
           case acp.methods.agent.session.new:
@@ -750,6 +760,7 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
           }
           case acp.methods.agent.session.prompt: {
             const text = JSON.stringify(message["params"]?.["prompt"] ?? "");
+            promptsSeen.push({ launch, text });
             // A rejected prompt, the shape of a provider failure: -32603 with upstream prose and no errorKind, so isAuthFailure ignores it.
             if (text.includes("fail me")) {
               send({
@@ -959,6 +970,85 @@ process.stdout.write("\nstopping the turn without stopping the session\n");
   check("and a session id nothing minted is still a 404", (await postCancel("s_nope")).status, 404);
 
   await cancelRegistry.shutdown();
+
+  // Q2.255: a cancel nobody honours ends the turn here and replaces the process before the queue reaches it.
+  class WedgeRuntime extends CancelRuntime {
+    override async launch(): Promise<AgentProcess> {
+      return spawnAgent(true);
+    }
+  }
+  const wedgeRegistry = new SessionRegistry(new MemoryEventStore(), null, undefined, new WedgeRuntime());
+  wedgeRegistry.setSessionLimits({ wedgedCancelMs: 150 });
+  const wedged = await wedgeRegistry.create({ agent: "kimi", cwd: tmp("wedgecheck-") });
+  const stopReasons = (): unknown[] =>
+    wedged.log
+      .read(0, 1000, 1 << 20)
+      .map((stored) => stored.event)
+      .flatMap((event) => (event.type === "turn_end" ? [event.stopReason] : []));
+  const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const firstLaunch = launches;
+
+  wedged.prompt("work quietly");
+  await quiesce();
+  const honoured = await wedged.cancelTurn();
+  check("a cancel the agent honours settles", honoured.kind === "cancelled" && honoured.settled, true);
+  await settle(300);
+  check("and past the bound nothing is replaced", launches, firstLaunch);
+
+  wedged.prompt("ignore me");
+  await quiesce();
+  // Not awaited: the message goes while the cancel is still pending, which is the case that wedged.
+  const cancelling = wedged.cancelTurn();
+  const meanwhile = await wedged.sendMidTurn("after the stop");
+  check("a message sent while the cancel is pending waits rather than reaching that agent", meanwhile.kind, "queued");
+  const ignoredCancel = await cancelling;
+  check(
+    "the bound is under the cancel's own wait, so it settles there, ended by the daemon",
+    ignoredCancel.kind === "cancelled" && ignoredCancel.settled,
+    true,
+  );
+  await settle(300);
+  check("past the bound the turn ends once, as the cancel asked", stopReasons(), ["cancelled", "cancelled"]);
+  check("and the agent was replaced", launches, firstLaunch + 1);
+  check(
+    "keeping the conversation: the new one resumed it",
+    methodsSeen
+      .filter((seen) => seen.launch === launches && seen.method.startsWith("session/"))
+      .map((seen) => seen.method)
+      .slice(0, 1),
+    [acp.methods.agent.session.resume],
+  );
+  check(
+    "the queued message reached the new agent and never the wedged one",
+    promptsSeen.filter((seen) => seen.text.includes("after the stop")).map((seen) => seen.launch),
+    [launches],
+  );
+  check("which is now working on it", wedged.status, "running");
+
+  await wedgeRegistry.shutdown();
+
+  // A person's stop landing while the replacement stops the old agent joined that stop, and its resume undid it.
+  let ending: { stop(reason: "stopped"): Promise<void> } | null = null;
+  const endRegistry = new SessionRegistry(new MemoryEventStore(), null, undefined, new WedgeRuntime(), null, (detail) => {
+    // A microtask: replaceWedgedAgent warns, then restartAgent runs to its first await, so this lands inside its stop.
+    if (detail.includes("replacing it")) queueMicrotask(() => void ending?.stop("stopped"));
+  });
+  endRegistry.setSessionLimits({ wedgedCancelMs: 150 });
+  const ended = await endRegistry.create({ agent: "kimi", cwd: tmp("wedgeend-") });
+  ending = ended;
+  ended.prompt("ignore me");
+  await quiesce();
+  const beforeEnd = launches;
+  const endCancel = ended.cancelTurn();
+  check("a message sent before the stop waits in the queue", (await ended.sendMidTurn("never delivered")).kind, "queued");
+  await endCancel;
+  await settle(300);
+  check(
+    "a person's stop during the replacement is the one that stands: stopped, nothing relaunched, the queue dropped",
+    [ended.status, ended.snapshot().exit?.reason, launches, promptsSeen.some((seen) => seen.text.includes("never delivered"))],
+    ["exited", "stopped", beforeEnd, false],
+  );
+  await endRegistry.shutdown();
 }
 
 process.stdout.write("\na permission id from a life that has ended\n");

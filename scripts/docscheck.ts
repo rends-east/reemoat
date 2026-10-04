@@ -25,8 +25,8 @@ function read(rel: string): string {
 /** The only copy of the ceiling, matching the limit at which Claude Code itself warns. */
 const MAX_CLAUDE_MD_CHARS = 150_000;
 
-/** Per-rule ceiling. Raised by small steps, not to a round number: a rule at the wall usually wants splitting by subject. */
-const MAX_RULE_CHARS: number | null = 34_000;
+/** Per-rule ceiling: every rule matching a file is loaded on each Read of it, so a rule at the wall wants cutting, not raising (Q4.130). */
+const MAX_RULE_CHARS: number | null = 15_000;
 
 /** Rule paths: globs are matched against these too, so a directory outside the list can never be scoped. */
 const SOURCE_DIRS = ["src", "scripts", "deploy", "packages", ".github", "plugins"];
@@ -217,6 +217,8 @@ const FOREIGN = new Set([
   "turnAwaitingSubagents",
   // claude-agent-acp 0.85.1's effort mode, cited in Q6.121 for being medium on every model rather than the CLI's level.
   "recommendedValue",
+  // claude-agent-acp's 30 s floor on a cancel, cited in Q2.255 for leaving the query wedged after it.
+  "forceCancelGraceMs",
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.

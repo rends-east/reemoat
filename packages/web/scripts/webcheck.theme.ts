@@ -98,6 +98,16 @@ process.stdout.write("\neach palette keeps the contrast the other was argued at\
       ],
       [true, true],
     );
+    // Q3.706: a person's message sits a step off the page, as Claude Code's does, and below raised so it reads softer.
+    check(
+      `${name}: the message bubble is a step between surface and raised, and body text reads on it`,
+      [
+        ratio(hex("bubble"), hex("surface")) > 1.05,
+        ratio(hex("bubble"), hex("surface")) < ratio(hex("raised"), hex("surface")),
+        ...short(4.5, ["fg"], ["bubble"]),
+      ],
+      [true, true],
+    );
     check(`${name}: a control's only boundary clears 3:1 on every paper`, short(3, ["edge-strong"], PAPERS), []);
     check(
       `${name}: a diff's ink reads on its own band, and body text on both bands`,
@@ -166,6 +176,7 @@ process.stdout.write("\nthe transcript's inks are spent where the owner asked, a
   const spenders = (pattern: RegExp): string[] =>
     srcFiles().filter((file) => !file.startsWith("legal/") && pattern.test(stripComments(srcFile(file)))).sort();
   check("the code ink and its chip are spent in the markdown alone", spenders(/\b(?:text|decoration|bg)-(?:code|chip)\b/), ["ui/Markdown.tsx"]);
+  check("and the bubble's fill in the bubble alone", spenders(/\b(?:text|border|bg)-bubble\b/), ["ui/Bubble.tsx"]);
   check("the link ink in the one constant", spenders(/\b(?:text|decoration|bg)-link\b/), ["ui/bits.tsx"]);
   // Q3.693: highlight.js writes class names, so its inks live in the stylesheet's rules and no component names one.
   check("a code block's inks are spent by no component", spenders(/-syn-/), []);

@@ -686,7 +686,7 @@ function GroupRow({ node, files }: { node: GroupNode; files: FileAccess | null }
         </span>
         <span className="min-w-0 flex-1 truncate">{runSummary(node.tally)}</span>
         <ChangeCounts events={node.tally.changes} />
-        {/* Plain text, not a Badge, whose fill is the user's bubble; a failure still outranks an approval (Q3.106). */}
+        {/* Plain text, not a Badge, whose raised fill reads as a control; a failure still outranks an approval (Q3.106). */}
         {node.failed > 0 && (
           <span className="shrink-0 text-2xs text-muted">{node.failed} failed</span>
         )}
@@ -806,8 +806,10 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
     status === "completed" &&
     backgroundState !== undefined &&
     !taskFinished(backgroundState);
+  // Its turn ended without it: neither running nor failed (Q3.702).
+  const stopped = node.turnEnded;
   const tone =
-    status === "failed" ? "text-fg" : status === "completed" && !running ? "text-muted" : "text-fg";
+    status === "failed" ? "text-fg" : (status === "completed" && !running) || stopped ? "text-muted" : "text-fg";
 
   return (
     <div>
@@ -828,18 +830,20 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
             as={
               status === "failed"
                 ? X
-                : running
-                  ? isSubagent
-                    ? Download
-                    : Terminal
-                  : status === "completed"
-                    ? Check
-                    : status === "in_progress"
-                      ? Loader
-                      : Download
+                : stopped
+                  ? Minus
+                  : running
+                    ? isSubagent
+                      ? Download
+                      : Terminal
+                    : status === "completed"
+                      ? Check
+                      : status === "in_progress"
+                        ? Loader
+                        : Download
             }
             size={12}
-            className={status === "in_progress" ? "animate-spin" : ""}
+            className={status === "in_progress" && !stopped ? "animate-spin" : ""}
           />
         </span>
         {/* Bot, not Brain: Brain is the ACP think kind, and delegation must not read as thinking. */}

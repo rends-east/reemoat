@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants, lstatSync } from "node:fs";
-import { chmod, mkdir, open, readdir, readFile, rm, type FileHandle } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rm, stat, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -309,7 +309,7 @@ export type KeepFileResult =
   | { kind: "denied" }
   | { kind: "not_a_file" }
   /** The daemon's own `/proc` entry: its environment holds this machine's token. */
-  | { kind: "daemon_process" }
+  | { kind: "process_file" }
   /** The filesystem did not answer: a stalled mount, never a missing file. */
   | { kind: "unresponsive" }
   | { kind: "too_large"; limit: number }
@@ -604,14 +604,15 @@ export class Uploads {
       stopped === null ? this.copyAgentFile(sessionId, sourcePath, options, deadlineAt) : { kind: stopped },
     );
     // Behind both: a call that gave up in line must not let the next one start beside the copy ahead of it.
-    const tail = Promise.allSettled([previous, run]).then(() => undefined);
+    const tail = Promise.allSettled([previous, run]).then(() => {
+      // On the tail, never this call's return: a call that gave up in line returns while the copy ahead of it still runs.
+      if (this.sending.get(sessionId) === tail) this.sending.delete(sessionId);
+    });
     this.sending.set(sessionId, tail);
     try {
       return await run;
     } catch (error) {
       return { kind: "failed", detail: describeError(error) };
-    } finally {
-      if (this.sending.get(sessionId) === tail) this.sending.delete(sessionId);
     }
   }
 
@@ -674,7 +675,7 @@ export class Uploads {
       if (resolved.value === null) return { kind: "unresponsive" };
       if (resolved.value.kind === "missing") return realpathRefusal(resolved.value.code);
       const real = resolved.value.value;
-      if (daemonProcessPath(real)) return { kind: "daemon_process" };
+      if (procPath(real)) return { kind: "process_file" };
       stallAt = stallKeyFor(real, context.value.mounts);
       const probed = await within(probeFile(real, probing));
       if (typeof probed === "string") return { kind: probed };
@@ -707,6 +708,8 @@ export class Uploads {
       const info = await within(reading.stat());
       if (typeof info === "string") return { kind: info };
       if (!info.value.isFile()) return { kind: "not_a_file" };
+      // Decided again on the descriptor: a folder on the way swapped for a link after the probe lands in /proc too.
+      if (info.value.dev === (await procDevice())) return { kind: "process_file" };
       if (info.value.size > MAX_SENT_FILE_BYTES) return { kind: "too_large", limit: MAX_SENT_FILE_BYTES };
 
       await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -1040,10 +1043,20 @@ function realpathRefusal(code: string | undefined): KeepFileResult {
   return { kind: "failed", detail: code };
 }
 
-/** Linux's view of this process, which `/proc/self` resolves to: its `environ` holds the daemon's own token. */
-function daemonProcessPath(real: string): boolean {
-  const own = `/proc/${process.pid}`;
-  return real === own || real.startsWith(`${own}/`);
+/** Linux's process views, all of them: a thread's or the `tsx` parent's `environ` holds the daemon's token as its own does (Q2.253). */
+function procPath(real: string): boolean {
+  return real === "/proc" || real.startsWith("/proc/");
+}
+
+let procDev: Promise<number | null> | null = null;
+
+/** The device `/proc` is mounted on, or null where there is none. */
+function procDevice(): Promise<number | null> {
+  procDev ??= stat("/proc").then(
+    (info) => info.dev,
+    () => null,
+  );
+  return procDev;
 }
 
 /** A write may take fewer bytes than it was offered. */

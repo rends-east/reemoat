@@ -1,63 +1,7 @@
 /**
- * Draw this app's icon at every size a bundle asks for, from one set of numbers.
- *
- * **Replaces `tauri icon`, which this repository may not run again.**
- * `native-packaging.md` records what it costs: it overwrites
- * `ic_launcher_foreground.png` with the whole badge and rewrites
- * `mipmap-anydpi-v26/ic_launcher.xml` and `values/ic_launcher_background.xml` back
- * to `@mipmap/…` and `#fff`. So this writes **only** the files listed in
- * {@link TARGETS} and {@link ANDROID}, and **no XML**: the two launcher XMLs stay
- * hand-authored, which `nativecheck` asserts from the other side.
- *
- * The Android rasters are drawn here too, with the 72dp a launcher's mask shows
- * standing in for the Dock's tile, so the mark is the same share of both (Q4.128).
- *
- * It also replaces a script that could not run at all: `package.json` said
- * `tauri icon icon.png` and `packages/native/icon.png` has never existed.
- *
- * ## The geometry, and the three numbers that are the platforms'
- *
- * The artwork is `packages/web/public/favicon.svg`, and it is **read off disk
- * rather than retyped** — the mark's six numbers live in three places already
- * (that file, `Mark.tsx`, and the landing repository's own copy), and a fourth
- * would be a fourth to correct. `nativecheck` compares the three that are here.
- *
- * What this adds to it is an **inset**, and that is the whole of the change the
- * app icon needed: the favicon's badge is 192×192 in a 192 viewBox — 100% of its
- * canvas, opaque corner to corner — because a browser tab strip does not mask an
- * icon and a full-bleed badge is right there. macOS *does* mask, and its grid puts
- * an **824×824 squircle in a 1024×1024 canvas**: a 9.77% transparent margin per
- * side. Drawn at 100% the tile reads about a quarter larger in linear terms than
- * every icon beside it in the Dock, which is exactly the report this fixes.
- *
- * So two numbers here are Apple's, one is Android's, and everything else is derived:
- *
- *   {@link MARGIN}           100 / 1024            the transparent margin, as a fraction of the side
- *   {@link RADIUS}           185.4 / 824           the corner, as a fraction of the badge
- *   {@link ADAPTIVE_MARGIN}  (108 - 72) / 2 / 108  what a launcher's mask cuts off each side
- *
- * ⚠ **`RADIUS` is the one place this departs from the favicon rather than scaling
- * it.** The favicon's `rx` is 48 of 192 = 25%; Apple's is 22.5% of the squircle.
- * Scaling the favicon's would give 206 where the grid says 185.4.
- *
- * ⚠ **A circular arc, not a continuous-curvature squircle.** Apple draws a
- * superellipse and a `<path>` would be more faithful. The defect being fixed is
- * **size**, and a corner-curvature change in the same commit makes the before and
- * after unreadable against each other. {@link coverage} is the only thing that
- * would have to change — one inside-test — the day the corner is the complaint.
- *
- * ## Why it rasterizes rather than shelling out
- *
- * There is no ImageMagick, no `rsvg-convert` and no `inkscape` in this tree, and
- * `sips` cannot read an SVG or pad with transparency (`--padColor` is opaque).
- * `iconutil` exists but is macOS's, and this package's scripts run wherever Node
- * does. The shapes are four rounded rectangles, so the rasterizer is a span test
- * and the three containers are all envelopes around PNG payloads — which is less
- * code than a dependency would be configuration, and, unlike a committed binary
- * master, it is a thing a driver can check the arithmetic of.
- *
- * Exact in x — a rounded rect's intersection with a horizontal line is one closed
- * interval — and {@link SUB}-sampled in y, which is where a curve needs it.
+ * Draws the app icon at every size a bundle asks for. Replaces `tauri icon`, which rewrites the
+ * launcher XMLs and the adaptive foreground: this writes only TARGETS and ANDROID, and no XML.
+ * The mark is read off `favicon.svg` and inset to the platforms' grids (native-packaging.md, Q4.128).
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -68,26 +12,14 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const FAVICON = join(root, "packages/web/public/favicon.svg");
 const TAURI = join(root, "packages/native/src-tauri");
 
-/** The transparent margin macOS expects, as a fraction of the canvas side. */
 export const MARGIN = 100 / 1024;
-/** The corner, as a fraction of the badge — Apple's 185.4 of 824, not the favicon's 25%. */
+/** Apple's corner, not the favicon's 25%: the one number that does not scale. */
 export const RADIUS = 185.4 / 824;
-/**
- * Android's adaptive layer is 108dp and a launcher's mask shows the centre 72dp of it.
- * Treating that 72dp as the badge puts the mark at the Dock's share of the visible
- * shape — 70.6% of its height, 51dp — well inside the 66dp safe circle.
- */
+/** A launcher shows the centre 72dp of the 108dp layer; treating that as the badge gives the Dock's share. */
 export const ADAPTIVE_MARGIN = (108 - 72) / 2 / 108;
-/** Vertical subsamples per pixel. Eight is past the point the corner stops stepping. */
 const SUB = 8;
 
-/**
- * The favicon, as numbers.
- *
- * Deliberately strict: every field is required and a miss throws by name. A
- * regex that quietly answers `undefined` for a rewritten attribute would draw a
- * blank tile and pass, which is the one failure mode a generator must not have.
- */
+/** Strict on purpose: a regex answering `undefined` for a rewritten attribute would draw a blank tile. */
 function readArtwork() {
   const svg = readFileSync(FAVICON, "utf8");
   const need = (re, what) => {
@@ -111,34 +43,21 @@ function readArtwork() {
   const side = Number(view[1]);
   if (Number(view[2]) !== side) throw new Error("favicon.svg: the viewBox is not square");
   if (Number(badge[1]) !== side || Number(badge[2]) !== side) {
-    // ⚠ The badge filling its viewBox is what makes this an *inset* rather than a
-    // second geometry. If the favicon is ever inset too, the margin below would
-    // compound and the tile would shrink twice.
+    // An inset favicon would compound with MARGIN and shrink the tile twice.
     throw new Error("favicon.svg: the badge no longer fills the viewBox — see this file's header");
   }
   return {
     side,
     ink: badge[4],
     paper: group[1],
-    // `scale(.7059)` — a leading dot is legal SVG and `Number(".7059")` reads it.
     mark: { tx: Number(group[2]), ty: Number(group[3]), scale: Number(group[4]) },
     bars,
   };
 }
 
-/**
- * The four shapes, in the pixels of a canvas of this size.
- *
- * One composition, scaled about the canvas centre so that the badge lands on
- * the grid `margin` names, then the mark carried along with it. The mark keeps the
- * same fraction of the badge it always had, so nothing about the drawing changes —
- * only how much of the canvas it is allowed to occupy.
- */
 function shapesFor(art, size, margin, radius) {
   const badge = size * (1 - 2 * margin);
   const origin = size * margin;
-  // SVG units to canvas pixels. The favicon's badge *is* its viewBox, which
-  // `readArtwork` refuses to proceed without.
   const f = badge / art.side;
   const s = art.mark.scale * f;
   return {
@@ -153,12 +72,7 @@ function shapesFor(art, size, margin, radius) {
   };
 }
 
-/**
- * Where a rounded rectangle starts and stops on one horizontal line.
- *
- * `null` above and below it. Inside the corner bands the inset is the circle's,
- * which is what makes the x axis exact and leaves only y to be sampled.
- */
+/** Exact in x; only y is subsampled. A circular arc, not Apple's superellipse (native-packaging.md). */
 function span(rect, y) {
   if (y < rect.y || y > rect.y + rect.h) return null;
   const into = Math.min(y - rect.y, rect.y + rect.h - y);
@@ -168,13 +82,11 @@ function span(rect, y) {
   return [rect.x + inset, rect.x + rect.w - inset];
 }
 
-/** How much of the pixel column `[px, px+1]` a span covers. */
 function overlap(at, px) {
   if (at === null) return 0;
   return Math.max(0, Math.min(at[1], px + 1) - Math.max(at[0], px));
 }
 
-/** One shape's alpha over the whole canvas, as a `Float64Array` of `size²`. */
 function coverage(rects, size) {
   const out = new Float64Array(size * size);
   for (let y = 0; y < size; y += 1) {
@@ -194,14 +106,7 @@ function coverage(rects, size) {
 
 const channel = (hex, at) => Number.parseInt(hex.slice(1 + at * 2, 3 + at * 2), 16);
 
-/**
- * The icon at one size, as straight (non-premultiplied) 8-bit RGBA.
- *
- * Source-over, mark on badge on nothing. The bars do not overlap each other —
- * their x ranges are disjoint in the artwork — so their coverages sum rather than
- * needing a union. `badge: false` is Android's foreground: the badge is the
- * background layer's colour there, and the launcher's mask is its shape.
- */
+/** Straight RGBA. The bars' coverages sum rather than union because their x ranges are disjoint. */
 function draw(art, size, { margin = MARGIN, radius = RADIUS, badge = true } = {}) {
   const shapes = shapesFor(art, size, margin, radius);
   const ink = badge ? coverage([shapes.ink], size) : new Float64Array(size * size);
@@ -223,7 +128,6 @@ function draw(art, size, { margin = MARGIN, radius = RADIUS, badge = true } = {}
   return rgba;
 }
 
-/** A PNG chunk: length, type, payload, CRC over type and payload. */
 function chunk(type, body) {
   const head = Buffer.alloc(8);
   head.writeUInt32BE(body.length, 0);
@@ -233,7 +137,6 @@ function chunk(type, body) {
   return Buffer.concat([head, body, tail]);
 }
 
-/** 8-bit RGBA, one `IDAT`, filter type 0 on every row. */
 function png(rgba, size) {
   const stride = size * 4;
   const raw = Buffer.alloc((stride + 1) * size);
@@ -254,17 +157,7 @@ function png(rgba, size) {
   ]);
 }
 
-/**
- * The macOS container: `icns`, a total length, then typed PNG payloads.
- *
- * ⚠ **No `is32`/`s8mk`/`il32`/`l8mk`.** Those are the legacy 16 and 32px members,
- * RGB plus a separate mask, PackBits-compressed. `tauri.conf.json` pins
- * `minimumSystemVersion` to 13.0 and every member macOS 13 reads is a PNG; `ic11`
- * already covers 32px and the Dock downscales it for 16. Writing an RLE encoder
- * for readers that cannot reach this build would be code with no reader.
- * `nativecheck` pins the member list, so this is a decision on the record rather
- * than something to infer from the bytes.
- */
+/** No legacy RGB+mask members: the macOS 13 floor reads only PNG ones, and `nativecheck` pins the list. */
 function icns(members) {
   const body = members.map(([type, payload]) => {
     const head = Buffer.alloc(8);
@@ -278,7 +171,7 @@ function icns(members) {
   return Buffer.concat([head, ...body]);
 }
 
-/** The Windows container. A 256 is written as 0, which is the format's own idiom. */
+/** A 256 is written as 0, which is the format's own idiom. */
 function ico(entries) {
   const dir = Buffer.alloc(6 + entries.length * 16);
   dir.writeUInt16LE(0, 0);
@@ -298,22 +191,11 @@ function ico(entries) {
   return Buffer.concat([dir, ...entries.map(([, payload]) => payload)]);
 }
 
-/**
- * Every file this writes, and the complete list of them.
- *
- * `icons/ios/*`, `Square*Logo.png` and `StoreLogo.png` are absent: iOS masks its
- * own icons, so full-bleed is right there and this inset would double; a Windows
- * tile sits on a coloured plate and wants a third geometry nobody here has measured.
- */
+/** Complete. iOS masks its own icons and the Windows tiles want an unmeasured geometry, so neither is here. */
 const TARGETS = { png: [32, 64, 128, 256], icns: ["ic11", 32, "ic12", 64, "ic07", 128, "ic08", 256, "ic13", 256, "ic09", 512, "ic14", 512, "ic10", 1024], ico: [16, 32, 48, 64, 128, 256] };
 const NAMED = { 32: "32x32.png", 64: "64x64.png", 128: "128x128.png", 256: "128x128@2x.png" };
 
-/**
- * Android, per density: a 108dp adaptive foreground and 48dp legacy rasters for API
- * 24 and 25, written into both trees so they cannot disagree. `gen/android` is the
- * one a build reads. The legacy square is the Dock's tile; the round one is the same
- * tile as a circle, and nothing names it (the manifest has no `roundIcon`).
- */
+/** Both trees, so they cannot disagree; `gen/android` is the one a build reads. */
 const ANDROID = {
   trees: ["icons/android", "gen/android/app/src/main/res"],
   densities: { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 },
@@ -326,7 +208,6 @@ const ANDROID = {
 
 const art = readArtwork();
 const made = new Map();
-/** Drawn once per size and variant, however many containers ask for it. */
 const at = (size, variant = {}) => {
   const key = `${String(size)} ${JSON.stringify(variant)}`;
   const held = made.get(key);
@@ -343,8 +224,7 @@ const put = (name, bytes) => {
 };
 
 for (const size of TARGETS.png) put(`icons/${NAMED[size]}`, at(size));
-// `icon.png` is the macOS master and is the *same bytes* as the `ic10` member, so
-// the file that looks like one is one. `nativecheck` asserts they are identical.
+// The same bytes as the `ic10` member, which `nativecheck` asserts.
 put("icons/icon.png", at(1024));
 const members = [];
 for (let i = 0; i < TARGETS.icns.length; i += 2) members.push([TARGETS.icns[i], at(TARGETS.icns[i + 1])]);

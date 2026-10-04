@@ -25,12 +25,15 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-04
+
 ### Added
 
 - **An agent can send you a file.** Ask for a file and the agent puts it in the conversation as a card with its name and size; a tap saves it, and an image is shown in place. It works for a file anywhere on the machine, not only one inside the session's folder, and the agent may send one unasked when what it made for you is a file. The copy is taken when it is sent, so it still opens after the agent changes or deletes the original. Up to 100 MB each; a session keeps the newest hundred. Claude Code, Codex and Grok send without asking permission first, as does Cursor; opencode sends too. Update the app before the machines, or the file is sent and an older app shows only the tool's name.
 
 ### Changed
 
+- **Your messages sit in a softer bubble**: lighter, closer to the page, with even corners, as in Claude Code.
 - **Agents are no longer handed tools that only work in their own terminal.** Claude Code loses the ones that address its other sessions and its remote control, its feedback and onboarding cards, switching to a worktree of its own (the session's folder is the one Reemoat gave it), and publishing to claude.ai. Codex loses its plugin-install prompt. What each can do here is unchanged, and its context is a little smaller. Scheduling tools are left as they were.
 - **Switching agent messaging off no longer takes the Reemoat tools away entirely**: sending you a file is not a message to another agent, so it stays.
 - **Subagents are listed under Background tasks**, as Claude Code lists them: a running one in Agents with its kind, its time, its steps and what it is doing now, and a finished one under Completed beside finished shells. Claude now runs most subagents in the background, so they had never appeared there. Its card in the conversation says it is running in the background rather than showing a check mark the moment it started. The line at the foot counts them.
@@ -41,6 +44,11 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- **A table in an agent's reply squeezed its short columns to a letter per line** whenever another column held longer text. Short columns now keep their words whole, and a column of short values, like sizes or names, keeps each value on one line.
+- **After the computer woke from sleep, "Connecting…" could stay on screen while everything worked**, until the next wake. It now clears within seconds of the server answering again. Waking also no longer reconnects the same conversation two or three times over.
+- **Stop could leave a session stuck for hours.** When the agent froze and ignored Stop, the turn ended only after half a minute and the next message went to the same frozen agent, which froze again. Now an agent that has not stopped 15 seconds after Stop is restarted where the conversation left off, and waiting messages go to the new one — unless it has work running in the background, which a restart would end. Ending the session in those seconds ends it for good.
+- **A message sent right after Stop appeared above "cancelled"** with *Waiting for the agent to finish* under it. It now waits until the stop has gone through and appears after it.
+- **Commands a stopped turn never ran still showed as running**, with the spinner on their row. They now show as stopped.
 - **The controls under the message box flickered when a quiet session woke up**, showing the agent's own defaults for a moment — Manual, default effort — before your choices came back. They now keep your choices throughout. This needs the machine updated.
 - **A file larger than about a megabyte could not be downloaded from a machine reached through the relay.** Pressing a sent file's card, or a changed file's download, did nothing for two minutes and then failed. The file now arrives in pieces, and the card shows a spinner while it does. This needs the machine updated; against an older one the app downloads as before.
 

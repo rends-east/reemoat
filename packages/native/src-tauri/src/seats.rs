@@ -1,56 +1,9 @@
-//! The webviews, one per account where the platform allows it — and the only
-//! file that builds one.
-//!
-//! **Two arms, and the split is confined to this file.** Everything the rest of
-//! the host decides — which account a command is about, what a switch changes,
-//! when a document is stale — is the same in both; what differs is whether an
-//! account change is a webview shown or a webview rebound. Q7.149.
-//!
-//! - **macOS: one window, one child webview per account** (`MULTI_WEBVIEW`). A
-//!   switch hides one and shows another: nothing reloads, and a page keeps its
-//!   heap, its sockets and whatever somebody was typing. Every account's webview
-//!   is created at launch — the shown one first, at full size, then the rest at
-//!   zero size and hidden — so each page boots and sets its computer up whether or
-//!   not anybody looks at it. It needs Tauri's `unstable` feature
-//!   (`Window::add_child`, `WindowBuilder`, `WebviewBuilder`,
-//!   `Manager::get_webview`), which `Cargo.toml` enables for the macOS target
-//!   alone.
-//! - **Everywhere else, and on macOS with `MULTI_WEBVIEW` flipped off: one
-//!   `WebviewWindow`, `main`, rebound.** A switch moves the webview's seat to the
-//!   other account and the page reloads (`location.replace("/")`). Linux is here
-//!   on purpose — tao packs a window's child webviews into a `GtkBox` and ignores
-//!   their bounds, so two children split the height — and Windows and Android
-//!   until a pass of their own measures them.
-//!
-//! **Every webview is built from `main`'s own configuration and guarded.**
-//! `from_config` is what carries `dragDropEnabled: false` (`native-shell.md`'s
-//! assertion with no other symptom) and the background colour into every
-//! account's webview, and `on_navigation(is_our_own)` is on every one, so no
-//! account's page can be navigated away from this app's own document. There is no
-//! `initialization_script` anywhere: the credential crosses by `host_boot`.
-//!
-//! **What a window close means, stated because nothing else here says it.**
-//! On macOS and Windows the close button hides the window and the app runs on
-//! (`away.rs`, Q3.697). On Linux, closing it destroys every child, and the last
-//! window's destruction is `RunEvent::Exit`, where `lib.rs` stops every account's
-//! daemon. Closing one child webview never quits — and the last account's webview
-//! is never closed: forgetting the last account rebinds it to a sign-in instead.
-//!
-//! ⚠ **What a hidden page is, as Q7.149 measured it.** It runs — its sockets stay
-//! open and its bootstrap completes — but `store.ts` skips its poll while
-//! `visibilityState` is not `visible`, `resume.ts` catches up on show, and macOS
-//! throttles a hidden `WKWebView`, then suspends it after about eight minutes. That last
-//! is why no account's *daemon* depends on its page: the host starts every set-up
-//! one at launch (`daemon::start_configured_at_launch`). And every page shares one
-//! `WKWebsiteDataStore`, so `localStorage` is shared across accounts — isolating it
-//! needs `data_store_identifier`, which is macOS 14, and the bundle's minimum is
-//! 13. Both are recorded in Q7.149.
-//!
-//! ⚠ **The lock rule** (`commands.rs`'s module docblock): nothing here holds a
-//! `Host` lock across a webview call. Every function copies what it needs out of
-//! `Host` first — `labels`, `label_of`, `shown` all answer copies — and the one
-//! lock an account change holds across these calls is `changing`, which the main
-//! thread never takes.
+//! The webviews, and the only file that builds one (Q7.149). macOS: one window, a child webview
+//! per account, a switch hides one and shows another; every page shares one `WKWebsiteDataStore`,
+//! so `localStorage` is shared. Elsewhere: one `WebviewWindow` rebound and reloaded (tao packs
+//! Linux children into a `GtkBox` and ignores their bounds). Every webview is `main`'s config,
+//! which carries `dragDropEnabled: false`, with `on_navigation(is_our_own)`. Nothing here holds a
+//! `Host` lock across a webview call: the main thread takes `seats` on every page load.
 
 use std::error::Error;
 
@@ -63,16 +16,12 @@ use crate::commands::Host;
 use crate::config::{self, Theme};
 use crate::is_our_own;
 
-/// One window, one webview per account. See the module docblock; flipping this is
-/// the whole of falling back to the single-webview arm on macOS.
+/// Flipping this is the whole of falling back to the single-webview arm on macOS.
 #[cfg(target_os = "macos")]
 pub const MULTI_WEBVIEW: bool = true;
 
-/// The label of the one `WebviewWindow` the single arm builds, which is also the
-/// window label in both arms.
 pub const MAIN: &str = "main";
 
-/// `main`'s configuration, as `tauri.conf.json` declares it with `create: false`.
 pub fn main_config(app: &AppHandle) -> Option<WindowConfig> {
     app.config()
         .app
@@ -82,8 +31,7 @@ pub fn main_config(app: &AppHandle) -> Option<WindowConfig> {
         .cloned()
 }
 
-/// The page's `--color-ink` in each palette: what shows before it paints. `nativecheck`
-/// holds both to `index.css`.
+/// The page's `--color-ink`, shown before it paints; `nativecheck` holds both to `index.css`.
 const LIGHT_INK: Color = Color(0xf9, 0xf8, 0xf6, 0xff);
 const DARK_INK: Color = Color(0x11, 0x10, 0x0e, 0xff);
 
@@ -108,29 +56,24 @@ fn from_tauri(theme: tauri::Theme) -> Theme {
     }
 }
 
-/// `main`'s configuration in the switch's theme, on that theme's ink. Always a theme: on
-/// macOS a window's is app-wide, and with none the system's would reach every page (Q3.671).
+/// Always a theme: on macOS a window's is app-wide, and with none the system's reaches every page (Q3.671).
 pub fn themed(config: &WindowConfig, theme: Theme) -> WindowConfig {
     let mut themed = inked(config, theme);
     themed.theme = Some(to_tauri(theme));
     themed
 }
 
-/// The theme a configuration from `themed` carries.
 fn theme_in(config: &WindowConfig) -> Theme {
     config.theme.map(from_tauri).unwrap_or(Theme::Light)
 }
 
-/// `config` with `theme`'s ink behind every page built from it.
 fn inked(config: &WindowConfig, theme: Theme) -> WindowConfig {
     let mut inked = config.clone();
     inked.background_color = Some(ink(theme));
     inked
 }
 
-/// Put `theme`'s ink on the window and behind every page in it. The second half is a no-op
-/// on a WKWebView: without wry's `transparent` feature it takes only an under-page colour,
-/// and only at creation.
+/// The per-webview half is a no-op on WKWebView, which takes a background only at creation.
 fn paint(window: &tauri::Window, theme: Theme) {
     let color = Some(ink(theme));
     let _ = window.set_background_color(color);
@@ -139,26 +82,20 @@ fn paint(window: &tauri::Window, theme: Theme) {
     }
 }
 
-/// Put the window in `theme`: `host_set_theme`'s change, and a window just built, since
-/// tao's Linux window ignores a configured theme at creation for the portal's.
-/// `Window::set_theme` rather than the app's: tao's app-wide call leaves the window's own
-/// answer stale on macOS, and its Linux preference in place.
+/// Also on a window just built: tao's Linux window ignores a configured theme. On the window, not
+/// app-wide, which leaves the window's theme stale on macOS.
 pub fn show_theme(window: &tauri::Window, theme: Theme) {
     let _ = window.set_theme(Some(to_tauri(theme)));
     paint(window, theme);
 }
 
-/// Which seats a launch opens, and which of them is shown.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Launch {
     pub seats: Vec<Slot>,
     pub shown: usize,
 }
 
-/// A seat per account, shown in the order they were added; the account shown
-/// last on top. A server chosen and never signed in to — before accounts, or a
-/// first run — is a pending seat, and it is the one shown when there is one,
-/// since that is where the person was.
+/// A pending server (chosen, never signed in to) is shown when there is one: that is where the person was.
 pub fn plan(roster: &config::Roster, server: Option<String>) -> Launch {
     let mut seats: Vec<Slot> = roster
         .accounts
@@ -188,9 +125,7 @@ pub fn plan(roster: &config::Roster, server: Option<String>) -> Launch {
     Launch { seats, shown }
 }
 
-/// Build the window and every account's webview. **Writes nothing** — the plan
-/// is read from what `lib.rs` already read, and a seat that cannot be built is
-/// opened on the switch that wants it rather than failing the launch.
+/// Writes nothing. A seat that cannot be built is opened by the switch that wants it.
 pub fn open_at_launch(
     app: &App,
     config: &WindowConfig,
@@ -206,7 +141,7 @@ pub fn open_at_launch(
     single::open_at_launch(app, config, &host, launch)
 }
 
-/// Show `target` in place of the caller — answering whether the page reloads.
+/// Answers whether the page reloads.
 pub fn switch_to(
     app: &AppHandle,
     host: &Host,
@@ -223,7 +158,6 @@ pub fn switch_to(
     Ok(true)
 }
 
-/// Open a sign-in for a new account and show it.
 pub fn add(app: &AppHandle, host: &Host, caller: &str) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     if MULTI_WEBVIEW {
@@ -234,8 +168,6 @@ pub fn add(app: &AppHandle, host: &Host, caller: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// The caller's account is gone: show `next`, or — with no account left —
-/// become `fallback` on the same webview and reload.
 pub fn leave(
     app: &AppHandle,
     host: &Host,
@@ -252,9 +184,7 @@ pub fn leave(
     Ok(true)
 }
 
-/// An account just gained a sign-in from somewhere else (`adopted`): reload its
-/// webview, if it has one, so its page boots with it. In the single arm the
-/// switch that follows reloads anyway.
+/// After an `adopted` sign-in. The single arm's following switch reloads anyway.
 pub fn refresh(app: &AppHandle, host: &Host, key: &str) {
     #[cfg(target_os = "macos")]
     if MULTI_WEBVIEW {
@@ -264,7 +194,6 @@ pub fn refresh(app: &AppHandle, host: &Host, key: &str) {
     let _ = (app, host, key);
 }
 
-/// One `WebviewWindow`, rebound.
 mod single {
     use super::*;
 
@@ -279,27 +208,22 @@ mod single {
             .into_iter()
             .nth(launch.shown)
             .unwrap_or(Slot::Pending { origin: None });
-        // Registered before it exists, so its first `host_boot` finds a seat.
         host.register(MAIN, slot);
         host.set_shown(MAIN);
         let window = tauri::WebviewWindowBuilder::from_config(app, config)?
             .on_navigation(is_our_own)
             .build()?;
-        // Visible already, but still inside `setup` on the main thread, so this lands before
-        // the loop draws; the macOS arm builds its window hidden instead.
+        // Still inside `setup` on the main thread, so this lands before the first draw.
         show_theme(&window.as_ref().window(), theme_in(config));
         Ok(())
     }
 }
 
-/// One window, one child webview per account.
 #[cfg(target_os = "macos")]
 mod multi {
     use super::*;
     use tauri::{LogicalPosition, PhysicalSize, Position, Rect, Size};
 
-    /// A child webview for `label`, from `main`'s configuration with the label
-    /// swapped in — `from_config` takes the label from the configuration.
     fn builder(config: &WindowConfig, label: &str) -> tauri::webview::WebviewBuilder<tauri::Wry> {
         let mut seat = config.clone();
         seat.label = label.to_string();
@@ -308,11 +232,7 @@ mod multi {
             .auto_resize()
     }
 
-    /// ⚠ **Hidden at creation cannot be said**: a webview has no visible flag
-    /// (`tauri-runtime`'s `WebviewAttributes`). So the window is built hidden, the
-    /// shown account's webview is added at full size and the window shown, and
-    /// every other account's is added at zero size and hidden — so none flashes on
-    /// top of the one somebody is looking at.
+    /// A webview has no visible flag, so the rest are added at zero size and hidden, after the shown one.
     pub fn open_at_launch(
         app: &App,
         config: &WindowConfig,
@@ -352,8 +272,6 @@ mod multi {
                 Ok(webview) => {
                     let _ = webview.hide();
                 }
-                // Opened lazily by the switch that wants it; a launch is not
-                // failed over one account's webview.
                 Err(_) => host.unregister(&label),
             }
         }
@@ -363,13 +281,11 @@ mod multi {
         Ok(())
     }
 
-    /// Build a hidden webview for `slot`, and answer its label.
     fn open(app: &AppHandle, host: &Host, slot: Slot) -> Result<String, String> {
         let config = main_config(app).ok_or("tauri.conf.json declares no window labelled main")?;
         let window = app
             .get_window(MAIN)
             .ok_or("the window has already closed")?;
-        // The ink of the theme the window is in now, which the switch may have moved since launch.
         let config = inked(
             &config,
             window.theme().map(from_tauri).unwrap_or(Theme::Light),
@@ -392,8 +308,7 @@ mod multi {
         }
     }
 
-    /// Show `label` and hide every other — **hide first, then show**, so two are
-    /// never on screen at once — then give it the window's size and the keyboard.
+    /// Hide first, then show, so two are never on screen at once.
     fn present(app: &AppHandle, host: &Host, label: &str) -> Result<(), String> {
         let window = app
             .get_window(MAIN)
@@ -408,8 +323,7 @@ mod multi {
                 }
             }
         }
-        // A seat added at zero size has auto-resize ratios of zero; setting its
-        // bounds to the window's is what resets them to the whole window.
+        // A seat added at zero size has auto-resize ratios of zero until its bounds are set.
         if let Ok(size) = window.inner_size() {
             let _ = target.set_bounds(Rect {
                 position: Position::Logical(LogicalPosition::new(0.0, 0.0)),
@@ -422,21 +336,8 @@ mod multi {
         Ok(())
     }
 
-    /// Close a webview and forget its seat. Closing the caller from its own
-    /// command leaves that command's answer with nobody to receive it, which is
-    /// the point.
-    ///
-    /// ⚠ **`Webview::close` alone leaves the page running, measured.** It drops
-    /// Tauri's wrapper and wry removes the view from its superview, but something
-    /// still retains the `WKWebView`, so its page is never closed: in the first
-    /// bundled build a signed-out account's page answered its WebSocket 17 s
-    /// later, its TCP connections stayed established until the app quit, and every
-    /// Add → Cancel left one more WebContent process of about 48 MB. That is a
-    /// removed account still talking to its server, which is the one thing Sign
-    /// out promises it no longer does. So the view is told `_close` first —
-    /// WebKit's own teardown of the page, whoever holds the view — and with it the
-    /// socket closed and the process exited at once. The retainer itself was not
-    /// traced; this does not depend on finding it.
+    /// `Webview::close` alone leaves the page running and talking to its server (measured,
+    /// Q7.149), so WebKit's `_close` is sent first.
     fn close(app: &AppHandle, host: &Host, label: &str) {
         if let Some(webview) = app.get_webview(label) {
             end_page(&webview);
@@ -445,20 +346,13 @@ mod multi {
         host.unregister(label);
     }
 
-    /// Ask WebKit to close the page behind a `WKWebView`, if it answers `_close`.
-    ///
-    /// A private selector, so it is asked for rather than assumed: a WebKit that
-    /// dropped it leaves `close` as it was — the page lives until quit — rather than
-    /// crashing on an unrecognised message. Queued on the main thread ahead of the
-    /// `close` the caller sends next, which is the order the measurement used.
+    /// A private selector, so asked for rather than assumed. Queued ahead of the caller's `close`.
     fn end_page(webview: &tauri::Webview) {
         use objc2::runtime::{AnyObject, Bool};
         use objc2::{msg_send, sel};
         let _ = webview.with_webview(|platform| {
             let view = platform.inner() as *mut AnyObject;
-            // SAFETY: `inner()` is the live WKWebView on the main thread, where
-            // this closure runs; both messages are sent to it and nothing else,
-            // and `_close` is only sent after the view says it answers it.
+            // SAFETY: `inner()` is the live WKWebView on the main thread, and `_close` is sent only if it answers.
             unsafe {
                 let answers: Bool = msg_send![view, respondsToSelector: sel!(_close)];
                 if answers.as_bool() {
@@ -484,8 +378,7 @@ mod multi {
     ) -> Result<bool, String> {
         let label = label_for(app, host, &target)?;
         present(app, host, &label)?;
-        // A pending caller is an Add account being cancelled: nothing of it is
-        // worth keeping, and a webview nobody can reach is a process wasted.
+        // A pending caller is a cancelled Add account.
         if matches!(caller_slot, Slot::Pending { .. }) {
             close(app, host, caller);
         }
@@ -517,8 +410,7 @@ mod multi {
             host.move_seat(caller, fallback);
             return Ok(true);
         };
-        // A hidden caller — a legacy seat at launch finding its account already
-        // open — goes quietly and leaves the screen alone.
+        // A hidden caller (a legacy seat whose account is already open) leaves the screen alone.
         if host.shown().as_deref() == Some(caller) {
             let label = label_for(app, host, &next)?;
             present(app, host, &label)?;
@@ -549,8 +441,7 @@ mod multi {
 mod tests {
     use super::*;
 
-    /// Tauri's label alphabet is `a-zA-Z0-9-/:_`, which an account key — `#` and
-    /// `.` in every one — is not in; so a seat's label is a counter.
+    /// An account key carries `#` and `.`, outside Tauri's label alphabet, so a label is a counter.
     #[test]
     fn a_seat_label_is_one_tauri_accepts() {
         let roster = config::Roster::default();
@@ -567,8 +458,6 @@ mod tests {
         }
     }
 
-    /// A launch is built in the switch's theme, on its ink, and reads it back — and nothing
-    /// else in the configuration moves.
     #[test]
     fn a_launch_is_built_in_the_theme() {
         let declared = WindowConfig {
@@ -608,9 +497,6 @@ mod tests {
         }
     }
 
-    /// A first run is one pending seat; a computer with accounts opens every one
-    /// with the last shown on top; and a server chosen before accounts and never
-    /// signed in to opens as the sign-in it was rather than as an account.
     #[test]
     fn a_launch_opens_every_account_with_the_last_one_shown() {
         let first = plan(&config::Roster::default(), Some("https://a.example".into()));

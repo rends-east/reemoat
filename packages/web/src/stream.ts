@@ -1,6 +1,7 @@
 import type { StreamSocket } from "./e2ee";
 import type { SessionId, SessionRef } from "./ids";
 import { SOCKET_ROTATE_MARGIN_MS, describe, type MachineConnection, type Route } from "./machine";
+import { monotonicNow } from "./wake";
 import type { LaggedFrame, SessionSnapshot, StoredEvent, StreamFrame } from "./wire";
 
 // Resuming from lastAppliedSeq fills a gap exactly once: the daemon reads seq greater than since, and attaches with no await between backlog and subscribe.
@@ -50,6 +51,7 @@ export class SessionStream {
   private attempt = 0;
   private stopped = false;
   private connectStartedAt = 0;
+  private liveSince: number | null = null;
   /** Bumped on every deliberate reconnect; frames and closes from a stale generation are ignored. */
   private generation = 0;
 
@@ -80,6 +82,11 @@ export class SessionStream {
     if (this.stopped) return;
     if (this.socket !== null || this.phase === "connecting") return;
     void this.connect();
+  }
+
+  /** Live on a socket opened at or after `since`, on `monotonicNow`'s clock. */
+  liveAfter(since: number): boolean {
+    return this.phase === "live" && this.liveSince !== null && this.liveSince >= since;
   }
 
   /** Tears down first, since a slept socket is dead but unreported; a young pending connect is left alone. */
@@ -114,6 +121,8 @@ export class SessionStream {
   }
 
   private setPhase(phase: StreamPhase, error: string | null = null): void {
+    if (phase !== "live") this.liveSince = null;
+    else if (this.phase !== "live") this.liveSince = monotonicNow();
     this.phase = phase;
     this.error = error;
     this.sink.onStatus(this.ref, this.status());

@@ -1601,6 +1601,40 @@ process.stdout.write("\na run of tool calls, folded into one row\n");
     check("a folded run starts collapsed, whatever it is doing", derived, "false");
 
     check("and liveness still inks the row it no longer opens", /node\.live/.test(footSrc), true);
+
+    // Q3.702: the call a wedged turn left pending stopped with it; a call after the end is still news.
+    const ended = (reason: string, after: unknown[] = []) => {
+      seq = 0;
+      return buildTail(
+        [
+          toolCall("a", "grep", "other", "failed"),
+          toolCall("b", "ls", "other", "pending"),
+          toolCall("c", "bash", "other", "in_progress"),
+          ev({ type: "turn_end", stopReason: reason, usage: null }),
+          ...after,
+        ] as never[],
+        [],
+      );
+    };
+    const cancelled = ended("cancelled");
+    check("a run its turn outlived is not live", [group(cancelled.rows).live, group(cancelled.rows).failed], [false, 1]);
+    check(
+      "and each call it left unfinished says its turn ended, the failed one keeping its own word",
+      group(cancelled.rows).children.map((node) => (node.kind === "tool" ? [node.status, node.turnEnded] : null)),
+      [["failed", false], ["pending", true], ["in_progress", true]],
+    );
+    check("an ordinary end, silent in the transcript, ends it the same way", group(ended("end_turn").rows).live, false);
+    const later = ended("cancelled", [toolCall("d", "cat", "other", "in_progress")]);
+    check(
+      "a call after the end is the only one still running",
+      later.rows.flatMap((row) => (row.kind === "tool" ? [row.turnEnded] : row.kind === "group" ? row.children.map((c) => c.kind === "tool" && c.turnEnded) : [])),
+      [false, true, true, false],
+    );
+    check(
+      "and the row draws the stop rather than a spinner",
+      /stopped\s*\?\s*Minus/.test(footSrc) && /status === "in_progress" && !stopped/.test(footSrc),
+      true,
+    );
   }
 
   {

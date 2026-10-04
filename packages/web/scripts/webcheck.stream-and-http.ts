@@ -110,6 +110,89 @@ process.stdout.write("\nreplay across a reconnect\n");
   stream.stop();
 }
 
+// Q3.703: a wake keeps a stream that went live after it, or each pass of one wake redials it and the pill comes back.
+process.stdout.write("\na stream says when it went live, so a wake keeps a fresh one\n");
+{
+  attaches.length = 0;
+  const rec = recorder();
+  const { monotonicNow } = await import("../src/wake.js");
+  const stream = newStream(rec.sink, 0);
+  const before = monotonicNow();
+  stream.start();
+  const first = await nextAttach(1);
+  check("not live before its hello", stream.liveAfter(before), false);
+  hello(first, 0);
+  await sleep(40);
+  check("live after it, on a socket newer than the moment before the dial", stream.liveAfter(before), true);
+  check("and not for a wake that came after it went live", stream.liveAfter(monotonicNow() + 1), false);
+  const goneLive = monotonicNow();
+  first.terminate();
+  await sleep(30);
+  check("a dropped socket is not live after anything", stream.liveAfter(before), false);
+  const second = await nextAttach(2);
+  hello(second, 0);
+  await sleep(40);
+  check("and the new one counts from its own hello", stream.liveAfter(goneLive), true);
+  stream.stop();
+
+  const store = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+  check(
+    "resume drops only a route not trusted since the absence, and redials only a stream not live since it",
+    [
+      /if \(!trusted\(connection\.routeSince\(\), since\)\) connection\.forgetRoute\(\);/.test(store),
+      /stream\.ref\.machineId === id && !stream\.liveAfter\(since\)\) stream\.reconnect\(\);/.test(store),
+    ],
+    [true, true],
+  );
+  check(
+    "every pass counts from the latest absence, raised even while a pass runs, never from a pass's own start",
+    [
+      /this\.suspectSince = raiseSuspicion\(this\.suspectSince, suspectSince\);\s*return this\.startResume\(reason\);/.test(store),
+      /this\.runResume\(reason, this\.suspectSince\)/.test(store),
+      /void this\.startResume\("coalesced"\)/.test(store),
+      store.includes("lastResumeStartedAt"),
+    ],
+    [true, true, true, false],
+  );
+}
+
+// Q3.703, on fake clocks: what one wake keeps, and what a second sleep during its pass does not.
+process.stdout.write("\nwhat a wake suspects: the start of the latest absence, not the moment it was noticed\n");
+{
+  const { raiseSuspicion, trusted, WakeClock, WAKE_AFTER_HIDDEN_MS } = await import("../src/wake.js");
+  check("a route proved at the absence's start or after is trusted, one before it or none is not", [trusted(40, 40), trusted(39, 40), trusted(null, 0)], [true, false, false]);
+  check("suspicion only rises, and a report of none leaves it", [raiseSuspicion(40, 10), raiseSuspicion(40, 90), raiseSuspicion(40, null)], [40, 90, 40]);
+
+  // Wall clock in seconds-scale ms, monotonic in its own units: the answer must be the monotonic one.
+  const clock = new WakeClock(1_000, 10, true);
+  check("a tick on time reports no absence", clock.tick(2_000, 11), null);
+  const slept = clock.tick(600_000, 12);
+  check("a tick past the threshold reports when the sleep began: the previous tick, on the monotonic clock", slept, 11);
+  check("a wall clock set back reports one too", new WakeClock(5_000, 50, true).tick(4_000, 51), 50);
+
+  // The bug: a route the first wake rebuilt, then a second sleep while that wake's pass still ran.
+  let since = raiseSuspicion(0, slept);
+  const rebuilt = 20;
+  check("the first wake keeps what its own pass rebuilt", trusted(rebuilt, since), true);
+  clock.tick(601_000, 21);
+  check("one wake's duplicate events, with no new sleep, move nothing", [clock.tick(602_000, 22), raiseSuspicion(since, null)], [null, since]);
+  const again = clock.tick(900_000, 30);
+  since = raiseSuspicion(since, again);
+  check("a second sleep during the pass reports its own start, and the queued pass no longer trusts the rebuilt route", [again, trusted(rebuilt, since)], [22, false]);
+
+  const view = new WakeClock(0, 0, true);
+  view.hide(1_000, 100);
+  check("a tab switch is no wake", view.show(1_000 + WAKE_AFTER_HIDDEN_MS - 1, 200).wake, false);
+  view.hide(50_000, 300);
+  check("a long absence is one, counted from the hide", view.show(50_000 + WAKE_AFTER_HIDDEN_MS, 400), { wake: true, since: 300 });
+
+  const net = new WakeClock(0, 0, true);
+  check("online with no offline seen suspects nothing: it is the duplicate a wake fires", net.online(), null);
+  net.offline(500);
+  net.offline(600);
+  check("online after offline suspects from the first offline, once", [net.online(), net.online()], [500, null]);
+}
+
 process.stdout.write("\nwhich answered request means the machine is gone\n");
 {
   const { ApiError, meansMachineGone, meansRestartRefused } = await import("../src/http.js");

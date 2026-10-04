@@ -37,6 +37,7 @@ import { mergeOptimistic } from "./sessionOrder";
 import { provideSignInAuth } from "./signInAuth";
 import { confirmDue } from "./slot";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
+import { monotonicNow, raiseSuspicion, trusted } from "./wake";
 import {
   countsAsLive,
   hasLiveAgent,
@@ -504,6 +505,10 @@ class AppStore implements StreamSink {
   });
   private resumeInFlight: Promise<void> | null = null;
   private resumeQueued = false;
+  /** Monotonic: what was proved before it may be a slept socket. Only ever raised (`raiseSuspicion`). */
+  private suspectSince = 0;
+  private listingRetry: Promise<void> | null = null;
+  private nextListingAt = 0;
   /** Taken by the next resume to start, so a resume already listing machines never spends it on the listing before the change. */
   private linksForced = false;
   private epoch = 0;
@@ -748,7 +753,7 @@ class AppStore implements StreamSink {
       const connection = id === null ? undefined : this.connections.get(id);
       if (id !== null && connection !== undefined) {
         this.nextProbeAt.delete(id);
-        await this.resumeMachine(connection, this.epoch);
+        await this.resumeMachine(connection, this.epoch, monotonicNow());
       }
     } finally {
       this.patch({ localDaemonStarting: false });
@@ -986,26 +991,35 @@ class AppStore implements StreamSink {
     this.patch({ pickingServer: false });
   }
 
-  /** Machines run independently: an unreachable one never delays the rest. */
-  async resume(reason: string): Promise<void> {
+  /**
+   * Machines run independently: an unreachable one never delays the rest. `suspectSince` is when the absence a socket may have
+   * died in began; null reports none, and a caller with no wake to name suspects everything (Q3.703).
+   */
+  async resume(reason: string, suspectSince: number | null = monotonicNow()): Promise<void> {
+    // Raised even when joining a pass: the one queued behind it must redial what predates a sleep that began meanwhile.
+    this.suspectSince = raiseSuspicion(this.suspectSince, suspectSince);
+    return this.startResume(reason);
+  }
+
+  private startResume(reason: string): Promise<void> {
     if (this.resumeInFlight !== null) {
       // Coalesce: one unlock fires several wake events.
       this.resumeQueued = true;
       return this.resumeInFlight;
     }
 
-    const run = this.runResume(reason).finally(() => {
+    const run = this.runResume(reason, this.suspectSince).finally(() => {
       this.resumeInFlight = null;
       if (this.resumeQueued) {
         this.resumeQueued = false;
-        void this.resume("coalesced");
+        void this.startResume("coalesced");
       }
     });
     this.resumeInFlight = run;
     return run;
   }
 
-  private async runResume(reason: string): Promise<void> {
+  private async runResume(reason: string, since: number): Promise<void> {
     const epoch = ++this.epoch;
     const forceLinks = this.linksForced;
     this.linksForced = false;
@@ -1013,41 +1027,10 @@ class AppStore implements StreamSink {
 
     await this.refreshLocalMachine();
 
-    if (cp.currentCredential() !== null && reason !== "bootstrap") {
-      try {
-        const machines = await cp.machines();
-        if (epoch === this.epoch) {
-          for (const record of machines) {
-            const id = machineId(record.id);
-            const existing = this.connections.get(id);
-            if (existing) existing.update(record);
-            else {
-              const created = new MachineConnection(record, () => this.emit());
-              this.connections.set(id, created);
-              this.daemons.set(id, new DaemonClient(created));
-            }
-          }
-          for (const id of [...this.connections.keys()]) {
-            if (!machines.some((m) => m.id === id)) this.dropMachine(id);
-          }
-          this.weighLocalMachine();
-          // A successful listing leaves loading even with no machines; only ever upwards.
-          const promote = this.snapshot.phase === "loading";
-          const firstListing = !this.registryKnown;
-          this.registryKnown = true;
-          this.patch(promote ? { cpError: null, phase: "ready" } : { cpError: null });
-          if (promote || this.snapshot.me === null) void this.refreshMe();
-          if (firstListing) void this.beginSetUp();
-          // Only while unknown: settings screens re-read it through refreshConfig.
-          if (this.snapshot.config === null) void this.loadConfig();
-        }
-      } catch (error) {
-        this.patch({ cpError: describe(error) });
-      }
-    }
+    if (cp.currentCredential() !== null && reason !== "bootstrap") await this.listMachines(epoch);
 
     await Promise.allSettled(
-      [...this.connections.values()].map((connection) => this.resumeMachine(connection, epoch)),
+      [...this.connections.values()].map((connection) => this.resumeMachine(connection, epoch, since)),
     );
 
     if (epoch === this.epoch) {
@@ -1056,6 +1039,41 @@ class AppStore implements StreamSink {
       const scope = this.linkScope();
       if (scope !== null) void this.links.syncAll(scope, this.linkCandidates(), forceLinks);
       else if (forceLinks) this.linksForced = true;
+    }
+  }
+
+  /** The registry read; its failure is the pill's `cpError`, which only a later success here clears. */
+  private async listMachines(epoch: number): Promise<void> {
+    try {
+      const machines = await cp.machines();
+      if (epoch === this.epoch) {
+        for (const record of machines) {
+          const id = machineId(record.id);
+          const existing = this.connections.get(id);
+          if (existing) existing.update(record);
+          else {
+            const created = new MachineConnection(record, () => this.emit());
+            this.connections.set(id, created);
+            this.daemons.set(id, new DaemonClient(created));
+          }
+        }
+        for (const id of [...this.connections.keys()]) {
+          if (!machines.some((m) => m.id === id)) this.dropMachine(id);
+        }
+        this.weighLocalMachine();
+        // A successful listing leaves loading even with no machines; only ever upwards.
+        const promote = this.snapshot.phase === "loading";
+        const firstListing = !this.registryKnown;
+        this.registryKnown = true;
+        this.patch(promote ? { cpError: null, phase: "ready" } : { cpError: null });
+        if (promote || this.snapshot.me === null) void this.refreshMe();
+        if (firstListing) void this.beginSetUp();
+        // Only while unknown: settings screens re-read it through refreshConfig.
+        if (this.snapshot.config === null) void this.loadConfig();
+      }
+    } catch (error) {
+      // Fenced like the success: a tick's late failure must not undo a newer pass's listing.
+      if (epoch === this.epoch) this.patch({ cpError: describe(error) });
     }
   }
 
@@ -1094,7 +1112,7 @@ class AppStore implements StreamSink {
     await this.machinesChanged("permissions-changed");
   }
 
-  private async resumeMachine(connection: MachineConnection, epoch: number): Promise<void> {
+  private async resumeMachine(connection: MachineConnection, epoch: number, since: number): Promise<void> {
     const id = connection.id;
 
     try {
@@ -1104,7 +1122,8 @@ class AppStore implements StreamSink {
     }
     if (epoch !== this.epoch) return;
 
-    connection.forgetRoute();
+    // A route or stream made since the absence began is the wake's answer; redialling it drops a healthy socket and draws "Connecting…" again (Q3.703).
+    if (!trusted(connection.routeSince(), since)) connection.forgetRoute();
     const route = await connection.resolveRoute();
     if (epoch !== this.epoch) return;
     if (route === null) {
@@ -1116,7 +1135,7 @@ class AppStore implements StreamSink {
     if (epoch !== this.epoch) return;
 
     for (const stream of this.streams.values()) {
-      if (stream.ref.machineId === id) stream.reconnect();
+      if (stream.ref.machineId === id && !stream.liveAfter(since)) stream.reconnect();
     }
   }
 
@@ -1140,6 +1159,18 @@ class AppStore implements StreamSink {
 
   private async tick(): Promise<void> {
     const epoch = this.epoch;
+
+    // A listing a wake tried before the network was back would otherwise hold "Connecting…" until the next wake (Q3.703).
+    // Not awaited, and at the offline probe's pace: reachable machines keep their poll through a control-plane outage.
+    if (this.snapshot.cpError !== null && this.connections.size > 0 && cp.currentCredential() !== null) {
+      const now = Date.now();
+      if (this.listingRetry === null && now >= this.nextListingAt) {
+        this.nextListingAt = now + OFFLINE_RETRY_MS;
+        this.listingRetry = this.listMachines(epoch).finally(() => {
+          this.listingRetry = null;
+        });
+      }
+    }
 
     // With no machine known, re-list the registry: startup outage, or a first machine added by its installer.
     if (this.connections.size === 0) {

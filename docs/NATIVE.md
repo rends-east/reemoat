@@ -335,6 +335,21 @@ Three consequences, each stated rather than worked around:
    `APPLE_SIGNING_IDENTITY=- pnpm native:build` has the bundler seal it ad-hoc,
    through the same code path a certificate takes, and that build verifies.
 
+**Android, measured on the built artifacts** (the rule in `native-packaging.md` keeps only
+what follows from each):
+
+- 0.10.1's release APK, at `minSdk` 24, carried no JAR signature — no `MANIFEST.MF`, `.SF`
+  or `.RSA` in `META-INF` — and a signing block of v2, AGP's dependency metadata and verity
+  padding. Otherwise on spec: `targetSdk` 36, native libraries uncompressed and 16 KB-aligned
+  under `extractNativeLibs="false"`, no v3 block. It installed on a Pixel (Android 16) and
+  over `adb install` on a OnePlus 13; that phone's own OxygenOS installer refused it.
+- `cargo tree --target aarch64-linux-android` carries no `openssl-sys`: `reqwest` 0.13 resolves
+  to `rustls` with `rustls-platform-verifier`.
+- The `.dynsym` of `libreemoat_native_lib.so` exports the keyring store crate's own
+  `initializeNdkContext` beside ours and no `JNI_OnLoad`; the APK's `classes.dex` holds no class
+  that calls the former. The two manifest providers (`FileProvider`, `lifecycle-process`'s
+  `InitializationProvider`) start before any activity and load no `.so`.
+
 **And three things a `.dmg` needs that a `.app` does not.** `bundle.targets` is
 `["app"]` alone, because Tauri's `bundle_dmg.sh` drives **Finder over AppleScript**
 to lay the disk image window out, and from a non-interactive shell that fails —

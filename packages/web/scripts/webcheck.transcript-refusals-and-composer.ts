@@ -611,12 +611,34 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "and a Stop pressed before the daemon answered waits for that answer rather than finding no turn",
     [
       /const landing = sendsInFlight\.get\(key\);/.test(composerSrc),
-      /void \(landing \?\? Promise\.resolve\(\)\)/.test(composerSrc),
+      /const stop: Promise<void> = \(landing \?\? Promise\.resolve\(\)\)/.test(composerSrc),
       /if \(landing !== undefined && \(now === undefined \|\| !canCancelTurn\(now\)\)\) return;/.test(composerSrc),
       /sendsInFlight\.set\(key, flight\);/.test(composerSrc),
       /if \(sendsInFlight\.get\(key\) === flight\) sendsInFlight\.delete\(key\);/.test(composerSrc),
     ],
     [true, true, true, true, true],
+  );
+  // Q3.701: the mirror. A message sent after Stop goes after the stop, or it lands above `cancelled` and in a wedged agent's queue.
+  check(
+    "and a message sent after Stop waits for the stop and for the daemon to say the cancel landed",
+    [
+      /stopsInFlight\.set\(key, stop\);/.test(composerSrc),
+      /if \(stopsInFlight\.get\(key\) === stop\) stopsInFlight\.delete\(key\);/.test(composerSrc),
+      /\(stopsInFlight\.get\(key\) \?\? Promise\.resolve\(\)\)\.then\(/.test(composerSrc),
+      /return now === undefined \|\| !cancelInFlight\(now\);/.test(composerSrc),
+      /: afterStop\(key\);/.test(composerSrc),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "held no longer than the daemon's own bound on a cancel nobody honours, plus a start",
+    (() => {
+      const hold = Number(/export const STOP_HOLD_MS = ([\d_]+);/.exec(composerSrc)?.[1]?.replace(/_/g, "") ?? NaN);
+      const daemonSrc = readFileSync(new URL("../../../src/registry.ts", import.meta.url), "utf8");
+      const wedged = Number(/export const WEDGED_CANCEL_MS = ([\d_]+);/.exec(daemonSrc)?.[1]?.replace(/_/g, "") ?? NaN);
+      return hold > wedged && hold <= wedged + 10_000;
+    })(),
+    true,
   );
   check(
     "and the box says the agent is working over the same wait",

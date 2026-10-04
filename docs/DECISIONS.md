@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 112 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 447 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 68 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 113 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 453 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 81 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1125** | |
+| | | **1133** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1125 rather than the 562
+dividers. So the count is over **both** depths, and it says 1133 rather than the 564
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9391,8 +9391,12 @@ path read from the wrong folder sent the wrong file silently: every answer names
 the path that was read — in the structured result too, since claude shows its model
 that half alone (measured on 2.1.288) — and the tool says which folder a relative
 path is taken from. Only ASCII whitespace is trimmed, a no-break space being part of
-a real name. A short write is finished. `/proc/<daemon pid>` is refused by name on
-Linux, its `environ` holding the machine's token. Old rate charges are swept.
+a real name. A short write is finished. All of `/proc` is refused on Linux: a
+process's `environ` holds the machine's token, and the daemon's own pid was not the
+only way to it — every thread is `/proc/<tid>` by name though never listed, and the
+`tsx` parent carries the same environment (review, 2026-10-04). Decided twice, on the
+resolved path and on the opened descriptor's device, since a folder on the way can be
+swapped for a link after the probe. Old rate charges are swept.
 
 **What a permission answer trusted.** grok's `variant: "UseTool"` was believed
 wherever it appeared, including the first announcement — whose `rawInput` is the
@@ -9453,6 +9457,48 @@ Covers every wake: a message to a parked session, a daemon restart's pass and
 Resume. `daemoncheck` samples the snapshot at the moment the fresh agent, still on
 its default, receives the replay; without the hold it read the default, and the log
 held three events where it now holds one.
+
+**Status.** Current.
+
+### Q2.255 — A cancel the agent never honours
+
+**Reported 2026-10-03 by the owner** on session lyra, measured on its log and processes.
+claude CLI 2.1.288 stopped mid-response at 22:16:19: a Bash `tool_call` complete, a
+`ToolSearch` begun, neither run. The CLI and adapter were alive at 0% CPU with no
+children, every socket to the API `CLOSED`, and its own transcript ended before that
+response. Stop sent `session/cancel`; the adapter's floor (`forceCancelGraceMs`, 30 s)
+resolved the prompt `cancelled` and logged *"the underlying query may still be wedged"*.
+A message sent during those 30 s was queued, and when the turn ended the daemon handed it
+to the same CLI, which wedged that turn too. Even SIGTERM left both processes standing;
+SIGKILL ended them. Only the 3 h silence bound (Q2.231) would have ended either turn.
+
+**Decision.** The first cancel of a turn arms `WEDGED_CANCEL_MS` (15 s, under claude's
+floor). If the turn is still open then, the daemon ends it in the log as `cancelled`
+(`Session.abandonTurn("cancelled")`, through the pump, so it is written once) and
+replaces the process with `restartAgent`: a stop as `config_changed`, which keeps the
+queue and kills past the dispose grace, then a resume of the same conversation. The
+queue is handed to the new agent, never the old one. A turn ending sooner disarms it; a
+repeated Stop does not push it out.
+
+**Why the daemon and not the adapter.** We patch claude's adapter (Q6.121), but a wedge
+is not claude's alone. The daemon's own clock covers every harness, and replacing a
+process is what `onAgentUnusable` already does for a rejected prompt (Q7.99). An agent
+that takes longer than 15 s to honour a cancel is replaced unnecessarily, at the cost of
+a resume; claude's interrupt takes well under the 1.5 s `CANCEL_SETTLE_MS`.
+
+**Two holds, from the review (2026-10-04).** A session reporting live background work is
+not replaced: the restart kills the process group, and with it a dev server the agent
+left running, so the turn stays open as before and End session is the escalation (the
+owner's call). And a person's stop that lands while the replacement is stopping the old
+agent joined that stop, whose resume then brought the agent back with the queue: `stop`
+records the reason (`stopDuringRestart`), and `restartAgent` records it as the exit and
+resumes nothing. Both are older than this entry for ultracode and credential restarts;
+this made them reachable seconds after a Stop.
+
+**Not changed.** A silent turn (Q2.231) still only abandons, so the next message after it
+may meet the same agent; a Stop then replaces it. `daemoncheck` drives a stub that never
+answers a cancel, with a message sent while the cancel is pending: one `turn_end`, a
+second launch that resumes, and the message delivered to it.
 
 **Status.** Current.
 
@@ -28634,6 +28680,151 @@ which is true: nothing is drawn as stopped before the daemon says so (Q3.222).
 
 **Status.** Current. Amends Q3.601 and Q3.654.
 
+#### Q3.701 — A message sent after Stop goes after the stop
+
+**Reported 2026-10-03 by the owner**: *"I pressed cancel first, then sent the message"*,
+and the transcript drew the message, *Waiting for the agent to finish*, then
+`cancelled`, then a turn that hung (Q2.255). The daemon was right about the order it
+saw: the cancel had not landed, so the message was queued into the turn being torn down
+and logged at acceptance, above that turn's end.
+
+**Decision.** The composer holds a message sent while a Stop is unanswered
+(`stopsInFlight`, the mirror of `sendsInFlight`) or while the snapshot still says a
+cancel is pending (`cancelInFlight`). The echo is drawn at once, at the foot, so nothing
+looks lost; the prompt is sent when the cancel has landed, as a new turn, so it is
+logged after `cancelled`. The hold ends at `STOP_HOLD_MS` (20 s, past
+`WEDGED_CANCEL_MS` plus a start) whatever the daemon says, so an older daemon queues it
+as before. The daemon keeps queueing a message that arrives mid-cancel from anywhere
+else, a peer or a plugin.
+
+**Status.** Current.
+
+#### Q3.702 — A call its turn outlived is not running
+
+**Question.** The run row from Q2.255's session read `Ran 4 commands, used ToolSearch ·
+1 failed ○` after the turn was cancelled: the two calls the wedged CLI never ran kept
+`pending` and `in_progress`, and `stillRunning` read the status alone.
+
+**Decision.** `buildTail` marks a top-level call `turnEnded` when it never finished and a
+turn end or agent start comes after it. `stillRunning` is false for it, so a run holding
+it is not live, and `ToolCall` draws `Minus` in `text-muted`, not a spinner. A failed
+call keeps its own word. Top level only: a detached subagent's steps may outlive the
+turn (`detachedEnd`'s rule 2), and a backgrounded call is the snapshot's to answer.
+
+**Status.** Current.
+
+#### Q3.703 — Waking from sleep: what kept "Connecting…" up
+
+**Reported 2026-10-04 by the owner**: after the laptop wakes, or on coming back to the
+app, connecting is slow, and the pill said *Connecting…* while the agent was visibly
+working. Read off the code (the relay logs carry no timestamps), three causes:
+
+- **A failed listing stuck.** The watchdog fires about a second after wake, often before
+  the network is back, and `cp.machines()` fails. `cpError` is the pill's first cause, and
+  only a successful listing in `runResume` cleared it; `tick` re-lists only with no
+  machine known. So one failure at wake held the pill until the next wake, over live
+  streams.
+- **A second pass redialled what the first rebuilt.** One wake fires several triggers
+  (`slept`, then `online` when the network associates); the second runs as a queued
+  `coalesced` pass and dropped every route and stream again.
+- **One pass dialled a live stream twice.** The dispose makes each stream retry and come
+  back live within a second, and the pass's last step then `reconnect()`ed it.
+
+**Decision.** `tick` re-reads the listing while `cpError` is set (`listMachines`,
+single-flight), at most every `OFFLINE_RETRY_MS` and without waiting for it: awaited at
+the poll's own 4 s, a control-plane outage held every reachable machine's session poll
+behind a 10 s timeout and had every open tab ask the control plane every 4 s (review,
+2026-10-04). A failed listing writes `cpError` only on its own epoch. `resumeMachine` drops
+a route only if it was proved before the absence began (`MachineConnection.routeSince`)
+and redials a stream only if it has not gone live since (`SessionStream.liveAfter`).
+
+**When the absence began, not when it was noticed (review, 2026-10-04).** The first cut
+counted a queued pass from the previous pass's start, so a second sleep while that pass
+still ran left its rebuilt, now dead, sockets trusted: the stuck pill again. Now
+`resume.ts` reports the start of each absence through `WakeClock` — the watchdog's tick
+before the gap, the moment the tab hid, the first `offline` — and the store keeps the
+latest (`suspectSince`, raised even when the call only joins a pass in flight). One
+wake's duplicate events report the same start and redial nothing that wake rebuilt; a
+sleep during the pass moves it, and the queued pass redials. An `online` with no
+`offline` seen reports nothing, being that duplicate. Other callers report "now", as
+before this entry. Stamps are `performance.now()` (`monotonicNow`), so a wall clock set
+back after sleep cannot make an old socket newer than the sleep; the watchdog still
+detects on the wall clock, the one that moves across a sleep.
+
+**Not changed, written down.** The browser leg of a stream has no liveness check: the
+daemon's ping is on its loopback leg and the relay splices, so a socket that died without
+a close is found only by a wake or a rotation. A pooled channel is reused on its token's
+margin alone. The listing and the mint still run before the probes. The native host's
+`reqwest` client sends no HTTP/2 keepalive, and its idle clock does not advance during
+sleep, so a control-plane call right after wake may ride a dead connection. Each wants a
+measurement on the laptop before code.
+
+**Status.** Current.
+
+#### Q3.704 — A table crushed its short columns to a letter a line
+
+**Reported 2026-10-04 by the owner**, two tables in a reply: a `ГБ` column drawn `Г`/`Б`,
+`≈ 61` as three lines, `Вариант` and `Navidrome` a letter or two a line.
+
+**Cause.** Every markdown body is `wrap-anywhere` (`overflow-wrap: anywhere;
+word-break: break-word`), and cells inherit it. Both values let a line break anywhere
+*for min-content*, so each cell's min-content was one character. The table is `w-full`;
+auto layout gives each column its min-content plus a share of what is left in proportion
+to max minus min, so beside a column of long prose a short column got almost none.
+
+**Decision.** `.wrap-anywhere td, .wrap-anywhere th` reset both, to `overflow-wrap:
+break-word` and `word-break: normal`: a cell still breaks a word that does not fit, but
+its min-content is its longest word. Measured in a `WKWebView` (swiftc snapshot of the
+two tables): every short column whole, prose wrapping at spaces. The cost: a token longer
+than the column, a bare URL, now widens the table, and the wrapper's `overflow-x-auto`
+scrolls it rather than breaking the token, as GitHub's tables do.
+
+**Status.** Current. Followed by Q3.705.
+
+#### Q3.705 — A short column still wrapped at its space
+
+**Reported 2026-10-04 by the owner** on build 0237: no letter-a-line any more, but every
+`≈ 61` in the `ГБ` column was two lines. Q3.704 made a column's minimum its longest word,
+and auto layout gives a column little beyond its minimum when another column holds prose,
+so `≈` and `61` split at the space between them.
+
+**Decision.** `remarkShortColumns` (`ui/mdtable.ts`, beside `mdlist.ts` for the same
+offline-testing reason) marks every cell of a column whose longest cell, header
+included, is at most `SHORT_CELL_CHARS` (12) characters, counted as code points over text,
+code and emphasis alike; `Markdown.tsx`'s `th` and `td` draw a marked cell
+`whitespace-nowrap`. A column of numbers, units, short names or dates keeps each value on
+one line; a column with any longer cell wraps as before. 12 rather than more so that a few
+such columns still fit a phone; a table that does not scrolls (Q3.704).
+
+**And a regression it nearly shipped.** Passing the class through a template literal put
+`align-top` against `${…}`, which Tailwind's scan does not read as a class: the build lost
+`.align-top` and every cell centred vertically. Caught on the WebKit snapshot, not by a
+check. `webcheck` now sweeps every `className` template in `packages/web/src` for a class
+against a substitution (with a floor), and `Markdown.tsx`'s ordered list, which had the
+same shape but a class used elsewhere, was straightened too.
+
+**Status.** Current.
+
+#### Q3.706 — A softer bubble for a person's message
+
+**Asked 2026-10-04 by the owner**, with Claude Code's bubble as the reference. Measured off
+the two screenshots: ours was `raised` (`#eae8e4`, 1.22:1 from `surface`) with 20px corners
+and a 10px tail; Claude Code's is `#f0f0ef` on `#fcfcfb`, 1.11:1, with even corners about
+7px on a bubble the same height as ours, and the same padding.
+
+**Decision.** A token of its own, `bubble`: `#f2f1ee` (1.13:1 from `surface`) and
+`#23211e` in the dark (1.13:1 from its `surface`), a step off the page and below `raised`,
+which `webcheck.theme.ts` holds in both palettes with `fg` readable on it. Spent in
+`Bubble.tsx` alone. Corners `rounded-md` (10px), even, with no tail: the nearest step of
+the radius scale. Not `chip` (`#f3f1ed`), whose three tokens are held to the markdown
+(Q3.691).
+
+**What it amends.** Q3.682 drew an `@name` pill in `edge` because `raised` was the bubble;
+`edge` still reads on `bubble`. Q7.72's "the one you wrote louder than the one the agent
+ran" still holds: `bubble` sits above a tool card's `ink`.
+
+**Status.** Current.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -31357,6 +31548,35 @@ there; from the daemon's own launchd domain it is not.
 **How it is checked offline.** `deploycheck` puts a fake `cursor-agent` on every real
 run's PATH, since an absent cursor downloads its installer, and asserts the absent
 path only under `--check`, which fetches nothing.
+
+**Status.** Current.
+
+### Q4.130 — How long may a rule file be, and what is it for?
+
+**Rule.** A `.claude/rules/*.md` file holds at most **15,000 characters** (the per-rule
+ceiling in `scripts/docscheck.ts`, down from 34,000). It states each rule, the
+symbol that enforces it and the Q-citation; the measurement, the alternatives and the
+history stay here. A rule at the wall gets cut, not the ceiling raised.
+
+**Why.** Claude Code loads every rule whose `paths:` match a file the moment that file is
+read, and again after every `/compact`. Measured from this repository's session transcripts
+on 2026-10-03, a large task (440–660K tokens) spent 7–15% of its context on rules and about
+5% on code comments: the 2026-09-24 comment cut (d7cda6a) had held at 18–19%, but it
+touched neither the rules nor `packages/native`. One read of `packages/web/src/wire.ts`
+pulled 142K characters of rules, `src/session.ts` 117K, the average source file 35K; 45
+rules held 896K characters, eight of them at the old ceiling, which had been raised by
+small steps and worked as a target.
+
+**What changed.** Every rule rewritten to the statement: 896K → 462K characters, the largest
+14,982. Per read: `wire.ts` 67K, `session.ts` 59K, the average source file 18K. Duplicates
+between rules that load together were kept in the most specific one. `packages/native`'s
+comments went from 367K characters (62%) to 55K (19%), the code proven identical by
+stripping comments from both versions. Measurements that had lived only in
+`native-packaging.md` moved to `docs/NATIVE.md`.
+
+**The rest of the cost is not in the repository.** The same transcripts put 28–51% of a
+task in the model's own retained reasoning (about 1.6× per step after the move from Opus 5
+to Opus 5.5 on 2026-09-22) and 25–33% in reading code piecemeal in the main context.
 
 **Status.** Current.
 

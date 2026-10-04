@@ -1,54 +1,54 @@
 import { store } from "./store";
+import { monotonicNow, raiseSuspicion, WakeClock } from "./wake";
 
 // Detection only: every trigger funnels into `store.resume`, coalesced. The watchdog is the only one that fires for a locked phone.
 
-const SUSPEND_THRESHOLD_MS = 5_000;
 const WATCHDOG_INTERVAL_MS = 1_000;
 
 const COALESCE_MS = 250;
 
-/** Shorter absences are tab switches and get one poll; must stay under the token refresh margin. */
-const WAKE_AFTER_HIDDEN_MS = 20_000;
-
 export function installWakeDetection(): () => void {
   let pending: ReturnType<typeof setTimeout> | null = null;
-  let lastTick = Date.now();
-  let hiddenAt: number | null = document.visibilityState === "visible" ? null : Date.now();
+  // The latest absence the events in one coalescing window reported; null, none that may have killed a socket.
+  let pendingSince: number | null = null;
+  const clock = new WakeClock(Date.now(), monotonicNow(), document.visibilityState === "visible");
 
-  const wake = (reason: string): void => {
+  const wake = (reason: string, since: number | null): void => {
+    pendingSince = pendingSince === null ? since : raiseSuspicion(pendingSince, since);
     if (pending !== null) clearTimeout(pending);
     pending = setTimeout(() => {
       pending = null;
-      void store.resume(reason);
+      const reported = pendingSince;
+      pendingSince = null;
+      void store.resume(reason, reported);
     }, COALESCE_MS);
   };
 
   const onVisibility = (): void => {
     if (document.visibilityState !== "visible") {
-      hiddenAt = Date.now();
+      clock.hide(Date.now(), monotonicNow());
       return;
     }
-    const away = hiddenAt === null ? Infinity : Date.now() - hiddenAt;
-    hiddenAt = null;
-    if (away >= WAKE_AFTER_HIDDEN_MS) wake("visible");
+    const back = clock.show(Date.now(), monotonicNow());
+    if (back.wake) wake("visible", back.since);
     else void store.poll();
   };
 
   const onPageShow = (event: PageTransitionEvent): void => {
-    if (event.persisted) wake("bfcache");
+    if (event.persisted) wake("bfcache", monotonicNow());
   };
 
-  const onOnline = (): void => wake("online");
+  const onOffline = (): void => clock.offline(monotonicNow());
+  const onOnline = (): void => wake("online", clock.online());
 
   const watchdog = setInterval(() => {
-    const now = Date.now();
-    const drift = now - lastTick;
-    lastTick = now;
-    if (drift > SUSPEND_THRESHOLD_MS || drift < 0) wake("slept");
+    const slept = clock.tick(Date.now(), monotonicNow());
+    if (slept !== null) wake("slept", slept);
   }, WATCHDOG_INTERVAL_MS);
 
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("pageshow", onPageShow);
+  window.addEventListener("offline", onOffline);
   window.addEventListener("online", onOnline);
 
   return () => {
@@ -56,6 +56,7 @@ export function installWakeDetection(): () => void {
     clearInterval(watchdog);
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("pageshow", onPageShow);
+    window.removeEventListener("offline", onOffline);
     window.removeEventListener("online", onOnline);
   };
 }

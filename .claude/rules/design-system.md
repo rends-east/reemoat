@@ -8,14 +8,10 @@ paths:
 
 # One control per question
 
-The web client has a design system, and it is two files of primitives rather than a
-library (Q3.683). `ui/bits.tsx` holds what the drivers already read there — `Button`,
-`IconButton`, `TwoStep`, `Dropdown`, `Menu` and the class constants. `ui/kit/` holds
-the families added since. **Before drawing a control, find the primitive that answers
-the question; if none does, add one to the kit rather than a local component.** The
-owner's brief, 2026-09-28, was that too many elements were one-offs, and three
-inventories had counted eight minimum heights and three menu implementations to prove
-it.
+Two files of primitives, not a library (Q3.683): `ui/bits.tsx` (`Button`, `IconButton`,
+`TwoStep`, `Dropdown`, `Menu`, the class constants) and `ui/kit/` (the families since).
+**Find the primitive that answers the question; if none does, add one to the kit, never a
+local component.**
 
 | The question | The control |
 |---|---|
@@ -31,98 +27,83 @@ it.
 
 ## One height
 
-`CONTROL` is `FIELD`'s height — `min-h-9`, reaching `min-h-11` under a finger — and
-every dropdown trigger and popover row spends it. Primary buttons and rows stay
-`min-h-11`. **Everything is 44px under a finger**; under a mouse, fields and popover rows
-are 36px. `webcheck.kit.ts` asserts `CONTROL` is `FIELD`'s height class for class,
-because `FIELD`'s own literal is pinned where it is declared and cannot be written as
-`${CONTROL}`.
+`CONTROL` is `FIELD`'s height (`min-h-9`, `min-h-11` under a finger), spent by every dropdown
+trigger and popover row; primary buttons and rows stay `min-h-11`. So everything is 44px
+under a finger, and fields and popover rows are 36px under a mouse. `webcheck.kit.ts` asserts
+`CONTROL` equals `FIELD`'s height class for class: `FIELD`'s literal is pinned where it is
+declared, so it cannot be written as `${CONTROL}`.
 
-## The dropdown
+## The dropdown (Q3.684)
 
-- **A field's name is its `Field` label, beside it.** The trigger takes `id` and
-  `labelledBy` from `Field`'s render prop and names itself `label + trigger`, so a screen
-  reader hears the value too. **No heading inside the panel**: `heading?: never` on the
-  field member, since both call sites of the old prop spent it repeating the label.
-- **A field's panel is exactly its trigger's width** (`inset-x-0`). An icon's panel grows
-  to its longest row, from 10rem up to 20rem, from the icon's edge — and only an icon may head
-  its panel, because there the heading *is* the label. **A row** is a whole `GROUP_ROW`: its
-  title on the left, the value and a chevron on the right, the panel from the row's end.
-- **The chosen option carries a 14px check on the trailing edge**, so an option's text
-  starts where the trigger's does; the highlighted row is `bg-raised`.
-- **The direction is measured at the tap** with `menuPlacement`, and focus comes back to
-  the trigger found by `triggerIn` — never to `document.activeElement`, which in WebKit is
-  the body after a click.
-- **No native `<select>` anywhere in `src/`** (Q3.463, now asserted across the tree).
-- **Every popover is one box**: `MENU_BOX`, and `MENU_PANEL` — the box capped at a height
-  `MENU_MAX_PX` states — for `Menu` and `Dropdown`; the composer's two menus cap it at their
-  own height.
+- **A field's name is its `Field` label, beside it.** The trigger takes `id` and `labelledBy`
+  from `Field`'s render prop and is named `label + trigger`. **No heading in a field's
+  panel**: `heading?: never` on the field member.
+- **A field's panel is exactly its trigger's width** (`inset-x-0`). An icon's panel grows to
+  its longest row, 10rem to 20rem, from the icon's edge, and only an icon may head its panel
+  (there the heading is the label). A row is a whole `GROUP_ROW`: title left, value and
+  chevron right, panel from the row's end.
+- The chosen option has a 14px check on the trailing edge; the highlighted row is
+  `bg-raised`.
+- Direction is measured at the tap (`menuPlacement`). Focus returns to the trigger found by
+  `triggerIn`, never `document.activeElement` (the body after a click, in WebKit).
+- **No native `<select>` anywhere in `src/`** (Q3.463).
+- Every popover is one box: `MENU_BOX`, and `MENU_PANEL` (capped at `MENU_MAX_PX`) for
+  `Menu` and `Dropdown`; the composer's two menus cap it at their own height.
 
-## A settings screen is a stack of groups
+## A settings screen is a stack of groups (Q3.686)
 
-**The owner chose grouped cards from three previews (2026-09-28)** — iOS and Telegram's
-settings, over flat rows and a label-left form (Q3.686). `Group` (`ui/kit/List.tsx`) is
-an optional caps title with a count and one action, one bordered box of rows split by
-hairlines, and an optional footer. **A row is exactly one of** `LinkRow`, `ValueRow`,
-`ActionRow`, `SwitchRow`, `ChoiceRow`, a `Dropdown` row, a record table, `EmptyRow`, or a
-`TwoStep` row (`TWO_STEP_ROW`) whose rest is a `DangerRow` or a `Button`. A shape that is
-none of them is a kit entry first.
+`Group` (`ui/kit/List.tsx`): an optional caps title with a count and one action, one
+bordered box of rows split by hairlines, an optional footer. **A row is exactly one of**
+`LinkRow`, `ValueRow`, `ActionRow`, `SwitchRow`, `ChoiceRow`, a `Dropdown` row, a record
+table, `EmptyRow`, or a `TwoStep` row (`TWO_STEP_ROW`) whose rest is a `DangerRow` or a
+`Button`. Any other shape is a kit entry first.
 
-- **The box is `edge-strong` and its rows carry no border**, so a row's glyph — chevron,
-  knob, action glyph — is what identifies it (`web-shell.md`'s rule for a control inside a
-  bounded container). A record row may carry one `Button size="sm"` at its end. A box that
-  holds no control, such as the log, is `still` and takes the hairline.
-- **The box never clips.** A menu or dropdown opened from a row is absolute, so the corner
-  rows round their own fill; `GROUP_ROW` carries `first:`/`last:` rounding for that.
-- **A table whose rows can arm a `TwoStep` is `table-fixed` with column widths**, and the
-  armed row is one cell spanning them, so the question gets the width and Cancel lands
-  where the act's button was (Q3.218).
-- **Nothing appears inside a screen.** Every form and every one-time secret is a leaf
+- The box is `edge-strong` and its rows carry no border, so a row's glyph identifies it
+  (`web-shell.md`). A record row may end in one `Button size="sm"`. A box with no control
+  (the log) is `still` and takes the hairline.
+- **The box never clips**: popovers are absolute, so `GROUP_ROW`'s `first:`/`last:` rounding
+  rounds the corner rows' fill.
+- A table whose rows can arm a `TwoStep` is `table-fixed` with column widths; the armed row
+  is one cell spanning them (Q3.218).
+- **Nothing appears inside a screen**: every form and one-time secret is a leaf
   (`SettingsLeaf`); a secret is minted on the row's tap, never on mount, and handed over in
-  module state as the new key is (Q3.549).
-- **A group title never repeats the screen's name**; a screen whose first group would be
-  named for the screen leaves it untitled.
-- **A subline wraps; a title truncates.** A switch, choice or dropdown row's subline is the
-  one sentence the copy caps allow it, eight words at most, so it takes a second line on a
-  phone rather than losing its end. A row's title keeps a 40% floor against a long value,
-  and a `Badge` never wraps or shrinks — the value truncates first.
-- **Two rows spend `GROUP_ROW` directly, on purpose**: the sign-in wizard's page step, an
-  `<a>` the native-bridge census reviews at its call site, and its device code, one of the
-  two values read once, which keeps a real fill. `OneTimeSecret`'s box is the one box drawn
-  by hand.
+  module state (Q3.549).
+- A group title never repeats the screen's name; such a first group is untitled.
+- **A subline wraps; a title truncates.** A switch, choice or dropdown row's subline takes a
+  second line on a phone rather than losing its end. A title keeps a 40% floor against a long
+  value; a `Badge` never wraps or shrinks.
+- Two rows spend `GROUP_ROW` directly, on purpose: the sign-in wizard's page step (an `<a>`
+  the native-bridge census reviews at its call site) and its device code (read once, so a
+  real fill). `OneTimeSecret`'s box is the one box drawn by hand.
 
-**What a screen may say** is Q3.544's table, unchanged: a row's title is a noun and its value
-sits at the trailing edge; a subline only on a switch or choice row, eight words at most; a
-footer only for a consequence at rest, six words at most; an act's consequence in its
-confirmation or on its leaf; no caveat, no meta text, nothing that restates a heading. An
-error goes under the group (`Group`'s `error`), never inside the box as a row.
+**What a screen may say** is Q3.544's table: a row's title is a noun, its value at the
+trailing edge; a subline only on a switch or choice row, eight words at most; a footer only
+for a consequence at rest, six words at most; an act's consequence in its confirmation or on
+its leaf; no caveat, no meta text, nothing restating a heading. An error goes under the group
+(`Group`'s `error`), never inside the box.
 
 ## A label beside its control
 
 `FIELD_LABEL` is sentence case (Q3.685); caps belong to `SETTINGS_HEADING` and
-`MENU_HEADING` alone. `Field` draws the `<label>` as a **sibling** bound by `htmlFor`,
-then the control, then a hint or an error attached by `aria-describedby`. A `<label>`
-never wraps a `Dropdown` trigger: it activates its first labelable descendant, which is
-how a plugin form's help paragraph came to open the picker (`plugin-ui.md`).
+`MENU_HEADING` alone. `Field` draws the `<label>` as a **sibling** bound by `htmlFor`, then
+the control, then a hint or error via `aria-describedby`. A `<label>` never wraps a
+`Dropdown` trigger: it activates its first labelable descendant (`plugin-ui.md`).
 
 ## The kit's one-way rule
 
-`kit/` may import from `bits.tsx`; `bits.tsx` may import nothing from `kit/`. `bits.tsx`
-already sits in a cycle with `Toast.tsx` that is safe only because each side reads the
-other inside function bodies, and a module-level `${FIELD}` composed across a
-`bits`↔`kit` cycle throws at load — on the gate page too, which imports `bits.tsx`.
-`webcheck.kit.ts` walks each kit module's value imports against the transport modules
-and `version.ts`.
+`kit/` may import from `bits.tsx`; `bits.tsx` imports nothing from `kit/`. `bits.tsx` is
+already in a cycle with `Toast.tsx`, safe only because each reads the other inside function
+bodies; a module-level `${FIELD}` across a `bits`↔`kit` cycle throws at load, on the gate
+page too. `webcheck.kit.ts` walks each kit module's value imports against the transport
+modules and `version.ts`.
 
 ## What is checked
 
-`webcheck.kit.ts`: the field panel's width and the absent heading; the trigger's
-accessible name; the direction taken at the tap; `CONTROL` against `FIELD`; focus
-returned to the trigger; no `<select>`; a sentence-case `FIELD_LABEL` drawn beside its
-control, never around it; and the kit's import closure. Over the settings screens: no
-`SETTINGS_SECTION` band; a kebab only through `RowMenu`; and two censuses by file — the
-boxes drawn by hand and the muted paragraphs — so a new one is a table row added on
-purpose rather than drift, which counts sites and not words (Q3.544 refused a word
-budget). Every checkbox in `src/` carries `CHECKBOX`. The Dropdown's refusal looks —
-a disabled trigger keeps its border, a refused option keeps its reason at full strength
-— are `webcheck.refusing-controls.ts`'s, as before.
+`webcheck.kit.ts`: the field panel's width and absent heading, the trigger's accessible
+name, direction at the tap, `CONTROL` against `FIELD`, focus returned to the trigger, no
+`<select>`, a sentence-case `FIELD_LABEL` beside its control and never around it, and the
+kit's import closure. Over the settings screens: no `SETTINGS_SECTION` band, a kebab only
+through `RowMenu`, and two censuses by file (boxes drawn by hand, muted paragraphs) that
+count sites, not words (Q3.544 refused a word budget). Every checkbox in `src/` carries
+`CHECKBOX`. The Dropdown's refusal looks (a disabled trigger keeps its border, a refused
+option its reason at full strength) are `webcheck.refusing-controls.ts`'s.

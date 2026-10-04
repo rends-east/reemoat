@@ -85,7 +85,7 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
       sendFileRefusal({ kind: "missing" }, "/w/a.txt"),
       sendFileRefusal({ kind: "denied" }, "/w/locked/a.txt"),
       sendFileRefusal({ kind: "not_a_file" }, "/w/dir"),
-      sendFileRefusal({ kind: "daemon_process" }, "/proc/42/environ"),
+      sendFileRefusal({ kind: "process_file" }, "/proc/42/environ"),
       sendFileRefusal({ kind: "too_large", limit: MAX_SENT_FILE_BYTES }, "/w/big.bin"),
       sendFileRefusal({ kind: "rate", retryAfterMs: 1_500 }, "/w/a.txt"),
       sendFileRefusal({ kind: "withdrawn" }, "/w/a.txt"),
@@ -94,7 +94,7 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
       "there is no file at /w/a.txt",
       "this machine would not let the daemon read /w/locked/a.txt; nothing was sent",
       "/w/dir is not a regular file; to send a folder, archive it and send the archive",
-      "/proc/42/environ is the daemon's own process, not a file of yours; nothing was sent",
+      "/proc/42/environ is a view of a running process, not a file; nothing was sent",
       "/w/big.bin is larger than the 100 MB a sent file may be; nothing was sent",
       "too much has been sent from this session in the last few minutes; try again in 2 seconds",
       "the session stopped before the file was kept; nothing was sent",
@@ -234,6 +234,27 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
     [["ok", "cancelled", "ok"], ["behind", "ahead", "after"]],
   );
 
+  // The last in line giving up emptied the queue while the copy ahead still ran, so the next call started beside it.
+  const tailLine: string[] = [];
+  const first = uploads.keepAgentFile("s_tail", join(work, "slow.bin")).then((result) => {
+    tailLine.push("first");
+    return result.kind;
+  });
+  const quitter = new AbortController();
+  const quit = uploads.keepAgentFile("s_tail", join(work, "small.txt"), { signal: quitter.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  quitter.abort();
+  const quitKind = (await quit).kind;
+  const later = uploads.keepAgentFile("s_tail", join(work, "small.txt")).then((result) => {
+    tailLine.push("later");
+    return result.kind;
+  });
+  check(
+    "a call arriving after the last one in line gave up still waits for the copy ahead",
+    [quitKind, await Promise.all([first, later]), tailLine],
+    ["cancelled", ["ok", "ok"], ["first", "later"]],
+  );
+
   // EACCES under a closed folder came back as "there is no file" (review of Q2.252).
   const locked = join(work, "locked");
   mkdirSync(locked);
@@ -243,10 +264,16 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
   chmodSync(locked, 0o700);
   check("a file behind a folder this machine will not open is refused as that, never as missing", shut, process.getuid?.() === 0 ? "ok" : "denied");
   if (process.platform === "linux") {
+    // A thread's directory is reachable by name though never listed, and its environ is the daemon's (review of Q2.253).
+    const thread = readdirSync(`/proc/${process.pid}/task`).find((tid) => tid !== String(process.pid)) ?? String(process.pid);
     check(
-      "and the daemon's own process is no file of the agent's: its environ holds this machine's token",
-      (await uploads.keepAgentFile("s_refuse", "/proc/self/environ")).kind,
-      "daemon_process",
+      "and no process view is a file of the agent's: the daemon's own, a thread's, its parent's",
+      await Promise.all(
+        ["/proc/self/environ", `/proc/${thread}/environ`, `/proc/${process.ppid}/environ`].map(
+          async (path) => (await uploads.keepAgentFile("s_refuse", path)).kind,
+        ),
+      ),
+      ["process_file", "process_file", "process_file"],
     );
   }
 
