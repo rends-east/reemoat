@@ -1,14 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { CONTROL_PLANE_UNREACHABLE, orderKeys, rememberRevokedKey, thisBrowsersKey } from "../../account";
+import { orderKeys, rememberRevokedKey, thisBrowsersKey } from "../../account";
 import * as cp from "../../cp";
 import type { ApiKeyRecord } from "../../cp";
 import { navigate } from "../../router";
 import { settingsLeafPath, settingsPath } from "../../settings";
-import { store } from "../../store";
 import type { Me } from "../../wire";
 import { errorText } from "../../http";
 import { Button, Empty, SkeletonRow, Spinner } from "../bits";
 import { toast } from "../Toast";
+import { MeUnread } from "../Unreachable";
 import { EmptyRow, Group } from "../kit/List";
 import { KeyRow, KeyTable } from "./KeyRow";
 import { OneTimeSecret } from "./OneTimeSecret";
@@ -37,21 +37,8 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
   };
   useEffect(load, []);
 
-  if (me === null) {
-    // Reachable: `bootstrap` stays ready with no `me` when the control plane is unreachable.
-    return (
-      <Empty
-        failed
-        action={
-          <Button size="sm" onClick={() => void store.refreshMe()}>
-            Try again
-          </Button>
-        }
-      >
-        {CONTROL_PLANE_UNREACHABLE}
-      </Empty>
-    );
-  }
+  // Not asked yet is a wait; only a read that failed is said (Q3.708).
+  if (me === null) return <MeUnread />;
 
   const live = keys === null || keys === "failed" ? 0 : keys.filter((key) => key.revokedAt === null).length;
   const atCeiling = live >= MAX_KEYS;

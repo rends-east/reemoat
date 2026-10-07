@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1133 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1144 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -507,6 +507,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `files-paths-git.md` | `src/changes.ts`, `src/worktree.ts`, `src/uploads.ts`, `src/stall.ts`, `src/paths.ts`, `src/git.ts` | Attachments in, files out · containment, symlinks and the one `rmSync` · why no synchronous filesystem call may touch a path this daemon did not create · how git is parsed |
 | `code-import.md` | `src/archive.ts`, `packages/web/src/ui/ImportCode.tsx`, `packages/web/src/importSkill.ts` | Bringing a codebase onto a machine · why containment had to be rebuilt for a path somebody else wrote · what each archive format costs, measured · the one thing the target may not notice |
 | `relay.md` | `src/relay/`, `src/server.ts`, `packages/control-plane/src/relay/`, `packages/web/src/stream.ts`, `machine.ts`, `localRoute.ts`, `src/announce.ts` | Why there is no direct path in, and the one exception · what bounds it, and how a daemon says where it is · what the tunnel carries and what it must never parse · a socket's lifetime, rotation and cursor · the h2 and flow-control measurements |
+| `reach.md` | `packages/web/src/reach.ts`, `echo.ts`, `ui/connection.ts`, `ConnectionPill.tsx`, `Unreachable.tsx`, `AccountRow.tsx`, `packages/native/src-tauri/src/proxy.rs` | What could not be reached, as three facts, and who may write each · where each sentence is written · what a list with nothing to draw may say · when the pill speaks, when it is silent, and when it opens by itself · what a drop of a few seconds may draw, and what is asked again and when · how a link that is back is noticed when nothing says so · what the shell may claim before the first answer · what a late or lost answer may not undo |
 | `http-and-routes.md` | `src/server.ts`, `src/http.ts`, `src/cors.ts`, `packages/web/src/http.ts`, `packages/control-plane/src/app.ts` | The error envelope every service answers in · which non-2xx is not an error · what a route retry may replay · every `pnpm client` verb |
 | `auth-and-tokens.md` | `src/auth.ts`, `src/token.ts`, `src/enroll.ts`, `packages/control-plane/src/keys.ts` | What a signature proves and what it does not · why the daemon makes exactly one control-plane request, ever · every credential this fleet mints and how each stops being one |
 | `authority.md` | `packages/control-plane/src/app.ts`, `main.ts`, `store.ts`, `schema.sql` | What this service is responsible for and what may never arrive in it · the two ratchets that hold that line, and the one exception named by literal · why it serves no browser UI by default · the three rules a migration owes |

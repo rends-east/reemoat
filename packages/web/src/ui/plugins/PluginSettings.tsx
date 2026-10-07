@@ -9,6 +9,7 @@ import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
 import { ambiguousNames } from "../../wire";
 import { Button, Empty, LINK, Spinner } from "../bits";
+import { registryUnread } from "../Unreachable";
 import { Notice } from "../kit/Status";
 import { PluginBlockView } from "../PluginView";
 
@@ -42,6 +43,9 @@ export function PluginSettingsScreen({
   }, [onIdentified, pluginId, name, version]);
 
   if (here.length === 0) {
+    // Only a list that was read can say they are gone (Q3.709).
+    const unread = registryUnread(state);
+    if (unread !== null) return <div className={PANE_PAD}>{unread}</div>;
     // A settled answer, not a failure; replace so Back does not walk into the dead scope.
     return (
       <div className={PANE_PAD}>

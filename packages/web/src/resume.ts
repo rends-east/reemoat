@@ -1,7 +1,7 @@
 import { store } from "./store";
 import { monotonicNow, raiseSuspicion, WakeClock } from "./wake";
 
-// Detection only: every trigger funnels into `store.resume`, coalesced. The watchdog is the only one that fires for a locked phone.
+// Detection only: every trigger funnels into `store.wake`, coalesced. The watchdog is the only one that fires for a locked phone.
 
 const WATCHDOG_INTERVAL_MS = 1_000;
 
@@ -20,7 +20,7 @@ export function installWakeDetection(): () => void {
       pending = null;
       const reported = pendingSince;
       pendingSince = null;
-      void store.resume(reason, reported);
+      void store.wake(reason, reported);
     }, COALESCE_MS);
   };
 
@@ -38,8 +38,14 @@ export function installWakeDetection(): () => void {
     if (event.persisted) wake("bfcache", monotonicNow());
   };
 
-  const onOffline = (): void => clock.offline(monotonicNow());
-  const onOnline = (): void => wake("online", clock.online());
+  const onOffline = (): void => {
+    clock.offline(monotonicNow());
+    store.noteDevice(false);
+  };
+  const onOnline = (): void => {
+    store.noteDevice(true);
+    wake("online", clock.online());
+  };
 
   const watchdog = setInterval(() => {
     const slept = clock.tick(Date.now(), monotonicNow());

@@ -17,6 +17,7 @@ import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
 import { MACHINE_GONE } from "../../plugins";
+import { registryUnread } from "../Unreachable";
 import { shortPath } from "../../paths";
 import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../router";
 import { agentSetupPath, settingsPath } from "../../settings";
@@ -69,15 +70,17 @@ export function MachineAgentsSection({
   if (machine === null) {
     // Not failed: a missing machine is a settled answer, and the way out is the machines list since the chevron leads to another dead end.
     return (
-      <Empty
-        action={
-          <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
-            All machines
-          </Button>
-        }
-      >
-        {MACHINE_GONE}
-      </Empty>
+      registryUnread(state) ?? (
+        <Empty
+          action={
+            <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
+              All machines
+            </Button>
+          }
+        >
+          {MACHINE_GONE}
+        </Empty>
+      )
     );
   }
 

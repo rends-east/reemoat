@@ -6,6 +6,7 @@ import { machineQuotaNotice, mayAddMachine } from "../quota";
 import type { Route } from "../router";
 import type { AppState } from "../store";
 import { CommandLine } from "./CommandLine";
+import { listBody } from "./groups";
 import { MachineColumn } from "./MachineColumn";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
@@ -13,6 +14,7 @@ import { LAYER } from "./overlay";
 import { PaneHandle } from "./PaneHandle";
 import { rail, railWidth, subscribeRail } from "./rail";
 import { subscribeTaskWidth, taskWidth } from "./taskWidth";
+import { Unreachable } from "./Unreachable";
 
 /** One screen at a time below `lg`, a permanent rail at `lg`; CSS decides which, never breakpoint state in JavaScript. */
 export function AppShell({
@@ -59,8 +61,27 @@ export function AppShell({
 }
 
 export function NothingSelected({ state }: { state: AppState }): ReactNode {
-  const probing = state.machines.some((m) => m.reach === "probing" || m.reach === "unknown");
-  if (state.machines.length === 0 && !probing) {
+  if (state.machines.length === 0) {
+    const body = listBody({
+      device: state.device,
+      server: state.server.state,
+      registry: state.registry,
+      fleet: [],
+      selected: null,
+      rows: 0,
+      needle: false,
+      hidden: 0,
+    });
+    // The rail carries the sentence at every width; this pane adds what there is room for here (Q3.709).
+    if (body.kind === "network" || body.kind === "server") {
+      return (
+        <div className="mx-auto w-full max-w-xs pt-2">
+          <Unreachable cause={body.kind === "network" ? { what: "network" } : { what: "server", why: body.why }} />
+        </div>
+      );
+    }
+    // Not read yet: the rail draws the shape, and this pane claims nothing.
+    if (body.kind !== "no_machines") return null;
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
         <p className="text-sm text-muted">No machines yet.</p>

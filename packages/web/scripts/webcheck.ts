@@ -23,6 +23,7 @@ await import("./webcheck.interrupted-and-spawn-routes.js");
 await import("./webcheck.history-and-cursor.js");
 await import("./webcheck.follow-and-wrap.js");
 await import("./webcheck.connection-pill.js");
+await import("./webcheck.reach.js");
 await import("./webcheck.elicitation-and-links.js");
 await import("./webcheck.accounts-and-credentials.js");
 await import("./webcheck.devices.js");
@@ -53,5 +54,7 @@ await import("./webcheck.e2ee.js");
 await import("./webcheck.typography.js");
 await import("./webcheck.kit.js");
 await import("./webcheck.theme.js");
+// Last: it drives the one store through hundreds of listings, and sections above read what a store that never listed says.
+await import("./webcheck.bad-network.js");
 
 finish();

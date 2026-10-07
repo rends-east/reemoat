@@ -315,7 +315,8 @@ export function sectionAllowed(section: SettingsSection, me: Me | null, canHostD
 /** Leaves the address alone, and speaks only for an admin section: a hidden Logs falls to the index without a sentence. */
 export function refusedSectionText(section: SettingsSection | null, me: Me | null): string | null {
   const spec = SECTION_SPECS.find((one) => one.id === section);
-  if (spec === undefined || !spec.adminOnly || me?.isAdmin === true) return null;
+  // An account not read yet has not been found wanting.
+  if (spec === undefined || !spec.adminOnly || me === null || me.isAdmin === true) return null;
   return `${spec.title} is for admins, and this account is not one.`;
 }
 

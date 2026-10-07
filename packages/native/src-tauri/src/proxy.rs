@@ -9,6 +9,13 @@ use url::Url;
 /// Only a backstop for a socket that never answers; `CP_TIMEOUT_MS` in `cp.ts` is the policy.
 const BACKSTOP: Duration = Duration::from_secs(30);
 
+/// A connection the network dropped reports nothing, and every later request rode it: silent this long
+/// it is pinged, and unanswered as long again it is closed, so the next request dials (Q3.716).
+const PING: Duration = Duration::from_secs(5);
+
+/// As long as the page waits for an answer: a dial still out past that is nobody's.
+const CONNECT: Duration = Duration::from_secs(10);
+
 /// Complete for `cp.ts`'s call sites, so the page cannot smuggle a header onto the credential.
 const FORWARDED: [&str; 2] = ["authorization", "content-type"];
 
@@ -38,6 +45,11 @@ pub fn client() -> reqwest::Client {
         // A redirect would walk the credential to a host nobody chose.
         .redirect(reqwest::redirect::Policy::none())
         .timeout(BACKSTOP)
+        .connect_timeout(CONNECT)
+        .http2_keep_alive_interval(PING)
+        .http2_keep_alive_timeout(PING)
+        // Idle too: the request that finds it dead is otherwise a sign-in or a token, ten seconds late.
+        .http2_keep_alive_while_idle(true)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

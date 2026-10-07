@@ -17,6 +17,7 @@ import {
 // Import cycle with machine.ts: read MAX_DOWNLOAD_BYTES only inside handlers, since a module-level alias would throw in the TDZ.
 import { MAX_DOWNLOAD_BYTES } from "./machine";
 import { hostDeviceDh, nativeBoot } from "./native";
+import { monotonicNow } from "./wake";
 
 /** Must equal the relay listener's RELAY_CHANNEL_PATH; webcheck.e2ee.ts is what compares the two. */
 export const RELAY_CHANNEL_PATH = "/__relay/channel";
@@ -29,6 +30,16 @@ const SEND_HIGH_WATER_BYTES = 512 * 1024;
 const DRAIN_POLL_MS = 25;
 
 const CHANNEL_READY_TIMEOUT_MS = 20_000;
+
+/** A stream suspected with its route is closed only if nothing arrives on it within this (Q3.715). */
+const STREAM_PROBATION_MS = 4_000;
+
+/**
+ * This client's own close of a stream it means to dial again. Never on the wire: the daemon's codes are its own. It is a
+ * code apart from 1006 because that close is no evidence about the route, and a stream that took it for evidence would
+ * suspect its siblings in turn, each probation closing the next for ever.
+ */
+export const CLOSE_REDIAL = 4990;
 
 const MAX_IDLE_CONNECTIONS = 2;
 
@@ -103,6 +114,12 @@ export interface StreamSocket {
 export interface Channel {
   request(wanted: ChannelRequest): Promise<ChannelResponse>;
   openSocket(path: string): StreamSocket;
+  /** Closes what redials at no cost: the idle connections, and a stream nothing arrives on. A request in flight is left to its own answer or timeout. */
+  dropRedialable(): void;
+  /** Closes the idle connections and nothing else: what one socket's death may have taken with it. */
+  dropIdle(): void;
+  /** Closes every connection dialled before `since`, in use or not: what a wake does to what the absence may have killed. */
+  closeDialledBefore(since: number): void;
   dispose(): void;
 }
 
@@ -119,6 +136,8 @@ export interface ChannelOptions {
   onWrongDevice: () => Promise<void>;
   /** Defaults to deviceStaticKey; a parameter only so a driver can hold a real key. */
   deviceKey?: () => StaticKey | null;
+  /** Defaults to STREAM_PROBATION_MS; a parameter only so a driver need not wait it out. */
+  probationMs?: number;
 }
 
 /** Only dh crosses the bridge: the private half stays in the shell. */
@@ -156,6 +175,15 @@ type Carrying =
   | { kind: "socket"; sink: ChannelSocket };
 
 class Connection {
+  /** When it was dialled, on `monotonicNow`'s clock: a wake ends only what predates the absence. */
+  readonly dialledAt = monotonicNow();
+  /** When bytes last arrived on it, on the same clock: the one sign of life a stream can give. */
+  heardAt = this.dialledAt;
+
+  get streaming(): boolean {
+    return this.carrying.kind === "socket";
+  }
+
   private readonly socket: WebSocket;
   private readonly reader = new LengthReader();
   private readonly handshake: NoiseHandshake;
@@ -191,6 +219,7 @@ class Connection {
     };
     this.socket.onmessage = (event): void => {
       if (!(event.data instanceof ArrayBuffer)) return;
+      this.heardAt = monotonicNow();
       const chunk = new Uint8Array(event.data);
       this.run(() => this.consume(chunk));
     };
@@ -224,8 +253,8 @@ class Connection {
     });
   }
 
-  /** Settles whatever was riding it. Idempotent, and never a verdict: that is fail's job. */
-  close(): void {
+  /** Settles whatever was riding it. Idempotent, and never a verdict: that is fail's job. `redial` tells a stream the close is this client's own. */
+  close(redial = false): void {
     if (this.closed) return;
     this.closed = true;
     this.socket.onmessage = null;
@@ -244,7 +273,10 @@ class Connection {
     const error = this.failure ?? new Error("the channel was closed");
     for (const waiter of waiters) waiter.reject(error);
     if (carrying.kind === "request") carrying.waiter.reject(error);
-    if (carrying.kind === "socket") carrying.sink.transportEnded(error);
+    if (carrying.kind === "socket") {
+      if (redial) carrying.sink.redialled();
+      else carrying.sink.transportEnded(error);
+    }
     this.onClosed();
   }
 
@@ -515,6 +547,13 @@ class ChannelSocket implements StreamSocket {
     this.onerror?.(new Event("error"));
     this.onclose?.(new CloseEvent("close", { code: 1006, reason: error.message, wasClean: false }));
   }
+
+  redialled(): void {
+    if (this.done) return;
+    this.done = true;
+    this.connection = null;
+    this.onclose?.(new CloseEvent("close", { code: CLOSE_REDIAL, reason: "closed to be dialled again", wasClean: true }));
+  }
 }
 
 export class MachineChannel implements Channel {
@@ -525,10 +564,50 @@ export class MachineChannel implements Channel {
 
   private recovered = false;
 
+  private readonly probations = new Set<ReturnType<typeof setTimeout>>();
+
   constructor(private readonly options: ChannelOptions) {}
+
+  /**
+   * One request's dead link is no verdict on another request, whose outcome nobody could then tell. An idle connection may have
+   * died with it, so those go; a connection still dialling is left to whatever it is for (Q3.712). A stream that still delivers
+   * is the one thing here known to be alive, so each is closed only if nothing arrives on it within the probation, and then
+   * resumes from its cursor: a browser socket reports a dead link in minutes, if at all (Q3.714).
+   */
+  dropRedialable(): void {
+    // As a channel rebuilt with the route used to be: the one wrong_device recovery is owed again.
+    this.recovered = false;
+    this.dropIdle();
+    const streams = [...this.live].filter((connection) => connection.streaming);
+    if (streams.length === 0) return;
+    const suspected = monotonicNow();
+    const timer = setTimeout(() => {
+      this.probations.delete(timer);
+      for (const connection of streams) {
+        if (connection.streaming && connection.heardAt <= suspected) connection.close(true);
+      }
+    }, this.options.probationMs ?? STREAM_PROBATION_MS);
+    this.probations.add(timer);
+  }
+
+  /** No stream is suspected here: a stream closed by its probation reports a dead socket, and that report must not start another's (Q3.715). */
+  dropIdle(): void {
+    for (const connection of this.idle.splice(0)) connection.close();
+  }
+
+  closeDialledBefore(since: number): void {
+    for (const connection of [...this.live]) {
+      if (connection.dialledAt >= since) continue;
+      const at = this.idle.indexOf(connection);
+      if (at !== -1) this.idle.splice(at, 1);
+      connection.close();
+    }
+  }
 
   /** Closes every connection, the live stream included; a disposed socket reaches stream.ts as a 1006. */
   dispose(): void {
+    for (const timer of this.probations) clearTimeout(timer);
+    this.probations.clear();
     this.idle.length = 0;
     // A copy, because `close()` removes the connection from this set as it goes.
     for (const connection of [...this.live]) connection.close();

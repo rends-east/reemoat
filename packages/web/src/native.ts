@@ -116,6 +116,7 @@ export interface NativeAccountMove {
 
 let boot: NativeBoot | null = null;
 let hydrating = inNativeShell();
+let bootFailed = false;
 
 /** Declared above `hostReady`, whose module-body call reads it synchronously. */
 const REBIND_PATIENCE_MS = 2_000;
@@ -144,11 +145,19 @@ export const hostReady: Promise<NativeBoot | null> = inNativeShell()
         generation = answer.generation ?? null;
         return answer;
       })
-      .catch(() => null)
+      .catch(() => {
+        bootFailed = true;
+        return null;
+      })
       .finally(() => {
         hydrating = false;
       })
   : Promise.resolve(null);
+
+/** The host never answered its boot call: a failure, never a signed-out answer. */
+export function hostBootFailed(): boolean {
+  return bootFailed;
+}
 
 export function nativeHydrating(): boolean {
   return hydrating;

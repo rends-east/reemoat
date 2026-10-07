@@ -27,8 +27,20 @@ import {
   type PendingAttachment,
 } from "../attach";
 import type { DaemonClient } from "../daemon";
-import { clearEcho, echoFor, echoVersion, sendFloor, setEcho, subscribeEchoes, type PendingEcho } from "../echo";
-import { errorText } from "../http";
+import {
+  arrivedFor,
+  clearEcho,
+  doubtSend,
+  echoClaimed,
+  echoFor,
+  echoVersion,
+  sendFloor,
+  setEcho,
+  subscribeEchoes,
+  takeArrived,
+  type PendingEcho,
+} from "../echo";
+import { errorText, isTransportFailure } from "../http";
 import { keyOf, type SessionKey, type SessionRef } from "../ids";
 import { composerKey } from "../keys";
 import {
@@ -418,6 +430,21 @@ export function Composer({
     }
   }, [parked]);
 
+  // A send given back as lost that the log has since shown: its copy leaves the box unless the reader has changed it (Q3.713).
+  const arrived = arrivedFor(key);
+  useEffect(() => {
+    if (arrived === null) return;
+    takeArrived(key, arrived);
+    if ((drafts.get(key) ?? "") === arrived.text) {
+      drafts.delete(key);
+      setText("");
+    }
+    for (const chip of attachmentsFor(key)) {
+      if (chip.uploadId !== null && arrived.attachments.some((file) => file.uploadId === chip.uploadId)) removeAttachment(key, chip.localId);
+    }
+    toast("ok", "That message did arrive.");
+  }, [arrived, key]);
+
   if (row === undefined) return null;
   const session = row.snapshot;
   // Nothing takes this box off the screen: Send is gated, never the box.
@@ -568,10 +595,11 @@ export function Composer({
     // Read live: a late caller may have gained a chip since this render, and the live list is cleared below.
     const sent = [...attachmentsFor(key)];
     const { ids: sending } = sendableAttachments(sent);
+    const held = store.getSnapshot();
     const echo: PendingEcho = {
       text: body,
       seq: Number.MAX_SAFE_INTEGER,
-      after: sendFloor(key, store.getSnapshot().transcripts.get(key)?.events.at(-1)?.seq ?? 0),
+      after: sendFloor(key, held.transcripts.get(key)?.events.at(-1)?.seq ?? 0, held.rowsByKey.get(key)?.snapshot.lastSeq ?? 0),
       attachments: echoAttachments(sent),
     };
     setEcho(key, echo);
@@ -598,8 +626,12 @@ export function Composer({
         store.applySnapshot(sessionRef, result.session);
       })
       .catch((cause: unknown) => {
+        // Its prompt event is already in the conversation: the answer was lost, the message was not.
+        if (isTransportFailure(cause) && echoClaimed(echo)) return;
         // Restore the chips with the text: the uploads are still valid.
         clearEcho(key, echo);
+        // A dead link says nothing about whether it arrived: if its prompt event turns up, the copy given back here is taken back (Q3.713).
+        if (isTransportFailure(cause)) doubtSend(key, echo);
         if (onScreen()) {
           update(body);
         } else if (body.length === 0) {

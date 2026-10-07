@@ -296,7 +296,7 @@ process.stdout.write("\nturning a machine's page\n");
   );
   check(
     "it is cut to a screen's rows, measured once per gesture",
-    [/going\.rows = away\.current\?\.rows \?\? Math\.ceil\(\(node\?\.clientHeight \?\? 0\) \/ ROW_FLOOR_PX\) \+ 1;/.test(swipe), /rows=\{beside\.rows\}/.test(browser), /rows = null,[\s\S]*drag=\{drag\} rows=\{rows\} \/>/.test(browser)],
+    [/going\.rows = away\.current\?\.rows \?\? Math\.ceil\(\(node\?\.clientHeight \?\? 0\) \/ ROW_FLOOR_PX\) \+ 1;/.test(swipe), /rows=\{beside\.rows\}/.test(browser), /rows = null,[\s\S]*drag=\{drag\}\s+rows=\{rows\}/.test(browser)],
     [true, true, true],
   );
   check(

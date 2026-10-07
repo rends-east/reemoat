@@ -9,7 +9,7 @@ import { check, report, sleep } from "./webcheck.env.js";
 import { serveSecureSession } from "../../../src/e2ee.js";
 import { SignedTokenVerifier } from "../../../src/auth.js";
 import { jwkThumbprint, publicKeyToJwk, signToken, x25519Jwk, type TokenClaims } from "../../../src/token.js";
-import { MachineChannel, RELAY_CHANNEL_PATH, bodyBytes, type StreamSocket } from "../src/e2ee.js";
+import { CLOSE_REDIAL, MachineChannel, RELAY_CHANNEL_PATH, bodyBytes, type StreamSocket } from "../src/e2ee.js";
 // Imported from its owner, so the flood below always crosses the app's real bound.
 import { MAX_DOWNLOAD_BYTES } from "../src/machine.js";
 
@@ -51,6 +51,14 @@ const daemon = createServer((req: IncomingMessage, res: ServerResponse) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ bytes: Buffer.concat(parts).length }));
     });
+    return;
+  }
+  // Answered late, so a caller can act on the channel while the request is still out.
+  if (path === "/late") {
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ late: true }));
+    }, 300);
     return;
   }
   // Never answered, so only the caller's AbortSignal or timeoutMs can settle it.
@@ -211,6 +219,7 @@ function channelFor(
     jkt?: string;
     lifetimeSeconds?: number;
     onWrongDevice?: () => Promise<void>;
+    probationMs?: number;
   } = {},
 ): MachineChannel {
   const secret = options.secret ?? device.secretKey;
@@ -231,6 +240,7 @@ function channelFor(
         registrations += 1;
       }),
     deviceKey: () => localStaticKey(secret),
+    ...(options.probationMs === undefined ? {} : { probationMs: options.probationMs }),
   });
 }
 
@@ -558,6 +568,7 @@ const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 const STRADDLE_HEAD = '{"type":"events","straddle":"';
 const BIG_MESSAGE = `${STRADDLE_HEAD}${"a".repeat(MAX_FRAME_PAYLOAD - 1 - STRADDLE_HEAD.length)}é","tail":"${"z".repeat(40_000)}"}`;
 
+const idleSockets = new Map<string, { terminate(): void }[]>();
 const sockets = new WebSocketServer({ server: daemon, path: "/stream" });
 // One server, three behaviours selected by the query: ws matches the pathname alone.
 sockets.on("connection", (ws, req) => {
@@ -565,6 +576,23 @@ sockets.on("connection", (ws, req) => {
   daemonSaw.push({ method: "GET", path, auth: req.headers.authorization });
   if (path.includes("big=1")) {
     ws.send(BIG_MESSAGE);
+    return;
+  }
+  // An idle conversation's stream as the daemon serves it: a hello the client can resume from, and then nothing.
+  if (path.includes("idle=1")) {
+    const url = new URL(path, "http://daemon.invalid");
+    const id = url.searchParams.get("id") ?? "?";
+    const since = Number(url.searchParams.get("since") ?? "0");
+    idleSockets.set(id, [...(idleSockets.get(id) ?? []), ws]);
+    ws.send(JSON.stringify({ type: "hello", instanceId: "i_e2ee", session: { id, lastSeq: since }, firstSeq: 1, lastSeq: since, since, gap: false }));
+    ws.send(JSON.stringify({ type: "caught_up", seq: since }));
+    return;
+  }
+  // Goes on delivering until the client leaves: what a working conversation's stream looks like.
+  if (path.includes("talk=1")) {
+    ws.send(JSON.stringify({ type: "hello", instanceId: "i_e2ee" }));
+    const beat = setInterval(() => ws.send(JSON.stringify({ type: "events", events: [] })), 20);
+    ws.on("close", () => clearInterval(beat));
     return;
   }
   // Never ended by the daemon: the only state in which disposing can be observed.
@@ -642,6 +670,125 @@ sockets.on("connection", (ws, req) => {
   check("and the bytes after the boundary are the ones that followed it", parsed?.tail?.length, 40_000);
 
   socket.close();
+  channel.dispose();
+}
+
+{
+  // One request's dead link is no verdict on the others (Q3.712): forgetting a route may close only what nothing is riding.
+  const { monotonicNow } = await import("../src/wake.js");
+  const PROBATION = 200;
+  const channel = channelFor({ probationMs: PROBATION });
+  await channel.request({ method: "GET", path: SECRET_PATH, timeoutMs: 5_000 });
+  const outcome = (pending: Promise<{ status: number }>): Promise<string> =>
+    pending.then(
+      (answer) => `answered ${String(answer.status)}`,
+      (error: unknown) => `failed: ${(error as Error).message}`,
+    );
+
+  const stream: StreamSocket = channel.openSocket("/stream?quiet=1");
+  let delivered = 0;
+  let streamClosed: number | null = null;
+  stream.onmessage = (): void => void (delivered += 1);
+  stream.onclose = (event): void => void (streamClosed = event.code);
+  for (let at = 0; at < 300 && delivered === 0; at += 1) await sleep(10);
+  check("the stream the daemon holds open is delivering before anything is forgotten", [delivered, streamClosed], [1, null]);
+
+  // Q3.714: a stream that still delivers is the one thing here known to be alive, and a forgotten route does not end it.
+  const talking: StreamSocket = channel.openSocket("/stream?talk=1");
+  let heard = 0;
+  let talkingClosed: number | null = null;
+  talking.onmessage = (): void => void (heard += 1);
+  talking.onclose = (event): void => void (talkingClosed = event.code);
+  for (let at = 0; at < 300 && heard === 0; at += 1) await sleep(10);
+  report("and so is the one that never stops", heard > 0 && talkingClosed === null, `${String(heard)} frames`);
+
+  const riding = outcome(channel.request({ method: "GET", path: "/late", timeoutMs: 5_000 }));
+  await sleep(60);
+  channel.dropRedialable();
+  await sleep(40);
+  check("a stream is not closed with a forgotten route: it is given a moment to show a sign of life", [streamClosed, talkingClosed], [null, null]);
+  const heardBefore = heard;
+  check("a request in flight outlives a forgotten route", await riding, "answered 200");
+  await sleep(PROBATION + 100);
+  // Not 1006: that close is this client's own and no evidence about the route, and a stream told otherwise would suspect its siblings in turn.
+  check("one that stays silent is then closed with this client's own code, to be dialled again from its cursor", [streamClosed, CLOSE_REDIAL], [4990, 4990]);
+  report("while one that went on delivering is left alone", talkingClosed === null && heard > heardBefore, `${String(heard - heardBefore)} frames since, closed: ${String(talkingClosed)}`);
+  talking.close();
+  const spared: StreamSocket = channel.openSocket("/stream?quiet=1");
+  let sparedHeard = 0;
+  let sparedClosed: number | null = null;
+  spared.onmessage = (): void => void (sparedHeard += 1);
+  spared.onclose = (event): void => void (sparedClosed = event.code);
+  for (let at = 0; at < 300 && sparedHeard === 0; at += 1) await sleep(10);
+  channel.dropIdle();
+  await sleep(PROBATION + 100);
+  check("and dropping what is idle touches no stream, silent or not", [sparedHeard, sparedClosed], [1, null]);
+  spared.close();
+  const after = await channel.request({ method: "GET", path: SECRET_PATH, timeoutMs: 5_000 });
+  check("and the channel still answers afterwards", after.status, 200);
+
+  const before = outcome(channel.request({ method: "GET", path: "/late", timeoutMs: 5_000 }));
+  await sleep(60);
+  const absence = monotonicNow();
+  await sleep(5);
+  const since = outcome(channel.request({ method: "GET", path: "/late", timeoutMs: 5_000, alone: true }));
+  await sleep(60);
+  channel.closeDialledBefore(absence);
+  const ended = await before;
+  report("a wake ends a request dialled before the absence began", ended.startsWith("failed"), ended);
+  check("and leaves one dialled after it to its own answer", await since, "answered 200");
+
+  channel.dispose();
+}
+
+{
+  // Q3.715: three idle conversations on one machine, and one socket that dies once. The probation closes the other two,
+  // which say nothing; taken for dead links, those closes made each stream suspect the rest, and the three dialled one
+  // another again every probation for as long as the app was open. The real channel and the real stream, with a stand-in
+  // for the three things MachineConnection does with a route. The probation outlasts the stream's first backoff, as 4 s does.
+  const { SessionStream } = await import("../src/stream.js");
+  const PROBATION = 800;
+  const channel = channelFor({ probationMs: PROBATION });
+  const route = { base: relayUrl, kind: "relay" as const };
+  let believed = true;
+  const forgets: number[] = [];
+  const began = Date.now();
+  const machine = {
+    id: "m_e2ee",
+    ensureToken: async (): Promise<string> => "t_ok",
+    resolveRoute: async (): Promise<typeof route> => {
+      believed = true;
+      return route;
+    },
+    currentRoute: (): typeof route | null => (believed ? route : null),
+    forgetRoute: (): void => {
+      if (!believed) return;
+      believed = false;
+      forgets.push(Date.now() - began);
+      channel.dropRedialable();
+    },
+    suspectRoute: (): void => {
+      if (believed) channel.dropIdle();
+    },
+    tokenExpiresAt: (): number | null => null,
+    openStream: (session: string, since: number): StreamSocket => channel.openSocket(`/stream?idle=1&id=${session}&since=${String(since)}`),
+  };
+  const quiet = { onEvents(): void {}, onSnapshot(): void {}, onGap(): void {}, onStatus(): void {}, onVanished(): void {} };
+  const ids = ["s_a", "s_b", "s_c"];
+  const streams = ids.map((id) => new SessionStream({ machineId: "m_e2ee", sessionId: id } as never, machine as never, quiet as never, 0));
+  for (const stream of streams) stream.start();
+  for (let at = 0; at < 300 && streams.some((stream) => stream.status().phase !== "live"); at += 1) await sleep(10);
+  const dials = (): number[] => ids.map((id) => idleSockets.get(id)?.length ?? 0);
+  check("three idle conversations are live on one channel, each dialled once", [streams.map((stream) => stream.status().phase), dials()], [["live", "live", "live"], [1, 1, 1]]);
+
+  idleSockets.get("s_a")?.at(-1)?.terminate();
+  await sleep(PROBATION * 4 + 400);
+  check(
+    "one socket dying costs each stream one dial and the route one forgetting, and then it is over",
+    [dials(), forgets.length, streams.map((stream) => stream.status().phase)],
+    [[2, 2, 2], 1, ["live", "live", "live"]],
+  );
+  for (const stream of streams) stream.stop();
   channel.dispose();
 }
 

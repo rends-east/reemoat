@@ -305,24 +305,89 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
     owned: true,
     scopes: [],
   };
-  const internals = store as unknown as { stopPolling(): void; connections: Map<string, unknown> };
+  const internals = store as unknown as {
+    stopPolling(): void;
+    connections: Map<string, unknown>;
+    serverRaw: { state: string; since: number | null };
+  };
+  const { RECONNECT_QUIET_MS } = await import("../src/reach.js");
+  // The store's waits are on the monotonic clock and the wall clock; a check moves them rather than sleeping through them.
+  const later = async (ms: number, run: () => void | Promise<void>): Promise<void> => {
+    const monotonic = performance.now.bind(performance);
+    const wall = Date.now;
+    performance.now = () => monotonic() + ms;
+    Date.now = () => wall() + ms;
+    try {
+      await run();
+    } finally {
+      performance.now = monotonic;
+      Date.now = wall;
+    }
+  };
 
+  // The hold on what is drawn runs out on a timer of its own. Held back here and run by hand below, so that a hold which
+  // never set one, or set it for the wrong moment, fails a check rather than waiting on some other publish to hide it.
+  const realTimeout = globalThis.setTimeout;
+  const holds: { run: () => void; ms: number }[] = [];
+  (globalThis as Record<string, unknown>)["setTimeout"] = (run: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms === undefined || ms <= RECONNECT_QUIET_MS - 1_000 || ms > RECONNECT_QUIET_MS) return (realTimeout as (...args: unknown[]) => unknown)(run, ms, ...rest);
+    holds.push({ run, ms });
+    return 0;
+  };
   cp.setSession("rs_boot");
   await store.bootstrap();
+  (globalThis as Record<string, unknown>)["setTimeout"] = realTimeout;
   // Stop the poll: tick would call the path under test mid-section.
   internals.stopPolling();
   // With several accounts, a down control plane must still draw the app so the drawer reaches the others.
   check("a control plane that is down still draws the app, drawer and all", store.getSnapshot().phase, "ready");
   report("and says so", store.getSnapshot().cpError !== null, `cpError: ${String(store.getSnapshot().cpError)}`);
+  // Q3.707: one string stood for a server that did not answer, one that answered badly, and a registry never read.
+  check(
+    "as three answers: the server did not answer, the registry was never read, and neither was the account",
+    [internals.serverRaw.state, internals.serverRaw.since !== null, store.getSnapshot().meRead],
+    ["unreachable", true, "failed"],
+  );
+  // Q3.714: one failed listing is weak evidence, and it is asked again before anything is drawn of it.
+  check(
+    "but a listing that has only just failed is drawn as the wait it still is",
+    [store.getSnapshot().server, store.getSnapshot().registry],
+    [{ state: "unknown", since: null }, "unknown"],
+  );
+  report("the hold set its own release, for when the window is spent", holds.length >= 1, holds.map((timer) => `${String(Math.round(timer.ms))}ms`).join(", "));
+  await later(RECONNECT_QUIET_MS, () => holds.at(-1)?.run());
+  check(
+    "and once it has outlasted the quiet window it is drawn as what it is, dated from the attempt that failed",
+    [store.getSnapshot().server.state, store.getSnapshot().registry, store.getSnapshot().server === internals.serverRaw],
+    ["unreachable", "failed", true],
+  );
   {
     const view = stripComments(srcFile("ui/SessionView.tsx"));
     const browser = stripComments(srcFile("ui/SessionBrowser.tsx"));
     const app = stripComments(srcFile("App.tsx"));
-    const loadingArm = app.slice(
-      app.indexOf('if (state.phase === "loading")'),
-      app.indexOf("if (state.me?.mustChangePassword === true)"),
+    // Q3.708: the only wait with no shell is the one before the host has named an account, and no request is out during it.
+    const loadingArm = app.slice(app.indexOf("function Starting()"), app.indexOf("function StartFailed()"));
+    report("the one wait with nothing known was found", loadingArm.includes("<Spinner />"), `${loadingArm.length} chars`);
+    const gates = app.slice(app.indexOf('if (state.phase === "signed_out")'), app.indexOf("<MenuDrawer"));
+    check(
+      "a signed-in launch draws the shell at once, loading or not, so the drawer and its accounts are never out of reach",
+      [
+        /if \(state\.phase === "loading" && state\.host === null && inNativeShell\(\)\) return <Starting \/>;/.test(gates),
+        (gates.match(/state\.phase === "loading"/g) ?? []).length,
+        /Reading your sign-in from this device…/.test(loadingArm),
+        /const STARTING_WORDS_MS = 2_000;/.test(app),
+      ],
+      [true, 1, true, true],
     );
-    report("the loading arm was found", loadingArm.includes("<Spinner />"), `${loadingArm.length} chars`);
+    check(
+      "and a boot call the host rejected is a failure with a way to ask again, never the sign-in form",
+      [
+        /if \(state\.bootFailed\) return <StartFailed \/>;/.test(app),
+        app.indexOf("if (state.bootFailed)") < app.indexOf('if (state.phase === "signed_out")'),
+        /if \(hostBootFailed\(\)\) \{\s*this\.patch\(\{ bootFailed: true \}\);\s*return;/.test(stripComments(srcFile("store.ts"))),
+      ],
+      [true, true, true],
+    );
     // The outage is the connection pill's to say (Q3.659): no banner over the list, and the title keeps its workspace line.
     check(
       "and nothing above the conversations says it",
@@ -331,10 +396,10 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
     );
     check(
       "and the list does not call an unread registry empty",
-      /state\.machines\.length === 0 && !probing && state\.cpError === null && \(/.test(browser),
-      true,
+      [/\{body\.kind === "no_machines" && \(/.test(browser), /state\.machines\.length === 0 && !probing/.test(browser)],
+      [true, false],
     );
-    check("and the loading screen says nothing about an outage, which never reaches it", /cpError/.test(loadingArm), false);
+    check("and the wait before the host answers says nothing about an outage, which never reaches it", /cpError|state\.server/.test(loadingArm), false);
   }
 
   const me = { id: "u_1", name: "ada", isAdmin: true, via: "session", hasPassword: true };
@@ -342,6 +407,11 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
   await store.resume("cp-retry");
   check("a registry that answers with nothing in it still leaves the loading screen", store.getSnapshot().phase, "ready");
   check("and the outage banner is cleared", store.getSnapshot().cpError, null);
+  check(
+    "and it is now known to be empty, which is the only thing that may be called no machines",
+    [store.getSnapshot().server, store.getSnapshot().registry],
+    [{ state: "ok", since: null }, "known"],
+  );
   // tick retries while there are no connections and the phase is loading, so leaving loading is what stops the poll.
   report(
     "so the four-second cp-retry stops firing, with no machine to make it stop",
@@ -367,9 +437,617 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
   routes = (path) => (path === "/v1/me" ? me : null);
   await store.resume("cp-retry");
   report("a listing that fails with a machine known is the pill's cause", store.getSnapshot().cpError !== null, `cpError: ${String(store.getSnapshot().cpError)}`);
+  check(
+    "the server is what did not answer, and a registry once read stays read",
+    [internals.serverRaw.state, store.getSnapshot().registry],
+    ["unreachable", "known"],
+  );
+  check("while a server that answered a moment ago is still drawn as answering", store.getSnapshot().server, { state: "ok", since: null });
   routes = (path) => (path === "/v1/machines" ? { machines: [record] } : path === "/v1/me" ? me : null);
   await store.poll();
+  report("a first failure is asked again a second later, and not by a poll that lands sooner", store.getSnapshot().cpError !== null, "still failed");
+  await later(1_000, () => store.poll());
   check("and the next poll asks again and clears it, with no wake", store.getSnapshot().cpError, null);
+
+  // The poll is four seconds apart, so the second-later attempt is a timer of the failure's own. Caught here rather than slept through.
+  {
+    const polling = store as unknown as { pollTimer: unknown; soonTimer: unknown };
+    const page = document as unknown as { visibilityState?: string };
+    const realSetTimeout = globalThis.setTimeout;
+    const armed: { run: () => void; ms: number }[] = [];
+    polling.pollTimer = 0;
+    page.visibilityState = "visible";
+    // Only the early pass is held back; every other timer here is somebody's real wait.
+    (globalThis as Record<string, unknown>)["setTimeout"] = (run: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms !== 1_000) return (realSetTimeout as (...args: unknown[]) => unknown)(run, ms, ...rest);
+      armed.push({ run, ms });
+      return 0;
+    };
+    try {
+      routes = (path) => (path === "/v1/me" ? me : null);
+      await store.resume("cp-retry");
+      const early = armed.filter((timer) => timer.ms === 1_000);
+      check("a listing that fails while the poll runs sets one early pass a second out", early.length, 1);
+      let asked = 0;
+      routes = (path) => {
+        if (path === "/v1/machines") asked += 1;
+        return path === "/v1/machines" ? { machines: [record] } : path === "/v1/me" ? me : null;
+      };
+      await later(1_000, async () => {
+        early[0]?.run();
+        for (let at = 0; at < 50 && store.getSnapshot().cpError !== null; at += 1) await sleep(10);
+      });
+      check("and that pass asks the listing again, which clears it between two polls", [asked > 0, store.getSnapshot().cpError], [true, null]);
+    } finally {
+      (globalThis as Record<string, unknown>)["setTimeout"] = realSetTimeout;
+      polling.pollTimer = null;
+      polling.soonTimer = null;
+      delete page.visibilityState;
+    }
+  }
+  check("which is the only thing that clears the server's trouble", store.getSnapshot().server, { state: "ok", since: null });
+
+  // Offline is a name for a failure and never one by itself: a server on this same computer answers with the network off.
+  store.noteDevice(false);
+  await sleep(30);
+  check(
+    "going offline asks the listing at once, and a server that still answers is no trouble",
+    [store.getSnapshot().device, store.getSnapshot().server.state, store.getSnapshot().cpError],
+    ["offline", "ok", null],
+  );
+  store.noteDevice(true);
+  routes = (path) => (path === "/v1/me" ? me : null);
+  store.noteDevice(false);
+  await sleep(30);
+  check(
+    "and one that does not is the failure the word is for",
+    [store.getSnapshot().device, store.getSnapshot().server.state, store.getSnapshot().registry],
+    ["offline", "unreachable", "known"],
+  );
+  routes = (path) => (path === "/v1/machines" ? { machines: [record] } : path === "/v1/me" ? me : null);
+  store.noteDevice(true);
+  await store.resume("online");
+  check(
+    "back online, the listing a wake asks clears it",
+    [store.getSnapshot().device, store.getSnapshot().server],
+    ["online", { state: "ok", since: null }],
+  );
+
+  // Q3.716: the link back. Each rule is about which of two answers lands first, so the listing is held open and let go by
+  // hand, the clock is moved rather than slept through, and every wait the store sets is caught and run here or not at all.
+  {
+    const peek = store as unknown as {
+      pollTimer: unknown;
+      soonTimer: unknown;
+      holdTimer: unknown;
+      holdDue: number | null;
+      nextListingAt: number;
+      listingFailures: number;
+      listingOut: number | null;
+      provedDown: Map<string, number>;
+      answeredFor: Map<string, number>;
+      listFailing: Map<string, number>;
+      awayAsks: number | null;
+      serverNudged: boolean;
+      soon(ms: number): void;
+      nextProbeAt: Map<string, number>;
+      probeFailures: Map<string, number>;
+      emit(): void;
+    };
+    const page = document as unknown as { visibilityState?: string };
+    const realSet = globalThis.setTimeout;
+    const nap = (ms: number): Promise<void> => new Promise((resolve) => void realSet(resolve, ms));
+    const timers: { run: () => void; ms: number }[] = [];
+    (globalThis as Record<string, unknown>)["setTimeout"] = (run: () => void, ms?: number) => {
+      timers.push({ run, ms: ms ?? 0 });
+      return 0;
+    };
+    const fetchBefore = globalThis.fetch;
+    let listing: "answers" | "fails" | "hangs" | "refuses" = "answers";
+    let asked = 0;
+    let fleet: unknown[] = [record];
+    const out: { answer: (machines: unknown[]) => void; lose: () => void }[] = [];
+    const json = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
+      const path = String(input);
+      if (path === "/v1/me") return Promise.resolve(json(me));
+      if (path !== "/v1/machines") return Promise.reject(new TypeError("fetch failed"));
+      asked += 1;
+      if (listing === "answers") return Promise.resolve(json({ machines: fleet }));
+      if (listing === "fails") return Promise.reject(new TypeError("fetch failed"));
+      if (listing === "refuses") return Promise.resolve(new Response("bad gateway", { status: 502 }));
+      return new Promise<Response>((resolve, reject) => out.push({ answer: (machines) => resolve(json({ machines })), lose: () => reject(new TypeError("fetch failed")) }));
+    }) as typeof fetch;
+    const lose = (): void => out.shift()?.lose();
+    /** One still out answers: with the fleet as it is now, or as it was when that one was asked. */
+    const land = (index: number, machines: unknown[] = fleet): void => out.splice(index, 1)[0]?.answer(machines);
+    const drawn: string[] = [];
+    const watching = store.subscribe(() => drawn.push(store.getSnapshot().server.state));
+
+    try {
+      // A request that timed out is known to have failed ten seconds after it was asked, its quiet window already spent.
+      listing = "hangs";
+      const lost = store.resume("cp-retry");
+      await nap(20);
+      listing = "answers";
+      timers.length = 0;
+      await later(10_000, async () => {
+        lose();
+        await lost;
+      });
+      check("a listing that timed out is known to have failed, and nothing is drawn of it", [internals.serverRaw.state, store.getSnapshot().server.state], ["unreachable", "ok"]);
+      const { SERVER_CONFIRM_MS } = await import("../src/reach.js");
+      check(
+        "its hold runs out when the ask that follows has had time to answer, not when the window did",
+        timers.filter((timer) => timer.ms > SERVER_CONFIRM_MS - 100 && timer.ms <= SERVER_CONFIRM_MS).length,
+        1,
+      );
+      await later(11_000, async () => {
+        await store.poll();
+        await nap(20);
+      });
+      check("and that ask answers, so one lost listing was never on screen", [store.getSnapshot().cpError, internals.serverRaw.state, drawn.includes("unreachable")], [null, "ok", false]);
+
+      listing = "hangs";
+      const gone = store.resume("cp-retry");
+      await nap(20);
+      timers.length = 0;
+      await later(10_000, async () => {
+        lose();
+        await gone;
+      });
+      const hold = timers.find((timer) => timer.ms > SERVER_CONFIRM_MS - 100 && timer.ms <= SERVER_CONFIRM_MS);
+      check("with nothing answering the ask that follows either, it is still not drawn a moment before", store.getSnapshot().server.state, "ok");
+      await later(10_000 + SERVER_CONFIRM_MS, () => hold?.run());
+      check("and is drawn once that time is up, dated from the ask that failed first", [store.getSnapshot().server.state, store.getSnapshot().server.since === internals.serverRaw.since], ["unreachable", true]);
+
+      // An ask still out rode the link as it was. Waited for, it holds the next one back for the ten seconds it takes to time out.
+      listing = "answers";
+      await later(11_000, async () => {
+        await store.poll();
+        await nap(20);
+      });
+      check("an answer clears it at once", [store.getSnapshot().server.state, store.getSnapshot().cpError], ["ok", null]);
+      listing = "fails";
+      await store.resume("cp-retry");
+      listing = "hangs";
+      asked = 0;
+      await later(1_100, () => store.poll());
+      check("a server that did not answer is asked again a second later", asked, 1);
+      listing = "answers";
+      await later(5_200, async () => {
+        await store.poll();
+        await nap(20);
+      });
+      check(
+        "past that it holds nothing back: the next is asked beside it at the poll's own pace, and its answer stands",
+        [asked, store.getSnapshot().cpError, internals.serverRaw.state],
+        [2, null, "ok"],
+      );
+      lose();
+      await nap(20);
+      check("and the one it was asked beside, failing after it, takes nothing back", [store.getSnapshot().cpError, internals.serverRaw.state], [null, "ok"]);
+
+      // Both still out: the older one times out six seconds after the newer was asked. Paced from that landing, every
+      // late failure of an outage put the next ask off again, and the asks came every six seconds for a pace of four.
+      listing = "fails";
+      await store.resume("cp-retry");
+      listing = "hangs";
+      await later(1_100, () => store.poll());
+      await later(5_200, () => store.poll());
+      const newest = peek.listingOut ?? 0;
+      await later(11_100, async () => {
+        lose();
+        await nap(20);
+      });
+      check("a failure landing late is paced from the ask already out beside it, which is its retry", [out.length, peek.nextListingAt - newest], [1, 2_000]);
+      lose();
+      await nap(20);
+      listing = "answers";
+      peek.nextListingAt = 0;
+      await later(12_000, async () => {
+        await store.poll();
+        await nap(20);
+      });
+
+      // Two listings out, the newer answering first: the older one's answer is the older truth.
+      listing = "hangs";
+      const older = store.resume("cp-retry");
+      await nap(20);
+      let newer: Promise<void> = Promise.resolve();
+      await later(1_100, async () => {
+        newer = store.retry();
+        await nap(10);
+      });
+      check("two listings are out", out.length, 2);
+      listing = "answers";
+      fleet = [{ ...record, name: "renamed" }];
+      land(1);
+      await nap(20);
+      const names = new Set<string | undefined>();
+      const naming = store.subscribe(() => void names.add(store.getSnapshot().machines.find((machine) => machine.id === "m_cp")?.name));
+      land(0, [record]);
+      await older;
+      await newer;
+      await nap(20);
+      naming();
+      check("an older listing that answers after a newer one changes nothing either", [...names], ["renamed"]);
+      fleet = [record];
+      await store.resume("cp-retry");
+
+      // Machines whose reach, route and tunnel this check decides, standing where real ones would.
+      const real = internals.connections.get("m_cp") as { state(): Record<string, unknown> };
+      interface StandIn {
+        connection: object;
+        reach: "online" | "offline";
+        relayOnline: boolean;
+        began: number;
+        routeAsks: number;
+        forgets: number;
+        fail(): void;
+      }
+      const standInFor = (id: string, name: string): StandIn => {
+        let route: Promise<null> | null = null;
+        let settle: (() => void) | null = null;
+        const self: StandIn = { connection: {}, reach: "offline", relayOnline: true, began: 0, routeAsks: 0, forgets: 0, fail: () => settle?.() };
+        self.connection = Object.assign(Object.create(real) as object, {
+          id,
+          state: () => ({ ...real.state(), id, name, reach: self.reach, offlineReason: self.reach === "offline" ? "no_route" : null, relayOnline: self.relayOnline }),
+          update: (next: { relayOnline: boolean }) => void (self.relayOnline = next.relayOnline),
+          forgetRoute: () => void (self.forgets += 1),
+          probedSince: () => self.began,
+          resolveRoute: (): Promise<null> => {
+            self.routeAsks += 1;
+            if (route === null) {
+              self.began = performance.now();
+              route = new Promise<null>((resolve) => {
+                settle = () => {
+                  route = null;
+                  settle = null;
+                  resolve(null);
+                };
+              });
+            }
+            return route;
+          },
+        });
+        return self;
+      };
+      const doubted = (): string[] => [...store.getSnapshot().doubted].sort();
+      const laptop = standInFor("m_cp", "laptop");
+      internals.connections.set("m_cp", laptop.connection);
+      // The machine it stands in for was probed while this section had its clock moved forward.
+      peek.provedDown.delete("m_cp");
+      peek.answeredFor.delete("m_cp");
+      peek.pollTimer = 0;
+      page.visibilityState = "visible";
+      peek.emit();
+
+      // Passes meet in one probe: an early one, the poll, a wake. Counted once each, three of them set the next four seconds out.
+      listing = "fails";
+      const before = peek.probeFailures.get("m_cp") ?? 0;
+      peek.nextProbeAt.delete("m_cp");
+      void store.poll();
+      await nap(10);
+      peek.nextProbeAt.delete("m_cp");
+      void store.poll();
+      await nap(10);
+      check("two passes that meet in one probe ask the route once between them", [laptop.forgets, laptop.routeAsks], [2, 1]);
+      laptop.fail();
+      await nap(20);
+      check("and its failure is one failure", (peek.probeFailures.get("m_cp") ?? 0) - before, 1);
+
+      // The link was down for both, and comes back to the server first. The probe still out was asked in the outage.
+      check("a machine found down while the server is not answering is in doubt", doubted(), ["m_cp"]);
+      peek.nextProbeAt.delete("m_cp");
+      void store.poll();
+      await nap(10);
+      listing = "answers";
+      peek.soonTimer = null;
+      timers.length = 0;
+      await later(4_000, async () => {
+        peek.nextListingAt = 0;
+        void store.poll();
+        await nap(20);
+      });
+      check(
+        "the server answers, and the machine is asked now rather than at the pace the outage had reached",
+        [internals.serverRaw.state, peek.probeFailures.has("m_cp"), timers.some((timer) => timer.ms === 0)],
+        ["ok", false, true],
+      );
+      check("the machine is still in doubt: the answer names nothing by itself", doubted(), ["m_cp"]);
+      peek.soonTimer = null;
+      timers.length = 0;
+      laptop.fail();
+      await nap(20);
+      check(
+        "the probe that was out fails, having begun before that answer: it settles nothing, and the one that will is asked now",
+        [doubted(), (peek.nextProbeAt.get("m_cp") ?? Infinity) <= Date.now(), timers.some((timer) => timer.ms === 0)],
+        [["m_cp"], true, true],
+      );
+      asked = 0;
+      await later(5_000, async () => {
+        void store.poll();
+        await nap(10);
+        laptop.fail();
+        await nap(20);
+      });
+      check("one begun after it settles it: the machine is its own trouble, and the server is asked nothing more for it", [doubted(), asked], [[], 0]);
+
+      // A second machine is found down. Held to the newest answer instead of the first, every listing asked for the one put
+      // the other back in doubt, and each doubt asked another listing: ninety in two minutes, with nothing changing.
+      const everDoubted = new Set<string>();
+      const noting = store.subscribe(() => void store.getSnapshot().doubted.forEach((id) => everDoubted.add(id)));
+      const studio = standInFor("m_two", "studio");
+      fleet = [record, { ...record, id: "m_two", name: "studio" }];
+      internals.connections.set("m_two", studio.connection);
+      peek.emit();
+      check("a second machine found down is in doubt, and the first is not", doubted(), ["m_two"]);
+      asked = 0;
+      for (const at of [6_000, 6_200, 10_000, 14_000, 18_000, 22_000]) {
+        await later(at, async () => {
+          peek.nextProbeAt.clear();
+          void store.poll();
+          await nap(10);
+          laptop.fail();
+          studio.fail();
+          await nap(20);
+        });
+      }
+      check("both are settled, by one listing, and the first was never put back in doubt by it", [doubted(), asked, everDoubted.has("m_cp")], [[], 1, false]);
+      const again = store.retry();
+      await nap(20);
+      laptop.fail();
+      studio.fail();
+      await again;
+      check("a press on Try again asks the server and leaves machines already named as they were", [asked, doubted()], [2, []]);
+      noting();
+
+      // A machine dropped while its probe is out: the failure is nobody's.
+      peek.nextProbeAt.clear();
+      void store.poll();
+      await nap(10);
+      fleet = [record];
+      await store.resume("cp-retry");
+      studio.fail();
+      laptop.fail();
+      await nap(20);
+      check("a probe that fails after its machine left the list is counted for nobody", [internals.connections.has("m_two"), peek.probeFailures.has("m_two"), peek.nextProbeAt.has("m_two")], [false, false, false]);
+
+      // A daemon the server says is not dialled in is probed without anything being asked, so no probe will ever find it
+      // back. Unasked, it stayed unreachable until its token was renewed, minutes after it had dialled in again.
+      laptop.relayOnline = false;
+      fleet = [{ ...record, relayOnline: false }];
+      peek.nextListingAt = Date.now() + 60_000;
+      peek.emit();
+      check("a daemon newly missed has the listing asked from a second out", [peek.awayAsks, peek.nextListingAt <= Date.now() + 1_000], [0, true]);
+      const paces: number[] = [];
+      let at = 0;
+      asked = 0;
+      for (let round = 0; round < 8; round += 1) {
+        at += (paces.at(-1) ?? 1_000) + 100;
+        await later(at, async () => {
+          void store.poll();
+          await nap(10);
+          paces.push(Math.round((peek.nextListingAt - Date.now()) / 100) * 100);
+          laptop.fail();
+          await nap(20);
+        });
+      }
+      check("and then at a pace that doubles to a minute, since it may be a laptop asleep for the night", [asked, paces], [8, [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]]);
+      fleet = [record];
+      peek.soonTimer = null;
+      timers.length = 0;
+      peek.nextProbeAt.set("m_cp", Date.now() + 600_000);
+      await later(at + 60_100, async () => {
+        void store.poll();
+        await nap(20);
+      });
+      peek.emit();
+      check(
+        "the listing that says it has dialled in again has it probed at once, and stops the asking",
+        [laptop.relayOnline, peek.nextProbeAt.has("m_cp"), timers.some((timer) => timer.ms === 0), peek.awayAsks],
+        [true, false, true, null],
+      );
+      laptop.fail();
+      await nap(20);
+
+      // A machine in doubt cannot wait out a listing's timeout, so its ask ignores the pace; it still gives the one out a second.
+      const mini = standInFor("m_two", "mini");
+      fleet = [record, { ...record, id: "m_two", name: "mini" }];
+      internals.connections.set("m_two", mini.connection);
+      peek.emit();
+      listing = "hangs";
+      asked = 0;
+      void store.poll();
+      await nap(10);
+      await later(500, async () => {
+        void store.poll();
+        await nap(10);
+      });
+      check("a listing asked for a machine in doubt is given the second a healthy answer takes", asked, 1);
+      await later(1_100, async () => {
+        void store.poll();
+        await nap(10);
+      });
+      check("and past it another is asked beside it, whatever the pace", asked, 2);
+      listing = "answers";
+      land(0);
+      land(0);
+      laptop.fail();
+      mini.fail();
+      await nap(20);
+      internals.connections.delete("m_two");
+      fleet = [record];
+      await store.resume("cp-retry");
+      laptop.fail();
+      await nap(20);
+
+      // Whatever answers first is the first word that the link is back.
+      const down = async (): Promise<void> => {
+        listing = "fails";
+        const pass = store.resume("cp-retry");
+        await nap(20);
+        laptop.fail();
+        await pass;
+        listing = "answers";
+        peek.nextListingAt = Date.now() + 60_000;
+        peek.listingFailures = 6;
+        peek.nextProbeAt.set("m_cp", Date.now() + 60_000);
+        peek.probeFailures.set("m_cp", 6);
+        // A timer caught here never fires, and one the store believes is still to fire would swallow the next.
+        peek.soonTimer = null;
+        timers.length = 0;
+      };
+      await down();
+      check("with the server not answering, and an outage's pace reached", [internals.serverRaw.state, peek.listingFailures, peek.nextListingAt > Date.now() + 50_000], ["unreachable", 6, true]);
+      laptop.reach = "online";
+      peek.emit();
+      check(
+        "a machine that answers again has the server asked now and its count started over",
+        [peek.listingFailures, peek.nextListingAt, timers.filter((timer) => timer.ms === 0).length],
+        [0, 0, 1],
+      );
+      // Under a server that is really down, a machine whose probes pass and whose listings fail comes back every second.
+      peek.nextListingAt = Date.now() + 60_000;
+      peek.listingFailures = 6;
+      peek.soonTimer = null;
+      timers.length = 0;
+      laptop.reach = "offline";
+      peek.emit();
+      laptop.reach = "online";
+      peek.emit();
+      check("once for that spell: coming back a second time is not a pace of its own", [peek.listingFailures, peek.nextListingAt > Date.now() + 50_000], [6, true]);
+      asked = 0;
+      peek.nextListingAt = 0;
+      await later(100, async () => {
+        void store.poll();
+        await nap(20);
+      });
+      check("and the next spell is another: the server answers, and its flag is put down", [asked, internals.serverRaw.state, peek.serverNudged], [1, "ok", false]);
+
+      laptop.reach = "offline";
+      peek.emit();
+      await down();
+      peek.nextListingAt = 0;
+      await later(100, async () => {
+        void store.poll();
+        await nap(20);
+      });
+      check(
+        "the server answering again asks about the machine, which had not been due for a minute",
+        [internals.serverRaw.state, peek.probeFailures.get("m_cp") ?? 0, peek.nextProbeAt.has("m_cp"), timers.some((timer) => timer.ms === 0)],
+        ["ok", 0, false, true],
+      );
+
+      await down();
+      const woke = store.wake("online", performance.now());
+      check("a wake starts both counts over before it asks anything: what it finds down is a first failure", [peek.listingFailures, peek.probeFailures.get("m_cp") ?? 0], [0, 0]);
+      await nap(20);
+      laptop.fail();
+      await woke;
+      // A server that answers with an error is alive and under load, and a lid opened is no reason to ask it more often.
+      listing = "refuses";
+      const refused = store.resume("cp-retry");
+      await nap(20);
+      laptop.fail();
+      await refused;
+      peek.listingFailures = 6;
+      const wokeAgain = store.wake("online", performance.now());
+      check("a wake leaves a refusing server its count", [internals.serverRaw.state, peek.listingFailures], ["refusing", 6]);
+      await nap(20);
+      laptop.fail();
+      await wokeAgain;
+      listing = "answers";
+      const mended = store.resume("cp-retry");
+      await nap(20);
+      laptop.fail();
+      await mended;
+
+      // A machine back by a door of its own, a stream's probe or a request's answer, with its sessions still unread.
+      peek.listFailing.set("m_cp", performance.now());
+      peek.soonTimer = null;
+      timers.length = 0;
+      laptop.reach = "online";
+      peek.emit();
+      check("a machine that answers again with its sessions unread has them read now, not at the next poll", [internals.serverRaw.state, timers.filter((timer) => timer.ms === 0).length], ["ok", 1]);
+      peek.listFailing.delete("m_cp");
+      laptop.reach = "offline";
+      peek.emit();
+
+      // The early pass is one timer, set for the soonest thing; what is due after it had no timer at all.
+      laptop.reach = "online";
+      peek.emit();
+      peek.soonTimer = null;
+      timers.length = 0;
+      laptop.reach = "offline";
+      peek.emit();
+      const early = timers.find((timer) => timer.ms === 1_000);
+      check("a machine newly down sets an early pass a second out", early !== undefined, true);
+      peek.nextProbeAt.set("m_cp", Date.now() + 3_000);
+      timers.length = 0;
+      early?.run();
+      await nap(20);
+      check("and a pass that fires before the probe is due sets the next for when it is", timers.filter((timer) => timer.ms > 2_900 && timer.ms <= 3_000).length, 1);
+      laptop.reach = "online";
+      peek.emit();
+      await down();
+      peek.nextListingAt = Date.now() + 2_000;
+      peek.soonTimer = null;
+      timers.length = 0;
+      peek.soon(0);
+      timers.find((timer) => timer.ms === 0)?.run();
+      await nap(20);
+      check("the same for a listing that is not due yet", timers.filter((timer) => timer.ms > 1_900 && timer.ms <= 2_000).length, 1);
+      listing = "answers";
+      await store.resume("cp-retry");
+      internals.connections.set("m_cp", real);
+
+      // With no machine held the poll is a whole pass, and passes wait for each other: one whose listing went out before the
+      // link was back held the next for its timeout, and a press on Try again adopted it.
+      internals.connections.delete("m_cp");
+      listing = "fails";
+      await store.resume("cp-retry");
+      listing = "hangs";
+      asked = 0;
+      const waiting = store.resume("cp-retry");
+      await nap(20);
+      listing = "answers";
+      await later(4_100, async () => {
+        void store.poll();
+        await nap(20);
+      });
+      check("with no machine held, the poll asks beside a pass still waiting on its listing, and the answer stands", [asked, internals.serverRaw.state, store.getSnapshot().cpError], [2, "ok", null]);
+      lose();
+      await waiting;
+      check("and that pass, failing after it, takes nothing back", [internals.serverRaw.state, store.getSnapshot().cpError], ["ok", null]);
+      listing = "fails";
+      await store.resume("cp-retry");
+      listing = "hangs";
+      const adopted = store.resume("cp-retry");
+      await nap(20);
+      listing = "answers";
+      asked = 0;
+      let pressed: Promise<void> = Promise.resolve();
+      await later(1_100, async () => {
+        pressed = store.retry();
+        await nap(20);
+      });
+      check("a press on Try again asks for itself rather than wait out the pass it adopts", [asked, internals.serverRaw.state, store.getSnapshot().cpError], [1, "ok", null]);
+      lose();
+      await adopted;
+      await pressed;
+    } finally {
+      watching();
+      (globalThis as Record<string, unknown>)["setTimeout"] = realSet;
+      globalThis.fetch = fetchBefore;
+      peek.pollTimer = null;
+      peek.soonTimer = null;
+      peek.holdTimer = null;
+      peek.holdDue = null;
+      delete page.visibilityState;
+    }
+  }
 
   internals.stopPolling();
   internals.connections.delete("m_cp");
@@ -779,12 +1457,26 @@ process.stdout.write("\nyour own API keys\n");
     [CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE, CONTROL_PLANE_UNREACHABLE],
   );
   check("and the sign-in reader builds on it", signInError(transport).startsWith(`${CONTROL_PLANE_UNREACHABLE} `), true);
+  // Q3.708: with the shell drawn at once these screens are reachable before the account is, and `me === null` alone drew a failure.
   const draws = ([["AccountSection.tsx", account], ["KeysSection.tsx", keys]] as const).filter(
     ([, src]) =>
-      !/import \{[^}]*\bCONTROL_PLANE_UNREACHABLE\b[^}]*\} from "\.\.\/\.\.\/account";/.test(src) ||
-      !/\{CONTROL_PLANE_UNREACHABLE\}/.test(src) ||
-      src.includes(CONTROL_PLANE_UNREACHABLE),
+      !/import \{ MeUnread \} from "\.\.\/Unreachable";/.test(src) ||
+      !/<MeUnread \/>/.test(src) ||
+      src.includes(CONTROL_PLANE_UNREACHABLE) ||
+      /me === null[^;]{0,120}<Empty failed/.test(src),
   );
-  check("both screens import it, draw it, and hold no copy", draws.map(([name]) => name), []);
-  check("the account screen draws it on all three of its failed arms", account.split("{CONTROL_PLANE_UNREACHABLE}").length - 1, 3);
+  check("both screens hand an unread account to the one guard, and hold no sentence of their own", draws.map(([name]) => name), []);
+  check("the account screen does on all three of its arms", account.split("<MeUnread />").length - 1, 3);
+  const unreadSrc = stripComments(srcFile("ui/Unreachable.tsx"));
+  const meUnread = unreadSrc.slice(unreadSrc.indexOf("export function MeUnread()"), unreadSrc.indexOf("function AskAgain("));
+  report("the guard's body was found", meUnread.length > 0, `${meUnread.length} chars`);
+  check(
+    "which is a wait until the account has been asked for, and names what failed only after",
+    [
+      /if \(state\.meRead !== "failed"\) return <SkeletonRow \/>;/.test(meUnread),
+      meUnread.indexOf("<SkeletonRow />") < meUnread.indexOf("<Unreachable"),
+      /<AskAgain ask=\{\(\) => store\.refreshMe\(\)\} \/>/.test(meUnread),
+    ],
+    [true, true, true],
+  );
 }

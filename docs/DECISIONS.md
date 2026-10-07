@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 113 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 453 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 463 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 81 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 82 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1133** | |
+| | | **1144** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1133 rather than the 564
+dividers. So the count is over **both** depths, and it says 1144 rather than the 565
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -28825,6 +28825,665 @@ ran" still holds: `bubble` sits above a tool card's `ink`.
 
 **Status.** Current.
 
+#### Q3.707 — What could not be reached is three facts, not one string
+
+**Reported 2026-10-06 by the owner**: "the mobile app cannot be entered if the active
+account does not load, though another account may be reachable." A design review of every
+loading and network-failure state followed, with the real client behind a stand-in host
+whose network fails on demand; its plan and screenshots are outside the repository.
+
+**What `cpError` stood for.** Three things, and one of them by its absence:
+
+- a listing that never arrived;
+- a listing that was answered with an error, since any failure that is not a sign-out
+  wrote it: a 500, a proxy's own error page;
+- nothing at all, for a server that died while rows were held. `tick` listed the registry
+  again only while `cpError` was already set or no machine was held, so the first evidence
+  was a token mint failing. The machine worked on its held token with nothing drawn
+  (`tokenDegraded`), and when that ran out each machine went offline as `cp_unreachable`,
+  which sat in `TRANSPORT_REASONS` and so was named unreachable itself, one tab at a time
+  and under All not at all. The machine was blamed for the server.
+
+**Decision.** `reach.ts`, pure and store-free, holds what could not be reached as separate
+facts, and `AppState` carries them beside `cpError`, which stays as the failure's own text.
+
+- **`device`**: offline only on a positive signal, `navigator.onLine === false` or an
+  `offline` event (`deviceNetwork`). `true` proves nothing. **It is a name for a failure
+  and never one by itself**: a server on this same computer answers with the network off,
+  which is this project's own dev stand, so offline alone draws nothing. Going offline
+  asks the listing at once (`noteDevice`), and what that answers decides.
+- **`server`**: `unknown`, `ok`, `unreachable`, `refusing`, and `since`, the monotonic
+  start of the trouble. Written only by a listing's own answer (`listingFailure`,
+  `serverAfter`), where `since` is when that attempt began, so a listing that timed out
+  has already spent its wait. Cleared only by a listing that succeeds.
+- **`registry`**: `unknown`, `failed`, `known` (`registryOf`), and `known` is sticky: a
+  list once read stays read while its server is down.
+- Beside them, a third answer wherever a read used to have two: `sessionsFailed` for a
+  session listing the daemon refused (it never entered `listed`, so it read as not asked
+  for ever), `pluginsRead`, `configRead` (an older server's 404 is an answer), `meRead`.
+
+**A failed mint asks; it does not write.** `serverEvidence` (a degraded token, or a machine
+offline for `cp_unreachable`) makes `tick` ask the listing at `OFFLINE_RETRY_MS`, and the
+listing says which it is. Writing the fact from the evidence was the alternative: it needs
+a time on each machine to know which is newer than the last good listing, and "only a
+listing clears it" stops being checkable. When the device comes back online a registry
+that failed is unasked again (`noteDevice`), since its answer was about the offline spell.
+
+**A machine that goes down on the wire is in doubt until the server answers.** A full
+outage takes the relay with the server, so the machine goes `no_route` minutes before any
+mint fails, and naming it at once blamed the machine again. `wireDownSince` remembers when
+each was first seen down and `doubtedOf` holds those newer than the last listing that
+succeeded; `tick` asks the listing for them at once, and until it answers neither the
+machine nor the server is named: the pill says "Connecting…" and an empty tab draws its
+skeleton. One listing per machine going down, and nothing while it stays down.
+
+**The sentences are written once**, in `reach.ts`: `NO_NETWORK`, `serverWords`,
+`machinesWords`. The owner's calls, 2026-10-06: the noun is "server", named by its host as
+the drawer names it (`serverLabel`), because with several accounts the host is the one fact
+that says which of them is in trouble; and three words for the connection where there was
+one. "Network", never "internet": a server on the LAN needs none.
+
+**Not measured, and it gates one word.** `navigator.onLine` in the Android shell. The
+manifest asks for `android.permission.INTERNET` alone, and a WebView that cannot ask the
+system is believed to answer online for ever, in which case "Waiting for network…" never
+shows there and the server's sentence stands in, which is still true. The owner's call
+(2026-10-07): measure it in airplane mode, and add the network-state permission if it never
+reads false. `WKWebView` is unmeasured too.
+
+**What it amends.** Q3.703: the listing is asked again on three kinds of evidence, not one.
+
+**Not built yet.** The rest of the vocabulary still says it the old way: ten uses of
+`CONTROL_PLANE_UNREACHABLE`, and about twenty sentences for a machine in the settings
+screens.
+
+**Status.** Current.
+
+#### Q3.708 — The shell is drawn at once, and the loading screen is gone
+
+**Measured**, with a host whose `host_cp` never answers: at 4 s the page held 0 characters
+of text and 0 buttons, a 12px spinner on an empty screen, and the app was drawn at 12 s,
+which is `CP_TIMEOUT_MS`. The menu drawer was not mounted on that branch, so the one thing
+the reader needed, another account, could not be reached; and on Android a switch reloads
+the page, so this was also what a switch looked like.
+
+**Decision.** `App.tsx` keeps a spinner for one wait only: the host has not answered its
+boot call, so not even the account is known (`state.host === null` in the shell). No
+request is out during it, only this device's credential store, and past
+`STARTING_WORDS_MS` it says so. Once a credential is held the shell is drawn, loading or
+not. `phase` keeps `loading`, which Settings reads; it has lost its screen.
+
+- **A boot call the host rejected is a failure** (`hostBootFailed`), with a reload, never
+  the sign-in form it used to fall through to. Not fixed here: the host still persists a
+  keyring read that failed as signed out.
+- **What claims nothing before the first answer**, since the shell is now on screen before
+  anything is known: the drawer's Settings and Plugins rows are drawn disabled (they used
+  to mount when `me` landed, under a finger that had already opened the drawer); the bell
+  reads "Not checked yet"; New session is disabled while no machine is held and the
+  registry is unread; the machine column's Add, drawn because `mayAddMachine` fails open,
+  is disabled until `meRead` is known; Account and API keys draw `MeUnread`, a wait until
+  the account has been asked for, where `me === null` alone drew the failed sentence; and
+  `refusedSectionText` refuses only an account it has read.
+
+**Accepted.** The forced password change and a sign-out by 401 now arrive over a drawn
+shell. Neither is a boundary: the control plane's second gate is.
+
+**Refused.** Keeping the screen and giving it the server's name and an account control
+after a second and a half. It decorates a state the shell already knows how to be in, and
+it still flashes on every Android switch. The owner's call.
+
+**Status.** Current.
+
+#### Q3.709 — A list with nothing to draw says why, and an unread list is never called empty
+
+**An unknown was drawn as a known empty**, in nine sentences with one cause:
+
+| Sentence | Drawn when the truth was |
+|---|---|
+| "No machines yet." with the install command, in the pane at `lg` | the listing failed |
+| "No machines yet." with "Add a machine", in New session | the listing failed |
+| "No sessions here yet." | the machine was unreachable, or not asked yet |
+| "That machine is no longer granted to you." | the listing failed |
+| "That machine is not in your list any more." on six screens | the listing failed |
+| "Nothing is installed on any of your machines yet." | a read failed, and was swallowed |
+| "This server has no plugin catalogue…" | the instance read failed |
+| "You have no machines yet, so there is nowhere to put a plugin." | the listing failed |
+| "Reemoat has not started a daemon for this server…" | the host did not answer |
+
+**Decision.** `listBody` in `ui/groups.ts` is the one answer to what a list with nothing to
+draw says: a total function, first match wins, driven over 177,600 states by `webcheck`.
+An empty-state sentence is reached only from a read that answered; an unread registry or
+machine is a skeleton with one spoken line; a failed one names what was not reached.
+
+- **With no machine held**: the skeleton, then `ui/Unreachable.tsx`'s block. The sentence
+  (Q3.707), a `Try again`, and for a server the other accounts on this device as rows, each
+  one tap away. The owner's choice of three rendered variants; the others said it without
+  the accounts, or put one line in the phone's header and left the list blank.
+- **The accounts are not offered when the device is offline**: they would not open either.
+  `host_accounts` reads no keyring and no network, so it answers through any outage.
+- **At `lg`** the block follows the "No machines yet." precedent: the sentence in the rail,
+  the control and the accounts in the pane, which was otherwise most of the window, blank.
+- **A machine's tab** is settled by that machine alone. The old skeleton asked whether any
+  machine in the fleet was still probing.
+- **`Try again` owns its attempt.** `store.retry` starts a pass or adopts the one already
+  out, and its mark is drawn for at least `RETRY_FLOOR_MS`. With nothing held the poll
+  used to ask every four seconds, so a press could not be told from it; a registry that
+  failed is now asked at `OFFLINE_RETRY_MS`, and the four seconds are kept for the case
+  they were written for, a registry that is known and holds no machine yet.
+- **Every other screen** asks through `registryUnread`, `configUnread` or `pluginsUnread`:
+  a wait until asked, what was not reached after, and null only from an answer.
+
+**What it amends.** Q3.659: nothing is drawn above conversations, as before; a body with no
+rows may say what is unreachable, and the pill beside it is then silent. Q3.202: an empty
+body says unreachable too; tabs still do not.
+
+**Not built yet.** The conversation's own states, a mark on the rows of a machine that
+cannot be asked, and a remembered list for a launch with no server. Until the last lands
+this block is what every such launch draws.
+
+**Status.** Current.
+
+#### Q3.710 — The pill's words, and why it opens by itself under a finger
+
+**One word stood for four causes and never changed**: "Connecting…" for this device having
+no network, the server not answering, a first probe and a stream reattaching, for as long
+as any of them lasted. And on a phone the words were behind a tap on a spinner: the pill
+opens on hover, and Q3.659 was drawn from Telegram Desktop.
+
+**Decision.** `connectionTrouble` reads Q3.707's facts and a monotonic clock, first match
+wins:
+
+| Cause | Words |
+|---|---|
+| Any row below but the fourth, on a device that says it is offline | "Waiting for network…" |
+| The server is unreachable, for under `SERVER_NAMED_AFTER_MS` | "Connecting…" |
+| The server is unreachable, past it | "Can’t reach ‹host›" |
+| The server answered with an error | "‹host› answered with an error" |
+| A machine in scope is offline on the wire | "‹machine› is unreachable" |
+| A stream reattaching, a first probe, the first listing still out | "Connecting…" |
+
+- **A machine offline for want of the server is never named** (`wantsServer`): it is a
+  reconnect until the listing Q3.707 has just asked says which it is.
+- **Under a coarse pointer it opens by itself for every cause but a reconnect**
+  (`opensByItself`), the owner's call: a reconnect says nothing a spinner does not, and
+  opening it would flash text on every sub-second reattach. It is one class on the default
+  arm, and no `matchMedia`: what is open is the stylesheet's answer, so the tap reads
+  `offsetWidth` back rather than keeping a second copy, and folds or opens from there.
+- **A long host is cut with an ellipsis.** The words were `whitespace-nowrap` in a clipped
+  window 240px wide at the narrowest rail, so they were cut by its edge.
+- **The clock is the store's**, `server.since`: with the spell's start in each pill's own
+  state the ten seconds restarted on every change of screen.
+
+**What it amends.** Q3.659's "on hover it expands": a finger has no hover.
+
+**Status.** Current.
+
+#### Q3.711 — An answer that arrives late is not the newer one
+
+**Reported 2026-10-07 by the owner**, on a bad connection through the relay: a session
+just created appeared in the list, left it and came back; a message then sent appeared,
+vanished leaving an empty conversation, and was then drawn twice. The daemon's log for
+that session holds the message once. Nothing was sent twice; it was drawn twice.
+
+**What it was.** `refreshMachineSessions` took each listing as the newest truth in the
+order answers *arrived*. The poll asked every `POLL_INTERVAL_MS` whether or not the last
+one had answered, a listing is the heaviest regular answer there is (sixty snapshots),
+and on a slow link listings overtake each other and the small answer to `POST /sessions`.
+One taken before the session existed, landing after its row, pruned it. The prune is
+`forgetSession`: it closed the stream, dropped the transcript and the echo, and took the
+key out of `streamOrder`, so when the next listing brought the row back nothing opened
+the conversation again. It stayed blank for as long as the reader stayed on it, with the
+agent working behind it, and a message sent there drew nothing. Opened again it loaded
+cold and found the message in history, where nothing claimed the echo, so both were drawn.
+
+**Measured** on `webcheck.bad-network.ts`, which runs the real store, `MachineConnection`,
+`DaemonClient` and `SessionStream` on a virtual clock over a link that delays every answer
+on its own: 300 schedules of create, open, send on a slow link that loses nothing.
+
+| | Before | After |
+|---|---|---|
+| The row went back to an older snapshot | 215 | 0 |
+| A session the daemon holds left the list | 42 | 0 |
+| The conversation still dead two minutes after the link healed | 31 | 0 |
+| The sent message drawn twice, for a reader who opened it again | 12 | 0 |
+| Listings that overtook one asked after them | 881 in 120 | 0 |
+
+**Decision.**
+
+- **`supersedes` is the one rule for which snapshot stands.** An older log (`lastSeq`)
+  never replaces a later one, whatever brought it: a listing, a stream frame, the answer
+  to a POST. Between two reads of the same log, a listing replaces the row only if it was
+  *asked* after the row last moved (`readClock`, `rowAsOf`).
+- **Whatever names a session confirms it as it lands**, a listing's row and an answer too
+  stale to draw alike, and the stamp only moves forward. **A listing prunes only rows
+  nothing has confirmed since it was asked.** Stamping a listed row with the moment the
+  listing was asked was tried first and moved the stamp backwards: two listings read by
+  the daemon in the opposite order to the one asked then pruned a live session.
+- **A daemon that started again is its own order** (`instances`, the listing's
+  `instanceId`): its log may have lost its tail, and a row held to the old number would
+  stay frozen until the new log passed it.
+- **One listing per machine is out at a time** (`polling`), keyed on the epoch so a wake's
+  own pass is never held up by a poll's.
+- **The conversation on screen stays wanted when it is forgotten.** `forgetSession` keeps
+  the newest key in `streamOrder`, so `attachWanted` opens it again if its row comes
+  back. The view opens a session once per reference and has no other door. A sign-out
+  empties the list.
+- **History claims the echo too**: `claimEcho` in `loadAll` and `primeBlocked`, since a
+  conversation opened after its message was taken finds that message in a page. That
+  needed a floor an empty conversation has: `sendFloor` takes the row's `lastSeq` beside
+  the transcript's tail, or a page carrying the same words from earlier in the log takes
+  the echo of a send it has nothing to do with.
+
+**Not built.** `lastSeq` is the only order the daemon gives. State that moves with no
+event between two reads of one log falls to the client's own clock, which is right about
+a listing and can only guess about two POST answers. A revision on the snapshot would be
+exact, and is a daemon change.
+
+**Status.** Current.
+
+#### Q3.712 — One request's dead link ends no other request
+
+**What it was.** `forgetRoute` closed the machine's whole channel, every connection in
+use included; Q6.120 had seen it take a download. Any transport failure calls it: a
+listing's fifteen-second timeout, a stream's 1006. So on a bad link the poll's failure
+ended a `POST /sessions/:id/prompt` the daemon had already taken. A POST is not replayed,
+so the composer cleared the echo, gave the text back and said it could not tell whether
+the message had arrived, while that message's event came down the redialled stream.
+
+**Measured** on the same driver, a link that loses six legs in a hundred and whose sockets
+die: 95 of 300 sends ended by a failure that was not theirs, 72 of them with the message
+delivered and its text back in the box. After: none.
+
+**Decision.**
+
+- **`forgetRoute` drops what redials at no cost** (`MachineChannel.dropRedialable`): the
+  idle connections, which may have died with the one that failed, and the streams, which
+  resume from their cursor. A request in flight keeps its own answer or its own timeout.
+  A connection still dialling is left to whatever it is for.
+- **Only a wake ends a request, and only one dialled before its absence began**
+  (`AppStore.wake`, `absentSince`, `abandonRoute`, `closeDialledBefore`, on
+  `monotonicNow`): Q3.703's rule taken down to the connection. Every other `resume`, a
+  refused rename and a press on Try again among them, re-proves the route and redials the
+  streams as before, and ends nothing in flight; they all used to.
+- **`abandonRoute` forgets the route before it closes anything**: a stream it closes
+  reports a dead route at once, and would otherwise drop the streams dialled since.
+- An expired token still closes the channel whole: the daemon pins the capability a
+  connection opened with. A channel now outlives a forgotten route, so `dropRedialable`
+  also owes the `wrong_device` recovery again, as a rebuilt channel did.
+
+**The cost.** A request on a connection that died silently now waits out its own timeout,
+where the next poll's failure used to end it within fifteen seconds: up to 150 s for a
+prompt. Its stream is redialled at once and draws the message if it arrived. Nothing
+tells a dead connection from a slow one but time, and ending the slow one is the defect.
+
+**Rejected.** Leaving the streams up as well: a browser's socket has no liveness of its
+own, and a conversation on a dead one would stay drawn as live. Ending requests once the
+probe has failed too: the probe has 1.5 s, and on the slow link above, which loses
+nothing, it fails often enough to draw the machine unreachable 3.5% of the time.
+
+**Status.** Current.
+
+#### Q3.713 — A send whose request failed may have arrived
+
+A transport failure says nothing about whether the daemon acted, and the composer's
+sentence already says so. What it did next did not follow from that: it gave the text
+back as if the message were lost, and left it there when the message turned up.
+
+**Decision.**
+
+- **A send whose own prompt event has been seen has arrived** (`echoClaimed`), and a
+  failure of its request after that has lost only the answer: nothing is given back and
+  nothing is said. Before, the text returned to the box under an error while the message
+  sat in the conversation above it.
+- **A failure in transit is held in doubt** (`doubtSend`), never a refusal. The text and
+  the chips still go back with the same sentence. If a prompt event past the send's floor
+  with its text and files then arrives, on the socket or in a page, the copy leaves the
+  box, its chips with it, and one line says the message did arrive. A box the reader has
+  changed since is left alone.
+- **Sending again spends the doubt**: the next event is the new echo's.
+
+**Not built, and what would close it.** Exactly-once is the daemon's to give: a key the
+client mints per send, which `POST /sessions/:id/prompt` answers a second time with the
+first acceptance. A send could then be asked again instead of given back. Until then a
+reader who resends straight after the failure sentence can send a message twice, and the
+doubt only withdraws the invitation once the log has spoken.
+
+**Rejected.** Keeping the bubble through the doubt and returning the text only when a
+socket opened after the failure has caught up without the event. A request the client
+gave up on can still land after a newer socket has caught up, so that verdict is wrong on
+exactly the links it is for.
+
+**Status.** Current.
+
+#### Q3.714 — A link that drops and is back within five seconds is drawn nowhere
+
+The owner's report, 2026-10-07: on a bad connection the screen jumps back and forth. The
+working line turns to "last seen working", the pill comes up bottom-left, and seconds
+later both are gone again, over and over. Three things in the client drew a fact the
+moment it was inferred:
+
+- `stale` was `stream.phase !== "live"`, so every redial froze the line at once.
+- The pill waited one second (`TROUBLE_GRACE_MS`). That was Telegram Desktop's own
+  connecting-state delay, which in that client's code applies at launch only.
+- One failed probe, on a 1.5 s budget, published a machine as `offline`, and it was then
+  asked again every 15 s. So was one failed listing, for the server.
+
+**What other clients do**, read in their source on 2026-10-07 unless marked:
+
+| Client | Before anything is shown | Once shown | Recovery |
+|---|---|---|---|
+| Signal Desktop | 5 s after an offline event; a socket close alone never | | at once |
+| mosh | "Last contact" after 6.5 s without data | | next packet |
+| matrix-js-sdk, Element | 3 failed syncs in a row; a reconnect draws nothing | stays in its error state "rather than keep flip-flopping" | next good sync |
+| Mattermost web | more than 7 failed closes, about 21 to 35 s | | first success |
+| Zulip web | the 8th failed poll | countdown hidden under 5 s "to avoid constant flickering" | first success |
+| VS Code Remote | 40 s since the last incoming data | sticky for the retry cycle | at once |
+| TDLib, Telegram iOS | 0.3 s | | 0.05 s, at once |
+| AndroidX's content-loading progress bar | 500 ms | 500 ms floor | |
+| `spin-delay` | 500 ms | 200 ms floor | |
+| Rocket.Chat, Telegram Android | none | none | the counter-examples |
+
+First retries are near at once everywhere (Telegram Desktop 1, 2, 3 ms then 1 s doubling;
+Phoenix 10, 50, 100 ms; TanStack Query 1 s doubling to 30 s). Four things recur across
+independent clients: slow to call a link bad and instant to call it good; bad is counted
+in failed attempts or seconds of silence, never in socket closes; what is already on
+screen is left alone; and an indicator, once shown, has a floor.
+
+**Decision.**
+
+- **One quiet window, `RECONNECT_QUIET_MS`, 5 s.** Whatever is inferred from a failure is
+  drawn only once it has outlasted the window, counted from the cause's own start: the
+  pill (`Spell.since`, `troubleDue`), the working line (`StreamStatus.downSince`,
+  `usePast`), a machine's reach (`drawnReach`) and the server (`drawnServer`).
+- **A positive word waits only the grace**, 1 s: this device saying it is offline, or the
+  server answering with an error. Nothing is held on a device that says it is offline. A
+  machine never yet drawn as up is held only while the server says its daemon is dialled
+  in, so a machine that is off is said to be at once.
+- **Recovery is drawn at once**, and the pill then stays `TROUBLE_MIN_SHOWN_MS`, 1.5 s.
+- **A spell once drawn stays drawn until it ends.** A change of cause takes nothing back
+  (`troubleLive`), and a machine drawn as down is not drawn as up again while it is still
+  down (`drawnAs`). The device saying offline and then online inside one machine's hold
+  did both: the machine went down, up and down, and the pill with it.
+- **No spell is drawn on the render that first sees it** (`TROUBLE_SIGHT_MS`). A hold that
+  has just run out hands the pill a cause already past its wait, and the body beside it
+  reports that it speaks one commit late.
+- **A machine drawn as up whose sessions cannot be read is a reconnect**
+  (`listFailingSince`, dated from the first listing that failed in transit). A probe is
+  small and a listing is not, so on a thin link the first can pass for ever while the
+  second times out: such a machine is never down for long enough to be drawn as down, and
+  without this nothing said its list had stopped.
+- **The hold is what is drawn, never what is acted on.** `AppState.machines` and
+  `AppState.server` are the drawn ones. The poll, `doubted` and every retry read the fact
+  as the connections and the listings gave it (`connection.state()`, `serverRaw`).
+- **A first failure is asked again soon**: `retryDelay` is 1, 2, 4, 8 s and then the 15 s
+  an outage is asked at, for a probe and for the listing. `soon` sets an early pass,
+  `tick(true)`, which asks again about what is down and leaves what answers to the poll.
+  A machine that is up again, by whatever door, is owed a first retry the next time.
+- **A launch is one spell**: a first listing and a first probe carry no date, so they are
+  counted from when the screen first saw them.
+
+**Measured**, in `webcheck.bad-network.ts`'s model: 300 schedules per link, 150 s of bad
+link each. "Before" is the old pacing and the old rules, "after" is what is drawn now
+(this entry and Q3.715 together).
+
+| Link | Working line frozen | Pill raised | Machine drawn unreachable |
+|---|---|---|---|
+| slow: stalls, nothing lost | 20 → 1 | 274 → 161 | 177 → 43 |
+| lossy: 6 % of legs lost, a socket dies every 15 s | 748 → 363 | 1845 → 1049 | 1355 → 190 |
+| flapping: that, and the device going offline and back | 954 → 415 | 2017 → 1279 | 1564 → 391 |
+
+Nothing shorter than the window is drawn on any link (`early`, asserted at zero, and
+dated by the driver's own clock rather than the store's). What is left is real: on the
+lossy link a redial through 6 % loss takes more than 5 s about four times in ten. The
+pill's count includes the new cause above, which the old rules never drew.
+
+**The window is the one knob.** Same model, lossy link, at 3, 5 and 8 s: the working
+line frozen 439, 363 and 251 times; the pill raised 1188, 1049 and 834 times; the machine
+drawn unreachable 387, 190 and 102 times. On the slow link the pill's counts are 135, 161
+and 92: the model's own noise, which is about a tenth from one run to the next, hides the
+step from 3 to 5 s there. Five is Signal's number and close to mosh's; a longer window
+hides more and admits a real outage later.
+
+**Rejected.**
+
+- *A debounce in each screen.* Three clocks drift, and the list and the pill disagree
+  about one machine.
+- *A patient transport*, with `MachineConnection` withholding `offline`. The poll and
+  `doubted` need the fact at once: that is what asks the listing which of the two it is.
+- *A count of failures instead of a time.* Attempts here are not evenly spaced (a stream
+  redials at 0.1 to 8 s, the poll every 4 s, a probe when asked), and time since the first
+  failure is what a reader lives through.
+- *Holding the good news*, hiding the pill only after some seconds of health. Every client
+  read shows recovery at once and floors the indicator instead.
+- *A fourth sentence for an unstable link.* The owner fixed three (Q3.710).
+
+**Not measured.** Nothing was seen in WKWebView or on a phone. A hidden tab throttles
+timers; the waits are compared on the clock when the timer fires, so a late timer draws
+late and never wrongly. Whether the model's links are harsher than a real bad one is not
+known.
+
+**Status.** Current. Supersedes the one-second grace of Q3.659 and Q3.710 for everything
+but a positive word.
+
+#### Q3.715 — A stream is ended by its own silence, and its first redial rides the route it had
+
+On the model's slow link nothing is ever lost, and streams dropped all the same. Every
+one of those drops was the client's own:
+
+- `forgetRoute` runs when any request times out, and since Q3.712 it closed every stream
+  with the idle connections, because a browser socket gives no sign of a dead link.
+- Every transport close of a stream forgot the route, so its redial began with a probe: a
+  second round trip, on a 1.5 s budget that the lossy link fails about half the time, and
+  each failure published the machine as down and set off the backoff.
+
+**Decision.**
+
+- **A stream suspected with its route is on probation** (`STREAM_PROBATION_MS`, 4 s):
+  `dropRedialable` closes it only if nothing has arrived on it since (`heardAt`). A
+  conversation that is streaming proves itself in a moment and is never dropped for
+  another request's failure. One that says nothing is closed as before, 4 s later.
+- **That close carries this client's own code** (`CLOSE_REDIAL`, never on the wire). The
+  stream dials again at once and asks nothing of the route.
+- **A socket that dies after a while live is redialled at once on the route it rode**
+  (`REDIAL_NOW_MS`, for one live at least `REDIAL_NOW_AFTER_MS`, 5 s). `suspectRoute`
+  drops the idle connections, keeps the memo, and does nothing to a route already
+  forgotten. One that dies sooner, or before its hello, drops the memo and waits out the
+  backoff, which is the old path.
+- **A probe that brings a machine back redials its streams, bar one still live.** That one
+  outlived the failure and is its probation's to judge.
+
+**What it costs.** A link that died silently under a working conversation is noticed 4 s
+later. A route that really is gone costs one dial before the probe; a black hole holds
+that dial for `CHANNEL_READY_TIMEOUT_MS`, and the poll's own failure forgets the route
+sooner.
+
+**Measured.** Same model as Q3.714, lossy link: the machine found down by a probe or a
+failed request 1355 → 892 times in 300 schedules. Against the real channel and the real
+daemon session (`webcheck.e2ee.ts`): a silent stream is closed after its probation, one
+that goes on delivering is not.
+
+**Three ways the first version of this failed, found by a review before it was built
+into an app.**
+
+- *Idle conversations on one machine redialled each other for ever.* A probation close
+  reached its stream as a dead link (1006), so that stream suspected the route in turn
+  and put its siblings on probation: with three open and one socket dying once, one
+  healthy stream was torn down every 4 s for as long as the app ran. Hence the code of
+  its own. `webcheck.e2ee.ts` drives three real streams through one blip: each is dialled
+  once more and the route forgotten once, against three dials and five forgettings with
+  the code taken away.
+- *A daemon that greets and closes was dialled 27 times in 3 s*, the route never proved
+  again: a hello resets the attempt count, and the at-once redial read nothing else.
+  Hence the 5 s a socket must have been live.
+- *The poll's re-probe undid the probation*: a stream that had just proved itself was
+  reconnected a second later by the early pass.
+
+**A check that could not fail.** Q3.712's "a stream is closed as a dead link would close
+it" passed for the wrong reason: its block ran before the driver's stream server existed,
+so the stream had never opened. The block now sits below that server and first asserts
+that both streams are delivering.
+
+**Not built.**
+
+- *A heartbeat frame from the daemon on the stream.* Silence would then be a verdict for
+  an idle conversation too. Daemons ship first (`compatibility.md`).
+- *A longer budget for the relay probe.* Measured on the slow link at 1.5, 4, 6 and 8 s,
+  before the two changes above: the machine found down 55, 40, 29 and 18 times in 100
+  schedules, and drawn down 17, 13, 9 and 6 times once held. The owner's to decide.
+
+**Status.** Current. Narrows Q3.712: a stream is no longer among what a forgotten route
+closes at once.
+
+#### Q3.716 — How soon is a link that came back drawn as back?
+
+The owner turned Wi-Fi off and on under the build of Q3.714 and "Can’t reach ‹host›" stood
+for about thirty seconds after the network was back. The stand's edge log holds that test
+(UTC, 2026-10-07): the app's relay sockets closed at 15:21:51 and 15:21:57, a
+control-plane request arrived at 15:21:57 already cancelled, five relay requests arrived
+after it, and the next listing arrived at 15:22:14. For seventeen seconds the
+conversations were streaming under a pill that said the server could not be reached.
+
+**Three causes.**
+
+- *The pace.* Q3.714's retries climb to `OFFLINE_RETRY_MS`, and a listing nothing answers
+  takes `CP_TIMEOUT_MS` to fail: one ask every 25 s once an outage is half a minute old.
+  The streams redial on a ceiling of 8 s, which is why they were back first.
+- *Nothing says the link is back.* WebKit on macOS reads online while any interface but
+  `lo`, `vnic` or `vmnet` holds an address, a VPN's `utun` and ZeroTier's `feth` included
+  (`NetworkStateNotifierMac.cpp`); an Android WebView is told of a change only where the
+  app holds the permission to read the network's state, which this one does not ask for. And what did answer,
+  the streams, told nobody.
+- *The host's own connection*, which is Q6.122.
+
+**How fourteen other clients do it**, read from their sources the same day. Where a
+person is watching the ceiling is short: socket.io 5 s, Phoenix 5 s, matrix-js-sdk 5 to
+10 s, Telegram's two web clients 3 s and 1 s. A ceiling of minutes (Firebase, Mattermost,
+TDLib on a phone: 300 s) comes only with something that resets it. The `online` event
+cancels the wait in five of them and is trusted alone in none; matrix-js-sdk's own
+comment calls it generally unreliable.
+
+**Decision.** The retries are the detector.
+
+- **What nothing answered is asked again at 1 and 2 s, then every `DOWN_RETRY_MS`**
+  (4 s, the poll's own interval). An answer that is a refusal keeps `OFFLINE_RETRY_MS`:
+  a server that answers with an error is alive and under load, and one that answers
+  nothing is cost nothing by being asked.
+- **A listing still out holds nothing back** once it has been out `LISTING_HEDGE_MS`
+  (`listingFree`, `askListing`). It rode the link as it was; waited for, it costs its
+  whole timeout after the link is back. Answers stand in the order asked
+  (`listingAsked`, `listingLanded`), and a retry is paced from the newest ask, or each
+  late failure would push the next one out again. The same on the path with no machine
+  held, where the poll is a whole pass and passes wait for each other, and on `Try
+  again`, which adopted such a pass.
+- **The first to answer asks for the other, once.** A machine that answers again has a
+  server still held unreachable asked now and its count started over (`machinesBack`),
+  once for that spell (`serverNudged`). The server answering again has every machine
+  that is down probed now. A wake starts the counts over before it asks anything, bar
+  a refusing server's.
+- **A listing's failure is confirmed before it is drawn**: `SERVER_CONFIRM_MS` from when
+  it landed (`serverLearnedAt`, `serverDrawnAt`), beside Q3.714's window from when it was
+  asked. A request that timed out is known to have failed ten seconds after it was
+  asked, its window spent: one lost in an outage's last seconds landed after the link
+  was back and drew the server unreachable for the second its retry took.
+- **A machine is named only on a probe begun after the first listing to answer since it
+  went down** (`answeredFor`, `provedDown`, `probedSince`). A link that was down for both
+  comes back to the server first, and the machine found down in the outage was named as
+  its own trouble until its next probe. A probe that fails having begun before that
+  answer settles nothing and is asked again at once, so a machine down by itself is
+  still named inside the quiet window. `doubt` asks the listing only for a machine the
+  server has not answered since.
+- **A daemon the server says is not dialled in is asked after through the listing**
+  (`undialled`, `awayAsks`): a second after it is first missed, then at twice the wait
+  each time up to `AWAY_RETRY_MS`. Its probe asks nothing on the wire, so nothing but a
+  listing or a token says it is back; the listing that does has it probed at once.
+- **Passes that meet in one probe count its failure once** (`probe`): an early pass, the
+  poll and a wake met in one, and three failures set the next probe four seconds out.
+  The early pass sets itself again for what is due after it (`nextDue`), having been one
+  timer for the soonest thing with nothing left for the rest. It also reads sessions
+  that could not be read (`listFailing`), which otherwise held the pill for a poll.
+
+**Measured**, in the model (`webcheck.bad-network.ts`, `BAD_NETWORK_OUTAGE=60`): a link
+that passes nothing for a while and then heals, 60 schedules each, differing in where
+the outage falls in the client's own cycles. How long the pill stayed after the link was
+back, median and worst, before and after:
+
+| Outage | The device says | Before | After |
+|---|---|---|---|
+| 20 s | nothing | 9.1 s, 11.2 s | 0.0 s, 3.6 s |
+| 45 s | nothing | 11.5 s, 13.7 s | 1.2 s, 4.0 s |
+| 90 s | nothing | 15.1 s, 17.8 s | 1.8 s, 4.0 s |
+| 45 s | offline, then online as it heals | 0.2 s, 13.7 s | 0.2 s, 1.6 s |
+| 90 s | offline, then online as it heals | 0.2 s, 12.3 s | 0.2 s, 1.5 s |
+| 8 s | online four seconds before it heals | 7.1 s, 7.6 s | 0.0 s, 0.0 s |
+| 45 s | online six seconds before it heals | 15.9 s, 26.0 s | 1.4 s, 4.1 s |
+| 90 s | online six seconds before it heals | 21.4 s, 27.8 s | 2.5 s, 3.1 s |
+
+The 90 s row with a silent device is the owner's case, and its 17.8 s is the log's
+seventeen. A device that says online before the path is usable (a VPN still joining) was
+the worst: the wake's one listing was lost, and the outage's pace resumed. Before the
+change the machine was named in 44 to 60 of 60 schedules wherever the device reported
+the outage; after it, in none. Q3.714's counts on the slow, lossy and flapping links are
+within their run-to-run noise.
+
+**In Chromium**, the harness of Q3.709 with a server that goes silent for 31, 37 and 43 s
+and then answers, its unanswered requests left unanswered: the server was named 14 s
+after it went silent, and was gone 4.0, 2.7 and 4.1 s after it answered. That account
+held no machine, which is the path where a pass waits out its own listing; one run
+before the hedge on that path took 5.6 s, and by construction it could take ten.
+
+**What it costs.** A server that is really down is named 2.5 s later than before where
+its listings time out, and at the same moment where they fail at once. While something
+is down and the page is visible, one listing and one probe per machine go out every 4 s
+instead of every 15, and up to three listings are out at once. A machine down by itself
+costs one probe more before it is named. A daemon that is not dialled in, a laptop
+asleep for the night, costs a listing a minute where it cost nothing.
+
+**Four ways the first version of this failed, found by a review before it was built
+into an app**, each driven against the real store with more than one machine, which the
+model has not.
+
+- *A doubt never closed with two machines down.* The first rule held a probe to the
+  newest listing that had answered. Every listing asked for one machine put the other
+  back in doubt, and each doubt asked another listing: 90 listings in two minutes with
+  nothing changing, and a machine that had been named drawn as a reconnect for 116 of
+  those 120 s. `Try again` on a machine named down took its sentence away for 11 s.
+  Hence the first answer since it went down, which later ones do not move: 3 listings,
+  and no time in doubt.
+- *A daemon that dialled in after the client's first listing stayed unreachable until
+  its token was renewed*, 146 s in one run. This was so before, but a client that now
+  asks within seconds asks before the daemon is back: with the daemon 8 s behind the
+  link it happened at 12 of 12 outage lengths, against 7 of 12. Hence the asking after
+  an undialled daemon: 2.4 s.
+- *One machine coming and going removed every backoff.* Whatever answered asked for
+  everything else, a stream going live and the device's word included, and started the
+  counts over. Under a server that was really down, a machine whose probes passed and
+  whose listings failed had it asked every 0.5 s, ten listings out at once. Hence once
+  a spell, and only the two that are evidence of the other side: every 4 s, three out.
+- *A wake started a refusing server's count over*, and a press on `Try again` with no
+  pass out asked a listing whose answer the pass it then started threw away.
+
+**Checks that could not fail, found by breaking the rules.** "Two passes that meet in
+one probe ask the route once" passed with the single flight taken out: the first pass
+had not been due, so only one ever asked. "A listing still out is given a second"
+passed with the wait taken out, because the pace held that ask back anyway; it is now
+asked of a machine in doubt, whose ask ignores the pace.
+
+**Not built.**
+
+- *Jitter.* Seven of the fourteen have it. Each client's pace starts from its own
+  failure, so a fleet is spread already; a server restart is the case that is not.
+- *The network-state permission on Android*, and a path monitor in the macOS host. Either
+  would make the device's word worth more than it is; neither replaces the retries.
+- *A second token mint beside one still out.* A machine whose token ran out during the
+  outage waits for that mint's timeout after the server is back.
+- *A backoff for a machine whose health answers and whose listings fail at once.* Its
+  count starts over each time it is up (Q3.714), and in the review's driver it was asked
+  four times a second, before this change as after it.
+- *More than one machine in the model.* The review's findings all needed two; they are
+  held by checks on the store in `webcheck.accounts-and-credentials.ts` instead.
+
+**Status.** Current. Narrows Q3.714: the server's hold is no longer the window alone, and
+the retries' ceiling is no longer the outage's.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -33175,7 +33834,7 @@ a clock.
 | Machines per user | **50 is the ceiling, not the limit.** It is the anti-abuse bound — creating one is reachable by anybody with a password, and each is a row plus an enrollment code plus a tunnel credential, against a `synchronous = FULL` file in the process carrying every tunnel. The *limit* is `machines.per_user`, a setting (env-seeded, database-owned) overridable per person in `user_machine_limits`, refused above the ceiling on both write paths and clamped again on read. **Unset resolves to 50**, which is the behaviour before the setting existed and deliberately not 0 — nothing seeds `instance_settings`, so a 0 default would take the whole fleet offline on deploy. Over the limit is **derived** from rank among `machine_owners` ordered by `(created_at, machine_id)`, never stored, so lowering switches off the newest and raising switches them back on with no recompute (Q1.51). Still counted with no revoked filter, which is why a revoke has to `releaseOwner` (Q1.43); `PUT …/owner` counts rows for *other* machines, so re-labelling one you already own is never your fifty-first — and it preserves `created_at` when the owner is unchanged, or an admin re-label would move a machine to the back of its own queue |
 | Control-plane bodies | 64 KiB above THE LINE and 256 KiB below it. The two public routes are the only places in this service where somebody with **no credential** decides how many bytes it reads, and neither had ever bounded it; below the line there was no bound at all, on the reasoning that a caller past the gate has a credential — a statement about *who* is asking and not about *how much*, when every route calls `readJsonObject`, which buffers before it looks. Both answer `413 payload_too_large` in the envelope every client here parses, because `bodyLimit`'s default `onError` is `text/plain` and none of them can read it. `currentPassword`/`newPassword` are refused over 512 characters |
 | Agent commands | 256 per session; 64 characters of name, 200 of description, 100 of hint — clamped at **ingest** in `session.ts`, like `MAX_PARENT_ID_CHARS`: the agent chooses the strings, the list rides no event so `truncateEvent` never sees it, and "bounded by what the agent sent" is not a bound. Measured 2026-08-03, claude publishes **100 commands / 18.7 KiB**, longest name 24, longest hint exactly 64, descriptions median 68 and max 1135. So 256 is for an MCP server publishing hundreds of prompts rather than for trimming a real list; the hint cap sits *above* the longest real one; the description cap is the only one that bites. **The name cap is a refusal and the other two are truncations** — `clip` appends `…[truncated N bytes]`, right for prose and wrong for a name, since a command is invoked by *sending* `/<name>`; dedup running on the unclipped name while the clipped one was stored made two long names collide with `dropped` reporting none. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot entirely; only `commandsRevision`, a number, rides the poll |
-| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible, 15s re-probe for an unreachable machine, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — each of which gets its own budget, its daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s) and never below `SLOW_ROUTE_FLOOR_MS` (90s): `POST /sessions` 215s, `/prompt` 150s, `GET /agents/capabilities` and the `/custom-agents` writes 290s, the rest 90s, each held above its chain by webcheck; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
+| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible; a probe or a listing nothing answered is asked again at 1 and 2s and then every 4s, one that was refused every 15s (`retryDelay`, Q3.716); 1.5s reachability probe; a drop shorter than 5s is drawn nowhere (`RECONNECT_QUIET_MS`), and a stream suspected with its route has 4s to deliver something (`STREAM_PROBATION_MS`, Q3.715); token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — each of which gets its own budget, its daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s) and never below `SLOW_ROUTE_FLOOR_MS` (90s): `POST /sessions` 215s, `/prompt` 150s, `GET /agents/capabilities` and the `/custom-agents` writes 290s, the rest 90s, each held above its chain by webcheck; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
 | Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
@@ -36236,6 +36895,44 @@ came back `high` in one `agent_config` event, and every change wrote one event t
 already carried its level.
 
 **Status.** Current. Reverses Q3.67's label.
+
+### Q6.122 — What does reqwest do with a pooled connection the network dropped?
+
+It rides it for ever. The app's host sends every control-plane request through one
+`reqwest::Client`, so they share a pooled HTTP/2 connection, and a network that goes away
+reports nothing on a socket.
+
+**Measured** 2026-10-07 on reqwest 0.13.5 with this build's features, against the dev
+stand through a forwarder that can stop relaying without closing anything: one request
+every 4 s, each abandoned by its caller after 10 s and left to run as the page leaves a
+host call, 12 s of relaying, 40 s of none, then relaying again for connections made from
+then on. In the first 12 s every run made one connection and spoke HTTP/2 on it.
+
+| Client | First request begun after the link was back |
+|---|---|
+| As built: a 30 s timeout and nothing else | never answered, to 99 s; with the old connection thawed 20 s later, at that thaw |
+| With `connect_timeout` alone | the same |
+| With keep-alive pings, 5 s and 5 s, idle or not, and a 10 s connect timeout | answered in 11 to 14 ms |
+| Pings only while a request is out, nothing asked during the outage | two requests failed on the old connection; the first answer came 9 s after the link was back |
+
+Every request's bytes went onto the old connection and no other was opened. The pool's
+idle timeout, 90 s, is its only way out, and a retry loop defeats it: hyper-util stamps
+the connection as used at every HTTP/2 checkout. After 76 s without a request the next
+one still rode it; after 92 s it was dropped. On a real path the kernel's retransmit
+timer ends the wait, minutes later at worst; the forwarder acknowledges on loopback, so
+that was not measured.
+
+**Decision.** `proxy.rs`'s `client()` pings a connection silent for `PING` and closes it
+unanswered for as long again, idle included, so the request that finds it dead dials.
+`CONNECT` bounds a dial at what the page waits for an answer: without it the dials made
+during the outage were never closed, and one request hung to the backstop.
+`nativecheck` holds the four calls and both numbers.
+
+**What it costs.** A ping every 5 s for the 90 s a connection stays pooled after its
+last request. A stall of more than 10 s on a link that would have recovered now ends
+the connection, at the moment the page gives up on the request anyway.
+
+**Status.** Current.
 
 ## Open questions and deliberate non-goals
 

@@ -85,6 +85,7 @@ export function events(attach: Attach, from: number, to: number): void {
 }
 
 export let forgotten = 0;
+export let suspected = 0;
 let tokenExpiresAt: number | null = null;
 
 export const machine = {
@@ -94,6 +95,7 @@ export const machine = {
   resolveRoute: async (): Promise<Route> => ({ base: `http://127.0.0.1:${port}`, kind: "relay" }),
   currentRoute: (): Route => ({ base: `http://127.0.0.1:${port}`, kind: "relay" }),
   forgetRoute: (): void => void (forgotten += 1),
+  suspectRoute: (): void => void (suspected += 1),
   tokenExpiresAt: (): number | null => tokenExpiresAt,
   streamUrl: (session: string, since: number, _token: string, _route: Route): string =>
     `ws://127.0.0.1:${port}/sessions/${session}/stream?since=${since}&token=t_ok`,

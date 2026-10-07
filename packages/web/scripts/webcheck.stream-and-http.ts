@@ -6,11 +6,25 @@ import {
   attaches,
   events,
   forgotten,
+  suspected,
   hello,
   newStream,
   nextAttach,
   recorder,
 } from "./webcheck.ws.js";
+
+const { CLOSE_REDIAL } = await import("../src/e2ee.js");
+
+/** A socket live for five seconds, without the five seconds: the stream reads the monotonic clock, and this moves it for one step. */
+async function aged<T>(run: () => Promise<T>): Promise<T> {
+  const real = performance.now.bind(performance);
+  performance.now = () => real() + 6_000;
+  try {
+    return await run();
+  } finally {
+    performance.now = real;
+  }
+}
 
 process.stdout.write("\nthe cursor across a rotation\n");
 {
@@ -96,17 +110,62 @@ process.stdout.write("\nreplay across a reconnect\n");
   events(first, 1, 3);
   await sleep(50);
 
+  // Q3.715: a socket dying after a while live is no proof its route did, and proving the route again first is a round trip
+  // the reader waits through. The while is on the monotonic clock, which is moved here rather than waited out.
   const before = forgotten;
-  first.terminate();
-  await sleep(60);
-  report("a transport close drops the route memo", forgotten > before, `forgetRoute called ${forgotten - before}×`);
-
-  const second = await nextAttach(2);
+  const suspectedBefore = suspected;
+  const whileLive = stream.status().downSince;
+  const diedAt = Date.now();
+  const second = await aged(async () => {
+    first.terminate();
+    return nextAttach(2);
+  });
+  const lostAt = stream.status().downSince;
+  report("a socket that dies after a while live is redialled at once", Date.now() - diedAt < 400, `${String(Date.now() - diedAt)}ms`);
+  check(
+    "on the route it rode, which is kept, while what else rode it is suspected",
+    [forgotten - before, suspected - suspectedBefore],
+    [0, 1],
+  );
   check("and reconnects from the cursor, not from zero", second.since, 3);
-  hello(second, 3);
-  events(second, 4, 6);
+  second.terminate();
+  const third = await nextAttach(3);
+  report("a redial that dies before its hello is the route's own failure, and drops the memo", forgotten > before, `forgetRoute called ${forgotten - before}×`);
+  check("and it still asks from the cursor", third.since, 3);
+  // What a reader is shown waits on how long the stream has been down, so a retry that fails may not start that count again.
+  const stillLostAt = stream.status().downSince;
+  hello(third, 3);
+  events(third, 4, 6);
   await sleep(50);
+  check(
+    "the loss is dated once: null while live, the same moment through every retry, and null again at the hello",
+    [whileLive, lostAt !== null, stillLostAt === lostAt, stream.status().downSince],
+    [null, true, true, null],
+  );
   check("no event is repeated and none is skipped", rec.seqs, [1, 2, 3, 4, 5, 6]);
+
+  // A socket that says hello and dies would otherwise be dialled without end, some nine times a second, its route never proved again.
+  const youngForgotten = forgotten;
+  const youngSuspected = suspected;
+  const youngAt = Date.now();
+  third.terminate();
+  const fourth = await nextAttach(4);
+  check(
+    "one that dies young is the route's to answer for: the memo goes, nothing is merely suspected, and the backoff is waited out",
+    [forgotten > youngForgotten, suspected - youngSuspected, Date.now() - youngAt >= 350],
+    [true, 0, true],
+  );
+  const spunFrom = attaches.length;
+  const spunAt = Date.now();
+  let greeted = fourth;
+  while (Date.now() - spunAt < 1_500) {
+    hello(greeted, 6);
+    await sleep(5);
+    const next = attaches.length + 1;
+    greeted.close(1011, "internal error");
+    greeted = await nextAttach(next);
+  }
+  report("so a daemon that greets and closes is dialled at the backoff's pace, never in a spin", attaches.length - spunFrom <= 5, `${String(attaches.length - spunFrom)} dials in 1.5s`);
   stream.stop();
 }
 
@@ -139,7 +198,7 @@ process.stdout.write("\na stream says when it went live, so a wake keeps a fresh
   check(
     "resume drops only a route not trusted since the absence, and redials only a stream not live since it",
     [
-      /if \(!trusted\(connection\.routeSince\(\), since\)\) connection\.forgetRoute\(\);/.test(store),
+      /if \(!trusted\(connection\.routeSince\(\), since\)\) connection\.abandonRoute\(this\.absentSince\);/.test(store),
       /stream\.ref\.machineId === id && !stream\.liveAfter\(since\)\) stream\.reconnect\(\);/.test(store),
     ],
     [true, true],
@@ -383,6 +442,9 @@ process.stdout.write("\na relayed download, a piece at a time\n");
     openSocket(): unknown {
       throw new Error("no socket in this section");
     },
+    dropRedialable(): void {},
+    dropIdle(): void {},
+    closeDialledBefore(): void {},
     dispose(): void {},
   })) as never;
   const connection = new MachineConnection(
@@ -645,10 +707,15 @@ process.stdout.write("\nhow long a slow route is given\n");
 
 process.stdout.write("\nthe close-code table\n");
 {
-  for (const [code, label, shouldForget] of [
-    [4401, "an expiry close", false],
-    [4003, "a slow-consumer close", false],
-    [1011, "an internal-error close", true],
+  // What each close asks of the route. Only a transport close asks anything: the memo, of a socket that died young, and
+  // no more than a suspicion of one that had been live a while (Q3.715). This client's own redial close asks nothing.
+  for (const [code, label, old, forgets, suspects] of [
+    [4401, "an expiry close", false, false, false],
+    [4003, "a slow-consumer close", false, false, false],
+    [1011, "an internal-error close on a socket just greeted", false, true, false],
+    [1011, "an internal-error close on a socket live a while", true, false, true],
+    [CLOSE_REDIAL, "this client's own close of a stream it means to dial again", false, false, false],
+    [CLOSE_REDIAL, "the same on a socket live a while", true, false, false],
   ] as const) {
     attaches.length = 0;
     const rec = recorder();
@@ -659,9 +726,21 @@ process.stdout.write("\nthe close-code table\n");
     await sleep(30);
 
     const before = forgotten;
-    attach.close(code, "bye");
-    await sleep(80);
-    check(`${label} ${shouldForget ? "drops" : "keeps"} the route memo`, forgotten > before, shouldForget);
+    const suspectedBefore = suspected;
+    const closeIt = async (): Promise<void> => {
+      attach.close(code, "bye");
+      await sleep(80);
+    };
+    await (old ? aged(closeIt) : closeIt());
+    check(
+      `${label} ${forgets ? "drops" : "keeps"} the route memo and suspects ${suspects ? "what rode the route with it" : "nothing"}`,
+      [forgotten > before, suspected > suspectedBefore],
+      [forgets, suspects],
+    );
+    if (code === CLOSE_REDIAL) {
+      const again = await attachWithin(2, 400);
+      report("and is dialled again at once", again !== null, `${String(attaches.length)} socket(s) opened`);
+    }
     stream.stop();
   }
 

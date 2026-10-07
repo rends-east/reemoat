@@ -1057,10 +1057,16 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     );
 
     const foot = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+    // Q3.714: a reconnect shorter than the quiet window freezes nothing, so the line is dated and never read off the phase.
     check(
-      "the foot asks whether anything is streaming at all, by the property rather than by a list",
-      /const stale = stream === null \|\| stream\.phase !== "live";/.test(foot),
-      true,
+      "the foot is stale once nothing has streamed for the quiet window, dated from the stream's own loss or from the opening",
+      [
+        /const stale = usePast\(stream === null \? opened : stream\.downSince, RECONNECT_QUIET_MS\);/.test(foot),
+        /const opened = useMemo\(\(\) => monotonicNow\(\), \[key\]\);/.test(foot),
+        /stream\.phase/.test(foot),
+        foot.indexOf("const stale = usePast(") < foot.indexOf("if (row === undefined)"),
+      ],
+      [true, true, false, true],
     );
     // The reconnecting banner is gone: a stream reattaching is the connection pill's to say (Q3.659).
     check(

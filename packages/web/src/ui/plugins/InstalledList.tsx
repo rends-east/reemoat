@@ -14,6 +14,7 @@ import type { PluginSummary } from "../../wire";
 import { Badge, Button, DangerButton, Empty, SETTINGS_HEADING, SETTINGS_SECTION } from "../bits";
 import { PLUGIN_ARCHIVE_ACCEPT, PluginArchiveNote, PluginConsent, PluginUnreadable } from "../PluginConsent";
 import { MachineInstalls } from "./MachineInstalls";
+import { pluginsUnread, registryUnread } from "../Unreachable";
 import { Group, LinkRow } from "../kit/List";
 import { useCatalogue } from "./MarketList";
 
@@ -27,7 +28,8 @@ export function InstalledList({ state, base }: { state: AppState; base: string |
   return (
     <div>
       {rows.length === 0 ? (
-        <Empty>Nothing is installed on any of your machines yet.</Empty>
+        // Said only once the machine list and every machine's own list have been read (Q3.709).
+        (registryUnread(state) ?? pluginsUnread(state) ?? <Empty>Nothing is installed on any of your machines yet.</Empty>)
       ) : (
         <Group>
           {rows.map((row) => (

@@ -29,6 +29,7 @@ import type { MachineState } from "../../machine";
 import { ConsentBrokenError, MACHINE_GONE, pluginFailure } from "../../plugins";
 import { machineBadgeText } from "../../quota";
 import { store, type AppState } from "../../store";
+import { registryUnread } from "../Unreachable";
 import { ambiguousNames, type PluginSummary } from "../../wire";
 import { Badge, Button, DangerButton, Empty, Icon, IconButton, Menu, menuRow, SEARCH_FIELD, SETTINGS_HEADING, Spinner } from "../bits";
 import { CHECKBOX } from "../kit/Field";
@@ -309,7 +310,7 @@ export function MachineInstalls({
     return (
       <div>
         {heading.length > 0 && <h2 className={SETTINGS_HEADING}>{heading}</h2>}
-        <Empty>{noRowsText(0, "", filter)}</Empty>
+        {registryUnread(state) ?? <Empty>{noRowsText(0, "", filter)}</Empty>}
       </div>
     );
   }

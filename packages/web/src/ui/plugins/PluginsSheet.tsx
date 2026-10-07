@@ -13,6 +13,7 @@ import {
 import { navigate, useOrigin } from "../../router";
 import type { AppState } from "../../store";
 import { Empty, IconButton, tabPill } from "../bits";
+import { configUnread } from "../Unreachable";
 import { MarketIcon } from "./MarketList";
 import { MarketNav } from "./MarketNav";
 import { InstalledList } from "./InstalledList";
@@ -103,7 +104,8 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
       ) : route.tab === "installed" ? (
         <InstalledList state={state} base={base} />
       ) : base === null ? (
-        <Empty>{NO_CATALOGUE}</Empty>
+        // An unread server has not said it has no catalogue (Q3.709).
+        (configUnread(state) ?? <Empty>{NO_CATALOGUE}</Empty>)
       ) : (
         <MarketList state={state} base={base} />
       )}

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
+import type { MachineState } from "../machine";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
@@ -40,6 +41,7 @@ import {
   IconButton,
   MachineLabel,
   nicknameLine,
+  OFFLINE_TEXT,
   Skeleton,
   StatusDot,
   resumeFailureText,
@@ -57,6 +59,7 @@ import {
   currentView,
   foldersOf,
   groupsVersion,
+  listBody,
   machineTabs,
   matching,
   orphansFor,
@@ -68,15 +71,18 @@ import {
   takeRows,
   toggleFolder,
   isFolderCollapsed,
+  type BodyMachine,
   type Filter,
   type Folder,
   type FolderId,
+  type ListBody as Body,
   type ListView,
   type MachineTab,
 } from "./groups";
 import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
 import { RenameField, SessionMenu } from "./SessionMenu";
+import { Unreachable } from "./Unreachable";
 import { WorkingMark } from "./Mark";
 
 /** Mounted twice, in the desktop aside and the phone wrapper; the breakpoint lives only in those two class strings. */
@@ -118,10 +124,22 @@ export function SessionBrowser({
     [drag.scrollerRef, swipe.scrollerRef],
   );
   const needle = currentQuery();
+  // Reported by the list itself, which has already cut and counted its rows: where its body names what is unreachable the pill says nothing.
+  const [speaks, setSpeaks] = useState(false);
+  // A retry the reader pressed that worked is said once; its block has unmounted and cannot say it.
+  const [said, setSaid] = useState("");
+  useEffect(() => {
+    if (said === "") return;
+    const timer = window.setTimeout(() => setSaid(""), SAID_MS);
+    return () => window.clearTimeout(timer);
+  }, [said]);
+  const connected = useCallback(() => setSaid("Connected"), []);
+  // Nothing can be started on a machine nobody has heard of: a registry that was read and is empty opens the sheet that says so.
+  const nowhere = state.machines.length === 0 && state.registry !== "known";
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} />
+      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} unchecked={nowhere} />
 
       {/* Below lg only; above it `MachineColumn` draws the machines as a column. */}
       {state.machines.length > 0 && (
@@ -148,6 +166,7 @@ export function SessionBrowser({
         {/* Pan-y plus pinch-zoom: the horizontal axis is the swipe's; refusing every gesture would stop the rail scrolling. */}
         <div
           ref={listRef}
+          data-session-list=""
           className="relative min-h-0 flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom]"
         >
           {drag.unpinning && (
@@ -160,7 +179,16 @@ export function SessionBrowser({
               </div>
             </div>
           )}
-          <ListBody state={state} groups={groups} view={view} activeKey={activeKey} drag={drag} rows={rows} />
+          <ListBody
+            state={state}
+            groups={groups}
+            view={view}
+            activeKey={activeKey}
+            drag={drag}
+            rows={rows}
+            onSpeaks={setSpeaks}
+            onConnected={connected}
+          />
         </div>
         <BesidePanes swipe={swipe} state={state} groups={groups} view={view} activeKey={activeKey} drag={drag} />
         {/* Over the list and above the foot's New session, like Telegram's; a row's own target runs its full width. */}
@@ -169,10 +197,14 @@ export function SessionBrowser({
           openKey={activeKey}
           machines={view.all ? "all" : view.machine === null ? [] : [view.machine]}
           placement="bottom-3 left-3"
+          silent={speaks}
         />
+        <p role="status" className="sr-only">
+          {said}
+        </p>
       </div>
 
-      <SidebarFoot machine={view.machine} />
+      <SidebarFoot machine={view.machine} disabled={nowhere} />
     </div>
   );
 }
@@ -223,6 +255,8 @@ function ListBody({
   activeKey,
   drag,
   rows,
+  onSpeaks,
+  onConnected,
 }: {
   state: AppState;
   groups: SessionGroups;
@@ -230,6 +264,9 @@ function ListBody({
   activeKey: SessionKey | null;
   drag: RowDrag;
   rows: number | null;
+  /** Whether this body names what is unreachable. Absent on a neighbour's page, which is a picture. */
+  onSpeaks?: (speaks: boolean) => void;
+  onConnected?: () => void;
 }): ReactNode {
   // Destructured so the call below reads exactly as webcheck greps for it; never reach past the helper here, not even in prose.
   const { filter } = view;
@@ -241,7 +278,6 @@ function ListBody({
     left.rows <= 0 ? [] : [{ ...folder, rows: takeRows(folder.rows, left, 1) }],
   );
   const orphans = takeRows(matching(orphansFor(groups, filter), view.query), left);
-  const probing = state.machines.some((m) => m.reach === "probing" || m.reach === "unknown");
   const needle = currentQuery();
   // Rows the filter alone withholds, so the empty state can offer them.
   const hiddenHere =
@@ -250,19 +286,35 @@ function ListBody({
       : view.all
         ? allRows(groups, { ...view, filter: "all" }).length
         : foldersOf(groups, { ...view, filter: "all" }).reduce((sum, one) => sum + one.rows.length, 0);
-  // The ban is checked first: it is the fact to fix before the limit.
-  const selected = view.all ? undefined : groups.groups.find((candidate) => candidate.id === view.machine);
-  const selectedOwnerDisabled = selected?.ownerDisabled === true;
-  const selectedOverLimit = !selectedOwnerDisabled && selected?.overLimit === true;
+  // A sentence names a machine by its own label, never by what this computer calls itself (Q7.139).
+  const selected = view.all ? undefined : state.machines.find((candidate) => candidate.id === view.machine);
+  const body = listBody({
+    device: state.device,
+    server: state.server.state,
+    registry: state.registry,
+    fleet: state.machines.map((machine) => bodyMachine(state, machine)),
+    selected: selected === undefined ? null : bodyMachine(state, selected),
+    rows: folders.length + everything.length,
+    needle: needle.trim().length > 0,
+    hidden: hiddenHere,
+  });
+  const speaks = body.kind === "network" || body.kind === "server" || body.kind === "unreachable";
+  useEffect(() => onSpeaks?.(speaks), [onSpeaks, speaks]);
 
   return (
     <>
-    {folders.length === 0 && everything.length === 0 && pinned.length === 0 && probing && (
-      <Skeleton rows={4} />
+    {/* Asked and not answered yet: a shape, and one spoken line, since the shape is hidden from a screen reader. */}
+    {body.kind === "skeleton" && pinned.length === 0 && (
+      <>
+        <Skeleton rows={4} />
+        <p role="status" className="sr-only">
+          {state.machines.length === 0 ? "Loading your machines" : "Loading sessions"}
+        </p>
+      </>
     )}
 
-    {/* Not while the registry is unreadable: no machines would be a guess. */}
-    {state.machines.length === 0 && !probing && state.cpError === null && (
+    {/* Only from a registry that answered: no machines would otherwise be a guess. */}
+    {body.kind === "no_machines" && (
       <div className="px-4 py-6 text-center">
         <p className="text-sm text-muted">No machines yet.</p>
         {mayAddMachine(state.me) ? (
@@ -356,10 +408,18 @@ function ListBody({
       </Section>
     )}
 
+    {/* What was not reached, by name, where there is nothing else to draw; over rows the pill says it (Q3.659, Q3.709). */}
+    {body.kind === "network" && <Unreachable cause={{ what: "network" }} split={splits(state, activeKey)} onConnected={onConnected} />}
+    {body.kind === "server" && (
+      <Unreachable cause={{ what: "server", why: body.why }} split={splits(state, activeKey)} onConnected={onConnected} />
+    )}
+    {body.kind === "unreachable" && <Unreachable cause={{ what: "machines", names: body.names }} onConnected={onConnected} />}
+    {body.kind === "sessions_failed" && <Unreachable cause={{ what: "sessions", name: body.name }} onConnected={onConnected} />}
+
     {/* Ask the unfiltered question before claiming the machine is empty. */}
-    {folders.length === 0 && everything.length === 0 && state.machines.length > 0 && !probing && (
+    {QUIET.has(body.kind) && (
       <div className="px-4 py-6 text-center">
-        {needle.trim().length > 0 ? (
+        {body.kind === "no_match" ? (
           // The only exit from a typo: the needle is not persisted and some browsers draw no native clear.
           <>
             <p className="text-sm text-muted">Nothing matches.</p>
@@ -367,24 +427,29 @@ function ListBody({
               Clear search
             </Button>
           </>
-        ) : selectedOwnerDisabled ? (
+        ) : body.kind === "owner_disabled" ? (
           <p className="text-sm text-muted">
             This machine&rsquo;s owner has been disabled, so it is not being reached.
           </p>
-        ) : selectedOverLimit ? (
+        ) : body.kind === "over_limit" ? (
           <p className="text-sm text-muted">
             This machine is over the machine limit, so it is not being reached.
           </p>
-        ) : hiddenHere > 0 ? (
+        ) : body.kind === "filtered" ? (
           <>
             <p className="text-sm text-muted">
-              {hiddenHere === 1 ? "One conversation here" : `${hiddenHere} conversations here`}
+              {body.hidden === 1 ? "One conversation here" : `${body.hidden} conversations here`}
               {filter === "ended" ? ", none of them ended." : ", all of them ended."}
             </p>
             <Button className="mt-3" onClick={() => setFilter("all")}>
               Show all
             </Button>
           </>
+        ) : body.kind === "refused" ? (
+          // Asking again changes nothing here: the reason is what somebody acts on.
+          <p className="text-sm text-muted">
+            {body.name} is unreachable: {OFFLINE_TEXT[body.reason]}
+          </p>
         ) : (
           <>
             <p className="text-sm text-muted">No sessions here yet.</p>
@@ -399,17 +464,50 @@ function ListBody({
   );
 }
 
+/** How long a spoken "Connected" stands before the region empties again. */
+const SAID_MS = 4_000;
+
+/** The bodies that state something calmly and offer at most a way to widen the view. */
+const QUIET: ReadonlySet<Body["kind"]> = new Set<Body["kind"]>([
+  "no_match",
+  "owner_disabled",
+  "over_limit",
+  "filtered",
+  "refused",
+  "no_sessions",
+]);
+
+function bodyMachine(state: AppState, machine: MachineState): BodyMachine {
+  return {
+    name: machine.name,
+    reach: machine.reach,
+    offlineReason: machine.offlineReason,
+    ownerDisabled: machine.ownerDisabled,
+    overLimit: !machine.ownerDisabled && machine.overLimit,
+    sessions: state.listed.has(machine.id) ? "known" : state.sessionsFailed.has(machine.id) ? "failed" : "unknown",
+    doubted: state.doubted.has(machine.id),
+  };
+}
+
+/** With no machine held and no conversation open, the pane at `lg` carries the control and the accounts, as it carries the installer's command. */
+function splits(state: AppState, activeKey: SessionKey | null): boolean {
+  return state.machines.length === 0 && activeKey === null;
+}
+
 /** The sr-only h1 is the only heading on the phone's primary screen. */
 function SidebarHeader({
   state,
   machines,
   needle,
   onMenu,
+  unchecked,
 }: {
   state: AppState;
   machines: number;
   needle: string;
   onMenu: () => void;
+  /** Nothing has been read yet, so nothing can be said of what is waiting. */
+  unchecked: boolean;
 }): ReactNode {
   const waiting = sessionLists(state).blocked;
   return (
@@ -421,7 +519,7 @@ function SidebarHeader({
       <span className="relative ml-auto inline-flex shrink-0">
         <IconButton
           icon={Bell}
-          label={waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`}
+          label={unchecked ? "Not checked yet" : waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`}
           size="chip"
           disabled={waiting.length === 0}
           onClick={() => {
@@ -888,7 +986,7 @@ function SessionLine({
   );
 }
 
-function SidebarFoot({ machine }: { machine: MachineId | null }): ReactNode {
+function SidebarFoot({ machine, disabled }: { machine: MachineId | null; disabled: boolean }): ReactNode {
   return (
     // `pb-2` inside, not beside `pb-safe`, which is unlayered and would win.
     <div className="pb-safe shrink-0 px-3 pt-3">
@@ -896,6 +994,7 @@ function SidebarFoot({ machine }: { machine: MachineId | null }): ReactNode {
         <Button
           size="sm"
           className="w-full"
+          disabled={disabled}
           onClick={() => navigate(machine === null ? newPath() : newPath(machine))}
         >
           <Icon as={Plus} size={16} />

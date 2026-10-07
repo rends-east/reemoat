@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { daemonRead } from "../../machine";
 import type { MachineId } from "../../ids";
 import { MACHINE_GONE } from "../../plugins";
+import { registryUnread } from "../Unreachable";
 import { navigate } from "../../router";
 import { harnessSigninPath, settingsPath } from "../../settings";
 import type { AppState } from "../../store";
@@ -25,15 +26,17 @@ export function MachineSystemsSection({
   if (machine === null) {
     // The chevron leads back to this same dead end, so the way out to the list is drawn here (Q3.415).
     return (
-      <Empty
-        action={
-          <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
-            All machines
-          </Button>
-        }
-      >
-        {MACHINE_GONE}
-      </Empty>
+      registryUnread(state) ?? (
+        <Empty
+          action={
+            <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
+              All machines
+            </Button>
+          }
+        >
+          {MACHINE_GONE}
+        </Empty>
+      )
     );
   }
 

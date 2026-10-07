@@ -1,6 +1,8 @@
 import { subscribeMachineOrder } from "../machineOrder";
 import type { MachineId } from "../ids";
+import type { OfflineReason, Reach } from "../machine";
 import { relativeTo } from "../paths";
+import { onTheWire, serverTroubled, wantsServer, type Answer, type DeviceNetwork, type Registry, type ServerState } from "../reach";
 import type { MachineGroup, SessionGroups, SessionRow } from "../store";
 import { needsHuman, showsAsEnded } from "../wire";
 import { orderSessions } from "../sessionOrder";
@@ -388,4 +390,104 @@ export function rowsOf(group: MachineGroup, filter: Filter): SessionRow[] {
   // Under all the union must be sorted: two sorted lists end to end are not one sorted list.
   if (filter === "ended") return orderSessions(group.ended);
   return orderSessions(filter === "all" ? [...group.active, ...group.ended] : group.active);
+}
+
+/** What the list body needs of one machine: its reach, and whether its sessions were ever read. */
+export interface BodyMachine {
+  name: string;
+  reach: Reach;
+  offlineReason: OfflineReason;
+  ownerDisabled: boolean;
+  overLimit: boolean;
+  sessions: Answer;
+  /** Down since the server last answered: the server is being asked which of the two it is. */
+  doubted: boolean;
+}
+
+export interface ListBodyInput {
+  device: DeviceNetwork;
+  server: ServerState;
+  registry: Registry;
+  /** Every machine held; under All each of them is read. */
+  fleet: readonly BodyMachine[];
+  /** The selected machine, or null under All. */
+  selected: BodyMachine | null;
+  /** Rows this tab draws below Pinned, after the filter and the needle. */
+  rows: number;
+  needle: boolean;
+  /** Rows the filter alone withholds. */
+  hidden: number;
+}
+
+export type ListBody =
+  | { kind: "rows" }
+  | { kind: "skeleton" }
+  | { kind: "network" }
+  | { kind: "server"; why: "unreachable" | "refusing" }
+  | { kind: "no_machines" }
+  | { kind: "no_match" }
+  | { kind: "filtered"; hidden: number }
+  | { kind: "owner_disabled" }
+  | { kind: "over_limit" }
+  | { kind: "unreachable"; names: readonly string[] }
+  | { kind: "refused"; name: string; reason: NonNullable<OfflineReason> }
+  | { kind: "sessions_failed"; name: string | null }
+  | { kind: "no_sessions" };
+
+/** Asked or about to be: nothing can be said of it yet. */
+function unsettled(machine: BodyMachine): boolean {
+  if (machine.reach === "unknown" || machine.reach === "probing") return true;
+  if (machine.doubted && onTheWire(machine.reach, machine.offlineReason)) return true;
+  return machine.reach === "online" && machine.sessions === "unknown";
+}
+
+/** A refusal somebody acts on: the machine cannot be reached and asking again will not change it. */
+function refusal(machine: BodyMachine): NonNullable<OfflineReason> | null {
+  if (machine.reach !== "offline" || machine.offlineReason === null) return null;
+  return machine.offlineReason === "no_route" || machine.offlineReason === "cp_unreachable" ? null : machine.offlineReason;
+}
+
+/**
+ * The one answer to what a list with nothing to draw says, first match wins (Q3.709). An empty-state sentence is reached only
+ * from a read that answered: an unread registry or machine is a skeleton, a failed one names what was not reached.
+ */
+export function listBody(input: ListBodyInput): ListBody {
+  const { device, server, registry, fleet, selected, rows, needle, hidden } = input;
+  // Offline renames a failure and is none by itself; a server that answered with an error was reached, and keeps its name.
+  const serverBody = (): ListBody =>
+    server === "refusing"
+      ? { kind: "server", why: "refusing" }
+      : device === "offline"
+        ? { kind: "network" }
+        : { kind: "server", why: "unreachable" };
+
+  if (fleet.length === 0) {
+    if (registry === "known") return { kind: "no_machines" };
+    return serverTroubled(server) ? serverBody() : { kind: "skeleton" };
+  }
+  if (rows > 0) return { kind: "rows" };
+
+  const read = selected === null ? fleet : [selected];
+  if (read.some(unsettled)) return { kind: "skeleton" };
+  if (needle) return { kind: "no_match" };
+  // The ban is checked first: it is the fact to fix before the limit.
+  if (selected?.ownerDisabled === true) return { kind: "owner_disabled" };
+  if (selected?.overLimit === true) return { kind: "over_limit" };
+  if (hidden > 0) return { kind: "filtered", hidden };
+
+  if (read.some((machine) => wantsServer(machine.reach, machine.offlineReason))) return serverBody();
+  const down = read.filter((machine) => onTheWire(machine.reach, machine.offlineReason));
+  if (down.length > 0) {
+    return device === "offline" ? { kind: "network" } : { kind: "unreachable", names: down.map((machine) => machine.name) };
+  }
+  const failed = read.filter((machine) => machine.reach === "online" && machine.sessions === "failed");
+  if (failed.length > 0) return { kind: "sessions_failed", name: failed.length === 1 ? (failed[0]?.name ?? null) : null };
+  // Nothing answered, and one of them never will until somebody acts: say that rather than call the list empty.
+  if (!read.some((machine) => machine.sessions === "known")) {
+    for (const machine of read) {
+      const reason = refusal(machine);
+      if (reason !== null) return { kind: "refused", name: machine.name, reason };
+    }
+  }
+  return { kind: "no_sessions" };
 }

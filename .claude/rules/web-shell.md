@@ -60,8 +60,8 @@ Shaped around **does anything anywhere need me**, answered on the rows:
   title, a count on its machine tab; subline stays (Q3.691), folder counts nothing (Q3.695),
   nothing lifts it (Q3.569), swept over filter × tab × query. `Sheet` draws no
   waiting count. Q3.674, Q3.200, Q3.434, Q3.201.
-- `machineSubline` ranks `blocked` above `offline`; only `ConnectionPill` says unreachable
-  (`relay.md`, Q3.659); `MachineTab.reach` has no caller outside `webcheck`. Q3.202.
+- `machineSubline` ranks `blocked` above `offline`; only `ConnectionPill` and an empty body
+  say unreachable (`reach.md`); `MachineTab.reach` has no caller outside `webcheck`. Q3.202.
 - **Nothing in a row mounts sideways into another control**: delete it, reserve its slot
   (the pin, the two spinners), or move it off the row.
 - `.scroll-stable` on the transcript only, never `*`, rail or pane (Q3.203). Pane
@@ -210,8 +210,8 @@ must stay assertable.
 
 **Bounds.** 3 live sockets (LRU); 16 MiB per session (`MAX_TRANSCRIPT_BYTES`); history pages
 of 5000, a failed page retried over 37.5s, then `attachWanted` re-drives. 60 sessions per
-machine per poll (why `listRank` puts pinned above live). 4s list poll, 15s
-re-probe when unreachable, 1.5s reachability probe; token refresh at `exp − 90s`, socket
+machine per poll (why `listRank` puts pinned above live). 4s list poll, re-probes
+paced by `reach.md`, 1.5s reachability probe; token refresh at `exp − 90s`, socket
 rotation at `exp − 60s`. 15s per request; process-spawning routes get daemon chain + 30s, at
 least 90s, `/prompt` always, never keyed on session state. `POST /sessions/:id/cancel` is
 not one, pinned absent. Change `docs/DECISIONS.md`'s Bounds table first. Q3.226

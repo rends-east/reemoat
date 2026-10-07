@@ -284,6 +284,9 @@ async function connect(id: string, channels: never = fetchChannel) {
     openSocket(): never {
       throw new Error("this section never opens one");
     },
+    dropRedialable(): void {},
+    dropIdle(): void {},
+    closeDialledBefore(): void {},
     dispose(): void {},
   })) as never;
 
@@ -461,6 +464,9 @@ async function connect(id: string, channels: never = fetchChannel) {
       openSocket(): never {
         throw new Error("this section never opens one");
       },
+      dropRedialable(): void {},
+      dropIdle(): void {},
+      closeDialledBefore(): void {},
       dispose(): void {},
     })) as never;
 

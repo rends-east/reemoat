@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
 import { MACHINE_GONE } from "../../plugins";
+import { registryUnread } from "../Unreachable";
 import { navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import type { AppState } from "../../store";
@@ -15,15 +16,17 @@ export function MachinePluginsList({ state, machineId }: { state: AppState; mach
   if (machine === null) {
     // The chevron leads back to a machine that is gone as well, so the way out to the list is drawn here (Q3.415).
     return (
-      <Empty
-        action={
-          <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
-            All machines
-          </Button>
-        }
-      >
-        {MACHINE_GONE}
-      </Empty>
+      registryUnread(state) ?? (
+        <Empty
+          action={
+            <Button size="sm" onClick={() => navigate(settingsPath("machines"), true)}>
+              All machines
+            </Button>
+          }
+        >
+          {MACHINE_GONE}
+        </Empty>
+      )
     );
   }
 
@@ -52,6 +55,6 @@ export function MachinePluginsList({ state, machineId }: { state: AppState; mach
 
 export function PluginInstallScreen({ state, machineId }: { state: AppState; machineId: MachineId }): ReactNode {
   const machine = state.machines.find((candidate) => candidate.id === machineId) ?? null;
-  if (machine === null) return <Empty>{MACHINE_GONE}</Empty>;
+  if (machine === null) return registryUnread(state) ?? <Empty>{MACHINE_GONE}</Empty>;
   return <PluginInstall key={machineId} machineId={machineId} />;
 }

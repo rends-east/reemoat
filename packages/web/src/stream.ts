@@ -1,4 +1,4 @@
-import type { StreamSocket } from "./e2ee";
+import { CLOSE_REDIAL, type StreamSocket } from "./e2ee";
 import type { SessionId, SessionRef } from "./ids";
 import { SOCKET_ROTATE_MARGIN_MS, describe, type MachineConnection, type Route } from "./machine";
 import { monotonicNow } from "./wake";
@@ -11,6 +11,10 @@ const CLOSE_TOKEN_EXPIRED = 4401;
 const CLOSE_SLOW_CONSUMER = 4003;
 
 const RECONNECT_MIN_MS = 500;
+/** The first redial of a socket that was live: at once, bar enough to let the close settle. */
+const REDIAL_NOW_MS = 100;
+/** Live for less than this, it is not redialled at once: a socket that says hello and dies would be dialled without end. */
+const REDIAL_NOW_AFTER_MS = 5_000;
 const RECONNECT_MAX_MS = 8_000;
 const SLOW_CONSUMER_BACKOFF_MS = 5_000;
 const CONNECT_SETTLE_MS = 2_000;
@@ -24,6 +28,8 @@ export interface StreamStatus {
   lastAppliedSeq: number;
   instanceId: string | null;
   error: string | null;
+  /** Monotonic, since when it has not been live; null while it is. A reconnect is drawn from this and never from the phase alone (Q3.714). */
+  downSince: number | null;
 }
 
 export interface StreamSink {
@@ -52,6 +58,7 @@ export class SessionStream {
   private stopped = false;
   private connectStartedAt = 0;
   private liveSince: number | null = null;
+  private downSince: number | null = monotonicNow();
   /** Bumped on every deliberate reconnect; frames and closes from a stale generation are ignored. */
   private generation = 0;
 
@@ -75,6 +82,7 @@ export class SessionStream {
       lastAppliedSeq: this.lastAppliedSeq,
       instanceId: this.instanceId,
       error: this.error,
+      downSince: this.downSince,
     };
   }
 
@@ -123,6 +131,8 @@ export class SessionStream {
   private setPhase(phase: StreamPhase, error: string | null = null): void {
     if (phase !== "live") this.liveSince = null;
     else if (this.phase !== "live") this.liveSince = monotonicNow();
+    if (phase === "live") this.downSince = null;
+    else this.downSince ??= monotonicNow();
     this.phase = phase;
     this.error = error;
     this.sink.onStatus(this.ref, this.status());
@@ -271,19 +281,33 @@ export class SessionStream {
         this.retryLater("dropped for falling behind", SLOW_CONSUMER_BACKOFF_MS);
         return;
 
-      default:
-        // A transport failure: the only close that drops the route memo.
-        this.machine.forgetRoute();
-        this.retryLater(reason.length > 0 ? reason : `socket closed (${code})`);
+      case CLOSE_REDIAL:
+        // The channel's own close of a socket nothing arrived on. No verdict on the route, so nothing is forgotten or suspected.
+        this.retryLater(reason, REDIAL_NOW_MS, true);
         return;
+
+      default: {
+        const error = reason.length > 0 ? reason : `socket closed (${code})`;
+        // A socket dying after a while live is no proof its route did: the first redial rides the route held, and proving it
+        // again first costs a round trip the reader waits through (Q3.715).
+        if (this.liveSince !== null && monotonicNow() - this.liveSince >= REDIAL_NOW_AFTER_MS) {
+          this.machine.suspectRoute();
+          this.retryLater(error, REDIAL_NOW_MS, true);
+          return;
+        }
+        // A transport failure before a hello: the only close that drops the route memo.
+        this.machine.forgetRoute();
+        this.retryLater(error);
+        return;
+      }
     }
   }
 
-  private retryLater(error: string, floorMs = RECONNECT_MIN_MS): void {
+  private retryLater(error: string, floorMs = RECONNECT_MIN_MS, now = false): void {
     if (this.stopped) return;
     this.attempt += 1;
-    const backoff = Math.min(RECONNECT_MIN_MS * 2 ** (this.attempt - 1), RECONNECT_MAX_MS);
-    const jittered = Math.round(Math.max(backoff, floorMs) * (0.8 + Math.random() * 0.4));
+    const backoff = now ? floorMs : Math.max(Math.min(RECONNECT_MIN_MS * 2 ** (this.attempt - 1), RECONNECT_MAX_MS), floorMs);
+    const jittered = Math.round(backoff * (0.8 + Math.random() * 0.4));
     this.setPhase("waiting", error);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;

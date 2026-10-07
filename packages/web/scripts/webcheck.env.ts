@@ -80,5 +80,8 @@ export const fetchChannel = ((options: { relayUrl: string }) => ({
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return new WebSocket(url.toString());
   },
+  dropRedialable(): void {},
+  dropIdle(): void {},
+  closeDialledBefore(): void {},
   dispose(): void {},
 })) as never;

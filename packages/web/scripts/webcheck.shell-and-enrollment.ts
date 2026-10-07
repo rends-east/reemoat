@@ -1017,12 +1017,23 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/<Icon\s+as=\{ChevronDown\}[\s\S]{0,120}?transition-transform[\s\S]{0,80}?rotate-180/.test(drawer), /transition/.test(/const DRAWER_ROW = "([^"]*)"/.exec(drawer)?.[1] ?? "transition")],
     [true, false],
   );
+  // The account's two lines are one component, drawn by the drawer and by the list's own way out when a server cannot be reached.
+  const accountRow = stripComments(readFileSync(new URL("../src/ui/AccountRow.tsx", import.meta.url), "utf8"));
   check(
     "each account's server is drawn in mono at the step below its name",
-    (drawer.match(/font-mono text-2xs text-muted">\{serverLabel\(/g) ?? []).length,
-    2,
+    [
+      (drawer.match(/font-mono text-2xs text-muted">\{serverLabel\(/g) ?? []).length,
+      (accountRow.match(/font-mono text-2xs text-muted">\{serverLabel\(/g) ?? []).length,
+      /import \{ AccountLines \} from "\.\/AccountRow";/.test(drawer),
+    ],
+    [1, 1, true],
   );
-  check("and signed out is a word at the trailing edge, where the host says so", /\{!account\.signedIn && <span className="shrink-0 text-2xs text-faint">signed out<\/span>\}/.test(drawer), true);
+  check("and signed out is a word at the trailing edge, where the host says so", /\{!account\.signedIn && <span className="shrink-0 text-2xs text-faint">signed out<\/span>\}/.test(accountRow), true);
+  check(
+    "the row is the drawer's own, written twice and compared here",
+    /export const ACCOUNT_ROW = "([^"]*)"/.exec(accountRow)?.[1],
+    /const DRAWER_ROW = "([^"]*)"/.exec(drawer)?.[1],
+  );
   const { personEmoji } = await import("../src/ui/bits.js");
   const faces = ["admin", "rends", "someone else", "Ада", "🙂 leading emoji"].map((n) => personEmoji(n));
   check("a face is the same one every time it is asked", faces, ["admin", "rends", "someone else", "Ада", "🙂 leading emoji"].map((n) => personEmoji(n)));
@@ -1051,7 +1062,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   );
   const names = [
     ...[...drawer.matchAll(/<span className="([^"]*)">\{name \?\? "Signed in"\}/g)].map((m) => m[1] ?? ""),
-    ...[...drawer.matchAll(/<span className="([^"]*)">\{account\.name \?\? serverLabel\(account\.origin\)\}/g)].map((m) => m[1] ?? ""),
+    ...[...(drawer + accountRow).matchAll(/<span className="([^"]*)">\{account\.name \?\? serverLabel\(account\.origin\)\}/g)].map((m) => m[1] ?? ""),
   ];
   report("every name the drawer draws was read", names.length >= 3, `${names.length} names`);
   check("and none of them carries a weight", names.filter((n) => /font-/.test(n)), []);

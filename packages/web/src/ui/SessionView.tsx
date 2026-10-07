@@ -13,6 +13,7 @@ import { backgroundReporting } from "../tasks";
 import { echoFor, echoVersion, subscribeEchoes } from "../echo";
 import { hiddenFinished, hiddenFinishedVersion, hideFinished, subscribeHiddenFinished } from "../finishedTasks";
 import { permissionContext } from "../permission";
+import { RECONNECT_QUIET_MS } from "../reach";
 import { keyOf, type SessionRef } from "../ids";
 import { ApiError } from "../http";
 import { describe, missingRowReason } from "../machine";
@@ -20,6 +21,7 @@ import { displayCwd, downloadablePath, folderLabel, INLINE_DOWNLOADS, relativeTo
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
+import { monotonicNow } from "../wake";
 import { machineDisplayName } from "../machineOrder";
 import {
   humanRequests,
@@ -41,6 +43,7 @@ import { Composer } from "./Composer";
 import { ConnectionPill } from "./ConnectionPill";
 import { EventList } from "./EventList";
 import { useFollow } from "./follow";
+import { usePast } from "./past";
 import { FileAccessContext, type FileAccess } from "./files";
 import { saveBlob } from "./download";
 import { Header } from "./Header";
@@ -50,6 +53,7 @@ import { PermissionCard } from "./PermissionCard";
 import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
 import { toast } from "./Toast";
 import { TASK_PANEL_GUTTER } from "./TaskPanel";
+import { Unreachable, unreadCause } from "./Unreachable";
 import {
   COLUMN,
   Icon,
@@ -103,16 +107,26 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   // Opaque, because below lg a back swipe draws the list under it (Q3.663).
   const back = useBackSwipe();
   const mentionScope = useMemo(() => ({ here: sessionRef.machineId as string, mentions: [] }), [sessionRef.machineId]);
+  // A conversation just opened has no stream yet, and that wait is dated from the opening.
+  const opened = useMemo(() => monotonicNow(), [key]);
+  const stream = transcript?.stream ?? null;
+  // What was last drawn stands through a reconnect shorter than the quiet window; the trouble itself is the pill's to say (Q3.714).
+  const stale = usePast(stream === null ? opened : stream.downSince, RECONNECT_QUIET_MS);
 
   if (row === undefined) {
     const why = missingRowReason(machine?.reach ?? null, state.listed.has(sessionRef.machineId));
+    // A machine the list does not hold is gone only if the list was read: before that it is a wait, or what was not reached (Q3.709).
+    const unread = machine === undefined && state.registry !== "known";
+    const cause = unread ? unreadCause(state) : null;
     return (
       <div ref={back.ref} onPointerDownCapture={back.press} className="flex min-h-0 flex-1 flex-col bg-surface">
         <Header title={<span className="text-base font-semibold">Session</span>} close backRef={back.gate} />
-        {why === "loading" ? (
+        {why === "loading" || (unread && cause === null) ? (
           <div className={`${COLUMN} px-4 py-2`}>
             <TranscriptSkeleton />
           </div>
+        ) : cause !== null ? (
+          <Unreachable cause={cause} />
         ) : (
           <p className="p-6 text-center text-sm text-muted">
             {why === "no_machine"
@@ -127,10 +141,6 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   }
 
   const session = row.snapshot;
-  const stream = transcript?.stream ?? null;
-  // Anything not live, since a handshake can sit in `connecting` indefinitely; the trouble itself is the pill's to say.
-  const stale = stream === null || stream.phase !== "live";
-
 
   return (
     // `min-h-0` so the transcript scrolls; the gutter pads this column because the fixed panel displaces nothing.

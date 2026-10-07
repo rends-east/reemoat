@@ -71,8 +71,10 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
         <div className="pb-safe shrink-0 border-t border-edge pt-1">
           <button
             type="button"
+            // `mayAddMachine` fails open on an unknown account, so the door is drawn; it opens once the account is known (Q3.708).
+            disabled={state.meRead !== "known"}
             onClick={() => navigate(settingsPath("machines"))}
-            className="tap flex min-h-14 w-full flex-col items-center justify-center gap-1 text-muted hover:bg-raised hover:text-fg"
+            className="tap flex min-h-14 w-full flex-col items-center justify-center gap-1 text-muted hover:bg-raised hover:text-fg disabled:bg-transparent disabled:text-faint"
           >
             <Icon as={Plus} size={18} />
             <span className="text-xs">Add</span>

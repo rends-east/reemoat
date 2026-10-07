@@ -8,6 +8,7 @@ import { daemonRead, type MachineState } from "../../machine";
 import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
 import { inNativeShell } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
+import { registryUnread } from "../Unreachable";
 import { navigate } from "../../router";
 import { agentStripPath, machineLeafPath, machineListPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
@@ -62,7 +63,7 @@ export function MachineSection({
   const [idleError, setIdleError] = useState<string | null>(null);
 
   if (machine === null) {
-    return <Empty>{MACHINE_GONE}</Empty>;
+    return registryUnread(state) ?? <Empty>{MACHINE_GONE}</Empty>;
   }
 
   const owned = machine.owned === true;
@@ -442,7 +443,7 @@ export function MachineNameScreen({ state, machineId }: { state: AppState; machi
     if (!gone && !mine) back();
   }, [gone, mine]);
 
-  if (machine === null) return <Empty>{MACHINE_GONE}</Empty>;
+  if (machine === null) return registryUnread(state) ?? <Empty>{MACHINE_GONE}</Empty>;
   if (!mine) return null;
   return <RenameMachine key={machine.id} machine={machine} onDone={back} />;
 }

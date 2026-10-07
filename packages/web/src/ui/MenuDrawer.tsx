@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNod
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
 import { marketPath } from "../market";
-import { nativeAccounts, type NativeAccountList, type NativeAccountSummary } from "../native";
+import { nativeAccounts, type NativeAccountList } from "../native";
 import { pluginPath, screenPlugins } from "../plugins";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
@@ -11,6 +11,7 @@ import { serverLabel } from "../slot";
 import { sessionGroups, store, type AppState } from "../store";
 import { currentTheme, setTheme, subscribeTheme } from "../theme";
 import { APP_VERSION } from "../version";
+import { AccountLines } from "./AccountRow";
 import { Icon, Monogram, personEmoji, SwitchKnob } from "./bits";
 import { isPulled, subscribePull, yieldPull } from "./drawerPull";
 import { currentView, groupsVersion, subscribeGroups } from "./groups";
@@ -113,18 +114,25 @@ export function MenuDrawer({
               {keyLine}
             </AccountPanel>
           )}
-          {me !== null && (
-            <button type="button" onClick={() => go(settingsPath())} className={`${DRAWER_ROW} text-fg hover:bg-raised`}>
-              <Icon as={SettingsIcon} size={18} />
-              Settings
-            </button>
-          )}
-          {me !== null && (
-            <button type="button" onClick={() => go(marketPath())} className={`${DRAWER_ROW} text-fg hover:bg-raised`}>
-              <Icon as={Puzzle} size={18} />
-              Plugins
-            </button>
-          )}
+          {/* Drawn from the first frame and disabled until the account is known: a row never arrives under a finger (Q3.708). */}
+          <button
+            type="button"
+            disabled={me === null}
+            onClick={() => go(settingsPath())}
+            className={`${DRAWER_ROW} text-fg hover:bg-raised disabled:bg-transparent disabled:text-faint`}
+          >
+            <Icon as={SettingsIcon} size={18} />
+            Settings
+          </button>
+          <button
+            type="button"
+            disabled={me === null}
+            onClick={() => go(marketPath())}
+            className={`${DRAWER_ROW} text-fg hover:bg-raised disabled:bg-transparent disabled:text-faint`}
+          >
+            <Icon as={Puzzle} size={18} />
+            Plugins
+          </button>
           {launchable.length > 0 && machine !== null && (
             <>
               <p className={DRAWER_HEADING}>screens</p>
@@ -314,18 +322,4 @@ function writeAccountsOpen(open: boolean): void {
   } catch {
     // A refused write only costs remembering the fold past this sitting.
   }
-}
-
-function AccountLines({ account }: { account: NativeAccountSummary }): ReactNode {
-  return (
-    <>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate">{account.name ?? serverLabel(account.origin)}</span>
-        {account.name !== null && (
-          <span className="block truncate font-mono text-2xs text-muted">{serverLabel(account.origin)}</span>
-        )}
-      </span>
-      {!account.signedIn && <span className="shrink-0 text-2xs text-faint">signed out</span>}
-    </>
-  );
 }

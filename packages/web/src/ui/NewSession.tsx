@@ -40,6 +40,7 @@ import {
   Spinner,
   reachText,
 } from "./bits";
+import { registryUnread } from "./Unreachable";
 import { Field, FIELD_LABEL } from "./kit/Field";
 import { toast } from "./Toast";
 import { VERBATIM_FIELD } from "./composing";
@@ -417,6 +418,7 @@ function NewSession({
             value={selected}
             fromRoute={fromRoute}
             me={state.me}
+            unread={registryUnread(state)}
             onChange={setMachine}
           />
         </div>
@@ -515,7 +517,8 @@ function NewSession({
             "this can take up to 45 seconds"
           ) : agents !== null && picked === null ? (
             agentsFailure !== null ? "" : empty !== null ? "no agent to start" : "choose an agent"
-          ) : cwd !== null ? (
+          ) : cwd !== null || selected === null ? (
+            // With no machine there is no folder to be choosing.
             ""
           ) : (
             "choosing a folder…"
@@ -853,6 +856,7 @@ function MachineLine({
   value,
   fromRoute,
   me,
+  unread,
   onChange,
 }: {
   machines: readonly DrawnMachine[];
@@ -861,11 +865,22 @@ function MachineLine({
   fromRoute: MachineId | null;
   // Passed whole so this file calls `mayAddMachine` itself, which `webcheck` asserts.
   me: Me | null;
+  /** Drawn in place of "No machines yet." while the list has not been read; null once it has (Q3.709). */
+  unread: ReactNode | null;
   onChange: (id: MachineId) => void;
 }): ReactNode {
   const settled = fromRoute !== null || reachable.length === 1;
   const [open, setOpen] = useState(!settled);
   const current = machines.find((candidate) => candidate.machine.id === value) ?? null;
+
+  if (machines.length === 0 && unread !== null) {
+    return (
+      <div>
+        <FieldLabel>Machine</FieldLabel>
+        {unread}
+      </div>
+    );
+  }
 
   if (machines.length === 0) {
     return (

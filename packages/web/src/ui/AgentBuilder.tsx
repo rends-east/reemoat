@@ -34,6 +34,7 @@ import {
 import type { MachineId } from "../ids";
 import { daemonRead } from "../machine";
 import { MACHINE_GONE } from "../plugins";
+import { registryUnread } from "./Unreachable";
 import { store } from "../store";
 import { AGENT_IDS, type AgentCapabilities, type AgentId, type AgentAvailability, type CustomAgent, type SystemInfo } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
@@ -294,7 +295,7 @@ export function AgentBuilder({
     return (
       <div className={SHEET_SCREEN}>
         <div className={SHEET_SCROLL}>
-          <Empty>{MACHINE_GONE}</Empty>
+          {registryUnread(state) ?? <Empty>{MACHINE_GONE}</Empty>}
         </div>
       </div>
     );

@@ -1695,6 +1695,27 @@ check("and leaves the previous server's daemon running", /supervisor|stop_all|\.
     ),
     true,
   );
+  // Q6.122: measured, a pooled connection the network dropped was ridden by every request after it and never closed.
+  const proxyFlat = flat(rustCode(read(`${TAURI_DIR}/src/proxy.rs`)));
+  check(
+    "a connection the network dropped is pinged and closed, idle or not, so the next request dials",
+    [
+      /\.http2_keep_alive_interval\(PING\)/.test(proxyFlat),
+      /\.http2_keep_alive_timeout\(PING\)/.test(proxyFlat),
+      /\.http2_keep_alive_while_idle\(true\)/.test(proxyFlat),
+      /const PING: Duration = Duration::from_secs\(5\);/.test(proxyFlat),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and a dial is given as long as the page waits for an answer",
+    [
+      /\.connect_timeout\(CONNECT\)/.test(proxyFlat),
+      /const CONNECT: Duration = Duration::from_secs\(10\);/.test(proxyFlat),
+      /const CP_TIMEOUT_MS = 10_000;/.test(read("packages/web/src/cp.ts")),
+    ],
+    [true, true, true],
+  );
   // Quarantine keys are per `<origin>#<user id>`; the bare origin counts only for an inherited device.
   const configFlat = flat(rustCode(read(`${TAURI_DIR}/src/config.rs`)));
   const scan = between(configFlat, "fn quarantine_is_only_about(dir: &Path, scope: &str) -> bool {", "fn is_scheme_byte(");

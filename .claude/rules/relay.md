@@ -7,8 +7,6 @@ paths:
   - packages/web/src/machine.ts
   - packages/web/src/localRoute.ts
   - src/announce.ts
-  - packages/web/src/ui/connection.ts
-  - packages/web/src/ui/ConnectionPill.tsx
   - scripts/relaycheck.ts
 ---
 
@@ -85,30 +83,32 @@ a replacement clears a dead relay's rows at boot. Q4.35.
 
 ## When a connection is down
 
-**One pill, bottom-left, no banner.** Server unreachable, machine unreachable, stream
-reattaching and first probe are `connectionTrouble`, drawn by `ConnectionPill` (36px
-spinner, opens on hover with `pointer-fine`, focus or tap). `webcheck` asserts the old
-banner and `reconnecting` line absent. Q3.659.
+What the client draws, and the facts it draws from, are `reach.md`'s: one pill, a body
+that names what was not reached, and three facts where `cpError` stood alone (Q3.659,
+Q3.707).
 
-- Only `no_route`, `cp_unreachable` or no reason counts; `over_limit`,
-  `owner_disabled`, `not_enrolled`, `no_token`, the key refusals and session notices
-  stay where drawn.
-- Reads this screen, not the fleet: the tab plus the open conversation's machine and
-  stream; under All a probe counts and an off machine does not. Server > machine >
-  stream.
-- A daemon the host is starting is *Connecting…* (`localDaemonStarting` while
-  `awaitLaunchStart` waits). Q3.692.
-- **A failed listing is retried, never held**: `cpError` outranks everything, so `tick`
-  re-reads `cp.machines()` while it is set, unawaited, every `OFFLINE_RETRY_MS`. A wake
-  redials only what was proved before the absence *began* (`WakeClock`, `suspectSince`,
-  monotonic). Q3.703.
-- `troubleSince` keeps one spell across kinds; `troubleShown` waits
-  `TROUBLE_GRACE_MS`. The live region is permanent: a spell announced once, a retry
-  never.
-- Shield only down the relay (Noise); TLS and loopback do not earn it.
-- In the list's pager window, never over New session; rows keep their full-width target.
-  Below `lg` a conversation draws its own (`lg:hidden`), lifted over a parked card; above
-  `lg` the list's reads that conversation. Exactly one is displayed.
+**One request's dead link ends no other request** (Q3.712). `forgetRoute` drops the memo
+and what redials at no cost (`MachineChannel.dropRedialable`: the idle connections). A
+request in flight keeps its own answer or timeout: ended, nobody could say whether a POST
+arrived. Only a wake ends requests (`store.wake`, from `resume.ts` alone), and only those
+dialled before its absence (`absentSince`, `abandonRoute`, `closeDialledBefore`); any
+other `resume` ends none. `abandonRoute` forgets before it closes. An expired token still
+closes the channel whole.
+
+**A stream is ended by its own silence** (Q3.715). A browser socket reports a dead link
+in minutes, if at all, so a stream suspected with its route is on probation: closed only
+if nothing arrives within `STREAM_PROBATION_MS` (`heardAt`), then resumed from its
+cursor. The poll's re-probe leaves a live one alone.
+
+- **That close is `CLOSE_REDIAL`, this client's own code, never 1006.** Taken for a dead
+  link it made the stream suspect the route in turn, and idle conversations on one
+  machine redialled each other for ever. The stream dials again and asks nothing of the
+  route.
+- **A socket that dies after `REDIAL_NOW_AFTER_MS` live is redialled at once on the
+  route it rode.** `suspectRoute` drops the idle connections only, keeps the memo, and
+  does nothing to a route already forgotten. One that dies sooner, or before its hello,
+  drops the memo and waits out the backoff: a hello resets the attempt count, so nothing
+  else stops a daemon that greets and closes from being dialled without end.
 
 ## Invariants
 
@@ -189,7 +189,7 @@ banner and `reconnecting` line absent. Q3.659.
 | `src/relay/protocol.ts` | Tunnel vocabulary and `parseAgentClis`/`formatAgentClis`. Imported by the control plane, so imports nothing of the daemon's (`announcedAgentClis` lives in `tunnel.ts`) |
 | `src/relay/tunnel.ts` | Daemon end: dial, h2 *server* on the dialled socket, CONNECT to loopback |
 | `packages/web/src/localRoute.ts` | The only compare of an announced machine id to a wanted one; composes no URL |
-| `packages/web/src/machine.ts` | One machine's token and reachability; `forgetRoute` never on an HTTP status; `missingRowReason` |
+| `packages/web/src/machine.ts` | One machine's token and reachability; `forgetRoute` never on an HTTP status, and never ending a request in flight; `missingRowReason` |
 | `packages/web/src/stream.ts` | One session's socket: rotation, the close-code table, the cursor |
 | `packages/control-plane/src/relay/main.ts` | Relay entry: mints no key, bootstraps nobody, sends no mail, does not wait for the API |
 | `packages/control-plane/src/relay/listener.ts` | Tunnel path, `/__relay/channel`, `/__relay/health` (**not** `/health`); rest refused. `RELAY_CHANNEL_PATH` mirrored in `packages/web/src/e2ee.ts`, literals compared by both drivers |

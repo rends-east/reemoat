@@ -25,6 +25,72 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Changed
+
+- **The app is drawn at once.** A signed-in launch used to hold a small spinner, with no
+  menu, until the server answered or ten seconds passed. The shell is now on screen from
+  the first frame, so the menu and the other accounts are always in reach; on Android,
+  where switching accounts reloads the page, that spinner was also what a switch looked
+  like.
+- **A list with nothing to show says why.** When the server cannot be reached and no
+  machine is held, the list names the server ("Can’t reach app.example"), offers Try
+  again, and lists the other accounts on this device. When this device itself has no
+  network it says that instead.
+- **The connection pill has three things to say** where it had one: "Waiting for
+  network…", "Connecting…", and after ten seconds the server by name. On a phone it opens
+  by itself for everything but a reconnect, since a finger has no hover.
+- **A connection that drops and is back within five seconds is no longer shown at all.**
+  On an unstable link the screen kept changing: the working line turned to "last seen
+  working", the pill came up, a machine was called unreachable, and seconds later it all
+  went back. Now nothing changes unless the trouble has lasted five seconds, recovery
+  still shows at once, and the pill stays at least a second and a half once it is up.
+  This device going offline, or the server answering with an error, is still said after
+  one second.
+- **A connection that comes back is noticed within a few seconds.** While something
+  cannot be reached it is asked again every four seconds where it was every fifteen, a
+  request still waiting no longer holds the next one back, and a machine or the server
+  that answers first has the other asked at once.
+
+### Fixed
+
+- **"Can’t reach ‹server›" stayed for up to half a minute after the network was back**,
+  with the conversations under it already streaming again. In the desktop and Android
+  apps there was a second cause: requests to the server kept riding a connection the
+  network had dropped, which nothing ever closed.
+- **A machine was named as unreachable for a few seconds after an outage that had taken
+  the server too**, and one request lost on a bad link could draw "Connecting…" ten
+  seconds later, when it timed out, for the second its retry took.
+- **A machine whose daemon reconnected a little after the app did stayed unreachable for
+  minutes**, until its token was renewed. The app now asks the server about a daemon that
+  is not connected: a second later, then less and less often, up to once a minute.
+- **A server that stopped while the app was open was never named.** Each machine was
+  called unreachable instead, one tab at a time, once its token ran out.
+- **Nine sentences that said something was empty when it had not been read**: "No
+  machines yet." beside an install command during an outage, "No sessions here yet." for a
+  machine that could not be asked, "That machine is not in your list any more." on a
+  machine's settings, and six more.
+- A server that answered with an error is no longer described as unreachable.
+- Settings, Account and API keys no longer show a failure while the account is still
+  being read.
+- **On a slow connection a session just created could leave the list and come back, with
+  its conversation left blank.** An answer that arrived late was taken for the newer one,
+  so a list read before the session existed removed it, and nothing opened the
+  conversation again. A message sent there drew nothing, and was drawn twice once the
+  conversation was reopened. The same late answers could show a session as working after
+  it had finished.
+- **One failed request no longer ends the others to that machine.** A list refresh that
+  timed out used to cut a message being sent, so its text came back to the box with an
+  error while the agent was already answering it.
+- A message whose answer was lost is no longer given back when it is already in the
+  conversation, and one given back as possibly lost leaves the box again if it turns out
+  to have arrived.
+- **A machine is no longer called unreachable after one slow answer.** A check that timed
+  out is repeated after one, two, four and eight seconds before the usual fifteen, and the
+  machine is drawn as down only if it stays down.
+- **A conversation that is streaming is no longer cut off when another request to its
+  machine fails**, and one whose connection does drop is redialled at once instead of
+  after the machine is checked again.
+
 ## [0.13.0] - 2026-10-04
 
 ### Added

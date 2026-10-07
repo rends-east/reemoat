@@ -3,7 +3,6 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import {
   ageText,
   changePasswordError,
-  CONTROL_PLANE_UNREACHABLE,
   PASSWORD_MIN,
   passwordProblem,
   passwordProblemText,
@@ -30,6 +29,7 @@ import {
   shortDuration,
 } from "../bits";
 import { toast } from "../Toast";
+import { MeUnread } from "../Unreachable";
 import { Field } from "../kit/Field";
 import { ActionRow, EmptyRow, Group, LinkRow, TABLE, TD, TWO_STEP_ROW, ValueRow } from "../kit/List";
 
@@ -44,17 +44,8 @@ export function AccountSection({
   return (
     <div>
       {me === null ? (
-        // Reachable: bootstrap can be ready with no me when the control plane is down; refreshMe is the retry.
-        <Empty
-          failed
-          action={
-            <Button size="sm" onClick={() => void store.refreshMe()}>
-              Try again
-            </Button>
-          }
-        >
-          {CONTROL_PLANE_UNREACHABLE}
-        </Empty>
+        // Not asked yet is a wait; only a read that failed is said, and with the shell drawn at once both are reachable (Q3.708).
+        <MeUnread />
       ) : (
         <>
           <Profile me={me} />
@@ -438,12 +429,12 @@ function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
 
 /** Done and Cancel navigate back with replace, so Back pops out of the form rather than through it. */
 export function PasswordScreen({ me }: { me: Me | null }): ReactNode {
-  if (me === null) return <Empty failed>{CONTROL_PLANE_UNREACHABLE}</Empty>;
+  if (me === null) return <MeUnread />;
   return <PasswordForm me={me} onDone={() => navigate(settingsPath("account"), true)} />;
 }
 
 export function EmailScreen({ me, config }: { me: Me | null; config: InstanceConfig | null }): ReactNode {
-  if (me === null) return <Empty failed>{CONTROL_PLANE_UNREACHABLE}</Empty>;
+  if (me === null) return <MeUnread />;
   if (!mailUsable(config)) return <p className="text-xs text-muted">This server cannot send mail.</p>;
   return <EmailForm onDone={() => navigate(settingsPath("account"), true)} />;
 }

@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
 import { legalPublishable } from "./legal";
+import { inNativeShell } from "./native";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, usePathname, useRoute, useUnder, type Route } from "./router";
 import { sessionLists, store } from "./store";
@@ -14,7 +15,8 @@ import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
 import { SignIn } from "./ui/SignIn";
 import { ToastHost } from "./ui/Toast";
-import { SHEET_SCROLL, Spinner } from "./ui/bits";
+import { registryUnread } from "./ui/Unreachable";
+import { Button, Empty, SHEET_SCROLL, Spinner } from "./ui/bits";
 
 // Lazy, to keep the markdown pipeline and Settings off the sign-in path.
 const SessionView = lazy(async () => ({ default: (await import("./ui/SessionView")).SessionView }));
@@ -63,6 +65,8 @@ export function App(): ReactNode {
     };
   }, [blocked]);
 
+  if (state.bootFailed) return <StartFailed />;
+
   // Native only: no server chosen yet, or somebody asked to change it. Unreachable in a browser.
   if (state.host !== null && (state.host.server === null || state.pickingServer)) return <ChooseServer />;
 
@@ -84,13 +88,9 @@ export function App(): ReactNode {
     return <SignIn notice={state.authError ?? revoked} config={state.config} />;
   }
 
-  if (state.phase === "loading") {
-    return (
-      <div className="flex min-h-full flex-col items-center justify-center gap-3 p-6">
-        <Spinner />
-      </div>
-    );
-  }
+  // Only before the host has named an account is there nothing to draw the shell from: once a credential is held the shell
+  // is drawn at once, loading or not, so the menu and its accounts are never out of reach (Q3.708).
+  if (state.phase === "loading" && state.host === null && inNativeShell()) return <Starting />;
 
   // Strictly true: ready with no me happens during an outage, and must not lock anybody into this form.
   if (state.me?.mustChangePassword === true) return <ForcedPasswordChange me={state.me} />;
@@ -132,6 +132,9 @@ function OverlaySheet({
       <Spinner />
     </div>
   );
+  // A machine the list does not hold is gone only if the list was read; until then the screen waits rather than saying so (Q3.709).
+  const pluginUnread =
+    route.name === "plugin" && !state.machines.some((machine) => machine.id === route.machineId) ? registryUnread(state) : null;
 
   return (
     <Sheet
@@ -153,7 +156,8 @@ function OverlaySheet({
           <PluginsSheet state={state} route={route} />
         </Suspense>
       )}
-      {route.name === "plugin" && (
+      {route.name === "plugin" && pluginUnread !== null && <div className={SHEET_SCROLL}>{pluginUnread}</div>}
+      {route.name === "plugin" && pluginUnread === null && (
         <Suspense fallback={spinner}>
           <div className={SHEET_SCROLL}>
             <PluginScreen
@@ -192,6 +196,45 @@ function screenOf(route: Route): string {
     case "legal":
       return `legal/${route.doc}`;
   }
+}
+
+/** Past this the one wait with nothing known says what it is waiting on. */
+const STARTING_WORDS_MS = 2_000;
+
+/** The host has not answered its boot call yet: no network is involved, only this device's credential store. */
+function Starting(): ReactNode {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSlow(true), STARTING_WORDS_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return (
+    <div className="flex min-h-full flex-col items-center justify-center gap-3 p-6">
+      <Spinner />
+      {/* Its line is reserved, so the words arriving move nothing. */}
+      <p role="status" className="h-4 text-xs text-muted">
+        {slow ? "Reading your sign-in from this device…" : ""}
+      </p>
+    </div>
+  );
+}
+
+/** A boot call the host rejected is a failure, never a signed-out answer: nothing here knows whose app this is. */
+function StartFailed(): ReactNode {
+  return (
+    <div className="flex min-h-full items-center justify-center p-6">
+      <Empty
+        failed
+        action={
+          <Button size="sm" onClick={() => window.location.reload()}>
+            Try again
+          </Button>
+        }
+      >
+        Reemoat couldn’t start
+      </Empty>
+    </div>
+  );
 }
 
 function Waiting(): ReactNode {

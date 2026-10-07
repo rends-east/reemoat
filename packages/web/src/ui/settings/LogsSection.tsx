@@ -23,6 +23,8 @@ export function LogsSection(): ReactNode {
   /** `DaemonState.stranger`: the daemon behind `status` enrolled with another control plane. */
   const [stranger, setStranger] = useState(false);
   const [read, setRead] = useState(!native);
+  /** The host did not answer the state read, which says nothing about whether a daemon was ever started. */
+  const [unread, setUnread] = useState(false);
   const paneRef = useRef<HTMLPreElement | null>(null);
   const following = useRef(true);
 
@@ -33,6 +35,7 @@ export function LogsSection(): ReactNode {
       const [said, state] = await Promise.all([daemonLog(), daemonState()]);
       if (cancelled) return;
       setLines(said);
+      setUnread(state === null);
       setStatus(state?.status ?? null);
       setStranger(state?.stranger === true);
       setRead(true);
@@ -65,7 +68,12 @@ export function LogsSection(): ReactNode {
           <Pending>Reading the daemon’s output…</Pending>
         </div>
       ) : lines.length === 0 ? (
-        <Empty failed={status === "exited"}>{nothingHere(status, stranger)}</Empty>
+        // The host did not answer: asked again on the next poll, and until then nothing is said of the daemon.
+        unread ? (
+          <Empty failed>Couldn’t load the daemon’s output</Empty>
+        ) : (
+          <Empty failed={status === "exited"}>{nothingHere(status, stranger)}</Empty>
+        )
       ) : (
         // No Clear: an empty ring tells `host_daemon_state` nothing was ever started here.
         <pre

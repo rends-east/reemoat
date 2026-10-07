@@ -186,6 +186,7 @@ export class MachineConnection {
   private chosen: Route | null = null;
   private resolving: Promise<Route | null> | null = null;
   private chosenAt = 0;
+  private probeBegan = 0;
   // Set on a loopback wrong_machine and cleared in update on every wake.
   private localDenied = false;
 
@@ -355,11 +356,28 @@ export class MachineConnection {
     return issued.token;
   }
 
+  /** Drops the belief that the route is up, with the idle connections and any stream nothing arrives on. A request in flight keeps its own answer or its own timeout (Q3.712). */
   forgetRoute(): void {
     if (this.chosen === null) return;
     this.chosen = null;
-    this.closeChannel();
+    this.channel?.dropRedialable();
     this.onChange();
+  }
+
+  /** One socket died on a route still believed in: the idle connections may have died with it, and the route is kept for the redial (Q3.715). */
+  suspectRoute(): void {
+    // A forgotten route is believed in by nobody, and whoever forgot it has already dropped what there was to drop.
+    if (this.chosen === null) return;
+    this.channel?.dropIdle();
+  }
+
+  /** Forgets the route, and ends every connection dialled before the last absence began, in use or not (Q3.703, Q3.712). */
+  abandonRoute(absentSince: number): void {
+    const held = this.chosen !== null;
+    // Forgotten first: a stream closed below reports a dead route at once, and must find nothing left to drop.
+    this.chosen = null;
+    this.channel?.closeDialledBefore(absentSince);
+    if (held) this.onChange();
   }
 
   // Forcing a mint re-reads the machine's current relay; only on an answered no_tunnel, never on a transport failure.
@@ -374,6 +392,11 @@ export class MachineConnection {
   }
 
   /** When the held route was proved, on `monotonicNow`'s clock; null with none held. */
+  /** Monotonic, when the newest probe began: one that fails says nothing of anything that answered after that. */
+  probedSince(): number {
+    return this.probeBegan;
+  }
+
   routeSince(): number | null {
     return this.chosen === null ? null : this.chosenAt;
   }
@@ -388,6 +411,7 @@ export class MachineConnection {
 
   // Try the local candidate before the relayOnline check: a laptop whose tunnel is down is exactly its case.
   private async probeRoute(): Promise<Route | null> {
+    this.probeBegan = monotonicNow();
     if (!this.enrolled) {
       this.reach = "offline";
       this.offlineReason = "not_enrolled";
