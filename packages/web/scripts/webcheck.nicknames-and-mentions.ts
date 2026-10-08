@@ -206,7 +206,7 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
   const view = stripComments(srcFile("ui/SessionView.tsx"));
   check("the header hands its line the nickname", /<WorkspaceLine\s+nickname=\{nicknameLine\(session\)\}/.test(view), true);
   const line = view.slice(view.indexOf("function WorkspaceLine("), view.indexOf("\nfunction ", view.indexOf("function WorkspaceLine(") + 1));
-  const own = line.indexOf('<span data-unit="" className="shrink-0">{nickname}</span>');
+  const own = line.indexOf('<span className="shrink-0">{nickname}</span>');
   report("the header's line was isolated", line.length > 0, `${line.length} chars`);
   check(
     "which leads with it, in the machine name's own style, before the machine",

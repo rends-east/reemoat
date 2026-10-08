@@ -44,6 +44,7 @@ import {
   resolvedByText,
   runSummary,
   stopReasonText,
+  stoppedSays,
   sameNode,
   stripFence,
   opensToAnything,
@@ -168,8 +169,9 @@ export function EventList({
   return (
     // One padding for both: the parked ask card is out of flow, so the room past it comes from here only.
     // sel-root covers selection in the space between messages, which no message owns.
+    // select-text because the app's body refuses selection, and this column is the conversation (Q3.717).
     <div
-      className={`sel-root ${COLUMN} px-4 pt-2`}
+      className={`sel-root ${COLUMN} px-4 pt-2 select-text`}
       style={{
         paddingBottom:
           askHeight === 0 ? `calc(${TRANSCRIPT_FOOT_PX}px - ${FOOT_LINE})` : Math.max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE),
@@ -199,9 +201,11 @@ export function EventList({
           <DecisionsContext.Provider value={decisions}>
             <QueuedContext.Provider value={queued}>
               <TasksContext.Provider value={taskStates}>
-                {rows.map((node) => (
-                  <TailRow key={node.key} node={node} files={files} />
-                ))}
+                <OpenTasksContext.Provider value={onOpenTasks}>
+                  {rows.map((node) => (
+                    <TailRow key={node.key} node={node} files={files} />
+                  ))}
+                </OpenTasksContext.Provider>
               </TasksContext.Provider>
             </QueuedContext.Provider>
           </DecisionsContext.Provider>
@@ -279,6 +283,13 @@ function callStates(background: readonly BackgroundTask[], agents: readonly Agen
 
 /** Must be stable: every consumer re-renders when it changes. */
 const ResizedContext = createContext<() => void>(() => {});
+
+/** Read only by StoppedRow; stable for ResizedContext's reason. */
+const OpenTasksContext = createContext<() => void>(() => {});
+
+/** One string for the working line as a button and for a stopped task's row, so the second reads as the first does (Q2.257). */
+const TASK_DOOR =
+  "tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint hover:bg-raised hover:text-fg";
 
 /** One sentence per notice for both the line and the live region; no default arm, so a new kind fails to build. */
 function noticeText(notice: TranscriptNotice): string {
@@ -402,10 +413,24 @@ function WaitingFoot({
       aria-haspopup="dialog"
       onClick={onOpenTasks}
       // Grows downward only, into the bottom padding, and only for coarse pointers so hover does not light from below.
-      className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:top-0 [@media(pointer:coarse)]:after:-bottom-6 [@media(pointer:coarse)]:after:content-[''] hover:bg-raised hover:text-fg"
+      className={`${TASK_DOOR} [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:top-0 [@media(pointer:coarse)]:after:-bottom-6 [@media(pointer:coarse)]:after:content-['']`}
     >
       {working ? <WorkingMark still={stale} /> : <Dot tone="pending" />}
       <span className="min-w-0 flex-1 truncate">{line}</span>
+      <span className="shrink-0">
+        <Icon as={ChevronRight} size={11} />
+      </span>
+    </button>
+  );
+}
+
+/** The working line's button for work that was stopped: the dot at rest, and the same door (Q2.257). */
+function StoppedRow({ count }: { count: number }): ReactNode {
+  const onOpenTasks = useContext(OpenTasksContext);
+  return (
+    <button aria-haspopup="dialog" onClick={onOpenTasks} className={`${TASK_DOOR} ${TAP_GROW_Y}`}>
+      <Dot tone="off" />
+      <span className="min-w-0 flex-1 truncate">{stoppedSays(count)}</span>
       <span className="shrink-0">
         <Icon as={ChevronRight} size={11} />
       </span>
@@ -440,6 +465,8 @@ const TailRow = memo(function TailRow({
       );
     case "gap":
       return <GapMarker gap={node.gap} />;
+    case "stopped":
+      return <StoppedRow count={node.count} />;
     case "event":
       return renderEvent(node, files);
   }
@@ -547,7 +574,7 @@ function PromptRow({
         mentions={event.mentions}
       />
       {waiting && (
-        <p className="-mt-3 mb-4 flex items-center justify-end gap-2 text-2xs text-faint">
+        <p className="-mt-5 mb-6 flex items-center justify-end gap-2 text-2xs text-faint">
           <Dot tone="pending" />
           Waiting for the agent to finish
         </p>

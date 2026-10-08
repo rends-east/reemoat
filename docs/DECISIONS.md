@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 113 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 463 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 115 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 464 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 82 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1144** | |
+| | | **1147** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1144 rather than the 565
+dividers. So the count is over **both** depths, and it says 1147 rather than the 567
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -8411,7 +8411,8 @@ against this daemon sees `status: "running"` with `turn: null`: a running dot in
 list and no working line — degraded, not broken.
 
 **Status.** Current. Narrows Q2.44 and closes the defect Q2.231 described from the
-other side.
+other side. Amended by Q2.256: an adapter's unnumbered notice lights nothing, and a Stop
+the agent never answers ends the work at `WEDGED_CANCEL_MS`.
 
 ### Q2.234 — Finished background work belonged to the process, and an effort change took it away
 
@@ -9499,6 +9500,141 @@ this made them reachable seconds after a Stop.
 may meet the same agent; a Stop then replaces it. `daemoncheck` drives a stub that never
 answers a cancel, with a message sent while the cancel is pending: one `turn_end`, a
 second launch that resumes, and the message delivered to it.
+
+**Status.** Current. Q2.256 gives the same bound to a cancel of work no turn holds.
+
+### Q2.256 — Stopping a background task woke the session, and Stop then left it working
+
+**Reported 2026-10-07 by the owner**, translated: *stopped the session, pressed stop on
+the background task, the session woke up for some reason, I pressed Stop and everything
+hung.* Measured read-only on the development machine's store, session `s_09517342`
+(claude-agent-acp 0.73.0): `turn_end{cancelled}` at seq 4804, and five seconds later one
+`text` at seq 4805, `**Task stopped by user:** …`, after which the row read `running`
+with nothing further in the log.
+
+**The adapter, read (`dist/async-tasks.js`).** Its stop handler awaits the SDK's stop,
+then publishes that sentence as an `agent_message_chunk` of its own, and its comment says
+why: *the SDK injects nothing into the model's context for a stopped shell task*. So no
+cycle runs, no result follows and no `usage_update` carries `_claude/origin`. The daemon
+read the sentence as the agent's own text with no prompt in flight (Q2.233) and lit
+`unpromptedSince`, which nothing on Q2.233's list could end short of the three-hour
+clock. The Stop that followed set `cancelRequestedAt`, sent a cancel to an idle query and
+waited for a marker that was never coming: a working line and a spinner over an agent
+doing nothing.
+
+**What tells a notice from the model.** The adapter stamps a `messageId`, the API's
+message id, on every chunk that is the model's and on none of its own: the stop
+acknowledgement, `Compacting...`, a local command's output, the model-fallback and
+fast-mode notices. In the same store 22 436 claude `text` events carry an id of their own
+(15 419 said, 7 017 thought) and 7 do not: six `Compacting…` lines inside a turn, and seq
+4805.
+
+**Decision, in two halves.**
+1. *A notice is not a cycle.* `Session.onUpdate` no longer calls `noteAgentWork` for an
+   `agent_message_chunk` with no `messageId` from an agent that numbers its messages
+   (`agentNumbersMessages`, the latch `messageIdFor` already keeps). It is still logged
+   and drawn. Read off the agent's own output, as Q2.233's latch is: an agent that numbers
+   nothing is unchanged. A thought is not gated: none has arrived unnumbered, and a cycle
+   often opens with one.
+2. *A Stop that nothing answers still ends.* `cancelWithoutTurn` arms
+   `watchUnpromptedCancel` on the first cancel of unprompted work, at `WEDGED_CANCEL_MS`
+   like Q2.255's. If the work is still lit then, with no turn begun and the cancel still
+   standing, the daemon calls `endUnprompted`. It writes nothing and replaces nobody: no
+   turn of ours hung, so nothing says the agent is wedged, and clearing a flag kills no
+   process group, so unlike Q2.255 it does not hold back over live background work. The
+   work ending sooner, a stop or a new agent disarms it; a repeated Stop does not push it
+   out. The agent's next output lights the line again, as any cycle's does.
+
+**Rejected.**
+- *Matching the sentence.* A vendor's wording, and one notice of several.
+- *A window around the daemon's own stop request.* The acknowledgement precedes the
+  response on the wire, but the SDK hands a notification through one `await` per
+  registered handler (`acp-extensions.md` has that measurement), so which continuation
+  runs first is a count of microtasks.
+- *Ending at `CANCEL_SETTLE_MS`.* A cycle slow to die would read idle and light again on
+  its last output, and "a cancel nobody honours" would have two numbers.
+- *Replacing the agent, as Q2.255 does.* An interrupt that pre-empts the result leaves a
+  healthy agent. The next turn is the test, and a Stop on it is Q2.255's.
+
+**Known wrong.** A cycle that opens by compacting lights at the model's first output
+rather than at `Compacting...`.
+
+**Driver.** `daemoncheck`: a numbering stub's unnumbered notice lights nothing and is
+still logged; the installed adapter's stop acknowledgement is read as still a message
+chunk with no `messageId`, so a bump that numbers it fails there; and a stub that never
+answers a cancel reads as ended at the bound, with no row written and no second launch.
+All three failed before the change.
+
+**Compatibility.** The daemon only; nothing on the wire changed.
+
+**Status.** Current. Narrows what Q2.233 lights and gives its Stop Q2.255's bound.
+Q2.257 rewords the one notice that started it.
+
+### Q2.257 — What the transcript says when a background task is stopped
+
+**Asked 2026-10-08 by the owner**, of the same line Q2.256 was filed over, translated:
+*it should not be this gigantic; say impersonally that 1 task stopped.* The adapter's
+acknowledgement is `**Task stopped by user:** ${task.name}.`, and a shell task's name is
+its command: at seq 4805 of `s_09517342` that was a heredoc of a Python script, 1 351
+bytes of it, drawn as the agent's own prose. The log's ceiling for one event is 128 KiB,
+so that is what a longer script would have cost.
+
+**Decision.** `Session.onUpdate` logs `1 task stopped` (`TASK_STOPPED_TEXT`) in place of
+a notice that opens with the adapter's sentence (`TASK_STOPPED_PREFIX`). A notice is
+Q2.256's: a message chunk a numbering agent left unnumbered, so the same sentence in a
+message the model wrote, which is always numbered, is carried as sent. Nothing is lost
+with the name: the command is the tool call's own row above, and the task's row in the
+panel. One line per stop, each a message of its own (Q3.604), since the panel stops one
+task per press.
+
+**The app draws it as a row of its own, asked for the same day in two steps.** The owner
+opened a build carrying the daemon's half and found seq 4805 as long as before: a logged
+line is not rewritten, and that daemon had not been restarted either. Then, translated:
+*it must be the full counterpart of the background tasks line: the same type, the same
+format, and a click opens the background tasks window.* So `buildTail` emits a
+`StoppedNode` where `stopsTask` matches a run of the agent's under a `~` id, either the
+three words or the adapter's sentence, and `StoppedRow` draws it on `TASK_DOOR`, the class
+string the working line's button is drawn on, with a dot at rest and the same chevron. It
+is a third door into `TaskPanel` and always open, where the working line's closes with
+nothing outstanding (Q3.698): this row is about finished work by definition. Stops with
+nothing drawn between them are one row, `stoppedSays` counting them, keyed on the oldest
+so a later stop moves no key.
+
+**Why matching the sentence is right here and was refused in Q2.256.** There a miss lit
+work nothing ended, so the test had to be one a reworded notice could not slip past. Here
+a miss draws the long line again and costs nothing else, and the driver reads the
+installed adapter's source for the sentence, so a bump that rewords it fails
+`daemoncheck` before it ships.
+
+**Rejected.**
+- *Rewording it in the app alone.* A client cannot be pushed (`compatibility.md`), so the
+  command would stay on every app older than the change; the daemon is restarted where it
+  is fixed. First shipped as the daemon alone, which left the one line the owner was
+  looking at.
+- *Rewriting the rows already logged.* One row on one machine, and a migration that edits
+  a conversation is the wrong size for it; it would reach no other machine's log.
+- *An event of its own, with a count the app sums.* An app that predates it draws nothing
+  for an unknown event, and this line is the only acknowledgement a stop gets. Not worth
+  it for a line of three words.
+- *Dropping the line.* The adapter's own comment is right that the transcript is where
+  the acknowledgement has to land.
+
+**Known wrong.** The log holds one `1 task stopped` per stop, so an app older than the
+change draws each as a line of prose, and a line logged before the daemon's half whole.
+The notices of 2026-09-12 carry no id (they predate Q3.604), so they stay one joined
+paragraph of names. The panel opens with its finished band folded, so the stopped task is
+one more tap away, and a daemon that has since dropped the row shows a panel without it.
+
+**Driver.** `daemoncheck`: the unnumbered acknowledgement is logged as the short line,
+another notice (`Compacting...`) and the numbered sentence are carried as sent, and the
+installed adapter's `taskStopped` still builds the sentence the prefix matches.
+`webcheck`: both spellings through `buildTail`, what folds and what splits a count, the
+model's own and a person's left alone, both strings held to `src/session.ts`'s character
+for character, and off `EventList.tsx` that the row and the working line spend one class
+string and open one panel.
+
+**Compatibility.** The event is the `text` it always was, and the two halves ship in
+either order: a new line needs one of them, a line already logged needs the app's.
 
 **Status.** Current.
 
@@ -28527,7 +28663,8 @@ conversation header painted blue.
   the same clicks now give `reemoat/s_078b731c`, `~/reemoat-prod` and `@rune`, with
   no line break.
 
-**Status.** Current. Amends Q3.570 and Q3.588.
+**Status.** Current, amended by Q3.717: the header's line takes no selection and its third
+click is gone. Amends Q3.570 and Q3.588.
 
 #### Q3.697 — The close button puts the app away on macOS and Windows
 
@@ -29483,6 +29620,67 @@ asked of a machine in doubt, whose ask ignores the pace.
 
 **Status.** Current. Narrows Q3.714: the server's hold is no longer the window alone, and
 the retries' ceiling is no longer the outage's.
+
+#### Q3.717 — Only the conversation and a text field take a selection
+
+**The owner, 2026-10-08**, three screenshots of the composer painted blue — the whole box
+with the band under it, the labels of two chips, the placeholder: *"none of these are areas
+that can be selected. The only space open to selection is the dialog and the input field."*
+
+**Decision.** The app's body is `user-select: none` (`body[data-app]` in `index.css`), and
+two things turn it back on: the conversation's column (`select-text` on `EventList`'s
+root) and what a card shows of the agent's, the plan, command or diff in `AskCard`'s
+context box. A text field needs nothing. The rail, the header, the composer's strip, every
+sheet, drawer and panel take none.
+
+**On body, and keyed on an attribute.** The drawer, the sheets, the task panel and the
+pickers are portals on body, so a rule on `#root` misses them. `gate.html` shares the
+stylesheet and its pages are documents in a browser, the legal ones above all, so the rule
+is keyed on `data-app`, which only `index.html`'s body carries.
+
+**Measured in a `WKWebView`, 2026-10-08**, real `NSEvent` drags over the built stylesheet,
+on a page carrying the shell's own class strings (rail, header, column, bubble, card,
+composer), 1100×760, the pixels diffed per element:
+
+| gesture | before | after |
+|---|---|---|
+| a drag from the box's padding across the placeholder | the placeholder painted, `Agent is working…` in the selection | nothing |
+| a drag from a paragraph down past the composer | one band, 900×578: the box, every chip, Send | the paragraphs' own lines, 662×83 |
+| Select All with the caret in no field | rail, header, conversation, composer | the conversation, and its text alone in the copy |
+| three clicks on the header's folder | the folder and its line break | nothing |
+| a drag along a row of the rail | the row's title | nothing |
+| a card, a drag from its title to Deny | title, command and `Deny` | the command |
+| a draft: a drag inside it, three clicks, typing | the field's own | the same: 2–14, 0–21, `hello` |
+
+**A field needs no rule and the placeholder none either.** Under a `none` body the
+textarea's computed `-webkit-user-select` is `text`: the engine's own sheet says so. The
+placeholder was painted only because a range begun outside the field ran over it, and
+nothing outside begins one now.
+
+**`selectUnit` is gone**, which amends Q3.696. Its third click made a range by script over
+the header's line, and over a block that takes no selection WebKit paints none of it and
+reads it back empty (measured), so the handler would have done nothing anybody could see.
+The paint it repaired cannot happen there any more.
+
+**What still turns selection on is a census in `webcheck`**: the column, the card's box, and
+inside the column the bubble, a sent file, a mention and a peer message. One file outside
+the conversation is on it, `OneTimeSecret`, whose `select-all` is what its own toast tells
+somebody to do when the clipboard refuses. A value needed elsewhere gets a `CopyButton`
+(the device code, the daemon's output, the installer line); the header's folder and
+branch have none and can no longer be copied, which is the cost.
+
+**The engine's, left as it is.** A drag begun on chrome that reaches the column selects
+from the column's first line to the pointer: WebKit lets a selection begin inside a
+`none` block and anchors it at the first thing that can hold one.
+
+**A trap in the measuring.** `takeSnapshot(with: nil)` leaves selection highlighting out of
+the bitmap: before and after came back byte-identical while `getSelection()` held the
+range. A configuration object, even an empty one, paints it.
+
+**Unverified.** Not yet seen in the built app, nor in Android's WebView, where the engine
+is Chromium and a selection never begins in a `none` block.
+
+**Status.** Current. Amends Q3.696 and narrows Q3.638 to the column it was written for.
 
 ## Deployment, packaging and code layout
 

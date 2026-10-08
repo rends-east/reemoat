@@ -108,6 +108,9 @@ const EFFORT_TIMEOUT_MS = 2_000;
 const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
 
 const ASYNC_TASK_STOP_TIMEOUT_MS = 10_000;
+// claude-agent-acp acknowledges a stopped task by its whole name, a shell task's being its command; the transcript says only that one stopped (Q2.257).
+const TASK_STOPPED_PREFIX = "**Task stopped by user:** ";
+const TASK_STOPPED_TEXT = "1 task stopped";
 // A timeout here can duplicate a message if the caller then queues it.
 const STEER_TIMEOUT_MS = 10_000;
 
@@ -1532,16 +1535,23 @@ export class Session {
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
       case "agent_thought_chunk":
-      case "user_message_chunk":
-        if (update.sessionUpdate !== "user_message_chunk") this.noteAgentWork();
+      case "user_message_chunk": {
+        // A numbering agent's unnumbered message is its adapter's own notice: no cycle is behind it, so nothing would end it (Q2.256).
+        const notice =
+          update.sessionUpdate === "agent_message_chunk" &&
+          this.agentNumbersMessages &&
+          !(typeof update.messageId === "string" && update.messageId.length > 0);
+        if (update.sessionUpdate !== "user_message_chunk" && !notice) this.noteAgentWork();
+        const said = renderContentBlock(update.content);
         this.queue.push({
           type: "text",
           role: update.sessionUpdate === "user_message_chunk" ? "user" : "agent",
           thought: update.sessionUpdate === "agent_thought_chunk",
-          text: renderContentBlock(update.content),
+          text: notice && said.startsWith(TASK_STOPPED_PREFIX) ? TASK_STOPPED_TEXT : said,
           messageId: this.messageIdFor(update.messageId),
         });
         return;
+      }
 
       case "tool_call": {
         // toolCallLineage reads the raw id for its self-parent test.

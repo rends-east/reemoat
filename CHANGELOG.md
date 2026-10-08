@@ -51,8 +51,23 @@ it — so a citation here would be the one kind nothing checks.
   request still waiting no longer holds the next one back, and a machine or the server
   that answers first has the other asked at once.
 
+- **More room around a message you sent.** The gap between it and the agent's text, above
+  and below, is half again what it was; another agent's message keeps the same rhythm.
+- **A stopped background task is acknowledged as *1 task stopped*.** claude named the
+  task instead, and a shell task's name is its whole command, so stopping one could put a
+  screen of script into the conversation. It is drawn as the *waiting for background
+  tasks* line is, opens Background tasks when pressed, and counts several stopped in a
+  row as one line. A line already in a conversation reads the same.
+- **Only the conversation and a text field take a selection.** A drag across the composer,
+  a chip, the list or a header used to paint it blue, and Select All took the whole
+  window. The folder and branch in a conversation's header are no longer selectable.
+
 ### Fixed
 
+- **Stopping a background task made the conversation read as working, with Stop spinning
+  over it until the next message.** claude acknowledges the stop with a line of its own,
+  which the daemon took for the agent starting work that nothing would end. That line no
+  longer counts as work, and a Stop the agent never answers ends within fifteen seconds.
 - **"Can’t reach ‹server›" stayed for up to half a minute after the network was back**,
   with the conversations under it already streaming again. In the desktop and Android
   apps there was a second cause: requests to the server kept riding a connection the

@@ -30,7 +30,7 @@ export function UserBubble({
   if (text.trim().length === 0 && attachments.length === 0) return null;
   return (
     // The row is `select-none` so a selection cannot fill the empty column; the wrapper inside restores `select-text` (`webcheck` asserts the pair).
-    <div className="my-4 flex justify-end select-none">
+    <div className="my-6 flex justify-end select-none">
       <div
         ref={box}
         // Keep the `lg` cap below `85%` so crossing `lg` never widens the bubble.

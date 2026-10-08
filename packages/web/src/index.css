@@ -296,6 +296,12 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
+/* Only the conversation and a text field take a selection; on body because every portal mounts there (Q3.717). */
+body[data-app] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* Needs viewport-fit=cover in index.html too. */
 .pb-safe {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));

@@ -239,7 +239,7 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
   check(
     "the session header's path is mono, on a subtitle line that is already text-2xs",
     [
-      /<span data-unit="" className="truncate font-mono" title=\{where\}>/.test(read("ui/SessionView.tsx")),
+      /<span className="truncate font-mono" title=\{where\}>/.test(read("ui/SessionView.tsx")),
       /justify-center text-2xs text-muted/.test(read("ui/Header.tsx")),
     ],
     [true, true],

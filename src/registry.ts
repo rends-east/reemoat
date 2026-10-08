@@ -929,6 +929,7 @@ export class ManagedSession {
   private turnStartedAt: number | null = null;
   private cancelRequestedAt: number | null = null;
   private cancelWatch: ReturnType<typeof setTimeout> | null = null;
+  private unpromptedCancelWatch: ReturnType<typeof setTimeout> | null = null;
   // Read by parkable: the queue outlives the turn, so an idle session may still owe a delivery.
   private queuedPrompts: QueuedEntry[] = [];
   private acceptOrder = 0;
@@ -1714,6 +1715,7 @@ export class ManagedSession {
 
     // Unconditional for the same reason: a previous agent's cycle is not this one's.
     this.unsubscribeUnprompted?.();
+    this.disarmUnpromptedCancelWatch();
     this.unpromptedSinceState = session.unpromptedSince;
     this.unsubscribeUnprompted = session.onUnpromptedChanged((since) => {
       if (this.session !== session) return;
@@ -1781,6 +1783,7 @@ export class ManagedSession {
   // Snapshot-only like cancelRequestedAt: an event per edge would put a row on screen for no act anybody did.
   private applyUnprompted(since: number | null): void {
     this.unpromptedSinceState = since;
+    if (since === null) this.disarmUnpromptedCancelWatch();
     // An out-of-turn cancel is answered by the work ending; a turn's own cancel is pump's to clear.
     if (since === null && this.turn === null) this.cancelRequestedAt = null;
     this.touchSafe();
@@ -2111,6 +2114,7 @@ export class ManagedSession {
     this.unsubscribeUnprompted?.();
     this.unsubscribeUnprompted = null;
     this.unpromptedSinceState = null;
+    this.disarmUnpromptedCancelWatch();
 
     // Bumped, never reset: the revision is a change marker clients compare.
     this.unsubscribeCommands?.();
@@ -2561,7 +2565,10 @@ export class ManagedSession {
     const working = this.unpromptedSinceState !== null;
     if (!working && this.awaitingCount === 0) return { kind: "no_turn", status: this.status };
 
-    if (working) this.cancelRequestedAt = Date.now();
+    if (working) {
+      this.cancelRequestedAt = Date.now();
+      this.watchUnpromptedCancel(session);
+    }
     this.touchSafe();
 
     try {
@@ -2576,6 +2583,25 @@ export class ManagedSession {
 
     const settled = working ? await session.awaitUnpromptedEnd() : true;
     return { kind: "cancelled", turn: null, settled };
+  }
+
+  /** watchCancel's bound for work nobody prompted, whose end marker may never come; ends it and replaces nobody, as no turn hung (Q2.256). */
+  private watchUnpromptedCancel(session: Session): void {
+    const ms = this.wedgedCancelMs();
+    if (ms <= 0 || this.unpromptedCancelWatch !== null) return;
+    this.unpromptedCancelWatch = setTimeout(() => {
+      this.unpromptedCancelWatch = null;
+      if (this.session !== session || this.turn !== null || this.cancelRequestedAt === null) return;
+      this.warn?.(`${this.id}: the agent never marked the end of work it was asked to stop ${ms} ms ago; reading it as ended`);
+      session.endUnprompted();
+    }, ms);
+    this.unpromptedCancelWatch.unref?.();
+  }
+
+  private disarmUnpromptedCancelWatch(): void {
+    if (this.unpromptedCancelWatch === null) return;
+    clearTimeout(this.unpromptedCancelWatch);
+    this.unpromptedCancelWatch = null;
   }
 
   /** Checks the id against announced tasks before it reaches the agent; not gated on the turn, since tasks outlive prompts. */

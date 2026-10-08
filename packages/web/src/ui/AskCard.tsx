@@ -240,7 +240,8 @@ export function AskCard({
           </div>
 
           {context !== undefined && context !== null && (
-            <div className="min-h-12 flex-1 overflow-y-auto border-t border-edge/60 px-3 py-2.5">
+            // select-text: the plan, command or diff is the agent's side of the conversation; the card's controls are not (Q3.717).
+            <div className="min-h-12 flex-1 overflow-y-auto border-t border-edge/60 px-3 py-2.5 select-text">
               {context}
             </div>
           )}

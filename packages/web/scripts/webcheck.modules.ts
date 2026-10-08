@@ -111,6 +111,7 @@ export const {
   SUMMARY_CHARS,
   sameNode,
   showsInTranscript,
+  stoppedSays,
   stripFence,
   supersedes,
   toolSummary,

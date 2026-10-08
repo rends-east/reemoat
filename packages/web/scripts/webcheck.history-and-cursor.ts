@@ -693,7 +693,7 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
 
   // Only the inner content is selectable: WebKit paints a selectable block's padding, so select-text on the padded box does nothing.
   const bubble = strip(readFileSync(new URL("../src/ui/Bubble.tsx", import.meta.url), "utf8"));
-  const bubbleRow = /className="my-4 flex justify-end[^"]*"/.exec(bubble)?.[0] ?? "";
+  const bubbleRow = /className="my-6 flex justify-end[^"]*"/.exec(bubble)?.[0] ?? "";
   const bubbleBox = /className="[^"]*\bml-auto w-fit[^"]*"/.exec(bubble)?.[0] ?? "";
   check("the user's bubble and the row it sits on were both found", [bubbleRow !== "", bubbleBox !== ""], [true, true]);
   check(
@@ -729,6 +729,60 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   check("so is the bubble, which hangs in a flex row", /\bsel-root\b/.test(bubbleBox), true);
   check("and so is the column, which owns the space between messages", /className=\{`sel-root \$\{COLUMN\}/.test(eventList), true);
   check("and the zero-width space it replaced is not still there", /content: "\\200B"/.test(strip(css)), false);
+
+  // Q3.717: the app's body refuses selection; the conversation, what a card shows of the agent's and a field take one. A field needs no rule:
+  // WebKit's own sheet gives it `text` (measured in a WKWebView with real drags, as everything here must be).
+  const appBody = /\nbody\[data-app\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  check(
+    "the app's body takes no selection, under both spellings",
+    [/-webkit-user-select:\s*none/.test(appBody), /(?<!-)user-select:\s*none/.test(appBody)],
+    [true, true],
+  );
+  const bodyTag = (shell: string): string =>
+    /<body[^>]*>/.exec(readFileSync(new URL(`../${shell}`, import.meta.url), "utf8"))?.[0] ?? "";
+  check(
+    "the app's shell is what that rule matches, and the gate's pages stay documents",
+    [bodyTag("index.html"), bodyTag("gate.html")],
+    ["<body data-app>", "<body>"],
+  );
+  check(
+    "the conversation's column turns it back on",
+    /className=\{`sel-root \$\{COLUMN\} px-4 pt-2 select-text`\}/.test(eventList),
+    true,
+  );
+  const askCard = strip(readFileSync(new URL("../src/ui/AskCard.tsx", import.meta.url), "utf8"));
+  check(
+    "and so does what a card shows of the agent's, never the card itself",
+    [(askCard.match(/\bselect-text\b/g) ?? []).length, /px-3 py-2\.5 select-text">\s*\{context\}/.test(askCard)],
+    [1, true],
+  );
+  // A census: a new file turning selection on fails as found-not-listed.
+  check(
+    "nothing else in the app turns selection on",
+    srcFiles()
+      .filter((file) => /\bselect-(?:text|all|auto)\b/.test(stripComments(srcFile(file))))
+      .sort(),
+    [
+      "ui/AskCard.tsx",
+      "ui/Bubble.tsx",
+      "ui/EventList.tsx",
+      "ui/MentionLink.tsx",
+      "ui/PeerMessage.tsx",
+      "ui/SentFile.tsx",
+      "ui/settings/OneTimeSecret.tsx",
+    ],
+  );
+  // The row and tab drags write `none` and take it back; only a value that turns selection on is refused.
+  check(
+    "and no component turns it on by hand",
+    srcFiles().filter((file) => /user-?select["']?\s*[:=]\s*["'](?:text|all|auto|contain)/i.test(stripComments(srcFile(file)))),
+    [],
+  );
+  check(
+    "a sweep that would see one written that way",
+    /user-?select["']?\s*[:=]\s*["'](?:text|all|auto|contain)/i.test('node.style.webkitUserSelect = "text";'),
+    true,
+  );
 
   // Q3.691: a double-click is the engine's word, as in Claude's client, and a triple-click the span rather than the paragraph — and so is every
   // click after it, where WebKit's fourth took the paragraph back; measured in a WKWebView.

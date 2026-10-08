@@ -593,6 +593,68 @@ process.stdout.write("\nwhat the agent asks, and does, with no turn held\n");
   check("stopping the session answers what is parked and ends the work", [((await blocking) as any)?.outcome?.outcome, managed.snapshot().unpromptedSince], ["cancelled", null]);
   check("and the old resolvers are unreachable", resolutions().filter((by) => by === "no_turn" || by === "turn_ended" || by === "pump_failed"), []);
 
+  // Q2.256, as filed: stopping a background task lit a working line nothing ended, and Stop left it standing.
+  const noticed = await registry.create({ agent: "kimi", cwd: dir });
+  const noticeRig = rigs[2]!;
+  const noticeLog = () => noticed.log.read(0, 10_000, 4 * 1024 * 1024).map((stored) => stored.event);
+  const numbered = (text: string, messageId: string) => ({ ...say(text), messageId });
+  const stopNotice = "**Task stopped by user:** pnpm build.";
+  noticed.prompt("go");
+  await settle();
+  noticeRig.emit(numbered("the build came back, reading it", "msg_1"));
+  await settle();
+  check("a message the agent numbered, with no turn held, is still the agent working", [noticed.status, typeof noticed.snapshot().unpromptedSince], ["running", "number"]);
+  noticeRig.emit(cycleEnd("task-notification"));
+  await settle();
+  noticeRig.emit(say(stopNotice));
+  await settle();
+  check("its adapter's own notice, left unnumbered, is no cycle: nothing would end it", [noticed.status, noticed.snapshot().unpromptedSince], ["idle", null]);
+  const lastSaid = () => (noticeLog().at(-1) as { text?: string } | undefined)?.text;
+  check("and is said in the transcript without the task's name, a shell task's being its whole command", lastSaid(), "1 task stopped");
+  noticeRig.emit(say("Compacting..."));
+  await settle();
+  check("while any other notice of the adapter's is carried as sent", lastSaid(), "Compacting...");
+  noticeRig.emit(numbered(stopNotice, "msg_quote"));
+  await settle();
+  check("and so is the same sentence when the model wrote it", lastSaid(), stopNotice);
+  noticeRig.emit(cycleEnd("task-notification"));
+  await settle();
+  const adapterTasks = await readFile(
+    new URL("../node_modules/@agentclientprotocol/claude-agent-acp/dist/async-tasks.js", import.meta.url),
+    "utf8",
+  );
+  const stopAcknowledged = /async taskStopped\(taskId\) \{[\s\S]*?\n    \}\n/.exec(adapterTasks)?.[0] ?? "";
+  check(
+    "which is the shape the installed claude adapter acknowledges a stopped task in",
+    [stopAcknowledged.includes('sessionUpdate: "agent_message_chunk"'), stopAcknowledged.includes("messageId")],
+    [true, false],
+  );
+  check(
+    "and the sentence it opens with, so a reworded one fails here rather than drawing the command again",
+    stopAcknowledged.includes("text: `**Task stopped by user:** ${task.name}.`"),
+    true,
+  );
+
+  registry.setSessionLimits({ wedgedCancelMs: 60 });
+  noticeRig.emit(numbered("a cycle the agent never marks the end of", "msg_2"));
+  await settle();
+  noticeRig.onCancel = () => {};
+  const launchesBefore = rigs.length;
+  const rowsBefore = noticeLog().length;
+  const unanswered = await post(`/sessions/${noticed.id}/cancel`);
+  check(
+    "a Stop the agent never answers ends the work nobody prompted at the wedged-cancel bound",
+    [unanswered.body?.cancelled, noticed.status, noticed.snapshot().unpromptedSince, noticed.snapshot().cancelRequestedAt],
+    [true, "idle", null, null],
+  );
+  check("writing nothing and replacing nobody, since no turn hung", [noticeLog().length - rowsBefore, rigs.length - launchesBefore], [0, 0]);
+  noticeRig.emit(numbered("the next cycle", "msg_3"));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  check("and the next cycle is its own: nobody cancelled it, so the bound does not end it", [noticed.status, noticed.snapshot().cancelRequestedAt], ["running", null]);
+  noticeRig.emit(cycleEnd("task-notification"));
+  await settle();
+  await noticed.stop();
+
   await registry.shutdown();
 }
 

@@ -82,6 +82,11 @@ for a consequence at rest, six words at most; an act's consequence in its confir
 its leaf; no caveat, no meta text, nothing restating a heading. An error goes under the group
 (`Group`'s `error`), never inside the box.
 
+**Nothing here is selectable**: the app's body refuses selection and only the conversation
+and a text field take one (`web-transcript.md`, Q3.717). A value somebody needs elsewhere
+gets a `CopyButton`, never `select-text`; `OneTimeSecret`'s `select-all` is the one
+exception, being what its own toast falls back on.
+
 ## A label beside its control
 
 `FIELD_LABEL` is sentence case (Q3.685); caps belong to `SETTINGS_HEADING` and

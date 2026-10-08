@@ -12,10 +12,11 @@ paths:
 What `TaskPanel` shows and how somebody reaches it; its width, exit and drag are
 `docked-panels.md`'s.
 
-- **One surface, two doors.** `WaitingFoot` counts both sources and opens `TaskPanel` only
+- **One surface, three doors.** `WaitingFoot` counts both sources and opens `TaskPanel` only
   while something is outstanding: `outstanding > 0` decides alone, never `retained`
   (Q3.698). The other door is the session header's kebab, at every width (`web-shell.md`,
-  Q3.631). The foot holds no list and claims no region (`aria-haspopup="dialog"`, never
+  Q3.631). A third is the transcript's `N tasks stopped` row, always open (Q2.257). The
+  foot holds no list and claims no region (`aria-haspopup="dialog"`, never
   `aria-expanded`). The panel's decisions (section order and labels, the chip table over
   five states, duration and token formatters, the four-cell meter) are pure in `tasks.ts`
   for `webcheck`. Strings and rules are Claude Code's `background-tasks-dialog`; each

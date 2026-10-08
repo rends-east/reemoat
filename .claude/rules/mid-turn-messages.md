@@ -164,7 +164,10 @@ the seqs; empty stays one identity.
 **claude works with no turn of ours when its background work comes back.** `Session`
 lights `unpromptedSince` when the agent's text, thought, tool call, plan or request
 arrives with no `session/prompt` in flight — on arrival in `onUpdate`'s order, never from
-the drain. A subagent's step lights nothing. It ends on the `usage_update` claude sends
+the drain. A subagent's step lights nothing, nor does a message chunk a numbering agent
+left unnumbered: its adapter's own notice (claude's *Task stopped by user*), with no cycle
+behind it to end (Q2.256). That one is logged as `1 task stopped`, since the adapter
+names the task by its whole command (Q2.257). It ends on the `usage_update` claude sends
 after every SDK result carrying `_meta["_claude/origin"]` (`marksCycleEnd`, any origin,
 one cycle at a time), the answer to a prompt of ours, a `/clear`, the process going, and
 the silent-turn clock (`daemon-bounds.md`). Latched on the first marker the agent sends,
@@ -181,7 +184,9 @@ pair). A message sent now is an ordinary `prompt`, which claude queues behind th
 send, sweep (`turn_cancelled`), watch and answers `cancelled: true, turn: null`
 (claude-agent-acp 0.73.0's `cancel()` interrupts the query regardless).
 `cancelRequestedAt` is set and cleared when the work ends; `armTurn` clears a stale one,
-or `pump`'s cancel-before-prompt check ends the next message unsent.
+or `pump`'s cancel-before-prompt check ends the next message unsent. A cancel nothing
+answers is read as ended `WEDGED_CANCEL_MS` after the first (`watchUnpromptedCancel`):
+nothing written, nobody replaced, live background work no hold (Q2.256).
 
 ## What deliberately did not change
 

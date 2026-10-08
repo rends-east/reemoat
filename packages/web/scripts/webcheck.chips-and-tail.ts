@@ -18,6 +18,8 @@ import {
   opensToAnything,
   resolveTool,
   restatesInput,
+  sameNode,
+  stoppedSays,
   supersedes,
 } from "./webcheck.modules.js";
 
@@ -414,6 +416,111 @@ process.stdout.write("\nthe tail is built backwards\n");
       buildTail([idTxt("a.", "~1"), idTxt("b.", "~2")], []).rows.map((r) => r.key),
       ["t1", "t2"],
     );
+
+    // A stopped task's acknowledgement is a row of its own, as the daemon logs it now or as it was logged before (Q2.257).
+    const said = (tail: ReturnType<typeof buildTail>): unknown[] =>
+      tail.rows.map((r) => (r.kind === "text" ? r.text : r.kind === "stopped" ? `${r.key}:${stoppedSays(r.count)}` : r.kind));
+    const stopped = "**Task stopped by user:** cd /x; python3 - <<'EOF'\nprint(1)\nEOF.";
+    const logged = "1 task stopped";
+    seq = 0;
+    check("a stopped task's notice is a row that names no task", said(buildTail([idTxt(logged, "~1")], [])), ["t1:1 task stopped"]);
+    seq = 0;
+    check("a line logged with the whole command included", said(buildTail([idTxt(stopped, "~1")], [])), ["t1:1 task stopped"]);
+    seq = 0;
+    check(
+      "stops with nothing drawn between them are one row that counts them, keyed on the oldest",
+      said(buildTail([idTxt(logged, "~1"), idTxt(stopped, "~2"), idTxt(logged, "~3")], [])),
+      ["t1:3 tasks stopped"],
+    );
+    seq = 0;
+    check(
+      "so a later stop moves no key",
+      said(buildTail([idTxt(logged, "~1"), idTxt(logged, "~2"), idTxt(logged, "~3"), idTxt(logged, "~4")], [])),
+      ["t1:4 tasks stopped"],
+    );
+    seq = 0;
+    check(
+      "a thought between two, which draws nothing, does not split them",
+      said(
+        buildTail(
+          [
+            idTxt(logged, "~1"),
+            { seq: (seq += 1), ts: seq * 1000, event: { type: "text", role: "agent", thought: true, text: "hm", messageId: "m1" } } as never,
+            idTxt(logged, "~2"),
+          ],
+          [],
+        ),
+      ),
+      ["t1:2 tasks stopped"],
+    );
+    seq = 0;
+    check(
+      "and anything drawn between two does",
+      said(buildTail([idTxt(logged, "~1"), idTxt("Stopped it.", "m1"), idTxt(logged, "~2")], [])),
+      ["t1:1 task stopped", "Stopped it.", "t3:1 task stopped"],
+    );
+    seq = 0;
+    check("the same sentence in a message the model wrote is drawn as sent", said(buildTail([idTxt(stopped, "m1")], [])), [stopped]);
+    seq = 0;
+    check("and so are the daemon's three words when the model wrote them", said(buildTail([idTxt(logged, "m1")], [])), [logged]);
+    seq = 0;
+    check("and any other notice of the adapter's", said(buildTail([idTxt("Compacting...", "~1")], [])), ["Compacting..."]);
+    seq = 0;
+    check(
+      "and a person's message that opens with it",
+      said(buildTail([{ seq: 1, ts: 1000, event: { type: "text", role: "user", thought: false, text: stopped, messageId: "~1" } } as never], [])),
+      [stopped],
+    );
+    seq = 0;
+    const one = buildTail([idTxt(logged, "~1")], []).rows[0];
+    seq = 0;
+    const two = buildTail([idTxt(logged, "~1"), idTxt(logged, "~2")], []).rows[0];
+    check(
+      "a row whose count moved is redrawn, and one whose count did not is not",
+      [one !== undefined && two !== undefined && sameNode(one, two), one !== undefined && sameNode(one, { ...one })],
+      [false, true],
+    );
+    const daemonSrc = readFileSync(new URL("../../../src/session.ts", import.meta.url), "utf8");
+    const tailSrc = readFileSync(new URL("../src/ui/tail.ts", import.meta.url), "utf8");
+    check(
+      "the sentence matched and the words logged are the daemon's own, character for character",
+      ['const TASK_STOPPED_PREFIX = "**Task stopped by user:** ";', 'const TASK_STOPPED_TEXT = "1 task stopped";'].map(
+        (line) => daemonSrc.includes(line) && tailSrc.includes(line),
+      ),
+      [true, true],
+    );
+    // The row is the working line's button: one class string for both, the same role, the same door.
+    const listSrc = stripComments(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"));
+    const bodyOf = (name: string): string => {
+      const at = listSrc.indexOf(`function ${name}(`);
+      return at < 0 ? "" : listSrc.slice(at, listSrc.indexOf("\n}\n", at));
+    };
+    const row = bodyOf("StoppedRow");
+    const foot = bodyOf("WaitingFoot");
+    check("the row's own component was found, and the foot's", [row.length > 0, foot.length > 0], [true, true]);
+    check(
+      "the row is drawn in the working line's own type and shape",
+      [
+        (listSrc.match(/\$\{TASK_DOOR\}/g) ?? []).length,
+        /className=\{`\$\{TASK_DOOR\} /.test(row),
+        /className=\{`\$\{TASK_DOOR\} /.test(foot),
+        /const TASK_DOOR =\s+"[^"]*\bh-5\b[^"]*\btext-2xs text-faint\b[^"]*";/.test(listSrc),
+        /<Icon as=\{ChevronRight\} size=\{11\} \/>/.test(row) && /<Icon as=\{ChevronRight\} size=\{11\} \/>/.test(foot),
+      ],
+      [2, true, true, true, true],
+    );
+    check(
+      "and opens the panel the working line opens, saying what it opens",
+      [
+        /aria-haspopup="dialog"/.test(row),
+        /onClick=\{onOpenTasks\}/.test(row),
+        /const onOpenTasks = useContext\(OpenTasksContext\);/.test(row),
+        /<OpenTasksContext\.Provider value=\{onOpenTasks\}>/.test(listSrc),
+        /case "stopped":\s+return <StoppedRow count=\{node\.count\} \/>;/.test(listSrc),
+      ],
+      [true, true, true, true, true],
+    );
+    check("with a mark at rest, since nothing is waited for", [/<Dot tone="off" \/>/.test(row), /animate|WorkingMark/.test(row)], [true, false]);
   }
 
   // Driven through `buildTail` rather than `mergeUpdates`: the construction site is what can drop a field.

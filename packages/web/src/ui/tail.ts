@@ -169,7 +169,16 @@ export interface GapNode {
   gap: Gap;
 }
 
-export type TailNode = TextNode | ToolNode | UpdateNode | ChangeNode | GroupNode | EventNode | GapNode;
+/** Background tasks stopped with nothing drawn between them: one row, a door into the panel (Q2.257). */
+export interface StoppedNode {
+  kind: "stopped";
+  key: string;
+  seq: number;
+  parentId: null;
+  count: number;
+}
+
+export type TailNode = TextNode | ToolNode | UpdateNode | ChangeNode | GroupNode | EventNode | GapNode | StoppedNode;
 
 /** Value equality for `React.memo`: `buildTail` rebuilds every node per token; members compare by `===` since stored events are never mutated. */
 export function sameNode(a: TailNode, b: TailNode): boolean {
@@ -230,6 +239,8 @@ export function sameNode(a: TailNode, b: TailNode): boolean {
       const other = b as GapNode;
       return a.gap.from === other.gap.from && a.gap.to === other.gap.to && a.gap.reason === other.gap.reason;
     }
+    case "stopped":
+      return a.count === (b as StoppedNode).count;
   }
 }
 
@@ -941,6 +952,19 @@ export function foldRuns(
   return out;
 }
 
+const TASK_STOPPED_PREFIX = "**Task stopped by user:** ";
+const TASK_STOPPED_TEXT = "1 task stopped";
+
+/** The adapter's acknowledgement of a stopped task, as the daemon logs it now or as it was logged before that (Q2.257). */
+export function stopsTask(text: string, messageId: string | null): boolean {
+  const notice = messageId !== null && messageId.startsWith("~");
+  return notice && (text === TASK_STOPPED_TEXT || text.startsWith(TASK_STOPPED_PREFIX));
+}
+
+export function stoppedSays(count: number): string {
+  return `${count} task${count === 1 ? "" : "s"} stopped`;
+}
+
 export function buildTail(
   events: readonly StoredEvent[],
   gaps: readonly Gap[],
@@ -980,16 +1004,29 @@ export function buildTail(
   const flush = (): void => {
     if (run === null) return;
     const current = run;
+    run = null;
+    const text = current.parts.reverse().join("");
+    if (current.role === "agent" && stopsTask(text, current.messageId)) {
+      // Walking back, so the row ends keyed on its oldest notice and a later stop keeps the key.
+      const newer = collected.at(-1);
+      if (newer?.kind === "stopped") {
+        newer.count += 1;
+        newer.seq = current.seq;
+        newer.key = `t${current.seq}`;
+      } else {
+        collected.push({ kind: "stopped", key: `t${current.seq}`, seq: current.seq, parentId: null, count: 1 });
+      }
+      return;
+    }
     collected.push({
       kind: "text",
       key: `t${current.seq}`,
       seq: current.seq,
       role: current.role,
       thought: current.thought,
-      text: current.parts.reverse().join(""),
+      text,
       parentId: null,
     });
-    run = null;
   };
 
   let index = events.length - 1;

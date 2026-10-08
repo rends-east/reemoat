@@ -32,7 +32,7 @@ export function PeerMessageRow({
     return <p className="my-3 px-1 text-2xs text-faint">{body}</p>;
   }
   return (
-    <div className="my-4 rounded-lg border border-edge bg-surface/60 px-3.5 py-2.5">
+    <div className="my-6 rounded-lg border border-edge bg-surface/60 px-3.5 py-2.5">
       <p className="text-2xs font-medium text-muted">
         {lead} <MentionLink name={name} exact={sender} />
         {where}

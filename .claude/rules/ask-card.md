@@ -26,7 +26,9 @@ shortcuts. It is `absolute` in a region ending where the composer begins; `inset
 disclosure. The spinner overlays the label. De-emphasis in fill and border, never text —
 except that rows fade (`typing`) while somebody types their own answer under a finger, still
 drawn and live. Q3.695. `essentialContext` and `detailContext` are a partition, the
-disclosure between them. No scrim. Q3.39.
+disclosure between them. No scrim. Q3.39. **Only the context box is selectable** (the plan,
+command or diff is the agent's side of the conversation); the title, the answers and the ✕
+are controls. Q3.717.
 
 **Nothing a person taps to answer an agent is under 44px**: a mis-tap here approves,
 refuses or submits. `webcheck` scans the class strings of `AskCard`, `PermissionCard` and

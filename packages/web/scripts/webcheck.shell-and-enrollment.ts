@@ -1440,14 +1440,13 @@ process.stdout.write("\nthe menu, the machines and the build\n");
       [true, true, true, true],
     );
   }
-  // Q3.696: three clicks on the conversation header's line take one item, never both header lines across the pane.
+  // Q3.717: the header takes no selection, so Q3.696's third-click handler went with it; a scripted range there is drawn by nothing.
   {
     const view = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
-    const unit = view.slice(view.indexOf("function selectUnit("), view.indexOf("\n}\n", view.indexOf("function selectUnit(")));
     check(
-      "the header line selects the unit under the pointer from the third click on",
-      [/<span onMouseDown=\{selectUnit\} className="flex min-w-0 items-center gap-1\.5">/.test(view), /event\.detail < 3/.test(unit), /event\.preventDefault\(\)/.test(unit), /closest<HTMLElement>\("\[data-unit\]"\)/.test(unit), (view.match(/data-unit=""/g) ?? []).length],
-      [true, true, true, true, 4],
+      "the conversation header selects nothing by script",
+      [/selectUnit/.test(view), /data-unit/.test(view), /getSelection|createRange/.test(view)],
+      [false, false, false],
     );
   }
   check("the list column still names the app for a screen reader, exactly once", (browser.match(/<h1\b/g) ?? []).length, 1);
