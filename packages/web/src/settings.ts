@@ -36,7 +36,7 @@ export type SettingsLeaf =
 export type MachineLeaf = Extract<SettingsLeaf, "machine-name" | "setup-code" | "plugin-install">;
 
 /** A machine's own lists, each a screen between the machine and the card it opens. */
-export type SettingsList = "systems" | "plugins";
+export type SettingsList = "systems" | "plugins" | "devices";
 
 /** Machine-level fields are set only under `machines`; `parseSettingsRoute` enforces that, not the type. */
 export interface SettingsRoute {
@@ -112,6 +112,8 @@ export function parseSettingsRoute(
       return { ...at, leaf: "machine-name" };
     case "setup-code":
       return { ...at, leaf: "setup-code" };
+    case "devices":
+      return { ...at, list: "devices" };
     // A plugin's own settings live under /plugins (Q3.459), so a stale `…/plugins/:id` falls to the machine's list.
     case "plugins":
       return segments[3] === "install" ? { ...at, leaf: "plugin-install" } : { ...at, list: "plugins" };
@@ -285,6 +287,8 @@ export function settingsPaneTitle(route: SettingsRoute): string | null {
     if (route.system !== null || route.signin !== null) return "Sign-in";
     if (route.list === "systems") return "Sign-ins";
     if (route.list === "plugins") return "Plugins";
+    // Not "Devices": that is the account's own screen, one level up, and the two list different things.
+    if (route.list === "devices") return "Device access";
     return "Machine settings";
   }
   return SECTION_SPECS.find((spec) => spec.id === route.section)?.title ?? null;

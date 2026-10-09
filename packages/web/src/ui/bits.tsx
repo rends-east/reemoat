@@ -254,6 +254,9 @@ export const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   no_machine_key: "needs a newer daemon",
   // About this device, not the row's machine: only a keyless shell reaches it, and Re-key under Devices clears it.
   no_device_key: "re-key this device under Settings → Devices",
+  // Both end under the machine's own settings: one is confirmed there, the other shows the code to read out.
+  machine_key_changed: "its encryption key changed; confirm it under Settings → Machines",
+  device_pending: "waiting to be let in; its code is under Settings → Machines",
 };
 
 /** A phrase for inside a sentence, so unknown reads as words, never a bare ellipsis. */

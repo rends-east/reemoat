@@ -183,14 +183,16 @@ export interface DaemonBuild {
   daemonVersion: string | null;
   protocolVersion: number;
   agentClis: string | null;
+  /** The key-set statement it held when it dialled; null from a daemon that does not announce one. */
+  keysetVersion: number | null;
   at: number;
 }
 
 export function recordDaemonBuild(db: DatabaseSync, machineId: string, build: DaemonBuild): void {
   try {
     db.prepare(
-      "UPDATE machines SET daemon_version = ?, daemon_protocol = ?, daemon_agents = ?, daemon_seen_at = ? WHERE id = ?",
-    ).run(build.daemonVersion, build.protocolVersion, build.agentClis, build.at, machineId);
+      "UPDATE machines SET daemon_version = ?, daemon_protocol = ?, daemon_agents = ?, daemon_keyset = ?, daemon_seen_at = ? WHERE id = ?",
+    ).run(build.daemonVersion, build.protocolVersion, build.agentClis, build.keysetVersion, build.at, machineId);
   } catch {
     // Reporting, not deciding: a tunnel dial must not fail for this.
   }

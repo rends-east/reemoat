@@ -231,7 +231,7 @@ CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/protocol/|^packages/we
 
 # The relay's own inputs, ANDed with the image fingerprint below; deploycheck fails if the relay's import closure leaves this pattern.
 # schema.sql is here because the relay holds prepared statements against the migrated tables.
-RELAY_INPUTS='^src/relay/|^src/(token|auth|http|cors)\.ts$|^packages/control-plane/src/relay/|^packages/control-plane/src/(store|keys|quota|settings|machines|machinekeys)\.ts$|^packages/control-plane/src/mail/address\.ts$|^packages/control-plane/src/schema\.sql$|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
+RELAY_INPUTS='^src/relay/|^src/(token|auth|http|cors)\.ts$|^packages/control-plane/src/relay/|^packages/control-plane/src/(store|keys|quota|settings|machines|machinekeys|trustroot)\.ts$|^packages/control-plane/src/mail/address\.ts$|^packages/control-plane/src/schema\.sql$|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
 
 # Both tsx binaries, since packages/control-plane has its own node_modules; only for unit-backed services, as the control plane installs inside its image.
 _needs_workspace=0

@@ -107,6 +107,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
     const runtimeTypesSrc = readFileSync(new URL("../../../src/runtime/types.ts", import.meta.url), "utf8");
     const browseSrc = readFileSync(new URL("../../../src/browse.ts", import.meta.url), "utf8");
     const peersSrc = readFileSync(new URL("../../../src/peers/hub.ts", import.meta.url), "utf8");
+    const devicesSrc = readFileSync(new URL("../../../src/devices.ts", import.meta.url), "utf8");
     const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
     const behind: string[] = [];
     let compared = 0;
@@ -124,6 +125,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
         runtimeTypesSrc,
         browseSrc,
         peersSrc,
+        devicesSrc,
       ]
         .map((src) => fieldsOf(src, name))
         .find((one) => one !== null);

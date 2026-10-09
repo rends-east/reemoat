@@ -45,9 +45,11 @@ pnpm cpctl admin deluser <id> | disable <id>  # delete is irreversible; disable 
 pnpm cpctl admin invite <id>         # resend an invitation, the only way back for one never received
 pnpm cpctl admin relay               # tunnels up, traffic, offline since (`machine_last_seen`). Q1.311
 pnpm cpctl admin signingkeys | rotatekey | retirekey <kid>
-                                     # rotate keeps **both** published (daemons never re-fetch); retire
-                                     #   after every daemon re-enrolled; the last active key is refused
-                                     #   (`ensureSigningKey` could not mint a replacement)
+                                     # the **oldest** active key signs: rotate publishes, retire is the
+                                     #   switch, once the fleet has been offered the statement naming the
+                                     #   new one (`machinesBehind`). The last active key is refused
+pnpm cpctl admin root [adopt <jwk>] | admin keyset draft | install   # the root that vouches for the key set
+pnpm cpctl root new | sign --key <file> | handover   # local, no server: an off-host root's own verbs
 ```
 
 **No route issues a credential for an account other than the caller's**: no

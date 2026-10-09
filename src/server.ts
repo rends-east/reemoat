@@ -28,6 +28,8 @@ import { isAuthRequiredMessage, SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
 import type { AgentInstallRuns } from "./agentinstall.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
+import { readDeviceDescription, type DeviceGate } from "./devices.js";
+import { jwkThumbprint, x25519Jwk } from "./token.js";
 import {
   importArchive,
   MAX_IMPORT_BYTES,
@@ -191,6 +193,10 @@ export interface ServerOptions {
   plugins?: PluginHost | null;
   // Absent, every /peer and /peers route answers 503.
   peers?: { hub: PeerHub; links: SqlitePeerLinkStore } | null;
+  // Absent, every /devices route answers 503 and no key is ever refused.
+  devices?: DeviceGate;
+  /** The public half this machine answers handshakes with; a thunk, since a refused dial can promote another. */
+  machineKey?: () => string | null;
 }
 
 export interface AppBundle {
@@ -210,6 +216,8 @@ export function createApp(options: ServerOptions): AppBundle {
   const roots = options.roots ?? [homedir()];
   const plugins = options.plugins ?? null;
   const peers = options.peers ?? null;
+  const devices = options.devices ?? null;
+  const machineKey = options.machineKey ?? ((): string | null => null);
   const maxChangedFiles = options.maxChangedFiles ?? DEFAULT_MAX_CHANGED_FILES;
   const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   const app = new Hono<AppEnv>();
@@ -358,6 +366,8 @@ export function createApp(options: ServerOptions): AppBundle {
       // Announced, not negotiated: nothing may branch on version; protocol is the one that carries capability.
       version: DAEMON_VERSION,
       protocol: RELAY_PROTOCOL_VERSION,
+      // Public, and only loopback reads it here unencrypted: an app on this computer learns the key from the machine itself (Q1.657).
+      ...(machineKey() === null ? {} : { machineKey: machineKey() }),
     });
   });
 
@@ -667,6 +677,65 @@ export function createApp(options: ServerOptions): AppBundle {
     for (const [key, value] of wanted) machineSettings.write(key, value);
     registry.applyMachineSettings();
     return c.json({ saved: true, settings: registry.machineSettings() });
+  });
+
+  // Who may open an encrypted channel to this machine. machine:admin throughout: the list is who can reach this computer.
+  const devicesAnswer = (c: Context<AppEnv>, gate: DeviceGate) => ({
+    lock: gate.locked,
+    fingerprint: gate.fingerprint(),
+    you: c.get("principal").keyThumbprint,
+    devices: gate.list(),
+  });
+  const noDevices = (c: Context<AppEnv>) =>
+    jsonError(c, 503, "devices_unavailable", "this daemon keeps no list of devices");
+
+  app.get("/devices", admin, (c) => {
+    if (devices === null) return noDevices(c);
+    return c.json(devicesAnswer(c, devices));
+  });
+
+  app.put("/devices/lock", admin, async (c) => {
+    if (devices === null) return noDevices(c);
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const on = body["on"];
+    if (typeof on !== "boolean") return jsonError(c, 400, "bad_request", "on must be true or false");
+
+    // Whoever turns the lock on stays in: a caller no channel ever recorded names its own key, checked against its capability.
+    const offered = body["device"];
+    const principal = c.get("principal");
+    if (on && offered !== undefined) {
+      const record = typeof offered === "object" && offered !== null ? (offered as Record<string, unknown>) : {};
+      const key = typeof record["publicKey"] === "string" ? record["publicKey"] : "";
+      const bytes = /^[A-Za-z0-9_-]{43}$/.test(key) ? new Uint8Array(Buffer.from(key, "base64url")) : null;
+      const kth = bytes === null || bytes.length !== 32 ? null : jwkThumbprint(x25519Jwk(bytes));
+      if (kth === null || kth !== principal.keyThumbprint) {
+        return jsonError(c, 400, "invalid_device", "that key is not the one this capability was issued to");
+      }
+      devices.vouch(key, kth, principal, readDeviceDescription(offered));
+    }
+    devices.setLocked(on);
+    return c.json(devicesAnswer(c, devices));
+  });
+
+  // Takes the id or the code somebody read off the waiting screen.
+  app.post("/devices/:id/approve", admin, (c) => {
+    if (devices === null) return noDevices(c);
+    const found = devices.find(c.req.param("id") ?? "");
+    if (found === null) return jsonError(c, 404, "device_not_found", "no such device is waiting or known here");
+    devices.approve(found.kth);
+    return c.json({ approved: true, id: found.kth, ...devicesAnswer(c, devices) });
+  });
+
+  // An unknown id is 200 removed false: the transport replays DELETE. Ends that key's open channels.
+  app.delete("/devices/:id", admin, (c) => {
+    if (devices === null) return noDevices(c);
+    const id = c.req.param("id") ?? "";
+    // Removing the key this request rides on would end the channel carrying its own answer.
+    if (id === c.get("principal").keyThumbprint) {
+      return jsonError(c, 409, "own_device", "this is the device asking; remove it from another one");
+    }
+    return c.json({ removed: devices.remove(id), id, ...devicesAnswer(c, devices) });
   });
 
   app.get("/agent-strip", read, (c) => {
@@ -1319,13 +1388,19 @@ export function createApp(options: ServerOptions): AppBundle {
   });
 
   // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.
+  // Rides the poll every app already makes, so a device asking to be let in is noticed without a second request. Absent at zero.
+  const waitingDevices = (): { devicesPending?: number } => {
+    const waiting = devices?.pendingCount() ?? 0;
+    return waiting === 0 ? {} : { devicesPending: waiting };
+  };
+
   app.get("/sessions", read, (c) => {
     const all = registry.list().map((session) => session.snapshot({ listing: true }));
     const limitParam = c.req.query("limit");
     const limit = limitParam === undefined ? null : Math.max(0, boundedInt(limitParam, 0));
 
     if (limit === null) {
-      return c.json({ sessions: all, total: all.length, truncated: false, now: Date.now(), instanceId });
+      return c.json({ sessions: all, total: all.length, truncated: false, now: Date.now(), instanceId, ...waitingDevices() });
     }
 
     const ranked = [...all].sort((a, b) => listRank(a) - listRank(b) || b.createdAt - a.createdAt);
@@ -1336,6 +1411,7 @@ export function createApp(options: ServerOptions): AppBundle {
       truncated: sessions.length < all.length,
       now: Date.now(),
       instanceId,
+      ...waitingDevices(),
     });
   });
 

@@ -4,6 +4,7 @@ import * as cp from "../../cp";
 import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
+import { waitingText } from "../../deviceAccess";
 import { daemonRead, type MachineState } from "../../machine";
 import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
 import { inNativeShell } from "../../native";
@@ -26,7 +27,7 @@ import {
 } from "../bits";
 import { toast } from "../Toast";
 import { Field } from "../kit/Field";
-import { DangerRow, Group, LinkRow, TWO_STEP_ROW } from "../kit/List";
+import { DangerRow, Group, LinkRow, TWO_STEP_ROW, ValueRow } from "../kit/List";
 import { OneTimeSecret } from "./OneTimeSecret";
 
 interface SetupCode {
@@ -60,6 +61,7 @@ export function MachineSection({
   // Minting holds its own flag and the retire's wait is TwoStep's, so the two never share a lock.
   const [minting, setMinting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [trusting, setTrusting] = useState(false);
   const [idleError, setIdleError] = useState<string | null>(null);
 
   if (machine === null) {
@@ -158,6 +160,44 @@ export function MachineSection({
             <Empty failed>
               <NotReachable machine={machine} />
             </Empty>
+          )}
+        </Group>
+      )}
+
+      {/* Outside the listable gate: a device waiting to be let in, or holding a key the server no longer names, cannot reach the machine at all. */}
+      {(machine.keyFingerprint !== null || listable) && (
+        <Group title="Security">
+          {machine.keyFingerprint !== null && <ValueRow title="Key fingerprint" value={machine.keyFingerprint} mono />}
+          {machine.approvalCode !== null && <ValueRow title="Approval code" value={machine.approvalCode} mono />}
+          {machine.offlineReason === "machine_key_changed" && machine.offeredKeyFingerprint !== null && (
+            <>
+              <ValueRow title="New key fingerprint" value={machine.offeredKeyFingerprint} mono />
+              <TwoStep
+                armed={trusting}
+                onArm={setTrusting}
+                align="end"
+                className={TWO_STEP_ROW}
+                question={<>Trust {machine.name}'s new key?</>}
+                consequence="Only after reinstalling its daemon."
+                act={{ label: "Trust" }}
+                onAct={() => store.trustMachineKey(machine.id)}
+                rest={
+                  <>
+                    <span className="min-w-0 flex-1 truncate text-sm">New key</span>
+                    <Button size="sm" onClick={() => setTrusting(true)}>
+                      Trust
+                    </Button>
+                  </>
+                }
+              />
+            </>
+          )}
+          {listable && (
+            <LinkRow
+              title="Device access"
+              value={waitingText(state.devicesWaiting.get(machineId) ?? 0) ?? undefined}
+              onClick={() => navigate(machineListPath(machine.id, "devices"))}
+            />
           )}
         </Group>
       )}

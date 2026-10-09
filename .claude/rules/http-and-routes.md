@@ -28,6 +28,8 @@ pnpm client changes <id> [--base head] [--ignored]
 pnpm client diff <id> <path>         # patch on stdout, header on stderr
 pnpm client workspace <id> | rmworkspace <id> [--force] [--delete-branch]
 pnpm client plugins | plugin install <archive> | plugin remove <id>   # .tar.gz or .zip
+pnpm client devices | devices approve <code> | devices remove <id>     # the machine's own list (e2ee.md)
+pnpm client devices lock | devices unlock
 pnpm client plugin enable <id> | disable <id> | view <id> [screen|settings]
 ```
 

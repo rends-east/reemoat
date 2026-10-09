@@ -45,8 +45,16 @@ export const MAX_HEADER_JSON_BYTES = MAX_FRAME_PAYLOAD;
 /** Bounds reassembly against a peer that never sends MESSAGE_END; matches the daemon's WebSocket maxPayload. */
 export const MAX_SOCKET_MESSAGE_BYTES = 1024 * 1024;
 
+/** What the initiator calls itself. Inside the channel, so the Authority neither writes nor reads it; a claim, never a credential. */
+export interface DeviceDescription {
+  name: string;
+  platform: string;
+}
+
 export interface HelloFrame {
   capability: string;
+  /** Absent from a build that predates it, and from a daemon dialling another daemon. */
+  device?: DeviceDescription;
 }
 
 export interface RequestFrame {

@@ -118,8 +118,8 @@ process.stdout.write("\nconnection trouble is one pill at the bottom-left, never
   );
   check(
     "a refusal somebody must act on is not connection trouble, and stays where it is drawn",
-    ["over_limit", "owner_disabled", "not_enrolled", "no_token", "no_machine_key", "no_device_key"].map((reason) => ask(down(reason), tab)),
-    [null, null, null, null, null, null],
+    ["over_limit", "owner_disabled", "not_enrolled", "no_token", "no_machine_key", "no_device_key", "machine_key_changed", "device_pending"].map((reason) => ask(down(reason), tab)),
+    [null, null, null, null, null, null, null, null],
   );
   check("a machine this screen does not read is not its trouble", ask(down("no_route"), { machines: ["laptop" as never], open: null }), null);
   // Q3.692: at launch the page asks before the host's child has announced, so this computer's machine reads offline for a few seconds.

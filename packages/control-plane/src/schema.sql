@@ -111,13 +111,41 @@ CREATE INDEX IF NOT EXISTS idx_grants_created_at ON grants (created_at);
 
 CREATE INDEX IF NOT EXISTS idx_grants_machine ON grants (machine_id, created_at);
 
--- Retired rather than deleted so a rotation can overlap: a daemon never re-fetches keys.
+-- Retired rather than deleted so a rotation can overlap: the oldest active key signs, and a daemon takes the newer set on its next dial.
 CREATE TABLE IF NOT EXISTS signing_keys (
   kid         TEXT PRIMARY KEY,          -- k_<hex>
-  private_pem TEXT    NOT NULL,
+  private_pem TEXT    NOT NULL,          -- a PEM, or wrapped under REEMOAT_CP_KEY_SECRET (keys.ts)
   public_jwk  TEXT    NOT NULL,
   created_at  INTEGER NOT NULL,
   retired_at  INTEGER
+);
+
+-- The key that vouches for signing_keys. private_pem is NULL for a root kept off this host; at most one row is live.
+CREATE TABLE IF NOT EXISTS trust_roots (
+  kid         TEXT PRIMARY KEY,          -- k_<hex>
+  public_jwk  TEXT    NOT NULL,
+  private_pem TEXT,
+  created_at  INTEGER NOT NULL,
+  retired_at  INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trust_roots_one_live ON trust_roots ((retired_at IS NULL)) WHERE retired_at IS NULL;
+
+-- What a root said the signing keys are. The relay hands the newest to every daemon that dials; a version is never reused.
+CREATE TABLE IF NOT EXISTS key_statements (
+  version    INTEGER PRIMARY KEY,
+  root_kid   TEXT    NOT NULL,
+  statement  TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- A root named by a key a daemon already trusts: a signing key introduces one, the previous root hands over to one.
+CREATE TABLE IF NOT EXISTS root_endorsements (
+  root_kid    TEXT    NOT NULL,
+  signer_kid  TEXT    NOT NULL,
+  endorsement TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (root_kid, signer_kid)
 );
 
 -- Single-use is enforced by the conditional UPDATE on used_at IS NULL.

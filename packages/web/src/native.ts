@@ -167,6 +167,12 @@ export function nativeBoot(): NativeBoot | null {
   return boot;
 }
 
+/** What this installation calls itself: to the Authority when it registers, and to a machine inside the channel. */
+export function deviceLabel(): { name: string; platform: string } | null {
+  if (boot === null || !inNativeShell()) return null;
+  return { name: boot.hostName ?? "This computer", platform: boot.platform };
+}
+
 export function controlPlaneOrigin(): string {
   return boot?.server ?? window.location.origin;
 }

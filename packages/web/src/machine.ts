@@ -1,8 +1,11 @@
+import { approvalCode, keyFingerprint } from "@reemoat/protocol";
 import { mintToken, registerDevice } from "./cp";
 import {
   ChannelRefused,
+  DEVICE_NOT_APPROVED,
   bodyBytes,
   bodyText,
+  fromBase64Url,
   openChannel,
   type Channel,
   type ChannelFactory,
@@ -21,6 +24,8 @@ import {
   withTimeout,
 } from "./http";
 import { localBaseFor } from "./localRoute";
+import { readMachineKey, storedPins, weighOfferedKey, type MachinePins } from "./machinePins";
+import { nativeBoot } from "./native";
 import type { MachineId } from "./ids";
 import { monotonicNow } from "./wake";
 import type { DaemonHealth, MachineRecord, Scope } from "./wire";
@@ -84,6 +89,10 @@ export type OfflineReason =
   | "no_machine_key"
   // The Authority still refuses this installation's device key after mint's one re-registration attempt.
   | "no_device_key"
+  // The server names a key this device did not pin for the machine, and the pinned one no longer answers (Q1.657).
+  | "machine_key_changed"
+  // The machine lets in only keys its owner approved, and this device's is waiting there (Q1.655).
+  | "device_pending"
   | null;
 
 export type MissingRow = "loading" | "no_machine" | "not_here" | "unreachable";
@@ -134,6 +143,38 @@ export interface MachineState {
   tokenExpiresAt: number | null;
   health: DaemonHealth | null;
   lastError: string | null;
+  /** Of the key this device dials with, to compare by eye with what the machine prints; null before one is held. */
+  keyFingerprint: string | null;
+  /** Set while the server names another key than the one held: what trusting it would switch to. */
+  offeredKeyFingerprint: string | null;
+  /** What this device shows while it waits to be let in; the machine's owner sees the same beside the request. */
+  approvalCode: string | null;
+}
+
+/** What a connection reads from outside itself, as parameters so a driver holds real values without a shell. */
+export interface MachinePorts {
+  pins?: MachinePins;
+  devicePublicKey?: () => string | null;
+}
+
+const fingerprints = new Map<string, string | null>();
+
+/** Memoised: `state()` is read on every publish. */
+function fingerprintOf(key: string | null): string | null {
+  if (key === null) return null;
+  const held = fingerprints.get(key);
+  if (held !== undefined) return held;
+  const bytes = fromBase64Url(key);
+  const made = bytes === null || bytes.length !== 32 ? null : keyFingerprint(bytes);
+  fingerprints.set(key, made);
+  return made;
+}
+
+function approvalCodeOf(device: string | null, machine: string | null): string | null {
+  const ours = device === null ? null : fromBase64Url(device);
+  const theirs = machine === null ? null : fromBase64Url(machine);
+  if (ours === null || theirs === null || ours.length !== 32 || theirs.length !== 32) return null;
+  return approvalCode(ours, theirs);
 }
 
 // Whitelist: an unknown method is unsafe, and the daemon's DELETEs are idempotent.
@@ -180,6 +221,12 @@ export class MachineConnection {
   private token: { value: string; expiresAt: number } | null = null;
   private minting: Promise<string> | null = null;
   private machineKey: string | null = null;
+  /** Another key the server names for this machine while a different one is pinned; never dialled until accepted. */
+  private offeredKey: string | null = null;
+  /** The last relay probe was answered by the machine refusing this device, rather than by nothing. */
+  private pendingApproval = false;
+  private readonly pins: MachinePins;
+  private readonly devicePublicKey: () => string | null;
   private channel: Channel | null = null;
   private channelKey: string | null = null;
   private channelBase: string | null = null;
@@ -202,7 +249,10 @@ export class MachineConnection {
     record: MachineRecord,
     onChange: () => void,
     private readonly channels: ChannelFactory = openChannel,
+    ports: MachinePorts = {},
   ) {
+    this.pins = ports.pins ?? storedPins();
+    this.devicePublicKey = ports.devicePublicKey ?? ((): string | null => nativeBoot()?.devicePublicKey ?? null);
     this.id = record.id as MachineId;
     this.name = record.name;
     this.relayUrl = record.relayUrl;
@@ -218,6 +268,7 @@ export class MachineConnection {
     this.agentMessagingIsolated = record.agentMessagingIsolated;
     this.scopes = record.scopes;
     this.onChange = onChange;
+    if (record.key !== undefined) this.takeOfferedKey(readMachineKey(record.key));
   }
 
   /** As `PUT …/permissions` answered; the sum follows it, since the switch is pressable only while the account's is on. */
@@ -255,6 +306,8 @@ export class MachineConnection {
       this.lastError = null;
     }
     this.scopes = record.scopes;
+    // A listing is asked the moment a machine stops answering, so a key the server changed is known before the next probe fails.
+    if (record.key !== undefined) this.takeOfferedKey(readMachineKey(record.key));
     this.onChange();
   }
 
@@ -281,6 +334,9 @@ export class MachineConnection {
       tokenExpiresAt: this.token?.expiresAt ?? null,
       health: this.health,
       lastError: this.lastError,
+      keyFingerprint: fingerprintOf(this.machineKey),
+      offeredKeyFingerprint: fingerprintOf(this.offeredKey),
+      approvalCode: this.offlineReason === "device_pending" ? approvalCodeOf(this.devicePublicKey(), this.machineKey) : null,
     };
   }
 
@@ -350,10 +406,46 @@ export class MachineConnection {
 
     this.relayUrl = issued.machine.relayUrl;
     this.relayOnline = issued.machine.relayOnline;
-    this.machineKey = issued.machine.key ?? null;
+    this.takeOfferedKey(readMachineKey(issued.machine.key));
 
     this.onChange();
     return issued.token;
+  }
+
+  /** The first key a machine is named with is kept, and one that differs later is not dialled until somebody here says so (Q1.657). */
+  private takeOfferedKey(offered: string | null): void {
+    const weighed = weighOfferedKey(this.pins.get(this.id), offered);
+    if (weighed.kind === "none") {
+      this.machineKey = null;
+      this.offeredKey = null;
+      return;
+    }
+    if (weighed.kind === "use" && weighed.pin) this.pins.set(this.id, weighed.key);
+    this.machineKey = weighed.key;
+    this.offeredKey = weighed.kind === "changed" ? weighed.offered : null;
+  }
+
+  /** Read off the machine itself over loopback, so it outranks whatever the server named. */
+  private learnLocalKey(announced: unknown): void {
+    const key = readMachineKey(announced);
+    if (key === null) return;
+    if (this.pins.get(this.id) !== key) this.pins.set(this.id, key);
+    this.machineKey = key;
+    this.offeredKey = null;
+  }
+
+  /** Somebody here says the key the server now names is the machine's: pinned from here on. Nothing offered, nothing done. */
+  acceptOfferedKey(): boolean {
+    if (this.offeredKey === null) return false;
+    this.pins.set(this.id, this.offeredKey);
+    this.machineKey = this.offeredKey;
+    this.offeredKey = null;
+    this.closeChannel();
+    this.chosen = null;
+    this.reach = "unknown";
+    this.offlineReason = null;
+    this.onChange();
+    return true;
   }
 
   /** Drops the belief that the route is up, with the idle connections and any stream nothing arrives on. A request in flight keeps its own answer or its own timeout (Q3.712). */
@@ -438,6 +530,7 @@ export class MachineConnection {
       const health = await this.proveLocal(local, token);
       if (health !== null) {
         this.health = health;
+        this.learnLocalKey(health.machineKey);
         return this.settleRoute({ base: local, kind: "local" }, null);
       }
     }
@@ -449,9 +542,15 @@ export class MachineConnection {
     if (this.machineKey === null) return this.settleRoute(null, "no_machine_key");
 
     const health = await this.probe({ base: relay, kind: "relay" }, token);
-    if (health === null) return this.settleRoute(null, "no_route");
+    if (health === null) return this.settleRoute(null, this.unansweredBecause());
     this.health = health;
     return this.settleRoute({ base: relay, kind: "relay" }, null);
+  }
+
+  /** A machine that will not let this device in says so; past that, a key the server changed is the suspect before the wire is. */
+  private unansweredBecause(): OfflineReason {
+    if (this.pendingApproval) return "device_pending";
+    return this.offeredKey === null ? "no_route" : "machine_key_changed";
   }
 
   private settleRoute(route: Route | null, reason: OfflineReason): Route | null {
@@ -508,6 +607,7 @@ export class MachineConnection {
           headers: token === null ? {} : { authorization: `Bearer ${token}` },
           timeoutMs: PROBE_TIMEOUT_MS,
         });
+        this.pendingApproval = false;
         if (answer.status < 200 || answer.status > 299) return null;
         return JSON.parse(bodyText(answer.body)) as DaemonHealth;
       }
@@ -517,8 +617,9 @@ export class MachineConnection {
       });
       if (!response.ok) return null;
       return (await response.json()) as DaemonHealth;
-    } catch {
-      // Every failure, an answered refusal included, means unreachable here.
+    } catch (error) {
+      if (route.kind === "relay") this.pendingApproval = ApiError.isApiError(error) && error.code === DEVICE_NOT_APPROVED;
+      // Every failure means unreachable here; the one refusal with its own remedy is remembered for unansweredBecause.
       return null;
     }
   }
@@ -687,6 +788,12 @@ export class MachineConnection {
       this.denyLocal();
       if (firstAttempt) return retry();
       throw error;
+    }
+    // The machine locked while this device was connected, or dropped it: the waiting state a probe would find.
+    if (ApiError.isApiError(error) && error.code === DEVICE_NOT_APPROVED) {
+      this.pendingApproval = true;
+      this.forgetRoute();
+      this.markUnreachable("device_pending", error.message);
     }
     // Keyed on the code, never the status: the daemon's own 503 unresponsive is not a missing machine.
     if (meansMachineGone(error)) {

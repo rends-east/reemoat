@@ -10,9 +10,10 @@ paths:
 ## Identity
 
 `REEMOAT_AUTH`: `shared_secret` (default, no control plane), `signed`, or `both`. Under
-`signed` the daemon verifies Ed25519 tokens against a public key obtained **once**, at
-enrollment, and **never contacts the control plane again**, so an outage there cannot
-stop a session, a daemon start or a verification. Q1.9. The control plane is always on
+`signed` the daemon verifies Ed25519 tokens against the key set it enrolled with, replaced
+only by a root-signed statement **announced** on its tunnel dial (`weighAnnouncement`), and
+**never asks the control plane anything again**, so an outage there cannot stop a session, a
+daemon start or a verification. Q1.9, Q1.659. The control plane is always on
 the data path (the tunnel the daemon dialled), but the daemon is never *asked*
 anything: no key fetched, no revocation list polled, no token validated over the
 tunnel. Q1.10.
@@ -35,8 +36,12 @@ tunnel. Q1.10.
   single-use).
 - **The daemon makes exactly one control-plane *request*, ever**: enrollment, in
   `enroll.ts`. The tunnel is a connection, never asked anything. No code may *read
-  something it needs* from the control plane; key rotation costs a re-enrollment, which
-  is why the key set is plural.
+  something it needs* from the control plane. A rotation arrives on the dial and is taken
+  or not; absent or refused, the keys held go on verifying.
+- **A key set is replaced whole, by a statement the held root signed, at a higher `v`.**
+  With no root held, only a signing key already held may introduce one; a held root is
+  replaced by its own signature alone. Each has its own `typ`, so none verifies as a token.
+- **The oldest active key signs** (`tokenSigningKey`): rotating publishes, retiring switches.
 
 ## Layout
 

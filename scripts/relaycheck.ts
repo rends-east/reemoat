@@ -14,6 +14,7 @@ import { jwkThumbprint, parseClaims, publicKeyToJwk, signToken, x25519Jwk, type 
 import { describeError } from "../src/http.js";
 import { RelayTunnel } from "../src/relay/tunnel.js";
 import { peerEndToEnd } from "./relaycheck.peer-e2e.js";
+import { signingKeysAndRoot } from "./relaycheck.keys.js";
 import { SignedTokenVerifier } from "../src/auth.js";
 import {
   FRAME,
@@ -7727,6 +7728,8 @@ await peerEndToEnd({ db, issuer: ISSUER, relayUrl, registry, check, waitForTunne
 relayListener.close();
 daemon.close();
 
+await signingKeysAndRoot({ issuer: ISSUER, check, report });
+
 process.stdout.write("\nthe SMTP client, against a fake server\n");
 {
   interface FakeSmtpOptions {
@@ -9267,7 +9270,7 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
     const published = ((await (await gget("/v1/jwks")).json()) as { keys: { kid: string }[] }).keys.map((k) => k.kid);
     check("both public halves are handed out", published.length, 2);
     report(
-      "with the newest first, which is the one that signs",
+      "with the newest first, though it is the oldest that signs",
       published[0] === after.find((key) => key.retiredAt === null)?.kid,
       `jwks: ${published.join(", ")}`,
     );
@@ -9871,13 +9874,15 @@ process.stdout.write("\nthe fleet inventory, as the route answers it\n");
     daemonVersion: "1.2.3",
     protocolVersion: RELAY_PROTOCOL_VERSION,
     agentClis: "claude=2.1.259;codex=0.153.1;kimi=-",
+    keysetVersion: 3,
     at,
   });
-  recordDaemonBuild(fdb, "m_gone", { daemonVersion: "0.0.1", protocolVersion: RELAY_PROTOCOL_VERSION, agentClis: null, at });
+  recordDaemonBuild(fdb, "m_gone", { daemonVersion: "0.0.1", protocolVersion: RELAY_PROTOCOL_VERSION, agentClis: null, keysetVersion: null, at });
   recordDaemonBuild(fdb, "m_behind", {
     daemonVersion: "0.9.0",
     protocolVersion: RELAY_PROTOCOL_VERSION - 1,
     agentClis: null,
+    keysetVersion: null,
     at,
   });
 

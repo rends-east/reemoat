@@ -15,12 +15,14 @@ export {
   frameLength,
   tryEncodeJsonFrame,
   type CloseFrame,
+  type DeviceDescription,
   type FrameType,
   type HelloFrame,
   type OpenFrame,
   type RequestFrame,
   type ResponseFrame,
 } from "./frames.js";
+export { approvalCode, keyFingerprint } from "./fingerprint.js";
 export {
   CipherState,
   generateStaticKey,

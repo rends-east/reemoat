@@ -127,7 +127,7 @@ const read = (rel: string): string => readFileSync(new URL(rel, SRC), "utf8");
   const machineSrc = stripComments(srcFile("machine.ts"));
 
   check("the registration carries the shell's device key", /publicKey/.test(cpSrc), true);
-  check("read off the boot payload rather than invented", /boot\.devicePublicKey/.test(cpSrc), true);
+  check("read off the boot payload rather than invented", /nativeBoot\(\)\?\.devicePublicKey/.test(cpSrc), true);
 
   // Keyed on the code through meansDeviceKeyMissing, never the status: a 409 carries unrelated refusals.
   check("the mint recognises the refusal", /meansDeviceKeyMissing/.test(machineSrc), true);

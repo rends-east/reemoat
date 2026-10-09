@@ -28,8 +28,8 @@ deploy/install.sh daemon [--non-interactive]  # enrolls to a local CP if any; fl
 deploy/deploy.sh [--ref <sha>] [--service daemon]  # update; --ref is also the rollback
 deploy/backup.sh [--schedule] [--dir <d>]  # control-plane DB: `VACUUM INTO` via a read-only handle,
                                      #   `PRAGMA integrity_check`, 0600, fourteen kept, daily 04:17. Stays on
-                                     #   this host without --dir. It holds the signing key: losing it
-                                     #   re-enrolls every machine by hand
+                                     #   this host without --dir. It holds the signing key, wrapped where
+                                     #   `REEMOAT_CP_KEY_SECRET` is set: lost, every machine re-enrolls
 deploy/compose.sh up -d              # control plane and relay; no unit; recreates both
 deploy/compose.sh up -d --no-deps relay   # a relay deploy
 deploy/compose.sh logs -f control-plane   # only place the admin key survives; any verb passes

@@ -4,12 +4,21 @@ import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { Duplex } from "node:stream";
 import { WebSocketServer, createWebSocketStream } from "ws";
-import { MAX_FRAME_PAYLOAD, generateStaticKey, localStaticKey } from "@reemoat/protocol";
+import { MAX_FRAME_PAYLOAD, approvalCode, generateStaticKey, localStaticKey } from "@reemoat/protocol";
 import { check, report, sleep } from "./webcheck.env.js";
 import { serveSecureSession } from "../../../src/e2ee.js";
+import { DeviceGate, type KnownDevice } from "../../../src/devices.js";
 import { SignedTokenVerifier } from "../../../src/auth.js";
 import { jwkThumbprint, publicKeyToJwk, signToken, x25519Jwk, type TokenClaims } from "../../../src/token.js";
-import { CLOSE_REDIAL, MachineChannel, RELAY_CHANNEL_PATH, bodyBytes, type StreamSocket } from "../src/e2ee.js";
+import {
+  CLOSE_REDIAL,
+  ChannelRefused,
+  DEVICE_NOT_APPROVED,
+  MachineChannel,
+  RELAY_CHANNEL_PATH,
+  bodyBytes,
+  type StreamSocket,
+} from "../src/e2ee.js";
 // Imported from its owner, so the flood below always crosses the app's real bound.
 import { MAX_DOWNLOAD_BYTES } from "../src/machine.js";
 
@@ -131,6 +140,8 @@ let channelsOpened = 0;
 // Closes seen at the relay: the only way a disposed connection is observed.
 let channelsClosed = 0;
 let tamperNext = false;
+// Absent for every section but the last: a daemon with no list lets in whoever the capability vouches for, as before.
+let gate: DeviceGate | undefined;
 
 const relay = createServer();
 const relaySockets = new WebSocketServer({ noServer: true });
@@ -183,8 +194,12 @@ relay.on("upgrade", (req, socket, head) => {
       stream: toDaemon,
       staticKey: localStaticKey(machineKey.secretKey),
       verifier,
+      ...(gate === undefined ? {} : { devices: gate }),
       local: { host: "127.0.0.1", port: daemonPort },
     });
+
+    // As the relay's splice does when the daemon ends a stream; only for the section that removes a device, so the others keep the stand-in they were written against.
+    if (gate !== undefined) toDaemon.once("close", () => ws.close());
 
     const shut = (): void => {
       carrier.destroy();
@@ -220,6 +235,7 @@ function channelFor(
     lifetimeSeconds?: number;
     onWrongDevice?: () => Promise<void>;
     probationMs?: number;
+    describe?: () => { name: string; platform: string } | null;
   } = {},
 ): MachineChannel {
   const secret = options.secret ?? device.secretKey;
@@ -240,6 +256,7 @@ function channelFor(
         registrations += 1;
       }),
     deviceKey: () => localStaticKey(secret),
+    ...(options.describe === undefined ? {} : { describe: options.describe }),
     ...(options.probationMs === undefined ? {} : { probationMs: options.probationMs }),
   });
 }
@@ -915,6 +932,67 @@ function withoutComments(source: string): string {
   const moved = `${deleted}\nif (this.closed) return;`;
   report("and the check can tell when the guard is gone", !guardsTheSeal(deleted), "the predicate fails with it removed");
   report("or when it has moved below the seal", !guardsTheSeal(moved), "the predicate fails with it reordered");
+}
+
+process.stdout.write("\nthe shipped channel against a machine that keeps its own list of devices\n");
+{
+  const rows = new Map<string, KnownDevice>();
+  let locked = false;
+  gate = new DeviceGate(
+    {
+      get: (kth) => rows.get(kth) ?? null,
+      list: () => [...rows.values()],
+      save: (row) => void rows.set(row.kth, row),
+      remove: (kth) => rows.delete(kth),
+      locked: () => locked,
+      setLocked: (on) => {
+        locked = on;
+      },
+    },
+    () => toBase64Url(machineKey.publicKey),
+  );
+
+  const laptop = channelFor({ describe: () => ({ name: "Driver laptop", platform: "macos" }) });
+  check("with the list unlocked the app connects as it always did", (await laptop.request({ method: "GET", path: "/health", timeoutMs: 5_000 })).status, 200);
+  check("and the machine now knows the device by the name the app gave inside the channel", rows.get(deviceThumbprint)?.label, "Driver laptop");
+  const wire = Buffer.concat(carried.map((one) => Buffer.from(one))).toString("latin1");
+  check("a name the relay never read", wire.includes("Driver laptop"), false);
+
+  gate.setLocked(true);
+  check("locked, the device already known still connects", (await laptop.request({ method: "GET", path: "/health", timeoutMs: 5_000 })).status, 200);
+
+  const phone = channelFor({ secret: stranger.secretKey, jkt: strangerThumbprint, describe: () => ({ name: "Phone", platform: "ios" }) });
+  const before = registrations;
+  const refused = await phone.request({ method: "GET", path: "/health", timeoutMs: 5_000 }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  report("a device with a perfectly good capability is refused by the machine itself", ChannelRefused.is(refused), String(refused));
+  check("in words the app can tell from every other refusal", ChannelRefused.is(refused) ? [refused.status, refused.reason] : null, [403, DEVICE_NOT_APPROVED]);
+  check("and not by re-registering its key, which would cure nothing", registrations, before);
+  check("the request is waiting on the machine", rows.get(strangerThumbprint)?.state, "pending");
+  check(
+    "under the code the phone derives from its own key and the machine's",
+    gate.list().find((one) => one.id === strangerThumbprint)?.code,
+    approvalCode(stranger.publicKey, machineKey.publicKey),
+  );
+
+  gate.approve(strangerThumbprint);
+  check("once let in on the machine, the same channel object connects", (await phone.request({ method: "GET", path: "/health", timeoutMs: 5_000 })).status, 200);
+
+  const closedBefore = channelsClosed;
+  gate.remove(strangerThumbprint);
+  await sleep(100);
+  report("removing it ends the connection it held open", channelsClosed > closedBefore, `${String(channelsClosed - closedBefore)} closed`);
+  const again = await phone.request({ method: "GET", path: "/health", timeoutMs: 5_000 }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  check("and its next dial waits again", ChannelRefused.is(again) ? again.reason : null, DEVICE_NOT_APPROVED);
+
+  laptop.dispose();
+  phone.dispose();
+  gate = undefined;
 }
 
 sockets.close();

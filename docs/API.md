@@ -74,7 +74,7 @@ auth gate.
 
 ---
 
-## The daemon — 67 routes
+## The daemon — 71 routes
 
 Runs on your machine, reachable through the relay's encrypted channel.
 
@@ -91,7 +91,7 @@ is the app.
 
 | | |
 |---|---|
-| `GET /health` | The one route with no credential |
+| `GET /health` | The one route with no credential. Carries `machineKey`, the public half this machine answers handshakes with: public, and believed only by an app reading it over loopback, where it comes from the machine itself rather than from a server naming it |
 
 ### Agents and their credentials
 
@@ -251,9 +251,28 @@ key, and delivered to that machine by its owner's app. `.claude/rules/agent-mess
 | `POST /peer/notices` | That a session there went idle or ended without answering, for a message this machine sent with `notify`. `202`, or `409 unexpected_notice` for one nothing here asked for — a link cannot wake a session by claiming to answer it |
 | `PUT /peers/links` | `machine:admin`. The link capabilities this machine holds for reaching others, written whole by the owner's app exactly as the control plane minted them, with the control plane's `messaging`, `isolated` and `policyAt`: a `policyAt` older than the one held changes neither flag, only the links, and an absent flag leaves the held one alone. It answers `messaging: {policy, isolated, env, policyAt}`, and an answer without it is a daemon that cannot switch its own sessions off (Q1.654). Nothing reads the links back (Q3.676) |
 
+### The devices this machine knows
+
+Every key that has opened an encrypted channel here, and the lock that turns that list
+from a journal into the only way in. `machine:admin` throughout. The control plane is
+not asked and cannot write a row: the list lives in this daemon's database and travels
+only inside the channel. Loopback is outside it — a request with no channel has no key.
+`.claude/rules/e2ee.md`, Q1.655.
+
+| | |
+|---|---|
+| `GET /devices` | `{lock, fingerprint, you, devices}`. Each row is a key: who it said it was, when it was first and last seen, whether it is `known` or `pending`, and the **code** a person compares with the waiting device's own screen before letting it in. `you` is the asking capability's own key, so a list can mark its own row. `fingerprint` is this machine's, as it prints it at start |
+| `PUT /devices/lock` | `{on, device?}`. On, a key not already `known` is refused the channel with `device_not_approved` and filed as `pending`, whatever the control plane signed for it. `device` is the caller's own `{publicKey, name, platform}`, taken only if that key is the one its capability was issued to (`400 invalid_device` otherwise, changing nothing), so whoever turns the lock on stays in even when it arrived over loopback and no channel ever recorded it |
+| `POST /devices/:id/approve` | Lets a waiting key in. `:id` is the row's id **or its code**, which is what `pnpm client devices approve` is given. `404 device_not_found` |
+| `DELETE /devices/:id` | Forgets a key and ends every channel open on it. `200 {removed: false}` for an id nothing answers to, since the transport replays a `DELETE`. `409 own_device` for the key the request itself rides on: removing it would end the channel carrying the answer |
+
+`GET /sessions` also carries `devicesPending` while the lock is on and something is
+waiting, so the app every device already runs notices a request on the poll it already
+makes.
+
 ---
 
-## The control plane — 67 routes
+## The control plane — 71 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -270,7 +289,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `GET /health` · `GET /v1/jwks` | Liveness, and the public keys every daemon verifies tokens against |
 | `GET /v1/instance` | What this instance allows, its plugin catalogue address (`plugins.catalogue`, `null` on an instance with no market), where it publishes a build of the app (`app.download`, `null` on one that publishes none), whether it publishes the built-in legal documents as its own (`legal.documents`, `false` on an instance that has not claimed them **and** on one predating the field) and its AGPL §13 source offer |
 | `POST /v1/login` | A name **or a confirmed email address**, plus a password, for a bearer session token — not a cookie; nothing here is ambient. Throttled on the submitted identifier and the caller's address |
-| `POST /v1/enroll` | A daemon's one and only control-plane request, ever |
+| `POST /v1/enroll` | A daemon's one and only control-plane request, ever. Beside the signing keys it answers `root`, the key that vouches for later key sets, and `keyset`, the live root's newest statement: `null` where there is none (no root yet, or a root handed over that has not signed one), and both absent from an instance predating them |
 | `POST /v1/provision` | Add a daemon for somebody else. Takes a `pk_`, not an account |
 | `POST /v1/register` · `POST /v1/register/confirm` | Sign up, then prove the address. A taken name answers 409; a taken address does not. Where the instance publishes legal documents (`legal.documents`), `acceptedTerms: true` is required and its absence answers `400 terms_not_accepted`; nothing about the acceptance is stored |
 | `POST /v1/forgot` · `POST /v1/reset` | Mailed recovery. `forgot` answers identically for known, unknown and unverified |
@@ -316,10 +335,12 @@ password change is refused all of it by a second positional gate.
 | `GET /v1/admin/grants` | Who holds what, paged. **The `PUT` and `DELETE` are deleted** — a grant is full access to a machine that runs agents as its owner, and an admin writing one for a machine they do not own was one request from that. Sharing is `PUT /v1/machines/:id/grants`; the read is kept, because an operator who cannot see this table cannot answer "why can this person reach that machine" |
 | `GET` · `PUT /v1/admin/settings` · `POST /v1/admin/settings/test` | Env-seeded, database-owned; the answer says which side won |
 | `GET /v1/admin/mail` · `POST /v1/admin/mail/:id/retry` | The outbox, and pushing a stuck message again |
-| `GET` · `POST /v1/admin/signing-keys` · `DELETE /v1/admin/signing-keys/:kid` | Rotate publishes **both**; retire once the fleet has re-enrolled |
+| `GET` · `POST /v1/admin/signing-keys` · `DELETE /v1/admin/signing-keys/:kid` | Rotate publishes **both** and the **oldest** goes on signing (`signs` in the listing); retiring it is the switch. Each answers the `statement` now in force, or `null` where the root is off this host and somebody has to sign one. The `DELETE` also answers `behind`, the machines dialled in that had not been offered the statement naming the key that signs next, and refuses `409 statement_stale` where an off-host root has not stated that key at all |
+| `GET` · `POST /v1/admin/root` | The root that vouches for the signing keys: its public half, whether its private half is on this host (`online`), and the statement in force with whether it is `current`. `POST {jwk, handover?}` hands the root to a key made elsewhere: this host then holds no private half of it and erases the old one's. `handover` is required only when the root being left is itself off this host (`409 handover_required`) |
+| `GET /v1/admin/keyset/draft` · `POST /v1/admin/keyset` | What an off-host root signs next (`{iss, v, keys}`), and installing the result. Refused unless it is the live root's signature, a version above the newest, and names **exactly** the active keys (`409 keyset_mismatch`): a statement that left the signer out would darken the fleet |
 | `GET` · `POST /v1/admin/provisioning-key` | Minting is the only verb; nothing ever draws the key |
 | `GET /v1/admin/relay` | Which tunnels are up, and how long an offline machine has been that way |
-| `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the daemon build, the protocol it agreed, and which build of each agent CLI it would launch (`agents`, harness → version, as of its last dial; `null` from a daemon older than the field). The inventory a protocol change or an agent rollout is planned from |
+| `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the daemon build, the protocol it agreed, which build of each agent CLI it would launch (`agents`, harness → version, as of its last dial; `null` from a daemon older than the field), and the key-set statement it held when it dialled (`keyset`, so one dial behind what it holds now; `null` from a daemon that does not say), beside the statement in force. The inventory a protocol change, an agent rollout or a key retirement is planned from |
 
 ### Outside `/v1`
 

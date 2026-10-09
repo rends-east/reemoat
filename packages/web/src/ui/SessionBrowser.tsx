@@ -21,7 +21,7 @@ import { useMachineDrag } from "./machineDrag";
 import { useMachineSwipe, type MachineSwipe } from "./machineSwipe";
 import { useTabPill, type TabPill } from "./tabPill";
 import { navigate, newPath, sessionPath } from "../router";
-import { settingsPath } from "../settings";
+import { machineListPath, settingsPath } from "../settings";
 import {
   elapsedSince,
   sessionGroups,
@@ -510,6 +510,8 @@ function SidebarHeader({
   unchecked: boolean;
 }): ReactNode {
   const waiting = sessionLists(state).blocked;
+  // A device asking to be let in to a machine waits on the same person, and has no session row to say so on.
+  const asking = waiting.length === 0 ? ([...state.devicesWaiting.keys()][0] ?? null) : null;
   return (
     <div className="pt-safe flex shrink-0 items-center gap-1.5 px-3 pb-2">
       <h1 className="sr-only">Reemoat</h1>
@@ -519,15 +521,24 @@ function SidebarHeader({
       <span className="relative ml-auto inline-flex shrink-0">
         <IconButton
           icon={Bell}
-          label={unchecked ? "Not checked yet" : waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`}
+          label={
+            unchecked
+              ? "Not checked yet"
+              : waiting.length > 0
+                ? `${waiting.length} waiting on you`
+                : asking !== null
+                  ? "A device is waiting to be let in"
+                  : "Nothing is waiting on you"
+          }
           size="chip"
-          disabled={waiting.length === 0}
+          disabled={waiting.length === 0 && asking === null}
           onClick={() => {
             const first = waiting[0];
             if (first !== undefined) navigate(sessionPath(first.ref));
+            else if (asking !== null) navigate(machineListPath(asking, "devices"));
           }}
         />
-        {waiting.length > 0 && (
+        {(waiting.length > 0 || asking !== null) && (
           <span className="pointer-events-none absolute top-1 right-1 h-2 w-2 rounded-full bg-brand ring-2 ring-ink" />
         )}
       </span>

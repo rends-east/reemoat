@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { jwkToPublicKey } from "./token.js";
 import { describeError } from "./http.js";
+import { weighAnnouncement } from "./keyset.js";
 
 // The only control-plane request, made once; rotating the signing key means re-enrolling every daemon.
 
@@ -65,6 +66,10 @@ export interface EnrollResult {
   /** The only secret enrollment returns, so the relay can identify the daemon; null from an older control plane. */
   tunnelKey: string | null;
   relayUrl: string | null;
+  /** The key that vouches for later key sets; null from a control plane that has none to name. */
+  root: { kid: string; jwk: unknown } | null;
+  /** The statement `keys` was taken from, when one came and verified under `root`. */
+  keysetVersion: number | null;
 }
 
 export interface EnrollOptions {
@@ -186,7 +191,31 @@ export function parseEnrollResponse(body: unknown): EnrollResult {
     }
   }
 
-  return { machineId, issuer, keys, tunnelKey, relayUrl };
+  // Both optional: an older control plane sends neither, and a root with a statement that does not verify under it is still the root.
+  const root = readRoot(fields["root"]);
+  const keyset = fields["keyset"];
+  const weighed = weighAnnouncement(
+    { issuer, keys, root, keysetVersion: null },
+    { statement: typeof keyset === "string" && keyset.length > 0 ? keyset : null, endorsements: [] },
+  );
+
+  return {
+    machineId,
+    issuer,
+    keys: [...weighed.next.keys],
+    tunnelKey,
+    relayUrl,
+    root,
+    keysetVersion: weighed.next.keysetVersion,
+  };
+}
+
+function readRoot(value: unknown): { kid: string; jwk: unknown } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const kid = record["kid"];
+  if (typeof kid !== "string" || kid.length === 0) return null;
+  return jwkToPublicKey(record["jwk"]) === null ? null : { kid, jwk: record["jwk"] };
 }
 
 function readError(body: unknown): string | null {

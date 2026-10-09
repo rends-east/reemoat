@@ -24,6 +24,7 @@ import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
+import { weighAnnouncement } from "../src/keyset.js";
 import { boundedInt } from "../src/http.js";
 import { atOrUnder, expandHome, resolveStateRoot } from "../src/paths.js";
 import {
@@ -35,10 +36,11 @@ import {
   TURN_SILENCE_MS,
   type WorktreePolicy,
 } from "../src/registry.js";
-import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
+import { RelayTunnel, announcedAgentClis, type TunnelOptions } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
-import { localStaticKey } from "@reemoat/protocol";
+import { keyFingerprint, localStaticKey } from "@reemoat/protocol";
 import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
+import { DeviceGate } from "../src/devices.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
@@ -168,7 +170,14 @@ try {
 
 // Printed for comparison against cpctl admin fleet; before serving and dialling, since the dial announces it.
 const machineKey = ensureMachineKey(stores.machineKeys);
-console.log(`machine key: ${machineKey.kth}`);
+// The fingerprint is what an app shows for this machine; the two are compared by eye, with no server in between.
+console.log(
+  `machine key: ${machineKey.kth} (fingerprint ${keyFingerprint(new Uint8Array(Buffer.from(machineKey.publicKey, "base64url")))})`,
+);
+// The live key, not the one booted on: a refused dial can promote another.
+const liveMachineKey = (): string | null => stores.machineKeys.active()?.publicKey ?? null;
+const deviceGate = new DeviceGate(stores.knownDevices, liveMachineKey);
+if (deviceGate.locked) console.log("devices: locked to the ones this machine already knows");
 
 const enrollmentWarning = enrollmentIgnored(process.env["REEMOAT_AUTH"], stores.identity.load());
 if (enrollmentWarning !== null) console.error(`warning: ${enrollmentWarning}`);
@@ -181,9 +190,17 @@ interface AuthSetup {
   relay: { relayUrl: string; tunnelKey: string } | null;
   /** The control plane the stored identity enrolled with, for the announcement only; not REEMOAT_CONTROL_PLANE, which only enrollment reads. */
   controlPlane: string | null;
+  /** How a key-set statement announced on the tunnel dial reaches the verifier; empty under the shared secret. */
+  keyset: Pick<TunnelOptions, "onKeyset" | "keysetVersion">;
 }
 
-const { verifier, machineId, relay: enrolledRelay, controlPlane: enrolledControlPlane } = await buildVerifier();
+const {
+  verifier,
+  machineId,
+  relay: enrolledRelay,
+  controlPlane: enrolledControlPlane,
+  keyset: keysetAnnouncements,
+} = await buildVerifier();
 
 let workspacePolicy;
 try {
@@ -448,6 +465,8 @@ const { app, injectWebSocket } = createApp({
   roots,
   plugins: pluginHost,
   peers: { hub: peers, links: stores.peerLinks },
+  devices: deviceGate,
+  machineKey: liveMachineKey,
 });
 
 if ((process.env["REEMOAT_RELAY"] ?? "").trim().length > 0) {
@@ -590,6 +609,7 @@ function startRelayTunnel(local: { host: string; port: number }): void {
   }
 
   tunnel = RelayTunnel.start({
+    ...keysetAnnouncements,
     relayUrl: enrolledRelay.relayUrl,
     tunnelKey: enrolledRelay.tunnelKey,
     local,
@@ -602,6 +622,7 @@ function startRelayTunnel(local: { host: string; port: number }): void {
 
     rotateMachineKey: machineKeyRotation(stores.machineKeys, machineKey),
     verifier,
+    devices: deviceGate,
     onEvent: (kind, detail) => {
       if (kind === "connected") console.log(`relay: tunnel up (${detail})`);
       else if (kind === "rejected") console.error(`relay: ${detail}`);
@@ -707,7 +728,7 @@ async function buildVerifier(): Promise<AuthSetup> {
       console.error("REEMOAT_TOKEN is required for REEMOAT_AUTH=shared_secret.");
       process.exit(2);
     }
-    return { verifier: shared, machineId: null, relay: null, controlPlane: null };
+    return { verifier: shared, machineId: null, relay: null, controlPlane: null, keyset: {} };
   }
 
   const controlPlane = (process.env["REEMOAT_CONTROL_PLANE"] ?? "").trim();
@@ -753,6 +774,8 @@ async function buildVerifier(): Promise<AuthSetup> {
         enrolledAt: Date.now(),
         tunnelKey: result.tunnelKey,
         relayUrl: result.relayUrl,
+        root: result.root,
+        keysetVersion: result.keysetVersion,
       };
       stores.identity.save(identity);
       console.log(`enrolled as ${identity.machineId} (${identity.keys.length} key(s), issuer ${identity.issuer})`);
@@ -803,6 +826,40 @@ async function buildVerifier(): Promise<AuthSetup> {
     process.exit(2);
   }
 
+  // Saved before it takes effect, so a restart never verifies against a key set this file does not hold.
+  let held: StoredIdentity = identity;
+  let lastRefusal: string | null = null;
+  const keyset: AuthSetup["keyset"] = {
+    keysetVersion: () => held.keysetVersion,
+    onKeyset: (announced) => {
+      const outcome = weighAnnouncement(held, announced);
+      if (outcome.refused !== null && outcome.refused !== "absent" && outcome.refused !== "not_newer") {
+        // Once per reason, since every redial would say it again.
+        if (lastRefusal !== outcome.refused) {
+          console.error(`keys: the relay announced a key set this machine did not take (${outcome.refused}); the keys it holds still verify`);
+        }
+        lastRefusal = outcome.refused;
+      }
+      if (outcome.next === held) return;
+      const next: StoredIdentity = {
+        ...held,
+        keys: [...outcome.next.keys],
+        root: outcome.next.root,
+        keysetVersion: outcome.next.keysetVersion,
+      };
+      stores.identity.save(next);
+      held = next;
+      if (outcome.rootChanged) console.log(`keys: root ${next.root?.kid ?? "(none)"} now vouches for this control plane's signing keys`);
+      if (outcome.keysChanged) {
+        signed.replaceKeys(next.keys);
+        lastRefusal = null;
+        console.log(
+          `keys: took key set v${String(next.keysetVersion)} off the tunnel dial (${next.keys.map((key) => key.kid).join(", ")})`,
+        );
+      }
+    },
+  };
+
   if (authMode === "both") {
     if (shared === null) {
       console.error("REEMOAT_AUTH=both requires REEMOAT_TOKEN to be set as well.");
@@ -813,6 +870,7 @@ async function buildVerifier(): Promise<AuthSetup> {
       machineId: identity.machineId,
       relay,
       controlPlane: announcedControlPlane(identity.controlPlane),
+      keyset,
     };
   }
   return {
@@ -820,6 +878,7 @@ async function buildVerifier(): Promise<AuthSetup> {
     machineId: identity.machineId,
     relay,
     controlPlane: announcedControlPlane(identity.controlPlane),
+    keyset,
   };
 }
 

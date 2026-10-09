@@ -5,6 +5,7 @@ import type { PeerOrigin, PeerPolicyKey, PromptMention } from "../events.js";
 import type { ManagedSession, MentionNote, PeerMidTurnResult, SessionRegistry, SessionSnapshot } from "../registry.js";
 import type { McpLaunch } from "../session.js";
 import type { OutboxEntry, PeerLink, SqliteMachineSettingsStore, SqlitePeerOutboxStore, SqlitePeerSeenStore } from "../store/sqlite.js";
+import { DEVICE_NOT_APPROVED } from "../e2ee.js";
 import { ASK_WAIT_MS, parseAskArguments, type PoseResult } from "./ask.js";
 import type { SendFileResult } from "./files.js";
 import type { PeerAnswer } from "./channel.js";
@@ -813,6 +814,13 @@ export class PeerHub {
     if (!answer.ok) {
       if (UNREACHABLE_STATUSES.has(answer.status) || UNREACHABLE_CODES.has(answer.code)) return offline(answer.code);
       if (answer.status === 429) return refuse("rate_limited", `${link.targetName}'s relay is refusing messages this fast; wait and retry`);
+      // Not the link's fault and no renewal cures it: the target is locked to the keys its owner approved (Q1.655).
+      if (answer.code === DEVICE_NOT_APPROVED) {
+        return refuse(
+          "link_refused",
+          `${link.targetName} lets in only what its owner approved, and this machine is waiting there; its owner approves it under that machine's devices`,
+        );
+      }
       const code = theirWords(answer.code, MAX_REMOTE_CODE_CHARS);
       return refuse("link_refused", `${link.targetName} refused this machine's link (${code}); its owner's app renews links when it next opens`);
     }

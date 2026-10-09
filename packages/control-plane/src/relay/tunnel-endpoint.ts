@@ -10,6 +10,9 @@ import {
   CONNECTION_WINDOW_BYTES,
   AGENT_CLIS_HEADER,
   DAEMON_VERSION_HEADER,
+  KEYSET_HEADER,
+  KEYSET_ROOT_HEADER,
+  KEYSET_VERSION_HEADER,
   MACHINE_KEY_HEADER,
   MAX_CONCURRENT_STREAMS,
   MAX_TUNNEL_BUFFERED_BYTES,
@@ -23,6 +26,8 @@ import {
   TUNNEL_PING_MAX_MISSES,
   TUNNEL_AUTH_HEADER,
   TUNNEL_VERSION_HEADER,
+  formatKeysetPing,
+  parseKeysetVersion,
   parseMachineKey,
   negotiateProtocolVersion,
 } from "../../../../src/relay/protocol.js";
@@ -30,6 +35,7 @@ import { recordDaemonBuild, readAgentClisHeader, readDaemonVersionHeader } from 
 import { pinMachineKey, type MachineKeyPin } from "../machinekeys.js";
 import { resolveTunnelKey } from "../keys.js";
 import { machineStanding } from "../quota.js";
+import { announcedKeyset, type AnnouncedKeyset } from "../trustroot.js";
 import { RelayTunnel, type TunnelRegistry } from "./registry.js";
 
 // Where a daemon dials out to: one WebSocket per daemon carrying HTTP/2, with the relay as h2 client because it opens the streams.
@@ -38,7 +44,12 @@ export interface TunnelEndpointOptions {
   db: DatabaseSync;
   registry: TunnelRegistry;
   onEvent?: (event: string, detail: string) => void;
+  /** A seam so a driver need not wait twenty seconds for a ping. */
+  pingIntervalMs?: number;
 }
+
+/** How stale the announced key set may be: a dial storm after a restart costs one read a second, not one a daemon. */
+export const KEYSET_REFRESH_MS = 1_000;
 
 export interface TunnelEndpoint {
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
@@ -55,6 +66,20 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
     maxPayload: MAX_TUNNEL_MESSAGE_BYTES,
   });
 
+  // Strings the Authority signed, read and never made here. A read that fails keeps the last answer, so it costs a stale header and never a dial.
+  let announced: AnnouncedKeyset = { statement: null, version: null, endorsements: [] };
+  let announcedAt = 0;
+  const keyset = (): AnnouncedKeyset => {
+    if (Date.now() - announcedAt < KEYSET_REFRESH_MS) return announced;
+    announcedAt = Date.now();
+    try {
+      announced = announcedKeyset(db);
+    } catch {
+      // SQLITE_BUSY on the shared file, or a database older than the tables.
+    }
+    return announced;
+  };
+
   // The agreed version rides the 101 itself; this event is the only place ws lets a header be added.
   wss.on("headers", (headers, request) => {
     const offered = request.headers[TUNNEL_VERSION_HEADER];
@@ -62,6 +87,9 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
       offered === undefined ? PRE_NEGOTIATION_PROTOCOL_VERSION : Number(offered),
     );
     if (agreed !== null) headers.push(`${TUNNEL_AGREED_VERSION_HEADER}: ${agreed}`);
+    const { statement, endorsements } = keyset();
+    if (statement !== null) headers.push(`${KEYSET_HEADER}: ${statement}`);
+    if (endorsements.length > 0) headers.push(`${KEYSET_ROOT_HEADER}: ${endorsements.join(" ")}`);
   });
 
   return {
@@ -125,6 +153,7 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
         daemonVersion: readDaemonVersionHeader(req.headers[DAEMON_VERSION_HEADER]),
         protocolVersion: agreed,
         agentClis: readAgentClisHeader(req.headers[AGENT_CLIS_HEADER]),
+        keysetVersion: parseKeysetVersion(req.headers[KEYSET_VERSION_HEADER]),
         at: Date.now(),
       });
 
@@ -185,11 +214,14 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
       }
       misses += 1;
       try {
-        ws.ping();
+        // The newest statement's version rides the ping, so a daemon on a tunnel that never drops still learns there is one.
+        const { version } = keyset();
+        if (version === null) ws.ping();
+        else ws.ping(formatKeysetPing(version));
       } catch {
         ws.terminate();
       }
-    }, TUNNEL_PING_INTERVAL_MS);
+    }, options.pingIntervalMs ?? TUNNEL_PING_INTERVAL_MS);
 
     ws.on("pong", () => {
       misses = 0;

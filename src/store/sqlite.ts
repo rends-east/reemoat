@@ -12,6 +12,7 @@ import {
 } from "../acp/systems.js";
 import { isContributedId } from "../plugins/manifest.js";
 import type { UploadIndex, UploadRow } from "../uploads.js";
+import type { KnownDevice, KnownDeviceStore } from "../devices.js";
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_EVENTS,
@@ -98,6 +99,7 @@ export interface StoreBundle {
   sessions: SqliteSessionStore;
   identity: SqliteIdentityStore;
   machineKeys: SqliteMachineKeyStore;
+  knownDevices: SqliteKnownDeviceStore;
   credentials: SqliteAgentCredentialStore;
   systemCredentials: SqliteSystemCredentialStore;
   customAgents: SqliteCustomAgentStore;
@@ -163,6 +165,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
 
   const identity = new SqliteIdentityStore(db);
   const machineKeys = new SqliteMachineKeyStore(db);
+  const knownDevices = new SqliteKnownDeviceStore(db);
   const credentials = new SqliteAgentCredentialStore(db);
   const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
   const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
@@ -181,6 +184,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     sessions,
     identity,
     machineKeys,
+    knownDevices,
     credentials,
     systemCredentials,
     customAgents,
@@ -272,6 +276,9 @@ function migrate(db: DatabaseSync): void {
   const has = (name: string): boolean => identityColumns.some((column) => column["name"] === name);
   if (!has("tunnel_key")) db.exec("ALTER TABLE identity ADD COLUMN tunnel_key TEXT");
   if (!has("relay_url")) db.exec("ALTER TABLE identity ADD COLUMN relay_url TEXT");
+  if (!has("root_kid")) db.exec("ALTER TABLE identity ADD COLUMN root_kid TEXT");
+  if (!has("root_jwk")) db.exec("ALTER TABLE identity ADD COLUMN root_jwk TEXT");
+  if (!has("keyset_version")) db.exec("ALTER TABLE identity ADD COLUMN keyset_version INTEGER");
 
   migrateCredentialsToV6(db);
   migrateMachineKeysToOneLive(db);
@@ -1498,6 +1505,10 @@ export interface StoredIdentity {
   tunnelKey: string | null;
   /** Where to dial for a tunnel, or `null` for a control plane running no relay. */
   relayUrl: string | null;
+  /** The key that vouches for `keys`, pinned at enrollment or introduced on a dial; `null` until either (src/keyset.ts). */
+  root: { kid: string; jwk: unknown } | null;
+  /** The newest key-set statement taken, or `null` while `keys` is still what enrollment answered. */
+  keysetVersion: number | null;
 }
 
 export class SqliteIdentityStore {
@@ -1508,12 +1519,13 @@ export class SqliteIdentityStore {
     this.loadStmt = db.prepare("SELECT * FROM identity WHERE id = 1");
     this.saveStmt = db.prepare(
       "INSERT INTO identity (id, machine_id, issuer, keys_json, control_plane, code_fp, enrolled_at, " +
-        "tunnel_key, relay_url) " +
-        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "tunnel_key, relay_url, root_kid, root_jwk, keyset_version) " +
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(id) DO UPDATE SET machine_id = excluded.machine_id, issuer = excluded.issuer, " +
         "keys_json = excluded.keys_json, control_plane = excluded.control_plane, " +
         "code_fp = excluded.code_fp, enrolled_at = excluded.enrolled_at, " +
-        "tunnel_key = excluded.tunnel_key, relay_url = excluded.relay_url",
+        "tunnel_key = excluded.tunnel_key, relay_url = excluded.relay_url, " +
+        "root_kid = excluded.root_kid, root_jwk = excluded.root_jwk, keyset_version = excluded.keyset_version",
     );
   }
 
@@ -1533,7 +1545,19 @@ export class SqliteIdentityStore {
       enrolledAt: Number(row["enrolled_at"] ?? 0),
       tunnelKey: row["tunnel_key"] == null ? null : String(row["tunnel_key"]),
       relayUrl: row["relay_url"] == null ? null : String(row["relay_url"]),
+      root: SqliteIdentityStore.storedRoot(row["root_kid"], row["root_jwk"]),
+      keysetVersion: row["keyset_version"] == null ? null : Number(row["keyset_version"]),
     };
+  }
+
+  /** An unreadable root reads as none held, so a held signing key may introduce it again; the key set is untouched either way. */
+  private static storedRoot(kid: unknown, jwk: unknown): { kid: string; jwk: unknown } | null {
+    if (typeof kid !== "string" || typeof jwk !== "string") return null;
+    try {
+      return { kid, jwk: JSON.parse(jwk) as unknown };
+    } catch {
+      return null;
+    }
   }
 
   save(identity: StoredIdentity): void {
@@ -1546,6 +1570,9 @@ export class SqliteIdentityStore {
       identity.enrolledAt,
       identity.tunnelKey,
       identity.relayUrl,
+      identity.root?.kid ?? null,
+      identity.root === null ? null : JSON.stringify(identity.root.jwk),
+      identity.keysetVersion,
     );
   }
 }
@@ -1632,6 +1659,89 @@ export class SqliteMachineKeyStore {
   retire(kth: string, now = Date.now()): void {
     this.retireStmt.run(now, kth);
   }
+}
+
+/** The lock rides machine_settings under a key PATCH /settings cannot name, as the peer policy does. */
+const DEVICE_LOCK_KEY = "deviceLock";
+
+export class SqliteKnownDeviceStore implements KnownDeviceStore {
+  private readonly getStmt: StatementSync;
+  private readonly listStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly removeStmt: StatementSync;
+  private readonly lockStmt: StatementSync;
+  private readonly setLockStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    const columns = "kth, public_key, kind, label, platform, subject, ref, state, first_seen, last_seen";
+    this.getStmt = db.prepare(`SELECT ${columns} FROM known_devices WHERE kth = ?`);
+    this.listStmt = db.prepare(`SELECT ${columns} FROM known_devices ORDER BY last_seen DESC, kth ASC`);
+    this.saveStmt = db.prepare(
+      `INSERT INTO known_devices (${columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ` +
+        "ON CONFLICT(kth) DO UPDATE SET public_key = excluded.public_key, kind = excluded.kind, label = excluded.label, " +
+        "platform = excluded.platform, subject = excluded.subject, ref = excluded.ref, state = excluded.state, " +
+        "last_seen = excluded.last_seen",
+    );
+    this.removeStmt = db.prepare("DELETE FROM known_devices WHERE kth = ?");
+    this.lockStmt = db.prepare("SELECT value FROM machine_settings WHERE key = ?");
+    this.setLockStmt = db.prepare(
+      "INSERT INTO machine_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+  }
+
+  get(kth: string): KnownDevice | null {
+    const row = this.getStmt.get(kth);
+    return row === undefined ? null : rowToKnownDevice(row);
+  }
+
+  list(): KnownDevice[] {
+    return this.listStmt.all().map(rowToKnownDevice);
+  }
+
+  /** first_seen is written once: an update keeps the row's own. */
+  save(device: KnownDevice): void {
+    this.saveStmt.run(
+      device.kth,
+      device.publicKey,
+      device.kind,
+      device.label,
+      device.platform,
+      device.subject,
+      device.ref,
+      device.state,
+      device.firstSeenAt,
+      device.lastSeenAt,
+    );
+  }
+
+  remove(kth: string): boolean {
+    return Number(this.removeStmt.run(kth).changes) > 0;
+  }
+
+  /** Anything but the one stored spelling of on is off, so a value this build cannot read never locks a machine. */
+  locked(): boolean {
+    return this.lockStmt.get(DEVICE_LOCK_KEY)?.["value"] === "1";
+  }
+
+  setLocked(on: boolean): void {
+    this.setLockStmt.run(DEVICE_LOCK_KEY, on ? "1" : "0");
+  }
+}
+
+function rowToKnownDevice(row: Record<string, unknown>): KnownDevice {
+  return {
+    kth: String(row["kth"]),
+    publicKey: String(row["public_key"]),
+    kind: row["kind"] === "machine" ? "machine" : "device",
+    label: row["label"] == null ? null : String(row["label"]),
+    platform: row["platform"] == null ? null : String(row["platform"]),
+    subject: String(row["subject"]),
+    ref: row["ref"] == null ? null : String(row["ref"]),
+    // Unreadable reads as waiting: a row this build cannot place must not be let in.
+    state: row["state"] === "known" ? "known" : "pending",
+    firstSeenAt: Number(row["first_seen"]),
+    lastSeenAt: Number(row["last_seen"]),
+  };
 }
 
 function rowToMachineKey(row: Record<string, unknown>): StoredMachineKey {

@@ -53,7 +53,7 @@ both sides and is `undefined` at runtime. `webcheck` compares every interface in
 unlisted file hits the sweep's `continue` and is never compared, so a mirrored type from a new
 daemon file means adding that file to the source list. It asserts **`daemon ⊆ client`, never
 equality**: a field added after the first release is optional here, since an older daemon omits
-it. Currently 54 with a floor of 52 that moves with the corpus. The reader anchors names (`Me`
+it. Currently 71 with a floor of 64 that moves with the corpus. The reader anchors names (`Me`
 must not match `MemoryEventStore`), resolves `extends`, refuses an `extends` it cannot find, and
 keeps a negative control (a bare prefix such as `Session` matches nothing). Its depth counter
 (nested objects) and paren counter (parameter lists) are separate properties, each driven on a
@@ -141,10 +141,10 @@ constrains any answer.
 
 ## What is still a flag day, and is not fixed here
 
-- **`cpctl admin rotatekey` darks every enrolled daemon.** A daemon captures the key set once at
-  enrollment, and `activeSigningKey` signs with the **newest**, whose `kid` no daemon holds.
-  `schema.sql` and `keys.ts` describe an overlapping rotation; only the publishing half is real,
-  so rotation means re-enrolling every machine. Which key signs is a security decision.
+- **A daemon too old to take a key-set statement is darkened by `retirekey`**, and only by
+  that: the oldest active key signs (`tokenSigningKey`), so `rotatekey` publishes and changes
+  nothing for anybody, and a daemon new enough takes the statement on its dial or within a
+  ping. `cpctl admin fleet` shows who has been offered it (`daemon_keyset`). Q1.659.
 - **The token header is exact**: `alg` `EdDSA`, `typ` `reemoat+jwt`, compared first. Unknown
   claims are ignored; changing either header field breaks every daemon at once.
 - **`REEMOAT_CP_RELAY_URL` is captured at enrollment**: changing it re-enrolls every machine

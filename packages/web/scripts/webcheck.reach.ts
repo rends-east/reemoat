@@ -151,7 +151,7 @@ process.stdout.write("\nthe list's body is one total function\n");
   type Input = Parameters<typeof listBody>[0];
   type Machine = Input["fleet"][number];
 
-  const REASONS = [null, "no_route", "cp_unreachable", "not_enrolled", "no_token", "no_machine_key", "no_device_key"] as const;
+  const REASONS = [null, "no_route", "cp_unreachable", "not_enrolled", "no_token", "no_machine_key", "no_device_key", "machine_key_changed", "device_pending"] as const;
   const shapes: Machine[] = [];
   for (const reach of ["unknown", "probing"] as const) {
     shapes.push({ name: "m", reach, offlineReason: null, ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: false });
@@ -550,7 +550,7 @@ process.stdout.write("\nthe shell is drawn at once, and claims nothing before th
     [
       /const nowhere = state\.machines\.length === 0 && state\.registry !== "known";/.test(browser),
       /<SidebarFoot machine=\{view\.machine\} disabled=\{nowhere\} \/>/.test(browser),
-      /label=\{unchecked \? "Not checked yet" : waiting\.length === 0 \? "Nothing is waiting on you" :/.test(browser),
+      /label=\{\s*unchecked\s*\? "Not checked yet"\s*: waiting\.length > 0/.test(browser),
     ],
     [true, true, true],
   );
@@ -605,7 +605,7 @@ process.stdout.write("\na link that drops and is back inside the quiet window is
     [1_000, 2_000, 4_000, 4_000, 4_000],
   );
 
-  const REASONS = [null, "no_route", "cp_unreachable", "no_token", "not_enrolled", "over_limit", "owner_disabled", "no_machine_key", "no_device_key"] as const;
+  const REASONS = [null, "no_route", "cp_unreachable", "no_token", "not_enrolled", "over_limit", "owner_disabled", "no_machine_key", "no_device_key", "machine_key_changed", "device_pending"] as const;
   check(
     "down for a reason the app keeps retrying is the wire or the server a token is minted by, and every other reason is an answer",
     REASONS.filter((reason) => retriedDown("offline", reason)),

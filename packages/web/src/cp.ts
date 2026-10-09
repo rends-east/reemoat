@@ -7,6 +7,7 @@ import {
   bindNativeCredential,
   clearNativeCredential,
   cpSend,
+  deviceLabel,
   inNativeShell,
   nativeBoot,
   setNativeDevice,
@@ -312,15 +313,13 @@ export async function login(name: string, password: string): Promise<Me> {
 }
 
 function describeDevice(): { id?: string; name: string; platform: string; publicKey?: string } | null {
-  const boot = nativeBoot();
-  if (!inNativeShell() || boot === null) return null;
-  const name = boot.hostName ?? "This computer";
+  const label = deviceLabel();
+  if (label === null) return null;
   const held = currentDevice();
-  const key = boot.devicePublicKey ?? undefined;
+  const key = nativeBoot()?.devicePublicKey ?? undefined;
   return {
     ...(held === null ? {} : { id: held }),
-    name,
-    platform: boot.platform,
+    ...label,
     ...(key === undefined ? {} : { publicKey: key }),
   };
 }

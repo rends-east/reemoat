@@ -21,6 +21,8 @@ export interface RelayListenerOptions {
   presence?: PresenceWriter | null;
   onEvent?: (event: string, detail: string) => void;
   channelTimeoutMs?: number;
+  /** A seam so a driver need not wait twenty seconds for the tunnel's ping. */
+  tunnelPingMs?: number;
   siblings?: SiblingRelays | null;
   /** A callback, because each entry point prints a different remedy. */
   onListenError?: (error: NodeJS.ErrnoException) => void;
@@ -44,7 +46,12 @@ export function createRelayListener(options: RelayListenerOptions): RelayListene
     channelTimeoutMs: options.channelTimeoutMs,
     siblings: options.siblings ?? null,
   });
-  const endpoint = createTunnelEndpoint({ db, registry, onEvent });
+  const endpoint = createTunnelEndpoint({
+    db,
+    registry,
+    onEvent,
+    ...(options.tunnelPingMs === undefined ? {} : { pingIntervalMs: options.tunnelPingMs }),
+  });
   const healthRead = db.prepare("SELECT 1 AS ok FROM signing_keys LIMIT 1");
 
   const server = createServer((req, res) => {

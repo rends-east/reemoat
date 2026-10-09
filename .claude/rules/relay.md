@@ -141,13 +141,13 @@ cursor. The poll's re-probe leaves a live one alone.
 - **`421 wrong_relay`** only after authorize, only when `dbRelayView.relayFor` names
   another mapped slot, with `RELAY_URL_HEADER`; else 503. A malformed map warns in
   `relay/main.ts`, never exits. Only a linked daemon sees it and follows once. Q1.653.
-- **Six tables read, two written, never on the request path.** Per request `machines`,
+- **Nine tables read, two written, never on the request path.** Per request `machines`,
   `users`, `grants`, a ≤1/s-cached `signing_keys.public_jwk`; per link channel
-  `machine_links` (`linkById`); on dial `machine_tunnel_keys`; `relay_tunnels` only for
-  a tunnel held elsewhere while `REEMOAT_CP_RELAY_URLS` is set. Writes: `relay_tunnels`
-  (register, unregister, 5s flush stamping one timestamp then sweeping this relay's older
-  rows) and `machines`' four `daemon_*` columns **on dial only** (`recordDaemonBuild`,
-  read by `cpctl admin fleet`); `daemon_agents` via `readAgentClisHeader` off
+  `machine_links` (`linkById`); on dial `machine_tunnel_keys` and `announcedKeyset`'s
+  three, ≤1/s, as strings; `relay_tunnels` only for a tunnel held elsewhere while
+  `REEMOAT_CP_RELAY_URLS` is set. Writes: `relay_tunnels` (register, unregister, a 5s
+  flush that stamps, then sweeps this relay's older rows) and `machines`' five
+  `daemon_*` columns **on dial only** (`recordDaemonBuild`, read by `cpctl admin fleet`); `daemon_agents` via `readAgentClisHeader` off
   `AGENT_CLIS_HEADER`, refused **whole** to `null` where `readDaemonVersionHeader` cuts
   a label, neither costing the dial. Every statement **best-effort and wrapped**: a
   `SQLITE_BUSY` on the shared 250ms timeout costs a stale row, never a tunnel. No private

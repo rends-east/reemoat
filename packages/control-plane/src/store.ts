@@ -170,6 +170,7 @@ function migrate(db: DatabaseSync): void {
   addColumn(db, has("daemon_protocol"), "ALTER TABLE machines ADD COLUMN daemon_protocol INTEGER");
   addColumn(db, has("daemon_seen_at"), "ALTER TABLE machines ADD COLUMN daemon_seen_at INTEGER");
   addColumn(db, has("daemon_agents"), "ALTER TABLE machines ADD COLUMN daemon_agents TEXT");
+  addColumn(db, has("daemon_keyset"), "ALTER TABLE machines ADD COLUMN daemon_keyset INTEGER");
   // Who minted the redeemed enrollment code (a user or provisioning key id), not who redeemed it; NULL means unknown.
   addColumn(db, has("enrolled_by"), "ALTER TABLE machines ADD COLUMN enrolled_by TEXT");
   const deviceColumns = db.prepare("PRAGMA table_info(devices)").all();

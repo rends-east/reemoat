@@ -69,7 +69,10 @@ CREATE TABLE IF NOT EXISTS identity (
   code_fp       TEXT    NOT NULL,
   enrolled_at   INTEGER NOT NULL,
   tunnel_key    TEXT,
-  relay_url     TEXT
+  relay_url     TEXT,
+  root_kid      TEXT,
+  root_jwk      TEXT,
+  keyset_version INTEGER
 );
 
 -- No retention by design (Q7.124); secrets in the clear, protected by the 0700 directory and 0600 file.
@@ -162,6 +165,21 @@ CREATE TABLE IF NOT EXISTS machine_keys (
   private_key TEXT    NOT NULL,
   created_at  INTEGER NOT NULL,
   retired_at  INTEGER
+);
+
+
+-- Keys that opened an encrypted channel here: a journal while the lock is off, the allowlist while it is on (Q1.655).
+CREATE TABLE IF NOT EXISTS known_devices (
+  kth         TEXT PRIMARY KEY,
+  public_key  TEXT    NOT NULL,
+  kind        TEXT    NOT NULL,
+  label       TEXT,
+  platform    TEXT,
+  subject     TEXT    NOT NULL,
+  ref         TEXT,
+  state       TEXT    NOT NULL,
+  first_seen  INTEGER NOT NULL,
+  last_seen   INTEGER NOT NULL
 );
 
 

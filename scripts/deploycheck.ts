@@ -2172,6 +2172,21 @@ process.stdout.write("\nwhat the relay is made of\n");
     pattern.test("src/registry.ts"),
     pattern.test("scripts/daemon.ts"),
   ], [false, false, false]);
+
+  // The secret that opens the wrapped signing keys is the API's alone: the relay shares the database file.
+  const reads = (file: string): boolean => /process\.env\[\s*"REEMOAT_CP_KEY_SECRET"\s*\]|process\.env\.REEMOAT_CP_KEY_SECRET/.test(readFileSync(file, "utf8"));
+  check("the API's entry reads the key secret", reads(join(repoRoot, "packages/control-plane/src/main.ts")), true);
+  check("and nothing the relay is built from does", [...seen].filter(reads), []);
+  check(
+    "nor does the relay's entry hand one to the key module",
+    /configureKeySecret/.test(readFileSync(entry, "utf8")),
+    false,
+  );
+  const compose = readFileSync(join(deployDir, "docker/compose.yml"), "utf8");
+  const relayService = compose.slice(compose.indexOf("\n  relay:\n"));
+  const apiService = compose.slice(compose.indexOf("\n  control-plane:\n"), compose.indexOf("\n  relay:\n"));
+  check("compose pins it empty on the relay, where environment: beats the shared env file", /^\s+REEMOAT_CP_KEY_SECRET: ""$/m.test(relayService), true);
+  check("and leaves the API's to the env file", /^\s+REEMOAT_CP_KEY_SECRET:/m.test(apiService), false);
 }
 
 process.stdout.write("\nwhat a deploy says a restart will cost\n");

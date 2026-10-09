@@ -11,13 +11,18 @@ import {
   frameLength,
   type CipherState,
   type CloseFrame,
+  type DeviceDescription,
+  type HelloFrame,
   type ResponseFrame,
   type StaticKey,
 } from "@reemoat/protocol";
 // Import cycle with machine.ts: read MAX_DOWNLOAD_BYTES only inside handlers, since a module-level alias would throw in the TDZ.
 import { MAX_DOWNLOAD_BYTES } from "./machine";
-import { hostDeviceDh, nativeBoot } from "./native";
+import { deviceLabel, hostDeviceDh, nativeBoot } from "./native";
 import { monotonicNow } from "./wake";
+
+/** The daemon's own word for a key its owner has not let in; webcheck.e2ee.ts compares it with src/e2ee.ts. */
+export const DEVICE_NOT_APPROVED = "device_not_approved";
 
 /** Must equal the relay listener's RELAY_CHANNEL_PATH; webcheck.e2ee.ts is what compares the two. */
 export const RELAY_CHANNEL_PATH = "/__relay/channel";
@@ -54,7 +59,7 @@ function toBase64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function fromBase64Url(text: string): Uint8Array | null {
+export function fromBase64Url(text: string): Uint8Array | null {
   if (!/^[A-Za-z0-9_-]+$/.test(text)) return null;
   try {
     const binary = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
@@ -136,6 +141,8 @@ export interface ChannelOptions {
   onWrongDevice: () => Promise<void>;
   /** Defaults to deviceStaticKey; a parameter only so a driver can hold a real key. */
   deviceKey?: () => StaticKey | null;
+  /** What this device calls itself to the machine; defaults to the shell's own answer. */
+  describe?: () => DeviceDescription | null;
   /** Defaults to STREAM_PROBATION_MS; a parameter only so a driver need not wait it out. */
   probationMs?: number;
 }
@@ -204,6 +211,7 @@ class Connection {
     staticKey: StaticKey,
     remoteStatic: Uint8Array,
     private readonly capability: string,
+    private readonly device: DeviceDescription | null,
     readonly expiresAt: number,
     // Pool bookkeeping hangs off this one callback, because there are too many close sites to maintain it at each.
     private readonly onClosed: () => void,
@@ -343,7 +351,8 @@ class Connection {
     this.send = transport.send;
     this.receive = transport.receive;
     // The capability rides the first transport message, not IK's replayable first message.
-    this.write(encodeJsonFrame(FRAME.HELLO, { capability: this.capability }));
+    const hello: HelloFrame = { capability: this.capability, ...(this.device === null ? {} : { device: this.device }) };
+    this.write(encodeJsonFrame(FRAME.HELLO, hello));
   }
 
   private dispatch(frame: Uint8Array): void {
@@ -697,7 +706,8 @@ export class MachineChannel implements Channel {
     // The credential rides the query on this hop only; inside the channel it is a frame.
     url.searchParams.set("token", token);
 
-    const connection: Connection = new Connection(url.toString(), staticKey, remoteStatic, token, expiresAt, () =>
+    const device = (this.options.describe ?? deviceLabel)();
+    const connection: Connection = new Connection(url.toString(), staticKey, remoteStatic, token, device, expiresAt, () =>
       this.live.delete(connection),
     );
     this.live.add(connection);

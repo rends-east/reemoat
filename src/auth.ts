@@ -27,6 +27,8 @@ export interface Principal {
   tokenId: string | null;
   /** Advisory, for the audit trail only; cnf is the binding that decides. */
   deviceId: string | null;
+  /** The capability's cnf.jkt: which key it was minted for, whether or not a channel proved it. */
+  keyThumbprint: string | null;
   via: "shared_secret" | "signed";
   /** Set only for a link capability: which machine's daemon is asking, as its Authority named it. */
   link: { id: string; sourceMachineId: string; sourceLabel: string } | null;
@@ -87,6 +89,7 @@ export class SharedSecretVerifier implements TokenVerifier {
         expiresAt: null,
         tokenId: null,
         deviceId: null,
+        keyThumbprint: null,
         via: "shared_secret",
         link: null,
       },
@@ -120,19 +123,22 @@ export interface SignedVerifierOptions {
 export class SignedTokenVerifier implements TokenVerifier {
   readonly mode = "signed";
 
-  private readonly keys: Map<string, KeyObject>;
+  private keys: Map<string, KeyObject>;
   private readonly leewayMs: number;
   private readonly onSuspectedClockSkew: ((detail: string) => void) | undefined;
 
   constructor(private readonly options: SignedVerifierOptions) {
-    this.keys = new Map();
-    for (const entry of options.identity.keys) {
-      const key = jwkToPublicKey(entry.jwk);
-      // An unparseable key is dropped: the set is plural so a rotation can be in flight.
-      if (key !== null) this.keys.set(entry.kid, key);
-    }
+    this.keys = usableKeys(options.identity.keys);
     this.leewayMs = options.leewayMs ?? AUTH_LEEWAY_MS;
     this.onSuspectedClockSkew = options.onSuspectedClockSkew;
+  }
+
+  /** The whole set at once, as a verified key-set statement replaces it; one with no usable key is refused and changes nothing. */
+  replaceKeys(keys: readonly { kid: string; jwk: unknown }[]): boolean {
+    const next = usableKeys(keys);
+    if (next.size === 0) return false;
+    this.keys = next;
+    return true;
   }
 
   get keyCount(): number {
@@ -223,6 +229,7 @@ export class SignedTokenVerifier implements TokenVerifier {
         expiresAt: expMs,
         tokenId: claims.jti,
         deviceId: claims.dev ?? null,
+        keyThumbprint: claims.cnf?.jkt ?? null,
         via: "signed",
         link:
           claims.lnk === undefined || claims.src === undefined || claims.srcl === undefined
@@ -241,6 +248,16 @@ export class SignedTokenVerifier implements TokenVerifier {
         `this machine's clock is probably wrong (it reads ${new Date(now).toISOString()})`,
     );
   }
+}
+
+function usableKeys(entries: readonly { kid: string; jwk: unknown }[]): Map<string, KeyObject> {
+  const keys = new Map<string, KeyObject>();
+  for (const entry of entries) {
+    const key = jwkToPublicKey(entry.jwk);
+    // An unparseable key is dropped: the set is plural so a rotation can be in flight.
+    if (key !== null) keys.set(entry.kid, key);
+  }
+  return keys;
 }
 
 /** Migration and break-glass: the shared secret bypasses every grant and scope check. */

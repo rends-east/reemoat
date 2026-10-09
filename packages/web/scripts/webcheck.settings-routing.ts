@@ -1057,7 +1057,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
     .filter(([, n]) => n > 0)
     .sort(([a], [b]) => (a < b ? -1 : 1));
   check(
-    "the sixteen confirmations are the primitive's, by file",
+    "the nineteen confirmations are the primitive's, by file",
     sites,
     [
       ["AccountSection.tsx", 1],
@@ -1066,14 +1066,15 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
       ["DevicesSection.tsx", 1],
       ["EmailSection.tsx", 1],
       ["MachineAgentsSection.tsx", 1],
-      ["MachineSection.tsx", 1],
+      ["MachineDevicesSection.tsx", 2],
+      ["MachineSection.tsx", 2],
       ["PluginsPanel.tsx", 1],
       ["ServerSection.tsx", 3],
       ["SystemsPanel.tsx", 1],
       ["UsersSection.tsx", 3],
     ],
   );
-  check("sixteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 16);
+  check("nineteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 19);
   check(
     "and every one of those files imports it from bits",
     sites.filter(([name]) => !/import \{[^}]*\bTwoStep\b[^}]*\} from "\.\.?\/bits"/.test(swept.find(([n]) => n === name)?.[1] ?? "")).map(([name]) => name),

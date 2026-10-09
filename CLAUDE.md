@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1147 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1152 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -93,8 +93,14 @@ pnpm protocolcheck                   # packages/protocol: the Noise handshake ag
                                      #   cross-implementation vectors, in both roles, with the ephemerals
                                      #   pinned — plus the two things the specification says nothing about,
                                      #   the reserved top of the nonce range and this repository's own frame
-                                     #   table. The only driver whose subject somebody else wrote
-pnpm authcheck                       # token verification and enrollment
+                                     #   table. The only driver whose subject somebody else wrote. And the
+                                     #   codes two screens compare, pinned as vectors because the two ends
+                                     #   that derive them ship apart
+pnpm authcheck                       # token verification and enrollment — and a key set announced on
+                                     #   the dial: every refusal one at a time with the half that says
+                                     #   nothing moved, a statement replayed at a lower version, a root
+                                     #   introduced by a held key and handed over by itself, and one
+                                     #   endorsed by a key this machine does not hold
 pnpm daemoncheck                     # the daemon's HTTP surface and durable state: routes,
                                      #   the v6 migration, the login pty, the WS, subagent lineage,
                                      #   permissions, stopping a turn, the SQLite log, changes/diff,
@@ -129,7 +135,11 @@ pnpm daemoncheck                     # the daemon's HTTP surface and durable sta
                                      #   agent works: two stubs, one advertising steering and one not,
                                      #   plus the one that advertises and then refuses — pinning that
                                      #   the message is never lost and never doubled, no second prompt
-                                     #   on the wire and no second `prompt` event on delivery
+                                     #   on the wire and no second `prompt` event on delivery. Plus the
+                                     #   devices a machine knows: the store against a real database, the
+                                     #   gate's every refusal and bound, the real responder with the lock
+                                     #   on — a signed capability for an unknown key refused, a removed
+                                     #   key's channel ended — and the four routes
 pnpm relaycheck                      # framing, flow control, authorization, tunnel supersede,
                                      #   tunnel presence as a row and the relay's own health route,
                                      #   live-row revocation, the control plane's routes,
@@ -155,7 +165,12 @@ pnpm relaycheck                      # framing, flow control, authorization, tun
                                      #   pair. Plus the provisioning key: that a refused
                                      #   provision changes nothing, that a name two accounts
                                      #   share bar case is refused rather than guessed, and
-                                     #   that guessing the key is counted and blocked
+                                     #   that guessing the key is counted and blocked. Plus the
+                                     #   signing key: wrapped at rest, a wrong or missing secret as a
+                                     #   refusal to start, the oldest key as the one that signs, and
+                                     #   rotate then retire against a real tunnel — the daemon end
+                                     #   taking the statement on the dial and on the ping, and a token
+                                     #   under the retired key no longer verifying
 pnpm webcheck                        # packages/web: the cursor, rotation, replay, the tail,
                                      #   the credential, the settings routes, admin visibility,
                                      #   the password rules, the gate (registration, confirmation
@@ -228,7 +243,11 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   And the dark palette: a twin for every token and the
                                      #   contrast both owe, computed in both; no colour outside
                                      #   the palette; one key for the two writers of `data-theme`;
-                                     #   and the drawer's switch as its last row
+                                     #   and the drawer's switch as its last row.
+                                     #   And which key a machine is dialled with: every pair of the
+                                     #   key held and the key the server names, a connection through
+                                     #   a changed key and through a wait to be let in, and the
+                                     #   shipped channel against the real responder with its lock on
 pnpm nativecheck                     # packages/native: the Boot payload's keys against NativeBoot's,
                                      #   which is the census a missing `serde(rename)` slips past in
                                      #   five checkers at once; that the frontend is a path inside the
@@ -331,7 +350,16 @@ a daemon that has not been updated stops dialling in until `deploy/deploy.sh` ru
 on its host. `.claude/rules/e2ee.md` is the area; Q7.37 and Q7.143 are the
 argument. ⚠ It removes the **relay** from the trusted path and defends against
 nothing else — the Authority still mints every capability and still ships the
-client.
+client. **Two things narrow that, neither on by itself for the first:** a daemon
+keeps its own list of the keys that reached it, and its owner can lock the machine
+to that list, after which a signed capability for an unknown key is refused
+(Q1.655); and the app keeps the key it first reached a machine with, and never
+dials a different one the server names later (Q1.657).
+
+**The signing key is wrapped at rest only where `REEMOAT_CP_KEY_SECRET` is set**, and
+the Authority's entry point alone reads it (Q1.658). **A rotation reaches daemons on
+their tunnel dial**, as a statement a root signed; the oldest active key signs, so
+`rotatekey` publishes and `retirekey` is the switch (Q1.659).
 
 **The daemon's config is env only** (`.env.example`; the client's
 `REEMOAT_URL`/`REEMOAT_MACHINE` are printed by `pnpm client` with their live
@@ -539,7 +567,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `agent-catalogue.md` | `packages/web/src/openrouter.ts`, `agents.ts`, `ui/AgentBuilder.tsx`, `src/acp/systems.ts` | The three places a model's name can come from, and which one the browser fetches · the one system whose two spellings are the same models · what the reader drops and why greying it would be worse · what has been tried in a heading and taken back out, twice |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |
 | `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts`, `packages/protocol/src/frames.ts` | What ships with what, and why a client nobody can push decides the rest · negotiated against announced · which way an unknown value must fail · which side ships first, and the one rule that produces both orders · how to make a breaking change without a flag day · what is still one |
-| `e2ee.md` | `packages/protocol/`, `src/e2ee.ts`, `machinekey.ts`, `packages/web/src/e2ee.ts`, `packages/control-plane/src/machinekeys.ts`, `packages/native/src-tauri/src/device.rs` | What the relay can read and what it cannot · which static key each end holds, where it is kept and who may touch it · why the capability may not ride the handshake · what a tag failure may not do, and the one refusal that cannot say why · what the device binding proves, and the two paths it deliberately does not reach |
+| `e2ee.md` | `packages/protocol/`, `src/e2ee.ts`, `machinekey.ts`, `devices.ts`, `packages/web/src/e2ee.ts`, `machinePins.ts`, `deviceAccess.ts`, `packages/control-plane/src/machinekeys.ts`, `packages/native/src-tauri/src/device.rs` | What the relay can read and what it cannot · which static key each end holds, where it is kept and who may touch it · why the capability may not ride the handshake · what a tag failure may not do, and the one refusal that cannot say why · what the device binding proves, and the two paths it deliberately does not reach · what a machine's own list of devices is, what the lock over it refuses, and what it grandfathers · what two screens compare before a device is let in · which key the app dials when the server names another |
 
 **Keeping this file small is `docscheck`'s job, not a preference.** It fails the
 build past a ceiling this file deliberately does not restate — the number lives in

@@ -19,6 +19,7 @@ import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
 import { LogsSection } from "./LogsSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
+import { MachineDevicesSection } from "./MachineDevicesSection";
 import { MachinePluginsList, PluginInstallScreen } from "./MachinePluginsSection";
 import { MachineSystemsList, MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineNameScreen, MachineSection, SetupCodeScreen } from "./MachineSection";
@@ -95,6 +96,8 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               <MachineSystemsList state={state} machineId={route.machineId} />
             ) : route.list === "plugins" ? (
               <MachinePluginsList state={state} machineId={route.machineId} />
+            ) : route.list === "devices" ? (
+              <MachineDevicesSection state={state} machineId={route.machineId} />
             ) : route.system === null && route.signin === null ? (
               <MachineSection state={state} machineId={route.machineId} />
             ) : (

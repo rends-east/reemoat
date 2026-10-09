@@ -5,6 +5,9 @@ import {
   AGENT_CLI_VERSION_RE,
   CONNECTION_WINDOW_BYTES,
   DAEMON_VERSION_HEADER,
+  KEYSET_HEADER,
+  KEYSET_ROOT_HEADER,
+  KEYSET_VERSION_HEADER,
   MACHINE_KEY_HEADER,
   MAX_CONCURRENT_STREAMS,
   MAX_TUNNEL_BUFFERED_BYTES,
@@ -25,12 +28,16 @@ import {
   TUNNEL_AUTH_HEADER,
   TUNNEL_VERSION_HEADER,
   formatAgentClis,
+  parseKeysetPing,
+  readKeysetHeaders,
   reconnectDelayMs,
   type AgentClis,
+  type KeysetHeaders,
 } from "./protocol.js";
 import { DAEMON_VERSION } from "../version.js";
 import { serveSecureSession } from "../e2ee.js";
 import type { TokenVerifier } from "../auth.js";
+import type { DeviceGate } from "../devices.js";
 import type { StaticKey } from "@reemoat/protocol";
 import { AGENT_IDS } from "../acp/agents.js";
 import type { SessionRuntime } from "../runtime/types.js";
@@ -51,6 +58,10 @@ export interface TunnelOptions {
   /** From the server's address, not config: a bind address like 0.0.0.0 is not connectable everywhere. */
   local: { host: string; port: number };
   onEvent?: (kind: TunnelEventKind, detail: string) => void;
+  /** What the relay announced on the 101, on every dial; the caller weighs it (src/keyset.ts). A throw is swallowed. */
+  onKeyset?: (announced: KeysetHeaders) => void;
+  /** The statement version held: announced on the dial, and compared with the relay's ping. Absent, neither happens. */
+  keysetVersion?: () => number | null;
   /** Asked at each handshake, since the answer moves under a running daemon; absent, empty, throwing or slow all send no header. */
   agentClis?: () => Promise<AgentClis>;
   /** The public half announced on each dial; rotateMachineKey may replace it after a 409. */
@@ -59,6 +70,7 @@ export interface TunnelOptions {
   /** After a 409: promotes another key this machine holds, or `null`; each kth is offered once per process, so it cannot loop. */
   rotateMachineKey?: () => { kth: string; machineKey: string; staticKey: StaticKey } | null;
   verifier?: TokenVerifier;
+  devices?: DeviceGate;
   upstreamTimeoutMs?: number;
   announceTimeoutMs?: number;
   random?: () => number;
@@ -87,6 +99,9 @@ export class RelayTunnel {
   private attempt = 0;
   private stopped = false;
   private stopping: Promise<void> | null = null;
+
+  /** Statement versions already redialled for, so one that never verifies costs one dial and not a loop. */
+  private readonly chasedKeysets = new Set<number>();
 
   // Moved together by rotateMachineKey: announcing one key while terminating with the other fails every handshake.
   private machineKey: string | undefined;
@@ -118,6 +133,14 @@ export class RelayTunnel {
 
   private emit(kind: TunnelEventKind, detail: string): void {
     this.options.onEvent?.(kind, detail);
+  }
+
+  private heldKeyset(): number {
+    try {
+      return this.options.keysetVersion?.() ?? 0;
+    } catch {
+      return 0;
+    }
   }
 
   private teardown(): void {
@@ -207,6 +230,9 @@ export class RelayTunnel {
         headers: {
           [TUNNEL_AUTH_HEADER]: `Bearer ${this.options.tunnelKey}`,
           [TUNNEL_VERSION_HEADER]: String(RELAY_PROTOCOL_VERSION),
+          ...(this.options.keysetVersion === undefined
+            ? {}
+            : { [KEYSET_VERSION_HEADER]: String(this.heldKeyset()) }),
           // Advisory, recorded, never acted on. See `DAEMON_VERSION`.
           [DAEMON_VERSION_HEADER]: DAEMON_VERSION,
           ...(announced === null ? {} : { [AGENT_CLIS_HEADER]: announced }),
@@ -285,6 +311,20 @@ export class RelayTunnel {
         return;
       }
       this.agreedVersion = agreed;
+      try {
+        this.options.onKeyset?.(readKeysetHeaders(res.headers[KEYSET_HEADER], res.headers[KEYSET_ROOT_HEADER]));
+      } catch {
+        // The key set held keeps verifying; a dial must not fail for an announcement.
+      }
+    });
+
+    // The ping names the newest statement. One not held is fetched by redialling, which is the only place a statement arrives.
+    ws.on("ping", (payload: Buffer) => {
+      if (this.options.keysetVersion === undefined) return;
+      const newest = parseKeysetPing(payload.toString("latin1"));
+      if (newest === null || newest <= this.heldKeyset() || this.chasedKeysets.has(newest)) return;
+      this.chasedKeysets.add(newest);
+      ws.close(1000, "a newer key set is published");
     });
 
     let connectedAt = 0;
@@ -411,6 +451,7 @@ export class RelayTunnel {
       stream,
       staticKey,
       verifier,
+      ...(this.options.devices === undefined ? {} : { devices: this.options.devices }),
       local: this.options.local,
       ...(this.options.upstreamTimeoutMs === undefined ? {} : { upstreamTimeoutMs: this.options.upstreamTimeoutMs }),
       onEvent: (kind, detail) => {

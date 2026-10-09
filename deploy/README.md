@@ -513,8 +513,9 @@ deploy/backup.sh                   # or take one now
 
 The volume holds `signing_keys.private_pem` — the Ed25519 key that mints every
 token in the fleet — plus every user, password hash, machine, grant, and the SMTP
-password. A daemon writes `keys_json` at enrollment and **never refetches it**, so
-losing this file is not a service to restore: it is a fresh enrollment code typed
+password. A daemon holds the key set it enrolled with and takes later ones off its tunnel
+dial, and that dial is authenticated by a tunnel key whose hash is in this file
+too — so losing it is not a service to restore: it is a fresh enrollment code typed
 on every machine in the fleet, by whoever owns it. `deploy/docker/README.md` says
 so under *Migrating*, and until `backup.sh` existed the only thing this repository
 offered was the five-line `VACUUM INTO` in that same file — a technique, never a
@@ -533,22 +534,59 @@ still yours. `--dir` points it at whatever you sync.
 
 ```sh
 pnpm cpctl admin signingkeys     # what exists, and which one signs
-pnpm cpctl admin rotatekey       # mint a new one; both stay published
-pnpm cpctl admin retirekey <kid> # once every daemon has re-enrolled
+pnpm cpctl admin rotatekey       # mint a new one; both are published, the OLD one goes on signing
+pnpm cpctl admin fleet           # who has not been offered the new key set yet
+pnpm cpctl admin retirekey <kid> # the switch: the next token is signed by the oldest key left
 ```
 
-**Three acts, spread over as long as the fleet takes**, and collapsing them is
-the one arrangement that cannot work: a daemon captures the key set once at
-enrollment and never asks again, so retiring the old key before every machine has
-re-enrolled leaves them verifying against a key that no longer signs. The control
-plane refuses to retire the last active key for the mirror reason — with none it
-can neither sign nor mint a replacement, because `ensureSigningKey` runs at
-startup and nothing here restarts itself.
+**Two acts, and no visit to any machine.** A root key vouches for the signing
+keys in a *statement*, and the relay hands the newest statement to every daemon
+on its tunnel dial; a daemon that is already dialled in is told there is a newer
+one on the relay's next ping and redials for it. So `rotatekey` reaches the fleet
+by itself, within about a ping for machines that are online and on the next dial
+for the rest, and because the **oldest** active key keeps signing, nothing stops
+verifying in between. `retirekey` is the switch — and it tells you how many
+dialled-in machines had not been offered the statement yet. Those refuse tokens
+until their next dial; restarting the relay makes every daemon dial at once.
 
-Rotation is **not** revocation of what the old key already signed: tokens live
-300 s and daemons verify locally, so a compromised key keeps working at the edge
-until each host is re-enrolled. Which is also to say: this is the remedy for a
-leaked database, and the visit to every machine is the part it does not remove.
+For a leaked database that is the whole remedy: `rotatekey`, restart the relay,
+`retirekey`. Tokens the old key signed stop verifying at each daemon as it takes
+the statement that no longer names it, not 300 s later.
+
+⚠ **A daemon older than this takes no statement** — `cpctl admin fleet` lists it
+as *announces none* — and for that machine rotation is still what it was: it
+verifies against the set it captured at enrollment until it is updated or
+re-enrolled. The control plane still refuses to retire the last active key.
+
+### Keeping the keys off the host
+
+Two separate things, and neither is on by default.
+
+**The database at rest.** Set `REEMOAT_CP_KEY_SECRET` in the control plane's env
+file and the private keys in the database are stored wrapped under it; the first
+start wraps what is there. From then on the service **refuses to start** without
+the same value rather than mint a key no daemon holds, so keep it somewhere the
+backups are not — a snapshot together with that value is the signing key again.
+`compose.yml` pins it empty on the relay, which shares the database file and
+loads no private key. It protects a copied file or a leaked backup; somebody
+running code on the host can still ask the service to sign.
+
+**The root.** By default the control plane makes the root itself and keeps its
+private half in the database, which is what makes rotation need no ceremony. To
+keep it somewhere the control plane's host cannot reach:
+
+```sh
+pnpm cpctl root new --out ~/reemoat-root.pem     # on YOUR machine; prints the public half
+pnpm cpctl admin root adopt '<that public jwk>'  # the server signs the handover, then erases its own
+pnpm cpctl admin keyset draft | pnpm cpctl root sign --key ~/reemoat-root.pem | pnpm cpctl admin keyset install
+```
+
+From then on the last line is how a statement is made, after every `rotatekey`
+and every `retirekey` — which say so — and `retirekey` is refused until a
+statement names the key that would sign next. What it buys: somebody who takes
+the host can use the signing key they find there, and cannot make the fleet
+accept one of their own, so `rotatekey` + sign + `retirekey` from your machine
+ends it. What it costs: that file is now the one thing that cannot be lost.
 
 ### Another init system
 

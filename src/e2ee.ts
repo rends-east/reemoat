@@ -16,11 +16,13 @@ import {
   tryEncodeJsonFrame,
   type CipherState,
   type CloseFrame,
+  type HelloFrame,
   type OpenFrame,
   type RequestFrame,
   type StaticKey,
 } from "@reemoat/protocol";
 import type { TokenVerifier } from "./auth.js";
+import { readDeviceDescription, type DeviceGate } from "./devices.js";
 import { jwkThumbprint, x25519Jwk } from "./token.js";
 
 // The daemon's end of an encrypted session: Noise_IK responder, capability bound to the handshake key, requests proxied to loopback.
@@ -53,12 +55,17 @@ function isCloseCode(code: unknown): code is number {
   return code >= 1000 && code <= 1013 && code !== 1004 && code !== 1005 && code !== 1006;
 }
 
+/** The one refusal that is not about the capability: the Authority vouched for this key and this machine has not. */
+export const DEVICE_NOT_APPROVED = "device_not_approved";
+
 export type SecureEventKind = "handshake_failed" | "refused" | "crypto_failure" | "opened" | "closed";
 
 export interface SecureSessionOptions {
   stream: Duplex;
   staticKey: StaticKey;
   verifier: TokenVerifier;
+  /** Absent, every key the Authority vouches for is let in and none is recorded. */
+  devices?: DeviceGate;
   local: { host: string; port: number };
   /** Bounds both a request left unanswered and a dial that never opens; a seam so a driver need not wait two minutes. */
   upstreamTimeoutMs?: number;
@@ -75,6 +82,8 @@ class SecureSession {
   private send: CipherState | null = null;
   private receive: CipherState | null = null;
   private peerThumbprint: string | null = null;
+  private peerKey: Uint8Array | null = null;
+  private unwatch: (() => void) | null = null;
   private capability: string | null = null;
   private authorized = false;
   private closed = false;
@@ -119,6 +128,8 @@ class SecureSession {
   private destroy(detail: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.unwatch?.();
+    this.unwatch = null;
     this.requestBody = null;
     this.carrying = "none";
     this.upstreamRequest?.destroy();
@@ -198,6 +209,7 @@ class SecureSession {
       this.receive = transport.receive;
       const remote = this.handshake.remoteStaticKey;
       if (remote === null) throw new Error("no peer key");
+      this.peerKey = remote;
       this.peerThumbprint = jwkThumbprint(x25519Jwk(remote));
     } catch (error) {
       this.emit("handshake_failed", error instanceof Error ? error.message : String(error));
@@ -221,7 +233,7 @@ class SecureSession {
 
     if (!this.authorized) {
       if (decoded.type !== FRAME.HELLO) return this.fail(401, "the first frame must present a capability");
-      const hello = decodeJson<{ capability: string }>(decoded.payload);
+      const hello = decodeJson<HelloFrame>(decoded.payload);
       if (hello === null || typeof hello.capability !== "string") return this.fail(400, "unreadable capability");
 
       // The capability must name the key this handshake authenticated; one copied from another device is refused.
@@ -231,6 +243,16 @@ class SecureSession {
       if (!verified.ok) {
         this.emit("refused", verified.code);
         return this.fail(401, verified.code);
+      }
+      // After the capability, never before: an unsigned stranger must not be able to write a row.
+      const gate = this.options.devices;
+      if (gate !== undefined && this.peerKey !== null && this.peerThumbprint !== null) {
+        const peer = { kth: this.peerThumbprint, publicKey: this.peerKey };
+        if (!gate.admit(peer, verified.principal, readDeviceDescription(hello.device))) {
+          this.emit("refused", DEVICE_NOT_APPROVED);
+          return this.fail(403, DEVICE_NOT_APPROVED);
+        }
+        this.unwatch = gate.watch(this.peerThumbprint, () => this.destroy("device removed"));
       }
       this.authorized = true;
       this.capability = hello.capability;

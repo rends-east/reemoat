@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 147 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 152 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 115 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 464 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 82 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1147** | |
+| | | **1152** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1147 rather than the 567
+dividers. So the count is over **both** depths, and it says 1152 rather than the 572
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -212,9 +212,10 @@ picture at all; signing is what a fleet needs.
 
 ### Q1.9 — Why does the daemon never contact the control plane after enrollment?
 
-**Decision.** Under `signed` the daemon verifies Ed25519-signed tokens against a
-public key it obtained **once**, at enrollment, and **never contacts the control
-plane again**.
+**Decision.** Under `signed` the daemon verifies Ed25519-signed tokens against the
+key set it enrolled with, and **never asks the control plane anything again**. A
+later key set is announced to it on the tunnel it dials anyway (Q1.659); one that
+never arrives changes nothing.
 
 **Why.** That is the load-bearing property: a control-plane outage cannot stop a
 session, cannot stop a daemon starting, and cannot stop a token verifying.
@@ -4545,6 +4546,211 @@ reading the revoked row is the one boundary, and it covers only traffic between
 machines.
 
 **Status.** Current.
+
+### Q1.655 — May a machine decide for itself which devices reach it?
+
+**Question.** A daemon lets in any device whose key the Authority put in a
+capability's `cnf.jkt`. So whoever holds `signing_keys.private_pem` — the operator, or
+somebody who took the database — mints a capability naming a key of their own and is on
+the machine. Q1.648 and Q7.37 both say so and stop there. Can the machine hold a list of
+its own?
+
+**Decision. Yes: `known_devices`, in the daemon's database, and a lock over it that is
+off until somebody turns it on.** `DeviceGate.admit` runs once per channel, after the
+capability has verified against the handshake's key and never before.
+
+- **Unlocked it is a journal.** Every key that opens a channel is written `known`, with
+  the name the device gives for itself in the hello (`readDeviceDescription`), and the
+  channel is let in exactly as before. Nothing is asked of anybody.
+- **Locked it is the allowlist.** A key that is not `known` is refused the channel with
+  `DEVICE_NOT_APPROVED` and filed `pending`, whatever was signed for it. It is let in by
+  a caller already inside (`POST /devices/:id/approve`) or from the machine itself
+  (`pnpm client devices approve`), since loopback has no channel and is outside the list.
+- **Turning the lock on grandfathers the list**, which is why the screen draws the list
+  above the switch and names the switch after it. The caller's own key is taken with the
+  switch (`vouch`), checked against its capability, so a device that reached the machine
+  only over loopback is not locked out by its own press.
+- **A removed key loses its open channels at once** (`watch`), rather than at the
+  capability's expiry.
+
+**Why opt-in.** The owner's rule for this product is that a new device signs in and
+works. With the lock on, a new device needs an old one in reach or a terminal on the
+machine, and losing every device means walking to it. That is a cost somebody chooses.
+
+**Why the device names itself.** The Authority's name for a device is the Authority's
+claim, and the point of this list is to not depend on it. The hello travels inside the
+channel, so the relay and the Authority neither read nor write the name. It is drawn and
+never decided on: the key is the identity.
+
+**A linked machine is a row like any other** (kind `machine`, labelled by its link), so
+under the lock another machine's agents wait for the owner too. The sending daemon is
+told so in words rather than `link_refused`'s usual sentence, which promises a renewal
+that cures nothing here.
+
+**Why authorization after all.** Q1.648 calls the device binding authentication and says
+getting that backwards means per-device grants. It still does on the Authority: no grant
+names a device and `relay/authorize.ts` reads no device row. The list is the daemon's
+own, off by default, and decides one thing: whether a key may open a channel.
+
+**What it does not defend against.** Whoever is let in runs agents as the owner and can
+edit this table, so the journal catches the careless and the lock is only as good as the
+devices inside it. An unlocked machine is as open to the Authority as before. And the
+Authority still routes: it can refuse to carry anything.
+
+**Bounds.** `MAX_PENDING_DEVICES` waiting at once, oldest out; a request nobody answers
+is dropped after `PENDING_DEVICE_TTL_MS`; `MAX_KNOWN_DEVICES` journal rows while
+unlocked, least recently seen out, and **never trimmed while locked**, where every row
+is somebody's way in.
+
+**Status.** Current.
+
+### Q1.656 — What does somebody compare before letting a device in, and why ten characters?
+
+**Decision.** `approvalCode`: BLAKE2s over a label, the asking key and the machine's
+key, as ten characters of Crockford base32 in two groups. The waiting device derives it
+from its own key and the machine key it was told; the machine derives it from the key
+that asked and its own. Equal codes mean the request the owner is looking at is the
+device in their hand, **and** that the device was told the machine's real key.
+
+**Why both keys.** A code over the asking key alone lets in the right device and says
+nothing about which machine that device thinks it is talking to. With the machine's key
+in it, an Authority that named a key of its own to the new device produces a different
+code on its screen, so the comparison covers first contact, which Q1.657's pin cannot.
+
+**Why not four or six.** Nothing in the exchange commits either side before the other
+speaks, so a short code can be ground: the Authority knows the device's key from
+registration and chooses its own, and at 30 bits a collision is seconds of key
+generation. Fifty bits is on the order of 10^15 scalar multiplications. A commit-reveal
+exchange would let six digits do, at the cost of three more messages and a frame-table
+change between two artifacts that ship apart (`compatibility.md`'s open question).
+
+**Why one implementation.** It lives in `packages/protocol`, beside `keyFingerprint`,
+and `protocolcheck` pins a vector for each: two ends that derive a code two ways agree
+with nothing, and would go on disagreeing silently.
+
+**Status.** Current.
+
+### Q1.657 — Does the app believe the control plane about a machine's key every time?
+
+**Decision. Once.** The first key `POST /v1/tokens` names for a machine is kept on the
+device (`storedPins`), and `weighOfferedKey` decides what a later answer is worth: the
+same key is used, no key at all leaves the held one in use, and **a different key is
+never dialled**. The held key is. Only if it no longer answers does the machine read
+`machine_key_changed`, and trusting the new key is a confirmation somebody gives
+(`acceptOfferedKey`).
+
+**Why dial the held key first.** A legitimate change and a substituted key look the same
+from the Authority's answer and differ in one observable: after a real reinstall the old
+key stops answering, and under a substitution it still does. So a lie about the key
+costs the reader nothing, and the question is asked only when it is real.
+
+**Loopback outranks the server.** `GET /health` carries the machine's own `machineKey`,
+and an app that proved a local daemon takes it (`learnLocalKey`). A daemon this app
+reinstalled on its own computer is therefore re-pinned without a question.
+
+**What it is worth alone, said plainly.** Little. It covers a control plane compromised
+*after* this device first reached this machine, and only against being read: an
+Authority that wants in mints a capability and connects, which is Q1.655's subject. A
+new device, or a new machine, believes the first answer; the lock's code closes that for
+whoever turns the lock on, and `keyFingerprint`, which the daemon prints at start and
+the machine's screen shows, closes it for whoever compares by eye. Pins are per device
+and not synced.
+
+**Rejected: the shell's config.** It would survive a wiped webview and cost a bridge
+command in each direction. A wiped store is a first use again, which is what a new
+device already is.
+
+**Status.** Current.
+
+### Q1.658 — Is the signing key in the database in the clear?
+
+**Decision. Not once `REEMOAT_CP_KEY_SECRET` is set.** `signing_keys.private_pem`, and an
+online root's, are then stored wrapped (`wrapPrivateKey`: AES-256-GCM under a key scrypt
+derives from the secret, with the row's kid as associated data, so a blob opens only on
+its own row). Unset, a row is the PEM it always was and nothing changes for anybody.
+
+- **The Authority's entry point alone reads the secret** (`configureKeySecret`). The
+  relay shares the database file, and `compose.yml` pins the variable empty on that
+  service, which `deploycheck` asserts beside the relay's import closure. So a
+  compromised relay host holds wrapped keys it cannot open, which E2EE alone never bought:
+  it took the payload away from the relay and left the signing key in a file it reads.
+- **A start that cannot open a key refuses to start** (`keySecretProblem`, exit 2),
+  for a missing secret and a wrong one alike. Minting a fresh key beside a wrapped one
+  would sign tokens no daemon in the fleet holds.
+- **The first start with the secret wraps what is there**, in one transaction
+  (`wrapStoredKeys`).
+- **There is a way back** (`REEMOAT_CP_KEY_UNWRAP`, `unwrapStoredKeys`), because
+  `compatibility.md`'s rule 3 says yesterday's image must start on today's database and
+  an older build cannot read a wrapped key.
+
+**What it covers.** The file and every copy of it: `deploy/backup.sh`'s output, a
+snapshot, a read-only injection, the relay's host. **What it does not**: whoever is on
+the Authority's host while it runs holds the secret and can sign, and can take the key
+away. Keeping the key where it cannot be taken is a signer outside this process, which
+is not built.
+
+**The cost.** The secret is now the thing to keep. Lost, the keys are gone and the fleet
+re-enrolls, exactly as a lost database always meant.
+
+**Status.** Current.
+
+### Q1.659 — How does a rotated signing key reach a daemon nobody visits?
+
+**Question.** Q1.9 and Q5.6 make the daemon ask the control plane nothing, and Q7.39
+drew the conclusion: rotation is re-enrolling every machine. So a leaked key stayed
+valid at each daemon until somebody got to it, and `rotatekey` darkened the fleet,
+because the newest key signed and no daemon held it.
+
+**Decision. A root key signs a statement of the active signing keys, and the relay
+announces it on the tunnel dial.** `weighAnnouncement` is the whole of the daemon's
+side, and it is pure.
+
+- **A statement replaces the key set whole**, and only if the held root signed it and
+  its `v` is higher than the one held. An older statement can never put a retired key
+  back.
+- **With no root held, only a signing key already held may introduce one**; a held root
+  is replaced by its own signature alone, along at most `MAX_ROOT_HANDOVERS`. So the
+  relay, which only carries these strings, can inject nothing: every one is checked
+  against something the daemon already trusts.
+- **Statement and endorsement each have their own `typ`** (`KEYSET_TYP`, `ROOT_TYP`),
+  compared exactly as a token's is, so neither verifies as a token nor a token as one.
+- **A live tunnel learns from the ping.** The relay's heartbeat carries the newest
+  version; a daemon holding less closes and redials, once per version
+  (`chasedKeysets`), so a statement that never verifies costs one dial.
+- **The oldest active key signs** (`tokenSigningKey`). Rotating publishes and darkens
+  nothing; retiring is the switch, and `machinesBehind` says how much of the fleet has
+  been offered the statement first.
+- **Enrollment hands over the root and the statement**, as two optional fields.
+
+**Why this keeps Q1.9.** The property was never "one request"; it was that an Authority
+outage cannot stop a verification. The announcement rides a connection the daemon opens
+anyway, and absent or refused it changes nothing: the keys held go on verifying. Nothing
+is asked for, and `src/` still holds three `fetch` calls.
+
+**The root may be kept off the host.** `ensureTrustRoot` makes one at start and keeps it
+in the database, wrapped under Q1.658's secret when there is one, so every instance gets
+rotation with no ceremony. `adoptRoot` hands over to a key whose private half was never
+there (`cpctl root new`, then `admin root adopt`): the leaving root signs the handover
+and its private half is erased. From then on a statement is drafted on the server,
+signed wherever the root is kept, and installed (`installStatement`, which refuses one
+that does not name exactly the active keys). With the root off the host, taking the
+server yields a signing key until the next statement, and no way to make that last.
+
+**What it does not cover.**
+
+- A daemon older than this takes no statement and is darkened by a retire.
+- A daemon with **no root yet** is introduced to one by any signing key it holds, the
+  leaked one included. Whoever holds that key *and* can write the dial's headers can
+  give such a daemon a root of their own. The window closes at each daemon's first dial
+  after it updates.
+- The auto-made root exists in the database, and in older backups of it, until it is
+  handed over.
+
+**Rejected: the relay kicks stale tunnels.** It knows what it announced, not what a
+daemon took, and a daemon that refuses a statement would be kicked for ever. The daemon
+decides, and remembers what it has already chased.
+
+**Status.** Current. Reverses Q7.39.
 
 ## Session lifecycle, questions and attachments
 
@@ -32511,9 +32717,10 @@ allow.
 
 **Rule.** The daemon makes exactly one control-plane *request*, ever: at
 enrollment, in `enroll.ts`. Nothing refreshes a key, polls a revocation list, or
-renews anything. Key rotation costs a re-enrollment instead, which is why the
-key set is plural. The relay tunnel is a **connection, not a request** — no key
-is fetched over it, no revocation list is polled, no token is validated by it;
+renews anything. A rotated key set is **announced** on the tunnel dial and taken
+or not (Q1.659); nothing waits for it. The relay tunnel is a **connection, not a
+request** — no key is fetched over it, no revocation list is polled, no token is
+validated by it;
 it carries traffic in the other direction, inbound requests to this daemon.
 What must never appear is code that *reads something it needs* from the control
 plane, over the tunnel or otherwise.
@@ -37913,14 +38120,16 @@ deciding when a stream ends, and they would eventually disagree.
 
 ### Q7.39 — How is a signing key rotated?
 
-**Position.** By re-enrolling every daemon, because a daemon never re-fetches.
-The key set is plural so old and new can be trusted at once: add the new key,
-re-enroll each daemon with a fresh code, retire the old one.
+**Position.** `rotatekey`, wait for the fleet to be offered the statement, `retirekey`.
+A daemon takes the new key set off its tunnel dial; nobody visits it. Q1.659.
 
-**Why not yet.** Polling `/v1/jwks` would make this automatic and is exactly what
-must not happen — it would put the control plane back in the runtime path.
+**What this entry said.** *"By re-enrolling every daemon, because a daemon never
+re-fetches… Polling `/v1/jwks` would make this automatic and is exactly what must not
+happen — it would put the control plane back in the runtime path."* The second half
+still holds, and is why the key set is **announced** rather than polled for: a daemon
+that hears nothing keeps verifying with what it holds.
 
-**Status.** Deliberate non-goal.
+**Status.** Reversed an earlier decision.
 
 ### Q7.40 — What is human authentication?
 

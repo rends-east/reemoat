@@ -8,6 +8,13 @@ paths:
   - packages/native/src-tauri/src/config.rs
   - src/machinekey.ts
   - packages/control-plane/src/machinekeys.ts
+  - src/devices.ts
+  - packages/protocol/src/fingerprint.ts
+  - packages/web/src/machinePins.ts
+  - packages/web/src/deviceAccess.ts
+  - packages/web/src/ui/settings/MachineDevicesSection.tsx
+  - scripts/daemoncheck.devices.ts
+  - packages/web/scripts/webcheck.device-trust.ts
 ---
 
 ## What is encrypted, and between whom
@@ -76,6 +83,44 @@ them **offline**, so it still makes exactly one control-plane request, ever. Q1.
   saw, and minting still succeeds. `MachineChannel` re-registers the same device id **once**
   (the key written in place, no new slot) and retries, once, so a failure surfaces, not loops.
 
+## The machine's own list of devices
+
+**`known_devices` is the daemon's, and the Authority neither reads nor writes it.**
+`DeviceGate.admit` runs once per channel, **after** the capability verified (an unsigned
+stranger must not write a row). Unlocked it is a journal and lets everybody in; locked it
+is the allowlist, and a key not `known` is refused `DEVICE_NOT_APPROVED` and filed
+`pending`. Off until somebody turns it on. Q1.655.
+
+- **`DEVICE_NOT_APPROVED` is not `wrong_device`**: that one re-registers the key and
+  retries, which cures nothing here. The app reads it as `device_pending`, and the
+  sending daemon of a link says so in words.
+- **The device names itself in the hello** (`HelloFrame.device`, optional both ways):
+  inside the channel, so it is not the Authority's claim. Drawn, never decided on.
+- **Turning the lock on grandfathers the list**, and takes the caller's own key with it
+  (`vouch`, checked against `cnf.jkt`): a device that only ever used loopback has no row.
+- **Loopback is outside the list** (no channel, no key): `pnpm client devices` on the
+  machine is the way back in after every device is lost.
+- **A removed key's open channels end at once** (`watch`), and `DELETE` refuses the key
+  the request rides on (`409 own_device`), which would end the channel carrying the answer.
+- **A locked list is never trimmed**; the journal and the pending rows are bounded.
+- **The code is `approvalCode(asking key, machine key)`, ten characters**: both keys, so
+  it also tells the new device it was given the machine's real key; ten, since nothing
+  commits either side first and a shorter one can be ground. One implementation, in
+  `packages/protocol`, with a pinned vector. Q1.656.
+
+## The key a machine was first reached with
+
+**The app believes `POST /v1/tokens` about a machine's key once** (`storedPins`, per
+server, `localStorage`). `weighOfferedKey` is total over held × named: a different key
+later is **never dialled**; the held one is, and only if it no longer answers does the
+machine read `machine_key_changed`, cleared by a person (`acceptOfferedKey`). So a lie
+about the key costs the reader nothing. A key read over loopback is the machine's own
+word and re-pins silently (`learnLocalKey`, `GET /health`'s `machineKey`). Q1.657.
+
+**Alone it is worth little**: it covers a compromise *after* first contact, against
+being read, never against being entered. First contact is closed by the lock's code or
+by comparing `keyFingerprint` by eye with what the daemon prints at start.
+
 ## Connections
 
 **A pool, not a multiplexer**: one connection, one thing at a time, or a paused download stalls
@@ -89,9 +134,10 @@ webview. The tunnel and relay still carry opaque bytes (Q1.25); the daemon is an
 
 ## What is not defended against
 
-- **A malicious Authority**: it mints every capability and holds `signing_keys.private_pem`, so
-  it can name a device key of its own. E2EE removes the **relay** from the trusted path; the
-  operator still ships the client.
+- **A malicious Authority, on an unlocked machine**: it mints every capability and holds
+  `signing_keys.private_pem`, so it can name a device key of its own. E2EE removes the
+  **relay** from the trusted path; the lock removes the Authority's signature as a way in,
+  for whoever turns it on. The operator still ships the client and still routes.
 - **A capability spent over loopback**: no channel, so no key to compare; a bearer token for its
   remaining life (`relay.md`; `SECURITY.md`'s revocation table).
 - **Anything on the machine itself**: agents run as you, unconfined.
@@ -108,6 +154,9 @@ webview. The tunnel and relay still carry opaque bytes (Q1.25); the daemon is an
 | `src/machinekey.ts` | The daemon's static, generated once into `machine_keys` |
 | `packages/control-plane/src/machinekeys.ts` | Trust-on-first-use pinning, and the 409 on a disagreement |
 | `packages/native/src-tauri/src/device.rs` | The device key, and the DH that never returns it |
+| `src/devices.ts` | `DeviceGate`: admit, approve, remove, the bounds, the code per row |
+| `packages/protocol/src/fingerprint.ts` | `approvalCode`, `keyFingerprint`; what two screens compare |
+| `packages/web/src/machinePins.ts` | The held key per machine, and `weighOfferedKey` |
 
 ## Verification
 
@@ -115,6 +164,10 @@ webview. The tunnel and relay still carry opaque bytes (Q1.25); the daemon is an
 `scripts/daemoncheck.e2ee.ts`: the real `serveSecureSession` and `createApp` against a
 hand-written client. `packages/web/scripts/webcheck.e2ee.ts`, the more important: the **real**
 `MachineChannel` against the **real** `serveSecureSession`, every relayed byte asserted unreadable.
+
+`scripts/daemoncheck.devices.ts`: the store, the gate, the real responder and the routes.
+`webcheck.device-trust.ts`: every pair of held and named key, a connection through a
+change and through a wait, and the two spellings of `DEVICE_NOT_APPROVED` compared.
 
 **The two copies of `RELAY_CHANNEL_PATH` are compared by exactly one check**: the relay carries no
 `@reemoat/protocol` and `packages/web` may import neither `src/` nor the control plane, so

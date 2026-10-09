@@ -53,7 +53,7 @@ One file, `~/.reemoat/control-plane.env`, read twice: as `--env-file` for the
 published ports and as the service's `env_file:` for the process. Seeded from
 `packages/control-plane/.env.example`, which documents every key.
 
-Three keys behave differently from the rest, and the difference matters because
+A few keys behave differently from the rest, and the difference matters because
 each one fails without a symptom.
 
 | key | what happens to it |
@@ -61,6 +61,7 @@ each one fails without a symptom.
 | `REEMOAT_CP_HOST`, `REEMOAT_CP_RELAY_HOST` | **Pinned to `0.0.0.0` by `compose.yml`, so setting them here does nothing.** Inside a namespace a loopback bind is reachable by nobody, and a leftover LAN address is an `EADDRNOTAVAIL` that `serve()` reports **asynchronously** — after the one-time admin key has printed. Use `REEMOAT_CP_PUBLISH` instead |
 | `REEMOAT_CP_DB` | **Pinned by `compose.yml`**, and the image `ENV` alone was not enough: `env_file:` beats an image `ENV`, so a value here used to win. Relocating the database is not an error — a fresh one is created and a **new signing key** is minted, after which every enrolled daemon rejects every token and nothing says why |
 | `REEMOAT_CP_ISSUER` | **Not pinned — carried**, deliberately. A fleet whose daemons enrolled against a non-default issuer needs exactly that value passed through, so `compose.yml` stays out of the way. The flip side is that a typo here is one typo from a fleet that rejects every token, and nothing will catch it. **Both containers read it**, and they must agree: a relay on a different issuer answers 401 to every request |
+| `REEMOAT_CP_KEY_SECRET` | **Carried to the API, pinned empty on the relay.** Wraps the private keys in the database, and once it has, the API refuses to start without the same value. The relay shares the database file and must hold nothing that opens them, so `compose.yml` blanks it there — `environment:` beats `env_file:`. `deploy/README.md`, *Keeping the keys off the host* |
 | `REEMOAT_CP_RELAY_MODE` | **Pinned to `external` by `compose.yml`.** This file *is* the split. A control plane here that started its own relay would bind a port nothing publishes and then answer `relayOnline` from a map no daemon ever dials into — every machine offline, two relays' worth of code running, and no error anywhere. `embedded` remains the default in `main.ts` and is what `pnpm cp` runs |
 
 `REEMOAT_CP_PUBLISH` is the lever that `REEMOAT_CP_HOST` used to be. Default

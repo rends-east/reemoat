@@ -1,5 +1,9 @@
 #!/usr/bin/env node
+import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { KEYSET_TYP, ROOT_TYP, jwkToPublicKey, publicKeyToJwk, signCompact } from "../../../src/token.js";
+import { keyIdFor } from "../src/keys.js";
 import { isSettingKey, SECRET_SETTING_KEYS } from "../src/settings.js";
 
 const BASE_URL = process.env["REEMOAT_CP_URL"] ?? "http://127.0.0.1:7888";
@@ -113,8 +117,29 @@ const USAGE = `cpctl — drive the Reemoat control plane
                                             protocol change or an agent rollout is planned from
 
   admin signingkeys                         the fleet's signing keys, and which one signs
-  admin rotatekey                           mint a new one; both stay published
-  admin retirekey <kid>                     retire an old one, once every daemon has re-enrolled
+  admin rotatekey                           mint a new one. Both are published and the OLD one goes
+                                            on signing, so nothing stops verifying; every daemon
+                                            takes the new set on its next tunnel dial
+  admin retirekey <kid>                     retire the old one — the switch: the next token is
+                                            signed by the oldest key left. Says how many dialled-in
+                                            machines have not been offered the new set yet
+  admin root                                the root that vouches for those keys, whether its
+                                            private half is on this host, and the statement in force
+  admin root adopt <public jwk> [--handover <jws>]
+                                            hand the root to a key made with 'cpctl root new'. This
+                                            host then holds no private half of it and erases the old
+                                            one's. --handover only when the current root is already
+                                            off this host
+  admin keyset draft                        what the root's holder signs next, as JSON
+  admin keyset install [<statement>]        install a statement signed off this host (or stdin)
+
+  root new --out <file>                     LOCAL, no control plane: generate a root key, write its
+                                            private half to <file> (0600) and print the public JWK
+  root sign --key <file>                    LOCAL: a draft on stdin, the signed statement on stdout:
+                                              cpctl admin keyset draft | cpctl root sign --key <file> | cpctl admin keyset install
+  root handover --key <file> --issuer <iss> <new public jwk>
+                                            LOCAL: the old root naming its successor, for
+                                            'admin root adopt --handover'
 
   admin grants [--limit N] [--offset N]     every grant, paged; says so when there are more
 
@@ -231,6 +256,10 @@ const { values, positionals } = parseArgs({
     limit: { type: "string" },
     offset: { type: "string" },
     scopes: { type: "string" },
+    key: { type: "string" },
+    out: { type: "string" },
+    issuer: { type: "string" },
+    handover: { type: "string" },
     new: { type: "boolean", default: false },
     json: { type: "boolean", default: false },
   },
@@ -333,6 +362,99 @@ function enrollmentLines(controlPlaneUrl: string, code: string): string {
   ].join("\n");
 }
 
+async function readStdin(): Promise<string> {
+  // A terminal has nothing piped in, and reading it would wait for an end of input nobody is going to type.
+  if (process.stdin.isTTY === true) return "";
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+
+function parseJson(text: string, what: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    fail(`${what} is not JSON`);
+  }
+}
+
+/** A root key file as `root new` wrote it, with the kid the control plane derives from its public half. */
+function readRootKey(path: string | undefined): { kid: string; privateKey: ReturnType<typeof createPrivateKey> } {
+  if (!path) fail("--key <file> is required: the root key file 'cpctl root new' wrote");
+  let privateKey;
+  try {
+    privateKey = createPrivateKey(readFileSync(path, "utf8"));
+  } catch (error) {
+    fail(`could not read a private key from ${path}: ${describe(error)}`);
+  }
+  return { kid: keyIdFor(publicKeyToJwk(createPublicKey(privateKey))), privateKey };
+}
+
+/** Nothing here reaches a control plane: a root kept off the host is only worth something if its file never has to go there. */
+async function localRoot(args: string[]): Promise<void> {
+  const [action, ...rest] = args;
+  switch (action) {
+    case "new": {
+      const path = values.out;
+      if (!path) fail("usage: cpctl root new --out <file>");
+      const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+      const jwk = publicKeyToJwk(publicKey);
+      try {
+        // wx: an existing file is somebody's root key, and overwriting it is unrecoverable.
+        writeFileSync(path, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600, flag: "wx" });
+      } catch (error) {
+        fail(`could not write ${path}: ${describe(error)}`);
+      }
+      show({ kid: keyIdFor(jwk), jwk, file: path }, () => {
+        out(`wrote the private half to ${path} (0600). Keep it off the control plane's host.`);
+        out(`root ${keyIdFor(jwk)}, public half:`);
+        out(JSON.stringify(jwk));
+        out("");
+        out(`hand it over with:  cpctl admin root adopt '${JSON.stringify(jwk)}'`);
+      });
+      return;
+    }
+    case "sign": {
+      const root = readRootKey(values.key);
+      const draft = parseJson(await readStdin(), "the draft on stdin") as { iss?: unknown; v?: unknown; keys?: unknown };
+      if (typeof draft?.iss !== "string" || typeof draft.v !== "number" || !Array.isArray(draft.keys)) {
+        fail("the draft on stdin is not what 'cpctl admin keyset draft' prints");
+      }
+      out(
+        signCompact(
+          KEYSET_TYP,
+          { iss: draft.iss, v: draft.v, iat: Math.floor(Date.now() / 1000), keys: draft.keys },
+          root.kid,
+          root.privateKey,
+        ),
+      );
+      return;
+    }
+    case "handover": {
+      const root = readRootKey(values.key);
+      const issuer = values.issuer;
+      const successor = rest[0];
+      if (!issuer || !successor) fail("usage: cpctl root handover --key <file> --issuer <iss> <new public jwk>");
+      const publicKey = jwkToPublicKey(parseJson(successor, "the new public jwk"));
+      if (publicKey === null) fail("the new public jwk is not an Ed25519 public key");
+      const jwk = publicKeyToJwk(publicKey);
+      out(
+        signCompact(
+          ROOT_TYP,
+          { iss: issuer, iat: Math.floor(Date.now() / 1000), root: { kid: keyIdFor(jwk), jwk } },
+          root.kid,
+          root.privateKey,
+        ),
+      );
+      return;
+    }
+    default:
+      fail(`unknown root command "${action ?? ""}" — new, sign or handover`);
+  }
+}
+
+const SIGN_AND_INSTALL = "cpctl admin keyset draft | cpctl root sign --key <root key file> | cpctl admin keyset install";
+
 function grantQuery(): string {
   const params = new URLSearchParams();
   if (values.limit !== undefined) params.set("limit", values.limit);
@@ -402,6 +524,9 @@ async function main(): Promise<void> {
     });
     return;
   }
+
+  // Above the REEMOAT_CP_KEY check: these three never leave this computer.
+  if (first === "root") return localRoot(rest);
 
   if (!API_KEY) fail("REEMOAT_CP_KEY is not set");
 
@@ -1064,8 +1189,10 @@ async function admin(args: string[]): Promise<void> {
           version: string | null;
           protocol: number | null;
           agents?: Record<string, string | null> | null;
+          keyset?: number | null;
           seenAt: number | null;
         }[];
+        keyset?: { version: number; issuedAt: number } | null;
       }>("/v1/admin/fleet");
       show(body, () => {
         out(
@@ -1093,6 +1220,24 @@ async function admin(args: string[]): Promise<void> {
             out(`  ${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ${clis}  (${seenLine(machine.seenAt)})`);
           }
         }
+        const stated = body.keyset ?? null;
+        if (stated !== null) {
+          // What it announced on its last dial, which is the statement it held going in: a dial since the issue has been offered the newest.
+          const unoffered = live.filter(
+            (machine) => machine.keyset == null || machine.seenAt === null || machine.seenAt < stated.issuedAt,
+          );
+          out("");
+          out(`signing keys: statement v${stated.version} is in force.`);
+          if (unoffered.length > 0) {
+            out("not offered it yet — no dial since it was issued, or a daemon too old to take one:");
+            for (const machine of unoffered) {
+              out(
+                `  ${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ` +
+                  `${machine.keyset == null ? "announces none" : `held v${machine.keyset}`}  (${seenLine(machine.seenAt)})`,
+              );
+            }
+          }
+        }
         const stale = body.machines.filter(
           (machine) => !machine.revoked && (machine.protocol === null || machine.protocol < body.relay.protocol),
         );
@@ -1109,9 +1254,9 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    // Rotation is three acts (mint, re-enroll every daemon, retire): a daemon captures the key set once, at enrollment.
+    // Rotation is two acts: rotatekey publishes, retirekey switches. A daemon takes each statement off its next tunnel dial.
     case "signingkeys": {
-      const body = await api<{ keys: { kid: string; createdAt: number; retiredAt: number | null }[] }>(
+      const body = await api<{ keys: { kid: string; createdAt: number; retiredAt: number | null; signs?: boolean }[] }>(
         "/v1/admin/signing-keys",
       );
       show(body, () => {
@@ -1119,34 +1264,117 @@ async function admin(args: string[]): Promise<void> {
           const age = Math.round((Date.now() - key.createdAt) / 86_400_000);
           out(
             `${key.kid.padEnd(18)} ${key.retiredAt === null ? "active " : "retired"}  ${age}d old` +
-              (key.retiredAt === null && key.kid === body.keys.find((k) => k.retiredAt === null)?.kid
-                ? "   (signs)"
-                : ""),
+              (key.signs === true ? "   (signs)" : ""),
           );
         }
       });
       return;
     }
     case "rotatekey": {
-      const body = await api<{ kid: string; active: number }>("/v1/admin/signing-keys", { method: "POST" });
+      const body = await api<{
+        kid: string;
+        active: number;
+        statement?: { version: number } | null;
+        rootOnline?: boolean;
+      }>("/v1/admin/signing-keys", { method: "POST" });
       show(body, () => {
-        out(`minted ${body.kid} — it signs from the next request.`);
-        out(`${body.active} keys are active and all of them are published.`);
-        out("");
-        out("Every daemon keeps verifying against the set it captured at enrollment,");
-        out("so nothing breaks and nothing is fixed yet: re-enroll each machine, then");
-        out(`retire the old key with  cpctl admin retirekey <kid>`);
+        out(`minted ${body.kid}. ${body.active} keys are active; the oldest still signs, so nothing stops verifying.`);
+        if (body.statement != null) {
+          out(`statement v${body.statement.version} names it, and every daemon takes that on its next tunnel dial —`);
+          out("one that is dialled in redials for it within a ping. 'cpctl admin fleet' shows who has not yet.");
+          out("");
+          out("then switch to the new key with  cpctl admin retirekey <old kid>");
+        } else {
+          out("");
+          out("the root is kept off this host, so no daemon has been told about this key yet.");
+          out("sign and install the statement that names it:");
+          out(`  ${SIGN_AND_INSTALL}`);
+          out("then switch with  cpctl admin retirekey <old kid>  and sign and install once more.");
+        }
       });
       return;
     }
     case "retirekey": {
       const kid = rest[0];
       if (!kid) fail("usage: cpctl admin retirekey <kid>");
-      const body = await api<{ retired: boolean }>(`/v1/admin/signing-keys/${encodeURIComponent(kid)}`, {
-        method: "DELETE",
+      const body = await api<{
+        retired: boolean;
+        statement?: { version: number } | null;
+        statementCurrent?: boolean;
+        behind?: number;
+      }>(`/v1/admin/signing-keys/${encodeURIComponent(kid)}`, { method: "DELETE" });
+      show(body, () => {
+        out(`retired ${kid}. The oldest key left signs from the next token.`);
+        if (body.statementCurrent === true) {
+          out(`statement v${body.statement?.version ?? "?"} no longer names it; a daemon stops accepting it on its next dial.`);
+        } else {
+          out("the root is kept off this host, so daemons still accept the retired key until a statement says otherwise:");
+          out(`  ${SIGN_AND_INSTALL}`);
+        }
+        if ((body.behind ?? 0) > 0) {
+          out("");
+          out(`${body.behind} machine(s) dialled in had not been offered the statement naming the key that signs now.`);
+          out("Each refuses tokens until its next dial; restarting the relay makes every daemon dial at once.");
+        }
       });
-      show(body, () => out(`retired ${kid}. Daemons still holding it verify until they re-enroll.`));
       return;
+    }
+    case "root": {
+      if (rest[0] === "adopt") {
+        const text = rest[1] ?? (await readStdin());
+        if (text.length === 0) fail("usage: cpctl admin root adopt <public jwk>   (as 'cpctl root new' printed it)");
+        const body = await api<{ root: { kid: string } }>("/v1/admin/root", {
+          method: "POST",
+          body: JSON.stringify({
+            jwk: parseJson(text, "the public jwk"),
+            ...(values.handover === undefined ? {} : { handover: values.handover }),
+          }),
+        });
+        show(body, () => {
+          out(`${body.root.kid} is the root now, and this host holds no private half of it.`);
+          out("Daemons follow the handover on their next dial. No statement is signed by it yet:");
+          out(`  ${SIGN_AND_INSTALL}`);
+        });
+        return;
+      }
+      if (rest[0] !== undefined) fail("usage: cpctl admin root [adopt <public jwk> [--handover <jws>]]");
+      const body = await api<{
+        issuer: string;
+        root: { kid: string; jwk: unknown; online: boolean; createdAt: number };
+        statement: { version: number; rootKid: string; issuedAt: number; current: boolean } | null;
+      }>("/v1/admin/root");
+      show(body, () => {
+        out(`issuer     ${body.issuer}`);
+        out(`root       ${body.root.kid}  (${body.root.online ? "private half on this host" : "kept off this host"})`);
+        out(`public     ${JSON.stringify(body.root.jwk)}`);
+        if (body.statement === null) out("statement  none yet");
+        else {
+          out(
+            `statement  v${body.statement.version}, ${coarseAge(body.statement.issuedAt)}` +
+              (body.statement.current ? "" : "  — STALE: it does not name the active keys under this root"),
+          );
+          if (!body.statement.current) out(`           ${SIGN_AND_INSTALL}`);
+        }
+      });
+      return;
+    }
+    case "keyset": {
+      if (rest[0] === "draft") {
+        // Always JSON, with or without --json: its reader is 'cpctl root sign'.
+        out(JSON.stringify(await api<unknown>("/v1/admin/keyset/draft")));
+        return;
+      }
+      if (rest[0] === "install") {
+        const statement = rest[1] ?? (await readStdin());
+        if (statement.length === 0) fail("usage: cpctl admin keyset install <statement>   (or on stdin)");
+        const body = await api<{ version: number }>("/v1/admin/keyset", {
+          method: "POST",
+          body: JSON.stringify({ statement }),
+        });
+        show(body, () => out(`installed statement v${body.version}. Every daemon takes it on its next tunnel dial.`));
+        return;
+      }
+      fail("usage: cpctl admin keyset draft | cpctl admin keyset install [<statement>]");
     }
     case "addmachine": {
       const name = rest[0];

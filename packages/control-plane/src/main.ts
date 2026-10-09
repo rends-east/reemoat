@@ -7,7 +7,16 @@ import { serve } from "@hono/node-server";
 import { createControlPlaneApp, drainDeferred, DEFAULT_TOKEN_TTL_SECONDS, MIN_TOKEN_TTL_SECONDS } from "./app.js";
 import { pruneDevices } from "./devices.js";
 import { pruneEmailTokens } from "./emails.js";
-import { ensureSigningKey, newApiKey, newId, pruneEnrollmentCodes } from "./keys.js";
+import {
+  configureKeySecret,
+  ensureSigningKey,
+  keySecretProblem,
+  newApiKey,
+  newId,
+  pruneEnrollmentCodes,
+  unwrapStoredKeys,
+  wrapStoredKeys,
+} from "./keys.js";
 import { pruneMailOutbox, startMailPump } from "./mail/outbox.js";
 import { DEFAULT_TRUSTED_PROXY_HOPS, forwardingIgnored } from "./net.js";
 import { socketDialer } from "./mail/smtp.js";
@@ -20,6 +29,7 @@ import { isBrowserReachable, parseRelayUrls } from "./relay/routing.js";
 import { DEFAULT_RELAY_ID, dbRelayView } from "./relay/presence.js";
 import { TunnelRegistry, type RelayView } from "./relay/registry.js";
 import { openControlStore, type ControlStore } from "./store.js";
+import { ensureTrustRoot, newestStatement, statementIsCurrent } from "./trustroot.js";
 import { describeError } from "../../../src/http.js";
 
 // Fallback only: libuv reads this at its first pool use, so the Dockerfile and launch scripts set it before node starts.
@@ -159,7 +169,30 @@ try {
   process.exit(2);
 }
 
+// This process alone reads it: the relay shares the database file and must hold nothing that opens a private key.
+const keySecret = process.env["REEMOAT_CP_KEY_SECRET"] ?? "";
+configureKeySecret(keySecret.length > 0 ? keySecret : null);
+// Asked before anything signs: a key that will not open is a refusal to start, never a fresh key minted beside it.
+const keyProblem = keySecretProblem(store.db);
+if (keyProblem !== null) {
+  console.error(
+    keyProblem === "missing"
+      ? `the private keys in ${dbPath} are wrapped and REEMOAT_CP_KEY_SECRET is not set.\n` +
+          "  Set it to the value this control plane last ran with. Without it nothing here can sign a\n" +
+          "  token, and starting anyway would mint a signing key no daemon in the fleet holds."
+      : `REEMOAT_CP_KEY_SECRET does not open the private keys in ${dbPath}.\n` +
+          "  Set it to the value this control plane last ran with; a different one is not a rotation.",
+  );
+  process.exit(2);
+}
+// The way back out: an older build cannot read a wrapped key, so a rollback past this one starts with this, once.
+const unwrapAsked = ["1", "true", "yes"].includes((process.env["REEMOAT_CP_KEY_UNWRAP"] ?? "").trim().toLowerCase());
+const keysUnwrapped = unwrapAsked ? unwrapStoredKeys(store.db) : 0;
+if (unwrapAsked) configureKeySecret(null);
+const keysWrapped = unwrapAsked ? 0 : wrapStoredKeys(store.db);
+
 const signing = ensureSigningKey(store.db);
+const trustRoot = ensureTrustRoot(store.db, issuer);
 
 const userCount = Number(store.db.prepare("SELECT COUNT(*) AS n FROM users").get()?.["n"] ?? 0);
 if (userCount === 0) {
@@ -344,6 +377,23 @@ const server = serve({ fetch: fetchWithProxyWarning, hostname: host, port }, (in
   console.log(`Reemoat control plane listening on http://${host}:${info.port}`);
   console.log(`issuer: ${issuer}`);
   console.log(`signing key: ${signing.kid}`);
+  const stated = newestStatement(store.db);
+  console.log(
+    `root: ${trustRoot.kid} (${trustRoot.online ? "kept here" : "kept off this host"}), key set ` +
+      (stated === null ? "not stated yet" : `v${stated.version}${statementIsCurrent(store.db) ? "" : " — STALE"}`),
+  );
+  if (!statementIsCurrent(store.db)) {
+    console.log("  daemons are not being told the signing keys as they stand. Sign and install a statement:");
+    console.log("  cpctl admin keyset draft | cpctl root sign --key <root key file> | cpctl admin keyset install");
+  }
+  console.log(
+    unwrapAsked
+      ? `private keys: stored as plain PEM again (${keysUnwrapped} unwrapped just now) — REEMOAT_CP_KEY_UNWRAP is set.\n` +
+          "  Remove it AND REEMOAT_CP_KEY_SECRET from the env file: with only this one removed, the next start wraps them again."
+      : keySecret.length > 0
+        ? `private keys: wrapped under REEMOAT_CP_KEY_SECRET${keysWrapped > 0 ? ` (${keysWrapped} wrapped just now)` : ""}`
+        : "private keys: stored as they are — REEMOAT_CP_KEY_SECRET is unset, so this database and its backups are the signing key",
+  );
   console.log(`token ttl: ${tokenTtlSeconds}s`);
   console.log(threadpoolNote());
   console.log(`state: ${dbPath}`);

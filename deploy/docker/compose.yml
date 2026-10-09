@@ -271,6 +271,12 @@ services:
       # REEMOAT_CP_ISSUER is deliberately NOT pinned, for the same reason as on
       # the API: it is *carried* from the env file, and these two must agree or
       # every token fails `iss` here.
+      #
+      # Pinned EMPTY, because both services read one env file and `environment:`
+      # beats it: the secret that opens the wrapped signing keys reaches the API
+      # and never this container. The relay shares the database file and loads no
+      # private key, so with this line a relay that is taken over holds ciphertext.
+      REEMOAT_CP_KEY_SECRET: ""
 
     ports:
       # ------------------------------------------------------------------

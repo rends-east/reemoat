@@ -794,6 +794,30 @@ export interface DaemonHealth {
   // A label, never a gate: nothing may branch on the daemon version.
   version?: string;
   protocol?: number;
+  // The machine's own key, as it says it: absent from a daemon that predates it. Believed only over loopback (Q1.657).
+  machineKey?: string;
+}
+
+/** Mirrors src/devices.ts: one key that has opened a channel to a machine, or is waiting to. */
+export interface DeviceView {
+  id: string;
+  kind: "device" | "machine";
+  label: string | null;
+  platform: string | null;
+  subject: string;
+  ref: string | null;
+  state: "known" | "pending";
+  firstSeenAt: number;
+  lastSeenAt: number;
+  code: string | null;
+}
+
+export interface DevicesAnswer {
+  lock: boolean;
+  fingerprint: string | null;
+  /** The asking capability's own key, so a list can say which row is this device. */
+  you: string | null;
+  devices: DeviceView[];
 }
 
 /** Named as the daemon names it, not AgentInfo: the drift check matches mirrors by name, so every interface here must use the daemon's own name. */
@@ -968,6 +992,8 @@ export interface SessionList {
   instanceId: string;
   total?: number;
   truncated?: boolean;
+  // Devices waiting to be let in; absent at zero and from a daemon that keeps no list.
+  devicesPending?: number;
 }
 
 export interface WireError {
@@ -1022,6 +1048,8 @@ export interface MachineRecord {
   scopes: Scope[];
   relayUrl: string | null;
   relayOnline: boolean;
+  // The machine's key as the control plane names it now; absent from an older one. Weighed against the key held, never assigned (Q1.657).
+  key?: string | null;
 }
 
 export interface IssuedToken {

@@ -4,6 +4,7 @@ import type { ContentValue } from "./elicitation";
 import type { SessionId } from "./ids";
 import type { MachineConnection } from "./machine";
 import type {
+  DevicesAnswer,
   MachineSettingsView,
   AgentAuthListing,
   AgentCapabilities,
@@ -112,6 +113,29 @@ export class DaemonClient {
   /** removed is false on a replayed delete whose first answer was lost. */
   removeCustomAgent(id: string): Promise<{ removed: boolean; id: string }> {
     return this.machine.request(`/custom-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  /** An older daemon answers the bare 404 `meansRouteAbsent` reads. */
+  devices(): Promise<DevicesAnswer> {
+    return this.machine.request("/devices");
+  }
+
+  /** `device` is this installation's own key and name, so whoever turns the lock on is let in beside it. */
+  setDeviceLock(on: boolean, device: { publicKey: string; name: string; platform: string } | null): Promise<DevicesAnswer> {
+    return this.machine.request("/devices/lock", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(on && device !== null ? { on, device } : { on }),
+    });
+  }
+
+  approveDevice(id: string): Promise<DevicesAnswer & { approved: true; id: string }> {
+    return this.machine.request(`/devices/${encodeURIComponent(id)}/approve`, { method: "POST" });
+  }
+
+  /** removed is false on a replayed delete whose first answer was lost. */
+  removeDevice(id: string): Promise<DevicesAnswer & { removed: boolean; id: string }> {
+    return this.machine.request(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   machineSettings(): Promise<{ settings: MachineSettingsView }> {

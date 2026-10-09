@@ -177,16 +177,41 @@ saying "ask me every time" would be a lie next to a config that already answered
 The settings screen reads that file and says so. Testing the permission path needs
 `kimi`, or an isolated `CLAUDE_CONFIG_DIR`.
 
-**The control plane's database is the whole fleet.** It holds the Ed25519 private
-key that signs every token for every machine. A leak of that file is a total
-compromise: whoever has it can mint a token for any machine and any grant. There
-is no per-machine revocation short of re-enrolling every host by hand —
-`cpctl admin rotatekey` mints a new key and `retirekey` drops the old one, but a
-daemon **captures the key set once at enrollment and never asks again**, so the
-old key keeps verifying at the edge until each machine has been visited. Rotation
-is the remedy for a leaked database; the visit to every machine is the part it
-does not remove. `deploy/backup.sh` snapshots that file, which is also to say that
-a backup of it is the same secret again.
+**The control plane's database is the signing key, unless it is told otherwise.** It
+holds the Ed25519 private key that signs every token for every machine, and by default
+it holds it as a PEM: a leak of that file, or of any backup `deploy/backup.sh` took of
+it, is then a key that mints a token for any machine and any grant. Two things narrow
+that, and each is stated with what it leaves.
+
+- **`REEMOAT_CP_KEY_SECRET` wraps the private keys at rest.** With it set the file and
+  its backups hold ciphertext, and so does the relay, which shares the database and is
+  never given the secret. ⚠ It does nothing against somebody on the Authority's own host
+  while it runs: that process holds the secret and signs. It is off until it is set,
+  and the secret is then the thing to keep: lost, the keys are lost with it.
+- **A rotation reaches the fleet without a visit.** A root key signs a statement of the
+  signing keys in force, the relay announces it on every tunnel dial, and a daemon
+  replaces its key set with it; one on a live tunnel redials for it within a ping. So
+  `cpctl admin rotatekey`, then `retirekey` on the old one, stops a leaked key at every
+  daemon new enough to take a statement, in under a minute. The relay only carries
+  those strings: a daemon checks each against a root it already holds, or, holding
+  none, against a signing key it already holds.
+
+⚠ **What the rotation leaves, each stated rather than discovered.**
+
+- **A daemon older than this takes no statement**, and is the one case that still needs
+  a visit: retiring the key it holds darkens it.
+- **By default the root is in the same database** (wrapped, with the secret set). Then
+  whoever takes the server takes the root too, and rotation only buys back a leak that
+  was a copy. `cpctl root new` and `cpctl admin root adopt` hand the root to a key kept
+  off the host; after that a taken server yields a signing key until the next statement
+  and no way to make that last. The root made at first start stays in older backups.
+- **A daemon holding no root yet takes one from any signing key it holds**, the leaked
+  one included. Somebody with that key who can also write the dial's response can give
+  such a daemon a root of their own. The window closes at a daemon's first dial after it
+  updates.
+- **Rotation does nothing about an operator.** It is the remedy for a theft. A machine
+  whose owner locked it to its own devices, further down, is the remedy that does not
+  depend on who holds the key.
 
 **An admin credential no longer reaches a machine on its own, and that is a much
 smaller claim than it sounds.** Three routes were the whole of it and are gone or
@@ -230,7 +255,10 @@ and serving the client is the one that matters most: whoever ships the code that
 holds the keys does not need to read the wire.)
 What the deletions buy is that an admin account, on its own, is no longer one
 request from somebody else's computer; **an operator is still trusted completely,
-and self-hosting is the only version of "not trusted" this system has.**
+and self-hosting is the only version of "not trusted" this system has** — with one
+exception an owner can choose per machine, described under the end-to-end note
+below: a machine locked to its own list of devices does not take the operator's
+signature as a way in.
 
 **Machine substitution is open, and is disclosed rather than refused.** An admin
 can revoke your machine, register a new one for you under the name that frees, and
@@ -326,7 +354,58 @@ Authority: that service mints every capability and holds
 `signing_keys.private_pem`, so it can issue one naming a device key of its
 choosing and talk to your daemon as you. It does not make the operator untrusted;
 they still serve the client from their own image. E2EE narrows one party's reach,
-and the paragraph above about operators is unchanged.
+and the paragraph above about operators is unchanged — **for a machine nobody has
+locked**, which is every machine until its owner does.
+
+**A machine can be locked to the devices it knows, and that is the one thing here an
+operator's signature does not open.** The daemon keeps its own list of every key that
+has opened an encrypted channel to it — in its own database, written and read only
+inside the channel, so the control plane neither sees it nor edits it. Unlocked, the
+list is a journal: who connected, under what name they gave, first and last. Locked
+(*Only these devices*, under the machine's *Device access*), a key that is not on it is
+refused whatever was signed for it, and waits there until somebody already inside lets
+it in, or somebody at the machine does with `pnpm client devices approve`. Before
+letting one in, the owner compares a ten-character code on both screens; it is derived
+from the asking key **and** the machine's key, so it also tells the new device that the
+machine key it was handed is the machine's.
+
+What that buys: on a locked machine, holding the signing key — as the operator, or as
+whoever took the database — no longer gets anybody in. The Authority is reduced to
+routing, and to refusing to route.
+
+⚠ **What it does not buy, each one stated because a lock is trusted past what it says.**
+
+- **It is off by default**, and an unlocked machine is exactly as open as the paragraphs
+  above describe. Turning it on is the owner's choice and has a price: a new device needs
+  one already let in, or a terminal on the machine, and with every device lost only the
+  terminal is left.
+- **Turning it on keeps every key already on the list.** A key planted while the machine
+  was unlocked is therefore inside. The list is drawn above the switch for that reason:
+  read it, and remove what you do not recognise, before or after.
+- **Whoever is inside can edit it.** An agent runs as you and can open the daemon's
+  database, so the journal catches the careless rather than the careful, and the lock is
+  as good as the devices on it.
+- **Loopback is outside it.** A request from the same computer has no channel and no key;
+  that is the door `pnpm client` uses, and it is the uid that owns `~/.reemoat`.
+- **The operator still ships the client and the installer.** A locked machine does not
+  survive a release that was tampered with, or an `install.sh` served to a *new* machine.
+  What changes is that a compromised **server** is no longer a compromised fleet: the app
+  carries its interface inside the binary and nothing here updates it from the server.
+- **The code is 50 bits, compared by eye.** Enough that grinding a key to match is not an
+  afternoon's work; not a proof, and worth nothing to somebody who presses *Let in*
+  without looking.
+
+**The app remembers the key it first reached a machine with.** The control plane names a
+machine's key on every token it mints, and used to be believed every time. Now the first
+answer is kept on the device, and a different key named later is never dialled: the held
+one is, and only if it no longer answers is anybody asked — *this machine's key changed*,
+with the new fingerprint, trusted by a confirmation. ⚠ On its own this is a small claim.
+It covers a server compromised **after** this device first reached this machine, and
+only against being read; it does nothing about a server that mints itself a way in,
+which is the lock's subject. A new device, and a new machine, believe the first answer.
+The machine's fingerprint is printed by the daemon at start and shown on the machine's
+screen for whoever wants to compare the two by eye; the lock's code does the same job
+without being asked. Pins are per device and are not synced.
 
 **A relayed stream's authorization is checked at open and not re-checked.** A
 grant revoked mid-stream does not tear down a live WebSocket; the daemon's own
@@ -431,6 +510,12 @@ days after revocation; a retired device is swept after 30 — longer because tha
 list is read *after* something has gone wrong rather than as a live inventory, and
 a list one row shorter cannot say whether a laptop was retired or never registered.
 Email tokens and unconfirmed sign-ups are swept on expiry.
+
+**What a machine keeps, which is not the control plane's to hold or to sweep**: its own
+list of the devices that reached it — a key, the name the device gave for itself, the
+platform it reported, the account id its capability carried, and when it was first and
+last seen. It is in that machine's database, shown to whoever holds `machine:admin` on
+it, bounded at 256 rows while unlocked, and removed a row at a time by its owner.
 `enrollment_codes` is swept 7 days after a code is used or expires, whichever
 applies — `used_from` is the only forensic trail here, so a code is not dropped on
 the tick of expiry.

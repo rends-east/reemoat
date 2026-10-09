@@ -8,12 +8,14 @@ import {
   MAX_SOCKET_MESSAGE_BYTES,
   MessageAssembler,
   NoiseHandshake,
+  approvalCode,
   decodeFrame,
   decodeJson,
   encodeFrame,
   encodeJsonFrame,
   encodeMessageFrames,
   frameLength,
+  keyFingerprint,
   localStaticKey,
   publicFromSecret,
   randomSecretKey,
@@ -518,6 +520,44 @@ process.stdout.write("\none socket message, in pieces\n");
 
   const next = assembler.push(new Uint8Array(4)) ? assembler.end() : null;
   report("while the same assembler is ready for the next message", next?.length === 4, `${next?.length ?? -1} bytes`);
+}
+
+{
+  process.stdout.write("\nwhat a person compares on two screens\n");
+  const device = Uint8Array.from({ length: 32 }, (_value, index) => index);
+  const machineKey = Uint8Array.from({ length: 32 }, (_value, index) => 32 + index);
+
+  // Pinned, because the two ends ship apart: a build that derives another code agrees with no daemon in the fleet.
+  check("an approval code is the one every earlier build derives", approvalCode(device, machineKey), "RMGTZ-CXMZ4");
+  check("and a key's fingerprint likewise", keyFingerprint(device), "2YNE-ZV79-GKKR-W01V");
+  check("the code is about which key asks which machine, not about the pair", approvalCode(machineKey, device), "6XMN1-M6G2W");
+  check("a fingerprint is of one key", keyFingerprint(machineKey), "F8BT-4P50-PC49-GM8E");
+
+  const flipped = device.slice();
+  flipped[31] = flipped[31]! ^ 1;
+  check("one bit of the asking key moves the code", approvalCode(flipped, machineKey) === approvalCode(device, machineKey), false);
+  const swapped = machineKey.slice();
+  swapped[0] = swapped[0]! ^ 1;
+  check("and so does one bit of the machine's, which is what shows a substituted machine", approvalCode(device, swapped) === approvalCode(device, machineKey), false);
+  report(
+    "no letter in a code has a second reading",
+    !/[ILOU]/.test(`${approvalCode(device, machineKey)}${keyFingerprint(device)}${keyFingerprint(machineKey)}`),
+    "Crockford's alphabet",
+  );
+  let refused = 0;
+  for (const bad of [new Uint8Array(31), new Uint8Array(33), new Uint8Array(0)]) {
+    try {
+      approvalCode(bad, machineKey);
+    } catch {
+      refused += 1;
+    }
+    try {
+      keyFingerprint(bad);
+    } catch {
+      refused += 1;
+    }
+  }
+  check("a key of the wrong length throws rather than yielding a code for something else", refused, 6);
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n" : `\n${failures} failure(s)\n`);

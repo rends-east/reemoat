@@ -15,6 +15,7 @@ import { parseManifest } from "../src/plugins/manifest.js";
 import { addedLines } from "../src/plugins/source.js";
 import type { PluginManifest, PluginSummary } from "../src/plugins/protocol.js";
 import type { WorkspaceStatus } from "../src/worktree.js";
+import type { DeviceView } from "../src/devices.js";
 
 const STATIC_TOKEN = process.env["REEMOAT_TOKEN"] ?? "";
 
@@ -75,6 +76,12 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   workspace <id>                   where the session runs, and what is in it
   rmworkspace <id> [--force]       remove the worktree; refuses if it holds work
 
+  devices                          which devices have reached this machine, and
+                                   whether it lets in only those
+  devices approve <code>           let a waiting one in, by the code it shows
+  devices remove <id>              forget one; its open connections end
+  devices lock | unlock            only these may connect | whoever the server vouches for
+
   plugins                          what is installed, and what each may reach
   plugin install <archive>         install or update one; a .tar.gz or a .zip.
                                    The same verb for both — the manifest says which
@@ -108,6 +115,12 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   only over an encrypted channel, which needs a device key this tool does not
   have and the Reemoat app does — so for another machine, use the app.
 `;
+
+interface DevicesAnswer {
+  lock: boolean;
+  fingerprint: string | null;
+  devices: DeviceView[];
+}
 
 class ApiError extends Error {
   constructor(
@@ -852,6 +865,47 @@ async function main(): Promise<void> {
         if (agent.hint) out(`    ${agent.hint.split("\n")[0]}`);
       }
       return;
+    }
+
+    case "devices": {
+      const verb = positionals[1];
+      const show = (answer: DevicesAnswer): void => {
+        out(`lock: ${answer.lock ? "on — only the devices below may connect" : "off"}`);
+        if (answer.fingerprint !== null) out(`this machine: ${answer.fingerprint}`);
+        if (answer.devices.length === 0) out("no device has connected through the relay yet");
+        for (const device of answer.devices) {
+          const name = device.label ?? (device.kind === "machine" ? "a linked machine" : "an unnamed device");
+          const waiting = device.state === "pending" ? "WAITING  " : "         ";
+          out(
+            `${waiting}${device.code ?? "-"}  ${name}${device.platform ? ` (${device.platform})` : ""}` +
+              `  last ${new Date(device.lastSeenAt).toISOString()}  ${device.id}`,
+          );
+        }
+      };
+      if (verb === undefined) {
+        show(await api<DevicesAnswer>("/devices"));
+        return;
+      }
+      if (verb === "lock" || verb === "unlock") {
+        show(
+          await api<DevicesAnswer>("/devices/lock", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ on: verb === "lock" }),
+          }),
+        );
+        return;
+      }
+      const wanted = positionals[2];
+      if (verb === "approve" && wanted !== undefined) {
+        show(await api<DevicesAnswer>(`/devices/${encodeURIComponent(wanted)}/approve`, { method: "POST" }));
+        return;
+      }
+      if (verb === "remove" && wanted !== undefined) {
+        show(await api<DevicesAnswer>(`/devices/${encodeURIComponent(wanted)}`, { method: "DELETE" }));
+        return;
+      }
+      fail("usage: devices | devices approve <code> | devices remove <id> | devices lock | devices unlock");
     }
 
     // Paste-a-token only: the login wizard wants a screen holding the run open, and a printed login code is lost.

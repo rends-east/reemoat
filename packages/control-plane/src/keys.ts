@@ -1,13 +1,174 @@
-import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, timingSafeEqual, type KeyObject } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createPrivateKey,
+  generateKeyPairSync,
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+  type KeyObject,
+} from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { publicKeyToJwk, type PublicKeyJwk } from "../../../src/token.js";
 
-// No credential is stored recoverably; only the signing key's private half is kept.
+// No credential is stored recoverably; only the private halves of the signing keys and of an online root are kept.
 
 export interface SigningKey {
   kid: string;
   privateKey: KeyObject;
   jwk: PublicKeyJwk;
+}
+
+// Private keys at rest. With REEMOAT_CP_KEY_SECRET set they are AES-256-GCM under a key scrypt derives from it, so the
+// database file and every backup of it stop being the fleet's signing key. Unset, a row is the PEM it always was.
+
+const WRAPPED_PREFIX = "enc:v1:";
+const WRAP_SALT_BYTES = 16;
+const WRAP_IV_BYTES = 12;
+const WRAP_TAG_BYTES = 16;
+
+let keySecret: string | null = null;
+// scrypt once per salt and one parse per stored value: activeSigningKeys runs on every token mint.
+const wrappingKeys = new Map<string, Buffer>();
+const loadedKeys = new Map<string, KeyObject>();
+
+/** The Authority's entry point alone calls this, once, before any key is read; the relay never holds the secret. */
+export function configureKeySecret(secret: string | null): void {
+  keySecret = secret !== null && secret.length > 0 ? secret : null;
+  wrappingKeys.clear();
+  loadedKeys.clear();
+}
+
+export class KeySecretError extends Error {
+  constructor(readonly reason: "missing" | "wrong") {
+    super(
+      reason === "missing"
+        ? "a private key in this database is wrapped and REEMOAT_CP_KEY_SECRET is not set"
+        : "REEMOAT_CP_KEY_SECRET does not open a private key in this database",
+    );
+    this.name = "KeySecretError";
+  }
+}
+
+function wrappingKey(salt: Buffer): Buffer {
+  const name = salt.toString("base64url");
+  let key = wrappingKeys.get(name);
+  if (key === undefined) {
+    key = scryptSync(keySecret ?? "", salt, 32);
+    wrappingKeys.set(name, key);
+  }
+  return key;
+}
+
+/** What to store for a private key: the PEM itself while no secret is configured. The kid is bound in, so a blob opens only on its own row. */
+export function wrapPrivateKey(pem: string, kid: string): string {
+  if (keySecret === null) return pem;
+  const salt = randomBytes(WRAP_SALT_BYTES);
+  const iv = randomBytes(WRAP_IV_BYTES);
+  const cipher = createCipheriv("aes-256-gcm", wrappingKey(salt), iv);
+  cipher.setAAD(Buffer.from(kid, "utf8"));
+  const sealed = Buffer.concat([cipher.update(pem, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  return `${WRAPPED_PREFIX}${salt.toString("base64url")}:${iv.toString("base64url")}:${sealed.toString("base64url")}`;
+}
+
+export function isWrapped(stored: string): boolean {
+  return stored.startsWith(WRAPPED_PREFIX);
+}
+
+/** Throws KeySecretError for a wrapped value this process cannot open; a plain PEM loads with or without a secret. */
+export function loadPrivateKey(stored: string, kid: string): KeyObject {
+  const name = `${kid}\n${stored}`;
+  const held = loadedKeys.get(name);
+  if (held !== undefined) return held;
+  const key = createPrivateKey(isWrapped(stored) ? unwrap(stored, kid) : stored);
+  loadedKeys.set(name, key);
+  return key;
+}
+
+function unwrap(stored: string, kid: string): string {
+  if (keySecret === null) throw new KeySecretError("missing");
+  const [salt, iv, sealed] = stored
+    .slice(WRAPPED_PREFIX.length)
+    .split(":")
+    .map((part) => Buffer.from(part, "base64url"));
+  if (salt === undefined || iv === undefined || sealed === undefined || sealed.length <= WRAP_TAG_BYTES) {
+    throw new KeySecretError("wrong");
+  }
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", wrappingKey(salt), iv);
+    decipher.setAAD(Buffer.from(kid, "utf8"));
+    decipher.setAuthTag(sealed.subarray(sealed.length - WRAP_TAG_BYTES));
+    return Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - WRAP_TAG_BYTES)), decipher.final()]).toString("utf8");
+  } catch {
+    // A tag failure: the wrong secret, or a blob moved onto another row.
+    throw new KeySecretError("wrong");
+  }
+}
+
+const PRIVATE_KEY_TABLES = ["signing_keys", "trust_roots"] as const;
+
+/** Whether every stored private key opens with what this process was given, retired rows included: asked at start, before anything signs. */
+export function keySecretProblem(db: DatabaseSync): "missing" | "wrong" | null {
+  for (const table of PRIVATE_KEY_TABLES) {
+    for (const row of db.prepare(`SELECT kid, private_pem FROM ${table} WHERE private_pem IS NOT NULL`).all()) {
+      const stored = String(row["private_pem"]);
+      if (!isWrapped(stored)) continue;
+      try {
+        loadPrivateKey(stored, String(row["kid"]));
+      } catch (error) {
+        if (error instanceof KeySecretError) return error.reason;
+        throw error;
+      }
+    }
+  }
+  return null;
+}
+
+/** Wraps every private key still stored as a PEM, in one transaction; nothing to do, and zero, while no secret is configured. */
+export function wrapStoredKeys(db: DatabaseSync): number {
+  if (keySecret === null) return 0;
+  let wrapped = 0;
+  db.exec("BEGIN");
+  try {
+    for (const table of PRIVATE_KEY_TABLES) {
+      const write = db.prepare(`UPDATE ${table} SET private_pem = ? WHERE kid = ?`);
+      for (const row of db.prepare(`SELECT kid, private_pem FROM ${table} WHERE private_pem IS NOT NULL`).all()) {
+        const stored = String(row["private_pem"]);
+        if (isWrapped(stored)) continue;
+        write.run(wrapPrivateKey(stored, String(row["kid"])), String(row["kid"]));
+        wrapped += 1;
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return wrapped;
+}
+
+/** The way back, for a rollback past the build that wraps or for giving the secret up: every wrapped key stored as its PEM again. */
+export function unwrapStoredKeys(db: DatabaseSync): number {
+  let unwrapped = 0;
+  db.exec("BEGIN");
+  try {
+    for (const table of PRIVATE_KEY_TABLES) {
+      const write = db.prepare(`UPDATE ${table} SET private_pem = ? WHERE kid = ?`);
+      for (const row of db.prepare(`SELECT kid, private_pem FROM ${table} WHERE private_pem IS NOT NULL`).all()) {
+        const stored = String(row["private_pem"]);
+        if (!isWrapped(stored)) continue;
+        const key = loadPrivateKey(stored, String(row["kid"]));
+        write.run(key.export({ type: "pkcs8", format: "pem" }).toString(), String(row["kid"]));
+        unwrapped += 1;
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return unwrapped;
 }
 
 /** Deterministic, so the same key always has the same id across restores and re-publishes. */
@@ -16,22 +177,33 @@ export function keyIdFor(jwk: PublicKeyJwk): string {
   return `k_${createHash("sha256").update(canonical, "utf8").digest("base64url").slice(0, 12)}`;
 }
 
-/** The newest signs and all are published, so a rotation can overlap: a daemon never re-fetches keys. */
+/** Newest first, all of them published. Which one signs is tokenSigningKey's answer, not this order's. */
 export function activeSigningKeys(db: DatabaseSync): SigningKey[] {
   const rows = db
-    .prepare("SELECT kid, private_pem, public_jwk FROM signing_keys WHERE retired_at IS NULL ORDER BY created_at DESC")
+    .prepare(
+      "SELECT kid, private_pem, public_jwk FROM signing_keys WHERE retired_at IS NULL ORDER BY created_at DESC, rowid DESC",
+    )
     .all();
   return rows.map((row) => ({
     kid: String(row["kid"]),
-    privateKey: createPrivateKey(String(row["private_pem"])),
+    privateKey: loadPrivateKey(String(row["private_pem"]), String(row["kid"])),
     jwk: JSON.parse(String(row["public_jwk"])) as PublicKeyJwk,
   }));
+}
+
+/**
+ * The oldest active key signs: it is the one every daemon already holds. So minting a key publishes it and darkens nothing,
+ * and retiring the old one is the switch, taken once daemons have had the statement that names the new one.
+ */
+export function tokenSigningKey(db: DatabaseSync): SigningKey | null {
+  const keys = activeSigningKeys(db);
+  return keys[keys.length - 1] ?? null;
 }
 
 /** Public halves only, for unauthenticated paths: never loads a private key. */
 export function activePublicKeys(db: DatabaseSync): { kid: string; jwk: PublicKeyJwk }[] {
   const rows = db
-    .prepare("SELECT kid, public_jwk FROM signing_keys WHERE retired_at IS NULL ORDER BY created_at DESC")
+    .prepare("SELECT kid, public_jwk FROM signing_keys WHERE retired_at IS NULL ORDER BY created_at DESC, rowid DESC")
     .all();
   return rows.map((row) => ({
     kid: String(row["kid"]),
@@ -39,14 +211,12 @@ export function activePublicKeys(db: DatabaseSync): { kid: string; jwk: PublicKe
   }));
 }
 
+/** The key that signs, minted if there is none. */
 export function ensureSigningKey(db: DatabaseSync): SigningKey {
-  const existing = activeSigningKeys(db);
-  const newest = existing[0];
-  if (newest) return newest;
-  return mintSigningKey(db);
+  return tokenSigningKey(db) ?? mintSigningKey(db);
 }
 
-/** Rotation: mint, let daemons re-enroll, then retire the old key. */
+/** Publishes a key and leaves the signer alone. A rotation goes through trustroot.ts, which issues the statement beside it. */
 export function mintSigningKey(db: DatabaseSync, now = Date.now()): SigningKey {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const jwk = publicKeyToJwk(publicKey);
@@ -54,11 +224,11 @@ export function mintSigningKey(db: DatabaseSync, now = Date.now()): SigningKey {
   const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   db.prepare(
     "INSERT INTO signing_keys (kid, private_pem, public_jwk, created_at) VALUES (?, ?, ?, ?)",
-  ).run(kid, pem, JSON.stringify(jwk), now);
+  ).run(kid, wrapPrivateKey(pem, kid), JSON.stringify(jwk), now);
   return { kid, privateKey, jwk };
 }
 
-/** The last active key cannot be retired. Tokens it signed keep verifying until daemons re-enroll. */
+/** The last active key cannot be retired. A daemon stops accepting the retired one when it takes the next statement. */
 export type RetireKeyResult = { ok: true } | { ok: false; reason: "not_found" | "last_active" };
 
 export function retireSigningKey(db: DatabaseSync, kid: string, now = Date.now()): RetireKeyResult {
@@ -72,15 +242,24 @@ export function retireSigningKey(db: DatabaseSync, kid: string, now = Date.now()
   return { ok: true };
 }
 
-export function signingKeyRows(db: DatabaseSync): { kid: string; createdAt: number; retiredAt: number | null }[] {
-  return db
-    .prepare("SELECT kid, created_at, retired_at FROM signing_keys ORDER BY created_at DESC")
+export interface SigningKeyRow {
+  kid: string;
+  createdAt: number;
+  retiredAt: number | null;
+  signs: boolean;
+}
+
+export function signingKeyRows(db: DatabaseSync): SigningKeyRow[] {
+  const rows = db
+    .prepare("SELECT kid, created_at, retired_at FROM signing_keys ORDER BY created_at DESC, rowid DESC")
     .all()
     .map((row) => ({
       kid: String(row["kid"]),
       createdAt: Number(row["created_at"]),
       retiredAt: row["retired_at"] == null ? null : Number(row["retired_at"]),
     }));
+  const signer = rows.findLast((row) => row.retiredAt === null)?.kid ?? null;
+  return rows.map((row) => ({ ...row, signs: row.kid === signer }));
 }
 
 // Every unguessable value in this service comes from here.

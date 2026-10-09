@@ -25,6 +25,38 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **A machine keeps its own list of the devices that reach it, and can be locked to
+  it.** Settings → Machines → a machine → *Device access* lists every device that has
+  connected through the relay, by the name it gave for itself. With *Only these devices*
+  on, a device that is not on the list waits there until somebody already let in
+  approves it — after comparing a ten-character code shown on both screens — or somebody
+  at the machine runs `pnpm client devices approve <code>`. The control plane cannot
+  read or edit the list, so on a locked machine its signature is no longer a way in.
+  Off by default. Needs the app and the daemon both updated; an older app against a
+  locked machine reads it as unreachable.
+- **The app remembers the key it first reached a machine with.** If the server later
+  names a different one, the app keeps dialling the key it holds, and only when that
+  stops answering does it say the machine's key changed and ask before trusting the new
+  one. A machine's fingerprint is on its settings screen and in the daemon's start-up
+  log, for comparing the two by eye.
+- `pnpm client devices`, `devices approve`, `devices remove`, `devices lock` and
+  `devices unlock`, against a daemon on this computer.
+- **A rotated signing key reaches every daemon by itself.** The control plane now signs
+  a statement of its signing keys with a root key, the relay announces it whenever a
+  daemon dials in, and a daemon on a live tunnel redials for a newer one within a ping.
+  `cpctl admin rotatekey` no longer takes the fleet offline: the oldest key goes on
+  signing until `cpctl admin retirekey` switches to the next. A daemon older than this
+  release takes no statement, so update daemons before retiring a key.
+- **The root can be kept off the server.** `cpctl root new` makes one locally,
+  `cpctl admin root adopt` hands over to it, and `cpctl admin keyset draft`,
+  `cpctl root sign` and `cpctl admin keyset install` are the rotation from then on.
+- **`REEMOAT_CP_KEY_SECRET`** wraps the control plane's private keys at rest, so the
+  database file and its backups are no longer the signing key by themselves. Unset,
+  nothing changes. The control plane refuses to start on wrapped keys with a missing or
+  wrong secret; `REEMOAT_CP_KEY_UNWRAP=1` is the way back for one start.
+
 ### Changed
 
 - **The app is drawn at once.** A signed-in launch used to hold a small spinner, with no

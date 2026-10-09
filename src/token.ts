@@ -8,6 +8,10 @@ export const TOKEN_ALG = "EdDSA";
 /** Distinguishes our tokens from any other JWT that might be pointed at us. */
 export const TOKEN_TYP = "reemoat+jwt";
 
+/** A key-set statement and a root endorsement each have their own typ, so neither verifies as a token nor a token as one of them. */
+export const KEYSET_TYP = "reemoat-keyset+jwt";
+export const ROOT_TYP = "reemoat-root+jwt";
+
 export interface TokenHeader {
   alg: string;
   typ: string;
@@ -59,6 +63,11 @@ function b64uDecode(input: string): Buffer | null {
 
 /** Structural checks only, no signature check: the payload stays an unparsed string until verified. */
 export function decodeToken(token: string): DecodedToken {
+  return decodeSigned(token, TOKEN_TYP);
+}
+
+/** The same checks for any of this fleet's signed objects; `typ` is compared exactly, like `alg`. */
+export function decodeSigned(token: string, expectedTyp: string): DecodedToken {
   const parts = token.split(".");
   if (parts.length !== 3) {
     return { ok: false, code: "malformed_token", message: "token is not a compact JWS" };
@@ -87,8 +96,8 @@ export function decodeToken(token: string): DecodedToken {
   if (alg !== TOKEN_ALG) {
     return { ok: false, code: "bad_alg", message: `unsupported alg; only ${TOKEN_ALG} is accepted` };
   }
-  if (typ !== TOKEN_TYP) {
-    return { ok: false, code: "bad_header", message: `unsupported typ; expected ${TOKEN_TYP}` };
+  if (typ !== expectedTyp) {
+    return { ok: false, code: "bad_header", message: `unsupported typ; expected ${expectedTyp}` };
   }
   if (typeof kid !== "string" || kid.length === 0) {
     return { ok: false, code: "bad_header", message: "token header has no kid" };
@@ -194,10 +203,85 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 export function signToken(claims: TokenClaims, kid: string, privateKey: KeyObject): string {
-  const header: TokenHeader = { alg: TOKEN_ALG, typ: TOKEN_TYP, kid };
-  const signingInput = `${b64uEncode(JSON.stringify(header))}.${b64uEncode(JSON.stringify(claims))}`;
+  return signCompact(TOKEN_TYP, claims, kid, privateKey);
+}
+
+export function signCompact(typ: string, payload: unknown, kid: string, privateKey: KeyObject): string {
+  const header: TokenHeader = { alg: TOKEN_ALG, typ, kid };
+  const signingInput = `${b64uEncode(JSON.stringify(header))}.${b64uEncode(JSON.stringify(payload))}`;
   const signature = sign(null, Buffer.from(signingInput, "ascii"), privateKey);
   return `${signingInput}.${b64uEncode(signature)}`;
+}
+
+/** The signing keys a root vouches for. `v` only grows, so an older statement can never put a retired key back. */
+export interface KeysetStatement {
+  iss: string;
+  v: number;
+  iat: number;
+  keys: { kid: string; jwk: PublicKeyJwk }[];
+}
+
+/** A root named by a key the reader already trusts: a signing key introduces one, the previous root hands over to one. */
+export interface RootEndorsement {
+  iss: string;
+  iat: number;
+  root: { kid: string; jwk: PublicKeyJwk };
+}
+
+export const MAX_STATEMENT_KEYS = 16;
+
+/** Call only after verifySignature. An unusable key is dropped, as at enrollment, so `keys` may come back empty. */
+export function parseKeysetStatement(payloadJson: string): KeysetStatement | null {
+  const fields = parseObject(payloadJson);
+  if (fields === null) return null;
+  const iss = fields["iss"];
+  const v = fields["v"];
+  const iat = fields["iat"];
+  const listed = fields["keys"];
+  if (typeof iss !== "string" || iss.length === 0) return null;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) return null;
+  if (!isFiniteNumber(iat)) return null;
+  if (!Array.isArray(listed) || listed.length > MAX_STATEMENT_KEYS) return null;
+  const keys: { kid: string; jwk: PublicKeyJwk }[] = [];
+  for (const entry of listed) {
+    const key = readNamedKey(entry);
+    if (key !== null && !keys.some((held) => held.kid === key.kid)) keys.push(key);
+  }
+  return { iss, v, iat, keys };
+}
+
+/** Call only after verifySignature. */
+export function parseRootEndorsement(payloadJson: string): RootEndorsement | null {
+  const fields = parseObject(payloadJson);
+  if (fields === null) return null;
+  const iss = fields["iss"];
+  const iat = fields["iat"];
+  if (typeof iss !== "string" || iss.length === 0) return null;
+  if (!isFiniteNumber(iat)) return null;
+  const root = readNamedKey(fields["root"]);
+  if (root === null) return null;
+  return { iss, iat, root };
+}
+
+function parseObject(json: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
+}
+
+function readNamedKey(entry: unknown): { kid: string; jwk: PublicKeyJwk } | null {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  const kid = record["kid"];
+  if (typeof kid !== "string" || kid.length === 0) return null;
+  const key = jwkToPublicKey(record["jwk"]);
+  if (key === null) return null;
+  return { kid, jwk: publicKeyToJwk(key) };
 }
 
 export interface PublicKeyJwk {

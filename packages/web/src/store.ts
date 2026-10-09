@@ -478,6 +478,8 @@ export interface AppState {
   listFailingSince: ReadonlyMap<MachineId, number>;
   /** How each machine's plugin read ended; absent is not asked or still asking. `pluginsByMachine` is seeded empty either way. */
   pluginsRead: ReadonlyMap<MachineId, "known" | "failed">;
+  /** Devices asking to be let in to a machine, as its last listing said; a machine with none is absent. */
+  devicesWaiting: ReadonlyMap<MachineId, number>;
   transcripts: ReadonlyMap<SessionKey, Transcript>;
   commands: ReadonlyMap<SessionKey, AgentCommandList>;
   /** Never written to `cpError`, which would take over the whole app. */
@@ -536,6 +538,7 @@ class AppStore implements StreamSink {
     downSince: new Map(),
     listFailingSince: new Map(),
     pluginsRead: new Map(),
+    devicesWaiting: new Map(),
     transcripts: new Map(),
     commands: new Map(),
     cpError: null,
@@ -610,6 +613,8 @@ class AppStore implements StreamSink {
   getSnapshot = (): AppState => this.snapshot;
 
   private readonly rootsByMachine = new Map<MachineId, readonly string[]>();
+  /** Replaced, never mutated, so a screen holding the old one sees a new identity. */
+  private devicesWaiting: ReadonlyMap<MachineId, number> = new Map();
 
   // Chained per session, because meta assigns rather than merges.
   private readonly metaWrites = new Map<
@@ -722,6 +727,7 @@ class AppStore implements StreamSink {
       downSince: this.downAt,
       listFailingSince: this.listFailingCache,
       pluginsRead: this.pluginsReadCache,
+      devicesWaiting: this.devicesWaiting,
       transcripts: this.transcriptsCache,
       commands: this.commandsCache,
     };
@@ -1120,6 +1126,7 @@ class AppStore implements StreamSink {
     this.listed.delete(id);
     this.sessionsFailed.delete(id);
     this.pluginsRead.delete(id);
+    this.noteDevicesWaiting(id, 0);
     this.nextProbeAt.delete(id);
     this.probeFailures.delete(id);
     this.probing.delete(id);
@@ -1228,6 +1235,25 @@ class AppStore implements StreamSink {
 
   forgetMachineRoute(id: MachineId): void {
     this.connections.get(id)?.forgetRoute();
+  }
+
+  /** The key the server now names becomes the one this device holds for the machine, which is asked again at once. */
+  trustMachineKey(id: MachineId): void {
+    const connection = this.connections.get(id);
+    if (connection === undefined || !connection.acceptOfferedKey()) return;
+    this.nextProbeAt.delete(id);
+    this.probeFailures.delete(id);
+    void this.probe(connection);
+  }
+
+  /** What a screen that just read a machine's device list knows sooner than the next listing would say. */
+  noteDevicesWaiting(id: MachineId, waiting: number): void {
+    if ((this.devicesWaiting.get(id) ?? 0) === waiting) return;
+    const next = new Map(this.devicesWaiting);
+    if (waiting > 0) next.set(id, waiting);
+    else next.delete(id);
+    this.devicesWaiting = next;
+    this.publish();
   }
 
   handleSignedOut(failure: AuthFailure): void {
@@ -1720,6 +1746,7 @@ class AppStore implements StreamSink {
     this.listed.add(connection.id);
     this.sessionsFailed.delete(connection.id);
     this.listFailing.delete(connection.id);
+    this.noteDevicesWaiting(connection.id, typeof listed.devicesPending === "number" ? listed.devicesPending : 0);
     if (!this.rootsByMachine.has(connection.id)) void this.fetchRoots(connection.id);
     if (!this.pluginsByMachine.has(connection.id)) void this.fetchPlugins(connection.id);
 

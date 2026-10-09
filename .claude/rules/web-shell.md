@@ -165,7 +165,7 @@ screen (`GET /sessions/:id/changes` never called). It polls `GET /sessions` per 
 holds sockets for the three most recent sessions.
 
 **Every settings-row confirmation is `TwoStep`** (Q3.552): `grep -c '<TwoStep'` over
-`ui/settings/*.tsx` and `AgentBuilder.tsx` is sixteen, two each in `MachineLimitPanel` and
+`ui/settings/*.tsx` and `AgentBuilder.tsx` is nineteen, two each in `MachineLimitPanel` and
 `AgentsPanel`, per file in `webcheck`. Revoking your own API key (`KeysSection`) is one
 tap, its one consequence the `this browser` row's (`thisBrowsersKey`), never under a
 session credential (Q3.219, Q3.545, Q3.546). Registration (`ServerSection`) is a

@@ -17,7 +17,6 @@ import { deviceKeyFor } from "./devices.js";
 import { machineKeyFor, setMachineKey } from "./machinekeys.js";
 import {
   activePublicKeys,
-  activeSigningKeys,
   burnMachineCodes,
   burnGranteeCodes,
   burnUserCodes,
@@ -29,13 +28,25 @@ import {
   hasProvisioningKey,
   mintEnrollmentCode,
   mintProvisioningKey,
-  mintSigningKey,
   newApiKey,
   newId,
   resolveProvisioningKey,
-  retireSigningKey,
   signingKeyRows,
+  tokenSigningKey,
 } from "./keys.js";
+import {
+  adoptRoot,
+  announcedKeyset,
+  draftStatement,
+  ensureTrustRoot,
+  installStatement,
+  liveRoot,
+  machinesBehind,
+  newestStatement,
+  retireKey,
+  rotateSigningKey,
+  statementIsCurrent,
+} from "./trustroot.js";
 import {
   burnEmailTokens,
   claimEmailToken,
@@ -660,11 +671,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     // The one place a machine key pin is replaced: redeeming a code means the machine is starting again.
     if (announcedKey !== null) setMachineKey(db, machineId, announcedKey, now);
 
-    // Every active key: a daemon never comes back, so a rotation in flight must be handed over whole.
+    // Every active key, and the root that vouches for later sets: a daemon asks nothing again, and takes those off its dial.
+    const root = liveRoot(db);
     return c.json({
       machineId,
       issuer,
       keys: keys.map((key) => ({ kid: key.kid, jwk: key.jwk })),
+      root: root === null ? null : { kid: root.kid, jwk: root.jwk },
+      keyset: announcedKeyset(db).statement,
       tunnelKey,
       relay: relayUrl === null ? null : { url: relayUrl },
       serverTime: now,
@@ -1658,7 +1672,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const caller = c.get("caller");
     const rows = db
       .prepare(
-        "SELECT m.id, m.name, m.enrolled_at, m.enrolled_by, g.scopes, o.label FROM grants g " +
+        "SELECT m.id, m.name, m.enrolled_at, m.enrolled_by, m.machine_key, g.scopes, o.label FROM grants g " +
           "JOIN machines m ON m.id = g.machine_id " +
           "LEFT JOIN machine_owners o ON o.machine_id = m.id AND o.user_id = g.user_id " +
           "WHERE g.user_id = ? AND m.revoked_at IS NULL " +
@@ -1705,6 +1719,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         relayUrl: relayUrlFor(String(row["id"])),
         relayOnline: relayOnline(String(row["id"])),
         lastSeenAt: lastSeenAt(String(row["id"])),
+        // What POST /v1/tokens would name, said here too: an app holding another key learns of the change on the listing it already asks for.
+        key: row["machine_key"] == null ? null : String(row["machine_key"]),
         enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? ""), row["enrolled_at"] !== null),
         // The owner's alone: a grantee is shown none of them, so draws no switch it could not throw.
         ...(row["label"] === null
@@ -2036,8 +2052,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       );
     }
 
-    const keys = activeSigningKeys(db);
-    const signing = keys[0];
+    const signing = tokenSigningKey(db);
     if (!signing) return jsonError(c, 503, "no_signing_key", "this control plane has no signing key");
 
     const scopes = parseScopes(String(grant["scopes"]));
@@ -2219,7 +2234,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         { messaging: true, isolated: false, policyAt: policy.at },
       );
     }
-    const signing = activeSigningKeys(db)[0];
+    const signing = tokenSigningKey(db);
     if (!signing) return jsonError(c, 503, "no_signing_key", "this control plane has no signing key");
 
     const targets = db
@@ -3009,8 +3024,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   app.get("/v1/admin/fleet", requireAdmin, (c) => {
     const rows = db
       .prepare(
-        `SELECT m.id, m.name, m.daemon_version, m.daemon_protocol, m.daemon_agents, m.daemon_seen_at, m.revoked_at,
-                mo.label AS label
+        `SELECT m.id, m.name, m.daemon_version, m.daemon_protocol, m.daemon_agents, m.daemon_keyset, m.daemon_seen_at,
+                m.revoked_at, mo.label AS label
            FROM machines m
            LEFT JOIN machine_owners mo ON mo.machine_id = m.id
           ORDER BY m.name`,
@@ -3025,6 +3040,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       version: typeof row["daemon_version"] === "string" ? row["daemon_version"] : null,
       protocol: typeof row["daemon_protocol"] === "number" ? row["daemon_protocol"] : null,
       agents: typeof row["daemon_agents"] === "string" ? parseAgentClis(row["daemon_agents"]) : null,
+      // The statement it held when it dialled, so one dial behind what it holds now; null from a daemon that does not say.
+      keyset: typeof row["daemon_keyset"] === "number" ? row["daemon_keyset"] : null,
       seenAt: typeof row["daemon_seen_at"] === "number" ? row["daemon_seen_at"] : null,
     }));
 
@@ -3035,9 +3052,11 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       byProtocol[key] = (byProtocol[key] ?? 0) + 1;
     }
 
+    const stated = newestStatement(db);
     return c.json({
       relay: { protocol: RELAY_PROTOCOL_VERSION, oldestAccepted: RELAY_PROTOCOL_MIN_VERSION },
       controlPlane: { version: VERSION },
+      keyset: stated === null ? null : { version: stated.version, issuedAt: stated.createdAt },
       byProtocol,
       machines,
     });
@@ -3048,18 +3067,45 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     c.json({ keys: signingKeyRows(db) }),
   );
 
-  // The old key stays active: daemons hold the key set from enrollment, so retiring is a separate, later act.
+  // Publishes a key and the statement naming it; the oldest key goes on signing, so nothing a daemon holds stops verifying.
   app.post("/v1/admin/signing-keys", requireAdmin, (c) => {
-    const minted = mintSigningKey(db);
-    return c.json({ kid: minted.kid, active: signingKeyRows(db).filter((row) => row.retiredAt === null).length }, 201);
+    const rotated = rotateSigningKey(db, issuer);
+    return c.json(
+      {
+        kid: rotated.key.kid,
+        active: signingKeyRows(db).filter((row) => row.retiredAt === null).length,
+        statement: rotated.statement === null ? null : { version: rotated.statement.version },
+        rootOnline: liveRoot(db)?.online === true,
+      },
+      201,
+    );
   });
 
-  // Refuses the last active key: with none, nothing can be signed and nothing mints a replacement until a restart.
+  // The switch: the next token is signed by the oldest key left. `behind` counts machines dialled in that have not been
+  // offered the statement in force before it, which is who would be handed a token signed by a key they do not hold yet.
   app.delete("/v1/admin/signing-keys/:kid", requireAdmin, (c) => {
-    const result = retireSigningKey(db, c.req.param("kid"));
-    if (result.ok) return c.json({ retired: true });
+    const behind = machinesBehind(db, newestStatement(db), relayOnline);
+    const result = retireKey(db, issuer, c.req.param("kid"));
+    if (result.ok) {
+      return c.json({
+        retired: true,
+        statement: result.statement === null ? null : { version: result.statement.version },
+        statementCurrent: statementIsCurrent(db),
+        rootOnline: liveRoot(db)?.online === true,
+        behind,
+      });
+    }
     if (result.reason === "not_found") {
       return jsonError(c, 404, "key_not_found", "no such active signing key");
+    }
+    if (result.reason === "statement_stale") {
+      return jsonError(
+        c,
+        409,
+        "statement_stale",
+        "the root is kept off this host and no installed statement names the key that would sign next; " +
+          "sign and install one before retiring this key",
+      );
     }
     return jsonError(
       c,
@@ -3067,6 +3113,80 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       "last_active",
       "this is the only active signing key; mint another before retiring it",
     );
+  });
+
+  // Public halves and inventory only. `online` is whether this host can sign a statement by itself.
+  app.get("/v1/admin/root", requireAdmin, (c) => {
+    const root = ensureTrustRoot(db, issuer);
+    const stated = newestStatement(db);
+    return c.json({
+      issuer,
+      root: { kid: root.kid, jwk: root.jwk, online: root.online, createdAt: root.createdAt },
+      statement:
+        stated === null
+          ? null
+          : { version: stated.version, rootKid: stated.rootKid, issuedAt: stated.createdAt, current: statementIsCurrent(db) },
+    });
+  });
+
+  // Hands the root to a key generated elsewhere; this host keeps no private half of it and erases the old one's.
+  app.post("/v1/admin/root", requireAdmin, async (c) => {
+    const body = await readJsonObject(c);
+    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    ensureTrustRoot(db, issuer);
+    const handover = body["handover"];
+    const adopted = adoptRoot(db, issuer, body["jwk"], typeof handover === "string" && handover.length > 0 ? handover : null);
+    if (adopted.ok) return c.json({ root: adopted.root, statementCurrent: false }, 201);
+    switch (adopted.reason) {
+      case "bad_key":
+        return jsonError(c, 400, "bad_request", "jwk must be an Ed25519 public key");
+      case "unchanged":
+        return jsonError(c, 409, "root_unchanged", "that key is already the root");
+      case "retired_root":
+        return jsonError(c, 409, "root_retired", "that key was the root before and was handed over from; generate a new one");
+      case "handover_required":
+        return jsonError(
+          c,
+          409,
+          "handover_required",
+          "the current root is kept off this host, so its holder has to sign the handover: cpctl root handover",
+        );
+      case "bad_handover":
+        return jsonError(c, 400, "bad_handover", "that handover is not the current root naming this key");
+    }
+  });
+
+  app.get("/v1/admin/keyset/draft", requireAdmin, (c) => c.json(draftStatement(db, issuer)));
+
+  app.post("/v1/admin/keyset", requireAdmin, async (c) => {
+    const body = await readJsonObject(c);
+    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    const statement = body["statement"];
+    if (typeof statement !== "string" || statement.length === 0) {
+      return jsonError(c, 400, "bad_request", "statement is required");
+    }
+    const installed = installStatement(db, issuer, statement.trim());
+    if (installed.ok) return c.json({ version: installed.version }, 201);
+    switch (installed.reason) {
+      case "no_root":
+        return jsonError(c, 409, "no_root", "this control plane has no root to check a statement against");
+      case "not_newer":
+        return jsonError(c, 409, "statement_not_newer", "a statement at that version or a later one is already installed");
+      case "keyset_mismatch":
+        return jsonError(
+          c,
+          409,
+          "keyset_mismatch",
+          "that statement does not name exactly the active signing keys; draft it again",
+        );
+      case "wrong_root":
+      case "bad_signature":
+        return jsonError(c, 400, "bad_statement", "that statement is not signed by this control plane's root");
+      case "wrong_issuer":
+        return jsonError(c, 400, "bad_statement", "that statement was signed for a different issuer");
+      case "unreadable":
+        return jsonError(c, 400, "bad_statement", "that is not a key-set statement");
+    }
   });
 
   // Mint an enrollment code; re-enrolling is redeeming a newer one, so this is also the key-rotation path.

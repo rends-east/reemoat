@@ -32,15 +32,17 @@ is its area.
 ## Three properties this division buys
 
 **An outage here cannot reach work already running.** A daemon verifies tokens
-against a public key it obtained once, at enrollment, and never asks this service
-anything again — `.claude/rules/auth-and-tokens.md` states it as an invariant and
-`src/enroll.ts` is the one and only request a daemon ever makes. So an Authority
-that is down stops new sign-ins, new tokens and new machines, and stops nothing
-that is already open.
+against public keys it already holds and never asks this service anything —
+`.claude/rules/auth-and-tokens.md` states it as an invariant and `src/enroll.ts` is
+the one and only request a daemon ever makes. A later key set is *announced* on the
+tunnel dial, signed by a root the daemon pinned, and one that is absent or refused
+changes nothing (`src/keyset.ts`). So an Authority that is down stops new sign-ins,
+new tokens and new machines, and stops nothing that is already open.
 
 **Nobody's source is in the same process as the fleet's signing key.** That key
 mints every token in the fleet and lives in one SQLite file, 0600 inside a 0700
-directory. What it must not also hold is anybody's work.
+directory, wrapped under `REEMOAT_CP_KEY_SECRET` where one is set. What it must not
+also hold is anybody's work.
 
 **The reachability cost is paid knowingly.** The relay is permanently on the data
 path, so an outage here costs *all* reachability to remote machines — Q1.24. The

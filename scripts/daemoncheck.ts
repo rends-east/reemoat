@@ -31,6 +31,7 @@ await import("./daemoncheck.contributions-and-launch.js");
 await import("./daemoncheck.agent-routes-and-capabilities.js");
 await import("./daemoncheck.agent-install.js");
 await import("./daemoncheck.e2ee.js");
+await import("./daemoncheck.devices.js");
 await import("./daemoncheck.announce.js");
 
 finish();

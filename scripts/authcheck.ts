@@ -2,6 +2,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   ALL_SCOPES,
   AUTH_LEEWAY_MS,
@@ -14,7 +16,20 @@ import {
 } from "../src/auth.js";
 import { generateStaticKey } from "@reemoat/protocol";
 import { codeFingerprint, enroll, EnrollError, parseEnrollResponse } from "../src/enroll.js";
-import { jwkThumbprint, publicKeyToJwk, signToken, x25519Jwk, type TokenClaims } from "../src/token.js";
+import { weighAnnouncement, type KeysetHeld } from "../src/keyset.js";
+import { openStores, type StoredIdentity } from "../src/store/sqlite.js";
+import { tmp } from "./tmp.js";
+import { formatKeysetPing, parseKeysetPing, parseKeysetVersion, readKeysetHeaders } from "../src/relay/protocol.js";
+import {
+  KEYSET_TYP,
+  ROOT_TYP,
+  jwkThumbprint,
+  publicKeyToJwk,
+  signCompact,
+  signToken,
+  x25519Jwk,
+  type TokenClaims,
+} from "../src/token.js";
 
 // Offline driver for token verification and enrollment: keys are generated in process and `now` is passed in.
 
@@ -423,6 +438,237 @@ process.stdout.write("\na daemon that enrolled and is about to ignore it\n");
 
   check("a daemon that never enrolled is not warned at", enrollmentIgnored(undefined, null), null);
   check("nor is one that never enrolled and asked for signed", enrollmentIgnored("signed", null), null);
+}
+
+process.stdout.write("\na key set announced on the tunnel dial\n");
+{
+  const ISS = "reemoat-cp";
+  const pair = (name: string): { kid: string; jwk: ReturnType<typeof publicKeyToJwk>; privateKey: typeof privateKey } => {
+    const made = generateKeyPairSync("ed25519");
+    return { kid: `k_${name}`, jwk: publicKeyToJwk(made.publicKey), privateKey: made.privateKey };
+  };
+  const named = (key: { kid: string; jwk: unknown }): { kid: string; jwk: unknown } => ({ kid: key.kid, jwk: key.jwk });
+  const k1 = pair("one");
+  const k2 = pair("two");
+  const stranger = pair("stranger");
+  const root = pair("root");
+  const root2 = pair("root2");
+  const root3 = pair("root3");
+  const otherRoot = pair("otherroot");
+
+  const statement = (
+    v: number,
+    keys: { kid: string; jwk: unknown }[],
+    signer = root,
+    overrides: { iss?: string; kid?: string } = {},
+  ): string =>
+    signCompact(KEYSET_TYP, { iss: overrides.iss ?? ISS, v, iat, keys: keys.map(named) }, overrides.kid ?? signer.kid, signer.privateKey);
+  const endorsement = (of: { kid: string; jwk: unknown }, by: ReturnType<typeof pair>, iss = ISS): string =>
+    signCompact(ROOT_TYP, { iss, iat, root: named(of) }, by.kid, by.privateKey);
+
+  const enrolled: KeysetHeld = { issuer: ISS, keys: [named(k1)], root: null, keysetVersion: null };
+  const kids = (held: KeysetHeld): string[] => held.keys.map((key) => key.kid);
+  /** A refusal's two halves: why, and that nothing at all moved. */
+  const refusal = (held: KeysetHeld, announced: { statement: string | null; endorsements: string[] }): unknown[] => {
+    const outcome = weighAnnouncement(held, announced);
+    return [outcome.refused, outcome.next === held, outcome.rootChanged, outcome.keysChanged];
+  };
+
+  check("a relay that announces nothing changes nothing", refusal(enrolled, { statement: null, endorsements: [] }), ["absent", true, false, false]);
+  check(
+    "a statement with no root to check it against is refused",
+    refusal(enrolled, { statement: statement(1, [k1, k2]), endorsements: [] }),
+    ["no_root", true, false, false],
+  );
+  check(
+    "an endorsement by a key this machine does not hold introduces nothing",
+    refusal(enrolled, { statement: statement(1, [k1, k2]), endorsements: [endorsement(root, stranger)] }),
+    ["no_root", true, false, false],
+  );
+  check(
+    "nor one that names a held key and was signed by another",
+    refusal(enrolled, {
+      statement: statement(1, [k1, k2]),
+      endorsements: [signCompact(ROOT_TYP, { iss: ISS, iat, root: named(root) }, k1.kid, stranger.privateKey)],
+    }),
+    ["no_root", true, false, false],
+  );
+  check(
+    "nor one written for a different control plane",
+    refusal(enrolled, { statement: statement(1, [k1, k2]), endorsements: [endorsement(root, k1, "somebody-else")] }),
+    ["no_root", true, false, false],
+  );
+  check(
+    "nor a statement dressed as an endorsement",
+    refusal(enrolled, { statement: statement(1, [k1, k2]), endorsements: [statement(1, [k1], k1)] }),
+    ["no_root", true, false, false],
+  );
+
+  const introduced = weighAnnouncement(enrolled, { statement: statement(1, [k1, k2]), endorsements: [endorsement(root, stranger), endorsement(root, k1)] });
+  check("a held signing key introduces the root", [introduced.next.root?.kid, introduced.rootChanged], [root.kid, true]);
+  check("and the statement it signed is taken whole", [introduced.refused, kids(introduced.next), introduced.next.keysetVersion], [null, [k1.kid, k2.kid], 1]);
+  check("the identity it was weighed against is untouched", [kids(enrolled), enrolled.root, enrolled.keysetVersion], [[k1.kid], null, null]);
+
+  const pinnedOnly = weighAnnouncement(enrolled, { statement: "not.a.statement", endorsements: [endorsement(root, k1)] });
+  check(
+    "a root introduced beside a statement that is refused is still pinned",
+    [pinnedOnly.refused, pinnedOnly.next.root?.kid, kids(pinnedOnly.next), pinnedOnly.next.keysetVersion, pinnedOnly.keysChanged],
+    ["unreadable", root.kid, [k1.kid], null, false],
+  );
+
+  const rooted = introduced.next;
+  check(
+    "a statement naming another root is refused",
+    refusal(rooted, { statement: statement(2, [k2], otherRoot), endorsements: [] }),
+    ["wrong_root", true, false, false],
+  );
+  check(
+    "one that names the held root and was signed by another is refused",
+    refusal(rooted, { statement: statement(2, [k2], otherRoot, { kid: root.kid }), endorsements: [] }),
+    ["bad_signature", true, false, false],
+  );
+  check(
+    "one for a different control plane is refused",
+    refusal(rooted, { statement: statement(2, [k2], root, { iss: "somebody-else" }), endorsements: [] }),
+    ["wrong_issuer", true, false, false],
+  );
+  check(
+    "the statement already held is not newer",
+    refusal(rooted, { statement: statement(1, [k1, k2]), endorsements: [] }),
+    ["not_newer", true, false, false],
+  );
+  check(
+    "one naming no usable key is refused, so the set is never emptied",
+    refusal(rooted, { statement: statement(2, [{ kid: "k_junk", jwk: { kty: "oct", k: "nope" } }]), endorsements: [] }),
+    ["no_usable_keys", true, false, false],
+  );
+  check(
+    "a token is not a statement",
+    refusal(rooted, { statement: signToken(claims, root.kid, root.privateKey), endorsements: [] }),
+    ["unreadable", true, false, false],
+  );
+  check(
+    "and a signing key cannot state the key set, whatever it claims in the header",
+    refusal(rooted, { statement: statement(2, [k2], k1, { kid: root.kid }), endorsements: [] }),
+    ["bad_signature", true, false, false],
+  );
+  check(
+    "a held root is not replaced by a signing key's endorsement",
+    refusal(rooted, { statement: null, endorsements: [endorsement(otherRoot, k1), endorsement(otherRoot, k2)] }),
+    ["absent", true, false, false],
+  );
+  check(
+    "nor by a root it never heard of",
+    refusal(rooted, { statement: statement(2, [k2], otherRoot), endorsements: [endorsement(otherRoot, otherRoot)] }),
+    ["wrong_root", true, false, false],
+  );
+
+  const retired = weighAnnouncement(rooted, { statement: statement(2, [k2]), endorsements: [] });
+  check("a newer statement replaces the set, so a retired key is gone", [retired.refused, kids(retired.next), retired.next.keysetVersion, retired.rootChanged], [null, [k2.kid], 2, false]);
+  check(
+    "and the older one replayed cannot put it back",
+    refusal(retired.next, { statement: statement(1, [k1, k2]), endorsements: [] }),
+    ["not_newer", true, false, false],
+  );
+
+  const handed = weighAnnouncement(retired.next, { statement: statement(3, [k2], root2), endorsements: [endorsement(root2, root)] });
+  check("the held root hands over to its successor", [handed.next.root?.kid, handed.rootChanged, handed.refused, handed.next.keysetVersion], [root2.kid, true, null, 3]);
+  check(
+    "after which the root it left signs nothing here",
+    refusal(handed.next, { statement: statement(4, [k1], root), endorsements: [] }),
+    ["wrong_root", true, false, false],
+  );
+  const chained = weighAnnouncement(retired.next, {
+    statement: statement(5, [k2], root3),
+    endorsements: [endorsement(root3, root2), endorsement(root2, root)],
+  });
+  check("a machine two roots behind follows both handovers", [chained.next.root?.kid, chained.refused, chained.next.keysetVersion], [root3.kid, null, 5]);
+  const circled = weighAnnouncement(retired.next, {
+    statement: null,
+    endorsements: [endorsement(root2, root), endorsement(root, root2)],
+  });
+  check("two handovers naming each other are not followed in a circle", circled.next.root?.kid, root2.kid);
+
+  const taking = new SignedTokenVerifier({ identity: { machineId: "m_self", issuer: ISS, keys: [...enrolled.keys] } });
+  const byTwo = signToken(claims, k2.kid, k2.privateKey);
+  const byOne = signToken(claims, k1.kid, k1.privateKey);
+  check("before the statement a token by the new key is unknown", codeOf(taking.verify(byTwo, now)), "unknown_key");
+  check("replacing the set is reported", taking.replaceKeys(introduced.next.keys), true);
+  check("after it both keys verify", [taking.verify(byTwo, now).ok, taking.verify(byOne, now).ok], [true, true]);
+  taking.replaceKeys(retired.next.keys);
+  check("and once the old key is retired it stops", [codeOf(taking.verify(byOne, now)), taking.verify(byTwo, now).ok], ["unknown_key", true]);
+  check("a set with no usable key is refused", taking.replaceKeys([{ kid: "k_junk", jwk: { kty: "oct" } }]), false);
+  check("and changes nothing", [taking.keyCount, taking.verify(byTwo, now).ok], [1, true]);
+
+  check(
+    "a statement is not a token either",
+    codeOf(new SignedTokenVerifier({ identity: { machineId: "m_self", issuer: ISS, keys: [named(root)] } }).verify(statement(1, [k1]), now)),
+    "malformed_token",
+  );
+
+  const base = { machineId: "m_self", issuer: ISS, keys: [named(k1)] };
+  const withRoot = parseEnrollResponse({ ...base, root: named(root), keyset: statement(7, [k1, k2]) });
+  check("enrollment pins the root it is handed", withRoot.root?.kid, root.kid);
+  check("and takes the statement that verifies under it", [withRoot.keysetVersion, withRoot.keys.map((key) => key.kid)], [7, [k1.kid, k2.kid]]);
+  const unverified = parseEnrollResponse({ ...base, root: named(root), keyset: statement(7, [k2], otherRoot) });
+  check(
+    "a statement that does not verify under that root is left out, and the keys answered stand",
+    [unverified.root?.kid, unverified.keysetVersion, unverified.keys.map((key) => key.kid)],
+    [root.kid, null, [k1.kid]],
+  );
+  const rootless = parseEnrollResponse({ ...base, keyset: statement(7, [k2]) });
+  check("a statement with no root beside it is not taken on its own word", [rootless.root, rootless.keysetVersion, rootless.keys.length], [null, null, 1]);
+  const older = parseEnrollResponse(base);
+  check("an older control plane names neither, and enrollment is what it was", [older.root, older.keysetVersion], [null, null]);
+  check("an unusable root is none", parseEnrollResponse({ ...base, root: { kid: "k_x", jwk: { kty: "oct" } } }).root, null);
+
+  // A real file, opened twice: what a restart verifies against is whatever this row holds.
+  const path = join(tmp("reemoat-authcheck-"), "reemoat.db");
+  const stored: StoredIdentity = {
+    machineId: "m_self",
+    issuer: ISS,
+    keys: retired.next.keys.map(named),
+    controlPlane: "https://cp.example",
+    codeFp: codeFingerprint("ec_test"),
+    enrolledAt: now,
+    tunnelKey: "tk_test",
+    relayUrl: "https://relay.example/",
+    root: named(root),
+    keysetVersion: 2,
+  };
+  const writer = openStores({ path, instanceId: "i_auth_w" });
+  writer.identity.save(stored);
+  writer.close();
+  const reader = openStores({ path, instanceId: "i_auth_r" });
+  check("the root, the version and the key set it named survive a restart", reader.identity.load(), stored);
+  reader.identity.save({ ...stored, root: null, keysetVersion: null });
+  check("re-enrolling against a control plane that names no root forgets the old one", [reader.identity.load()?.root, reader.identity.load()?.keysetVersion], [null, null]);
+  reader.identity.save(stored);
+  reader.db.prepare("UPDATE identity SET root_jwk = 'not json'").run();
+  check("a root that cannot be read is none held, and the keys stand", [reader.identity.load()?.root, reader.identity.load()?.keys.length], [null, 1]);
+  reader.close();
+
+  // A file from before the columns existed: the same row, and nothing held that it did not have.
+  const preRoot = new DatabaseSync(path);
+  for (const column of ["root_kid", "root_jwk", "keyset_version"]) preRoot.exec(`ALTER TABLE identity DROP COLUMN ${column}`);
+  preRoot.close();
+  const upgraded = openStores({ path, instanceId: "i_auth_u" });
+  check(
+    "an identity enrolled before there was a root opens with none, and its keys as they were",
+    [upgraded.identity.load()?.root, upgraded.identity.load()?.keysetVersion, upgraded.identity.load()?.keys, upgraded.identity.load()?.tunnelKey],
+    [null, null, stored.keys, "tk_test"],
+  );
+  upgraded.identity.save(stored);
+  check("and can take one from then on", upgraded.identity.load()?.root?.kid, root.kid);
+  upgraded.close();
+
+  check("the dial announces a version as digits", [parseKeysetVersion("12"), parseKeysetVersion(["7", "9"]), parseKeysetVersion("0")], [12, 7, 0]);
+  check("and anything else is no announcement", [parseKeysetVersion("1.5"), parseKeysetVersion("-1"), parseKeysetVersion("v2"), parseKeysetVersion(undefined)], [null, null, null, null]);
+  check("the ping carries the newest version", parseKeysetPing(formatKeysetPing(42)), 42);
+  check("and a ping that carries something else says nothing", [parseKeysetPing(""), parseKeysetPing("ks:"), parseKeysetPing("42")], [null, null, null]);
+  const headers = readKeysetHeaders(statement(1, [k1]), `${endorsement(root, k1)} not-a-jws ${endorsement(root, k2)}`);
+  check("the 101's headers are read as a statement and its endorsements", [headers.statement !== null, headers.endorsements.length], [true, 2]);
+  check("and absent headers as neither", readKeysetHeaders(undefined, undefined), { statement: null, endorsements: [] });
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

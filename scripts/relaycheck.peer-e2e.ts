@@ -35,9 +35,9 @@ export interface PeerEndToEnd {
 /** Two daemons of the shipped shape, one owner, the shipped relay between them: the only place a link is driven end to end. */
 export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
   const { db, issuer, relayUrl, check } = ctx;
-  // Read here, not handed in: sections before this one rotate the control plane's key, and it mints with the newest.
+  // Read here, not handed in: sections before this one add a second key, and the control plane signs with the oldest active one.
   const keys = activeSigningKeys(db);
-  const signing = keys[0]!;
+  const signing = keys[keys.length - 1]!;
   const acp = await import("@agentclientprotocol/sdk");
   process.stdout.write("\nagents on two machines, through the relay\n");
 

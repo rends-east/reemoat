@@ -70,6 +70,61 @@ export function parseMachineKey(text: unknown): string | null {
   return value;
 }
 
+/** On the 101: the newest key-set statement, and the endorsements that introduce or hand over its root. Weighed by src/keyset.ts, never here. */
+export const KEYSET_HEADER = "x-reemoat-keyset";
+
+export const KEYSET_ROOT_HEADER = "x-reemoat-root";
+
+/** On the dial: the statement version the daemon holds, 0 for none. Announced and recorded, never negotiated. */
+export const KEYSET_VERSION_HEADER = "x-reemoat-keyset-version";
+
+export const MAX_KEYSET_STATEMENT_CHARS = 4096;
+
+export const MAX_KEYSET_ENDORSEMENT_CHARS = 1024;
+
+export const MAX_KEYSET_ENDORSEMENTS = 8;
+
+const COMPACT_JWS = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
+export function parseKeysetVersion(text: unknown): number | null {
+  const value = Array.isArray(text) ? text[0] : text;
+  if (typeof value !== "string" || !/^\d{1,15}$/.test(value.trim())) return null;
+  return Number(value.trim());
+}
+
+export interface KeysetHeaders {
+  statement: string | null;
+  endorsements: string[];
+}
+
+/** Shape and size only; an entry that is not a compact JWS is dropped, since the reader verifies each one anyway. */
+export function readKeysetHeaders(statement: unknown, endorsements: unknown): KeysetHeaders {
+  const one = (value: unknown): string => {
+    const text = Array.isArray(value) ? value[0] : value;
+    return typeof text === "string" ? text.trim() : "";
+  };
+  const stated = one(statement);
+  return {
+    statement: stated.length <= MAX_KEYSET_STATEMENT_CHARS && COMPACT_JWS.test(stated) ? stated : null,
+    endorsements: one(endorsements)
+      .split(" ")
+      .filter((entry) => entry.length <= MAX_KEYSET_ENDORSEMENT_CHARS && COMPACT_JWS.test(entry))
+      .slice(0, MAX_KEYSET_ENDORSEMENTS),
+  };
+}
+
+/** The relay's ping payload: the newest statement's version, so a daemon on a live tunnel learns there is one to redial for. */
+export const KEYSET_PING_PREFIX = "ks:";
+
+export function formatKeysetPing(version: number): string {
+  return `${KEYSET_PING_PREFIX}${version}`;
+}
+
+export function parseKeysetPing(payload: string): number | null {
+  if (!payload.startsWith(KEYSET_PING_PREFIX)) return null;
+  return parseKeysetVersion(payload.slice(KEYSET_PING_PREFIX.length));
+}
+
 export const STREAM_VERSION_HEADER = "reemoat-v";
 
 export const STREAM_ENCRYPTION_HEADER = "reemoat-enc";
