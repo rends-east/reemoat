@@ -528,26 +528,25 @@ process.stdout.write("\none socket message, in pieces\n");
   const machineKey = Uint8Array.from({ length: 32 }, (_value, index) => 32 + index);
 
   // Pinned, because the two ends ship apart: a build that derives another code agrees with no daemon in the fleet.
-  check("an approval code is the one every earlier build derives", approvalCode(device, machineKey), "RMGTZ-CXMZ4");
+  check("an approval code is the one every earlier build derives", approvalCode(device), "P0EBX-PHYWE");
   check("and a key's fingerprint likewise", keyFingerprint(device), "2YNE-ZV79-GKKR-W01V");
-  check("the code is about which key asks which machine, not about the pair", approvalCode(machineKey, device), "6XMN1-M6G2W");
+  check("the code is of the asking key, so another key has another", approvalCode(machineKey), "0BSW9-VWZKD");
   check("a fingerprint is of one key", keyFingerprint(machineKey), "F8BT-4P50-PC49-GM8E");
 
   const flipped = device.slice();
   flipped[31] = flipped[31]! ^ 1;
-  check("one bit of the asking key moves the code", approvalCode(flipped, machineKey) === approvalCode(device, machineKey), false);
-  const swapped = machineKey.slice();
-  swapped[0] = swapped[0]! ^ 1;
-  check("and so does one bit of the machine's, which is what shows a substituted machine", approvalCode(device, swapped) === approvalCode(device, machineKey), false);
+  check("one bit of the asking key moves the code", approvalCode(flipped) === approvalCode(device), false);
+  // One input: a second key in the code is a second thing one party may choose, and equal codes then cost 2^25 (Q1.656).
+  check("and the asking key is all it takes", approvalCode.length, 1);
   report(
     "no letter in a code has a second reading",
-    !/[ILOU]/.test(`${approvalCode(device, machineKey)}${keyFingerprint(device)}${keyFingerprint(machineKey)}`),
+    !/[ILOU]/.test(`${approvalCode(device)}${keyFingerprint(device)}${keyFingerprint(machineKey)}`),
     "Crockford's alphabet",
   );
   let refused = 0;
   for (const bad of [new Uint8Array(31), new Uint8Array(33), new Uint8Array(0)]) {
     try {
-      approvalCode(bad, machineKey);
+      approvalCode(bad);
     } catch {
       refused += 1;
     }

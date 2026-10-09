@@ -537,6 +537,7 @@ pnpm cpctl admin signingkeys     # what exists, and which one signs
 pnpm cpctl admin rotatekey       # mint a new one; both are published, the OLD one goes on signing
 pnpm cpctl admin fleet           # who has not been offered the new key set yet
 pnpm cpctl admin retirekey <kid> # the switch: the next token is signed by the oldest key left
+pnpm cpctl admin retirekey <kid> --force   # the same, with machines still behind: for a leaked key
 ```
 
 **Two acts, and no visit to any machine.** A root key vouches for the signing
@@ -545,18 +546,40 @@ on its tunnel dial; a daemon that is already dialled in is told there is a newer
 one on the relay's next ping and redials for it. So `rotatekey` reaches the fleet
 by itself, within about a ping for machines that are online and on the next dial
 for the rest, and because the **oldest** active key keeps signing, nothing stops
-verifying in between. `retirekey` is the switch — and it tells you how many
-dialled-in machines had not been offered the statement yet. Those refuse tokens
-until their next dial; restarting the relay makes every daemon dial at once.
+verifying in between. `retirekey` is the switch — and it is **refused** while a
+dialled-in machine has not been offered the statement yet, naming the machines
+as `admin fleet` lists them. `--force` retires anyway, which is what a leaked
+key calls for: those machines refuse tokens until their next dial, and
+restarting the relay makes every daemon dial at once. No more than 16 keys may
+be active at a time — as many as a statement names — so `rotatekey` is refused
+there until one is retired.
+
+**What a retire costs, forced or not.** Every capability an app holds was signed
+by the key just retired, and the relay stops verifying a retired key within a
+second. An app mints a new one only 90 s before the old one expires, so with the
+default 300 s lifetime every app reads its machines as unreachable for up to
+210 s; nothing is lost, and each comes back by itself. A link between two
+machines carries a 90-day capability, and that stays refused until its owner's
+app is next opened. And the count is of machines that have not been *offered*
+the statement, not of machines that took it: a daemon that was offered one and
+refused it is not in it.
 
 For a leaked database that is the whole remedy: `rotatekey`, restart the relay,
-`retirekey`. Tokens the old key signed stop verifying at each daemon as it takes
-the statement that no longer names it, not 300 s later.
+`retirekey` — with `--force` where a machine too old to take a statement is
+still dialled in. Tokens the old key signed stop verifying at each daemon as it
+takes the statement that no longer names it, not 300 s later.
 
 ⚠ **A daemon older than this takes no statement** — `cpctl admin fleet` lists it
 as *announces none* — and for that machine rotation is still what it was: it
-verifies against the set it captured at enrollment until it is updated or
-re-enrolled. The control plane still refuses to retire the last active key.
+verifies against the set it captured at enrollment. Updating it is enough: a key
+it holds introduces the root, a since-retired one too while the announcement has
+room for it (eight entries, handovers and active keys first). Past that it has to
+be re-enrolled. The control plane still refuses to retire the last active key.
+
+⚠ **`cpctl` and the control plane are updated together, the control plane
+first.** On a control plane from before statements `rotatekey` makes the new
+key sign at once, so `rotatekey` and `retirekey` look for the root first and
+stop, saying so, where there is none.
 
 ### Keeping the keys off the host
 
@@ -564,9 +587,15 @@ Two separate things, and neither is on by default.
 
 **The database at rest.** Set `REEMOAT_CP_KEY_SECRET` in the control plane's env
 file and the private keys in the database are stored wrapped under it; the first
-start wraps what is there. From then on the service **refuses to start** without
-the same value rather than mint a key no daemon holds, so keep it somewhere the
-backups are not — a snapshot together with that value is the signing key again.
+start wraps what is there and scrubs the plain copies out of the file and its
+write-ahead log. Snapshots and backups made before that start still hold the
+key in the clear, so after first setting the secret run `rotatekey` and then
+`retirekey` once: the key that signs from then on was never stored unwrapped.
+A root made on this host before the secret is in those backups as well, and
+handing it over, below, is what leaves them behind. From then on the service
+**refuses to start** without the same value rather than mint a key no daemon
+holds, so keep it somewhere the backups are not — a snapshot together with that
+value is the signing key again.
 `compose.yml` pins it empty on the relay, which shares the database file and
 loads no private key. It protects a copied file or a leaked backup; somebody
 running code on the host can still ask the service to sign.
@@ -583,10 +612,17 @@ pnpm cpctl admin keyset draft | pnpm cpctl root sign --key ~/reemoat-root.pem | 
 
 From then on the last line is how a statement is made, after every `rotatekey`
 and every `retirekey` — which say so — and `retirekey` is refused until a
-statement names the key that would sign next. What it buys: somebody who takes
-the host can use the signing key they find there, and cannot make the fleet
-accept one of their own, so `rotatekey` + sign + `retirekey` from your machine
-ends it. What it costs: that file is now the one thing that cannot be lost.
+statement names the key that would sign next. The draft is the server's own
+word for which keys to vouch for, so `root sign` prints its issuer, its version
+and every key id to stderr before signing — stdout stays the statement, so the
+pipe is unchanged — and refuses a draft in which an id is not its key's own.
+Pass `--expect <kid,kid,...>` with the ids you mean to vouch for, and it
+refuses a draft that names anything but exactly those.
+
+What it buys: somebody who takes the host can use the signing key they find
+there, and cannot make the fleet accept one of their own, so
+`rotatekey` + sign + `retirekey` from your machine ends it. What it costs: that
+file is now the one thing that cannot be lost.
 
 ### Another init system
 

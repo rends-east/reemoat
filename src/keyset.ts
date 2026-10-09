@@ -1,3 +1,4 @@
+import { MAX_KEYSET_ENDORSEMENTS, MAX_ROOT_HANDOVERS } from "./relay/protocol.js";
 import {
   KEYSET_TYP,
   ROOT_TYP,
@@ -9,7 +10,7 @@ import {
   type DecodedToken,
 } from "./token.js";
 
-// What a relay announced on a dial, weighed against what this machine already trusts. Pure: no clock, no store, no network.
+// What a relay announced on a dial, weighed against what this machine already trusts. The weighing is pure: no clock, no store, no network.
 // Nothing here is asked for: an announcement that is absent or refused changes nothing, and verification goes on with the keys held.
 
 export interface TrustedKey {
@@ -49,11 +50,6 @@ export interface KeysetOutcome {
   refused: StatementRefusal | null;
 }
 
-/** How many roots back a daemon may be and still follow the handovers to the live one. */
-export const MAX_ROOT_HANDOVERS = 4;
-
-export const MAX_ANNOUNCED_ENDORSEMENTS = 16;
-
 interface Endorsement {
   signer: string;
   decoded: Extract<DecodedToken, { ok: true }>;
@@ -61,7 +57,7 @@ interface Endorsement {
 
 export function weighAnnouncement(held: KeysetHeld, announced: KeysetAnnouncement): KeysetOutcome {
   const endorsements: Endorsement[] = [];
-  for (const text of announced.endorsements.slice(0, MAX_ANNOUNCED_ENDORSEMENTS)) {
+  for (const text of announced.endorsements.slice(0, MAX_KEYSET_ENDORSEMENTS)) {
     const decoded = decodeSigned(text, ROOT_TYP);
     if (decoded.ok) endorsements.push({ signer: decoded.header.kid, decoded });
   }
@@ -132,4 +128,66 @@ function endorsedRoot(endorsement: Endorsement, signer: TrustedKey, issuer: stri
   const payload = parseRootEndorsement(endorsement.decoded.payloadJson);
   if (payload === null || payload.iss !== issuer) return null;
   return payload.root;
+}
+
+/** The identity fields a statement moves; whatever else the stored row carries rides along untouched. */
+export interface StoredKeyset {
+  issuer: string;
+  keys: TrustedKey[];
+  root: TrustedKey | null;
+  keysetVersion: number | null;
+}
+
+export interface KeysetTakerOptions<T extends StoredKeyset> {
+  held: T;
+  store: { save(identity: T): void };
+  verifier: { replaceKeys(keys: readonly TrustedKey[]): boolean };
+  /** Once per reason until a set is taken: every redial would say it again. Never for `absent` or `not_newer`. */
+  onRefused?: (reason: StatementRefusal) => void;
+  onRootChanged?: (root: TrustedKey | null) => void;
+  onKeysTaken?: (held: T) => void;
+  /** Once until a save lands. */
+  onSaveFailed?: (error: unknown) => void;
+}
+
+export interface KeysetTaker<T extends StoredKeyset> {
+  held(): T;
+  keysetVersion(): number | null;
+  /** Throws when what it weighed could not be stored: nothing was taken, and the caller may offer it again. */
+  onKeyset(announced: KeysetAnnouncement): void;
+}
+
+/** Saved before it takes effect, so a restart never verifies against a key set the store does not hold. */
+export function createKeysetTaker<T extends StoredKeyset>(options: KeysetTakerOptions<T>): KeysetTaker<T> {
+  let held = options.held;
+  let lastRefusal: StatementRefusal | null = null;
+  let saveFailing = false;
+  return {
+    held: () => held,
+    keysetVersion: () => held.keysetVersion,
+    onKeyset(announced) {
+      const outcome = weighAnnouncement(held, announced);
+      if (outcome.refused !== null && outcome.refused !== "absent" && outcome.refused !== "not_newer") {
+        if (lastRefusal !== outcome.refused) options.onRefused?.(outcome.refused);
+        lastRefusal = outcome.refused;
+      }
+      if (outcome.next === held) return;
+      const next: T = { ...held, keys: [...outcome.next.keys], root: outcome.next.root, keysetVersion: outcome.next.keysetVersion };
+      try {
+        options.store.save(next);
+      } catch (error) {
+        if (!saveFailing) options.onSaveFailed?.(error);
+        saveFailing = true;
+        throw error;
+      }
+      saveFailing = false;
+      held = next;
+      if (outcome.rootChanged) options.onRootChanged?.(next.root);
+      if (outcome.keysChanged) {
+        options.verifier.replaceKeys(next.keys);
+        lastRefusal = null;
+        options.onKeysTaken?.(next);
+      }
+    },
+  };
 }

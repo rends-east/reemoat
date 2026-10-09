@@ -4,7 +4,7 @@ import * as cp from "../../cp";
 import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
-import { waitingText } from "../../deviceAccess";
+import { mayLetIn, waitingText } from "../../deviceAccess";
 import { daemonRead, type MachineState } from "../../machine";
 import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
 import { inNativeShell } from "../../native";
@@ -61,7 +61,8 @@ export function MachineSection({
   // Minting holds its own flag and the retire's wait is TwoStep's, so the two never share a lock.
   const [minting, setMinting] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [trusting, setTrusting] = useState(false);
+  /** The fingerprint on offer when the question was armed: what was compared is what is trusted, or nothing is (Q1.657). */
+  const [trusting, setTrusting] = useState<string | null>(null);
   const [idleError, setIdleError] = useState<string | null>(null);
 
   if (machine === null) {
@@ -74,6 +75,7 @@ export function MachineSection({
   const setupOffered = owned && !machine.enrolled && !machine.overLimit;
   const provenance = enrolledByText(machine.enrolledBy);
   const listable = machine.enrolled && read === "readable";
+  const devicesOffered = listable && mayLetIn(machine);
 
   const mint = (): void => {
     setMinting(true);
@@ -104,6 +106,11 @@ export function MachineSection({
         toast("ok", `${machine.name} is retired.`);
         void store.machinesChanged("machine-revoked");
       });
+
+  const trust = (): void => {
+    if (trusting !== null && store.trustMachineKey(machine.id, trusting)) return;
+    toast("error", "The key on offer changed. Compare it again.");
+  };
 
   return (
     <div>
@@ -165,7 +172,7 @@ export function MachineSection({
       )}
 
       {/* Outside the listable gate: a device waiting to be let in, or holding a key the server no longer names, cannot reach the machine at all. */}
-      {(machine.keyFingerprint !== null || listable) && (
+      {(machine.keyFingerprint !== null || devicesOffered) && (
         <Group title="Security">
           {machine.keyFingerprint !== null && <ValueRow title="Key fingerprint" value={machine.keyFingerprint} mono />}
           {machine.approvalCode !== null && <ValueRow title="Approval code" value={machine.approvalCode} mono />}
@@ -173,18 +180,25 @@ export function MachineSection({
             <>
               <ValueRow title="New key fingerprint" value={machine.offeredKeyFingerprint} mono />
               <TwoStep
-                armed={trusting}
-                onArm={setTrusting}
+                armed={trusting !== null}
+                onArm={(next) => {
+                  if (!next) setTrusting(null);
+                }}
                 align="end"
                 className={TWO_STEP_ROW}
                 question={<>Trust {machine.name}'s new key?</>}
-                consequence="Only after reinstalling its daemon."
+                consequence={
+                  <>
+                    Only if its daemon prints this fingerprint at start, or{" "}
+                    <span className="font-mono text-2xs">pnpm client devices</span> does.
+                  </>
+                }
                 act={{ label: "Trust" }}
-                onAct={() => store.trustMachineKey(machine.id)}
+                onAct={trust}
                 rest={
                   <>
                     <span className="min-w-0 flex-1 truncate text-sm">New key</span>
-                    <Button size="sm" onClick={() => setTrusting(true)}>
+                    <Button size="sm" onClick={() => setTrusting(machine.offeredKeyFingerprint)}>
                       Trust
                     </Button>
                   </>
@@ -192,7 +206,7 @@ export function MachineSection({
               />
             </>
           )}
-          {listable && (
+          {devicesOffered && (
             <LinkRow
               title="Device access"
               value={waitingText(state.devicesWaiting.get(machineId) ?? 0) ?? undefined}

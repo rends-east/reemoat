@@ -12,7 +12,7 @@ import {
   parseAgentClis,
   parseMachineKey,
 } from "../../../src/relay/protocol.js";
-import { jwkThumbprint, signToken, x25519Jwk, type TokenClaims } from "../../../src/token.js";
+import { MAX_STATEMENT_KEYS, jwkThumbprint, signToken, x25519Jwk, type TokenClaims } from "../../../src/token.js";
 import { deviceKeyFor } from "./devices.js";
 import { machineKeyFor, setMachineKey } from "./machinekeys.js";
 import {
@@ -3070,6 +3070,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   // Publishes a key and the statement naming it; the oldest key goes on signing, so nothing a daemon holds stops verifying.
   app.post("/v1/admin/signing-keys", requireAdmin, (c) => {
     const rotated = rotateSigningKey(db, issuer);
+    if (!rotated.ok) {
+      return jsonError(
+        c,
+        409,
+        "too_many_keys",
+        `${MAX_STATEMENT_KEYS} signing keys are active, which is as many as a statement may name; retire one before minting another`,
+      );
+    }
     return c.json(
       {
         kid: rotated.key.kid,
@@ -3085,7 +3093,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   // offered the statement in force before it, which is who would be handed a token signed by a key they do not hold yet.
   app.delete("/v1/admin/signing-keys/:kid", requireAdmin, (c) => {
     const behind = machinesBehind(db, newestStatement(db), relayOnline);
-    const result = retireKey(db, issuer, c.req.param("kid"));
+    const result = retireKey(db, issuer, c.req.param("kid"), c.req.query("force") === "1" ? 0 : behind);
     if (result.ok) {
       return c.json({
         retired: true,
@@ -3105,6 +3113,16 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         "statement_stale",
         "the root is kept off this host and no installed statement names the key that would sign next; " +
           "sign and install one before retiring this key",
+      );
+    }
+    if (result.reason === "machines_behind") {
+      return jsonError(
+        c,
+        409,
+        "machines_behind",
+        `${behind} machine(s) dialled in have not been offered the statement naming the key that would sign next, ` +
+          "and would refuse every token it signs; wait for their next dial, or retire with ?force=1",
+        { behind },
       );
     }
     return jsonError(

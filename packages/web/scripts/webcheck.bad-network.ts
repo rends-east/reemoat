@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 import { snapshot as baseSnapshot } from "./webcheck.ws.js";
 
 // The real store, `MachineConnection`, `DaemonClient` and `SessionStream` over a daemon and a link that live on a virtual
@@ -1112,7 +1113,9 @@ process.stdout.write("\nlistings read by the daemon in one order and landing in 
   const internals = store as unknown as {
     connections: Map<string, unknown>;
     daemons: Map<string, unknown>;
+    streams: Map<string, unknown>;
     streamOrder: string[];
+    listedAsOf: Map<string, number>;
     epoch: number;
     refreshMachineSessions: (connection: unknown, epoch: number) => Promise<void>;
   };
@@ -1171,13 +1174,62 @@ process.stdout.write("\nlistings read by the daemon in one order and landing in 
     check("a daemon that started again is its own order, shorter log and all", held(), { status: "interrupted", lastSeq: 2 });
   }
   {
-    internals.streamOrder = [key];
+    // With its stream open, as a conversation on screen has: closing that takes the key out of the order, and it is put back.
+    let stopped = 0;
+    const stream = { ref, stop: () => void (stopped += 1), status: () => ({ phase: "live" }) };
+    internals.streams.set(key, stream);
+    internals.streamOrder = ["k_other", key];
     const gone = ask();
     await gone.lands(listing([], "i_two"));
     check("a listing asked after everything else, and lacking the session, removes it", held(), null);
+    check(
+      "its stream is closed and the conversation on screen stays wanted, so its row coming back opens it again",
+      [stopped, internals.streams.has(key), internals.streamOrder],
+      [1, false, ["k_other", key]],
+    );
     store.onVanished(ref);
-    check("and the conversation on screen stays wanted once, however often it is forgotten", internals.streamOrder, [key]);
+    check("and the conversation on screen stays wanted once, however often it is forgotten", internals.streamOrder, ["k_other", key]);
+    internals.streams.set(key, stream);
+    internals.streamOrder = [key, "k_other"];
+    store.onVanished(ref);
+    check("while one nobody is looking at is closed and wanted by nobody", [stopped, internals.streams.has(key), internals.streamOrder], [2, false, ["k_other"]]);
     internals.streamOrder = [];
+  }
+  const waiting = (): number | undefined => store.getSnapshot().devicesWaiting.get(machine);
+  {
+    // Q3.711: a daemon restarted between two listings, and the one the process before it read lands last, with that process's longer log.
+    const old = ask();
+    await old.lands(listing([shot(100)], "i_old"));
+    check("a long log is held", held(), { status: "idle", lastSeq: 100 });
+    const late = ask();
+    const fresh = ask();
+    await fresh.lands(listing([shot(2)], "i_new"));
+    check("the daemon starts again, and its own shorter log replaces it", held(), { status: "idle", lastSeq: 2 });
+    const stamped = internals.listedAsOf.get(machine);
+    await late.lands({ ...(listing([shot(100)], "i_old") as object), devicesPending: 4 });
+    check(
+      "a listing from the process before it, landing late with that longer log, replaces nothing and stamps nothing",
+      [held(), internals.listedAsOf.get(machine) === stamped, waiting()],
+      [{ status: "idle", lastSeq: 2 }, true, undefined],
+    );
+    const next = ask();
+    await next.lands(listing([shot(3)], "i_new"));
+    check("so the restarted daemon's row moves on with its next listing", held(), { status: "idle", lastSeq: 3 });
+  }
+  {
+    // Q1.655: the count behind the bell is the listing's own field, and a listing without it says nobody is waiting.
+    const counted = ask();
+    await counted.lands({ ...(listing([shot(3)], "i_new") as object), devicesPending: 2 });
+    check("a listing that counts the devices waiting to be let in is where that count is read", waiting(), 2);
+    const again = ask();
+    await again.lands({ ...(listing([shot(3)], "i_new") as object), devicesPending: 2 });
+    check("the same count again is the same count", waiting(), 2);
+    const silent = ask();
+    await silent.lands(listing([shot(3)], "i_new"));
+    check("one that carries none, as an older daemon's does or one sent to somebody who may not let them in, clears it", waiting(), undefined);
+    const odd = ask();
+    await odd.lands({ ...(listing([shot(3)], "i_new") as object), devicesPending: "2" });
+    check("and a count that is no number is none", waiting(), undefined);
   }
 
   store.forgetMachine(machine);
@@ -1191,7 +1243,12 @@ process.stdout.write("\na message sent into a conversation that holds nothing ye
   const machine = machineId("m_floor");
   const ref = { machineId: machine, sessionId: sessionId("s_floor") };
   const key = keyOf(ref);
-  const internals = store as unknown as { daemons: Map<string, unknown>; transcripts: Map<string, unknown> };
+  const internals = store as unknown as {
+    daemons: Map<string, unknown>;
+    transcripts: Map<string, unknown>;
+    primed: Set<string>;
+    primeBlocked: (ref: unknown, snapshot: { lastSeq: number }) => Promise<void>;
+  };
   const prompt = (seq: number): unknown => ({ seq, ts: seq, event: { type: "prompt", text: "continue", attachments: [] } });
   const other = (seq: number): unknown => ({ seq, ts: seq, event: { type: "text", role: "assistant", thought: false, text: `#${String(seq)} ` } });
   const cold = (log: unknown[], rowLast: number): void => {
@@ -1225,6 +1282,25 @@ process.stdout.write("\na message sent into a conversation that holds nothing ye
   cold([other(1), prompt(5), other(6), other(7), other(8), other(9), prompt(10), other(11)], 11);
   await store.loadAll(ref);
   check("its own event in a page of history is", [echoes.echoFor(key), echoes.echoClaimed(sent)], [null, true]);
+
+  // The third door: the page read for a session that waits on somebody, before anybody has opened it.
+  const unopened = (log: unknown[], rowLast: number): Promise<void> => {
+    cold(log, rowLast);
+    internals.transcripts.delete(key);
+    internals.primed.delete(key);
+    return internals.primeBlocked(ref, { lastSeq: rowLast });
+  };
+  const waited = { text: "continue", seq: Number.MAX_SAFE_INTEGER, after: echoes.sendFloor(key, 0, 9), attachments: [] };
+  echoes.setEcho(key, waited);
+  await unopened([other(1), prompt(5), other(6), other(7), other(8), other(9)], 9);
+  check(
+    "a waiting session's first page holds to the same floor: the same words from earlier are not this send",
+    [internals.transcripts.has(key), echoes.echoFor(key) === waited, echoes.echoClaimed(waited)],
+    [true, true, false],
+  );
+  await unopened([other(1), prompt(5), other(6), other(7), other(8), other(9), prompt(10), other(11)], 11);
+  check("and its own event in that page claims it", [internals.transcripts.has(key), echoes.echoFor(key), echoes.echoClaimed(waited)], [true, null, true]);
+  internals.primed.delete(key);
 
   echoes.clearEcho(key);
   internals.daemons.delete(machine);
@@ -1418,21 +1494,60 @@ process.stdout.write("\nwho may end a request in flight\n");
   check("and nothing outside machine.ts abandons one", /abandonRoute/.test(streamSrc), false);
   const wake = body(storeSrc, /\n {2}wake\(reason: string, since: number \| null\): Promise<void> \{/);
   check("only a wake names the absence that may end a request", (storeSrc.match(/this\.absentSince = /g) ?? []).length === 1 && /this\.absentSince = raiseSuspicion\(this\.absentSince, since\)/.test(wake), true);
-  check("and wake detection is its one caller", [/store\.wake\(reason, reported\)/.test(read("../src/resume.ts")), /store\.resume\(/.test(read("../src/resume.ts"))], [true, false]);
+  const resumeSrc = read("../src/resume.ts");
+  check("and wake detection is its one caller", [/store\.wake\(reason, reported\)/.test(resumeSrc), /store\.resume\(/.test(resumeSrc)], [true, false]);
+  // The model above says the device's word and then wakes; these are the two handlers it stands in for.
+  check(
+    "the device's own word reaches the store from the two events that carry it: offline at once, and online before the wake it names",
+    [
+      /const onOffline = \(\): void => \{\s*clock\.offline\(monotonicNow\(\)\);\s*store\.noteDevice\(false\);\s*\};/.test(resumeSrc),
+      /const onOnline = \(\): void => \{\s*store\.noteDevice\(true\);\s*wake\("online", clock\.online\(\)\);\s*\};/.test(resumeSrc),
+      /window\.addEventListener\("offline", onOffline\);\s*window\.addEventListener\("online", onOnline\);/.test(resumeSrc),
+      /window\.removeEventListener\("offline", onOffline\);\s*window\.removeEventListener\("online", onOnline\);/.test(resumeSrc),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and nothing else in the app says it",
+    srcFiles().filter((rel) => /\bnoteDevice\(/.test(stripComments(srcFile(rel)))).sort(),
+    ["resume.ts", "store.ts"],
+  );
 
   const failed = /\.catch\(\(cause: unknown\) => \{([\s\S]*?)\}\)\s*\.finally/.exec(composerSrc.slice(composerSrc.indexOf("const flight: Promise<void>")))?.[1] ?? "";
-  const order = ["echoClaimed(echo)", "clearEcho(key, echo)", "doubtSend(key, echo)", "update(body)"].map((needle) => failed.indexOf(needle));
-  check("a failed send is weighed against its own event before anything is given back", order.every((at) => at !== -1) && order.join() === [...order].sort((a, b) => a - b).join(), true);
-  check("and only a failure in transit is held in doubt", /if \(isTransportFailure\(cause\)\) doubtSend\(key, echo\)/.test(failed), true);
+  report("the composer's failed-send handler was found", failed.length > 200, `${String(failed.length)} chars`);
+  // The statements themselves, from the handler's first: a negated test or a dropped return keeps every word in order.
+  check(
+    "a failed send is weighed against its own event before anything is given back",
+    /^\s*if \(isTransportFailure\(cause\) && echoClaimed\(echo\)\) return;\s*clearEcho\(key, echo\);/.test(failed),
+    true,
+  );
+  check(
+    "and only a failure in transit is held in doubt, before the text and the chips go back",
+    /clearEcho\(key, echo\);\s*if \(isTransportFailure\(cause\)\) doubtSend\(key, echo\);\s*if \(onScreen\(\)\) \{\s*update\(body\);\s*\} else if \(body\.length === 0\) \{\s*drafts\.delete\(key\);\s*\} else \{\s*drafts\.set\(key, body\);\s*\}\s*restoreAttachments\(key, sent\);/.test(failed),
+    true,
+  );
+  // The model's own copy of this effect is what the schedules above ran; this is the one it stands in for.
+  check(
+    "a doubted send the log has since shown leaves the box, taken once, and only where the reader left it as sent",
+    /const arrived = arrivedFor\(key\);\s*useEffect\(\(\) => \{\s*if \(arrived === null\) return;\s*takeArrived\(key, arrived\);\s*if \(\(drafts\.get\(key\) \?\? ""\) === arrived\.text\) \{\s*drafts\.delete\(key\);\s*setText\(""\);\s*\}\s*for \(const chip of attachmentsFor\(key\)\) \{[^}]*\}\s*toast\("ok", "That message did arrive\."\);\s*\}, \[arrived, key\]\);/.test(composerSrc),
+    true,
+  );
 
   const forgetSession = body(storeSrc, /private forgetSession\(key: SessionKey\): void \{/);
   check(
     "the conversation on screen stays wanted when forgotten, so its row coming back opens it again",
-    /const onScreen = this\.streamOrder\.at\(-1\) === key/.test(forgetSession) && /if \(onScreen && this\.streamOrder\.at\(-1\) !== key\) this\.streamOrder = /.test(forgetSession),
+    /^\{\s*const onScreen = this\.streamOrder\.at\(-1\) === key;\s*this\.closeStream\(key\);\s*if \(onScreen && this\.streamOrder\.at\(-1\) !== key\) this\.streamOrder = \[\.\.\.this\.streamOrder, key\];\s*this\.rows\.delete\(key\);/.test(forgetSession),
     true,
   );
   const signedOut = body(storeSrc, /\n {2}handleSignedOut\(failure: AuthFailure\): void \{/);
   check("and a sign-out leaves nothing wanted", /this\.streamOrder = \[\]/.test(signedOut), true);
   const loadAll = body(storeSrc, /async loadAll\(ref: SessionRef\): Promise<void> \{/);
   check("history claims the echo too", /claimEcho\(key, block\)/.test(loadAll), true);
+  const prime = body(storeSrc, /private async primeBlocked\(ref: SessionRef, snapshot: SessionSnapshot\): Promise<void> \{/);
+  check(
+    "and so does the page read for a session that waits on somebody, once that page is what is held",
+    /this\.replaceTranscript\(key, \{[^}]*\}\);\s*claimEcho\(key, page\.events\);\s*this\.emit\(\);/.test(prime),
+    true,
+  );
+  check("which makes three doors, and no fourth", (storeSrc.match(/\bclaimEcho\(key, /g) ?? []).length, 3);
 }

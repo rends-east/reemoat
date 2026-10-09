@@ -584,7 +584,7 @@ export class MachineChannel implements Channel {
    * resumes from its cursor: a browser socket reports a dead link in minutes, if at all (Q3.714).
    */
   dropRedialable(): void {
-    // As a channel rebuilt with the route used to be: the one wrong_device recovery is owed again.
+    // A forgotten route owes the one wrong_device recovery again.
     this.recovered = false;
     this.dropIdle();
     const streams = [...this.live].filter((connection) => connection.streaming);

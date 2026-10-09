@@ -144,7 +144,7 @@ cursor. The poll's re-probe leaves a live one alone.
 - **Nine tables read, two written, never on the request path.** Per request `machines`,
   `users`, `grants`, a ≤1/s-cached `signing_keys.public_jwk`; per link channel
   `machine_links` (`linkById`); on dial `machine_tunnel_keys` and `announcedKeyset`'s
-  three, ≤1/s, as strings; `relay_tunnels` only for a tunnel held elsewhere while
+  four, ≤1/s, as strings; `relay_tunnels` only for a tunnel held elsewhere while
   `REEMOAT_CP_RELAY_URLS` is set. Writes: `relay_tunnels` (register, unregister, a 5s
   flush that stamps, then sweeps this relay's older rows) and `machines`' five
   `daemon_*` columns **on dial only** (`recordDaemonBuild`, read by `cpctl admin fleet`); `daemon_agents` via `readAgentClisHeader` off

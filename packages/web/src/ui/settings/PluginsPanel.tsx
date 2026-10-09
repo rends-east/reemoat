@@ -22,6 +22,7 @@ import {
   TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
+import { CopyButton } from "../kit/CopyButton";
 import { ActionRow, EmptyRow, Group, LinkRow, TWO_STEP_ROW } from "../kit/List";
 import { Notice, Pending, RecheckButton } from "../kit/Status";
 
@@ -323,8 +324,13 @@ function PluginFailure({
       </span>
       {log !== null && (
         <>
-          <span className={`mt-2 block ${SETTINGS_HEADING}`}>What it printed</span>
-          <pre className="mt-1 font-mono text-2xs leading-snug whitespace-pre-wrap wrap-anywhere text-muted">
+          <span className="mt-2 flex items-center gap-2">
+            <span className={SETTINGS_HEADING}>What it printed</span>
+            <span className="ml-auto flex items-center">
+              <CopyButton value={log} label="what it printed" />
+            </span>
+          </span>
+          <pre className="font-mono text-2xs leading-snug whitespace-pre-wrap wrap-anywhere text-muted">
             {log}
           </pre>
         </>

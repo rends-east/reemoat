@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import { Icon } from "../bits";
-import { copyText } from "../clipboard";
+import { COPY_FAILED, copyText } from "../clipboard";
 import { toast } from "../Toast";
 
 /** Copy one value from beside it: a ghost square whose glyph turns into a check, and a toast when the platform refuses. */
@@ -19,7 +19,7 @@ export function CopyButton({ value, label }: { value: string; label: string }): 
       onClick={() => {
         void copyText(value).then((ok) => {
           if (ok) setCopied(true);
-          else toast("error", "Could not copy — select it by hand.");
+          else toast("error", COPY_FAILED);
         });
       }}
       aria-label={copied ? "Copied" : `Copy ${label}`}

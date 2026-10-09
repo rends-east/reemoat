@@ -784,6 +784,42 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
     true,
   );
 
+  // What takes no selection is copied by a control, and a copy that failed may not send anybody to select it.
+  const agentsPanel = stripComments(srcFile("ui/settings/AgentsPanel.tsx"));
+  const pluginsPanel = stripComments(srcFile("ui/settings/PluginsPanel.tsx"));
+  check(
+    "the three panes that were only ever copied by selecting them each carry the kit's copy control",
+    [
+      /\{output\.length > 0 && <CopyButton value=\{output\} label="the terminal output" \/>\}/.test(agentsPanel),
+      /<CopyButton value=\{output\} label="the installer’s output" \/>/.test(agentsPanel),
+      /<CopyButton value=\{log\} label="what it printed" \/>/.test(pluginsPanel),
+    ],
+    [true, true, true],
+  );
+  check(
+    "beside the pane or at its heading's trailing edge, never laid over it",
+    [
+      (agentsPanel.match(/<div className="mt-1 flex items-start gap-1">\s*<pre\b[^>]*\bmin-w-0 flex-1\b/g) ?? []).length,
+      /<span className=\{SETTINGS_HEADING\}>What it printed<\/span>\s*<span className="ml-auto flex items-center">\s*<CopyButton/.test(pluginsPanel),
+      /absolute/.test(stripComments(srcFile("ui/kit/CopyButton.tsx")).replace(/<Icon[^>]*\/>/g, "")),
+    ],
+    [2, true, false],
+  );
+  const { COPY_FAILED } = await import("../src/ui/clipboard.js");
+  check("a copy that failed says only that", COPY_FAILED, "Could not copy.");
+  check(
+    "from the kit's button, the import sheet and the install command alike",
+    ["ui/kit/CopyButton.tsx", "ui/ImportCode.tsx", "ui/CommandLine.tsx"].filter((file) => !/toast\("error", COPY_FAILED\)/.test(stripComments(srcFile(file)))),
+    [],
+  );
+  check(
+    "and only the one-time secret, whose box does take a selection, still says to select it by hand",
+    srcFiles()
+      .filter((file) => /by hand/i.test((stripComments(srcFile(file)).match(/toast\([^;]*\);/g) ?? []).join("\n")))
+      .sort(),
+    ["ui/settings/OneTimeSecret.tsx"],
+  );
+
   // Q3.691: a double-click is the engine's word, as in Claude's client, and a triple-click the span rather than the paragraph — and so is every
   // click after it, where WebKit's fourth took the paragraph back; measured in a WKWebView.
   const inlineCode = markdown.slice(markdown.indexOf("function InlineCode"), markdown.indexOf("function CodeBlock"));

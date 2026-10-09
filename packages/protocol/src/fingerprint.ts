@@ -7,7 +7,7 @@ const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 const encoder = new TextEncoder();
 
-/** 50 bits. Shorter, and a key ground to collide with somebody's code costs an afternoon rather than a datacentre (Q1.656). */
+/** 50 bits over one key: matching somebody's code is a second preimage, 2^50 key generations (Q1.656). */
 const APPROVAL_CODE_CHARS = 10;
 
 /** 80 bits, in four groups of four: the most that stays whole beside its label on a phone, and far past grinding. */
@@ -48,11 +48,10 @@ function assertKey(key: Uint8Array): void {
   if (key.length !== 32) throw new Error("a key is 32 bytes");
 }
 
-/** Both keys are in it: the one asking and the machine it believes it is asking, so swapping either shows as two different codes. */
-export function approvalCode(initiator: Uint8Array, machine: Uint8Array): string {
+/** The asking key alone: a second key in it is a second thing one party may choose, and equal codes then cost 2^25 (Q1.656). */
+export function approvalCode(initiator: Uint8Array): string {
   assertKey(initiator);
-  assertKey(machine);
-  const digest = blake2s(concat(encoder.encode("reemoat/approve/1"), initiator, machine));
+  const digest = blake2s(concat(encoder.encode("reemoat/approve/2"), initiator));
   return grouped(base32(digest, APPROVAL_CODE_CHARS), 5);
 }
 

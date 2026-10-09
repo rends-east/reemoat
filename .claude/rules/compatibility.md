@@ -144,7 +144,8 @@ constrains any answer.
 - **A daemon too old to take a key-set statement is darkened by `retirekey`**, and only by
   that: the oldest active key signs (`tokenSigningKey`), so `rotatekey` publishes and changes
   nothing for anybody, and a daemon new enough takes the statement on its dial or within a
-  ping. `cpctl admin fleet` shows who has been offered it (`daemon_keyset`). Q1.659.
+  ping. `cpctl admin fleet` shows who has been offered it (`daemon_keyset`), and the retire
+  is refused while one dialled in has not been, unless forced. Q1.659.
 - **The token header is exact**: `alg` `EdDSA`, `typ` `reemoat+jwt`, compared first. Unknown
   claims are ignored; changing either header field breaks every daemon at once.
 - **`REEMOAT_CP_RELAY_URL` is captured at enrollment**: changing it re-enrolls every machine

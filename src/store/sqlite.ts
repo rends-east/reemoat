@@ -1669,6 +1669,7 @@ export class SqliteKnownDeviceStore implements KnownDeviceStore {
   private readonly listStmt: StatementSync;
   private readonly saveStmt: StatementSync;
   private readonly removeStmt: StatementSync;
+  private readonly pendingStmt: StatementSync;
   private readonly lockStmt: StatementSync;
   private readonly setLockStmt: StatementSync;
 
@@ -1683,6 +1684,7 @@ export class SqliteKnownDeviceStore implements KnownDeviceStore {
         "last_seen = excluded.last_seen",
     );
     this.removeStmt = db.prepare("DELETE FROM known_devices WHERE kth = ?");
+    this.pendingStmt = db.prepare("SELECT COUNT(*) AS waiting FROM known_devices WHERE state <> 'known' AND last_seen > ?");
     this.lockStmt = db.prepare("SELECT value FROM machine_settings WHERE key = ?");
     this.setLockStmt = db.prepare(
       "INSERT INTO machine_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1716,6 +1718,11 @@ export class SqliteKnownDeviceStore implements KnownDeviceStore {
 
   remove(kth: string): boolean {
     return Number(this.removeStmt.run(kth).changes) > 0;
+  }
+
+  /** Anything but known is waiting, which is how rowToKnownDevice reads a state too. */
+  countPending(seenAfter: number): number {
+    return Number(this.pendingStmt.get(seenAfter)?.["waiting"] ?? 0);
   }
 
   /** Anything but the one stored spelling of on is off, so a value this build cannot read never locks a machine. */

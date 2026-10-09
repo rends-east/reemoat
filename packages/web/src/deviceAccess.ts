@@ -1,4 +1,5 @@
-import type { DeviceView, DevicesAnswer } from "./wire";
+import type { MachineId } from "./ids";
+import type { DeviceView, DevicesAnswer, Scope } from "./wire";
 
 // What the screen over a machine's device list says, as functions a driver can assert without a DOM (Q1.655).
 
@@ -25,6 +26,19 @@ export function deviceRows(answer: DevicesAnswer): DeviceRows {
 export function waitingText(count: number): string | null {
   if (count <= 0) return null;
   return count === 1 ? "1 waiting" : `${String(count)} waiting`;
+}
+
+/** Letting a device in is a machine admin's act, so nobody else is told that one is waiting. */
+export function mayLetIn(machine: { scopes: readonly Scope[] }): boolean {
+  return machine.scopes.includes("machine:admin");
+}
+
+/** The first machine, in the list's order, with a device waiting that this account may let in. */
+export function waitingMachine(
+  machines: readonly { id: MachineId; scopes: readonly Scope[] }[],
+  waiting: ReadonlyMap<MachineId, number>,
+): MachineId | null {
+  return machines.find((machine) => (waiting.get(machine.id) ?? 0) > 0 && mayLetIn(machine))?.id ?? null;
 }
 
 /** Removing the device that is asking would end the channel carrying the answer, and the machine refuses it. */

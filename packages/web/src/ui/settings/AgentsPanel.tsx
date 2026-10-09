@@ -981,12 +981,15 @@ function LoginWizard({
 
       <details className="mt-6 px-4" open={rawTranscriptIsOpen(view, outcome)}>
         <summary className="tap list-none text-xs text-muted hover:text-fg">Show terminal output</summary>
-        <pre
-          ref={paneRef}
-          className="mt-1 max-h-56 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80"
-        >
-          {output.length === 0 ? "starting…" : output}
-        </pre>
+        <div className="mt-1 flex items-start gap-1">
+          <pre
+            ref={paneRef}
+            className="max-h-56 min-w-0 flex-1 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80"
+          >
+            {output.length === 0 ? "starting…" : output}
+          </pre>
+          {output.length > 0 && <CopyButton value={output} label="the terminal output" />}
+        </div>
       </details>
 
       <div className="mt-6 flex flex-wrap items-center gap-2">
@@ -1200,9 +1203,12 @@ function InstallPane({
         <details className="mt-4 px-4" open={rawInstallIsOpen(run)}>
           <summary className="tap list-none text-xs text-muted hover:text-fg">What the installer said</summary>
           {gap && <p className="mt-1 text-2xs text-muted">Some earlier output was dropped.</p>}
-          <pre className="mt-1 max-h-56 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80">
-            {output}
-          </pre>
+          <div className="mt-1 flex items-start gap-1">
+            <pre className="max-h-56 min-w-0 flex-1 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80">
+              {output}
+            </pre>
+            <CopyButton value={output} label="the installer’s output" />
+          </div>
         </details>
       )}
       <div className="mt-4 flex justify-end gap-2">

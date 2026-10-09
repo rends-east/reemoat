@@ -15,7 +15,7 @@ import { parseManifest } from "../src/plugins/manifest.js";
 import { addedLines } from "../src/plugins/source.js";
 import type { PluginManifest, PluginSummary } from "../src/plugins/protocol.js";
 import type { WorkspaceStatus } from "../src/worktree.js";
-import type { DeviceView } from "../src/devices.js";
+import type { DevicesAnswer } from "../src/devices.js";
 
 const STATIC_TOKEN = process.env["REEMOAT_TOKEN"] ?? "";
 
@@ -115,12 +115,6 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   only over an encrypted channel, which needs a device key this tool does not
   have and the Reemoat app does — so for another machine, use the app.
 `;
-
-interface DevicesAnswer {
-  lock: boolean;
-  fingerprint: string | null;
-  devices: DeviceView[];
-}
 
 class ApiError extends Error {
   constructor(

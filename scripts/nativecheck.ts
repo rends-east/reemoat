@@ -1594,6 +1594,16 @@ check("and leaves the previous server's daemon running", /supervisor|stop_all|\.
   );
 }
 
+// The daemon answers a page only from where the shell serves the app: one rule in two languages, and a third origin here means a line there (Q1.655).
+{
+  const origins = read("src/origin.ts");
+  check(
+    "the daemon's list of the shell's origins names both places lib.rs serves the app from",
+    [/"tauri:\/\/localhost"/.test(origins), /"http:\/\/tauri\.localhost"/.test(origins), /"tauri" => true/.test(libRs), /Some\("tauri\.localhost"\) => true/.test(libRs)],
+    [true, true, true, true],
+  );
+}
+
 // `seats.rs` builds every webview from `main`'s config with `on_navigation(is_our_own)`; any other builder loses the drop setting and the navigation guard.
 {
   const seatsCode = flat(rustCode(read(`${TAURI_DIR}/src/seats.rs`)));

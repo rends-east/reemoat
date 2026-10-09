@@ -1,5 +1,5 @@
 import { Trash2 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { deviceName, deviceRows, removable } from "../../deviceAccess";
 import { errorText, meansRouteAbsent } from "../../http";
 import type { MachineId } from "../../ids";
@@ -57,38 +57,67 @@ function DeviceAccess({
   waiting: number;
 }): ReactNode {
   const [answer, setAnswer] = useState<DevicesAnswer | null>(null);
+  const [unread, setUnread] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [absent, setAbsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
+  /** The count this component last wrote to the store: coming back as `waiting`, it is no cue to read the list again. */
+  const wrote = useRef<number | null>(null);
+  const asking = useRef(0);
 
   const take = (next: DevicesAnswer): void => {
+    const count = deviceRows(next).waiting.length;
+    wrote.current = count;
     setAnswer(next);
+    setUnread(false);
     setError(null);
-    store.noteDevicesWaiting(machineId, deviceRows(next).waiting.length);
+    store.noteDevicesWaiting(machineId, count);
+  };
+
+  const ask = (): void => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) return;
+    const mine = (asking.current += 1);
+    void daemon.devices().then(
+      (next) => {
+        if (asking.current === mine) take(next);
+      },
+      (cause: unknown) => {
+        if (asking.current !== mine) return;
+        // An envelope-free 404 means the daemon predates the list: settled, not a failure.
+        if (meansRouteAbsent(cause)) setAbsent(true);
+        else setUnread(true);
+      },
+    );
   };
 
   useEffect(() => {
-    const daemon = store.daemonFor(machineId);
-    if (daemon === undefined) return;
-    let cancelled = false;
-    void daemon
-      .devices()
-      .then((next) => {
-        if (!cancelled) take(next);
-      })
-      .catch((cause: unknown) => {
-        if (cancelled) return;
-        // An envelope-free 404 means the daemon predates the list: settled, not a failure.
-        if (meansRouteAbsent(cause)) setAbsent(true);
-        else setError(errorText(cause));
-      });
+    const own = wrote.current === waiting;
+    wrote.current = null;
+    if (!own) ask();
     return () => {
-      cancelled = true;
+      asking.current += 1;
     };
   }, [machineId, waiting]);
 
   if (absent) return <Empty>{machineName} needs a newer daemon to list its devices.</Empty>;
+  if (unread) {
+    return (
+      <Group title="Known">
+        <Empty
+          failed
+          action={
+            <Button size="sm" onClick={ask}>
+              Try again
+            </Button>
+          }
+        >
+          Could not read this machine's devices.
+        </Empty>
+      </Group>
+    );
+  }
 
   const setLock = (on: boolean): Promise<void> => {
     const daemon = store.daemonFor(machineId);
@@ -113,7 +142,7 @@ function DeviceAccess({
       )}
 
       <Group title="Known" error={error}>
-        {rows === null && error === null && <SkeletonRow />}
+        {rows === null && <SkeletonRow />}
         {rows !== null && rows.known.length === 0 && <EmptyRow>No device has connected through the relay yet.</EmptyRow>}
         {rows !== null && rows.known.length > 0 && (
           <DeviceTable
@@ -153,6 +182,18 @@ function DeviceAccess({
           />
         </Group>
       )}
+    </>
+  );
+}
+
+/** A code is compared character by character: mono, a step under the sans around it, and never broken at its hyphen. */
+const CODE = "font-mono text-2xs whitespace-nowrap";
+
+function approveOnly(code: string | null): ReactNode {
+  if (code === null) return "Only if it shows this same code.";
+  return (
+    <>
+      Only if it shows <span className={CODE}>{code}</span>.
     </>
   );
 }
@@ -228,10 +269,16 @@ function DeviceRow({
         if (!next) setConfirming(null);
       }}
       align="end"
-      question={confirming === "approve" ? `Let ${name} in?` : pending ? `Deny ${name}?` : `Remove ${name}?`}
+      question={
+        <>
+          {confirming === "approve" ? "Let " : pending ? "Deny " : "Remove "}
+          <bdi>{name}</bdi>
+          {confirming === "approve" ? " in?" : "?"}
+        </>
+      }
       consequence={
         confirming === "approve"
-          ? `Only if it shows ${row.code ?? "this same code"}.`
+          ? approveOnly(row.code)
           : pending
             ? "It can ask again."
             : locked
@@ -241,7 +288,7 @@ function DeviceRow({
       act={
         confirming === "approve"
           ? { label: "Let in", ariaLabel: `Let ${name} in` }
-          : { label: pending ? "Deny" : "Remove", danger: true, icon: Trash2, ariaLabel: `Remove ${name}` }
+          : { label: pending ? "Deny" : "Remove", danger: true, icon: Trash2, ariaLabel: `${pending ? "Deny" : "Remove"} ${name}` }
       }
       onAct={confirming === "approve" ? approve : remove}
       onFailure={(cause) => toast("error", errorText(cause))}
@@ -275,9 +322,9 @@ function DeviceRow({
     <tr className="border-t border-edge first:border-t-0">
       <td className={TD}>
         <span className="flex min-w-0 items-center gap-2">
-          <span className="min-w-0 truncate font-medium">{name}</span>
-          {/* What somebody compares with the waiting device's own screen: beside the name and never truncated, so the row is two lines armed or not. */}
-          {pending && row.code !== null && <span className="shrink-0 font-mono text-2xs text-muted">{row.code}</span>}
+          <span className="min-w-0 truncate font-medium">
+            <bdi>{name}</bdi>
+          </span>
           {/* One badge per row: this device, then a machine. */}
           {own ? (
             <span className="shrink-0">
@@ -291,6 +338,13 @@ function DeviceRow({
             )
           )}
         </span>
+        {/* Compared with the waiting device's own screen, so it shares a line with nothing the device chose (Q1.656). */}
+        {pending && row.code !== null && (
+          <span className={`block text-muted ${CODE}`}>
+            <span className="sr-only">code </span>
+            {row.code}
+          </span>
+        )}
         <span className="block truncate text-2xs text-faint">
           {row.platform !== null && row.platform.length > 0 ? `${platformName(row.platform)} · ` : ""}
           {pending

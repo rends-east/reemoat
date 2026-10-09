@@ -693,7 +693,11 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
         self.connection = Object.assign(Object.create(real) as object, {
           id,
           state: () => ({ ...real.state(), id, name, reach: self.reach, offlineReason: self.reach === "offline" ? "no_route" : null, relayOnline: self.relayOnline }),
-          update: (next: { relayOnline: boolean }) => void (self.relayOnline = next.relayOnline),
+          // As `MachineConnection.update` ends: the store publishes inside the call, before the listing reads anything of it.
+          update: (next: { relayOnline: boolean }) => {
+            self.relayOnline = next.relayOnline;
+            peek.emit();
+          },
           forgetRoute: () => void (self.forgets += 1),
           probedSince: () => self.began,
           resolveRoute: (): Promise<null> => {
@@ -819,22 +823,55 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
       laptop.relayOnline = false;
       fleet = [{ ...record, relayOnline: false }];
       peek.nextListingAt = Date.now() + 60_000;
+      peek.soonTimer = null;
+      timers.length = 0;
       peek.emit();
-      check("a daemon newly missed has the listing asked from a second out", [peek.awayAsks, peek.nextListingAt <= Date.now() + 1_000], [0, true]);
+      check(
+        "a daemon newly missed has the listing asked from a second out, by a pass set for it",
+        [peek.awayAsks, peek.nextListingAt <= Date.now() + 1_000, timers.filter((timer) => timer.ms === 1_000).length],
+        [0, true, 1],
+      );
       const paces: number[] = [];
+      const probedAt: number[] = [];
+      const probeWaits: number[] = [];
+      let earlyPasses = 0;
       let at = 0;
       asked = 0;
+      const counted = peek.probeFailures.get("m_cp") ?? 0;
+      peek.nextProbeAt.delete("m_cp");
       for (let round = 0; round < 8; round += 1) {
         at += (paces.at(-1) ?? 1_000) + 100;
         await later(at, async () => {
+          const routeAsks = laptop.routeAsks;
           void store.poll();
           await nap(10);
           paces.push(Math.round((peek.nextListingAt - Date.now()) / 100) * 100);
+          peek.soonTimer = null;
+          timers.length = 0;
           laptop.fail();
           await nap(20);
+          if (laptop.routeAsks === routeAsks) return;
+          probedAt.push(at);
+          probeWaits.push(Math.round(((peek.nextProbeAt.get("m_cp") ?? 0) - Date.now()) / 100) * 100);
+          earlyPasses += timers.filter((timer) => timer.ms <= 4_000).length;
         });
       }
       check("and then at a pace that doubles to a minute, since it may be a laptop asleep for the night", [asked, paces], [8, [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]]);
+      // Its probe asks nothing, so it is no failure of the wire: at a failure's pace it republishes the whole store fifteen times a minute.
+      check(
+        "while its own probe, which has nothing to ask, runs fifteen seconds apart at the soonest, sets no early pass and counts no failure",
+        [probedAt, probeWaits, earlyPasses, (peek.probeFailures.get("m_cp") ?? 0) - counted],
+        [[1_100, 16_500, 32_600, 64_700, 124_800], [15_000, 15_000, 15_000, 15_000, 15_000], 0, 0],
+      );
+      // So the listing's asks ride no probe's pass: each pass sets the next for when the listing is due.
+      peek.nextProbeAt.set("m_cp", Date.now() + 600_000);
+      peek.nextListingAt = Date.now() + 2_000;
+      peek.soonTimer = null;
+      timers.length = 0;
+      peek.soon(0);
+      timers.find((timer) => timer.ms === 0)?.run();
+      await nap(20);
+      check("and a pass that finds that listing not due yet sets the next for when it is", timers.filter((timer) => timer.ms > 1_900 && timer.ms <= 2_000).length, 1);
       fleet = [record];
       peek.soonTimer = null;
       timers.length = 0;
@@ -851,6 +888,28 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
       );
       laptop.fail();
       await nap(20);
+
+      // Not dialled in is the server's own word, and with no early pass no probe would follow it for fifteen seconds.
+      const nas = standInFor("m_nas", "nas");
+      nas.relayOnline = false;
+      fleet = [record, { ...record, id: "m_nas", name: "nas", relayOnline: false }];
+      internals.connections.set("m_nas", nas.connection);
+      peek.nextProbeAt.set("m_cp", Date.now() + 600_000);
+      peek.emit();
+      check("a daemon found missing is in doubt until the server answers", doubted(), ["m_nas"]);
+      listing = "hangs";
+      void store.poll();
+      await nap(10);
+      nas.fail();
+      await nap(20);
+      check("its probe, begun before that answer, settles nothing", [doubted(), nas.routeAsks], [["m_nas"], 1]);
+      listing = "answers";
+      land(0);
+      await nap(20);
+      check("the answer that says it is not dialled in names it, with no second probe to wait for", [doubted(), nas.routeAsks], [[], 1]);
+      store.forgetMachine("m_nas" as never);
+      fleet = [record];
+      peek.nextProbeAt.delete("m_cp");
 
       // A machine in doubt cannot wait out a listing's timeout, so its ask ignores the pace; it still gives the one out a second.
       const mini = standInFor("m_two", "mini");

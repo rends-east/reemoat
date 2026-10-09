@@ -31,6 +31,8 @@ export interface KnownDeviceStore {
   remove(kth: string): boolean;
   locked(): boolean;
   setLocked(on: boolean): void;
+  /** Rows not let in and last seen after the given time. A store without it is counted by its list. */
+  countPending?(seenAfter: number): number;
 }
 
 export interface DeviceView {
@@ -43,8 +45,16 @@ export interface DeviceView {
   state: KnownDeviceState;
   firstSeenAt: number;
   lastSeenAt: number;
-  /** Compared by eye with what the waiting device shows; null with no machine key to derive it from. */
+  /** Compared by eye with what the waiting device shows; null for a stored key this build cannot read. */
   code: string | null;
+}
+
+export interface DevicesAnswer {
+  lock: boolean;
+  fingerprint: string | null;
+  /** The asking capability's own key, so a list can say which row is this device. */
+  you: string | null;
+  devices: DeviceView[];
 }
 
 export const MAX_DEVICE_LABEL_CHARS = 128;
@@ -61,22 +71,49 @@ export const PENDING_DEVICE_TTL_MS = 24 * 60 * 60 * 1000;
 /** A row's last_seen moves at most this often: a pool opens a connection per request. */
 const TOUCH_INTERVAL_MS = 5 * 60 * 1000;
 
-function clamp(value: unknown, max: number): string | null {
+// sentFileName's set (src/uploads.ts) as the Unicode property that holds it: a variation selector splits a code as unseen as U+200B.
+const INVISIBLE = /[\p{Cs}\p{Default_Ignorable_Code_Point}]/gu;
+
+const CROCKFORD = "[0-9A-HJKMNP-TV-Z]";
+// Only an ASCII letter or digit holds a group to a word: a dash drawn with a letter of another script joins two as a hyphen does.
+const ALNUM = "[0-9A-Za-z]";
+const JOINED = "[^0-9A-Za-z]*";
+
+// The shape of what this build draws as an approval code or a key fingerprint, however its groups are joined (Q1.656).
+const CODE_SHAPED = new RegExp(
+  `(?<!${ALNUM})(?:${CROCKFORD}{5}${JOINED}${CROCKFORD}{5}|${CROCKFORD}{4}(?:${JOINED}${CROCKFORD}{4}){3})(?!${ALNUM})`,
+  "giu",
+);
+
+/** Written as a code is drawn, in capitals, or grouped with a digit in it: "Steve Adams" and "server2024" are names and stay. */
+function readsAsCode(token: string): boolean {
+  return !/[a-z]/.test(token) || (/[0-9]/.test(token) && /[^0-9A-Za-z]/.test(token));
+}
+
+/** A name as it may be drawn beside a code: nothing unseen, nothing shaped like a code, one line, at most max long. */
+function drawable(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
-  // Control characters out first: this is drawn in a list and printed in a terminal.
-  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
-  return cleaned.length === 0 ? null : cleaned.slice(0, max);
+  // NFKC first: a code spelled in fullwidth or mathematical letters is the same ten characters.
+  let text = value.normalize("NFKC").replace(INVISIBLE, "").replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
+  text = text.slice(0, max).replace(/[\ud800-\udbff]$/, "");
+  // After the cut and to a fixpoint: a cut, or a removal, can leave a code standing where there was none.
+  for (;;) {
+    const next = text.replace(CODE_SHAPED, (token) => (readsAsCode(token) ? " " : token)).replace(/\s+/g, " ").trim();
+    if (next === text) break;
+    text = next;
+  }
+  return text.length === 0 ? null : text;
 }
 
 export function readDeviceDescription(value: unknown): DeviceDescription | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  const name = clamp(record["name"], MAX_DEVICE_LABEL_CHARS);
+  const name = drawable(record["name"], MAX_DEVICE_LABEL_CHARS);
   if (name === null) return null;
-  return { name, platform: clamp(record["platform"], MAX_DEVICE_PLATFORM_CHARS) ?? "" };
+  return { name, platform: drawable(record["platform"], MAX_DEVICE_PLATFORM_CHARS) ?? "" };
 }
 
-function decodeKey(text: string): Uint8Array | null {
+export function decodeDeviceKey(text: string): Uint8Array | null {
   if (!/^[A-Za-z0-9_-]{43}$/.test(text)) return null;
   const bytes = new Uint8Array(Buffer.from(text, "base64url"));
   return bytes.length === 32 ? bytes : null;
@@ -103,7 +140,7 @@ export class DeviceGate {
     now = Date.now(),
   ): boolean {
     const kind: KnownDeviceKind = principal.link === null ? "device" : "machine";
-    const label = kind === "machine" ? clamp(principal.link?.sourceLabel, MAX_DEVICE_LABEL_CHARS) : (described?.name ?? null);
+    const label = kind === "machine" ? drawable(principal.link?.sourceLabel, MAX_DEVICE_LABEL_CHARS) : (described?.name ?? null);
     const platform = kind === "machine" ? null : described?.platform || null;
     const ref = kind === "machine" ? (principal.link?.sourceMachineId ?? null) : principal.deviceId;
     let held: KnownDevice | null;
@@ -170,38 +207,41 @@ export class DeviceGate {
 
   list(now = Date.now()): DeviceView[] {
     this.expirePending(now);
-    const machine = decodeKey(this.machineKey() ?? "");
     return this.store
       .list()
       .sort((a, b) => Number(b.state === "pending") - Number(a.state === "pending") || b.lastSeenAt - a.lastSeenAt)
       .map((device) => {
-        const key = decodeKey(device.publicKey);
+        const key = decodeDeviceKey(device.publicKey);
         return {
           id: device.kth,
           kind: device.kind,
-          label: device.label,
-          platform: device.platform,
+          // Held to the rule again on the way out: whoever runs as the owner can write this table (Q1.655).
+          label: drawable(device.label, MAX_DEVICE_LABEL_CHARS),
+          platform: drawable(device.platform, MAX_DEVICE_PLATFORM_CHARS),
           subject: device.subject,
           ref: device.ref,
           state: device.state,
           firstSeenAt: device.firstSeenAt,
           lastSeenAt: device.lastSeenAt,
-          code: machine === null || key === null ? null : approvalCode(key, machine),
+          code: key === null ? null : approvalCode(key),
         };
       });
   }
 
   /** What the machine itself prints, for comparing against what an app pinned. */
   fingerprint(): string | null {
-    const machine = decodeKey(this.machineKey() ?? "");
+    const machine = decodeDeviceKey(this.machineKey() ?? "");
     return machine === null ? null : keyFingerprint(machine);
   }
 
   /** Zero while unlocked: nothing waits on anybody then, and a row left over is let in at its next dial. */
   pendingCount(now = Date.now()): number {
     if (!this.store.locked()) return 0;
-    return this.store.list().filter((device) => device.state === "pending" && now - device.lastSeenAt < PENDING_DEVICE_TTL_MS)
-      .length;
+    const seenAfter = now - PENDING_DEVICE_TTL_MS;
+    return (
+      this.store.countPending?.(seenAfter) ??
+      this.store.list().filter((device) => device.state === "pending" && device.lastSeenAt > seenAfter).length
+    );
   }
 
   /** By id, or by the code as somebody reads it off the waiting screen. Null when nothing or more than one row answers. */
@@ -226,8 +266,7 @@ export class DeviceGate {
 
   /** Lets a caller in beside the switch it is about to turn on, when no channel ever recorded its key. */
   vouch(publicKey: string, kth: string, principal: Principal, described: DeviceDescription | null, now = Date.now()): boolean {
-    const key = decodeKey(publicKey);
-    if (key === null) return false;
+    if (decodeDeviceKey(publicKey) === null) return false;
     const held = this.store.get(kth);
     this.store.save({
       kth,

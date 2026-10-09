@@ -6,7 +6,7 @@ import { OPERATOR } from "./operator";
 export const PRIVACY_EN: LegalDocument = {
   doc: "privacy",
   lang: "en",
-  effective: "2026-09-10",
+  effective: "2026-10-09",
   lead: "This notice describes what personal data we collect, the purposes and the bases on which we process it, who else processes it, how long we keep it, and the rights you have. In summary: we hold your account and little else, because your code and your agent conversations remain on your own machine.",
   sections: [
     {
@@ -76,7 +76,7 @@ export const PRIVACY_EN: LegalDocument = {
         },
         {
           kind: "para",
-          text: "The one qualification, and it matters: when you supervise a machine from a phone, that traffic reaches it through a relay we operate, and the relay is the only route in. Your connection to us is encrypted and so is ours to your machine, but the relay terminates that encryption and could therefore see what a session carries \u2014 prompts, diffs, file contents. It is written to route bytes and never to interpret them, and only what you are looking at right now travels; but that is a discipline in our code rather than a guarantee mathematics gives you, and we would rather say so than let \"encrypted\" imply more than it does. There is no end-to-end encryption today. If you run your own control plane, none of this passes through us.",
+          text: "The one qualification, and it matters: when you supervise a machine from a phone or another computer, that traffic reaches it through a relay we operate, and the relay is the only route in. What a session carries \u2014 prompts, diffs, file contents \u2014 is encrypted end to end between your app and your machine, with keys that stay on those two, so the relay forwards bytes it holds no key for and cannot read them. It still sees that a connection exists, between which account and which machine, and how much travels. And this is a statement about the relay, not about us as a whole: we issue the credentials that let a device connect and we ship the app, so an operator acting deliberately could admit a device of its own or change the software, and we would rather say so than let \"end to end\" imply more than it does. Two things narrow that and are yours to use: a machine can be locked to the devices its owner approved, after which our signature alone admits nobody, and the app keeps the key it first reached a machine with and does not quietly accept another. If you run your own control plane, none of this passes through us.",
         },
       ],
     },

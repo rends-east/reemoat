@@ -1,7 +1,8 @@
 import { Check, Copy } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Icon } from "./bits";
-import { copyText } from "./clipboard";
+import { COPY_FAILED, copyText } from "./clipboard";
+import { toast } from "./Toast";
 
 /** Wraps at a space and never scrolls, so the command is readable whole before it is pasted; the copy control is a flex sibling, not overlaid. */
 export function CommandLine({ command, className = "mt-3" }: { command: string; className?: string }): ReactNode {
@@ -22,6 +23,7 @@ export function CommandLine({ command, className = "mt-3" }: { command: string; 
         onClick={() => {
           void copyText(command).then((ok) => {
             if (ok) setCopied(true);
+            else toast("error", COPY_FAILED);
           });
         }}
         aria-label={copied ? "Copied" : `Copy ${command}`}

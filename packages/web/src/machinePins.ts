@@ -32,13 +32,15 @@ export function weighOfferedKey(pinned: string | null, offered: string | null): 
 
 // Seeded lazily, as localRoute.ts is, so webcheck can stub storage after import.
 let held: Stored | null = null;
+/** Set here and refused by storage: laid over whatever storage says, so it still governs this session. */
+let unsaved: Stored = {};
+let watching = false;
 
-function read(): Stored {
-  if (held !== null) return held;
-  held = {};
+function stored(): Stored {
+  const out: Stored = {};
   try {
     const parsed: unknown = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}");
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return held;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return out;
     for (const [server, machines] of Object.entries(parsed)) {
       if (typeof machines !== "object" || machines === null || Array.isArray(machines)) continue;
       const kept: Record<string, string> = {};
@@ -46,25 +48,50 @@ function read(): Stored {
         const usable = readMachineKey(key);
         if (usable !== null) kept[id] = usable;
       }
-      held[server] = kept;
+      out[server] = kept;
     }
   } catch {
     // Private mode or a hand-edited value: nothing held, so each machine is a first use again.
   }
-  return held;
+  return out;
+}
+
+/** Storage laid over what is held: every account's webview on this computer writes the one value. */
+function reread(): Stored {
+  const next: Stored = { ...held };
+  for (const layer of [stored(), unsaved]) {
+    for (const [server, machines] of Object.entries(layer)) next[server] = { ...next[server], ...machines };
+  }
+  held = next;
+  watch();
+  return next;
+}
+
+function watch(): void {
+  if (watching || typeof window.addEventListener !== "function") return;
+  watching = true;
+  window.addEventListener("storage", (event) => {
+    if (event.key === null || event.key === STORAGE_KEY) held = null;
+  });
 }
 
 /** Scoped by server: a machine id is only a name within the control plane that minted it. */
 export function storedPins(server: () => string = controlPlaneOrigin): MachinePins {
   return {
-    get: (machineId) => read()[server()]?.[machineId] ?? null,
+    get(machineId) {
+      const origin = server();
+      // A miss asks storage before it is one: another document may have pinned since this one last read.
+      return held?.[origin]?.[machineId] ?? reread()[origin]?.[machineId] ?? null;
+    },
     set(machineId, key) {
-      const all = read();
-      all[server()] = { ...all[server()], [machineId]: key };
+      const origin = server();
+      const all = reread();
+      all[origin] = { ...all[origin], [machineId]: key };
       try {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+        unsaved = {};
       } catch {
-        // The in-memory copy still governs this session.
+        unsaved[origin] = { ...unsaved[origin], [machineId]: key };
       }
     },
   };

@@ -366,8 +366,9 @@ list is a journal: who connected, under what name they gave, first and last. Loc
 refused whatever was signed for it, and waits there until somebody already inside lets
 it in, or somebody at the machine does with `pnpm client devices approve`. Before
 letting one in, the owner compares a ten-character code on both screens; it is derived
-from the asking key **and** the machine's key, so it also tells the new device that the
-machine key it was handed is the machine's.
+from the asking key alone, so it says which device is asking and nothing about the
+machine. That the machine key a new device was handed is the machine's is the key
+fingerprint's to say, compared the same way.
 
 What that buys: on a locked machine, holding the signing key — as the operator, or as
 whoever took the database — no longer gets anybody in. The Authority is reduced to
@@ -386,14 +387,23 @@ routing, and to refusing to route.
   database, so the journal catches the careless rather than the careful, and the lock is
   as good as the devices on it.
 - **Loopback is outside it.** A request from the same computer has no channel and no key;
-  that is the door `pnpm client` uses, and it is the uid that owns `~/.reemoat`.
+  that is the door `pnpm client` uses. What holds it to this computer is the daemon
+  itself: it binds `127.0.0.1`, refuses any request whose `Origin` is a web page other
+  than the app's own (a browser writes that header, a page cannot forge it), and refuses
+  a `Host` that is a name rather than this computer, which is how a page rebound to
+  loopback arrives. A daemon bound beyond loopback will not take the lock. **What is
+  left is a program already running on that computer**, as any user: it sends no
+  `Origin`, and a signed token in its hands is a way in.
 - **The operator still ships the client and the installer.** A locked machine does not
   survive a release that was tampered with, or an `install.sh` served to a *new* machine.
   What changes is that a compromised **server** is no longer a compromised fleet: the app
   carries its interface inside the binary and nothing here updates it from the server.
-- **The code is 50 bits, compared by eye.** Enough that grinding a key to match is not an
-  afternoon's work; not a proof, and worth nothing to somebody who presses *Let in*
-  without looking.
+- **The code is 50 bits over the asking device's key alone, compared by eye.** Matching
+  somebody's code means finding a key with the same fifty bits, about 2^50 key
+  generations. An earlier form hashed the machine's key in as well, which let one party
+  choose a key on each side and brought that down to minutes; it never shipped. A
+  device's own name is stripped of anything shaped like a code before it is drawn. Not
+  a proof, and worth nothing to somebody who presses *Let in* without looking.
 
 **The app remembers the key it first reached a machine with.** The control plane names a
 machine's key on every token it mints, and used to be believed every time. Now the first

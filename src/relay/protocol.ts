@@ -84,6 +84,9 @@ export const MAX_KEYSET_ENDORSEMENT_CHARS = 1024;
 
 export const MAX_KEYSET_ENDORSEMENTS = 8;
 
+/** How many roots back a daemon may be and still follow the handovers to the live one: announced that deep, followed that far. */
+export const MAX_ROOT_HANDOVERS = 4;
+
 const COMPACT_JWS = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
 export function parseKeysetVersion(text: unknown): number | null {

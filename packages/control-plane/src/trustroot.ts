@@ -1,8 +1,9 @@
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { MAX_KEYSET_ENDORSEMENTS } from "../../../src/relay/protocol.js";
+import { MAX_KEYSET_ENDORSEMENTS, MAX_ROOT_HANDOVERS } from "../../../src/relay/protocol.js";
 import {
   KEYSET_TYP,
+  MAX_STATEMENT_KEYS,
   ROOT_TYP,
   decodeSigned,
   jwkToPublicKey,
@@ -17,6 +18,7 @@ import {
   activePublicKeys,
   activeSigningKeys,
   ensureSigningKey,
+  erasingKeys,
   keyIdFor,
   loadPrivateKey,
   mintSigningKey,
@@ -44,9 +46,6 @@ export interface StoredStatement {
   createdAt: number;
   kids: string[];
 }
-
-/** How many roots back the announcement still carries a handover for; src/keyset.ts follows as many. */
-const ANNOUNCED_ROOT_DEPTH = 4;
 
 export function liveRoot(db: DatabaseSync): TrustRoot | null {
   const row = db
@@ -90,6 +89,11 @@ function activeKids(db: DatabaseSync): string[] {
   return activePublicKeys(db)
     .map((key) => key.kid)
     .sort();
+}
+
+/** Each key as its id and its bytes: a statement is compared on both, since a kid is only a name. */
+function namedKeys(keys: { kid: string; jwk: PublicKeyJwk }[]): string {
+  return JSON.stringify(keys.map((key) => `${key.kid} ${key.jwk.x}`).sort());
 }
 
 /** The newest statement is the live root's and names exactly the keys that are active now. */
@@ -151,15 +155,32 @@ function transact<T>(db: DatabaseSync, body: () => T): T {
   }
 }
 
+/** Active signing keys that have not endorsed this root, so a daemon holding only one of them could never be introduced to it. */
+function unendorsing(db: DatabaseSync, rootKid: string): SigningKey[] {
+  const endorsed = new Set(
+    db
+      .prepare("SELECT signer_kid FROM root_endorsements WHERE root_kid = ?")
+      .all(rootKid)
+      .map((row) => String(row["signer_kid"])),
+  );
+  return activeSigningKeys(db).filter((key) => !endorsed.has(key.kid));
+}
+
 /**
- * The live root, made here and kept on this host when there is none. Every active signing key endorses a new one, which is
- * what introduces it to a daemon that enrolled before there was a root. A statement for the current keys is issued beside it.
+ * The live root, made here and kept on this host when there is none. Every active signing key endorses it, which is what
+ * introduces it to a daemon that enrolled before there was a root. A statement for the current keys is issued beside it.
  */
 export function ensureTrustRoot(db: DatabaseSync, issuer: string, now = Date.now()): TrustRoot {
   ensureSigningKey(db);
   const held = liveRoot(db);
   if (held !== null) {
-    if (!statementIsCurrent(db)) transact(db, () => issueStatement(db, issuer, now));
+    const missing = unendorsing(db, held.kid);
+    if (missing.length > 0 || !statementIsCurrent(db)) {
+      transact(db, () => {
+        for (const signer of missing) endorse(db, issuer, { kid: held.kid, jwk: held.jwk }, signer, now);
+        if (!statementIsCurrent(db)) issueStatement(db, issuer, now);
+      });
+    }
     return held;
   }
   return transact(db, () => {
@@ -179,37 +200,44 @@ export function ensureTrustRoot(db: DatabaseSync, issuer: string, now = Date.now
   });
 }
 
-export interface RotationAnswer {
-  key: SigningKey;
-  /** The statement now naming it, or `null` where the root is off this host and somebody has to sign one. */
-  statement: StoredStatement | null;
-}
+/** `statement` names the new key, or is `null` where the root is off this host and somebody has to sign one. */
+export type RotationAnswer =
+  | { ok: true; key: SigningKey; statement: StoredStatement | null }
+  | { ok: false; reason: "too_many_keys" };
 
-/** Publishes a new signing key and, with the root here, the statement that names it, in one transaction. The old key goes on signing. */
+/**
+ * Publishes a new signing key, which endorses the live root, and with the root here the statement naming it, in one
+ * transaction. The old key goes on signing. Refused with nothing written at as many keys as a statement's reader takes.
+ */
 export function rotateSigningKey(db: DatabaseSync, issuer: string, now = Date.now()): RotationAnswer {
-  ensureTrustRoot(db, issuer, now);
-  return transact(db, () => {
+  if (activePublicKeys(db).length >= MAX_STATEMENT_KEYS) return { ok: false, reason: "too_many_keys" };
+  const root = ensureTrustRoot(db, issuer, now);
+  return transact<RotationAnswer>(db, () => {
     const key = mintSigningKey(db, now);
-    return { key, statement: ensureStatement(db, issuer, now) };
+    endorse(db, issuer, { kid: root.kid, jwk: root.jwk }, key, now);
+    return { ok: true, key, statement: ensureStatement(db, issuer, now) };
   });
 }
 
 export type RetirementAnswer =
   | { ok: true; statement: StoredStatement | null }
-  | { ok: false; reason: Extract<RetireKeyResult, { ok: false }>["reason"] | "statement_stale" };
+  | { ok: false; reason: Extract<RetireKeyResult, { ok: false }>["reason"] | "statement_stale" | "machines_behind" };
 
 /**
- * Retiring is the switch: the next token is signed by the oldest key left. With the root off this host it is refused until
- * an installed statement names every key that stays, or the fleet would be handed tokens it has never been told to accept.
+ * Retiring is the switch: the next token is signed by the oldest key left. Refused with the root off this host until an
+ * installed statement names every key that stays, and then while `behind` is above zero: a caller that forces passes zero.
  */
-export function retireKey(db: DatabaseSync, issuer: string, kid: string, now = Date.now()): RetirementAnswer {
+export function retireKey(db: DatabaseSync, issuer: string, kid: string, behind = 0, now = Date.now()): RetirementAnswer {
   const root = ensureTrustRoot(db, issuer, now);
   const active = activeKids(db);
-  if (!root.online && active.includes(kid) && active.length > 1) {
+  if (!active.includes(kid)) return { ok: false, reason: "not_found" };
+  if (active.length <= 1) return { ok: false, reason: "last_active" };
+  if (!root.online) {
     const stated = newestStatement(db);
     const named = stated !== null && stated.rootKid === root.kid ? stated.kids : [];
     if (active.some((one) => one !== kid && !named.includes(one))) return { ok: false, reason: "statement_stale" };
   }
+  if (behind > 0) return { ok: false, reason: "machines_behind" };
   return transact<RetirementAnswer>(db, () => {
     const retired = retireSigningKey(db, kid, now);
     if (!retired.ok) return retired;
@@ -231,7 +259,7 @@ export type InstallRefusal =
   | "not_newer"
   | "keyset_mismatch";
 
-/** A statement signed elsewhere. It must name exactly the active keys: one that left the signer out would darken the fleet. */
+/** A statement signed elsewhere. It must name exactly the active keys, by id and by bytes: one that left the signer out would darken the fleet. */
 export function installStatement(
   db: DatabaseSync,
   issuer: string,
@@ -249,8 +277,7 @@ export function installStatement(
   if (payload === null) return { ok: false, reason: "unreadable" };
   if (payload.iss !== issuer) return { ok: false, reason: "wrong_issuer" };
   if (payload.v <= (newestStatement(db)?.version ?? 0)) return { ok: false, reason: "not_newer" };
-  const named = payload.keys.map((key) => key.kid).sort();
-  if (JSON.stringify(named) !== JSON.stringify(activeKids(db))) return { ok: false, reason: "keyset_mismatch" };
+  if (namedKeys(payload.keys) !== namedKeys(activePublicKeys(db))) return { ok: false, reason: "keyset_mismatch" };
   db.prepare("INSERT INTO key_statements (version, root_kid, statement, created_at) VALUES (?, ?, ?, ?)").run(
     payload.v,
     root.kid,
@@ -304,17 +331,21 @@ export function adoptRoot(
     }
   }
 
-  return transact<{ ok: true; root: TrustRoot }>(db, () => {
-    db.prepare("UPDATE trust_roots SET retired_at = ?, private_pem = NULL WHERE retired_at IS NULL").run(now);
-    db.prepare("INSERT INTO trust_roots (kid, public_jwk, private_pem, created_at) VALUES (?, ?, NULL, ?)").run(
-      kid,
-      JSON.stringify(jwk),
-      now,
-    );
-    if (leaving !== null && signed !== null) writeEndorsement(db, kid, leaving.kid, signed, now);
-    for (const signer of activeSigningKeys(db)) endorse(db, issuer, { kid, jwk }, signer, now);
-    return { ok: true, root: { kid, jwk, online: false, createdAt: now } };
-  });
+  return erasingKeys<{ ok: true; root: TrustRoot }>(
+    db,
+    () => {
+      db.prepare("UPDATE trust_roots SET retired_at = ?, private_pem = NULL WHERE retired_at IS NULL").run(now);
+      db.prepare("INSERT INTO trust_roots (kid, public_jwk, private_pem, created_at) VALUES (?, ?, NULL, ?)").run(
+        kid,
+        JSON.stringify(jwk),
+        now,
+      );
+      if (leaving !== null && signed !== null) writeEndorsement(db, kid, leaving.kid, signed, now);
+      for (const signer of activeSigningKeys(db)) endorse(db, issuer, { kid, jwk }, signer, now);
+      return { ok: true, root: { kid, jwk, online: false, createdAt: now } };
+    },
+    () => leaving?.online === true,
+  );
 }
 
 export interface AnnouncedKeyset {
@@ -324,32 +355,45 @@ export interface AnnouncedKeyset {
 }
 
 /**
- * What the relay hands a daemon on its dial, as strings another process signed: the live root's newest statement, and the
- * endorsements of it and of each root before it along the handovers, so a daemon several roots behind can follow to it.
+ * What the relay hands a daemon on its dial, as strings another process signed: the live root's newest statement, then the
+ * handover into each root back along the chain, then the live root's introductions by the active signing keys, oldest first,
+ * then those by keys since retired while there is room.
  */
 export function announcedKeyset(db: DatabaseSync): AnnouncedKeyset {
   const live = db.prepare("SELECT kid FROM trust_roots WHERE retired_at IS NULL").get();
+  const liveKid = live === undefined ? null : String(live["kid"]);
   const newest =
-    live === undefined
+    liveKid === null
       ? undefined
-      : db
-          .prepare("SELECT version, statement FROM key_statements WHERE root_kid = ? ORDER BY version DESC LIMIT 1")
-          .get(String(live["kid"]));
+      : db.prepare("SELECT version, statement FROM key_statements WHERE root_kid = ? ORDER BY version DESC LIMIT 1").get(liveKid);
   const endorsements: string[] = [];
-  const isRoot = db.prepare("SELECT 1 AS hit FROM trust_roots WHERE kid = ?");
-  const endorsing = db.prepare(
-    "SELECT signer_kid, endorsement FROM root_endorsements WHERE root_kid = ? ORDER BY created_at DESC, rowid DESC",
+  const handover = db.prepare(
+    "SELECT e.signer_kid, e.endorsement FROM root_endorsements e JOIN trust_roots r ON r.kid = e.signer_kid WHERE e.root_kid = ?",
   );
-  let rootKid: string | null = live ? String(live["kid"]) : null;
-  for (let depth = 0; depth < ANNOUNCED_ROOT_DEPTH && rootKid !== null; depth += 1) {
-    let previous: string | null = null;
-    for (const row of endorsing.all(rootKid)) {
-      endorsements.push(String(row["endorsement"]));
-      const signer = String(row["signer_kid"]);
-      if (previous === null && isRoot.get(signer) !== undefined) previous = signer;
-    }
-    rootKid = previous;
+  const chain: string[] = [];
+  let rootKid = liveKid;
+  for (let hop = 0; hop < MAX_ROOT_HANDOVERS && rootKid !== null; hop += 1) {
+    chain.push(rootKid);
+    const row = handover.get(rootKid);
+    if (row === undefined) break;
+    endorsements.push(String(row["endorsement"]));
+    rootKid = String(row["signer_kid"]);
   }
+  if (liveKid !== null) {
+    const introductions = db
+      .prepare(
+        "SELECT e.endorsement FROM root_endorsements e JOIN signing_keys k ON k.kid = e.signer_kid " +
+          "WHERE e.root_kid = ? AND k.retired_at IS NULL ORDER BY k.created_at ASC, k.rowid ASC",
+      )
+      .all(liveKid);
+    for (const row of introductions) endorsements.push(String(row["endorsement"]));
+  }
+  // Last, a daemon that slept through a rotation: the key it holds is retired here and still introduces a root to it.
+  const retired = db.prepare(
+    "SELECT e.endorsement FROM root_endorsements e JOIN signing_keys k ON k.kid = e.signer_kid " +
+      "WHERE e.root_kid = ? AND k.retired_at IS NOT NULL ORDER BY k.retired_at DESC, k.rowid DESC",
+  );
+  for (const kid of chain) for (const row of retired.all(kid)) endorsements.push(String(row["endorsement"]));
   return {
     statement: newest ? String(newest["statement"]) : null,
     version: newest ? Number(newest["version"]) : null,

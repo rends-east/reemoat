@@ -24,7 +24,7 @@ import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
-import { weighAnnouncement } from "../src/keyset.js";
+import { createKeysetTaker } from "../src/keyset.js";
 import { boundedInt } from "../src/http.js";
 import { atOrUnder, expandHome, resolveStateRoot } from "../src/paths.js";
 import {
@@ -41,6 +41,7 @@ import { createApp } from "../src/server.js";
 import { keyFingerprint, localStaticKey } from "@reemoat/protocol";
 import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
 import { DeviceGate } from "../src/devices.js";
+import { bindIsLoopback } from "../src/origin.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
@@ -178,6 +179,14 @@ console.log(
 const liveMachineKey = (): string | null => stores.machineKeys.active()?.publicKey ?? null;
 const deviceGate = new DeviceGate(stores.knownDevices, liveMachineKey);
 if (deviceGate.locked) console.log("devices: locked to the ones this machine already knows");
+// The lock is over keys that opened a channel through the relay; a listener reachable any other way is outside it.
+const listensOn = bindIsLoopback(host) ? "loopback" : "beyond";
+if (deviceGate.locked && listensOn === "beyond") {
+  console.error(
+    `warning: devices are locked, but REEMOAT_HOST=${host} lets this daemon be reached without the relay, where the lock does not apply.\n` +
+      "  Bind it to 127.0.0.1, or treat every signed token as a way in.",
+  );
+}
 
 const enrollmentWarning = enrollmentIgnored(process.env["REEMOAT_AUTH"], stores.identity.load());
 if (enrollmentWarning !== null) console.error(`warning: ${enrollmentWarning}`);
@@ -467,6 +476,7 @@ const { app, injectWebSocket } = createApp({
   peers: { hub: peers, links: stores.peerLinks },
   devices: deviceGate,
   machineKey: liveMachineKey,
+  listensOn,
 });
 
 if ((process.env["REEMOAT_RELAY"] ?? "").trim().length > 0) {
@@ -826,39 +836,24 @@ async function buildVerifier(): Promise<AuthSetup> {
     process.exit(2);
   }
 
-  // Saved before it takes effect, so a restart never verifies against a key set this file does not hold.
-  let held: StoredIdentity = identity;
-  let lastRefusal: string | null = null;
-  const keyset: AuthSetup["keyset"] = {
-    keysetVersion: () => held.keysetVersion,
-    onKeyset: (announced) => {
-      const outcome = weighAnnouncement(held, announced);
-      if (outcome.refused !== null && outcome.refused !== "absent" && outcome.refused !== "not_newer") {
-        // Once per reason, since every redial would say it again.
-        if (lastRefusal !== outcome.refused) {
-          console.error(`keys: the relay announced a key set this machine did not take (${outcome.refused}); the keys it holds still verify`);
-        }
-        lastRefusal = outcome.refused;
-      }
-      if (outcome.next === held) return;
-      const next: StoredIdentity = {
-        ...held,
-        keys: [...outcome.next.keys],
-        root: outcome.next.root,
-        keysetVersion: outcome.next.keysetVersion,
-      };
-      stores.identity.save(next);
-      held = next;
-      if (outcome.rootChanged) console.log(`keys: root ${next.root?.kid ?? "(none)"} now vouches for this control plane's signing keys`);
-      if (outcome.keysChanged) {
-        signed.replaceKeys(next.keys);
-        lastRefusal = null;
-        console.log(
-          `keys: took key set v${String(next.keysetVersion)} off the tunnel dial (${next.keys.map((key) => key.kid).join(", ")})`,
-        );
-      }
-    },
-  };
+  const taker = createKeysetTaker<StoredIdentity>({
+    held: identity,
+    store: stores.identity,
+    verifier: signed,
+    onRefused: (reason) =>
+      console.error(`keys: the relay announced a key set this machine did not take (${reason}); the keys it holds still verify`),
+    onRootChanged: (root) => console.log(`keys: root ${root?.kid ?? "(none)"} now vouches for this control plane's signing keys`),
+    onKeysTaken: (next) =>
+      console.log(
+        `keys: took key set v${String(next.keysetVersion)} off the tunnel dial (${next.keys.map((key) => key.kid).join(", ")})`,
+      ),
+    onSaveFailed: (error) =>
+      console.error(
+        `keys: could not store the key set the relay announced (${describe(error)}); ` +
+          "the keys this machine holds still verify, and the next dial offers it again",
+      ),
+  });
+  const keyset: AuthSetup["keyset"] = { keysetVersion: taker.keysetVersion, onKeyset: taker.onKeyset };
 
   if (authMode === "both") {
     if (shared === null) {

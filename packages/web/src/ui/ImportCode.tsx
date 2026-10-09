@@ -9,7 +9,7 @@ import { displayCwd } from "../paths";
 import type { MachineId } from "../ids";
 import { Button, Icon, SHEET_FOOT, SHEET_SCROLL } from "./bits";
 import { Sheet } from "./Sheet";
-import { copyText } from "./clipboard";
+import { COPY_FAILED, copyText } from "./clipboard";
 import { toast } from "./Toast";
 
 /** A step inside the New session form on component state, not a route: a nested route would unmount the form and its choices (Q7.69). */
@@ -151,7 +151,7 @@ export function ImportCode({
   const copy = (): void => {
     void copyText(IMPORT_SKILL).then((ok) => {
       if (!ok) {
-        toast("error", "Could not copy. Select the text and copy it by hand.");
+        toast("error", COPY_FAILED);
         return;
       }
       setCopied(true);

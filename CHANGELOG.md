@@ -36,6 +36,12 @@ it — so a citation here would be the one kind nothing checks.
   read or edit the list, so on a locked machine its signature is no longer a way in.
   Off by default. Needs the app and the daemon both updated; an older app against a
   locked machine reads it as unreachable.
+- **The daemon answers its own app, and no other web page.** A request from a page that
+  is not the app's own is refused before anything else, so a site open in a browser on
+  the same computer cannot reach the daemon on `127.0.0.1`, whatever token it carries.
+  Programs on the computer (`pnpm client`) are unaffected. A daemon whose `REEMOAT_HOST`
+  is not loopback refuses to be locked to its devices, since the lock covers only what
+  comes through the relay.
 - **The app remembers the key it first reached a machine with.** If the server later
   names a different one, the app keeps dialling the key it holds, and only when that
   stops answering does it say the machine's key changed and ask before trusting the new
@@ -48,17 +54,31 @@ it — so a citation here would be the one kind nothing checks.
   daemon dials in, and a daemon on a live tunnel redials for a newer one within a ping.
   `cpctl admin rotatekey` no longer takes the fleet offline: the oldest key goes on
   signing until `cpctl admin retirekey` switches to the next. A daemon older than this
-  release takes no statement, so update daemons before retiring a key.
+  release takes no statement, so update daemons before retiring a key: the retire is
+  refused while a machine that is dialled in has not been offered the new key set, and
+  `--force` is for a leaked key. Retiring also ends every capability the old key signed,
+  so each open app reads its machines as unreachable for up to three and a half minutes
+  and links between machines wait for their owner's app. At most sixteen keys are active
+  at once.
 - **The root can be kept off the server.** `cpctl root new` makes one locally,
   `cpctl admin root adopt` hands over to it, and `cpctl admin keyset draft`,
   `cpctl root sign` and `cpctl admin keyset install` are the rotation from then on.
+  `root sign` prints what it is about to sign, and `--expect` names the keys it must
+  find.
 - **`REEMOAT_CP_KEY_SECRET`** wraps the control plane's private keys at rest, so the
-  database file and its backups are no longer the signing key by themselves. Unset,
-  nothing changes. The control plane refuses to start on wrapped keys with a missing or
-  wrong secret; `REEMOAT_CP_KEY_UNWRAP=1` is the way back for one start.
+  database file and the backups made from then on are no longer the signing key by
+  themselves. The first start with it also removes the unwrapped bytes from the file. A
+  backup made before that still holds the key, so rotate and retire once after setting
+  the secret. Unset, nothing changes. The control plane refuses to start on wrapped keys
+  with a missing or wrong secret; `REEMOAT_CP_KEY_UNWRAP=1` is the way back for one
+  start.
 
 ### Changed
 
+- **The Privacy Policy says what the relay can and cannot see.** It still said there was
+  no end-to-end encryption. It now says that what a session carries is encrypted between
+  your app and your machine, that the relay sees only that a connection exists, and that
+  this is a statement about the relay and not about the operator as a whole.
 - **The app is drawn at once.** A signed-in launch used to hold a small spinner, with no
   menu, until the server answered or ten seconds passed. The shell is now on screen from
   the first frame, so the menu and the other accounts are always in reach; on Android,
@@ -93,6 +113,8 @@ it — so a citation here would be the one kind nothing checks.
 - **Only the conversation and a text field take a selection.** A drag across the composer,
   a chip, the list or a header used to paint it blue, and Select All took the whole
   window. The folder and branch in a conversation's header are no longer selectable.
+  A sign-in's terminal output, what an installer said and what a plugin printed each
+  have a copy button instead.
 
 ### Fixed
 

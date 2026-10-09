@@ -19,10 +19,19 @@ import { codeFingerprint, enroll, EnrollError, parseEnrollResponse } from "../sr
 import { weighAnnouncement, type KeysetHeld } from "../src/keyset.js";
 import { openStores, type StoredIdentity } from "../src/store/sqlite.js";
 import { tmp } from "./tmp.js";
-import { formatKeysetPing, parseKeysetPing, parseKeysetVersion, readKeysetHeaders } from "../src/relay/protocol.js";
+import {
+  KEYSET_HEADER,
+  KEYSET_ROOT_HEADER,
+  KEYSET_VERSION_HEADER,
+  formatKeysetPing,
+  parseKeysetPing,
+  parseKeysetVersion,
+  readKeysetHeaders,
+} from "../src/relay/protocol.js";
 import {
   KEYSET_TYP,
   ROOT_TYP,
+  TOKEN_TYP,
   jwkThumbprint,
   publicKeyToJwk,
   signCompact,
@@ -606,6 +615,25 @@ process.stdout.write("\na key set announced on the tunnel dial\n");
     "malformed_token",
   );
 
+  // One payload every reader would take, so the typ is the only thing left to tell the three apart.
+  const everything = { iss: ISS, sub: "u_alice", aud: "m_self", jti: "t_every", iat, nbf: iat, exp: iat + 300, scp: ["session:read"], v: 2, keys: [named(k2)], root: named(root) };
+  const typed = (typ: string, by: ReturnType<typeof pair>): string => signCompact(typ, everything, by.kid, by.privateKey);
+  const tokens = new SignedTokenVerifier({ identity: { machineId: "m_self", issuer: ISS, keys: [named(k1)] } });
+  const introduces = (endorsements: string[]): string | null => weighAnnouncement(enrolled, { statement: null, endorsements }).next.root?.kid ?? null;
+  const states = (text: string): string | null => weighAnnouncement(rooted, { statement: text, endorsements: [] }).refused;
+  check(
+    "under its own typ that payload is a token, an endorsement and a statement",
+    [codeOf(tokens.verify(typed(TOKEN_TYP, k1), now)), introduces([typed(ROOT_TYP, k1)]), states(typed(KEYSET_TYP, root))],
+    ["(accepted)", root.kid, null],
+  );
+  check(
+    "under either other typ it is no token, whoever signed it",
+    [codeOf(tokens.verify(typed(KEYSET_TYP, k1), now)), codeOf(tokens.verify(typed(ROOT_TYP, k1), now))],
+    ["malformed_token", "malformed_token"],
+  );
+  check("nor an endorsement, though a held key signed it", introduces([typed(TOKEN_TYP, k1), typed(KEYSET_TYP, k1)]), null);
+  check("nor a statement, though the held root signed it", [states(typed(TOKEN_TYP, root)), states(typed(ROOT_TYP, root))], ["unreadable", "unreadable"]);
+
   const base = { machineId: "m_self", issuer: ISS, keys: [named(k1)] };
   const withRoot = parseEnrollResponse({ ...base, root: named(root), keyset: statement(7, [k1, k2]) });
   check("enrollment pins the root it is handed", withRoot.root?.kid, root.kid);
@@ -665,6 +693,14 @@ process.stdout.write("\na key set announced on the tunnel dial\n");
   check("the dial announces a version as digits", [parseKeysetVersion("12"), parseKeysetVersion(["7", "9"]), parseKeysetVersion("0")], [12, 7, 0]);
   check("and anything else is no announcement", [parseKeysetVersion("1.5"), parseKeysetVersion("-1"), parseKeysetVersion("v2"), parseKeysetVersion(undefined)], [null, null, null, null]);
   check("the ping carries the newest version", parseKeysetPing(formatKeysetPing(42)), 42);
+  // Literals from here: a daemon and a relay from different releases meet on these bytes, and a round trip would agree with any spelling.
+  check("spelled as every release spells it", [formatKeysetPing(42), parseKeysetPing("ks:42")], ["ks:42", 42]);
+  check("each signed object has the typ another release compares it with", [KEYSET_TYP, ROOT_TYP], ["reemoat-keyset+jwt", "reemoat-root+jwt"]);
+  check(
+    "and the dial's three headers the names another release reads",
+    [KEYSET_HEADER, KEYSET_ROOT_HEADER, KEYSET_VERSION_HEADER],
+    ["x-reemoat-keyset", "x-reemoat-root", "x-reemoat-keyset-version"],
+  );
   check("and a ping that carries something else says nothing", [parseKeysetPing(""), parseKeysetPing("ks:"), parseKeysetPing("42")], [null, null, null]);
   const headers = readKeysetHeaders(statement(1, [k1]), `${endorsement(root, k1)} not-a-jws ${endorsement(root, k2)}`);
   check("the 101's headers are read as a statement and its endorsements", [headers.statement !== null, headers.endorsements.length], [true, 2]);

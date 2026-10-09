@@ -155,6 +155,8 @@ export interface MachineState {
 export interface MachinePorts {
   pins?: MachinePins;
   devicePublicKey?: () => string | null;
+  /** This device says it is offline, or the server is unreachable or refusing: a probe that fails then proves nothing about a key. */
+  linkInDoubt?: () => boolean;
 }
 
 const fingerprints = new Map<string, string | null>();
@@ -170,11 +172,9 @@ function fingerprintOf(key: string | null): string | null {
   return made;
 }
 
-function approvalCodeOf(device: string | null, machine: string | null): string | null {
+function approvalCodeOf(device: string | null): string | null {
   const ours = device === null ? null : fromBase64Url(device);
-  const theirs = machine === null ? null : fromBase64Url(machine);
-  if (ours === null || theirs === null || ours.length !== 32 || theirs.length !== 32) return null;
-  return approvalCode(ours, theirs);
+  return ours === null || ours.length !== 32 ? null : approvalCode(ours);
 }
 
 // Whitelist: an unknown method is unsafe, and the daemon's DELETEs are idempotent.
@@ -227,6 +227,7 @@ export class MachineConnection {
   private pendingApproval = false;
   private readonly pins: MachinePins;
   private readonly devicePublicKey: () => string | null;
+  private readonly linkInDoubt: () => boolean;
   private channel: Channel | null = null;
   private channelKey: string | null = null;
   private channelBase: string | null = null;
@@ -253,6 +254,7 @@ export class MachineConnection {
   ) {
     this.pins = ports.pins ?? storedPins();
     this.devicePublicKey = ports.devicePublicKey ?? ((): string | null => nativeBoot()?.devicePublicKey ?? null);
+    this.linkInDoubt = ports.linkInDoubt ?? ((): boolean => false);
     this.id = record.id as MachineId;
     this.name = record.name;
     this.relayUrl = record.relayUrl;
@@ -336,7 +338,7 @@ export class MachineConnection {
       lastError: this.lastError,
       keyFingerprint: fingerprintOf(this.machineKey),
       offeredKeyFingerprint: fingerprintOf(this.offeredKey),
-      approvalCode: this.offlineReason === "device_pending" ? approvalCodeOf(this.devicePublicKey(), this.machineKey) : null,
+      approvalCode: this.offlineReason === "device_pending" ? approvalCodeOf(this.devicePublicKey()) : null,
     };
   }
 
@@ -434,9 +436,9 @@ export class MachineConnection {
     this.offeredKey = null;
   }
 
-  /** Somebody here says the key the server now names is the machine's: pinned from here on. Nothing offered, nothing done. */
-  acceptOfferedKey(): boolean {
-    if (this.offeredKey === null) return false;
+  /** Somebody here says the key they compared is the machine's: pinned only while that one is still what is on offer (Q1.657). */
+  acceptOfferedKey(expected: string): boolean {
+    if (this.offeredKey === null || fingerprintOf(this.offeredKey) !== expected) return false;
     this.pins.set(this.id, this.offeredKey);
     this.machineKey = this.offeredKey;
     this.offeredKey = null;
@@ -483,12 +485,12 @@ export class MachineConnection {
     return this.chosen;
   }
 
-  /** When the held route was proved, on `monotonicNow`'s clock; null with none held. */
   /** Monotonic, when the newest probe began: one that fails says nothing of anything that answered after that. */
   probedSince(): number {
     return this.probeBegan;
   }
 
+  /** When the held route was proved, on `monotonicNow`'s clock; null with none held. */
   routeSince(): number | null {
     return this.chosen === null ? null : this.chosenAt;
   }
@@ -547,10 +549,10 @@ export class MachineConnection {
     return this.settleRoute({ base: relay, kind: "relay" }, null);
   }
 
-  /** A machine that will not let this device in says so; past that, a key the server changed is the suspect before the wire is. */
+  /** A machine that will not let this device in says so; past that, a key the server changed is the suspect only on a link that works. */
   private unansweredBecause(): OfflineReason {
     if (this.pendingApproval) return "device_pending";
-    return this.offeredKey === null ? "no_route" : "machine_key_changed";
+    return this.offeredKey === null || this.linkInDoubt() ? "no_route" : "machine_key_changed";
   }
 
   private settleRoute(route: Route | null, reason: OfflineReason): Route | null {

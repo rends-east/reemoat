@@ -4597,32 +4597,74 @@ edit this table, so the journal catches the careless and the lock is only as goo
 devices inside it. An unlocked machine is as open to the Authority as before. And the
 Authority still routes: it can refuse to carry anything.
 
+**Loopback is held to this computer by the daemon, not by the browser.** A request with
+no channel has no key, so the list cannot weigh it, and the listener answered every web
+origin: a page opened on that computer, carrying a token the Authority signed for
+itself, could switch the lock off or `vouch` a key of its own. Whether a browser lets an
+`https:` page reach `http://127.0.0.1` differs by browser and was nothing to rest on.
+Now the first thing the listener does is refuse a request whose `Origin` is a page other
+than the app's own (`pageOriginAllowed`: the shell's origins, and a page served from
+this computer, which is the shell in development), with no CORS header, its preflight
+included. A caller that sends no `Origin` is a program and passes. A page whose name
+was rebound to this address makes same-origin `GET`s that carry no `Origin`, so a
+loopback-bound daemon also refuses a `Host` that is not this computer
+(`hostIsLoopback`). A daemon bound beyond loopback (`bindIsLoopback`) refuses to take
+the lock (`409 lock_needs_loopback`) and warns at start if it already holds one. What
+is left outside is a program already on the computer, under any uid: that is not
+built, and a secret from the `0600` announcement file is the seam.
+
 **Bounds.** `MAX_PENDING_DEVICES` waiting at once, oldest out; a request nobody answers
 is dropped after `PENDING_DEVICE_TTL_MS`; `MAX_KNOWN_DEVICES` journal rows while
 unlocked, least recently seen out, and **never trimmed while locked**, where every row
 is somebody's way in.
 
+**Who is told a device is waiting.** The count rides `GET /sessions` as
+`devicesPending`, on the poll every app already makes, and only for a caller holding
+`machine:admin`: nobody else can answer the request, and their bell led to a refusal.
+A list that cannot be read costs the field, never the listing.
+
 **Status.** Current.
 
 ### Q1.656 — What does somebody compare before letting a device in, and why ten characters?
 
-**Decision.** `approvalCode`: BLAKE2s over a label, the asking key and the machine's
-key, as ten characters of Crockford base32 in two groups. The waiting device derives it
-from its own key and the machine key it was told; the machine derives it from the key
-that asked and its own. Equal codes mean the request the owner is looking at is the
-device in their hand, **and** that the device was told the machine's real key.
+**Decision.** `approvalCode`: BLAKE2s over a label and **the asking key alone**, as ten
+characters of Crockford base32 in two groups. The waiting device derives it from its own
+key; the machine derives it from the key that asked. Equal codes mean the request the
+owner is looking at is the device in their hand.
 
-**Why both keys.** A code over the asking key alone lets in the right device and says
-nothing about which machine that device thinks it is talking to. With the machine's key
-in it, an Authority that named a key of its own to the new device produces a different
-code on its screen, so the comparison covers first contact, which Q1.657's pin cannot.
+**Why one key, and not the machine's as well.** The first version hashed both, so that
+an Authority naming a key of its own to the new device would produce a different code on
+its screen. It bought the opposite. The Authority then chooses a key on *each* side of
+the comparison, its own asking key towards the machine and the machine key it names to
+the device, so equal codes are a search over two free inputs: about 2^25 key generations
+a side for fifty bits, where one free input needs 2^50. Measured 2026-10-09 with this
+function and real X25519 keys, 44 000 keys a second on one core: a 30-bit prefix agreed
+after 52 000 keys (1.2 s), a 40-bit prefix after 3.3 million (76 s), which puts ten
+characters at 25 to 50 minutes. With one key in the code the Authority has one input to
+choose.
+
+**What a substituted machine key looks like now.** A device told a key of the
+Authority's dials the Authority and never the machine, so no request under its code
+appears there: the owner has nothing to let in, and the Authority's own request shows
+another code. Which machine a device reached is `keyFingerprint`'s to say, eighty bits
+on both screens (Q1.657).
+
+**A name may not carry a code.** The asking device names itself, and its name is drawn
+by the request. An Authority that knows a waiting phone's key knows its code, and could
+dial with a key of its own named `Rends-iPhone 7K2M9-PQ4XA`. So `drawable`, which every
+claimed name, link label and platform passes through, removes what nobody sees (bidi
+controls, zero-width and other default-ignorable characters, after NFKC) and any token
+in the shape of a code or a fingerprint that `readsAsCode`: written in capitals as a
+code is drawn, or grouped with a digit in it. `Steve Adams` and `server2024` are names
+and stay. A name left empty is no name. And the screen draws the code on a line of its
+own that holds nothing the device chose.
 
 **Why not four or six.** Nothing in the exchange commits either side before the other
 speaks, so a short code can be ground: the Authority knows the device's key from
-registration and chooses its own, and at 30 bits a collision is seconds of key
-generation. Fifty bits is on the order of 10^15 scalar multiplications. A commit-reveal
-exchange would let six digits do, at the cost of three more messages and a frame-table
-change between two artifacts that ship apart (`compatibility.md`'s open question).
+registration and chooses its own. Thirty bits is hours of key generation on one core
+and fifty is on the order of 10^15. A commit-reveal exchange would let six digits do, at
+the cost of three more messages and a frame-table change between two artifacts that
+ship apart (`compatibility.md`'s open question).
 
 **Why one implementation.** It lives in `packages/protocol`, beside `keyFingerprint`,
 and `protocolcheck` pins a vector for each: two ends that derive a code two ways agree
@@ -4639,6 +4681,16 @@ never dialled**. The held key is. Only if it no longer answers does the machine 
 `machine_key_changed`, and trusting the new key is a confirmation somebody gives
 (`acceptOfferedKey`).
 
+**What is trusted is what was compared.** `acceptOfferedKey` takes the fingerprint that
+was on screen when the question was armed and refuses if another key is on offer by the
+press: every listing may replace the offer, and the server that names it writes the
+listing. The state is not raised from a probe that failed while this device is offline
+or the server itself is in trouble (`linkInDoubt`), since the server that names the
+new key also carries the relay and can make the held one stop answering. Its sentence
+says what is known, that the machine does not answer on the key held and the server
+names another, and the question says where the true value is: what the machine's own
+daemon prints at start.
+
 **Why dial the held key first.** A legitimate change and a substituted key look the same
 from the Authority's answer and differ in one observable: after a real reinstall the old
 key stops answering, and under a substitution it still does. So a lie about the key
@@ -4654,7 +4706,10 @@ Authority that wants in mints a capability and connects, which is Q1.655's subje
 new device, or a new machine, believes the first answer; the lock's code closes that for
 whoever turns the lock on, and `keyFingerprint`, which the daemon prints at start and
 the machine's screen shows, closes it for whoever compares by eye. Pins are per device
-and not synced.
+and not synced. On macOS every account's webview shares the one stored value, so a
+miss reads storage again and a write merges into what is there (`storedPins`): written
+whole from one webview's copy, a pin another had made was lost, and the next launch
+took whatever key the server named.
 
 **Rejected: the shell's config.** It would survive a wiped webview and cost a bridge
 command in each direction. A wiped store is a first use again, which is what a new
@@ -4679,15 +4734,27 @@ its own row). Unset, a row is the PEM it always was and nothing changes for anyb
   would sign tokens no daemon in the fleet holds.
 - **The first start with the secret wraps what is there**, in one transaction
   (`wrapStoredKeys`).
+- **And takes the old bytes out of the file** (`erasingKeys`). An `UPDATE` replaces a
+  value and leaves its bytes: measured 2026-10-09 on throwaway files, the PEM was still
+  in the main file until a checkpoint for one, two and three keys, and with two keys
+  one survived a `wal_checkpoint(TRUNCATE)` as well. With `secure_delete` on for the
+  write and a truncating checkpoint after it, none did. An adopted root's erased
+  private half goes the same way. `BEGIN IMMEDIATE`, since the relay commits on the
+  same file and a deferred transaction that reads, derives a key and then writes can
+  be refused its upgrade.
 - **There is a way back** (`REEMOAT_CP_KEY_UNWRAP`, `unwrapStoredKeys`), because
   `compatibility.md`'s rule 3 says yesterday's image must start on today's database and
   an older build cannot read a wrapped key.
 
-**What it covers.** The file and every copy of it: `deploy/backup.sh`'s output, a
-snapshot, a read-only injection, the relay's host. **What it does not**: whoever is on
-the Authority's host while it runs holds the secret and can sign, and can take the key
-away. Keeping the key where it cannot be taken is a signer outside this process, which
-is not built.
+**What it covers.** The file as it stands from the first start with the secret, and
+every copy made after it: `deploy/backup.sh`'s output, a snapshot, a read-only
+injection, the relay's host. **What it does not**: a copy made **before** that start
+still holds the key in the clear, so a signing key that was never stored so comes only
+from a rotate and a retire after the secret is set. A host that can **write** the
+database can plant a key rather than read one; the wrap is confidentiality, not
+integrity. And whoever is on the Authority's host while it runs holds the secret and
+can sign, and can take the key away. Keeping the key where it cannot be taken is a
+signer outside this process, which is not built.
 
 **The cost.** The secret is now the thing to keep. Lost, the keys are gone and the fleet
 re-enrolls, exactly as a lost database always meant.
@@ -4716,10 +4783,25 @@ side, and it is pure.
   compared exactly as a token's is, so neither verifies as a token nor a token as one.
 - **A live tunnel learns from the ping.** The relay's heartbeat carries the newest
   version; a daemon holding less closes and redials, once per version
-  (`chasedKeysets`), so a statement that never verifies costs one dial.
+  (`chasedKeysets`), so a statement that never verifies costs one dial. One that
+  verified and could not be **saved** is another matter (`createKeysetTaker` reports it
+  and leaves the verifier alone): it is chased again, at most every `KEYSET_RETRY_MS`,
+  since a redial cuts every stream on the tunnel.
 - **The oldest active key signs** (`tokenSigningKey`). Rotating publishes and darkens
-  nothing; retiring is the switch, and `machinesBehind` says how much of the fleet has
-  been offered the statement first.
+  nothing; retiring is the switch. `machinesBehind` counts the dialled-in machines not
+  yet offered the statement, and while it is above zero the retire is refused
+  (`409 machines_behind`) unless forced, which is for a leak.
+- **Every signing key endorses the root**: at the root's making, at an adoption, and
+  when the key is minted (`rotateSigningKey`), with `ensureTrustRoot` filling in any
+  that is missing. A key minted after the root would otherwise introduce it to nobody,
+  and a daemon that enrolled on an older build after a rotation holds only such keys.
+- **What is announced is ordered and bounded** (`announcedKeyset`,
+  `MAX_KEYSET_ENDORSEMENTS`): the handover into each root back along the chain, then
+  the live root's introductions by the active keys, oldest first, then those by keys
+  since retired, for a daemon that slept through a rotation. Cut from the end, so the
+  cap never takes a handover.
+- **No more keys than a statement may name**: a rotation past `MAX_STATEMENT_KEYS` is
+  refused before anything is written (`409 too_many_keys`).
 - **Enrollment hands over the root and the statement**, as two optional fields.
 
 **Why this keeps Q1.9.** The property was never "one request"; it was that an Authority
@@ -4733,12 +4815,26 @@ rotation with no ceremony. `adoptRoot` hands over to a key whose private half wa
 there (`cpctl root new`, then `admin root adopt`): the leaving root signs the handover
 and its private half is erased. From then on a statement is drafted on the server,
 signed wherever the root is kept, and installed (`installStatement`, which refuses one
-that does not name exactly the active keys). With the root off the host, taking the
-server yields a signing key until the next statement, and no way to make that last.
+that does not name exactly the active keys, by id and by key). The holder is shown what
+they sign: `cpctl root sign` prints the issuer, the version and every key id before it
+signs, refuses a key whose id is not its own, and takes `--expect` for the ids it must
+find. With the root off the host, taking the server yields a signing key until the next
+statement, and no way to make that last.
+
+**What a retire costs, beyond the daemons.** Every capability an app holds was signed
+by the key just retired. The relay stops verifying it within a second and the app mints
+again only near expiry, so each app reads its machines as unreachable for up to 210 s.
+A link's capability lasts ninety days and stays refused until its owner's app next
+opens.
 
 **What it does not cover.**
 
 - A daemon older than this takes no statement and is darkened by a retire.
+- `machinesBehind` counts what was **offered**. A daemon announces the version it holds
+  before it is handed the next, so one that dialled and refused looks like one that
+  took it.
+- A database restored from before a rotation issues versions the fleet already holds,
+  and a daemon drops those as `not_newer` without a word.
 - A daemon with **no root yet** is introduced to one by any signing key it holds, the
   leaked one included. Whoever holds that key *and* can write the dial's headers can
   give such a daemon a root of their own. The window closes at each daemon's first dial
@@ -29403,7 +29499,9 @@ on its own: 300 schedules of create, open, send on a slow link that loses nothin
   the daemon in the opposite order to the one asked then pruned a live session.
 - **A daemon that started again is its own order** (`instances`, the listing's
   `instanceId`): its log may have lost its tail, and a row held to the old number would
-  stay frozen until the new log passed it.
+  stay frozen until the new log passed it. A listing from the process before it that
+  lands late, overtaken by one of the new process's, is dropped whole: its higher
+  numbers would otherwise put the old rows back, and nothing after could correct them.
 - **One listing per machine is out at a time** (`polling`), keyed on the epoch so a wake's
   own pass is never held up by a poll's.
 - **The conversation on screen stays wanted when it is forgotten.** `forgetSession` keeps
@@ -29738,6 +29836,16 @@ comment calls it generally unreliable.
   (`undialled`, `awayAsks`): a second after it is first missed, then at twice the wait
   each time up to `AWAY_RETRY_MS`. Its probe asks nothing on the wire, so nothing but a
   listing or a token says it is back; the listing that does has it probed at once.
+  That last clause was false as first built: `listMachines` tested `away` after
+  `update`, which publishes and had already weighed the machine as dialled in, so the
+  branch never ran, and the machine was picked up only because its empty probe was
+  counted as a wire failure and given the early passes of one, about fifteen a minute
+  for as long as a laptop slept. Now the membership is read first, an `undialled`
+  machine's probe counts no failure and waits `OFFLINE_RETRY_MS`, the listing sets its
+  own early pass (`weighAway`, `nextDue`), and its answer names the machine
+  (`provedDown`), so no probe is waited for. On a virtual clock, two machines away:
+  thirty probes and thirty-four publishes a minute before, eight and twelve after, and
+  the listing asked at 0, 1, 2, 4, 8 s where it had been 0, 1, 3, 5.7, 9.7.
 - **Passes that meet in one probe count its failure once** (`probe`): an early pass, the
   poll and a wake met in one, and three failures set the next probe four seconds out.
   The early pass sets itself again for what is due after it (`nextDue`), having been one
@@ -29872,8 +29980,11 @@ The paint it repaired cannot happen there any more.
 inside the column the bubble, a sent file, a mention and a peer message. One file outside
 the conversation is on it, `OneTimeSecret`, whose `select-all` is what its own toast tells
 somebody to do when the clipboard refuses. A value needed elsewhere gets a `CopyButton`
-(the device code, the daemon's output, the installer line); the header's folder and
-branch have none and can no longer be copied, which is the cost.
+(the device code, the daemon's output, the installer line, and the three panes that
+were only ever copied by selecting them: a sign-in's terminal output, what the
+installer said, what a plugin printed); the header's folder and branch have none and
+can no longer be copied, which is the cost. A copy that fails says only that
+(`COPY_FAILED`): the old sentence told people to select the text by hand.
 
 **The engine's, left as it is.** A drag begun on chrome that reaches the column selects
 from the column's first line to the pointer: WebKit lets a selection begin inside a
@@ -42278,7 +42389,9 @@ client. Does the answer hold?
 app reaches a daemon on the **same computer** over loopback. `probeRoute` returns
 two answers again; `Route` carries a `kind`, read by `settleAnswer` and by nothing
 else. A browser cannot take this path at all — `localBaseFor` answers `null` outside
-the shell, because a page served over `https:` cannot reach `http://127.0.0.1`.
+the shell, because a page served over `https:` cannot reach `http://127.0.0.1`. That
+last clause is a browser's policy and varies by browser; since Q1.655 the daemon
+refuses such a page itself, by its `Origin`.
 
 **Why, and it is one fact Q7.135 did not weigh: who can take this path.** That entry
 priced the loss correctly — the relay reads live user, machine and grant rows before

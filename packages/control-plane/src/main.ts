@@ -187,9 +187,20 @@ if (keyProblem !== null) {
 }
 // The way back out: an older build cannot read a wrapped key, so a rollback past this one starts with this, once.
 const unwrapAsked = ["1", "true", "yes"].includes((process.env["REEMOAT_CP_KEY_UNWRAP"] ?? "").trim().toLowerCase());
-const keysUnwrapped = unwrapAsked ? unwrapStoredKeys(store.db) : 0;
+let keysUnwrapped = 0;
+let keysWrapped = 0;
+try {
+  if (unwrapAsked) keysUnwrapped = unwrapStoredKeys(store.db);
+  else keysWrapped = wrapStoredKeys(store.db);
+} catch (error) {
+  console.error(
+    `could not ${unwrapAsked ? "unwrap" : "wrap"} the private keys in ${dbPath}: ${describeError(error)}\n` +
+      "  It is one transaction, so every key is stored as it was. Another process writing the same file\n" +
+      "  is the usual cause; start again.",
+  );
+  process.exit(2);
+}
 if (unwrapAsked) configureKeySecret(null);
-const keysWrapped = unwrapAsked ? 0 : wrapStoredKeys(store.db);
 
 const signing = ensureSigningKey(store.db);
 const trustRoot = ensureTrustRoot(store.db, issuer);

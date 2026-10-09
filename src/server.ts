@@ -28,7 +28,8 @@ import { isAuthRequiredMessage, SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
 import type { AgentInstallRuns } from "./agentinstall.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
-import { readDeviceDescription, type DeviceGate } from "./devices.js";
+import { decodeDeviceKey, readDeviceDescription, type DeviceGate, type DevicesAnswer } from "./devices.js";
+import { hostIsLoopback, pageOriginAllowed } from "./origin.js";
 import { jwkThumbprint, x25519Jwk } from "./token.js";
 import {
   importArchive,
@@ -197,6 +198,8 @@ export interface ServerOptions {
   devices?: DeviceGate;
   /** The public half this machine answers handshakes with; a thunk, since a refused dial can promote another. */
   machineKey?: () => string | null;
+  /** How the listener is bound. `loopback` holds a request to this computer's own name; `beyond` refuses the lock, which covers the relay alone. */
+  listensOn?: "loopback" | "beyond";
 }
 
 export interface AppBundle {
@@ -230,6 +233,17 @@ export function createApp(options: ServerOptions): AppBundle {
     if (error instanceof HTTPException) return error.getResponse();
     // 500 is deliberately not in ErrorStatus: this is a failure to answer, not a refusal.
     return c.json(errorEnvelope("internal_error", describeError(error)), 500);
+  });
+
+  // First, and with no CORS header: a page that is not this app's own gets no answer it can read, its preflight included (Q1.655).
+  app.use("*", async (c, next) => {
+    if (!pageOriginAllowed(c.req.header("origin"))) {
+      return jsonError(c, 403, "foreign_origin", "this daemon answers its own app, not a page from elsewhere");
+    }
+    if (options.listensOn === "loopback" && !hostIsLoopback(c.req.header("host"))) {
+      return jsonError(c, 403, "foreign_host", "this daemon is addressed as this computer, not by a name");
+    }
+    return next();
   });
 
   // gzip, then CORS, both before the auth gate: a preflight carries no credential, and a 401 without CORS headers is unreadable.
@@ -680,7 +694,7 @@ export function createApp(options: ServerOptions): AppBundle {
   });
 
   // Who may open an encrypted channel to this machine. machine:admin throughout: the list is who can reach this computer.
-  const devicesAnswer = (c: Context<AppEnv>, gate: DeviceGate) => ({
+  const devicesAnswer = (c: Context<AppEnv>, gate: DeviceGate): DevicesAnswer => ({
     lock: gate.locked,
     fingerprint: gate.fingerprint(),
     you: c.get("principal").keyThumbprint,
@@ -700,6 +714,15 @@ export function createApp(options: ServerOptions): AppBundle {
     if (body instanceof Response) return body;
     const on = body["on"];
     if (typeof on !== "boolean") return jsonError(c, 400, "bad_request", "on must be true or false");
+    // The list is of keys that opened a channel; a listener reachable without the relay lets a signed token in with none.
+    if (on && options.listensOn === "beyond") {
+      return jsonError(
+        c,
+        409,
+        "lock_needs_loopback",
+        "this daemon listens beyond this computer (REEMOAT_HOST), where the lock does not apply; bind it to 127.0.0.1 first",
+      );
+    }
 
     // Whoever turns the lock on stays in: a caller no channel ever recorded names its own key, checked against its capability.
     const offered = body["device"];
@@ -707,12 +730,11 @@ export function createApp(options: ServerOptions): AppBundle {
     if (on && offered !== undefined) {
       const record = typeof offered === "object" && offered !== null ? (offered as Record<string, unknown>) : {};
       const key = typeof record["publicKey"] === "string" ? record["publicKey"] : "";
-      const bytes = /^[A-Za-z0-9_-]{43}$/.test(key) ? new Uint8Array(Buffer.from(key, "base64url")) : null;
-      const kth = bytes === null || bytes.length !== 32 ? null : jwkThumbprint(x25519Jwk(bytes));
-      if (kth === null || kth !== principal.keyThumbprint) {
-        return jsonError(c, 400, "invalid_device", "that key is not the one this capability was issued to");
-      }
-      devices.vouch(key, kth, principal, readDeviceDescription(offered));
+      const bytes = decodeDeviceKey(key);
+      const kth = bytes === null ? null : jwkThumbprint(x25519Jwk(bytes));
+      const vouched =
+        kth !== null && kth === principal.keyThumbprint && devices.vouch(key, kth, principal, readDeviceDescription(offered));
+      if (!vouched) return jsonError(c, 400, "invalid_device", "that key is not the one this capability was issued to");
     }
     devices.setLocked(on);
     return c.json(devicesAnswer(c, devices));
@@ -1388,10 +1410,17 @@ export function createApp(options: ServerOptions): AppBundle {
   });
 
   // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.
-  // Rides the poll every app already makes, so a device asking to be let in is noticed without a second request. Absent at zero.
-  const waitingDevices = (): { devicesPending?: number } => {
-    const waiting = devices?.pendingCount() ?? 0;
-    return waiting === 0 ? {} : { devicesPending: waiting };
+  // Rides the poll every app already makes, so a device asking to be let in is noticed without a second request.
+  // Absent at zero, and for a caller without machine:admin, who could do nothing about it.
+  const waitingDevices = (c: Context<AppEnv>): { devicesPending?: number } => {
+    if (devices === null || !hasScope(c.get("principal"), "machine:admin")) return {};
+    try {
+      const waiting = devices.pendingCount();
+      return waiting === 0 ? {} : { devicesPending: waiting };
+    } catch {
+      // A device list that cannot be read is no reason to fail the session listing.
+      return {};
+    }
   };
 
   app.get("/sessions", read, (c) => {
@@ -1400,7 +1429,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const limit = limitParam === undefined ? null : Math.max(0, boundedInt(limitParam, 0));
 
     if (limit === null) {
-      return c.json({ sessions: all, total: all.length, truncated: false, now: Date.now(), instanceId, ...waitingDevices() });
+      return c.json({ sessions: all, total: all.length, truncated: false, now: Date.now(), instanceId, ...waitingDevices(c) });
     }
 
     const ranked = [...all].sort((a, b) => listRank(a) - listRank(b) || b.createdAt - a.createdAt);
@@ -1411,7 +1440,7 @@ export function createApp(options: ServerOptions): AppBundle {
       truncated: sessions.length < all.length,
       now: Date.now(),
       instanceId,
-      ...waitingDevices(),
+      ...waitingDevices(c),
     });
   });
 

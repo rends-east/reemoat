@@ -72,6 +72,7 @@ import {
   type AgentConfig,
   type CreatedMachine,
   type LaggedFrame,
+  type MachineRecord,
   type Me,
   type PendingElicitationSnapshot,
   type PendingPermissionSnapshot,
@@ -489,7 +490,7 @@ export interface AppState {
   cpError: string | null;
   /** This device's own network; offline only on a positive signal (Q3.707). */
   device: DeviceNetwork;
-  /** As the last listing answered; only a listing that succeeds clears it. */
+  /** What is drawn of the server, held through the quiet window; `serverRaw` is as the listings answered (Q3.714). */
   server: ServerFact;
   /** An empty-state sentence about machines is drawn only from `known`. */
   registry: Registry;
@@ -647,7 +648,7 @@ class AppStore implements StreamSink {
   private probeFailures = new Map<MachineId, number>();
   /** One probe a machine at a time here, so passes that meet in one count its failure once. */
   private probing = new Map<MachineId, Promise<Route | null>>();
-  /** Monotonic, when each machine's newest failed probe began (`doubtedOf`). */
+  /** Monotonic, when each machine's newest failed probe began, or when the server last said its daemon is not dialled in (`doubtedOf`). */
   private provedDown = new Map<MachineId, number>();
   private soonTimer: ReturnType<typeof setTimeout> | null = null;
   private soonAt = 0;
@@ -794,6 +795,8 @@ class AppStore implements StreamSink {
     else if (fresh || this.awayAsks === null) {
       this.awayAsks = 0;
       this.nextListingAt = Math.min(this.nextListingAt, Date.now() + retryDelay(1, AWAY_RETRY_MS));
+      // Its own pass: no probe of a daemon that is not dialled in sets one (Q3.716).
+      this.soon(retryDelay(1, AWAY_RETRY_MS));
     }
   }
 
@@ -818,7 +821,7 @@ class AppStore implements StreamSink {
   private nextDue(): number | null {
     const now = Date.now();
     const due = [...this.downAt.keys()].map((id) => this.nextProbeAt.get(id) ?? 0);
-    if (serverTroubled(this.serverRaw.state)) due.push(this.nextListingAt);
+    if (serverTroubled(this.serverRaw.state) || this.awayAsks !== null) due.push(this.nextListingAt);
     const ahead = due.filter((at) => at > now);
     return ahead.length === 0 ? null : Math.min(...ahead);
   }
@@ -867,7 +870,7 @@ class AppStore implements StreamSink {
         if (existing) {
           existing.update(record);
         } else {
-          this.connections.set(id, new MachineConnection(record, () => this.emit()));
+          this.connections.set(id, this.connect(record));
         }
       }
       for (const id of [...this.connections.keys()]) {
@@ -883,7 +886,9 @@ class AppStore implements StreamSink {
       // `authFailure` keys on the code: a non-admin's 403 is not a sign-out.
       if (authFailure(error) !== null) return;
       // An outage still draws the app, so the menu reaches other accounts.
-      this.patch({ phase: "ready", meRead: "failed", cpError: describe(error), ...this.serverFacts(listingFailure(error), began) });
+      // A `me` held from the sign-in stays known, as in `refreshMe`: nothing asks again while one is held.
+      const meRead: Answer = this.snapshot.me === null ? "failed" : "known";
+      this.patch({ phase: "ready", meRead, cpError: describe(error), ...this.serverFacts(listingFailure(error), began) });
     }
 
     // Host order: confirm the account, register the device, then set up. True means this document is leaving.
@@ -1115,6 +1120,12 @@ class AppStore implements StreamSink {
     }
   }
 
+  private connect(record: MachineRecord): MachineConnection {
+    return new MachineConnection(record, () => this.emit(), undefined, {
+      linkInDoubt: () => this.snapshot.device === "offline" || serverTroubled(this.serverRaw.state),
+    });
+  }
+
   private dropMachine(id: MachineId): void {
     for (const [key, row] of this.rows) {
       if (row.ref.machineId === id) {
@@ -1237,13 +1248,14 @@ class AppStore implements StreamSink {
     this.connections.get(id)?.forgetRoute();
   }
 
-  /** The key the server now names becomes the one this device holds for the machine, which is asked again at once. */
-  trustMachineKey(id: MachineId): void {
+  /** The key somebody compared becomes the one this device holds for the machine, which is asked again at once; false when another is on offer by now. */
+  trustMachineKey(id: MachineId, expected: string): boolean {
     const connection = this.connections.get(id);
-    if (connection === undefined || !connection.acceptOfferedKey()) return;
+    if (connection === undefined || !connection.acceptOfferedKey(expected)) return false;
     this.nextProbeAt.delete(id);
     this.probeFailures.delete(id);
     void this.probe(connection);
+    return true;
   }
 
   /** What a screen that just read a machine's device list knows sooner than the next listing would say. */
@@ -1295,7 +1307,11 @@ class AppStore implements StreamSink {
   private serverFacts(next: ServerState, began: number, pacedFrom = Date.now()): Pick<AppState, "server" | "registry"> {
     if (next === "ok") {
       this.serverAnsweredAt = monotonicNow();
-      for (const id of this.wireDown.keys()) if (!this.answeredFor.has(id)) this.answeredFor.set(id, this.serverAnsweredAt);
+      for (const id of this.wireDown.keys()) {
+        if (!this.answeredFor.has(id)) this.answeredFor.set(id, this.serverAnsweredAt);
+        // Not dialled in is this answer's own word about the machine, and its probe has nothing more to ask (Q3.716).
+        if (this.away.has(id)) this.provedDown.set(id, this.serverAnsweredAt);
+      }
     }
     const cameBack = next === "ok" && this.serverRaw.state === "unreachable";
     if (next !== "unreachable") this.serverNudged = false;
@@ -1451,7 +1467,7 @@ class AppStore implements StreamSink {
     }
   }
 
-  /** The registry read; its failure is the pill's `cpError`, which only a later success here clears. */
+  /** The registry read: its answer is the server fact, and a failure is `cpError` as well. */
   private async listMachines(epoch: number): Promise<void> {
     const began = monotonicNow();
     const asked = (this.listingAsked += 1);
@@ -1465,15 +1481,17 @@ class AppStore implements StreamSink {
           const id = machineId(record.id);
           const existing = this.connections.get(id);
           if (existing) {
+            // Read first: the update publishes, and that weighs the machine as dialled in already.
+            const wasAway = this.away.has(id);
             existing.update(record);
             // Dialled in again: its probe has something to ask now, and is not left to the pace of one that had nothing.
-            if (this.away.has(id) && record.relayOnline) {
+            if (wasAway && record.relayOnline) {
               this.probeFailures.delete(id);
               this.nextProbeAt.delete(id);
               dialled = true;
             }
           } else {
-            const created = new MachineConnection(record, () => this.emit());
+            const created = this.connect(record);
             this.connections.set(id, created);
             this.daemons.set(id, new DaemonClient(created));
           }
@@ -1608,7 +1626,9 @@ class AppStore implements StreamSink {
     const began = connection.probedSince();
     this.provedDown.set(connection.id, began);
     const state = connection.state();
-    const failures = retriedDown(state.reach, state.offlineReason) ? (this.probeFailures.get(connection.id) ?? 0) + 1 : null;
+    // Not dialled in, the probe asked nothing: no failure of the wire to count or to ask again early; a listing says when it is back (Q3.716).
+    const retried = retriedDown(state.reach, state.offlineReason) && !undialled(state);
+    const failures = retried ? (this.probeFailures.get(connection.id) ?? 0) + 1 : null;
     if (failures !== null) this.probeFailures.set(connection.id, failures);
     // Begun before the server's answer, it settles nothing about the machine: the one that will is asked now, once.
     const answered = this.answeredFor.get(connection.id);
@@ -1625,7 +1645,7 @@ class AppStore implements StreamSink {
     const epoch = this.epoch;
 
     // A listing a wake tried before the network was back would otherwise hold "Connecting…" until the next wake (Q3.703).
-    // Not awaited, and at the offline probe's pace: reachable machines keep their poll through a control-plane outage.
+    // Not awaited, and paced by `listingPace`: reachable machines keep their poll through a control-plane outage.
     // A daemon the server says is not dialled in is asked after here too: nothing on the wire would say it is back.
     const troubled = this.snapshot.cpError !== null || this.awayAsks !== null || serverEvidence([...this.connections.values()].map((c) => c.state()));
     // A machine newly down on the wire is asked about at once: which of the two it is decides what the reader is told.
@@ -1735,12 +1755,14 @@ class AppStore implements StreamSink {
       return;
     }
     if (epoch !== this.epoch) return;
-    // One number for all this answer lists: what it confirms, nothing asked before now may prune.
-    const landed = (this.readClock += 1);
     // A daemon that started again is its own order: its log may have lost its tail, so nothing of the old process outranks it.
     const inOrder = asked > (this.listedAsOf.get(connection.id) ?? 0);
     const before = this.instances.get(connection.id);
-    const restarted = inOrder && before !== undefined && typeof listed.instanceId === "string" && before !== listed.instanceId;
+    const restarted = before !== undefined && typeof listed.instanceId === "string" && before !== listed.instanceId;
+    // Another process's listing, overtaken by one that has landed: it confirms nothing and replaces nothing (Q3.711).
+    if (restarted && !inOrder) return;
+    // One number for all this answer lists: what it confirms, nothing asked before now may prune.
+    const landed = (this.readClock += 1);
     if (inOrder && typeof listed.instanceId === "string") this.instances.set(connection.id, listed.instanceId);
     this.listedAsOf.set(connection.id, landed);
     this.listed.add(connection.id);

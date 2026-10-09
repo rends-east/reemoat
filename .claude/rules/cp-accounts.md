@@ -44,12 +44,15 @@ pnpm cpctl admin machinelimit <id> [<n>|default]  # lowering switches off the ne
 pnpm cpctl admin deluser <id> | disable <id>  # delete is irreversible; disable is undoable
 pnpm cpctl admin invite <id>         # resend an invitation, the only way back for one never received
 pnpm cpctl admin relay               # tunnels up, traffic, offline since (`machine_last_seen`). Q1.311
-pnpm cpctl admin signingkeys | rotatekey | retirekey <kid>
+pnpm cpctl admin signingkeys | rotatekey | retirekey <kid> [--force]
                                      # the **oldest** active key signs: rotate publishes, retire is the
-                                     #   switch, once the fleet has been offered the statement naming the
-                                     #   new one (`machinesBehind`). The last active key is refused
+                                     #   switch, refused while a dialled-in machine has not been offered
+                                     #   the statement (`machinesBehind`) unless forced, which is for a
+                                     #   leak. The last active key is refused, and so is a 17th
 pnpm cpctl admin root [adopt <jwk>] | admin keyset draft | install   # the root that vouches for the key set
-pnpm cpctl root new | sign --key <file> | handover   # local, no server: an off-host root's own verbs
+pnpm cpctl root new | sign --key <file> [--expect <kids>] | handover
+                                     # local, no server: an off-host root's own verbs. `sign` prints what
+                                     #   it signs to stderr
 ```
 
 **No route issues a credential for an account other than the caller's**: no

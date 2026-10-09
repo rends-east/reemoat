@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import type { MachineState } from "../machine";
+import { waitingMachine } from "../deviceAccess";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
@@ -511,7 +512,7 @@ function SidebarHeader({
 }): ReactNode {
   const waiting = sessionLists(state).blocked;
   // A device asking to be let in to a machine waits on the same person, and has no session row to say so on.
-  const asking = waiting.length === 0 ? ([...state.devicesWaiting.keys()][0] ?? null) : null;
+  const asking = waiting.length === 0 ? waitingMachine(state.machines, state.devicesWaiting) : null;
   return (
     <div className="pt-safe flex shrink-0 items-center gap-1.5 px-3 pb-2">
       <h1 className="sr-only">Reemoat</h1>

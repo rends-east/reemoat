@@ -438,8 +438,39 @@ process.stdout.write("\nand every screen that could call an unread list empty as
     ],
     [true, true, true, true],
   );
-  const { RETRY_FLOOR_MS } = await import("../src/ui/Unreachable.js");
+  const { RETRY_FLOOR_MS, unreadCause } = await import("../src/ui/Unreachable.js");
   check("a press is drawn for at least 400 ms", RETRY_FLOOR_MS, 400);
+  // Q3.707: what a read that failed was a failure of. Five guards draw from this one answer, so it is swept whole.
+  const causes = (["unknown", "ok", "unreachable", "refusing"] as const).flatMap((state) =>
+    (["online", "offline"] as const).map((device) => {
+      const cause = unreadCause({ server: { state, since: state === "unreachable" || state === "refusing" ? 1 : null }, device });
+      return `${state}, ${device}: ${cause === null ? "nothing yet" : cause.what === "server" ? `the server, ${cause.why}` : cause.what}`;
+    }),
+  );
+  check(
+    "a failed read is the server's until the device says offline, which renames only what did not answer, and is nobody's before the server is asked",
+    causes,
+    [
+      "unknown, online: nothing yet",
+      "unknown, offline: nothing yet",
+      "ok, online: nothing yet",
+      "ok, offline: nothing yet",
+      "unreachable, online: the server, unreachable",
+      "unreachable, offline: network",
+      "refusing, online: the server, refusing",
+      "refusing, offline: the server, refusing",
+    ],
+  );
+  check(
+    "and the five guards that draw from it are those five",
+    srcFiles()
+      .map((rel) => [rel, (stripComments(srcFile(rel)).match(/\bunreadCause\(state\)/g) ?? []).length] as const)
+      .filter(([, asks]) => asks > 0),
+    [
+      ["ui/SessionView.tsx", 1],
+      ["ui/Unreachable.tsx", 4],
+    ],
+  );
   const retry = /async retry\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(store)?.[1] ?? "";
   report("the store's retry was found", retry.length > 0, retry.replace(/\s+/g, " ").trim());
   // F15: with nothing held the poll already asked every four seconds, and a press only joined that pass.
@@ -513,9 +544,21 @@ process.stdout.write("\nand every screen that could call an unread list empty as
     .filter((rel) => /<Empty[^>]*>\s*\{MACHINE_GONE\}|>\s*\{MACHINE_GONE\}\s*<\/Empty>/.test(stripComments(srcFile(rel))))
     .sort();
   report("the screens that draw a gone machine were found", bodies.length >= 5, bodies.join(", "));
+  // Body for body: two files hold two of them each, and a guard answers for the one body it stands before.
+  const gone = bodies.map((rel) => {
+    const src = stripComments(srcFile(rel));
+    const drawn = [...src.matchAll(/>\s*\{MACHINE_GONE\}\s*<\/Empty>/g)];
+    const guarded = drawn.filter((body) => /registryUnread\(state\) \?\?\s*\(?\s*$/.test(src.slice(0, src.lastIndexOf("<Empty", body.index))));
+    return { rel, drawn: drawn.length, guarded: guarded.length };
+  });
+  report(
+    "every body in them was counted, the two files that hold two each among them",
+    gone.reduce((total, file) => total + file.drawn, 0) >= 8 && gone.filter((file) => file.drawn > 1).length >= 2,
+    gone.map((file) => `${file.rel} ${String(file.drawn)}`).join(", "),
+  );
   check(
     "each of them asks whether the list was read first",
-    bodies.filter((rel) => !/registryUnread\(state\) \?\?/.test(stripComments(srcFile(rel)))),
+    gone.filter((file) => file.guarded !== file.drawn).map((file) => `${file.rel}: ${String(file.guarded)} of ${String(file.drawn)} guarded`),
     [],
   );
   check(
@@ -811,7 +854,8 @@ process.stdout.write("\na link that drops and is back inside the quiet window is
       /return retryDelay\(this\.listingFailures, this\.serverRaw\.state === "refusing" \? OFFLINE_RETRY_MS : DOWN_RETRY_MS\);/.test(store),
       /const wait = failures === null \? OFFLINE_RETRY_MS : unsettled \? 0 : retryDelay\(failures, DOWN_RETRY_MS\);/.test(store),
       /const POLL_INTERVAL_MS = 4_000;[\s\S]{0,400}const DOWN_RETRY_MS = 4_000;/.test(store),
-      /const failures = retriedDown\(state\.reach, state\.offlineReason\) \? \(this\.probeFailures\.get\(connection\.id\) \?\? 0\) \+ 1 : null;/.test(store),
+      // Q3.716: a daemon not dialled in was asked nothing, so its probe is no failure to count or to ask again early.
+      /const retried = retriedDown\(state\.reach, state\.offlineReason\) && !undialled\(state\);\s*const failures = retried \? \(this\.probeFailures\.get\(connection\.id\) \?\? 0\) \+ 1 : null;/.test(store),
       // Up by whatever door: a stream's own probe or a request's answer brings a machine back without the poll knowing.
       /if \(machine\.reach !== "online"\) continue;\s*this\.probeFailures\.delete\(machine\.id\);\s*this\.nextProbeAt\.delete\(machine\.id\);/.test(store),
       /if \(\[\.\.\.this\.downAt\.keys\(\)\]\.some\(\(id\) => !was\.has\(id\)\)\) this\.soon\(retryDelay\(1, OFFLINE_RETRY_MS\)\);/.test(store),

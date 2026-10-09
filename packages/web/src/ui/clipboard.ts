@@ -1,5 +1,8 @@
 import { copyNative, inNativeShell } from "../native";
 
+/** All a failed copy may say: outside the conversation and a field nothing can be selected by hand (Q3.717). */
+export const COPY_FAILED = "Could not copy.";
+
 /** The one place the clipboard API is named (webcheck enforces it): native first, then the async API, then `execCommand` for insecure origins where the API is absent. */
 export async function copyText(text: string): Promise<boolean> {
   if (inNativeShell()) return await copyNative(text);

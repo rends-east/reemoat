@@ -2,7 +2,7 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { KEYSET_TYP, ROOT_TYP, jwkToPublicKey, publicKeyToJwk, signCompact } from "../../../src/token.js";
+import { KEYSET_TYP, MAX_STATEMENT_KEYS, ROOT_TYP, jwkToPublicKey, publicKeyToJwk, signCompact } from "../../../src/token.js";
 import { keyIdFor } from "../src/keys.js";
 import { isSettingKey, SECRET_SETTING_KEYS } from "../src/settings.js";
 
@@ -119,10 +119,12 @@ const USAGE = `cpctl — drive the Reemoat control plane
   admin signingkeys                         the fleet's signing keys, and which one signs
   admin rotatekey                           mint a new one. Both are published and the OLD one goes
                                             on signing, so nothing stops verifying; every daemon
-                                            takes the new set on its next tunnel dial
-  admin retirekey <kid>                     retire the old one — the switch: the next token is
-                                            signed by the oldest key left. Says how many dialled-in
-                                            machines have not been offered the new set yet
+                                            takes the new set on its next tunnel dial. Refused at
+                                            ${MAX_STATEMENT_KEYS} active keys: retire one first
+  admin retirekey <kid> [--force]           retire the old one — the switch: the next token is
+                                            signed by the oldest key left. Refused while a dialled-in
+                                            machine has not been offered the new set yet, and says
+                                            which; --force retires anyway, and is for a leaked key
   admin root                                the root that vouches for those keys, whether its
                                             private half is on this host, and the statement in force
   admin root adopt <public jwk> [--handover <jws>]
@@ -135,8 +137,13 @@ const USAGE = `cpctl — drive the Reemoat control plane
 
   root new --out <file>                     LOCAL, no control plane: generate a root key, write its
                                             private half to <file> (0600) and print the public JWK
-  root sign --key <file>                    LOCAL: a draft on stdin, the signed statement on stdout:
+  root sign --key <file> [--expect <kid,kid,...>]
+                                            LOCAL: a draft on stdin, the signed statement on stdout:
                                               cpctl admin keyset draft | cpctl root sign --key <file> | cpctl admin keyset install
+                                            The draft is the server's word for which keys to vouch
+                                            for, so its issuer, version and every key id are printed
+                                            to stderr before it is signed, and --expect refuses a
+                                            draft that does not name exactly those ids
   root handover --key <file> --issuer <iss> <new public jwk>
                                             LOCAL: the old root naming its successor, for
                                             'admin root adopt --handover'
@@ -260,6 +267,8 @@ const { values, positionals } = parseArgs({
     out: { type: "string" },
     issuer: { type: "string" },
     handover: { type: "string" },
+    expect: { type: "string" },
+    force: { type: "boolean", default: false },
     new: { type: "boolean", default: false },
     json: { type: "boolean", default: false },
   },
@@ -420,14 +429,26 @@ async function localRoot(args: string[]): Promise<void> {
       if (typeof draft?.iss !== "string" || typeof draft.v !== "number" || !Array.isArray(draft.keys)) {
         fail("the draft on stdin is not what 'cpctl admin keyset draft' prints");
       }
-      out(
-        signCompact(
-          KEYSET_TYP,
-          { iss: draft.iss, v: draft.v, iat: Math.floor(Date.now() / 1000), keys: draft.keys },
-          root.kid,
-          root.privateKey,
-        ),
-      );
+      const keys = draft.keys.map((entry: unknown) => {
+        const named = entry as { kid?: unknown; jwk?: unknown } | null;
+        const publicKey = jwkToPublicKey(named?.jwk);
+        if (publicKey === null) fail("the draft on stdin names a key that is not an Ed25519 public key");
+        const jwk = publicKeyToJwk(publicKey);
+        // A kid is derived from the key, so one that is not is a known name on somebody else's key.
+        if (named?.kid !== keyIdFor(jwk)) fail(`the draft on stdin calls a key ${String(named?.kid)}, and its id is ${keyIdFor(jwk)}; nothing was signed`);
+        return { kid: keyIdFor(jwk), jwk };
+      });
+      const kids = keys.map((key) => key.kid).sort();
+      // stderr, so the pipe into 'admin keyset install' still carries only the statement.
+      process.stderr.write(`signing for issuer ${draft.iss}: statement v${draft.v} naming ${kids.length} key(s)\n`);
+      for (const kid of kids) process.stderr.write(`  ${kid}\n`);
+      if (values.expect !== undefined) {
+        const expected = values.expect.split(",").map((kid) => kid.trim()).filter((kid) => kid.length > 0).sort();
+        if (JSON.stringify(expected) !== JSON.stringify(kids)) {
+          fail(`the draft does not name exactly the keys --expect lists (${expected.join(", ") || "none"}); nothing was signed`);
+        }
+      }
+      out(signCompact(KEYSET_TYP, { iss: draft.iss, v: draft.v, iat: Math.floor(Date.now() / 1000), keys }, root.kid, root.privateKey));
       return;
     }
     case "handover": {
@@ -454,6 +475,64 @@ async function localRoot(args: string[]): Promise<void> {
 }
 
 const SIGN_AND_INSTALL = "cpctl admin keyset draft | cpctl root sign --key <root key file> | cpctl admin keyset install";
+
+interface FleetAnswer {
+  relay: { protocol: number; oldestAccepted: number };
+  controlPlane: { version: string };
+  byProtocol: Record<string, number>;
+  machines: {
+    id: string;
+    name: string;
+    revoked: boolean;
+    version: string | null;
+    protocol: number | null;
+    agents?: Record<string, string | null> | null;
+    keyset?: number | null;
+    seenAt: number | null;
+  }[];
+  keyset?: { version: number; issuedAt: number } | null;
+}
+
+function seenLine(seenAt: number | null): string {
+  return seenAt === null ? "never seen" : `${Math.round((Date.now() - seenAt) / 86400000)}d ago`;
+}
+
+/** What each machine announced on its last dial is the statement it held going in: a dial since the issue has been offered the newest. */
+function unofferedLines(fleet: FleetAnswer): string[] {
+  const stated = fleet.keyset ?? null;
+  if (stated === null) return [];
+  return fleet.machines
+    .filter((machine) => !machine.revoked && (machine.keyset == null || machine.seenAt === null || machine.seenAt < stated.issuedAt))
+    .map(
+      (machine) =>
+        `${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ` +
+        `${machine.keyset == null ? "announces none" : `held v${machine.keyset}`}  (${seenLine(machine.seenAt)})`,
+    );
+}
+
+function errorCode(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  return (error.body as { error?: { code?: string } } | null)?.error?.code ?? null;
+}
+
+function behindCount(error: unknown): string {
+  const detail = error instanceof ApiError ? (error.body as { error?: { detail?: { behind?: unknown } } } | null)?.error?.detail : null;
+  return typeof detail?.behind === "number" ? String(detail.behind) : "some";
+}
+
+/** A control plane with no root route predates statements: there a minted key signs at once and no daemon is ever told of it. */
+async function requireStatements(verb: string): Promise<void> {
+  try {
+    await api<unknown>("/v1/admin/root");
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404) throw error;
+    fail(
+      `this control plane is older than this cpctl and has no key-set statements, so '${verb}' was not sent.\n` +
+        "   On that build a new key signs at once and no daemon is told of it, so every machine goes dark.\n" +
+        "   Update the control plane first, then run this again.",
+    );
+  }
+}
 
 function grantQuery(): string {
   const params = new URLSearchParams();
@@ -1178,22 +1257,7 @@ async function admin(args: string[]): Promise<void> {
       return;
     }
     case "fleet": {
-      const body = await api<{
-        relay: { protocol: number; oldestAccepted: number };
-        controlPlane: { version: string };
-        byProtocol: Record<string, number>;
-        machines: {
-          id: string;
-          name: string;
-          revoked: boolean;
-          version: string | null;
-          protocol: number | null;
-          agents?: Record<string, string | null> | null;
-          keyset?: number | null;
-          seenAt: number | null;
-        }[];
-        keyset?: { version: number; issuedAt: number } | null;
-      }>("/v1/admin/fleet");
+      const body = await api<FleetAnswer>("/v1/admin/fleet");
       show(body, () => {
         out(
           `control plane ${body.controlPlane.version}, relay speaks ` +
@@ -1203,8 +1267,6 @@ async function admin(args: string[]): Promise<void> {
         if (counts.length > 0) {
           out(`machines by protocol: ${counts.map(([v, n]) => `v${v}=${n}`).join("  ")}`);
         }
-        const seenLine = (seenAt: number | null): string =>
-          seenAt === null ? "never seen" : `${Math.round((Date.now() - seenAt) / 86400000)}d ago`;
         const live = body.machines.filter((machine) => !machine.revoked);
         if (live.length > 0) {
           out("");
@@ -1222,20 +1284,12 @@ async function admin(args: string[]): Promise<void> {
         }
         const stated = body.keyset ?? null;
         if (stated !== null) {
-          // What it announced on its last dial, which is the statement it held going in: a dial since the issue has been offered the newest.
-          const unoffered = live.filter(
-            (machine) => machine.keyset == null || machine.seenAt === null || machine.seenAt < stated.issuedAt,
-          );
+          const unoffered = unofferedLines(body);
           out("");
           out(`signing keys: statement v${stated.version} is in force.`);
           if (unoffered.length > 0) {
             out("not offered it yet — no dial since it was issued, or a daemon too old to take one:");
-            for (const machine of unoffered) {
-              out(
-                `  ${machine.name.padEnd(20)} ${(machine.version ?? "unknown").padEnd(12)} ` +
-                  `${machine.keyset == null ? "announces none" : `held v${machine.keyset}`}  (${seenLine(machine.seenAt)})`,
-              );
-            }
+            for (const line of unoffered) out(`  ${line}`);
           }
         }
         const stale = body.machines.filter(
@@ -1259,24 +1313,33 @@ async function admin(args: string[]): Promise<void> {
       const body = await api<{ keys: { kid: string; createdAt: number; retiredAt: number | null; signs?: boolean }[] }>(
         "/v1/admin/signing-keys",
       );
+      // A control plane that marks none predates statements, and there the newest active key signs.
+      const signer = body.keys.find((key) => key.signs === true) ?? body.keys.find((key) => key.retiredAt === null);
       show(body, () => {
         for (const key of body.keys) {
           const age = Math.round((Date.now() - key.createdAt) / 86_400_000);
           out(
             `${key.kid.padEnd(18)} ${key.retiredAt === null ? "active " : "retired"}  ${age}d old` +
-              (key.signs === true ? "   (signs)" : ""),
+              (key === signer ? "   (signs)" : ""),
           );
         }
       });
       return;
     }
     case "rotatekey": {
+      await requireStatements("rotatekey");
       const body = await api<{
         kid: string;
         active: number;
         statement?: { version: number } | null;
         rootOnline?: boolean;
-      }>("/v1/admin/signing-keys", { method: "POST" });
+      }>("/v1/admin/signing-keys", { method: "POST" }).catch((error: unknown) => {
+        if (errorCode(error) !== "too_many_keys") throw error;
+        fail(
+          `${MAX_STATEMENT_KEYS} signing keys are active, and a statement names no more than that, so no key was minted.\n` +
+            "   retire one first:  cpctl admin signingkeys   then   cpctl admin retirekey <kid>",
+        );
+      });
       show(body, () => {
         out(`minted ${body.kid}. ${body.active} keys are active; the oldest still signs, so nothing stops verifying.`);
         if (body.statement != null) {
@@ -1296,13 +1359,30 @@ async function admin(args: string[]): Promise<void> {
     }
     case "retirekey": {
       const kid = rest[0];
-      if (!kid) fail("usage: cpctl admin retirekey <kid>");
+      if (!kid) fail("usage: cpctl admin retirekey <kid> [--force]");
+      await requireStatements("retirekey");
       const body = await api<{
         retired: boolean;
         statement?: { version: number } | null;
         statementCurrent?: boolean;
         behind?: number;
-      }>(`/v1/admin/signing-keys/${encodeURIComponent(kid)}`, { method: "DELETE" });
+      }>(`/v1/admin/signing-keys/${encodeURIComponent(kid)}${values.force === true ? "?force=1" : ""}`, {
+        method: "DELETE",
+      }).catch(async (error: unknown) => {
+        if (errorCode(error) !== "machines_behind") throw error;
+        const fleet = await api<FleetAnswer>("/v1/admin/fleet");
+        const lines = unofferedLines(fleet);
+        fail(
+          `${kid} was not retired: ${behindCount(error)} machine(s) dialled in have not been offered the statement naming the\n` +
+            "   key that would sign next, and would refuse every token it signs.\n" +
+            (lines.length > 0
+              ? `   not offered it, as 'cpctl admin fleet' lists them (the ones dialled in are the ones counted):\n${lines.map((line) => `   ${line}`).join("\n")}\n`
+              : "") +
+            "   Each takes it on its next dial, and a daemon new enough redials within a ping; one that\n" +
+            "   announces none has to be updated first.\n" +
+            `   --force retires it anyway, and is for a leaked key:  cpctl admin retirekey ${kid} --force`,
+        );
+      });
       show(body, () => {
         out(`retired ${kid}. The oldest key left signs from the next token.`);
         if (body.statementCurrent === true) {

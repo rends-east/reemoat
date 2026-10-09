@@ -200,7 +200,8 @@ are waited for; `on_page_load` runs there and takes `seats`. `seats.rs` copies `
 ## What is not built
 
 Notifications or badges for off-screen accounts (Q7.149). Per-account `localStorage`: one
-sign-out's `forgetAllConfig` clears every account's controls. A multi-webview arm off macOS;
+sign-out's `forgetAllConfig` clears every account's controls (machine-key pins re-read
+and merge instead, `e2ee.md`). A multi-webview arm off macOS;
 several accounts in a browser. A proof that waits for the root's daemon: an unannounced
 `install.sh` root with no bare claim is bound a guest at the first confirm (Q7.149). A protected
 `release` environment for the default-server variable (Q4.127).

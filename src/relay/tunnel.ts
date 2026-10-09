@@ -58,7 +58,7 @@ export interface TunnelOptions {
   /** From the server's address, not config: a bind address like 0.0.0.0 is not connectable everywhere. */
   local: { host: string; port: number };
   onEvent?: (kind: TunnelEventKind, detail: string) => void;
-  /** What the relay announced on the 101, on every dial; the caller weighs it (src/keyset.ts). A throw is swallowed. */
+  /** What the relay announced on the 101, on every dial; the caller weighs it (src/keyset.ts). A throw means nothing was stored: the dial goes on. */
   onKeyset?: (announced: KeysetHeaders) => void;
   /** The statement version held: announced on the dial, and compared with the relay's ping. Absent, neither happens. */
   keysetVersion?: () => number | null;
@@ -73,10 +73,14 @@ export interface TunnelOptions {
   devices?: DeviceGate;
   upstreamTimeoutMs?: number;
   announceTimeoutMs?: number;
+  keysetRetryMs?: number;
   random?: () => number;
 }
 
 export const ANNOUNCE_TIMEOUT_MS = 3_000;
+
+/** How soon a statement whose taking threw may be redialled for again. A redial cuts every stream, so never once per ping. */
+export const KEYSET_RETRY_MS = 5 * 60_000;
 
 export async function announcedAgentClis(runtime: Pick<SessionRuntime, "agentCli">): Promise<AgentClis> {
   const chosen = await Promise.all(AGENT_IDS.map((agent) => runtime.agentCli(agent)));
@@ -102,6 +106,8 @@ export class RelayTunnel {
 
   /** Statement versions already redialled for, so one that never verifies costs one dial and not a loop. */
   private readonly chasedKeysets = new Set<number>();
+  /** When onKeyset last threw: what it was offered is neither held nor refused, so those versions may be chased again. */
+  private keysetThrewAt: number | null = null;
 
   // Moved together by rotateMachineKey: announcing one key while terminating with the other fails every handshake.
   private machineKey: string | undefined;
@@ -313,8 +319,10 @@ export class RelayTunnel {
       this.agreedVersion = agreed;
       try {
         this.options.onKeyset?.(readKeysetHeaders(res.headers[KEYSET_HEADER], res.headers[KEYSET_ROOT_HEADER]));
+        this.keysetThrewAt = null;
       } catch {
         // The key set held keeps verifying; a dial must not fail for an announcement.
+        this.keysetThrewAt = Date.now();
       }
     });
 
@@ -322,7 +330,12 @@ export class RelayTunnel {
     ws.on("ping", (payload: Buffer) => {
       if (this.options.keysetVersion === undefined) return;
       const newest = parseKeysetPing(payload.toString("latin1"));
-      if (newest === null || newest <= this.heldKeyset() || this.chasedKeysets.has(newest)) return;
+      if (newest === null || newest <= this.heldKeyset()) return;
+      if (this.chasedKeysets.has(newest)) {
+        const threwAt = this.keysetThrewAt;
+        if (threwAt === null || Date.now() - threwAt < (this.options.keysetRetryMs ?? KEYSET_RETRY_MS)) return;
+        this.keysetThrewAt = null;
+      }
       this.chasedKeysets.add(newest);
       ws.close(1000, "a newer key set is published");
     });

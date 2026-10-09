@@ -972,9 +972,9 @@ process.stdout.write("\nthe shipped channel against a machine that keeps its own
   check("and not by re-registering its key, which would cure nothing", registrations, before);
   check("the request is waiting on the machine", rows.get(strangerThumbprint)?.state, "pending");
   check(
-    "under the code the phone derives from its own key and the machine's",
+    "under the code the phone derives from its own key",
     gate.list().find((one) => one.id === strangerThumbprint)?.code,
-    approvalCode(stranger.publicKey, machineKey.publicKey),
+    approvalCode(stranger.publicKey),
   );
 
   gate.approve(strangerThumbprint);

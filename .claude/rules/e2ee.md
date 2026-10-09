@@ -99,23 +99,31 @@ is the allowlist, and a key not `known` is refused `DEVICE_NOT_APPROVED` and fil
 - **Turning the lock on grandfathers the list**, and takes the caller's own key with it
   (`vouch`, checked against `cnf.jkt`): a device that only ever used loopback has no row.
 - **Loopback is outside the list** (no channel, no key): `pnpm client devices` on the
-  machine is the way back in after every device is lost.
+  machine is the way back in after every device is lost. The listener holds it to this
+  computer first: a foreign `Origin` or, bound to loopback, a foreign `Host` is a 403
+  before CORS (`src/origin.ts`), and a daemon bound beyond loopback refuses the lock.
 - **A removed key's open channels end at once** (`watch`), and `DELETE` refuses the key
   the request rides on (`409 own_device`), which would end the channel carrying the answer.
 - **A locked list is never trimmed**; the journal and the pending rows are bounded.
-- **The code is `approvalCode(asking key, machine key)`, ten characters**: both keys, so
-  it also tells the new device it was given the machine's real key; ten, since nothing
-  commits either side first and a shorter one can be ground. One implementation, in
+- **The code is `approvalCode(asking key)`, ten characters, and of that one key**: with
+  the machine's key in it too, one party chose a key on each side and equal codes cost
+  2^25. Which machine was reached is `keyFingerprint`'s. One implementation, in
   `packages/protocol`, with a pinned vector. Q1.656.
+- **A claimed name may not carry a code**: `drawable` removes what nobody sees and any
+  token that `readsAsCode`, for a name, a link's label and a platform; the screen draws
+  the code on a line holding nothing the device chose. Q1.656.
 
 ## The key a machine was first reached with
 
 **The app believes `POST /v1/tokens` about a machine's key once** (`storedPins`, per
 server, `localStorage`). `weighOfferedKey` is total over held × named: a different key
 later is **never dialled**; the held one is, and only if it no longer answers does the
-machine read `machine_key_changed`, cleared by a person (`acceptOfferedKey`). So a lie
-about the key costs the reader nothing. A key read over loopback is the machine's own
-word and re-pins silently (`learnLocalKey`, `GET /health`'s `machineKey`). Q1.657.
+machine read `machine_key_changed`, cleared by a person (`acceptOfferedKey`, which takes
+the fingerprint that was compared and refuses another). Never raised while the link
+itself is in doubt (`linkInDoubt`). So a lie about the key costs the reader nothing. A
+key read over loopback is the machine's own word and re-pins silently (`learnLocalKey`,
+`GET /health`'s `machineKey`). A miss re-reads storage and a write merges: every
+account's webview shares the one value. Q1.657.
 
 **Alone it is worth little**: it covers a compromise *after* first contact, against
 being read, never against being entered. First contact is closed by the lock's code or

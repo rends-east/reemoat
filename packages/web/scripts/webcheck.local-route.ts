@@ -51,6 +51,8 @@ interface Answers {
   machineKey?: false;
   // Refused as the Authority does, 409 device_key_required (a 401 would sign the store out); transport throws, since an outage has no status.
   mint?: { status: number; code: string } | "transport";
+  /** What loopback's `/health` reports as the machine's own key; absent is a daemon that reports none. */
+  localKey?: unknown;
 }
 
 let mints = 0;
@@ -86,7 +88,9 @@ function stubFetch(answers: Answers): () => void {
     }
     asked.push(url);
     if (url.startsWith(LOCAL)) {
-      if (url.endsWith("/health")) return json({ ok: true, instanceId: "i_x", authMode: "signed" });
+      if (url.endsWith("/health")) {
+        return json({ ok: true, instanceId: "i_x", authMode: "signed", ...(answers.localKey === undefined ? {} : { machineKey: answers.localKey }) });
+      }
       const answer = answers.roots;
       if (typeof answer === "number") return json({ roots: [] }, answer);
       return json({ error: { code: answer.code, message: answer.code } }, answer.status);
@@ -140,6 +144,59 @@ async function connect(id: string, channels: never = fetchChannel) {
     ["/fs/roots", "/health"],
   );
   restore();
+}
+
+{
+  // Q1.657: a key read off the machine itself over loopback is its own word, and outranks whatever the server named.
+  installShell();
+  const { generateStaticKey, keyFingerprint } = await import("@reemoat/protocol");
+  const cp = await import("../src/cp.js");
+  const { MachineConnection } = await import("../src/machine.js");
+  cp.setSession("rs_local");
+  const fresh = (): string => Buffer.from(generateStaticKey().publicKey).toString("base64url");
+  const print = (key: string): string => keyFingerprint(Buffer.from(key, "base64url"));
+  const own = fresh();
+  const stale = fresh();
+  const held = new Map<string, string>();
+  const pins = { get: (id: string) => held.get(id) ?? null, set: (id: string, key: string) => void held.set(id, key) };
+  const reach = async (id: string, localKey?: unknown): Promise<{ route: string | null; held: string | null; using: string | null; offered: string | null; reason: string | null }> => {
+    announced = { machineId: id, base: LOCAL, instanceId: "i_x" };
+    held.set(id, stale);
+    const restore = stubFetch({ roots: 200, localKey });
+    const connection = new MachineConnection(
+      { id, name: "laptop", relayUrl: RELAY, relayOnline: true, enrolled: true, owned: true, scopes: [], key: MACHINE_KEY } as never,
+      () => {},
+      fetchChannel,
+      { pins, devicePublicKey: () => null },
+    );
+    const offeredBefore = connection.state().offeredKeyFingerprint;
+    const route = await connection.resolveRoute();
+    restore();
+    const state = connection.state();
+    return {
+      route: route?.kind ?? null,
+      held: held.get(id) ?? null,
+      using: state.keyFingerprint,
+      offered: offeredBefore === print(MACHINE_KEY) ? state.offeredKeyFingerprint : "no offer was standing",
+      reason: state.offlineReason,
+    };
+  };
+  check(
+    "a key the machine itself reports over loopback is the one held from then on, with nothing left to confirm",
+    await reach("m_ownkey", own),
+    { route: "local", held: own, using: print(own), offered: null, reason: null },
+  );
+  check(
+    "a daemon that reports none leaves the key held and the server's offer where they were",
+    await reach("m_nokeysaid"),
+    { route: "local", held: stale, using: print(stale), offered: print(MACHINE_KEY), reason: null },
+  );
+  check(
+    "and so does one that reports something that is no key",
+    [await reach("m_badkey", `${own}=`), await reach("m_numkey", 7)].map((one) => [one.held, one.offered]),
+    [[stale, print(MACHINE_KEY)], [stale, print(MACHINE_KEY)]],
+  );
+  removeShell();
 }
 
 {

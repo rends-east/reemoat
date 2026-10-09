@@ -125,50 +125,60 @@ export function keySecretProblem(db: DatabaseSync): "missing" | "wrong" | null {
   return null;
 }
 
-/** Wraps every private key still stored as a PEM, in one transaction; nothing to do, and zero, while no secret is configured. */
-export function wrapStoredKeys(db: DatabaseSync): number {
-  if (keySecret === null) return 0;
-  let wrapped = 0;
-  db.exec("BEGIN");
+/**
+ * A write that takes a private key out of the file (Q1.658): bytes it frees are zeroed, and the log still holding the old
+ * pages is truncated when `erased` says something left. IMMEDIATE, since the relay commits on the same file meanwhile.
+ */
+export function erasingKeys<T>(db: DatabaseSync, write: () => T, erased: (answer: T) => boolean): T {
+  db.exec("PRAGMA secure_delete = ON");
+  db.exec("BEGIN IMMEDIATE");
+  let answer: T;
   try {
-    for (const table of PRIVATE_KEY_TABLES) {
-      const write = db.prepare(`UPDATE ${table} SET private_pem = ? WHERE kid = ?`);
-      for (const row of db.prepare(`SELECT kid, private_pem FROM ${table} WHERE private_pem IS NOT NULL`).all()) {
-        const stored = String(row["private_pem"]);
-        if (isWrapped(stored)) continue;
-        write.run(wrapPrivateKey(stored, String(row["kid"])), String(row["kid"]));
-        wrapped += 1;
-      }
-    }
+    answer = write();
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
   }
-  return wrapped;
+  if (erased(answer)) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      // A reader holding the log: the close's checkpoint or the next one truncates it, and a start must not fail for it.
+    }
+  }
+  return answer;
+}
+
+function rewriteStoredKeys(db: DatabaseSync, wanted: (stored: string) => boolean, store: (stored: string, kid: string) => string): number {
+  return erasingKeys(
+    db,
+    () => {
+      let changed = 0;
+      for (const table of PRIVATE_KEY_TABLES) {
+        const write = db.prepare(`UPDATE ${table} SET private_pem = ? WHERE kid = ?`);
+        for (const row of db.prepare(`SELECT kid, private_pem FROM ${table} WHERE private_pem IS NOT NULL`).all()) {
+          const stored = String(row["private_pem"]);
+          if (!wanted(stored)) continue;
+          write.run(store(stored, String(row["kid"])), String(row["kid"]));
+          changed += 1;
+        }
+      }
+      return changed;
+    },
+    (changed) => changed > 0,
+  );
+}
+
+/** Wraps every private key still stored as a PEM, in one transaction; nothing to do, and zero, while no secret is configured. */
+export function wrapStoredKeys(db: DatabaseSync): number {
+  if (keySecret === null) return 0;
+  return rewriteStoredKeys(db, (stored) => !isWrapped(stored), wrapPrivateKey);
 }
 
 /** The way back, for a rollback past the build that wraps or for giving the secret up: every wrapped key stored as its PEM again. */
 export function unwrapStoredKeys(db: DatabaseSync): number {
-  let unwrapped = 0;
-  db.exec("BEGIN");
-  try {
-    for (const table of PRIVATE_KEY_TABLES) {
-      const write = db.prepare(`UPDATE ${table} SET private_pem = ? WHERE kid = ?`);
-      for (const row of db.prepare(`SELECT kid, private_pem FROM ${table} WHERE private_pem IS NOT NULL`).all()) {
-        const stored = String(row["private_pem"]);
-        if (!isWrapped(stored)) continue;
-        const key = loadPrivateKey(stored, String(row["kid"]));
-        write.run(key.export({ type: "pkcs8", format: "pem" }).toString(), String(row["kid"]));
-        unwrapped += 1;
-      }
-    }
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
-  return unwrapped;
+  return rewriteStoredKeys(db, isWrapped, (stored, kid) => loadPrivateKey(stored, kid).export({ type: "pkcs8", format: "pem" }).toString());
 }
 
 /** Deterministic, so the same key always has the same id across restores and re-publishes. */

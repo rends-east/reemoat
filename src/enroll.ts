@@ -3,7 +3,7 @@ import { jwkToPublicKey } from "./token.js";
 import { describeError } from "./http.js";
 import { weighAnnouncement } from "./keyset.js";
 
-// The only control-plane request, made once; rotating the signing key means re-enrolling every daemon.
+// The only control-plane request, made once; a later key set arrives on the tunnel dial (Q1.659).
 
 export type EnrollErrorCode =
   | "unreachable"

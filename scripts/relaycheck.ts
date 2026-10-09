@@ -16,11 +16,15 @@ import { RelayTunnel } from "../src/relay/tunnel.js";
 import { peerEndToEnd } from "./relaycheck.peer-e2e.js";
 import { signingKeysAndRoot } from "./relaycheck.keys.js";
 import { SignedTokenVerifier } from "../src/auth.js";
+import { DeviceGate } from "../src/devices.js";
+import { DEVICE_NOT_APPROVED } from "../src/e2ee.js";
+import { SqliteKnownDeviceStore } from "../src/store/sqlite.js";
 import {
   FRAME,
   LengthReader,
   NoiseHandshake,
   decodeFrame,
+  decodeJson,
   encodeFrame,
   encodeJsonFrame,
   encodeMessageFrames,
@@ -28,6 +32,7 @@ import {
   generateStaticKey,
   localStaticKey,
   type CipherState,
+  type CloseFrame,
 } from "@reemoat/protocol";
 import { KEY_REFRESH_MS, createRelayAuthorizer } from "../packages/control-plane/src/relay/authorize.js";
 import {
@@ -1736,6 +1741,14 @@ process.stdout.write("\nthe encrypted channel\n");
   const encryptedTunnelKey = issueTunnelKey(db, encrypted);
   const machineStatic = generateStaticKey();
   const deviceStatic = generateStaticKey();
+  const deviceThumbprint = jwkThumbprint(x25519Jwk(deviceStatic.publicKey));
+
+  // The machine's own list, locked before this device ever reached it: the one thing a signed capability does not open.
+  const knownDb = new DatabaseSync(":memory:");
+  knownDb.exec(readFileSync(new URL("../src/store/schema.sql", import.meta.url), "utf8"));
+  const knownDevices = new SqliteKnownDeviceStore(knownDb);
+  const gate = new DeviceGate(knownDevices, () => Buffer.from(machineStatic.publicKey).toString("base64url"));
+  gate.setLocked(true);
 
   const encryptedTunnel = RelayTunnel.start({
     relayUrl,
@@ -1750,6 +1763,7 @@ process.stdout.write("\nthe encrypted channel\n");
         keys: [{ kid: signing.kid, jwk: signing.jwk }],
       },
     }),
+    devices: gate,
   });
   check("a daemon holding a machine key dials in", await waitForTunnel(encrypted), true);
 
@@ -1764,72 +1778,82 @@ process.stdout.write("\nthe encrypted channel\n");
       nbf: seconds,
       exp: seconds + 300,
       scp: ["session:read"],
-      cnf: { jkt: jwkThumbprint(x25519Jwk(deviceStatic.publicKey)) },
+      cnf: { jkt: deviceThumbprint },
     },
     signing.kid,
     signing.privateKey,
   );
 
-  const outcome = await new Promise<{ ready: boolean; carried: string }>((resolve) => {
-    const ws = new WebSocket(
-      `ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(bound)}`,
-    );
-    const reader = new LengthReader();
-    const handshake = NoiseHandshake.start({
-      initiator: true,
-      staticKey: localStaticKey(deviceStatic.secretKey),
-      remoteStatic: machineStatic.publicKey,
-    });
-    let send: CipherState | null = null;
-    let receive: CipherState | null = null;
-    const seen: Buffer[] = [];
-    // Record both directions: the capability travels outbound, so a receive-only buffer could never contain it.
-    const sendRecorded = (bytes: Uint8Array): void => {
-      seen.push(Buffer.from(bytes));
-      ws.send(bytes);
-    };
-    const give = (ready: boolean): void => {
-      ws.terminate();
-      resolve({ ready, carried: Buffer.concat(seen).toString("latin1") });
-    };
-    const timer = setTimeout(() => give(false), 8_000);
-    timer.unref();
+  const dialChannel = (): Promise<{ ready: boolean; refusal: CloseFrame | null; carried: string }> =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(bound)}`,
+      );
+      const reader = new LengthReader();
+      const handshake = NoiseHandshake.start({
+        initiator: true,
+        staticKey: localStaticKey(deviceStatic.secretKey),
+        remoteStatic: machineStatic.publicKey,
+      });
+      let send: CipherState | null = null;
+      let receive: CipherState | null = null;
+      const seen: Buffer[] = [];
+      // Record both directions: the capability travels outbound, so a receive-only buffer could never contain it.
+      const sendRecorded = (bytes: Uint8Array): void => {
+        seen.push(Buffer.from(bytes));
+        ws.send(bytes);
+      };
+      const give = (ready: boolean, refusal: CloseFrame | null = null): void => {
+        clearTimeout(timer);
+        ws.terminate();
+        resolve({ ready, refusal, carried: Buffer.concat(seen).toString("latin1") });
+      };
+      const timer = setTimeout(() => give(false), 8_000);
+      timer.unref();
 
-    ws.on("open", () => {
-      void handshake.writeMessage().then((first: Uint8Array) => sendRecorded(frameLength(first)));
-    });
-    ws.on("message", (data: Buffer) => {
-      seen.push(data);
-      for (const message of reader.push(new Uint8Array(data))) {
-        if (send === null) {
-          void handshake.readMessage(message).then(() => {
-            const transport = handshake.split();
-            send = transport.send;
-            receive = transport.receive;
-            // The capability rides the first transport message, never the handshake payload, which lacks forward secrecy and is replayable.
-            sendRecorded(
-              frameLength(send.encrypt(new Uint8Array(0), encodeJsonFrame(FRAME.HELLO, { capability: bound }))),
-            );
-          });
-          continue;
-        }
-        try {
-          const frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
-          if (frame?.type === FRAME.READY) {
-            clearTimeout(timer);
-            give(true);
+      ws.on("open", () => {
+        void handshake.writeMessage().then((first: Uint8Array) => sendRecorded(frameLength(first)));
+      });
+      ws.on("message", (data: Buffer) => {
+        seen.push(data);
+        for (const message of reader.push(new Uint8Array(data))) {
+          if (send === null) {
+            void handshake.readMessage(message).then(() => {
+              const transport = handshake.split();
+              send = transport.send;
+              receive = transport.receive;
+              // The capability rides the first transport message, never the handshake payload, which lacks forward secrecy and is replayable.
+              sendRecorded(
+                frameLength(send.encrypt(new Uint8Array(0), encodeJsonFrame(FRAME.HELLO, { capability: bound }))),
+              );
+            });
+            continue;
           }
-        } catch {
-          clearTimeout(timer);
-          give(false);
+          try {
+            const frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
+            if (frame?.type === FRAME.READY) give(true);
+            // Sealed by the machine under the session key, so the relay that carried it could not have written it.
+            if (frame?.type === FRAME.FAILED) give(false, decodeJson<CloseFrame>(frame.payload));
+          } catch {
+            give(false);
+          }
         }
-      }
+      });
+      ws.on("unexpected-response", () => give(false));
+      ws.on("error", () => give(false));
     });
-    ws.on("unexpected-response", () => give(false));
-    ws.on("error", () => give(false));
-  });
 
-  report("a Noise handshake completes through the relay's splice", outcome.ready, "READY");
+  const unapproved = await dialChannel();
+  check(
+    "a channel the relay authorized and carried is refused by the machine itself, for a device its locked list has never seen",
+    [unapproved.ready, unapproved.refusal?.code, unapproved.refusal?.reason],
+    [false, 403, DEVICE_NOT_APPROVED],
+  );
+  check("and the request is waiting on the machine, under the key the handshake proved", knownDevices.get(deviceThumbprint)?.state, "pending");
+  check("which its owner approves there", gate.approve(deviceThumbprint), true);
+
+  const outcome = await dialChannel();
+  report("after which a Noise handshake completes through the relay's splice", outcome.ready, "READY");
   // No JWS prefix in anything that crossed; the control first proves the search could find one.
   check(
     "the search would find the capability if it were in the clear",
@@ -1840,6 +1864,7 @@ process.stdout.write("\nthe encrypted channel\n");
   report("in bytes this end wrote as well as bytes it read", outcome.carried.length > 0, `${outcome.carried.length} bytes`);
 
   encryptedTunnel.stop();
+  knownDb.close();
 }
 
 // A stream is stamped with the version its tunnel negotiated, asserted with one this build does not speak.
