@@ -75,6 +75,9 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- **A turn the daemon ended because the agent went silent leaves no line in the
+  conversation.** It used to end with a centred *"the agent stopped answering"*. Now the
+  working line simply stops, in conversations already written as well.
 - **The Privacy Policy says what the relay can and cannot see.** It still said there was
   no end-to-end encryption. It now says that what a session carries is encrypted between
   your app and your machine, that the relay sees only that a connection exists, and that

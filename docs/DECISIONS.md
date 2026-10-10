@@ -8530,6 +8530,15 @@ change is one `TurnStopReason` member and the daemon ships first: `wire.ts` type
 `stopReason` as `string` and `stopReasonText` already falls through for a value it
 has never heard of.
 
+**The app draws nothing for it (the owner's call, 2026-10-10).** It drew a centred
+*"the agent stopped answering"*, on the argument that nothing else accounted for the
+gap. Read in a real conversation it was a status under an answer that was already
+whole, three hours late, and it named a fault where the reader saw none. So
+`showsInTranscript` refuses `abandoned` beside `agent_error`: the working line stops
+and that is the whole of it. Decided where a row is drawn, never where the daemon
+writes one, so conversations already in the log lose the line too, and the event is
+still written — `taskFloor` and the `turn.ended` hook read it.
+
 ### Q2.232 — a question the agent asks between turns is cancelled the instant it arrives
 
 **Symptom.** Reported by the owner from session `s_078b731c` on their own machine:

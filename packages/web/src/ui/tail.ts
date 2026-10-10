@@ -1195,9 +1195,12 @@ export const TRANSCRIPT_SILENT: ReadonlySet<string> = new Set([
   "workspace",
 ]);
 
+// agent_error is said by the row above it; abandoned by the working line stopping, and by nothing else (Q2.231).
+const UNDRAWN_STOPS: ReadonlySet<string> = new Set(["end_turn", "agent_error", "abandoned"]);
+
 export function showsInTranscript(event: SessionEvent): boolean {
   if (TRANSCRIPT_SILENT.has(event.type)) return false;
-  if (event.type === "turn_end") return event.stopReason !== "end_turn" && event.stopReason !== "agent_error";
+  if (event.type === "turn_end") return !UNDRAWN_STOPS.has(event.stopReason);
   if (event.type === "text") return !event.thought;
   return true;
 }
@@ -1244,8 +1247,6 @@ const STOP_REASON_TEXT: Record<string, string> = {
   max_tokens: "the agent ran out of room",
   max_turn_requests: "the agent hit its step limit",
   refusal: "the agent declined",
-  // Drawn because no row above accounts for the silence (Q2.231).
-  abandoned: "the agent stopped answering",
 };
 
 export function stopReasonText(stopReason: string): string {

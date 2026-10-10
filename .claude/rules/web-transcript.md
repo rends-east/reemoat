@@ -94,8 +94,9 @@ are `background-work.md`'s.
   falls through to the identifier for an unknown value. `taskFloor` keys on
   `stopReason !== "end_turn"` alone.
 - **`showsInTranscript` refuses status lines, workspace rows and `turn_end: end_turn`**;
-  other stop reasons stay, except `agent_error`, whose rejection is the row above. It still
-  raises `taskFloor`, which runs before the gate; `webcheck` pins the pair. Q2.218.
+  other stop reasons stay, except `agent_error`, whose rejection is the row above, and
+  `abandoned`, which the working line stopping says alone (Q2.231). Both still raise
+  `taskFloor`, which runs before the gate; `webcheck` pins each pair. Q2.218.
 - **A run of agent text is keyed on `messageId`** as well as `role` and `thought`, since
   parts join with no separator. The daemon numbers what the agent did not: the first id
   latches, then an unnumbered message gets a `~`-prefixed id; an agent numbering nothing

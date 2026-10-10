@@ -177,6 +177,10 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       outstandingTasks(failed.rows, failed.taskFloor).length,
       0,
     );
+    seq = 0;
+    const silent = buildTail([...spawn(), ended("abandoned")], []);
+    check("a turn ended for silence draws no line and still cuts", silent.taskFloor > 0, true);
+    check("and leaves nothing waiting either", outstandingTasks(silent.rows, silent.taskFloor).length, 0);
   }
 
   // Q3.699: a subagent is background work, running while it runs and finished once it has, wherever its own call says it ended.

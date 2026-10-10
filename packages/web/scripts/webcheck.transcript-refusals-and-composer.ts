@@ -91,11 +91,15 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
     [true, true, true, true, true, true, true, true],
   );
   check("an ordinary turn ending is not news", drawn({ type: "turn_end", stopReason: "end_turn" }), false);
-  // `abandoned` draws a row: an unanswered turn leaves nothing else to account for the gap (Q2.231).
   check(
     "but a turn that did not finish is",
-    ["max_tokens", "refusal", "cancelled", "abandoned"].map((reason) => drawn({ type: "turn_end", stopReason: reason })),
-    [true, true, true, true],
+    ["max_tokens", "refusal", "cancelled"].map((reason) => drawn({ type: "turn_end", stopReason: reason })),
+    [true, true, true],
+  );
+  check(
+    "one the daemon ended for silence leaves no line: the working line stopping is the whole of it",
+    drawn({ type: "turn_end", stopReason: "abandoned" }),
+    false,
   );
   check(
     "and a turn the agent rejected is not, because the error above it already said so",

@@ -383,9 +383,8 @@ process.stdout.write("\nwhat a turn says when it stops\n");
   check("and the one somebody did says who did it", resolvedByText("turn_cancelled"), "you stopped the turn");
   check("an unknown one keeps the old rendering", resolvedByText("some_new_reason" as never), "some new reason");
 
-  // abandoned is this daemon's own (Q2.231), listed so it never falls through to the raw enum.
   check("a cancelled turn says one word", stopReasonText("cancelled"), "cancelled");
-  const others = ["max_tokens", "max_turn_requests", "refusal", "abandoned"] as const;
+  const others = ["max_tokens", "max_turn_requests", "refusal"] as const;
   check(
     "and the rest say what happened rather than naming a constant",
     others.filter((reason) => stopReasonText(reason).includes(reason)),
