@@ -1,0 +1,246 @@
+{
+ "kind": "refusals",
+ "about": "What cannot be carried, each as the sentence the transcript shows.",
+ "source": "Constructed from the Messages API reference (2026-10-11).",
+ "model": "probe-model",
+ "cases": [
+  {
+   "about": "a document",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "document",
+        "source": {
+         "type": "base64",
+         "media_type": "application/pdf",
+         "data": "aGk="
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "untranslatable": "The conversation holds a block of type \"document\", which cannot be carried to this provider."
+  },
+  {
+   "about": "a block type nobody here knows",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "container_upload",
+        "file_id": "file_1"
+       }
+      ]
+     }
+    ]
+   },
+   "untranslatable": "The conversation holds a block of type \"container_upload\", which cannot be carried to this provider."
+  },
+  {
+   "about": "a result for a call never made",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "call_missing",
+        "content": "text"
+       }
+      ]
+     }
+    ]
+   },
+   "untranslatable": "A tool result answers the call \"call_missing\", which the conversation never made."
+  },
+  {
+   "about": "a result holding what a result cannot",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "Read",
+        "input": {}
+       }
+      ]
+     },
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "call_1",
+        "content": [
+         {
+          "type": "tool_reference",
+          "tool_name": "Read"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "untranslatable": "A tool result holds a block of type \"tool_reference\", which cannot be carried to this provider."
+  },
+  {
+   "about": "an image held in another vendor's file store",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "image",
+        "source": {
+         "type": "file",
+         "file_id": "file_1"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "untranslatable": "An image arrives as \"file\", which cannot be carried to this provider."
+  },
+  {
+   "about": "another vendor's server tool in the conversation",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "text"
+     },
+     {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "server_tool_use",
+        "id": "srvtoolu_1",
+        "name": "web_search",
+        "input": {}
+       }
+      ]
+     }
+    ]
+   },
+   "untranslatable": "The conversation holds a block of type \"server_tool_use\", which cannot be carried to this provider."
+  },
+  {
+   "about": "a fourth role",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "tool",
+      "content": "text"
+     }
+    ]
+   },
+   "untranslatable": "The conversation holds a message from \"tool\", which has no counterpart at this provider."
+  },
+  {
+   "about": "a required tool that is another vendor's own",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "text"
+     }
+    ],
+    "tools": [
+     {
+      "type": "web_search_20250305",
+      "name": "web_search"
+     }
+    ],
+    "tool_choice": {
+     "type": "tool",
+     "name": "web_search"
+    }
+   },
+   "untranslatable": "The request requires the tool \"web_search\", which is not among those this provider can be given."
+  },
+  {
+   "about": "an output format other than a schema",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "text"
+     }
+    ],
+    "output_config": {
+     "format": {
+      "type": "grammar"
+     }
+    }
+   },
+   "untranslatable": "The request asks for output as \"grammar\", which has no counterpart at this provider."
+  },
+  {
+   "about": "a system prompt that is not text",
+   "messages": {
+    "model": "probe-model",
+    "max_tokens": 1,
+    "messages": [
+     {
+      "role": "user",
+      "content": "text"
+     }
+    ],
+    "system": [
+     {
+      "type": "image",
+      "source": {
+       "type": "url",
+       "url": "https://example.invalid/a.png"
+      }
+     }
+    ]
+   },
+   "untranslatable": "The conversation holds a block of type \"image\", which cannot be carried to this provider."
+  },
+  {
+   "about": "a body that is not an object",
+   "messages": [],
+   "untranslatable": "The request is not one this gateway can read."
+  },
+  {
+   "about": "messages that are not a list",
+   "messages": {
+    "model": "probe-model",
+    "messages": "text"
+   },
+   "untranslatable": "The request is not one this gateway can read."
+  }
+ ]
+}

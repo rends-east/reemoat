@@ -114,6 +114,9 @@ every read, so a presence test would refuse every installed plugin at the next s
   RFC1918, ULA, `.local`/`.internal`/`.home.arpa` — and never a metadata address under
   either scheme (`169.254.169.254`). The opposite of `net`'s allowlist in the same file, and its comment says
   so: that list is a plugin's own outbound; this is where the operator's key goes.
+- **The catalogue files a manifest's one address under a wire protocol**
+  (`declaredEndpoints`): `anthropic` under Messages, `openai` under Chat Completions,
+  the dialect a manifest does not state. Q7.155.
 - **A metadata service is refused by name as well as by address**:
   `metadata.google.internal` (which `isPrivateHost` accepts as `.internal`), and
   `[::ffff:a9fe:a9fe]`, the spelling the dotted-quad arm never sees.

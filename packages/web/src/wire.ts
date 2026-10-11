@@ -871,6 +871,10 @@ export interface SystemInfo {
   displayName: string;
   apiType: string;
   routable?: boolean;
+  /** The protocols this system answers in. Absent from a daemon older than this, which is read by apiType. */
+  protocols?: string[];
+  /** Present only on a system that is signed in to and takes no key: who is signed in, or null. Nothing draws it yet (Q7.160). */
+  signIn?: { account: string | null; at: number } | null;
   nativeHarness: AgentId | null;
   loginVia: AgentId | null;
   models: { id: string; name: string }[];
@@ -887,6 +891,8 @@ export interface AgentRouting {
   supported: string[];
   // Absent means true, the opposite of routable: an older daemon can only route the built-in that always could.
   pinsModel?: boolean;
+  /** The protocols this harness can be pointed at another system in. Absent from a daemon older than this, which is read by supported and pinsModel. */
+  hosts?: string[];
 }
 
 export interface AgentCapabilities {

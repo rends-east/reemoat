@@ -1,0 +1,352 @@
+{
+ "kind": "stream",
+ "about": "The same turn cut inside the first call's arguments: the open block is closed and nothing says the answer finished.",
+ "source": "Constructed from the Responses streaming reference (2026-10-11), event names and fields as openai-node types them: no recording holds a tool call.",
+ "model": "probe-model",
+ "cut": true,
+ "responses": [
+  {
+   "event": "response.created",
+   "data": {
+    "type": "response.created",
+    "sequence_number": 0,
+    "response": {
+     "id": "resp_1",
+     "object": "response",
+     "created_at": 0,
+     "status": "in_progress",
+     "model": "probe-model",
+     "output": [],
+     "usage": null
+    }
+   }
+  },
+  {
+   "event": "response.in_progress",
+   "data": {
+    "type": "response.in_progress",
+    "sequence_number": 1,
+    "response": {
+     "id": "resp_1",
+     "object": "response",
+     "created_at": 0,
+     "status": "in_progress",
+     "model": "probe-model",
+     "output": [],
+     "usage": null
+    }
+   }
+  },
+  {
+   "event": "response.output_item.added",
+   "data": {
+    "type": "response.output_item.added",
+    "sequence_number": 2,
+    "output_index": 0,
+    "item": {
+     "id": "rs_1",
+     "type": "reasoning",
+     "summary": []
+    }
+   }
+  },
+  {
+   "event": "response.reasoning_summary_part.added",
+   "data": {
+    "type": "response.reasoning_summary_part.added",
+    "sequence_number": 3,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "part": {
+     "type": "summary_text",
+     "text": ""
+    }
+   }
+  },
+  {
+   "event": "response.reasoning_summary_text.delta",
+   "data": {
+    "type": "response.reasoning_summary_text.delta",
+    "sequence_number": 4,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "delta": "first "
+   }
+  },
+  {
+   "event": "response.reasoning_summary_text.delta",
+   "data": {
+    "type": "response.reasoning_summary_text.delta",
+    "sequence_number": 5,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "delta": "part"
+   }
+  },
+  {
+   "event": "response.reasoning_summary_text.done",
+   "data": {
+    "type": "response.reasoning_summary_text.done",
+    "sequence_number": 6,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "text": "first part"
+   }
+  },
+  {
+   "event": "response.reasoning_summary_part.done",
+   "data": {
+    "type": "response.reasoning_summary_part.done",
+    "sequence_number": 7,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 0,
+    "part": {
+     "type": "summary_text",
+     "text": "first part"
+    }
+   }
+  },
+  {
+   "event": "response.reasoning_summary_part.added",
+   "data": {
+    "type": "response.reasoning_summary_part.added",
+    "sequence_number": 8,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 1,
+    "part": {
+     "type": "summary_text",
+     "text": ""
+    }
+   }
+  },
+  {
+   "event": "response.reasoning_summary_text.delta",
+   "data": {
+    "type": "response.reasoning_summary_text.delta",
+    "sequence_number": 9,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 1,
+    "delta": "second part"
+   }
+  },
+  {
+   "event": "response.reasoning_summary_text.done",
+   "data": {
+    "type": "response.reasoning_summary_text.done",
+    "sequence_number": 10,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 1,
+    "text": "second part"
+   }
+  },
+  {
+   "event": "response.reasoning_summary_part.done",
+   "data": {
+    "type": "response.reasoning_summary_part.done",
+    "sequence_number": 11,
+    "item_id": "rs_1",
+    "output_index": 0,
+    "summary_index": 1,
+    "part": {
+     "type": "summary_text",
+     "text": "second part"
+    }
+   }
+  },
+  {
+   "event": "response.output_item.done",
+   "data": {
+    "type": "response.output_item.done",
+    "sequence_number": 12,
+    "output_index": 0,
+    "item": {
+     "id": "rs_1",
+     "type": "reasoning",
+     "summary": [
+      {
+       "type": "summary_text",
+       "text": "first part"
+      },
+      {
+       "type": "summary_text",
+       "text": "second part"
+      }
+     ],
+     "encrypted_content": "PROBEBLOBHwcCoCeRI9b0wLneShj3bOQopP93pmIGKZtputc4HwcCoCeRI9b0wLn"
+    }
+   }
+  },
+  {
+   "event": "response.output_item.added",
+   "data": {
+    "type": "response.output_item.added",
+    "sequence_number": 13,
+    "output_index": 1,
+    "item": {
+     "id": "fc_1",
+     "type": "function_call",
+     "status": "in_progress",
+     "call_id": "call_1",
+     "name": "Read",
+     "arguments": ""
+    }
+   }
+  },
+  {
+   "event": "response.function_call_arguments.delta",
+   "data": {
+    "type": "response.function_call_arguments.delta",
+    "sequence_number": 14,
+    "item_id": "fc_1",
+    "output_index": 1,
+    "delta": "{\"pa"
+   }
+  },
+  {
+   "event": "response.function_call_arguments.delta",
+   "data": {
+    "type": "response.function_call_arguments.delta",
+    "sequence_number": 15,
+    "item_id": "fc_1",
+    "output_index": 1,
+    "delta": "th\":\"a.txt\","
+   }
+  }
+ ],
+ "messages": [
+  {
+   "event": "message_start",
+   "data": {
+    "type": "message_start",
+    "message": {
+     "id": "resp_1",
+     "type": "message",
+     "role": "assistant",
+     "model": "probe-model",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 0
+     }
+    }
+   }
+  },
+  {
+   "event": "content_block_start",
+   "data": {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "first "
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "part"
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "\n\nsecond part"
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "signature_delta",
+     "signature": "rmr1.eyJpZCI6InJzXzEiLCJlbmNyeXB0ZWRfY29udGVudCI6IlBST0JFQkxPQkh3Y0NvQ2VSSTliMHdMbmVTaGozYk9Rb3BQOTNwbUlHS1p0cHV0YzRId2NDb0NlUkk5YjB3TG4iLCJzdW1tYXJ5IjpbeyJ0eXBlIjoic3VtbWFyeV90ZXh0IiwidGV4dCI6ImZpcnN0IHBhcnQifSx7InR5cGUiOiJzdW1tYXJ5X3RleHQiLCJ0ZXh0Ijoic2Vjb25kIHBhcnQifV19"
+    }
+   }
+  },
+  {
+   "event": "content_block_stop",
+   "data": {
+    "type": "content_block_stop",
+    "index": 0
+   }
+  },
+  {
+   "event": "content_block_start",
+   "data": {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "tool_use",
+     "id": "call_1",
+     "name": "Read",
+     "input": {}
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "{\"pa"
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "input_json_delta",
+     "partial_json": "th\":\"a.txt\","
+    }
+   }
+  },
+  {
+   "event": "content_block_stop",
+   "data": {
+    "type": "content_block_stop",
+    "index": 1
+   }
+  }
+ ]
+}

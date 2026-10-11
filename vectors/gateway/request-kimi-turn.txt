@@ -1,0 +1,1455 @@
+{
+ "kind": "request",
+ "about": "kimi's third turn: one system block, a tool carrying cache_control, thinking with no effort named, and a larger output bound.",
+ "source": "Kimi Code CLI 0.29.2 with KIMI_MODEL_PROVIDER_TYPE=anthropic, recorded 2026-10-11 by pnpm doorprobe (Q6.125). Structure only, as above.",
+ "model": "probe-model",
+ "messages": {
+  "model": "probe-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "thought",
+      "signature": "PROBEBLOBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "thought",
+      "signature": "PROBEBLOBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     }
+    ]
+   }
+  ],
+  "max_tokens": 128000,
+  "thinking": {
+   "type": "adaptive",
+   "display": "summarized"
+  },
+  "context_management": {
+   "edits": [
+    {
+     "type": "clear_thinking_20251015",
+     "keep": "all"
+    }
+   ]
+  },
+  "system": [
+   {
+    "type": "text",
+    "text": "system text 0",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   }
+  ],
+  "tools": [
+   {
+    "name": "Agent",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "subagent_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "resume": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "prompt",
+      "description"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "AgentSwarm",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "subagent_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt_template": {
+       "description": "description",
+       "type": "string"
+      },
+      "items": {
+       "description": "description",
+       "type": "array"
+      },
+      "resume_agent_ids": {
+       "description": "description",
+       "type": "object"
+      }
+     },
+     "required": [
+      "description"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "AskUserQuestion",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "questions": {
+       "description": "description",
+       "type": "array"
+      },
+      "background": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "questions"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Bash",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "command": {
+       "description": "description",
+       "type": "string"
+      },
+      "cwd": {
+       "description": "description",
+       "type": "string"
+      },
+      "timeout": {
+       "description": "description",
+       "type": "integer"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "disable_timeout": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CreateGoal",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "objective": {
+       "description": "description",
+       "type": "string"
+      },
+      "completionCriterion": {
+       "description": "description",
+       "type": "string"
+      },
+      "replace": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "objective"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronCreate",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "cron": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "recurring": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "cron",
+      "prompt"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronDelete",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "id": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronList",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Edit",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "old_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "new_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "replace_all": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "path",
+      "old_string",
+      "new_string"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "EnterPlanMode",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ExitPlanMode",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "options": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "FetchURL",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "url": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "url"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "GetGoal",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Glob",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "include_ignored": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "include_dirs": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Grep",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "glob": {
+       "description": "description",
+       "type": "string"
+      },
+      "type": {
+       "description": "description",
+       "type": "string"
+      },
+      "output_mode": {
+       "description": "description",
+       "type": "string"
+      },
+      "-i": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "-n": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "-A": {
+       "description": "description",
+       "type": "integer"
+      },
+      "-B": {
+       "description": "description",
+       "type": "integer"
+      },
+      "-C": {
+       "description": "description",
+       "type": "integer"
+      },
+      "head_limit": {
+       "description": "description",
+       "type": "integer"
+      },
+      "offset": {
+       "description": "description",
+       "type": "integer"
+      },
+      "multiline": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "include_ignored": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Read",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "line_offset": {
+       "description": "description"
+      },
+      "n_lines": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ReadMediaFile",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "region": {
+       "description": "description",
+       "type": "object"
+      },
+      "full_resolution": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "SetGoalBudget",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "value": {
+       "description": "description",
+       "type": "number"
+      },
+      "unit": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "value",
+      "unit"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Skill",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "skill": {
+       "description": "description",
+       "type": "string"
+      },
+      "args": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "skill"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskList",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "active_only": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "limit": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskOutput",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "task_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "block": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "timeout": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskStop",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "task_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "reason": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TodoList",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "todos": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "UpdateGoal",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "status": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "status"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Write",
+    "description": "description",
+    "input_schema": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "content": {
+       "description": "description",
+       "type": "string"
+      },
+      "mode": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ],
+     "additionalProperties": false
+    },
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   }
+  ],
+  "metadata": {
+   "user_id": "xxxxxxx_00000000-0000-4000-8000-000000000000"
+  },
+  "stream": true
+ },
+ "responses": {
+  "model": "probe-model",
+  "instructions": "system text 0",
+  "input": [
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "text",
+      "annotations": []
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "text",
+      "annotations": []
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "name": "Agent",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "subagent_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "resume": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "prompt",
+      "description"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "AgentSwarm",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "subagent_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt_template": {
+       "description": "description",
+       "type": "string"
+      },
+      "items": {
+       "description": "description",
+       "type": "array"
+      },
+      "resume_agent_ids": {
+       "description": "description",
+       "type": "object"
+      }
+     },
+     "required": [
+      "description"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "AskUserQuestion",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "questions": {
+       "description": "description",
+       "type": "array"
+      },
+      "background": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "questions"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Bash",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "command": {
+       "description": "description",
+       "type": "string"
+      },
+      "cwd": {
+       "description": "description",
+       "type": "string"
+      },
+      "timeout": {
+       "description": "description",
+       "type": "integer"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "disable_timeout": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CreateGoal",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "objective": {
+       "description": "description",
+       "type": "string"
+      },
+      "completionCriterion": {
+       "description": "description",
+       "type": "string"
+      },
+      "replace": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "objective"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CronCreate",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "cron": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "recurring": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "cron",
+      "prompt"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CronDelete",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "id": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CronList",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Edit",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "old_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "new_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "replace_all": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "path",
+      "old_string",
+      "new_string"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "EnterPlanMode",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ExitPlanMode",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "options": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "FetchURL",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "url": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "url"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "GetGoal",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Glob",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "include_ignored": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "include_dirs": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Grep",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "glob": {
+       "description": "description",
+       "type": "string"
+      },
+      "type": {
+       "description": "description",
+       "type": "string"
+      },
+      "output_mode": {
+       "description": "description",
+       "type": "string"
+      },
+      "-i": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "-n": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "-A": {
+       "description": "description",
+       "type": "integer"
+      },
+      "-B": {
+       "description": "description",
+       "type": "integer"
+      },
+      "-C": {
+       "description": "description",
+       "type": "integer"
+      },
+      "head_limit": {
+       "description": "description",
+       "type": "integer"
+      },
+      "offset": {
+       "description": "description",
+       "type": "integer"
+      },
+      "multiline": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "include_ignored": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "pattern"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Read",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "line_offset": {
+       "description": "description"
+      },
+      "n_lines": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ReadMediaFile",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "region": {
+       "description": "description",
+       "type": "object"
+      },
+      "full_resolution": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "SetGoalBudget",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "value": {
+       "description": "description",
+       "type": "number"
+      },
+      "unit": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "value",
+      "unit"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Skill",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "skill": {
+       "description": "description",
+       "type": "string"
+      },
+      "args": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "skill"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "TaskList",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "active_only": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "limit": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "TaskOutput",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "task_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "block": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "timeout": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "TaskStop",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "task_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "reason": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "task_id"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "TodoList",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "todos": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "UpdateGoal",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "status": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "status"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Write",
+    "description": "description",
+    "parameters": {
+     "$schema": "http://json-schema.org/draft-07/schema#",
+     "type": "object",
+     "properties": {
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "content": {
+       "description": "description",
+       "type": "string"
+      },
+      "mode": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   }
+  ],
+  "reasoning": {
+   "effort": "medium",
+   "summary": "auto"
+  },
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 128000,
+  "prompt_cache_key": "4ffda1e9adf0f49589df65b9fadbaf9699c219d5577fed9b768592a8338e9834",
+  "store": false,
+  "stream": true
+ }
+}

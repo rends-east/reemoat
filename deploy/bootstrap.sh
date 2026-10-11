@@ -9,6 +9,8 @@ CONTROL_PLANE_DEFAULT=@REEMOAT_CONTROL_PLANE@
 # deploycheck holds these to package.json's engines.node and packageManager.
 NODE_MAJOR=24
 PNPM_VERSION=11.17.0
+# And this one to GIT_MIN_VERSION in src/git.ts, the oldest git the daemon is run against.
+GIT_MIN_VERSION=2.31
 
 REEMOAT_HOME="${REEMOAT_HOME:-$HOME/.reemoat}"
 TOOLCHAIN="$REEMOAT_HOME/toolchain"
@@ -507,6 +509,14 @@ ensure_pnpm() {
   note "pnpm          $PNPM_VERSION"
 }
 
+# True where the version cannot be read: the daemon then says so itself, at the first session.
+git_new_enough() {
+  _v=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')
+  [ -n "$_v" ] || return 0
+  [ "${_v% *}" -gt "${GIT_MIN_VERSION%.*}" ] && return 0
+  [ "${_v% *}" -eq "${GIT_MIN_VERSION%.*}" ] && [ "${_v#* }" -ge "${GIT_MIN_VERSION#*.}" ]
+}
+
 ensure_git() {
   if [ "$PLATFORM" = darwin ] && ! xcode-select -p >/dev/null 2>&1; then
     # A bare git here opens a modal GUI dialog that a piped script cannot show.
@@ -515,7 +525,17 @@ ensure_git() {
   Run this, let it finish, then run this installer again:
       xcode-select --install"
   fi
-  command -v git >/dev/null 2>&1 && return 0
+  if command -v git >/dev/null 2>&1; then
+    git_new_enough && return 0
+    _hint=""
+    if [ -r /etc/os-release ] && grep -q '^ID=ubuntu$' /etc/os-release; then
+      _hint="
+  On Ubuntu: sudo add-apt-repository -y ppa:git-core/ppa && sudo apt-get update && sudo apt-get install -y git"
+    fi
+    die "git here is $(git --version 2>/dev/null | sed 's/^git version //'), and a session in a repository needs $GIT_MIN_VERSION or newer.
+
+  Update git, then run this installer again.$_hint"
+  fi
   for _pm in apt-get dnf pacman apk zypper; do
     command -v "$_pm" >/dev/null 2>&1 || continue
     case "$_pm" in

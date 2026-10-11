@@ -31,7 +31,8 @@ daemon that cannot dial in has no second door): rule 1's range, and rule 4's inv
 
 **The daemon still asks the control plane nothing** (Q1.9, Q1.10): everything below is
 announced on a connection it opens anyway or read off a reply it already gets. `src/` holds
-three `fetch` calls, each named in `plugins.md`, and that count is the property.
+five `fetch` calls, each named in `plugins.md`, and the list is the property: `gatewaycheck`
+holds it, and only the gateway's two are on a session's path (`model-gateway.md`).
 
 **Updating a daemon is its owner's act**: never self-updated, told to update or sent a version;
 `deploy/deploy.sh` on the host is the mechanism and fleet rollout is a non-goal (Q7.42). The

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 
 // The only place that spawns git: argv arrays, a scrubbed env, a timeout on every call, failures thrown as GitError, nothing printed.
 
-export type GitErrorCode = "git_missing" | "git_failed" | "git_timeout" | "git_output_too_large";
+export type GitErrorCode = "git_missing" | "git_too_old" | "git_failed" | "git_timeout" | "git_output_too_large";
 
 export class GitError extends Error {
   constructor(
@@ -16,6 +16,37 @@ export class GitError extends Error {
     super(message);
     this.name = "GitError";
   }
+}
+
+/** The oldest git this is driven against, which `pnpm gitfloor` builds and runs the drivers on (Q6.128). */
+export const GIT_MIN_VERSION: readonly [number, number] = [2, 31];
+
+export interface GitVersion {
+  major: number;
+  minor: number;
+  /** As far as the digits go: `2.39.5` of `git version 2.39.5 (Apple Git-154)`. */
+  text: string;
+}
+
+export function parseGitVersion(output: string): GitVersion | null {
+  const match = /^git version ((\d+)\.(\d+)(?:\.\d+)*)/.exec(output.trim());
+  if (!match) return null;
+  return { major: Number(match[2]), minor: Number(match[3]), text: match[1] ?? "" };
+}
+
+export function gitTooOld(version: GitVersion): boolean {
+  const [major, minor] = GIT_MIN_VERSION;
+  return version.major < major || (version.major === major && version.minor < minor);
+}
+
+/** `found` is null where the version could not be read and an answer gave the age away. */
+export function tooOldGit(argv: readonly string[], found: string | null): GitError {
+  const floor = GIT_MIN_VERSION.join(".");
+  const message =
+    found === null
+      ? `git on this machine is older than the ${floor} a session in a repository needs`
+      : `git on this machine is ${found}, and a session in a repository needs ${floor} or newer`;
+  return new GitError("git_too_old", argv, null, "", message);
 }
 
 export interface RunGitOptions {
@@ -218,6 +249,19 @@ export function splitNul(buffer: Buffer): Buffer[] {
   let start = 0;
   for (let i = 0; i < buffer.length; i += 1) {
     if (buffer[i] !== 0) continue;
+    out.push(buffer.subarray(start, i));
+    start = i + 1;
+  }
+  if (start < buffer.length) out.push(buffer.subarray(start));
+  return out;
+}
+
+/** For a listing with no `-z`: one token a line, the trailing newline not a token. */
+export function splitLines(buffer: Buffer): Buffer[] {
+  const out: Buffer[] = [];
+  let start = 0;
+  for (let i = 0; i < buffer.length; i += 1) {
+    if (buffer[i] !== 0x0a) continue;
     out.push(buffer.subarray(start, i));
     start = i + 1;
   }

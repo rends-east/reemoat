@@ -28,6 +28,11 @@ export function hostable(
   if (routing === null) {
     return `${nameOf(harness)} only runs its own models.`;
   }
+  // A daemon that names protocols on both sides is read by them alone; what follows is what an older one sends.
+  if (routing.hosts !== undefined && system.protocols !== undefined) {
+    const hosts = routing.hosts;
+    return system.protocols.some((one) => hosts.includes(one)) ? null : cannotRunSystem(harness, system, nameOf);
+  }
   if (!routing.supported.includes(system.apiType)) {
     return cannotRunSystem(harness, system, nameOf);
   }

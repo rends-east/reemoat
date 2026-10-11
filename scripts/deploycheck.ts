@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { AGENT_IDS, AGENT_LOGIN, MANAGED_CLI_DIRS } from "../src/acp/agents.js";
 // Imported so the emitter in agents.sh is driven against the real parser.
 import { readStep } from "../src/agentinstall.js";
+import { GIT_MIN_VERSION } from "../src/git.js";
 import { SETTING_KEYS, envNameFor } from "../packages/control-plane/src/settings.js";
 import { tmp } from "./tmp.js";
 
@@ -3431,11 +3432,19 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     [usesDeps.test(jobText(releaseYml, "app")), usesDeps.test(jobText(checkWorkflow, "native"))],
     [true, true],
   );
+  // The floor job builds git and names the one header package that takes; it is no app's dependency and no list.
+  const gitfloorJob = jobText(checkWorkflow, "gitfloor");
   check(
     "and neither workflow installs a package list of its own beside it",
-    [/apt-get/.test(releaseYml), /apt-get/.test(checkWorkflow)],
+    [/apt-get/.test(releaseYml), /apt-get/.test(checkWorkflow.replace(gitfloorJob, ""))],
     [false, false],
   );
+  check(
+    "the one package check.yml installs itself is zlib's headers, for the job that compiles git",
+    [...gitfloorJob.matchAll(/apt-get install ([^\n;}]*)/g)].map((match) => (match[1] ?? "").split(/\s+/).filter((word) => word.length > 0 && !word.startsWith("-"))),
+    [["zlib1g-dev"]],
+  );
+  check("and that job runs the driver through the one command", /^\s+run: pnpm gitfloor$/m.test(gitfloorJob), true);
 
   // Job ids are the only two-space keys with no value under `jobs:`, which makes this split safe.
   const jobsBody = releaseYml.slice(releaseYml.indexOf("\njobs:\n")).split("\n");
@@ -3937,6 +3946,69 @@ process.stdout.write("\nthe one-line installer\n");
   check(
     "and the node it installs satisfies engines.node",
     Number.parseInt(pinned("NODE_MAJOR"), 10) >= engineMajor,
+    true,
+  );
+
+  // One number in three files, since the installer is served alone and can read neither of the others (Q6.128).
+  const [gitMajor, gitMinor] = GIT_MIN_VERSION;
+  const libLines = readFileSync(join(deployDir, "lib.sh"), "utf8").split("\n");
+  check(
+    "the git both installers refuse below is the one the daemon refuses below",
+    [pinned("GIT_MIN_VERSION"), lineIn("lib.sh", libLines, "the git floor", "GIT_MIN_VERSION=").slice("GIT_MIN_VERSION=".length)],
+    [`${gitMajor}.${gitMinor}`, `${gitMajor}.${gitMinor}`],
+  );
+  check(
+    "and it is the git deploy/README.md says a daemon needs",
+    /\| Needs \|.*\bgit ≥ (\d+\.\d+) \|/.exec(readFileSync(join(deployDir, "README.md"), "utf8"))?.[1],
+    `${gitMajor}.${gitMinor}`,
+  );
+  const gitSaying = (says: string): string => {
+    const dir = join(sandbox, `git-${says.replace(/[^0-9a-z]+/gi, "-")}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "git"), `#!/bin/sh\necho '${says}'\n`);
+    chmodSync(join(dir, "git"), 0o755);
+    return `${dir}:${baseEnv["PATH"]}`;
+  };
+  const floorCheck = (source: string, call: string, says: string): Run => {
+    const run = spawnSync("sh", ["-c", `GIT_MIN_VERSION=${gitMajor}.${gitMinor}\n${source}\n${call}`], {
+      encoding: "utf8",
+      env: { ...baseEnv, PATH: gitSaying(says) },
+    });
+    return { status: run.status ?? -1, out: run.stdout ?? "", err: run.stderr ?? "" };
+  };
+  const newEnough = blockIn("bootstrap.sh", bootstrapLines, "git_new_enough", "git_new_enough() {", "}");
+  const requireFloor = blockIn("lib.sh", libLines, "require_git_floor", "require_git_floor() {", "}");
+  const older = `${gitMajor}.${gitMinor - 1}.9`;
+  for (const [says, passes] of [
+    [`git version ${older}`, false],
+    [`git version ${gitMajor - 1}.${gitMinor + 60}.0`, false],
+    [`git version ${gitMajor}.${gitMinor}.0`, true],
+    [`git version ${gitMajor}.${gitMinor + 8}.5 (Apple Git-154)`, true],
+    [`git version ${gitMajor + 1}.0.0`, true],
+    // Unreadable passes: the daemon refuses on the answers themselves, and an installer that guessed would refuse a git that works.
+    ["a git that says something else", true],
+  ] as const) {
+    check(
+      `${JSON.stringify(says)} ${passes ? "passes" : "is refused by"} both installers`,
+      [floorCheck(newEnough, "git_new_enough", says).status === 0, floorCheck(requireFloor, "require_git_floor", says).status === 0],
+      [passes, passes],
+    );
+  }
+  const refused = floorCheck(requireFloor, "require_git_floor", `git version ${older}`);
+  check(
+    "and the refusal names the version found and the one needed",
+    [refused.status, refused.err.includes(`git here is ${older}`), refused.err.includes(`needs ${gitMajor}.${gitMinor} or newer`)],
+    [2, true, true],
+  );
+  const ensureGit = blockIn("bootstrap.sh", bootstrapLines, "ensure_git", "ensure_git() {", "}");
+  check(
+    "the one-line installer asks before it clones, in the same words",
+    [/git_new_enough && return 0/.test(ensureGit), ensureGit.includes("needs $GIT_MIN_VERSION or newer")],
+    [true, true],
+  );
+  check(
+    "and install.sh asks for a daemon only, since the control plane starts no session",
+    /^if \[ "\$SERVICE" = daemon \]; then require_git_floor; fi$/m.test(readFileSync(join(deployDir, "install.sh"), "utf8")),
     true,
   );
 

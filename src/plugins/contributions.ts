@@ -4,6 +4,7 @@ import {
   type ContributedHarness,
 } from "../acp/agents.js";
 import {
+  declaredEndpoints,
   isBuiltinSystemId,
   SYSTEM_IDS,
   SYSTEMS,
@@ -24,7 +25,11 @@ export class Contributions implements MachineCatalogue {
   private declaredHarnesses = new Set<string>();
   private declaredSystems = new Set<string>();
 
-  constructor(installed: readonly InstalledPlugin[] = []) {
+  /** hidden: built-in systems this machine does not offer, as if this build did not ship them. */
+  constructor(
+    installed: readonly InstalledPlugin[] = [],
+    private readonly hidden: ReadonlySet<string> = new Set(),
+  ) {
     this.refresh(installed);
   }
 
@@ -60,7 +65,7 @@ export class Contributions implements MachineCatalogue {
         systems.set(id, {
           displayName: one.name,
           apiType: one.apiType,
-          baseUrl: one.baseUrl,
+          endpoints: declaredEndpoints(one.apiType, one.baseUrl),
           authHeader: one.authHeader,
           // Namespaced here, so a manifest names only its own harness and a renamed plugin cannot point at another's.
           nativeHarness: one.nativeHarness === null ? null : contributedId(plugin.id, one.nativeHarness),
@@ -68,6 +73,7 @@ export class Contributions implements MachineCatalogue {
           models: one.models,
           nativeModelPrefix: one.nativeModelPrefix,
           keyEnv: one.keyEnv,
+          signIn: null,
           contributedBy: by,
         });
       }
@@ -92,15 +98,17 @@ export class Contributions implements MachineCatalogue {
   }
 
   system(id: string): SystemConfig | null {
+    if (this.hidden.has(id)) return null;
     if (isBuiltinSystemId(id)) return SYSTEMS[id];
     return this.systems.get(id) ?? null;
   }
 
   systemIds(): readonly string[] {
-    return [...SYSTEM_IDS, ...this.systems.keys()];
+    return [...SYSTEM_IDS.filter((id) => !this.hidden.has(id)), ...this.systems.keys()];
   }
 
   systemState(id: string): CatalogueState {
+    if (this.hidden.has(id)) return "unknown";
     if (isBuiltinSystemId(id)) return "enabled";
     return this.stateOf(id, this.systems.has(id), this.declaredSystems);
   }

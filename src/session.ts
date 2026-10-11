@@ -53,15 +53,16 @@ import {
   type XaiQuestionResponse,
 } from "./acp/xai.js";
 import { QUESTION_TOOL_HARNESSES, sessionMetaFor } from "./acp/agents.js";
+import { doorOf } from "./acp/doors.js";
 import { ASK_TOOL_NAME } from "./peers/ask.js";
 import { PEER_SERVER_NAME } from "./peers/envelope.js";
 import { SEND_FILE_TOOL_NAME } from "./peers/files.js";
 import type { AgentRouting } from "./acp/systems.js";
 import {
   BUILTIN_CATALOGUE,
-  hostable,
   routedModelEnv,
   routedPairing,
+  routeFor,
   routingHeaders,
   type MachineCatalogue,
   type SystemId,
@@ -205,6 +206,8 @@ export interface SessionOptions {
   machine?: MachineCatalogue | null;
   // Called after initialize, once per agent process: /clear reuses the answer.
   mcpServers?: ((capabilities: acp.McpCapabilities, launch: McpLaunch) => acp.McpServer[]) | null;
+  // The registry's own id for this session, the same at every launch: it names a home a door keeps per session.
+  sessionKey?: string | null;
 }
 
 /** A bearer minted before the spawn and already in the agent's environment under `env`. */
@@ -502,15 +505,7 @@ export class Session {
       options.machine ?? BUILTIN_CATALOGUE,
     );
     const bearer = mcpBearerOf(options, config);
-    const client = await AcpClient.launch(
-      config,
-      await runtime.launch(options.agent, spawnEnvOf(options, bearer), pairing, options.cwd),
-      {
-        fileIo: runtime.clientFileIo,
-        elicitation: options.elicitations != null,
-        authMethod: runtime.authMethod(options.agent, pairing),
-      },
-    );
+    const client = await launchThroughDoor(options, runtime, config, bearer, pairing, runtime.clientFileIo);
 
     let routed: boolean;
     try {
@@ -582,15 +577,7 @@ export class Session {
       options.machine ?? BUILTIN_CATALOGUE,
     );
     const bearer = mcpBearerOf(options, config);
-    const client = await AcpClient.launch(
-      config,
-      await runtime.launch(options.agent, spawnEnvOf(options, bearer), pairing, options.cwd),
-      {
-        fileIo,
-        elicitation: options.elicitations != null,
-        authMethod: runtime.authMethod(options.agent, pairing),
-      },
-    );
+    const client = await launchThroughDoor(options, runtime, config, bearer, pairing, fileIo);
 
     // Re-applied on every resume: routing lives in the agent process.
     let routed: boolean;
@@ -1053,7 +1040,7 @@ export class Session {
           this.dropUnclaimedCalls();
           this.queue.push({
             type: "error",
-            message: describeError(error),
+            message: describeTurnError(error),
             data: error instanceof acp.RequestError ? { code: error.code, data: error.data } : null,
           });
         },
@@ -2041,7 +2028,7 @@ function sessionMetaOf(options: SessionOptions): Record<string, unknown> | undef
   return sessionMetaFor(options.agent, { ultracode: options.ultracode === true, elicitation: options.elicitations != null });
 }
 
-// Native pairings only. Answers a sentence: start refuses on it, openResumed demotes (Q2.216).
+// Native pairings, and a door set at the spawn. Answers a sentence: start refuses on it, openResumed demotes (Q2.216).
 async function pinNativeModel(session: Session, options: SessionOptions): Promise<string | null> {
   const model = options.model ?? null;
   const system = options.system ?? null;
@@ -2054,11 +2041,17 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
       ? `This session's provider comes from a plugin that is switched off on this machine.`
       : `This session's provider is no longer on this machine.`;
   }
-  if (spec !== null && spec.nativeHarness !== options.agent) return null;
-
-  // The one place a model id is respelled, so a preset stays harness-agnostic; idempotent.
-  const prefix = spec?.nativeModelPrefix ?? null;
-  const wanted = prefix === null || model.startsWith(prefix) ? model : `${prefix}${model}`;
+  let wanted: string;
+  if (spec !== null && spec.nativeHarness !== options.agent) {
+    const door = doorOf(options.agent);
+    // Through providers/set the model is named at the spawn and the agent is asked nothing (Q7.115).
+    if (door?.via !== "spawn") return null;
+    wanted = door.held(model);
+  } else {
+    // The one place a model id is respelled, so a preset stays harness-agnostic; idempotent.
+    const prefix = spec?.nativeModelPrefix ?? null;
+    wanted = prefix === null || model.startsWith(prefix) ? model : `${prefix}${model}`;
+  }
 
   const option = session.modelOption;
   if (option === null) return `${options.agent} offers no choice of model on this machine.`;
@@ -2076,10 +2069,97 @@ async function pinNativeModel(session: Session, options: SessionOptions): Promis
     );
   }
   await session.setConfigOption(option.id, wanted);
+  // Read back: an agent that accepts a pin and stays where it was is on another model (Q6.126).
+  const now = session.modelOption?.value;
+  if (now !== wanted) return `${options.agent} was asked for ${JSON.stringify(wanted)} and stayed on ${JSON.stringify(now ?? "")}.`;
   return null;
 }
 
 const MODEL_NAMES_IN_PIN_REFUSAL = 8;
+
+const MAX_ERROR_DETAIL_CHARS = 500;
+
+/** grok answers a failed turn "Internal error" and puts what the endpoint said in data, where nobody reads it (Q6.127). */
+function describeTurnError(error: unknown): string {
+  const said = describeError(error);
+  if (!(error instanceof acp.RequestError)) return said;
+  const data: unknown = error.data;
+  const detail =
+    typeof data === "string" ? data : typeof (data as { message?: unknown } | null)?.message === "string" ? (data as { message: string }).message : null;
+  if (detail === null || detail.trim() === "" || said.includes(detail)) return said;
+  const line = detail.replace(/\s+/g, " ").trim();
+  return `${said}: ${line.length <= MAX_ERROR_DETAIL_CHARS ? line : `${line.slice(0, MAX_ERROR_DETAIL_CHARS)}…`}`;
+}
+
+/** The agent process, started through its harness's door where that door is set at the spawn; the grant ends with the process. */
+async function launchThroughDoor(
+  options: SessionOptions,
+  runtime: SessionRuntime,
+  config: AgentLaunchConfig,
+  bearer: McpBearer | null,
+  pairing: boolean,
+  fileIo: boolean,
+): Promise<AcpClient> {
+  const door = openSpawnDoor(options, runtime);
+  let client: AcpClient;
+  try {
+    client = await AcpClient.launch(
+      config,
+      await runtime.launch(options.agent, { ...spawnEnvOf(options, bearer), ...door?.env }, pairing, options.cwd),
+      {
+        fileIo,
+        elicitation: options.elicitations != null,
+        authMethod: runtime.authMethod(options.agent, pairing),
+      },
+    );
+  } catch (error) {
+    door?.close();
+    throw error;
+  }
+  if (door !== null) void client.closed.then(door.close, door.close);
+  return client;
+}
+
+/** null where this launch is native, bare, or pointed after the handshake by applySystem. */
+function openSpawnDoor(options: SessionOptions, runtime: SessionRuntime): { env: NodeJS.ProcessEnv; close(): void } | null {
+  const system = options.system ?? null;
+  const door = doorOf(options.agent);
+  if (system === null || door?.via !== "spawn") return null;
+  const machine = options.machine ?? BUILTIN_CATALOGUE;
+  const route = routeFor(options.agent, system, null, machine);
+  if (route.kind === "native") return null;
+  if (route.kind === "refused") throw new SystemRoutingError(route.why);
+  const displayName = machine.system(system)?.displayName ?? system;
+  const model = options.model ?? "";
+  // A door names one model or the harness picks its own, which on a home with nothing else in it is none.
+  if (model === "") throw new SystemRoutingError(`This session names no ${displayName} model to run.`);
+  const missing = runtime.systemMissing(system);
+  if (missing !== null) throw new SystemRoutingError(missing);
+  const grant = runtime.openRoute({
+    system,
+    model,
+    inbound: route.protocol,
+    outbound: route.outbound,
+  });
+  if (grant === null) {
+    throw new SystemRoutingError(
+      `${displayName} is reached through this machine's model gateway, which is switched off in its configuration.`,
+    );
+  }
+  try {
+    const env = door.prepare({
+      origin: grant.origin,
+      bearer: grant.bearer,
+      model,
+      protocol: route.protocol,
+      home: runtime.doorHome(options.agent, door.home === "session" ? (options.sessionKey ?? null) : null),
+    });
+    return { env, close: grant.close };
+  } catch (error) {
+    grant.close();
+    throw new SystemRoutingError(`This agent could not be pointed at ${displayName}: ${describeError(error)}`);
+  }
+}
 
 function spawnEnvOf(options: SessionOptions, bearer: McpBearer | null): NodeJS.ProcessEnv {
   const held = bearer === null ? {} : { [bearer.env]: bearer.token };
@@ -2108,29 +2188,44 @@ async function applySystem(
   }
   // routedPairing may answer true where this throws, never false where this routes.
   if (spec.nativeHarness === options.agent) return false;
+  const door = doorOf(options.agent);
+  // Set at the spawn, by launchThroughDoor: there is nothing to tell the agent.
+  if (door?.via === "spawn") return true;
 
   const routing = await client.routing();
-  const refusal = hostable(options.agent, system, routing, machine);
-  if (refusal !== null) throw new SystemRoutingError(refusal);
-  if (routing === null || spec.baseUrl === null) {
+  const route = routeFor(options.agent, system, routing, machine);
+  if (route.kind === "refused") throw new SystemRoutingError(route.why);
+  if (route.kind !== "routed" || routing === null) {
     throw new SystemRoutingError(`${spec.displayName} cannot be reached from this agent.`);
   }
 
-  const secret = runtime.systemSecret(system);
-  if (secret === null) {
-    throw new SystemRoutingError(
-      `No key is saved for ${spec.displayName} on this machine, so nothing can sign these requests.`,
-    );
+  // Refused here though the gateway asks again on every request: a start that cannot sign anything is said at the start.
+  const missing = runtime.systemMissing(system);
+  if (missing !== null) throw new SystemRoutingError(missing);
+
+  let pointing: { baseUrl: string; headers: Record<string, string> };
+  if (route.via === "gateway") {
+    const grant = runtime.openRoute({
+      system,
+      model: options.model == null || options.model === "" ? null : options.model,
+      inbound: route.protocol,
+      outbound: route.outbound,
+    });
+    if (grant === null) {
+      throw new SystemRoutingError(
+        `${spec.displayName} is reached through this machine's model gateway, which is switched off in its configuration.`,
+      );
+    }
+    // Good for this agent process and no longer, whichever way it ends.
+    void client.closed.then(grant.close, grant.close);
+    pointing = { baseUrl: grant.origin, headers: door?.via === "providers-set" ? door.grantHeaders(grant.bearer) : {} };
+  } else {
+    pointing = { baseUrl: route.outbound.baseUrl, headers: routingHeaders(system, runtime.systemSecret(system) ?? "", machine) };
   }
 
   try {
     await withDeadline(
-      client.setProvider({
-        providerId: routing.providerId,
-        apiType: spec.apiType,
-        baseUrl: spec.baseUrl,
-        headers: routingHeaders(system, secret, machine),
-      }),
+      client.setProvider({ providerId: routing.providerId, apiType: route.apiType, ...pointing }),
       SET_CONFIG_TIMEOUT_MS,
       "providers/set",
     );

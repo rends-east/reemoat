@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -19,9 +19,19 @@ import {
 } from "../src/changes.js";
 import type { BackgroundTask } from "../src/acp/asynctasks.js";
 import { containedIn } from "../src/paths.js";
-import { GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
+import {
+  GIT_MIN_VERSION,
+  GitError,
+  gitTooOld,
+  hostGit,
+  parseGitVersion,
+  type GitExec,
+  type GitRun,
+} from "../src/git.js";
 import { SessionRegistry } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
+import type { AgentAvailability } from "../src/runtime/types.js";
+import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
 import { createApp } from "../src/server.js";
 import { DEFAULT_MIN_SESSIONS, SCHEMA_VERSION, openStores, takeDaemonRow } from "../src/store/sqlite.js";
 import type { DaemonRow } from "../src/store/sqlite.js";
@@ -32,7 +42,7 @@ import { RelayTunnel } from "../src/relay/tunnel.js";
 import { MACHINE_KEY_HEADER } from "../src/relay/protocol.js";
 import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
 import { jwkThumbprint, x25519Jwk } from "../src/token.js";
-import { createWorkspace, inspectRepo, removeWorkspace, WorktreeError } from "../src/worktree.js";
+import { createWorkspace, inspectRepo, listWorktrees, removeWorkspace, WorktreeError } from "../src/worktree.js";
 import { tmp } from "./tmp.js";
 import { check, report } from "./daemoncheck.env.js";
 import {
@@ -45,6 +55,7 @@ import {
   storeOf,
   rowFor,
   credentials,
+  stubAgentConfig,
 } from "./daemoncheck.fixtures.js";
 
 /** The real store through a reopen: put swallows its own failures, so a broken statement fails every write silently and only a reopen shows it. */
@@ -1526,6 +1537,274 @@ process.stdout.write("\nwhat a session changed\n");
       check("never the repository-relative one", patch.patch?.includes("nested/inner.txt"), false);
     }
   }
+}
+
+// The real git under a runner that answers the two questions an older one answers differently, as recorded off
+// builds of 2.30.2, 2.31.0 and 2.34.1 (Q6.128). `pnpm gitfloor` runs this whole driver on the floor itself.
+
+process.stdout.write("\na git older than the one this was written against\n");
+{
+  const floor = GIT_MIN_VERSION.join(".");
+  const read = (output: string): unknown => {
+    const version = parseGitVersion(output);
+    return version === null ? null : [version.major, version.minor, version.text, gitTooOld(version)];
+  };
+  check("a version is read as far as its digits go", [
+    read("git version 2.31.0\n"),
+    read("git version 2.39.5 (Apple Git-154)"),
+    read("git version 2.43.0.windows.1"),
+    read("git version 2.44.0-rc1"),
+    read("git version 2.31.GIT"),
+  ], [
+    [2, 31, "2.31.0", false],
+    [2, 39, "2.39.5", false],
+    [2, 43, "2.43.0", false],
+    [2, 44, "2.44.0", false],
+    [2, 31, "2.31", false],
+  ]);
+  check("and the floor is a comparison of two numbers, not of strings", [
+    read("git version 2.30.9"),
+    read("git version 2.9.5"),
+    read("git version 1.99.0"),
+    read("git version 3.0.0"),
+    read("git version 2.100.0"),
+  ], [
+    [2, 30, "2.30.9", true],
+    [2, 9, "2.9.5", true],
+    [1, 99, "1.99.0", true],
+    [3, 0, "3.0.0", false],
+    [2, 100, "2.100.0", false],
+  ]);
+  check("while anything else is not a version at all", [read(""), read("fatal: not a git repository"), read("version 2.40.0")], [null, null, null]);
+
+  const host = parseGitVersion(execFileSync("git", ["--version"], { encoding: "utf8" }));
+  report(
+    "the git these checks run on is not below the floor",
+    host !== null && !gitTooOld(host),
+    `git ${host?.text ?? "unreadable"}, floor ${floor}`,
+  );
+  // Set by `pnpm gitfloor`, so a run that was meant for another git cannot pass on the one already on PATH.
+  const asked = process.env["GITFLOOR_GIT"];
+  if (asked !== undefined) check("and it is the git this run was asked to use", host?.text, asked);
+  const hostListsByNul = host !== null && (host.major > 2 || (host.major === 2 && host.minor >= 36));
+
+  const shaped = (shape: {
+    version: string | null;
+    nul: boolean;
+    pathFormat: boolean;
+  }): { runner: GitExec; argv: () => string[][] } => {
+    const argv: string[][] = [];
+    const run: GitExec["run"] = async (args, options) => {
+      argv.push([...args]);
+      if (args[0] === "--version") {
+        if (shape.version === null) throw new GitError("git_failed", args, 128, "fatal: unreadable", "git --version failed");
+        return { stdout: Buffer.from(`git version ${shape.version}\n`), stderr: "", exitCode: 0, truncated: false };
+      }
+      if (!shape.nul && args[0] === "worktree" && args[1] === "list" && args.includes("-z")) {
+        throw new GitError(
+          "git_failed",
+          args,
+          129,
+          "error: unknown switch `z'\nusage: git worktree list [<options>]\n",
+          "git worktree list exited 129: error: unknown switch `z'",
+        );
+      }
+      if (!shape.pathFormat && args[0] === "rev-parse" && args.includes("--path-format=absolute")) {
+        const answered = await hostGit.run(args.filter((arg) => arg !== "--path-format=absolute"), options);
+        return { ...answered, stdout: Buffer.concat([Buffer.from("--path-format=absolute\n"), answered.stdout]) };
+      }
+      return hostGit.run(args, options);
+    };
+    return { runner: { run, readCapped: (args, options) => hostGit.readCapped(args, options) }, argv: () => argv };
+  };
+  const jammy = { version: "2.34.1", nul: false, pathFormat: true };
+  const bullseye = { version: "2.30.2", nul: false, pathFormat: false };
+
+  const repo = join(sandbox, "oldgit");
+  mkdirSync(join(repo, "sub"), { recursive: true });
+  const git = (...args: string[]): void => {
+    execFileSync("git", ["-C", repo, "-c", "user.name=daemoncheck", "-c", "user.email=d@example.invalid", ...args], {
+      stdio: "pipe",
+    });
+  };
+  execFileSync("git", ["init", "--quiet", "--initial-branch=main", repo], { stdio: "pipe" });
+  writeFileSync(join(repo, "sub", "a.txt"), "one\n");
+  git("add", "-A");
+  git("commit", "--quiet", "-m", "base");
+  const linked = join(sandbox, "oldgit-wt");
+  git("worktree", "add", "--quiet", "-b", "side", join(linked, "branch"));
+  git("worktree", "add", "--quiet", "--detach", join(linked, "detached"));
+  git("worktree", "add", "--quiet", "-b", "kept", join(linked, "locked"));
+  git("worktree", "lock", "--reason", "kept for a reason", join(linked, "locked"));
+  git("worktree", "add", "--quiet", "-b", "lost", join(linked, "gone"));
+  rmSync(join(linked, "gone"), { recursive: true, force: true });
+
+  const listedByLine = shaped(jammy);
+  const byLine = await listWorktrees(repo, listedByLine.runner);
+  check("a listing read by line is the listing read by NUL", byLine, await listWorktrees(repo, hostGit));
+  // Sorted: git lists linked worktrees in the order of its own directory, not the order they were made in.
+  check(
+    "with every annotation the daemon reads still on its entry",
+    byLine
+      .map((entry) => [entry.branch ?? "", entry.detached, entry.locked, entry.lockedReason, entry.prunable])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    [
+      ["", true, false, null, false],
+      ["kept", false, true, "kept for a reason", false],
+      ["lost", false, false, null, true],
+      ["main", false, false, null, false],
+      ["side", false, false, null, false],
+    ],
+  );
+  check(
+    "asked for by NUL first, and by line only once git said it has no such switch",
+    listedByLine.argv().filter((args) => args[0] === "worktree").map((args) => args.includes("-z")),
+    [true, false],
+  );
+
+  const bare = join(sandbox, "oldgit-bare.git");
+  execFileSync("git", ["clone", "--quiet", "--bare", repo, bare], { stdio: "pipe" });
+  for (const [where, dir] of [
+    ["the main checkout", repo],
+    ["a directory inside it", join(repo, "sub")],
+    ["a linked worktree", join(linked, "branch")],
+    ["a bare repository", bare],
+  ] as const) {
+    check(`and ${where} is inspected to the same answer`, await inspectRepo(dir, shaped(jammy).runner), await inspectRepo(dir, hostGit));
+  }
+
+  // Only a path can put a line outside the listing's own words there, and a path cut at the break names another directory.
+  const broken = join(sandbox, "oldgit-nl");
+  mkdirSync(broken, { recursive: true });
+  execFileSync("git", ["init", "--quiet", "--initial-branch=main", broken], { stdio: "pipe" });
+  execFileSync(
+    "git",
+    ["-C", broken, "-c", "user.name=daemoncheck", "-c", "user.email=d@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "base"],
+    { stdio: "pipe" },
+  );
+  const brokenPath = join(sandbox, "oldgit-nl-wt", "one\ntwo");
+  execFileSync("git", ["-C", broken, "worktree", "add", "--quiet", "-b", "nl", brokenPath], { stdio: "pipe" });
+  const listing = async (runner: GitExec): Promise<unknown> => {
+    try {
+      return (await listWorktrees(broken, runner)).map((entry) => entry.path);
+    } catch (error) {
+      return error instanceof GitError ? [error.code, error.message] : String(error);
+    }
+  };
+  const refusedByLine = [
+    "git_failed",
+    "a worktree of this repository has a line break in its path, which git older than 2.36 cannot list",
+  ];
+  check("a path with a line break in it is refused by line rather than cut at the break", await listing(shaped(jammy).runner), refusedByLine);
+  check(
+    "and listed whole by a git that separates with NUL",
+    await listing(hostGit),
+    hostListsByNul ? [broken, brokenPath] : refusedByLine,
+  );
+
+  const failing = (exitCode: number, stderr: string): { runner: GitExec; listings: () => number } => {
+    let listings = 0;
+    const run: GitExec["run"] = async (args, options) => {
+      if (args[0] !== "worktree") return hostGit.run(args, options);
+      listings += 1;
+      throw new GitError("git_failed", args, exitCode, stderr, `git worktree list exited ${exitCode}`);
+    };
+    return { runner: { run, readCapped: (args, options) => hostGit.readCapped(args, options) }, listings: () => listings };
+  };
+  for (const [what, exitCode, stderr] of [
+    ["a repository that is not one", 128, "fatal: not a git repository (or any of the parent directories): .git\n"],
+    ["another switch git does not know", 129, "error: unknown option `porcelain'\nusage: git worktree list [<options>]\n"],
+  ] as const) {
+    const git = failing(exitCode, stderr);
+    const outcome = await listWorktrees(repo, git.runner).then(
+      () => "listed",
+      (error: unknown) => (error instanceof GitError ? error.exitCode : String(error)),
+    );
+    check(`${what} is that failure, and is not asked again by line`, [outcome, git.listings()], [exitCode, 1]);
+  }
+
+  const worktreeRoot = join(sandbox, "oldgit-worktrees");
+  const start = async (
+    runner: GitExec,
+    policy: "auto" | "require" | "never",
+    cwd: string = repo,
+    sessionId = "s_oldgit",
+  ): Promise<unknown> => {
+    try {
+      const made = await createWorkspace({ cwd, sessionId, policy, worktreeRoot, branchPrefix: "dcheck", runner });
+      return [made.workspace.mode, made.workspace.plainReason, made.workspace.git === null ? null : "git"];
+    } catch (error) {
+      return error instanceof WorktreeError ? [error.code, error.message] : String(error);
+    }
+  };
+  const tooOld = ["git_too_old", `git on this machine is 2.30.2, and a session in a repository needs ${floor} or newer`];
+  const old = shaped(bullseye);
+  check("below the floor a worktree is refused, in a sentence with both versions", await start(old.runner, "require"), tooOld);
+  check("and so is the default, which would otherwise put the agent in the checkout itself", await start(old.runner, "auto"), tooOld);
+  check(
+    "with nothing asked of that git past its version",
+    old.argv().map((args) => args[0]),
+    ["rev-parse", "--version", "rev-parse", "--version"],
+  );
+  check("and nothing made", [existsSync(worktreeRoot), existsSync(join(repo, ".git", "refs", "heads", "dcheck"))], [false, false]);
+  check("a session that asked for no worktree still starts, knowing nothing of the repository", await start(old.runner, "never"), ["plain", "not_requested", null]);
+
+  const plainDir = join(sandbox, "oldgit-plain");
+  mkdirSync(plainDir, { recursive: true });
+  const outside = shaped(bullseye);
+  check("a folder that is no repository starts as it always did", await start(outside.runner, "auto", plainDir), ["plain", "not_a_repo", null]);
+  check("its git never asked how old it is", outside.argv().some((args) => args[0] === "--version"), false);
+
+  check(
+    "a git that will not say its version and prints the option back is refused on that answer",
+    await start(shaped({ version: null, nul: false, pathFormat: false }).runner, "require"),
+    ["git_too_old", `git on this machine is older than the ${floor} a session in a repository needs`],
+  );
+  check("still with nothing made", existsSync(worktreeRoot), false);
+
+  const silent = shaped({ version: null, nul: true, pathFormat: true });
+  check("while one that only will not say is taken at its answers", await start(silent.runner, "require", repo, "s_silent"), ["worktree", null, "git"]);
+  const made = join(worktreeRoot, readdirSync(worktreeRoot)[0] ?? "none", "s_silent");
+  check("and the worktree is really there", existsSync(join(made, "sub", "a.txt")), true);
+  git("worktree", "remove", "--force", "--", made);
+
+  // The status is the route's own: 503 is "the remedy is on this machine", where the default arm would answer 409.
+  class OldGitRuntime extends LocalRuntime {
+    launches = 0;
+    override git(): GitExec {
+      return old.runner;
+    }
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "claude", displayName: "claude", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<never> {
+      this.launches += 1;
+      throw new Error("nothing may be launched where no workspace was made");
+    }
+  }
+  const runtime = new OldGitRuntime();
+  const registry = new SessionRegistry(
+    new MemoryEventStore(),
+    storeOf([]),
+    { worktreeRoot, branchPrefix: "dcheck/", defaultMode: "auto" },
+    runtime,
+  );
+  registry.restore({ reapOrphans: false });
+  const { app } = createApp({ registry, verifier, instanceId: "i_oldgit", startedAt: now, credentials, roots: [users] });
+  const response = await app.fetch(
+    new Request("http://d/sessions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+      body: JSON.stringify({ agent: "claude", cwd: repo }),
+    }),
+  );
+  const body = (await response.json()) as { error?: { code?: string; message?: string } };
+  check("over HTTP that is a 503 in the same sentence", [response.status, body.error?.code, body.error?.message], [503, ...tooOld]);
+  check("and no agent was started for it", [runtime.launches, registry.list().length], [0, 0]);
+  await registry.shutdown();
 }
 
 // A worktree root that traverses a symlink must still accept a leaf that does not exist yet.

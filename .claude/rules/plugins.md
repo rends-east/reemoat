@@ -81,11 +81,12 @@ absent. Q4.105.
   `daemoncheck` sweeps every method against a manifest declaring nothing. Q1.614.
 - A refused scope or undeclared host is reported through `onWarning`, not only refused.
 
-**`src/` holds three `fetch` calls, all named**
+**`src/` holds five `fetch` calls, all named**
 
-- `enroll.ts`; `net.fetch` on a plugin's behalf; and `fetchArchive` in
-  `src/plugins/source.ts`, reached only by `POST /plugins/source`. The daemon still asks
-  the control plane nothing, and none is on a start or session path. Q1.615, Q1.620.
+- `enroll.ts`; `net.fetch` on a plugin's behalf; `fetchArchive` in
+  `src/plugins/source.ts`, reached only by `POST /plugins/source`; and the gateway's
+  two (`model-gateway.md`), alone on a session path. The daemon still asks the control
+  plane nothing. Q1.615, Q1.620, Q7.157.
 - The third is not a registry: the daemon knows no catalogue, polls nothing, and
   fetches once the repository and commit somebody who read the permissions hands it.
   Nothing updates a plugin by itself. It exists because `codeload.github.com` answers no

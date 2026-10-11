@@ -79,6 +79,36 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   check("while a daemon too old to say is read as yes", hostable("claude", system(), claude), null);
   check("and so is one that says yes", hostable("claude", system(), { ...claude, pinsModel: true }), null);
 
+  // A daemon with a gateway names protocols on both sides. A harness pointed at its spawn answers nothing about routing,
+  // so what it is sent is empty in every field an older app reads, and that app refuses the row it cannot start.
+  const atTheSpawn = { providerId: "", supported: [], pinsModel: true, hosts: ["anthropic-messages", "openai-responses", "openai-chat"] };
+  const named = system({ protocols: ["anthropic-messages"] });
+  check("a harness pointed at its spawn can run a system whose protocol it carries", hostable("opencode", named, atTheSpawn), null);
+  check(
+    "and is refused one it does not, in the sentence a mismatch always had",
+    hostable("opencode", named, { ...atTheSpawn, hosts: ["openai-chat"] }),
+    "Opencode cannot run Moonshot models.",
+  );
+  check(
+    "the protocols outrank the older label and the pin, since the daemon that sent them weighed both",
+    [
+      hostable("claude", system({ apiType: "openai", protocols: ["anthropic-messages"] }), { ...claude, hosts: ["anthropic-messages"] }),
+      hostable("claude", named, { ...claude, pinsModel: false, hosts: ["anthropic-messages"] }),
+      hostable("claude", named, { ...claude, hosts: [] }),
+    ],
+    [null, null, "Claude Code cannot run Moonshot models."],
+  );
+  check(
+    "an app reading an older daemon's system, or an older daemon's harness, falls back to the label",
+    [
+      hostable("opencode", system(), atTheSpawn),
+      hostable("claude", named, claude),
+      hostable("codex", named, codex),
+    ],
+    ["Opencode cannot run Moonshot models.", null, "Codex cannot run Moonshot models."],
+  );
+  check("a system nothing can be pointed at is still refused first", hostable("opencode", system({ routable: false, protocols: [] }), atTheSpawn), "Only Kimi Code can run Moonshot models.");
+
   const anthropic = system({
     id: "anthropic",
     displayName: "Anthropic",

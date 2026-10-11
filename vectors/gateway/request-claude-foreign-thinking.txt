@@ -1,0 +1,244 @@
+{
+ "kind": "request",
+ "about": "The third turn of a conversation whose thinking blocks were signed by another vendor: both are dropped, and the system messages between turns arrive as a string and as blocks.",
+ "source": "Claude Code 2.1.296 through claude-agent-acp 0.73.0, recorded 2026-10-11 by pnpm doorprobe (Q6.123). Structure only: prose is a placeholder, ids are zeroed, tool schemas are cut to one level. Its 25 tools are the first turn's and are left out.",
+ "model": "probe-model",
+ "messages": {
+  "model": "probe-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": "text"
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "thought",
+      "signature": "PROBEBLOBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": "text"
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "thought",
+      "signature": "PROBEBLOBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     },
+     {
+      "type": "text",
+      "text": "text",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": [
+     {
+      "type": "text",
+      "text": "text",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     }
+    ]
+   }
+  ],
+  "system": [
+   {
+    "type": "text",
+    "text": "x-anthropic-billing-header: placeholder"
+   },
+   {
+    "type": "text",
+    "text": "system text 1",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   },
+   {
+    "type": "text",
+    "text": "system text 2",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   }
+  ],
+  "metadata": {
+   "user_id": "{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000000000\"}"
+  },
+  "max_tokens": 32000,
+  "thinking": {
+   "type": "adaptive",
+   "display": "updates"
+  },
+  "context_management": {
+   "edits": [
+    {
+     "type": "clear_thinking_20251015",
+     "keep": "all"
+    }
+   ]
+  },
+  "output_config": {
+   "effort": "high"
+  },
+  "stream": true
+ },
+ "responses": {
+  "model": "probe-model",
+  "instructions": "system text 1\n\nsystem text 2",
+  "input": [
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     },
+     {
+      "type": "input_text",
+      "text": "text"
+     },
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "developer",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "text",
+      "annotations": []
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "developer",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "text",
+      "annotations": []
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "developer",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   }
+  ],
+  "reasoning": {
+   "effort": "high",
+   "summary": "auto"
+  },
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 32000,
+  "prompt_cache_key": "5cf72f4c1e8cd89bb0b2ff3c9a6f82bbfcc64fec08e229cf74c48b57de3dbbdf",
+  "store": false,
+  "stream": true
+ }
+}

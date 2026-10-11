@@ -28,8 +28,7 @@ own harness publishes needs no list; those rows arrive as `"published"`.
 
 **The browser reads OpenRouter** (a catalogue on its own host, the market's shape): the
 endpoint needs no credential and answers `access-control-allow-origin: *`, and the
-daemon may not grow a fourth `fetch` (`compatibility.md` states the count in `src/` as
-the property).
+daemon's outbound calls are a named list a catalogue is not on (`compatibility.md`).
 
 - **`connect-src` names `https://openrouter.ai` unconditionally** — every instance
   compiles the same `SYSTEMS`. Omitted, the browser refuses before a byte leaves, as a
@@ -41,7 +40,7 @@ the property).
 model against `MAX_MODEL_CHARS` only, and the table goes stale with no refresh mechanism
 — a refresh is a hand edit against vendors' documentation, since the routed vendors'
 list endpoints answer 401 unauthenticated (failing Q3.501's browser door) and the daemon
-door is the fourth `fetch`; a plugin contributing the provider is the legal shape. The
+door is a call that list does not hold; a plugin contributing the provider is the legal shape. The
 builder draws a field at the foot of every **`routable`** provider's group; `adoptModels`
 puts the id into that system's `models` as `{id, name: id}` before `allModels`, and the
 row then dedupes, greys, refuses and groups with no new arm, and seeds the agent's name.
@@ -58,9 +57,9 @@ would hand the dedupe a table row whose name wins.
   `nativeModelPrefix` divides it: a system with one takes only the published ids
   carrying it, stripped; a system with none takes everything (its harness serves one
   system).
-- `SYSTEMS.zen` is `baseUrl: null` like `anthropic` and `openai`: naming its endpoint
-  would offer claude a routed arm that dies on the pinning test (`ROUTED_MODEL_ENV` has
-  no OpenAI-shaped door).
+- `SYSTEMS.zen` names no `endpoints`: nothing here has driven its own, and a row is a
+  measurement. `anthropic` and `openai` name their vendors' API endpoints, for an API
+  key that is another product than the sign-in their harness holds (Q7.159).
 - **A plugin's provider may only name a harness that plugin added**: `nativeHarness`,
   `loginVia`, `keyEnv` and `nativeModelPrefix` take a local id from the same manifest.
   Naming a built-in would let a manifest assert a vendor's two lists are the same models
@@ -69,7 +68,7 @@ would hand the dedupe a table row whose name wins.
   (opencode has no sign-in and is named). It decides whether the system's screen draws
   that harness's card or a bare **system** key box.
 - **A row that is not routable must name a `loginVia`**: a system credential is only
-  spent in `providers/set` headers, so a key box on a row with no `baseUrl` would store a
+  spent in `providers/set` headers, so a key box on a row with no `endpoints` would store a
   secret and never send it. `daemoncheck` sweeps the whole table for it.
 
 ## Two spellings for one model

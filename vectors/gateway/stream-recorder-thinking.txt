@@ -1,0 +1,442 @@
+{
+ "kind": "stream",
+ "about": "The recorder's answer with reasoning: the item arrives whole, with no summary deltas, and still becomes one thinking block.",
+ "source": "scripts/doorprobe.recorder.ts: responsesStream is what codex 0.162.1 accepted (Q6.124), and `accepted` is messagesStream, which Claude Code 2.1.296 accepted (Q6.123). The opaque blob is shortened from 16 KiB.",
+ "model": "probe-model",
+ "accepted": [
+  {
+   "event": "message_start",
+   "data": {
+    "type": "message_start",
+    "message": {
+     "id": "msg_doorprobe",
+     "type": "message",
+     "role": "assistant",
+     "model": "probe-model",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 10,
+      "output_tokens": 1
+     }
+    }
+   }
+  },
+  {
+   "event": "content_block_start",
+   "data": {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "probe reasoning"
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "signature_delta",
+     "signature": "PROBEBLOBHwcCoCeRI9b0wLneShj3bOQopP93pmIGKZtputc4HwcCoCeRI9b0wLn"
+    }
+   }
+  },
+  {
+   "event": "content_block_stop",
+   "data": {
+    "type": "content_block_stop",
+    "index": 0
+   }
+  },
+  {
+   "event": "content_block_start",
+   "data": {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   }
+  },
+  {
+   "event": "ping",
+   "data": {
+    "type": "ping"
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "probe-ok"
+    }
+   }
+  },
+  {
+   "event": "content_block_stop",
+   "data": {
+    "type": "content_block_stop",
+    "index": 1
+   }
+  },
+  {
+   "event": "message_delta",
+   "data": {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn",
+     "stop_sequence": null
+    },
+    "usage": {
+     "output_tokens": 5
+    }
+   }
+  },
+  {
+   "event": "message_stop",
+   "data": {
+    "type": "message_stop"
+   }
+  }
+ ],
+ "responses": [
+  {
+   "event": "response.created",
+   "data": {
+    "type": "response.created",
+    "sequence_number": 0,
+    "response": {
+     "id": "resp_doorprobe",
+     "object": "response",
+     "created_at": 0,
+     "status": "in_progress",
+     "model": "probe-model",
+     "output": [],
+     "usage": null
+    }
+   }
+  },
+  {
+   "event": "response.in_progress",
+   "data": {
+    "type": "response.in_progress",
+    "sequence_number": 1,
+    "response": {
+     "id": "resp_doorprobe",
+     "object": "response",
+     "created_at": 0,
+     "status": "in_progress",
+     "model": "probe-model",
+     "output": [],
+     "usage": null
+    }
+   }
+  },
+  {
+   "event": "response.output_item.added",
+   "data": {
+    "type": "response.output_item.added",
+    "sequence_number": 2,
+    "output_index": 0,
+    "item": {
+     "id": "rs_doorprobe",
+     "type": "reasoning",
+     "summary": []
+    }
+   }
+  },
+  {
+   "event": "response.output_item.done",
+   "data": {
+    "type": "response.output_item.done",
+    "sequence_number": 3,
+    "output_index": 0,
+    "item": {
+     "id": "rs_doorprobe",
+     "type": "reasoning",
+     "summary": [
+      {
+       "type": "summary_text",
+       "text": "probe reasoning"
+      }
+     ],
+     "encrypted_content": "PROBEBLOBHwcCoCeRI9b0wLneShj3bOQopP93pmIGKZtputc4HwcCoCeRI9b0wLn"
+    }
+   }
+  },
+  {
+   "event": "response.output_item.added",
+   "data": {
+    "type": "response.output_item.added",
+    "sequence_number": 4,
+    "output_index": 1,
+    "item": {
+     "id": "msg_doorprobe",
+     "type": "message",
+     "status": "in_progress",
+     "role": "assistant",
+     "content": []
+    }
+   }
+  },
+  {
+   "event": "response.content_part.added",
+   "data": {
+    "type": "response.content_part.added",
+    "sequence_number": 5,
+    "item_id": "msg_doorprobe",
+    "output_index": 1,
+    "content_index": 0,
+    "part": {
+     "type": "output_text",
+     "text": "",
+     "annotations": []
+    }
+   }
+  },
+  {
+   "event": "response.output_text.delta",
+   "data": {
+    "type": "response.output_text.delta",
+    "sequence_number": 6,
+    "item_id": "msg_doorprobe",
+    "output_index": 1,
+    "content_index": 0,
+    "delta": "probe-ok"
+   }
+  },
+  {
+   "event": "response.output_text.done",
+   "data": {
+    "type": "response.output_text.done",
+    "sequence_number": 7,
+    "item_id": "msg_doorprobe",
+    "output_index": 1,
+    "content_index": 0,
+    "text": "probe-ok"
+   }
+  },
+  {
+   "event": "response.content_part.done",
+   "data": {
+    "type": "response.content_part.done",
+    "sequence_number": 8,
+    "item_id": "msg_doorprobe",
+    "output_index": 1,
+    "content_index": 0,
+    "part": {
+     "type": "output_text",
+     "text": "probe-ok",
+     "annotations": []
+    }
+   }
+  },
+  {
+   "event": "response.output_item.done",
+   "data": {
+    "type": "response.output_item.done",
+    "sequence_number": 9,
+    "output_index": 1,
+    "item": {
+     "id": "msg_doorprobe",
+     "type": "message",
+     "status": "completed",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "probe-ok",
+       "annotations": []
+      }
+     ]
+    }
+   }
+  },
+  {
+   "event": "response.completed",
+   "data": {
+    "type": "response.completed",
+    "sequence_number": 10,
+    "response": {
+     "id": "resp_doorprobe",
+     "object": "response",
+     "created_at": 0,
+     "status": "completed",
+     "model": "probe-model",
+     "output": [
+      {
+       "id": "rs_doorprobe",
+       "type": "reasoning",
+       "summary": [
+        {
+         "type": "summary_text",
+         "text": "probe reasoning"
+        }
+       ],
+       "encrypted_content": "PROBEBLOBHwcCoCeRI9b0wLneShj3bOQopP93pmIGKZtputc4HwcCoCeRI9b0wLn"
+      },
+      {
+       "id": "msg_doorprobe",
+       "type": "message",
+       "status": "completed",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "output_text",
+         "text": "probe-ok",
+         "annotations": []
+        }
+       ]
+      }
+     ],
+     "usage": {
+      "input_tokens": 10,
+      "input_tokens_details": {
+       "cached_tokens": 0
+      },
+      "output_tokens": 5,
+      "output_tokens_details": {
+       "reasoning_tokens": 0
+      },
+      "total_tokens": 15
+     }
+    }
+   }
+  }
+ ],
+ "messages": [
+  {
+   "event": "message_start",
+   "data": {
+    "type": "message_start",
+    "message": {
+     "id": "resp_doorprobe",
+     "type": "message",
+     "role": "assistant",
+     "model": "probe-model",
+     "content": [],
+     "stop_reason": null,
+     "stop_sequence": null,
+     "usage": {
+      "input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 0
+     }
+    }
+   }
+  },
+  {
+   "event": "content_block_start",
+   "data": {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "thinking",
+     "thinking": "",
+     "signature": ""
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "thinking_delta",
+     "thinking": "probe reasoning"
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "signature_delta",
+     "signature": "rmr1.eyJpZCI6InJzX2Rvb3Jwcm9iZSIsImVuY3J5cHRlZF9jb250ZW50IjoiUFJPQkVCTE9CSHdjQ29DZVJJOWIwd0xuZVNoajNiT1FvcFA5M3BtSUdLWnRwdXRjNEh3Y0NvQ2VSSTliMHdMbiIsInN1bW1hcnkiOlt7InR5cGUiOiJzdW1tYXJ5X3RleHQiLCJ0ZXh0IjoicHJvYmUgcmVhc29uaW5nIn1dfQ"
+    }
+   }
+  },
+  {
+   "event": "content_block_stop",
+   "data": {
+    "type": "content_block_stop",
+    "index": 0
+   }
+  },
+  {
+   "event": "content_block_start",
+   "data": {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   }
+  },
+  {
+   "event": "content_block_delta",
+   "data": {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+     "type": "text_delta",
+     "text": "probe-ok"
+    }
+   }
+  },
+  {
+   "event": "content_block_stop",
+   "data": {
+    "type": "content_block_stop",
+    "index": 1
+   }
+  },
+  {
+   "event": "message_delta",
+   "data": {
+    "type": "message_delta",
+    "delta": {
+     "stop_reason": "end_turn",
+     "stop_sequence": null
+    },
+    "usage": {
+     "input_tokens": 10,
+     "cache_creation_input_tokens": 0,
+     "cache_read_input_tokens": 0,
+     "output_tokens": 5
+    }
+   }
+  },
+  {
+   "event": "message_stop",
+   "data": {
+    "type": "message_stop"
+   }
+  }
+ ]
+}

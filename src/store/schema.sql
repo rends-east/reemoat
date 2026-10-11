@@ -134,6 +134,25 @@ CREATE TABLE IF NOT EXISTS system_credentials (
 );
 
 
+-- A sign-in a system is reached with where it takes one in place of a key. Only the access token goes anywhere but its issuer (Q7.160).
+CREATE TABLE IF NOT EXISTS system_sign_ins (
+  system        TEXT    NOT NULL PRIMARY KEY,
+  flow          TEXT    NOT NULL,
+  client_id     TEXT    NOT NULL,
+  access        TEXT    NOT NULL,
+  refresh       TEXT    NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  account       TEXT,
+  signed_in_by  TEXT,
+  updated_at    INTEGER NOT NULL
+);
+-- What this machine calls itself to a sign-in provider: minted once per flow and kept through a sign-out.
+CREATE TABLE IF NOT EXISTS sign_in_hosts (
+  flow          TEXT    NOT NULL PRIMARY KEY,
+  host_id       TEXT    NOT NULL
+);
+
+
 -- harness and system are validated on read, model never (Q7.31).
 CREATE TABLE IF NOT EXISTS custom_agents (
   id            TEXT    NOT NULL PRIMARY KEY,

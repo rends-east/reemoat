@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { dirname } from "node:path";
@@ -8,8 +9,11 @@ import {
   isBuiltinSystemId,
   type AgentStripEntry,
   type CustomAgent,
+  type StoredSignIn,
   type SystemId,
+  type SystemSignInPort,
 } from "../acp/systems.js";
+import type { SignInTokens } from "../gateway/signin/types.js";
 import { isContributedId } from "../plugins/manifest.js";
 import type { UploadIndex, UploadRow } from "../uploads.js";
 import type { KnownDevice, KnownDeviceStore } from "../devices.js";
@@ -93,6 +97,57 @@ export interface OpenStoresOptions {
   onPruned?: ((detail: string) => void) | undefined;
 }
 
+export class SqliteSystemSignInStore implements SystemSignInPort {
+  private readonly getStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly deleteStmt: StatementSync;
+  private readonly hostStmt: StatementSync;
+  private readonly mintHostStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.getStmt = db.prepare(
+      "SELECT flow, client_id, access, refresh, expires_at, account, signed_in_by, updated_at FROM system_sign_ins WHERE system = ?",
+    );
+    this.saveStmt = db.prepare(
+      "INSERT INTO system_sign_ins (system, flow, client_id, access, refresh, expires_at, account, signed_in_by, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(system) DO UPDATE SET flow = excluded.flow, client_id = excluded.client_id, " +
+        "access = excluded.access, refresh = excluded.refresh, expires_at = excluded.expires_at, account = excluded.account, " +
+        "signed_in_by = excluded.signed_in_by, updated_at = excluded.updated_at",
+    );
+    this.deleteStmt = db.prepare("DELETE FROM system_sign_ins WHERE system = ?");
+    this.hostStmt = db.prepare("SELECT host_id FROM sign_in_hosts WHERE flow = ?");
+    this.mintHostStmt = db.prepare("INSERT INTO sign_in_hosts (flow, host_id) VALUES (?, ?) ON CONFLICT(flow) DO NOTHING");
+  }
+
+  get(system: SystemId): StoredSignIn | null {
+    const row = this.getStmt.get(system);
+    if (row === undefined) return null;
+    return {
+      flow: String(row["flow"]),
+      clientId: String(row["client_id"]),
+      access: String(row["access"]),
+      refresh: String(row["refresh"]),
+      expiresAt: Number(row["expires_at"]),
+      account: row["account"] == null ? null : String(row["account"]),
+      signedInBy: row["signed_in_by"] == null ? null : String(row["signed_in_by"]),
+      updatedAt: Number(row["updated_at"]),
+    };
+  }
+
+  save(system: SystemId, flow: string, tokens: SignInTokens, signedInBy: string | null): void {
+    this.saveStmt.run(system, flow, tokens.clientId, tokens.access, tokens.refresh, tokens.expiresAt, tokens.account, signedInBy, Date.now());
+  }
+
+  remove(system: SystemId): void {
+    this.deleteStmt.run(system);
+  }
+
+  hostId(flow: string): string {
+    this.mintHostStmt.run(flow, `urn:uuid:${randomUUID()}`);
+    return String(this.hostStmt.get(flow)?.["host_id"]);
+  }
+}
+
 export interface StoreBundle {
   db: DatabaseSync;
   events: SqliteEventStore;
@@ -102,6 +157,7 @@ export interface StoreBundle {
   knownDevices: SqliteKnownDeviceStore;
   credentials: SqliteAgentCredentialStore;
   systemCredentials: SqliteSystemCredentialStore;
+  systemSignIns: SqliteSystemSignInStore;
   customAgents: SqliteCustomAgentStore;
   agentStrip: SqliteAgentStripStore;
   machineSettings: SqliteMachineSettingsStore;
@@ -168,6 +224,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const knownDevices = new SqliteKnownDeviceStore(db);
   const credentials = new SqliteAgentCredentialStore(db);
   const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
+  const systemSignIns = new SqliteSystemSignInStore(db);
   const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
   const agentStrip = new SqliteAgentStripStore(db);
   const machineSettings = new SqliteMachineSettingsStore(db);
@@ -187,6 +244,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     knownDevices,
     credentials,
     systemCredentials,
+    systemSignIns,
     customAgents,
     agentStrip,
     machineSettings,

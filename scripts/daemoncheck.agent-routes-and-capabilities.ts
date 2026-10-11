@@ -115,6 +115,21 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     (await call(withSystems, "PUT", "/systems/moonshot", { token: "x".repeat(9000) })).status,
     400,
   );
+  // A sign-in to Claude's own client is not an API key, and nothing but that client may hold it (Q7.156). Refused for every system: it is a key to none.
+  const subscription = await Promise.all(
+    ["anthropic", "moonshot"].map((system) => call(withSystems, "PUT", `/systems/${system}`, { token: "  sk-ant-oat01-doorprobe-not-a-token  " })),
+  );
+  check(
+    "a Claude subscription token is refused as a provider's key, in words, and nothing is stored",
+    [subscription.map((one) => [one.status, one.body.error.code]), systems.credentials.get("anthropic"), systems.credentials.get("moonshot")],
+    [[[400, "subscription_token"], [400, "subscription_token"]], null, null],
+  );
+  check(
+    "while an API key with the same vendor's prefix is a key",
+    [(await call(withSystems, "PUT", "/systems/anthropic", { token: "sk-ant-api03-doorprobe-not-a-key" })).status, systems.credentials.get("anthropic")],
+    [200, "sk-ant-api03-doorprobe-not-a-key"],
+  );
+  keys.delete("anthropic");
   check("saving one works", (await call(withSystems, "PUT", "/systems/moonshot", { token: "sekrit" })).status, 200);
   check("and the daemon can read it back", systems.credentials.get("moonshot"), "sekrit");
   // Swept for the secret only once a key is saved; before that the sweep could not fail.
@@ -328,7 +343,8 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   }
   check("editing: the route's matrix is the adapters' matrix", editMatrix, [
     "claude x anthropic: saved",
-    "claude x openai: incompatible_pairing",
+    "claude x openai: saved",
+    "claude x chatgpt: saved",
     "claude x openrouter: saved",
     "claude x cursor: incompatible_pairing",
     "claude x xai: incompatible_pairing",
@@ -338,6 +354,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "claude x zen: incompatible_pairing",
     "kimi x anthropic: incompatible_pairing",
     "kimi x openai: incompatible_pairing",
+    "kimi x chatgpt: incompatible_pairing",
     "kimi x openrouter: incompatible_pairing",
     "kimi x cursor: incompatible_pairing",
     "kimi x xai: incompatible_pairing",
@@ -347,6 +364,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "kimi x zen: incompatible_pairing",
     "codex x anthropic: incompatible_pairing",
     "codex x openai: saved",
+    "codex x chatgpt: incompatible_pairing",
     "codex x openrouter: incompatible_pairing",
     "codex x cursor: incompatible_pairing",
     "codex x xai: incompatible_pairing",
@@ -354,27 +372,30 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "codex x zhipu: incompatible_pairing",
     "codex x minimax: incompatible_pairing",
     "codex x zen: incompatible_pairing",
-    "opencode x anthropic: incompatible_pairing",
-    "opencode x openai: incompatible_pairing",
+    "opencode x anthropic: saved",
+    "opencode x openai: saved",
+    "opencode x chatgpt: saved",
     // readAssembledAgent consults asks.capabilities first, and opencode's routing is null, which the native arm never reads.
     "opencode x openrouter: saved",
     "opencode x cursor: incompatible_pairing",
     "opencode x xai: incompatible_pairing",
-    "opencode x moonshot: incompatible_pairing",
-    "opencode x zhipu: incompatible_pairing",
-    "opencode x minimax: incompatible_pairing",
+    "opencode x moonshot: saved",
+    "opencode x zhipu: saved",
+    "opencode x minimax: saved",
     "opencode x zen: saved",
-    "grok x anthropic: incompatible_pairing",
-    "grok x openai: incompatible_pairing",
-    "grok x openrouter: incompatible_pairing",
+    "grok x anthropic: saved",
+    "grok x openai: saved",
+    "grok x chatgpt: saved",
+    "grok x openrouter: saved",
     "grok x cursor: incompatible_pairing",
     "grok x xai: saved",
-    "grok x moonshot: incompatible_pairing",
-    "grok x zhipu: incompatible_pairing",
-    "grok x minimax: incompatible_pairing",
+    "grok x moonshot: saved",
+    "grok x zhipu: saved",
+    "grok x minimax: saved",
     "grok x zen: incompatible_pairing",
     "cursor x anthropic: incompatible_pairing",
     "cursor x openai: incompatible_pairing",
+    "cursor x chatgpt: incompatible_pairing",
     "cursor x openrouter: incompatible_pairing",
     "cursor x cursor: saved",
     "cursor x xai: incompatible_pairing",
@@ -687,6 +708,105 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
       "ca_aabbccdd",
     ]);
     reopened.close();
+  }
+
+  // A system that is signed in to: listed with who is signed in, never given a key, and started and finished over these routes.
+  {
+    const { SystemSignInRuns } = await import("../src/gateway/signin/runs.js");
+    const codeOf = (one: { status: number; body: any }): string =>
+      `${one.status}${one.body?.error?.code == null ? "" : ` ${String(one.body.error.code)}`}`;
+    const signedIn = new Map<string, any>();
+    const signIns = {
+      get: (system: string) => signedIn.get(system) ?? null,
+      save: (system: string, flow: string, tokens: any, signedInBy: string | null) => void signedIn.set(system, { ...tokens, flow, signedInBy, updatedAt: 9 }),
+      remove: (system: string) => void signedIn.delete(system),
+      hostId: () => "urn:uuid:this-machine",
+    };
+    let handsBackAt = "";
+    const flow = {
+      id: "openai-siwc",
+      authorizeOrigin: "https://id.invalid",
+      begin: (input: { redirectUri: string; hostId: string }) => ({
+        // Kept, since a run shows nobody where its listener is: the redirect it gave its flow is the only place that is written.
+        ...((handsBackAt = input.redirectUri), {}),
+        authorizeUrl: "https://id.invalid/authorize",
+        state: "st",
+        verifier: "v",
+        nonce: "n",
+        redirectUri: input.redirectUri,
+        hostId: input.hostId,
+      }),
+      complete: async () => ({ clientId: "c", access: "a", refresh: "r", expiresAt: 1, account: "somebody@example.com" }),
+      refresh: async () => "signed_out" as const,
+    };
+    const registry = new SessionRegistry(new MemoryEventStore());
+    const runs = new SystemSignInRuns({ machine: () => registry.machineCatalogue, flows: { [flow.id]: flow }, signIns: signIns as never, transport: {} as never });
+    const withSignIns = build({
+      registry,
+      verifier,
+      instanceId: "i_signins",
+      startedAt: now,
+      systems: { ...systems, signIns } as never,
+      signInRuns: runs,
+      asks: asks as never,
+      roots: [users],
+    }).app;
+    const listed = async (): Promise<any> => (await call(withSignIns, "GET", "/systems")).body.systems;
+    check(
+      "a system that is signed in to says so in the listing, and no other system carries the field",
+      [(await listed()).filter((one: any) => "signIn" in one).map((one: any) => [one.id, one.signIn, one.keySet])],
+      [[["chatgpt", null, false]]],
+    );
+    check(
+      "it takes no key, in words, and none is stored",
+      [codeOf(await call(withSignIns, "PUT", "/systems/chatgpt", { token: "sk-anything" })), keys.has("chatgpt")],
+      ["400 takes_sign_in", false],
+    );
+    check(
+      "a system that takes a key has no sign-in to start, and a daemon with no sign-ins answers that it has none",
+      [codeOf(await call(withSignIns, "POST", "/systems/moonshot/sign-in", {})), codeOf(await call(withSystems, "POST", "/systems/chatgpt/sign-in", {}))],
+      ["400 sign_in_refused", "503 sign_in_unavailable"],
+    );
+    check(
+      "a read-only grant starts none and gives none up",
+      [
+        codeOf(await call(withSignIns, "POST", "/systems/chatgpt/sign-in", {}, tokenWith("u_reader", ["session:read"]))),
+        codeOf(await call(withSignIns, "DELETE", "/systems/sign-in/si_x", undefined, tokenWith("u_reader", ["session:read"]))),
+        codeOf(await call(withSignIns, "POST", "/systems/sign-in/si_x/redirect", { url: "http://127.0.0.1:1/auth/callback" }, tokenWith("u_reader", ["session:read"]))),
+      ],
+      ["403 insufficient_scope", "403 insufficient_scope", "403 insufficient_scope"],
+    );
+    const started = await call(withSignIns, "POST", "/systems/chatgpt/sign-in", {});
+    const run = started.body.signIn;
+    check("a start answers the page to open and nothing an attempt keeps to itself", [started.status, run.phase, run.openUrl, Object.keys(run).sort()], [
+      201,
+      "waiting",
+      "https://id.invalid/authorize",
+      ["account", "expiresAt", "id", "message", "openUrl", "phase", "system"],
+    ]);
+    check("it can be read while it waits, and an unknown one is not found", [
+      (await call(withSignIns, "GET", `/systems/sign-in/${run.id}`)).body.signIn.phase,
+      codeOf(await call(withSignIns, "GET", "/systems/sign-in/si_nobody")),
+    ], ["waiting", "404 sign_in_not_found"]);
+    check(
+      "an address that is not this sign-in's is refused, and one with none at all is a bad request",
+      [
+        codeOf(await call(withSignIns, "POST", `/systems/sign-in/${run.id}/redirect`, { url: "https://evil.example/auth/callback?code=c" })),
+        codeOf(await call(withSignIns, "POST", `/systems/sign-in/${run.id}/redirect`, {})),
+      ],
+      ["400 sign_in_refused", "400 bad_request"],
+    );
+    const finished = await call(withSignIns, "POST", `/systems/sign-in/${run.id}/redirect`, { url: `${handsBackAt}?code=c&state=st` });
+    check("the pasted address finishes it, as whoever started it", [finished.body.signIn.phase, finished.body.signIn.account, signedIn.get("chatgpt")?.signedInBy], [
+      "done",
+      "somebody@example.com",
+      "u_alice",
+    ]);
+    check("and the listing then names who is signed in, and reads as ready to an app that knows only keys", (await listed()).filter((one: any) => one.id === "chatgpt").map((one: any) => [one.signIn, one.keySet]), [
+      [{ account: "somebody@example.com", at: 9 }, true],
+    ]);
+    check("signing out is the route that clears a key", [codeOf(await call(withSignIns, "DELETE", "/systems/chatgpt")), signedIn.has("chatgpt")], ["200", false]);
+    runs.shutdown();
   }
 
   /** Every route in this section and its scope, read by both the scope sweep and the no-store sweep. */

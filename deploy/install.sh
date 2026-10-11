@@ -66,6 +66,8 @@ fi
 
 # Precondition only: a host with no git must fail now, not in its first deploy.sh after the hard reset.
 resolve_bin git "deploy/deploy.sh" >/dev/null
+# The daemon's own floor, said here rather than at the first session somebody starts from a phone.
+if [ "$SERVICE" = daemon ]; then require_git_floor; fi
 
 ENV_FILE=$(env_file "$SERVICE")
 ENV_EXAMPLE=$(env_example "$SERVICE")

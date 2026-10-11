@@ -1,6 +1,7 @@
 ---
 paths:
   - src/acp/systems.ts
+  - scripts/doorprobe*
   - src/agentask.ts
   - packages/web/src/agents.ts
   - packages/web/src/ui/AgentBuilder.tsx
@@ -14,7 +15,8 @@ you sign in to. A harness is pointed elsewhere with ACP's `providers/set`
 (`acp.methods.agent.providers.set`) between `initialize` and `session/new`; its
 configuration is process-scoped and applies to later sessions, which matches one
 adapter per session. Never an environment variable, never `~/.codex/config.toml`
-(`acp/agents.ts`'s reason). Q7.114.
+(`acp/agents.ts`'s reason). Q7.114. Where the harness has a door, what it is pointed at
+is this daemon's gateway and never the vendor: `model-gateway.md`.
 
 | Adapter | `agentCapabilities.providers` | `providerId` | `supported` |
 |---|---|---|---|
@@ -31,7 +33,7 @@ adapter per session. Never an environment variable, never `~/.codex/config.toml`
   including a marker that said yes and a call that said no.
 - opencode is the native side of two systems with no sign-in: `agent-catalogue.md`.
 - grok has no marker signed out or keyed, so `SYSTEMS.xai` names it a `nativeHarness`
-  with `baseUrl` null. Signed in by `grok login`, an `authenticate` is harmful.
+  with no `endpoints`. Signed in by `grok login`, an `authenticate` is harmful.
   `ACP_AUTH_METHOD` is which id spends a pasted key, `SessionRuntime.authMethod`
   whether there is one; `agent-login.md`, `acp-agents.md`. Q6.110.
 
@@ -80,13 +82,15 @@ answering `null` to `providers/list`. Q3.480.
   `plugin.json` may add a row (fetched from one hardcoded host at a 40-hex commit after
   a consent screen, fixed for that install), so reachable hosts are not a constant of
   this repository. `plugin-contributions.md`.
-- **The credential travels in `providers/set`'s headers, never in the environment this
-  daemon spawns — one hop, not secrecy.** `claude-agent-acp` folds the headers into
-  `ANTHROPIC_CUSTOM_HEADERS` and `ROUTED_MODEL_ENV` permits only `claude`, so a routed
-  key is as exposed as a pasted one (`acp/systems.ts`). `daemoncheck` asserts only this
-  daemon's boundary.
+- **A harness with a door holds a credential of this daemon's, good for its own
+  process, and the vendor's key reaches no agent** (`model-gateway.md`, Q7.157). A
+  plugin's harness has no door and is handed the vendor's own in `providers/set`'s
+  headers, one hop from a command line (Q6.123). `daemoncheck` asserts both.
 - **`hostable` is the only place the matrix exists, on each side**: two agent answers
-  plus a table row, never written out, driven as a sweep over the whole matrix.
+  plus a table row, never written out, driven as a sweep over the whole matrix. On the
+  daemon it is `routeFor`'s refusal, and `applySystem` sends the same call's route.
+- **A system names `endpoints` by `WireProtocol`**, most preferred first; `apiType` is
+  only what an older app reads. ACP's `supported` is coarser (`ACP_API_TYPE`). Q7.155.
 - **Routable and un-pinnable must refuse**: `hostable` folds in `ROUTED_MODEL_ENV`, or a
   pairing quietly runs the endpoint's default. It fires only on a launch carrying the
   routing options: with `options.system` absent `applySystem` returns at its first line

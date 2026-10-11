@@ -10,7 +10,7 @@ relay up beside the API and asks no extra questions.
 | How many | one per fleet | one, beside it | one per host that runs agents |
 | Typically lives | a Linux box with a public address | the same box | wherever the code you work on lives, usually behind NAT |
 | Runs as | **a container**, under Docker | the same image, second container | a launchd / systemd *user* unit |
-| Needs | Docker with the compose plugin, git, node (for `deploy/`'s own probes) | — | Node ≥ 24, pnpm and git |
+| Needs | Docker with the compose plugin, git, node (for `deploy/`'s own probes) | — | Node ≥ 24, pnpm and git ≥ 2.31 |
 | Builds on update | its image — the API and the relay, no web bundle | the same image | nothing |
 | Holds | the Ed25519 key that signs every token | every daemon's tunnel, and nothing durable | your sessions, their worktrees, your agents' logins |
 | Restart costs | nothing anyone is holding | **every tunnel in the fleet**: ~10–45s of reconnecting per open session, every in-flight request | **every live session becomes `interrupted`** |

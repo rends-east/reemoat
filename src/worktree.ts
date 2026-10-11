@@ -14,9 +14,13 @@ import {
   GIT_TIMEOUT_MUTATE_MS,
   GIT_TIMEOUT_READ_MS,
   GIT_TIMEOUT_STRUCTURAL_MS,
+  gitTooOld,
   linesOf,
+  parseGitVersion,
+  splitLines,
   splitNul,
   textOf,
+  tooOldGit,
   type GitExec,
 } from "./git.js";
 import { describeError } from "./http.js";
@@ -57,6 +61,7 @@ export type WorktreeErrorCode =
   | "worktree_root_unwritable"
   | "outside_worktree_root"
   | "git_missing"
+  | "git_too_old"
   | "git_failed"
   | "git_timeout"
   | "git_output_too_large";
@@ -179,14 +184,14 @@ export async function inspectRepo(dir: string, runner: GitExec): Promise<RepoInf
     throw error;
   }
 
-  const paths = linesOf(
-    await runner.run(
-      bare
-        ? ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]
-        : ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"],
-      structural(dir),
-    ),
-  );
+  await refuseOldGit(dir, runner);
+
+  const located = bare
+    ? ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]
+    : ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"];
+  const paths = linesOf(await runner.run(located, structural(dir)));
+  // A git that does not know the option prints it back and answers relative paths, exit 0 (Q6.128).
+  if (paths[0] === "--path-format=absolute") throw tooOldGit(located, null);
   const gitDir = paths[0] ?? null;
   const commonDir = paths[1] ?? null;
   const toplevel = bare || !paths[2] ? null : paths[2];
@@ -223,12 +228,36 @@ export async function inspectRepo(dir: string, runner: GitExec): Promise<RepoInf
   };
 }
 
+/** Below the floor nothing here is measured; a version that cannot be read is let through to the answers themselves. */
+async function refuseOldGit(dir: string, runner: GitExec): Promise<void> {
+  const asked = ["--version"];
+  let output: string;
+  try {
+    output = textOf(await runner.run(asked, structural(dir)));
+  } catch (error) {
+    if (error instanceof GitError && error.code === "git_failed") return;
+    throw error;
+  }
+  const version = parseGitVersion(output);
+  if (version !== null && gitTooOld(version)) throw tooOldGit(asked, version.text);
+}
+
+const LISTED_KEYS = new Set(["worktree", "HEAD", "branch", "detached", "bare", "locked", "prunable"]);
+
 export async function listWorktrees(dir: string, runner: GitExec): Promise<WorktreeEntry[]> {
-  const run = await runner.run(["worktree", "list", "--porcelain", "-z"], {
-    dir,
-    timeoutMs: GIT_TIMEOUT_LIST_MS,
-    maxBytes: GIT_MAX_LIST_BYTES,
-  });
+  const options = { dir, timeoutMs: GIT_TIMEOUT_LIST_MS, maxBytes: GIT_MAX_LIST_BYTES };
+  let tokens: Buffer[];
+  let byLine = false;
+  try {
+    tokens = splitNul((await runner.run(["worktree", "list", "--porcelain", "-z"], options)).stdout);
+  } catch (error) {
+    // Before 2.36 the listing takes no -z and git says so in a usage error (Q6.128).
+    if (!(error instanceof GitError && error.exitCode === 129 && /unknown switch [`']z'/.test(error.stderr))) {
+      throw error;
+    }
+    tokens = splitLines((await runner.run(["worktree", "list", "--porcelain"], options)).stdout);
+    byLine = true;
+  }
 
   const out: WorktreeEntry[] = [];
   let current: WorktreeEntry | null = null;
@@ -238,7 +267,7 @@ export async function listWorktrees(dir: string, runner: GitExec): Promise<Workt
   };
 
   // With -z the blank line between records becomes an empty token.
-  for (const token of splitNul(run.stdout)) {
+  for (const token of tokens) {
     const line = token.toString("utf8");
     if (line.length === 0) {
       flush();
@@ -247,6 +276,16 @@ export async function listWorktrees(dir: string, runner: GitExec): Promise<Workt
     const space = line.indexOf(" ");
     const key = space === -1 ? line : line.slice(0, space);
     const value = space === -1 ? "" : line.slice(space + 1);
+    // By line, the only thing a line outside the listing's own words can be is the rest of a path.
+    if (byLine && !LISTED_KEYS.has(key)) {
+      throw new GitError(
+        "git_failed",
+        ["worktree", "list", "--porcelain"],
+        null,
+        "",
+        "a worktree of this repository has a line break in its path, which git older than 2.36 cannot list",
+      );
+    }
 
     switch (key) {
       case "worktree":

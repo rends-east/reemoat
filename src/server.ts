@@ -15,14 +15,18 @@ import type { WebSocket as RawWebSocket } from "ws";
 import { AgentUnavailableError, claudeSettingsMode, isBuiltinAgentId, type AgentId } from "./acp/agents.js";
 import {
   hostable,
+  hostedProtocols,
+  isRoutable,
   routedModelNaming,
   systemSecretFor,
+  type AgentRouting,
   type CustomAgent,
   type SystemId,
   type AgentStripEntry,
   type SystemStores,
 } from "./acp/systems.js";
 import { AgentAskError, type AgentCapabilityReader } from "./agentask.js";
+import type { SystemSignInRuns } from "./gateway/signin/runs.js";
 import type { AgentLoginSupport } from "./runtime/types.js";
 import { isAuthRequiredMessage, SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
@@ -184,6 +188,8 @@ export interface ServerOptions {
   credentials?: AgentCredentialStore;
   // Absent, every systems route answers 503 except GET /systems, whose table is compiled in.
   systems?: SystemStores;
+  // Absent, a system that takes a sign-in can be listed and never signed in to.
+  signInRuns?: SystemSignInRuns;
   machineSettings?: MachineSettingsPort;
   asks?: AgentCapabilityReader;
   logins?: AgentLoginRuns;
@@ -211,6 +217,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const { registry, verifier, instanceId, startedAt } = options;
   const credentials = options.credentials;
   const systems = options.systems ?? null;
+  const signInRuns = options.signInRuns ?? null;
   const machineSettings = options.machineSettings ?? null;
   const asks = options.asks ?? null;
   const logins = options.logins ?? null;
@@ -435,6 +442,11 @@ export function createApp(options: ServerOptions): AppBundle {
         )
       : jsonError(c, 400, "invalid_system", "unknown system");
 
+  const signedInTo = (system: SystemId): { account: string | null; at: number } | null => {
+    const held = systems?.signIns?.get(system) ?? null;
+    return held === null ? null : { account: held.account, at: held.updatedAt };
+  };
+
   app.get("/systems", read, (c) => {
     const machine = registry.machineCatalogue;
     const saved = new Map((systems?.credentials.list() ?? []).map((one) => [one.system, one]));
@@ -447,13 +459,17 @@ export function createApp(options: ServerOptions): AppBundle {
           id,
           displayName: spec.displayName,
           apiType: spec.apiType,
-          routable: spec.baseUrl !== null,
+          routable: isRoutable(spec),
+          protocols: Object.keys(spec.endpoints),
           nativeHarness: spec.nativeHarness,
           loginVia: spec.loginVia,
           models: spec.models,
           nativeModelPrefix: spec.nativeModelPrefix,
           keyEnv: spec.keyEnv,
+          // Only on a system that takes a sign-in: who is signed in, or null. An app that does not know the field draws a key box, and saving one is refused in words.
+          ...(spec.signIn === null ? {} : { signIn: signedInTo(id) }),
           keySet:
+            signedInTo(id) !== null ||
             systemSecretFor(
               id,
               systems?.credentials.get(id) ?? null,
@@ -467,6 +483,12 @@ export function createApp(options: ServerOptions): AppBundle {
       }),
     });
   });
+
+  /** A code and a state in a loopback address are a few hundred characters; this is room for a provider to grow them. */
+  const MAX_REDIRECT_CHARS = 8192;
+
+  /** What `claude setup-token` prints. Anthropic's API keys carry another infix. */
+  const SUBSCRIPTION_TOKEN = /^sk-ant-oat/i;
 
   app.put("/systems/:system", write, async (c) => {
     if (systems === null) {
@@ -482,8 +504,21 @@ export function createApp(options: ServerOptions): AppBundle {
     if (token.length > MAX_CREDENTIAL_CHARS) {
       return jsonError(c, 400, "bad_request", `token exceeds ${MAX_CREDENTIAL_CHARS} characters`);
     }
+    const takesSignIn = registry.machineCatalogue.system(system);
+    if (takesSignIn !== null && takesSignIn.signIn !== null) {
+      return jsonError(c, 400, "takes_sign_in", `${takesSignIn.displayName} is signed in to, and takes no key.`);
+    }
+    // A sign-in to a vendor's own client is not a key, and may be held by that client alone (Q7.156).
+    if (SUBSCRIPTION_TOKEN.test(token.trim())) {
+      return jsonError(
+        c,
+        400,
+        "subscription_token",
+        "This is a Claude subscription token, which only Claude Code may hold. A provider here takes an API key.",
+      );
+    }
     systems.credentials.save(system, token.trim());
-    // No availability flush or restart: a system key is handed to providers/set at launch, never injected at spawn.
+    // No availability flush or restart: the gateway reads a system key on every request, and a direct route at each launch.
     return c.json({ saved: true, system });
   });
 
@@ -495,8 +530,47 @@ export function createApp(options: ServerOptions): AppBundle {
     const named = c.req.param("system") ?? "";
     const system = systemIdParam(c);
     systems.credentials.remove(named as SystemId);
+    systems.signIns?.remove(named as SystemId);
     // Presets naming this system are deliberately kept; starting one without a key refuses by name.
     return c.json({ removed: system !== null, system: named });
+  });
+
+  const noSignIns = (c: Context<AppEnv>): Response =>
+    jsonError(c, 503, "sign_in_unavailable", "this daemon cannot sign in to a provider");
+  const noSuchSignIn = (c: Context<AppEnv>): Response => jsonError(c, 404, "sign_in_not_found", "no such sign-in");
+
+  app.post("/systems/:system/sign-in", write, async (c) => {
+    if (signInRuns === null) return noSignIns(c);
+    const system = systemIdParam(c);
+    if (system === null) return noSuchSystem(c);
+    const started = await signInRuns.start(system, c.get("principal").subject);
+    if ("refusal" in started) return jsonError(c, 400, "sign_in_refused", started.refusal);
+    return c.json({ signIn: started }, 201);
+  });
+
+  app.get("/systems/sign-in/:id", read, (c) => {
+    if (signInRuns === null) return noSignIns(c);
+    const run = signInRuns.view(c.req.param("id") ?? "");
+    return run === null ? noSuchSignIn(c) : c.json({ signIn: run });
+  });
+
+  // For a browser on another computer than this daemon: the address it was sent back to, which loaded nothing there, pasted here.
+  app.post("/systems/sign-in/:id/redirect", write, async (c) => {
+    if (signInRuns === null) return noSignIns(c);
+    const body = await readJsonObject(c);
+    const url = body?.["url"];
+    if (typeof url !== "string" || url.length === 0 || url.length > MAX_REDIRECT_CHARS) {
+      return jsonError(c, 400, "bad_request", "url is required");
+    }
+    const run = await signInRuns.redirected(c.req.param("id") ?? "", url);
+    if (run === null) return noSuchSignIn(c);
+    if ("refusal" in run) return jsonError(c, 400, "sign_in_refused", run.refusal);
+    return c.json({ signIn: run });
+  });
+
+  app.delete("/systems/sign-in/:id", write, (c) => {
+    if (signInRuns === null) return noSignIns(c);
+    return signInRuns.abandon(c.req.param("id") ?? "") ? c.json({ abandoned: true }) : noSuchSignIn(c);
   });
 
   // Spawns one agent per harness, with no prompt; AgentAskRuns bounds and caches it. Per-harness failures are answered, never thrown.
@@ -507,6 +581,12 @@ export function createApp(options: ServerOptions): AppBundle {
     // Asked all at once: the capability path queues for an ask slot, so the sweep cannot lose a race against its own bound.
     const machine = machineOf();
     const pinsModel = (id: string): boolean => routedModelNaming(id, machine) !== null;
+    // hosts is what a current app reads; supported and pinsModel are what an older one does, and for a harness pointed at the spawn they are empty, which that app reads as a refusal.
+    const wireRouting = (id: string, routing: AgentRouting | null): unknown => {
+      const hosts = hostedProtocols(id, routing, machine);
+      if (routing !== null) return { ...routing, pinsModel: pinsModel(id), hosts };
+      return hosts.length === 0 ? null : { providerId: "", supported: [], pinsModel: true, hosts };
+    };
     const entries = await Promise.all(
       machine.harnessIds().map(async (id): Promise<readonly [string, unknown]> => {
       try {
@@ -515,7 +595,7 @@ export function createApp(options: ServerOptions): AppBundle {
           id,
           {
             models: answer.models,
-            routing: answer.routing === null ? null : { ...answer.routing, pinsModel: pinsModel(id) },
+            routing: wireRouting(id, answer.routing),
             // Projected: the CLI's absolute path is deliberately not sent.
             cli: answer.cli === null ? null : { version: answer.cli.version, source: answer.cli.source },
             error: null,
@@ -3008,8 +3088,8 @@ function workspaceRefused(
 function gitError(c: Context, error: unknown): Response {
   if (error instanceof WorktreeError) return worktreeError(c, error);
   if (error instanceof GitError) {
-    if (error.code === "git_missing") {
-      return jsonError(c, 503, "git_missing", error.message);
+    if (error.code === "git_missing" || error.code === "git_too_old") {
+      return jsonError(c, 503, error.code, error.message);
     }
     if (error.code === "git_timeout") {
       return jsonError(c, 504, "git_timeout", error.message);
@@ -3022,6 +3102,7 @@ function gitError(c: Context, error: unknown): Response {
 function worktreeError(c: Context, error: WorktreeError): Response {
   switch (error.code) {
     case "git_missing":
+    case "git_too_old":
     case "worktree_root_unwritable":
       return jsonError(c, 503, error.code, error.message, error.detail);
     case "git_timeout":

@@ -61,15 +61,15 @@ bug in the file.
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 464 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 82 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 154 | `###` |
-| | | **1152** | |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 88 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 160 | `###` |
+| | | **1164** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1152 rather than the 572
+dividers. So the count is over **both** depths, and it says 1164 rather than the 584
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -37459,6 +37459,465 @@ the connection, at the moment the page gives up on the request anyway.
 
 **Status.** Current.
 
+### Q6.123 — What reaches the wire when Claude Code is routed, and what it does with the answer
+
+**Behaviour.** A header named `authorization` in `providers/set` never reaches the
+endpoint, and the key is on a command line. Both were read off the wire rather than off
+the adapter.
+
+**Measured** 2026-10-11 with `pnpm doorprobe` — a loopback recorder standing where the
+endpoint would, answering canned Messages streams — against `claude-agent-acp` 0.73.0
+and `claude` 2.1.296, through the door production uses: `providers/set`, with
+`ROUTED_MODEL_ENV` naming the model.
+
+- **The credential.** The adapter sets the CLI's auth token to the literal `acp-proxy`
+  beside the custom headers it was given, and the CLI sends one `authorization` line,
+  `Bearer acp-proxy`. The header this daemon put there is gone. `x-api-key` arrives, and
+  so does a header no SDK sets, each beside that constant. Every built-in routed row
+  names `authorization: Bearer` as its `authHeader`, so all four have been signing their
+  traffic with a constant; none had been driven with a real key (Q7.115), which is how
+  it stood.
+- **The process table.** The adapter passes the CLI `--settings` holding the address and
+  the custom-headers string, so `ps` shows the key to every user of the machine. Q7.114's
+  "never touches the process table" is true of this daemon's spawn and of nothing below
+  it.
+- **Every call names the pinned model**: the turn, the title call (a JSON-schema
+  `output_config`, no tools) and `/compact`. A subagent's was not measured; the recorder
+  answers no tool call.
+- **Paths.** `HEAD /api/hello` once per process, `POST /v1/messages?beta=true`, and
+  after a compaction seventeen `POST /v1/messages/count_tokens?beta=true`. A 404 there
+  changed nothing a turn showed.
+- **The body.** Adaptive thinking for an id it does not know, `cache_control` on system
+  and message blocks, a `context_management` key, and **`system` as a role inside
+  `messages`** — a translator that maps messages by role meets a third one.
+- **An opaque signature comes back whole.** A 16 KiB blob on a thinking block returned
+  byte-identical on the next turn, and again after the process was ended and the
+  conversation resumed in a new one.
+
+What the endpoint's answer does to the turn. `session/prompt` fails `-32603`, and
+`data.errorKind` is in brackets:
+
+| The endpoint answers | The turn |
+|---|---|
+| 400 | fails at once [`unknown`], the endpoint's own message in the transcript |
+| 404 | fails at once [`model_not_found`], a sentence naming the model |
+| 403 | fails at once [`authentication_failed`] |
+| 401 | retried for 185 s, then [`authentication_failed`] |
+| 429 | retried for 174 s, then [`rate_limit`]; two 429s and then an answer cost 0.8 s |
+| 500, 529 | retried for about 180 s, then [`server_error`], naming "your inference gateway" and its address |
+| a stream cut mid-answer | retried for 185 s, then answered: the last attempt asked without `stream` |
+| 75 s of silence before the first event | waited, with pings and without |
+
+**Which header the four vendors read**, asked the same day with no key and with a bogus
+one. OpenRouter, Moonshot and Z.ai each answer one 401 to no credential and another to a
+bad one, the same in either header, so each reads `x-api-key` as well as
+`authorization`. MiniMax answers one sentence to all three, and that sentence names
+`X-Api-Key`. Where both headers are present only OpenRouter could be told apart without
+a key: `Bearer acp-proxy` beside a well-formed bogus `x-api-key` answers *User not
+found*, where `Bearer acp-proxy` alone answers *Missing Authentication header*. So
+OpenRouter falls through to `x-api-key`. Z.ai does the opposite, and that could be told
+too: it answers a malformed bearer *token expired or incorrect* and a well-formed
+bogus key *Authentication Failed*, and with `Bearer acp-proxy` beside a well-formed
+`x-api-key` it answers the first. `authorization` wins there and the key beside it is
+never read. Moonshot and MiniMax answer one sentence to every bad credential and cannot
+be told apart without a key.
+
+**Why it matters past the defect.** `authentication_failed` is what `onAuthFailure`
+replaces the agent on, and no restart repairs a credential the agent never held. A
+refusal that will not clear by itself costs three minutes when it is answered in a
+status this CLI retries. So whatever stands in front of this harness answers what is
+terminal as a 400 carrying its own sentence, and never a 401, 403 or 429.
+
+**Decision.** No row changes. A row could move its key to `x-api-key`, which is
+measured to reach one vendor of four and measured not to reach another. What reaches
+all four is a request this daemon sends itself, with `authorization` as each vendor
+documents it, so the harness is pointed at the daemon: Q7.157.
+
+**Status.** Fixed by Q7.157.
+
+### Q6.124 — How codex is pointed at another endpoint, and what leaves by the other door
+
+**Behaviour.** `providers/set` moves the turn and `CODEX_CONFIG` names its model, which
+is the measurement Q7.147 said nobody had taken. Three things leave by another door
+while that one is set: the title call, a guardian review, and a thread reopened without
+it.
+
+**Measured** 2026-10-11 with `pnpm doorprobe` against `codex-acp` 1.8.0 and `codex`
+0.162.1, on this machine's ChatGPT-signed-in home and on an empty `CODEX_HOME`; where a
+second endpoint had to be watched, the built-in provider was moved with
+`openai_base_url` in a scratch home's `config.toml` holding a fake key.
+
+- **The door.** `providers/list` answers `providerId` `openai`, `supported` `openai`.
+  `providers/set` with `apiType` `openai` is accepted, and codex appends `/responses` to
+  whatever address it is given, so the address ends at `/v1`. Under the door it called
+  nothing else: no `/models`, no `/responses/compact`, no websocket. Compaction is the
+  same `POST`.
+- **The pin is `CODEX_CONFIG`'s `model`, and nothing else is.** With it the control
+  reads the id, lists it, and the first request names it. Without it the request names
+  codex's own default. `session/set_config_option` with an id codex does not ship
+  answers `-32602`. It is read at each launch, built through `codexConfigEnv`.
+- **Headers pass untouched**: `authorization: Bearer`, `x-api-key` and a header no SDK
+  sets all arrived as sent, and with nothing in `authorization` codex put nothing there.
+  No request under the door carried the home's own credential or account id. Neither
+  the key nor the address was on a command line or in a file under the home.
+- **An empty home opens** once a provider is set; with none it refuses `-32000`.
+- **The body** for an id codex has no metadata for: `store: false`, `stream: true`,
+  `include` asking for the encrypted reasoning, a `prompt_cache_key`, no `instructions`
+  (the prompt is `developer` items in `input`), no `previous_response_id`, no output
+  limit. Tools are functions, one `namespace` holding five more, and a `web_search`
+  server tool. Every item carries an id, the ones the client minted included. An id
+  codex does ship switches the body to a second dialect with no `tools` key.
+- **The opaque reasoning blob comes back whole** on the next turn, after a resume and
+  into the compaction request; after a compaction it is gone.
+- **What a thread keeps** is a provider name and the model, never the address or a
+  header: reopened through a door at a new address it called only the new one.
+
+What leaves by the other door:
+
+- **The title.** After the first turn the adapter runs a second thread on codex's
+  built-in provider, on an OpenAI model, carrying the person's first message and the
+  home's own credential. Seen on the scratch home as a request to the moved built-in
+  address, and on the real home as a title that came back while the routed endpoint
+  answered only canned text. A first prompt of `/rename` made it not happen. The
+  `OPENAI_BASE_URL` variable did not move it.
+- **A guardian review** (Q6.55) goes to the routed endpoint, but under an OpenAI model
+  id and in the second dialect; three answers it could not use failed the command with
+  no permission request. In mode `read-only` the escalation arrives as
+  `session/request_permission` and no such call is made.
+- **A routed thread reopened with no provider set** resumes on codex's own default and
+  sends the whole history to the built-in provider. Driven on the scratch home only.
+
+Also measured: the model control lists codex's own ids beside the pinned one, and
+choosing one sends that id to the routed endpoint, after which the foreign id is
+refused. A signed-in home advertised the person's ChatGPT connectors as tools (24 of
+them, a 323 KB body) until `features.apps` was false and `web_search` disabled, which
+left 8. A header and a body key carry an installation id and, in a git checkout, the
+absolute path and the remote's address. Every turn on a foreign id begins with a line
+of agent text warning that the model's metadata was not found.
+
+| The endpoint answers | The turn |
+|---|---|
+| 400 | ends at once, the endpoint's body as agent text |
+| 401 | six requests over 6 s, then an error naming the address |
+| 402, 403, 404, 422 | six requests, then `end_turn` with the status and the endpoint's message |
+| 429 | one request, `end_turn`, "exceeded retry limit" |
+| 429 typed `usage_limit_reached` | an error, codex's own sentence in place of the endpoint's |
+| 500 | thirty requests over 25 s, then codex's "high demand" sentence |
+| 503, 529 | thirty requests, then the status and the endpoint's message |
+| a stream cut mid-answer | six requests, then "stream disconnected" |
+| 330 s of silence | waited |
+
+Most failures end the turn as text and not as an ACP error, and the address is in that
+text.
+
+**Why it matters.** Pointing codex elsewhere is one call and one variable, but a
+session that only does that still sends a first message to OpenAI under the person's
+own login, and loses the thread to OpenAI's default if it is ever reopened bare. So a
+`codex` row is not routable on the strength of the door alone; Q7.155 carries what it
+owes first.
+
+**Status.** Current as a measurement. Not measured: an idle limit past 330 s, a 429
+with `Retry-After`, an error after partial output, and whether a real third-party
+endpoint accepts a `namespace` tool or a client-minted item id. The probes on the real
+home left five threads in codex's own session store, written by codex.
+
+### Q6.125 — How kimi is pointed at another endpoint, and what it does when the pointing is wrong
+
+**Behaviour.** The door is four environment variables, it needs no login, and when any
+part of it is invalid kimi ignores all of it and runs on the home's own provider with
+the home's own credential.
+
+**Measured** 2026-10-11 with `pnpm doorprobe` against Kimi Code CLI 0.29.2 (`kimi acp`,
+which declares no `providers`), on this machine's signed-in home and on relocated ones;
+what left for other hosts was read off a proxy logging each `CONNECT`, which kimi
+honours.
+
+| `KIMI_MODEL_PROVIDER_TYPE` | Request | Credential |
+|---|---|---|
+| `anthropic` | `POST /v1/messages?beta=true`; the address carries no `/v1` | `x-api-key` |
+| `openai` | `POST <address>/chat/completions`; the address carries `/v1` | `authorization: Bearer` |
+| `kimi`, or unset | the same path, with the machine's hostname and a device id in headers | `authorization: Bearer` |
+| `openai_responses` | nothing: refused as a type, and the whole door with it | — |
+
+With it go `KIMI_MODEL_BASE_URL`, `KIMI_MODEL_API_KEY` and `KIMI_MODEL_NAME`. Responses
+is reachable only as a provider in a home's `config.toml`.
+
+- **The model arrives as named** on the first request. The control publishes it under
+  the value `__kimi_env_model__`, the id being that choice's name, and already current
+  on a new session. Setting the control to the id is refused `-32603`; to the alias,
+  accepted.
+- **No login is needed**: an empty relocated `KIMI_CODE_HOME` opens a session. On the
+  person's own home the door wins over their configured provider, and their
+  `config.toml` was unchanged afterwards.
+- **An invalid door is ignored whole.** A type it does not know, or a missing key, logs
+  that the overrides are ignored and the session runs on the home's default: the
+  request was seen at that provider with its credential. With the address missing, the
+  token went to the type's vendor default.
+- **A session can leave the door.** With a second provider in the home, setting the
+  model control to it was accepted and the next turn went there with the routed
+  conversation. On the own home the control offers the subscription's models beside
+  the alias.
+- **Resume.** Through the door: reopens on the alias and reaches the endpoint. A
+  session born on the home's provider and reopened through the door stays on its stored
+  model until the alias is set, which then survives the next resume. A session born
+  through the door and reopened without it continues on the home's default with the
+  whole history; on an empty home it is refused `-32000`.
+- **What else leaves.** A session and one prompt on the own home made no other
+  connection in 40 s. A search or fetch tool call refreshed the Kimi login and went to
+  Kimi's own service, with no permission asked; with `KIMI_WEB_SEARCH_BASE_URL` and
+  `KIMI_WEB_FETCH_BASE_URL` set, or on an empty home, neither did.
+- **The opaque blob comes back whole** on the next turn and after a resume, on
+  `anthropic` and on Responses. The chat types have no opaque field; the reasoning text
+  is echoed.
+- **Exposure.** Nothing on a command line and nothing in a file under the home, across
+  82 of them. The shell tool's environment holds the key and the address.
+- `KIMI_CODE_CUSTOM_HEADERS` is inherited from the spawning environment: on the chat
+  types an `authorization` there replaces the door's, on `anthropic` it is added beside
+  it. An empty string switches it off.
+
+| The endpoint answers | The turn |
+|---|---|
+| 400, 402, 403, 404, 413, 422 | `end_turn`, nothing said, one request |
+| 401 | `-32000` authentication required, one request |
+| 429, 500, 529 | `end_turn`, nothing said, 30 requests over about 155 s |
+| a stream cut mid-answer | `end_turn`; the chat types emitted the partial text on each of ten attempts |
+| 60 s of silence | waited |
+
+**No failure reaches ACP in words.** The sentence exists only in kimi's own log under
+the home, so nothing an endpoint says in an error can be drawn, and the one error that
+does arrive reads as a sign-in failure. `KIMI_LOOP_MAX_RETRIES_PER_STEP` at 1 cut the
+30 requests to 3.
+
+**Why it matters.** Every failure of the door is silent and falls towards the person's
+own account. Routed on a home this daemon owns, each of those becomes a refusal: no
+default to fall to, no login for a tool to spend, no other model on the control.
+
+**Status.** Current as a measurement. Not measured: a session longer than 40 s, the
+subagent and media tools. The runs on the own home left four sessions in kimi's own
+store, and kimi refreshed its own login once.
+
+### Q6.126 — How opencode is pointed at another endpoint, and which of its calls a provider alone does not move
+
+**Behaviour.** An inline config in `OPENCODE_CONFIG_CONTENT` adds a provider in any of
+three protocols with nothing downloaded. Naming the provider is not enough: the title
+call, a compaction and a reopened session each go elsewhere unless the same config
+closes five more keys.
+
+**Measured** 2026-10-11 with `pnpm doorprobe` against opencode 1.18.35, in isolated XDG
+homes with a person's config planted where one was needed, a second recorder standing
+for their provider, and a proxy refusing and logging every other `CONNECT`.
+
+| `provider.<id>.npm` | Request | Credential |
+|---|---|---|
+| `@ai-sdk/openai-compatible` | `POST /v1/chat/completions` | `authorization: Bearer` |
+| `@ai-sdk/openai` | `POST /v1/responses`, `store: false`, the prompt as the first input item | `authorization: Bearer` |
+| `@ai-sdk/anthropic` | `POST /v1/messages`, no `count_tokens` | `x-api-key` |
+
+All three are in the binary: a first turn took under a second and nothing asked the
+registry. A package it does not bundle is accepted at the pin and fails the first
+prompt, after trying to fetch it.
+
+- **The model** is published as `<id>/<model>`, set through
+  `session/set_config_option`, and arrives as named, slashes, dots and colons
+  included. One the config did not declare is refused `-32602`. `limit.context` is what
+  usage reports; with no `limit` there is no usage at all.
+- **A session nobody pinned runs on Zen.** With only the provider in the config it
+  opens on `opencode/big-pickle`, and a prompt there went to `opencode.ai`. The control
+  reading the routed model at `session/new` proved nothing: it read so with no choices
+  published.
+- **The auxiliary calls** are a title, on the first message, and a compaction. Each
+  follows the person's own config before the provider:
+
+| The person's config holds | The inline config holds | Title | Compaction |
+|---|---|---|---|
+| nothing | the provider, pinned | routed | routed |
+| a `small_model` of theirs | the provider, pinned | **theirs** | routed |
+| `small_model` on Zen | the provider, pinned | **to `opencode.ai`**, and the turn still ends normally | — |
+| their own `agent.title.model` and `agent.compaction.model` | plus `model` and `small_model` | **theirs** | **theirs** |
+| the same | plus `agent.title.model`, `agent.summary.model`, `agent.compaction.model` | routed | routed |
+| the same, and the routed provider disabled | all of it, with `enabled_providers` | routed | routed |
+
+- **It merges per key, the inline config winning**, and arrays replace. So a person's
+  providers stay on the model control until `enabled_providers` names only the routed
+  one. A person's `share: "auto"` produced a connection to opencode's share host, and
+  the inline `share: "disabled"` removed it.
+- **Resume.** The session stores the provider id and the model, never the address:
+  reopened through a door on another port it called only the new one. Reopened with the
+  door gone it resumes, reads `opencode/big-pickle`, and sends the routed history
+  towards Zen with no refusal. A changed provider id does the same.
+- **The opaque blob comes back whole** on Responses and Messages, on the next turn and
+  after a resume; a compaction carries none. Chat replays the reasoning text.
+- **A key the config omits is taken from the environment**: the Anthropic package sent
+  the ambient Anthropic key and the OpenAI one the ambient OpenAI key. The key may be
+  written as `{env:NAME}` or `{file:/path}`, and the text is JSONC.
+- **Invalid JSON ends the start and prints the whole inline text on stderr**, the key
+  with it, and with `{env:NAME}` the substituted value. A config that parses and fails
+  the schema does not.
+- **Exposure.** Nothing on a command line; in the home, the provider id and the
+  conversation, never the key or the address.
+
+| The endpoint answers | The turn |
+|---|---|
+| 400, 401, 403 | fails `-32603` within a second, the endpoint's message its only content |
+| 429, 500, 529 | nothing said while it retries; six requests over 75 s, then `-32603` |
+| a stream cut mid-answer | retried the same way; Chat emitted the partial text on every attempt |
+| 60 s of silence | waited |
+
+`data` carries no status and no code, so the message string is all an endpoint can say.
+
+**Why it matters.** Each gap sends conversation text to a party nobody chose and
+reports nothing, so the door is the whole config or it is not a door: `model`,
+`small_model`, the three `agent` models, `enabled_providers`, `share`, and a pin that
+is read back. A person's own `OPENCODE_CONFIG_CONTENT` cannot be merged under it the
+way `codexConfigEnv` merges, since it may be JSONC with tokens `JSON.parse` refuses.
+
+**Status.** Current as a measurement. Not measured: which model a subagent takes, a
+compaction opencode starts by itself, a `retry-after`, silence past 60 s. One run on
+the person's own home left one session row in opencode's database.
+
+### Q6.127 — How grok is pointed at another endpoint, with no login and no key of xAI's
+
+**Behaviour.** A `[model.<key>]` block in the `config.toml` of a relocated `GROK_HOME`
+opens a session with no login, no xAI key and no `authenticate`, in any of three
+protocols. The overlay variables Q6.118 measured do not carry such a block, so the door
+cannot sit beside a person's own login without writing their config.
+
+**Measured** 2026-10-11 with `pnpm doorprobe` against grok 1.0.40, in relocated homes,
+with a proxy refusing and logging every other connection (grok honours it) and grok's
+own debug log, which agreed.
+
+| `api_backend` | Request | Notes |
+|---|---|---|
+| `chat_completions` | `POST /v1/chat/completions` | earlier assistant messages carry the reasoning text |
+| `responses` | `POST /v1/responses` | `store: false`, the prompt as an input item, the encrypted reasoning asked for |
+| `messages` | `POST /v1/messages` | no `x-api-key` and no `anthropic-version` header |
+
+`base_url` carries `/v1`. On all three the credential is `authorization: Bearer`,
+from the block's `api_key` or the variable its `env_key` names. An `authorization`
+among `extra_headers` replaces it; other headers there pass.
+
+- **What opens a session.** A block holding any non-empty key, one character included:
+  `authMethods` then lists `xai.api_key` and `session/new` answers. A block with only
+  headers, an `env_key` naming an empty variable, or the block handed over in
+  `GROK_CONFIG` or `GROK_CONFIG_PATH`, is refused `-32000`: the overlay keeps the
+  `models` and `features` sections and drops every `[model.*]`.
+- **The model control lists the block's key, not the id on the wire.** With
+  `allowed_models` it lists that one; without, xAI's own beside it. `[models].default`
+  selects it with no pin, and a pin through `session/set_config_option` is accepted.
+- **Nothing left for xAI** on that door, in about forty runs up to seventeen minutes:
+  no catalogue fetch, no telemetry. What is auxiliary lands on the same endpoint: a
+  `GET /` with no credential, a title request, and for every turn a second request with
+  the whole context, for a summary. Two turns were seven requests.
+- **Without `session_summary`** the title request names an xAI model, and on a session
+  that was pinned and not defaulted it went to xAI's own host.
+- **With `XAI_API_KEY` in the environment** grok checks that key at `initialize`
+  against xAI's API, and a block with no key of its own is sent that one.
+- **The opaque blob comes back whole** on Responses and Messages, on the next turn and
+  after a resume; Chat echoes the reasoning text.
+- **Resume** reopens on the block's model, and through a door at a new address with a
+  new token reached only the new one.
+- **Exposure.** Nothing on a command line. The home holds the address in `config.toml`
+  and the token only when it is written inline; grok appends a section of its own to
+  that file. A header carries the person's real agent id out of a relocated home.
+  grok's debug log prints the key.
+- A relocated home leaves the person's login, config and sessions behind, and still
+  reads `CLAUDE.md`, skills and permission settings from under their `~/.claude`.
+
+| The endpoint answers | The turn |
+|---|---|
+| 400, 403 | fails `-32603` at once, the status and the endpoint's message in `data` |
+| 401 | fails at once, `data` a string naming the address, the model and the build |
+| 429 | one retry after 2 s, then `-32003`; two in a row end the turn |
+| 500, 529 | **45 requests over 1041 s**, nothing said meanwhile, then `-32603` |
+| a stream cut mid-answer | the same 45; Chat emitted the partial text on each |
+| 60 s of silence | waited |
+
+`max_retries` in the block bounds it: at 2, eight requests over 50 s.
+
+**Why it matters.** grok is routable after all, which the plan had left open, and the
+door is a file. It is one this daemon owns, under its own state root, so "no settings
+file under somebody's home" (Q7.114) stands. What it owes: every key of the block that
+names a model, a retry bound, and an endpoint that answers what is final as a 4xx,
+since a 5xx holds a turn silently for seventeen minutes.
+
+**Status.** Current as a measurement. Not measured: `session/load`, where the image and
+feedback tools send, and a block beside a signed-in home, which only writing that home
+could show. Reading the real home's configuration made grok rewrite its own model
+cache there.
+
+### Q6.128 — Which git does the daemon need, and what does an older one do with what it is sent?
+
+**Behaviour.** Two options this daemon passes are newer than the git a distribution
+still in support ships, a third thing it reads is as new, and an older git answers
+each differently. Measured on builds from git's own source (2.17.0, 2.25.1, 2.30.2,
+2.31.0, 2.34.1, 2.35.8, 2.36.0) and on the Ubuntu 22.04 and 20.04 images:
+
+| What | Since | What an older git does |
+|---|---|---|
+| `worktree list --porcelain -z` | 2.36.0 | exit 129, `error: unknown switch` and the letter, usage on stderr |
+| `rev-parse --path-format=absolute` | 2.31.0 | exit **0**: the option printed back as the first line, relative answers after it |
+| `locked` and `prunable` in that listing | 2.31.0 | neither is printed, so a locked worktree reads as unlocked |
+
+The second is the dangerous one, since nothing fails: `rev-parse` echoes what it does
+not know, and the daemon would have read the option as the git directory. It was
+hidden only because the first came straight after it.
+
+**How it was found.** From a phone, as git's own usage error beside Start, on a
+machine nobody had measured. The line is the first commit's. Every run of every
+driver had been on a new git: 2.39.5 on the laptop, a recent one on CI's runner, 2.43
+on the boxes this fleet provisions. `daemoncheck`'s worktree sections do run a real
+git, which is the git of whatever machine runs them.
+
+**Decision.**
+
+- **The floor is `GIT_MIN_VERSION`, 2.31**: the lowest git at which everything but
+  `-z` is native. Below it a session in a repository is refused, `git_too_old` and 503,
+  in a sentence holding both versions. It is not started in the folder itself instead:
+  `auto` would then put the agent in the checkout with nothing saying isolation was
+  lost. A folder that is no repository is never asked how old its git is, and a
+  session that asked for no worktree still starts.
+- **From 2.31 to 2.35 the listing is asked by NUL first and by line on that one
+  refusal** (`listWorktrees`), keyed on git's answer rather than on its version. By
+  line, a path holding a line break is refused: the listing has seven words of its own
+  in that range (read off `show_worktree_porcelain` in 2.17, 2.25 and 2.34), so any
+  other line is the rest of a path, and a path cut at the break names another
+  directory. A lock's reason is C-quoted there where it holds special characters;
+  nothing reads the reason.
+- **A version that cannot be read is let through**, and a git that prints the option
+  back is refused on that answer (`refuseOldGit`, `tooOldGit`).
+- **`pnpm gitfloor` builds git at the floor from source and runs `daemoncheck` on
+  it**, and a CI job runs that. Built rather than taken from an older image so that
+  git is the only thing that differs from the `check` job: a container also changes
+  who the driver runs as, and it asserts on what a user may not write. The driver
+  checks that the git it ran on is the one the run asked for.
+- **The number is written in three files**, `src/git.ts`, `deploy/lib.sh` and
+  `deploy/bootstrap.sh`, the last because it is served alone. `deploycheck` holds them
+  equal, and both installers refuse below it before anything is cloned or enabled.
+
+**Alternatives taken back out.**
+
+- *A fallback below 2.31*, resolving the relative answers in the daemon. The worktree
+  directory's name hashes `commonDir` (`repoKey`), so the fallback has to reproduce
+  git's own realpath byte for byte or one repository gets a second directory the day
+  its git is updated; and the lock annotation is missing there too, so a removal would
+  pass a lock it cannot see. Three fallbacks, exercised only by the floor job, for
+  systems out of support (Ubuntu 20.04 ships 2.25.1, Debian 11 2.30.2), against one
+  sentence.
+- *A floor of 2.36 and no fallback.* Ubuntu 22.04 ships 2.34.1 and is supported into
+  2027.
+- *Saying it in the app before Start.* The New session screen sends no `worktree` and
+  nothing inspects the folder before the start, so it does not know whether the folder
+  is a repository, which is the only case the floor matters in. The sentence at Start
+  is exact, and it is drawn where the usage error was.
+- *A table of every switch against the version it arrived in*, checked offline. A
+  person fills that table in; the floor run needs nobody to remember.
+
+**Status.** Current. The whole of `daemoncheck` passes on 2.31.0 and on 2.34.1 on
+macOS, and on 2.31.0 on Linux in a container. Not measured: the CI job itself, which
+was written on a laptop and has never run, including whether the runner image carries
+zlib's headers (the job installs them where it does not). Nothing below 2.31 is
+measured past the refusal.
+
 ## Open questions and deliberate non-goals
 
 ### Q7.1 — Was keeping full session history on disk an optimisation?
@@ -43840,3 +44299,403 @@ browser login has since been finished on this machine and carried a session unde
 the launchd daemon; whether through the wizard is not recorded.
 
 **Status.** Known limitation.
+
+### Q7.155 — Why does a system name its endpoints by protocol, and what is still owed before a second harness is routed?
+
+**Decision.** A system lists `endpoints` keyed by `WireProtocol` — Anthropic Messages,
+OpenAI Responses, OpenAI Chat Completions — where it had one address and ACP's coarse
+`apiType`. `routeFor` is the single answer to whether and how a harness reaches a
+system: `hostable` reports its refusal and `applySystem` sends its route, so the two
+can no longer be about different pairings. Nothing that was allowed or refused has
+changed: the matrix is the same 54 cells in the same four sentences, and the daemon's
+answer to `GET /systems` is the same bytes.
+
+**Why.** Q7.114 found the matrix "smaller than it looks" and it stayed at four routed
+cells, all of them Claude Code at an Anthropic-shaped address, because the pair was the
+unit: one address, one type, one harness that could be told. The protocol is the unit
+that generalises. A harness speaks some of the three, an endpoint answers some of the
+three, and a pairing is their intersection — which is how one account at a provider
+serving all three reaches every harness with a door, with nobody translating.
+
+**What a manifest's row becomes.** `declaredEndpoints` files a rung-5 `anthropic` under
+Messages and an `openai` under Chat Completions. A manifest does not say which OpenAI
+dialect it means and nothing distinguishes the two yet: ACP's `supported` says only
+`openai`, and `ACP_API_TYPE` reads that as either. `apiType` stays on the row as the
+label an app from before this reads, and nothing routes on it.
+
+**What the doors turned out to be.** Measured 2026-10-11, one entry each: Q6.123
+(claude), Q6.124 (codex), Q6.125 (kimi), Q6.126 (opencode), Q6.127 (grok). Five of six
+harnesses can be pointed elsewhere; cursor declares nothing and documents nothing, and
+stays a refusal.
+
+| Harness | Speaks | The door | What it owes beyond an address |
+|---|---|---|---|
+| claude | Messages | `providers/set` and the model variables | the key in a header other than `authorization` |
+| codex | Responses | `providers/set` and `CODEX_CONFIG`'s `model` | the title call, guardian reviews and a bare reopen kept off OpenAI; the connector tools off |
+| kimi | Messages, Chat | four `KIMI_MODEL_*` variables | a home of this daemon's, or every mistake falls to the person's own account |
+| opencode | all three | an inline config | the whole config: both models, the three `agent` models, the provider list, a pin read back |
+| grok | all three | a `config.toml` in a relocated `GROK_HOME` | every key that names a model, and a retry bound |
+
+**A door is not an address.** Each of the five, set as its documentation suggests,
+sends something to a party nobody chose: a first message to OpenAI under the person's
+login, a title to OpenCode Zen, a search to Kimi's service, a title to xAI. None of
+them reports it, and three of them reopen a routed conversation on their vendor's
+default when the door is missing. So a row is routable when its door has been measured
+*closed*, which is more than reaching the endpoint, and why `ROUTED_MODEL_ENV` still
+holds one harness.
+
+**What is owed, in order.**
+
+- **A listener of this daemon's between the harness and the endpoint.** Three of the
+  doors are an environment or a file, where Q3.515 forbids a vendor's key; a loopback
+  address and a credential good for one launch may ride them. It also sends each
+  vendor the header that vendor reads, which is what Q6.123 found broken.
+- **Refusals in a status the harness ends on.** A 400 with a sentence ends a turn at
+  once on claude, codex, opencode and grok. A 5xx holds one for three minutes on
+  claude and seventeen on grok, and a 401 reads as a sign-in failure everywhere. kimi
+  shows nothing an endpoint says, so its sentence has to reach the transcript another
+  way.
+- **Translation only where the intersection is empty**: Messages to Responses, then
+  the reverse. Every harness returned an opaque reasoning blob byte-identical across
+  turns and a resume, so what a translator must carry can ride the conversation and
+  none of it need live in the daemon.
+
+**Rejected.** *A second direct path with the vendor's key in the door.* It is what
+three of the doors would take with no listener, and it is the one thing Q3.515 rules
+out. *Routing on the label.* `openai` would have paired codex, which speaks only
+Responses, with every Chat-only endpoint a plugin names.
+
+**Status.** The table and `routeFor` are built, the listener with the doors of
+claude, opencode and grok (Q7.157, Q7.158), and Messages into Responses (Q7.159).
+kimi's and codex's doors and the reverse translation are not built.
+
+### Q7.156 — Can a subscription be spent in a harness other than its vendor's?
+
+**Position.** Only where the vendor says so, which is a different answer for each of
+them and a fact about a contract, not about a protocol. An API key is sold to be used
+from anywhere, so reaching every harness with one is engineering (Q7.155). A
+subscription is a sign-in to the vendor's own client, and what else may hold that
+sign-in is the vendor's to say.
+
+**Read** 2026-10-10 and 2026-10-11, from the vendors' own pages and the tools' own
+sources; none of it driven here.
+
+| Subscription | Outside its own CLI |
+|---|---|
+| ChatGPT | OpenAI's "Sign in with ChatGPT" programme, launched 2026-09-29: a client issued to one person, the public Responses endpoint, no hosted tools. Its documentation is for "open-source and locally hosted apps"; a paid or remotely hosted one fills in a form |
+| Claude Free, Pro, Max | prohibited: Anthropic's terms allow those credentials in its unmodified CLI and forbid any other program to hold or relay them |
+| Gemini CLI, Antigravity | prohibited in third-party software, with account suspensions on record |
+| GitHub Copilot, SuperGrok | partnerships with named clients; opencode is one, this product is not |
+| Kimi Code, Z.ai's coding plan | a key, in tools the vendor lists, for interactive use |
+
+**What opencode does** is two things. Since 2026-01 it has signed in with the Codex
+CLI's own client id and called ChatGPT's backend address, which OpenAI's staff
+encourage and its programme's documentation says not to do. Since its 2.0 line it also
+implements the programme.
+
+**What a router that "turns subscriptions into one API" does** was read off one, at
+its release tag: it signs in with each vendor CLI's client id and makes its requests
+look like that CLI — a forged billing header and client hash for Claude, a pinned
+client version and TLS profile for ChatGPT, the same for six more. Its own screen says
+the session "is not authorized for proxy/router use" and that the account may be
+restricted, and its tracker holds the bans. Its protocol translation is real, and is
+bound to its own database and provider registry.
+
+**Decision.** Nothing here presents itself as another vendor's client, for any vendor.
+The ChatGPT plan is to be reached through OpenAI's programme and no other way, as a
+system of its own beside `openai`, whose key and whose sign-in are two products the
+way Moonshot's are (Q3.488). A Claude or Gemini sign-in is never a system credential:
+whatever spends system credentials takes a system and no harness, so it has nothing to
+read one from. Somebody who runs such a router on their own machine reaches it as they
+reach any local endpoint, and nothing in this repository names it.
+
+**What it would take.** OpenAI's answer on whether a product with a hosted control
+plane and a paid tier is one of the clients its programme is open to. And a decision
+this daemon has not had to make: a grant on a machine lets another person start
+sessions there, and a plan signed in on that machine would then be theirs to spend.
+The documentation binds each issued client to "the authenticated user", and the terms
+page it points to could not be read, so what it says of that is unknown. It would be a
+check on who is asking, on a daemon that "stops asking who the subject is".
+
+**Status.** Not built.
+
+### Q7.157 — What stands between a routed agent and its vendor?
+
+**Decision.** A listener of this daemon's, on loopback. A harness with a door in
+`HARNESS_DOORS` is handed that address and a credential good for its own agent
+process, in `providers/set`; the gateway adds the vendor's key and sends the request on.
+`routeFor` says which way a pairing goes, `SessionRuntime.openRoute` hands out the
+grant, and `applySystem` closes it with the agent. Claude's door is the first.
+
+**Why.** Q6.123: the four built-in routed rows had never signed a request. Claude Code
+overwrites the one header they all used, and no header it leaves alone reaches every
+vendor. A request sent from here carries `authorization` as each vendor documents it.
+The same listener is what Q7.155 found the other harnesses owe, since three of their
+doors are an environment or a file, where Q3.515 forbids a vendor's key.
+
+**Measured** 2026-10-11, the real `claude` 2.1.296 driven through the real gateway with
+`pnpm doorprobe --gateway messages`, the recorder standing where the vendor would:
+
+- Every request arrived signed with the vendor's key in `authorization`, and carried
+  six headers: the content type, `accept`, the user agent and the two Anthropic ones.
+  The harness's credential, its session id and its client headers stopped at the
+  gateway. Its `HEAD /api/hello` was answered there and reached nobody.
+- A turn, a title call, a compaction with its seventeen token counts and a resume in a
+  new process all passed; the opaque reasoning blob came back identical through it.
+- A vendor answering 401 ended the turn in 0.1 s with *refused the key saved on this
+  machine* and the vendor's words, where the same answer unmediated cost 185 s and read
+  as the agent's own sign-in failing. A 403 the same.
+- A launch that named another model than its grant's was refused in 0.3 s with both
+  names, and nothing reached the vendor.
+
+**What it reverses.** Q1.620 counted this daemon's `fetch` calls at three with none on
+a session's path; there are four and this one is. The property was never the number: it
+is that each is named, which `gatewaycheck` now asserts as a list. Q7.114's "never an
+environment variable" narrows to what it was protecting — no vendor's key — and what
+an agent holds is a loopback address and a credential that opens nothing once its
+process is gone.
+
+**What it does not change.** The credential is still on the `claude` command line,
+where the adapter puts everything `providers/set` gives it; it is the gateway's now and
+not the vendor's. An agent runs as this uid and can read the database the key is in,
+so this is hygiene of the kind `agentEnv` is, and no fence.
+
+**Rejected.** *Moving each row's key to `x-api-key`*: reaches OpenRouter, measured not
+to reach Z.ai. *Rewriting a request's model to the grant's*: the session would run a
+model its own control does not show. *A fallback to the vendor's address when the
+gateway is off*: the path Q6.123 measured broken, kept alive as the one nobody tests.
+*A route on the daemon's own HTTP surface*: that one is reachable through the relay,
+gated on a token an agent must never hold, and buffers what it answers.
+
+**Status.** Current. A plugin's harness is still handed the vendor's address and key:
+nothing is known about what its adapter does with a header. Not measured: the model a
+claude subagent names, which the gateway refuses if it is another.
+
+### Q7.158 — How is a harness that answers nothing about routing pointed at the gateway?
+
+**Decision.** At its spawn. `HARNESS_DOORS` holds two kinds of row: claude's, told
+through `providers/set` after the handshake, and a door `via: "spawn"`, whose
+`prepare` is given the gateway's address, the launch's credential, the model and a
+home of this daemon's, and answers the environment the process starts with.
+`launchThroughDoor` opens the grant before the spawn and ends it with the process.
+opencode and grok have one each.
+
+**Why at the spawn.** Neither declares `providers` (Q6.126, Q6.127), so there is
+nothing to tell them afterwards, and `routeFor` reads the door and never the agent for
+them. What can be read back is the agent's own model control, as on a native pairing:
+`held(model)` is what it must show, `pinNativeModel` sets it and reads it again, and a
+start that cannot get there refuses where a resume demotes (Q2.216).
+
+**opencode.** The whole inline config Q6.126 found it needs: the model under `model`,
+`small_model` and the three `agent` entries, the one provider under
+`enabled_providers`, `share` off, and the provider itself in the protocol the route
+chose. Its XDG directories are a home per harness under this daemon's state root, so
+no config of the person's is merged under it. The provider's id is a constant, since a
+session reopened under another falls back to opencode's own models.
+
+**grok.** A `config.toml` rewritten at every launch in a home per session: `default`,
+`session_summary` and `allowed_models` all naming one block, the block naming the
+model, the gateway, the protocol, a retry bound and the variable the credential is in.
+Per session because the file holds one default; with only a pin, Q6.127 saw the title
+go to xAI. The block's key is the model's id with everything but letters, digits and
+dashes replaced, and is what grok's control shows. An xAI key in the daemon's own
+environment is withheld, or grok checks it against xAI at the handshake.
+
+**Measured** 2026-10-11, the production doors of the real opencode 1.18.35 and grok
+1.0.40 driven with `pnpm doorprobe --door <harness>:door --gateway <protocol>`, and
+then through a daemon of their own against the vendors with a key that is not one.
+
+- In each of the three protocols, both: a session opened, the control read the held
+  value as its only choice, two turns and a resume in a new process reached the
+  recorder signed with the vendor's key, and the gateway refused nothing — no request
+  named another model, the title calls included. The opaque reasoning blob came back
+  identical on Messages and Responses. Nothing was on a command line.
+- grok carried a model id holding a slash and a dot: `vendor-some-model-4-5` on the
+  control, the id itself on the wire. Three turns were eight requests: it asks for a
+  summary of every turn.
+- Through a daemon: opencode on Moonshot answered *Moonshot refused the key saved on
+  this machine* in 2 s; both sessions came back by themselves after the daemon was
+  restarted and reached their vendors again through new credentials.
+- grok on OpenRouter answered **`Internal error`** and nothing else: it puts what an
+  endpoint says in the error's `data`. `describeTurnError` now carries a `data` that
+  is a string, or holds a `message`, into the sentence, for every harness.
+
+**What the app is told.** `hostedProtocols` per harness, as `AgentRouting.hosts`, and
+`SystemInfo.protocols`; it allows a pairing where the two meet. A harness pointed at
+its spawn answers nothing about routing, so every field an older app reads is sent
+empty, and that app refuses a row it has no way to draw. The matrix went from eleven
+allowed cells to eighteen with no endpoint added.
+
+**Not built.**
+
+- **kimi's door.** It is measured and takes four variables, but kimi shows nothing an
+  endpoint says (Q6.125): a refusal there ends the turn in silence. It owes a way for
+  the gateway's sentence into the transcript that is not the answer's body.
+  `GrantSpec.onFault` is the seam; an `error` event ends a turn in `Session.prompt`,
+  so what carries it must not be one while kimi's own turn is still open.
+- **codex's door.** `providers/set` and `CODEX_CONFIG` reach the endpoint (Q6.124),
+  and three things leave by another way. It owes the built-in provider pointed
+  somewhere that sends nothing to OpenAI, and escalations that arrive as permission
+  requests in every mode.
+- **Removing a grok session's home** with the session. Each is about 1 MB of grok's
+  own documentation.
+- **A context size.** opencode reports no usage without a limit in its config, and
+  nothing here knows a routed model's.
+- **The name on the control.** opencode's reads `reemoat/<model>` and grok's a
+  respelling; the app draws what the agent published.
+
+**Rejected.** *One grok home for every session*: one file, one default. *The person's
+own opencode config merged under the door*: it may be JSONC, and each key it holds is
+a way out. *Pinning in the gateway what the harness would not hold*: Q7.157.
+
+**Status.** Current.
+
+### Q7.159 — How does a harness that speaks one protocol reach an endpoint that speaks another?
+
+**Decision.** The gateway translates, for the pairs `TRANSLATIONS` lists, and
+`routeFor` ends a route in another protocol only where the two sides share none. One
+pair exists: Anthropic Messages in, OpenAI Responses out. With it `SYSTEMS.openai`
+names OpenAI's API endpoint and claude reaches it, which is the cell Q7.114 said
+"cannot be without a translating proxy this product does not run".
+
+**Two rows it makes real.** `openai` and `anthropic` each name their vendor's API
+endpoint, for an API key saved as that system's. Both are another product than the
+sign-in their native harness holds, as Moonshot's two are (Q3.488): the key is a system
+credential, the sign-in is the harness's, and nothing reads one for the other.
+`PUT /systems/:system` refuses a Claude subscription token by its prefix, for every
+system, since it is a key to none (Q7.156).
+
+**Where the state is.** In the conversation. A Responses reasoning item must be sent
+back on the next request or the model loses its own reasoning, and its
+`encrypted_content` means nothing to anybody else. The translator packs the item into
+the Messages thinking block's `signature`, marked `rmr1.`, and unpacks it in place
+when the harness sends the block back. Nothing is kept in the daemon, so a restart, a
+resume and a second daemon all see the same thing.
+
+**Measured** 2026-10-11, the real `claude` 2.1.296 through the gateway with
+`pnpm doorprobe --gateway messages --upstream responses`, the recorder answering as a
+Responses endpoint, and then through a daemon against the vendors with keys that are
+not keys.
+
+- The recorder was sent Responses requests: the prompt as `instructions`, the turn as
+  input items, a `system` message mid-conversation as a `developer` item, 25 function
+  tools, `store: false`, the title call's JSON schema under `text`. Claude drew the
+  answer and the reasoning summary as its own.
+- **The packed reasoning came back identical** on the next turn and after the process
+  was ended and the conversation resumed: the recorder's blob went out in a
+  `signature`, through the real CLI, and arrived as `encrypted_content` again.
+- Through a daemon, claude on `openai` reached OpenAI's Responses endpoint and drew
+  *OpenAI refused the key saved on this machine* with OpenAI's words; opencode on
+  `anthropic` drew Anthropic's *invalid x-api-key*; grok on `openai` the same as
+  claude. kimi on `openai` and codex on `anthropic` were refused when the pairing was
+  saved.
+
+**What is refused and what is left behind.** A content block the other protocol has
+no place for refuses the turn in a sentence naming it. A top-level request option the
+translator does not read is dropped, which is the opposite call and deliberate: a
+harness adds one in an update, and refusing it ends every turn of every session until
+a release learns its name. A hosted tool of the harness's own vendor is dropped from
+the tool list. A token count is a 404.
+
+**Not carried, and it costs something.** OpenAI's `phase` on an assistant message has
+no place in a text block. The title call asks for the reasoning effort the turn does.
+A `document` block is refused though a counterpart exists. An error inside a stream
+that is fatal still rides as one a harness retries.
+
+**Not driven.** No real key: every row here reached its vendor and was refused for the
+key, so the path and the header are measured and a model's answer through it is not.
+Whether a model of one family does good work in a harness written for another is not
+something this measures at all, and Anthropic says of its own that it does not support
+it.
+
+**Rejected.** *A hub format every protocol passes through*: what one read off a router
+that has one (Q7.156) loses is the signature, the reasoning item and the cache marks,
+which is the part that matters. *Keeping the reasoning in the daemon, keyed by a
+call*: gone at a restart, silently. *Refusing an option it does not know*: above.
+
+**Status.** Current. The reverse pair, and either into Chat Completions, are not
+built: nothing routes to them, since opencode and grok speak all three themselves.
+
+### Q7.160 — How is a ChatGPT plan signed in to, and what does the daemon hold of it?
+
+**Position.** Built on the daemon's side and switched off: `REEMOAT_CHATGPT_PLAN=on`
+is what lists `chatgpt` as a provider. It was written against the documentation of
+OpenAI's "Sign in with ChatGPT — ChatGPT plan usage" programme and has never been
+driven with a real account, and whether this product is one the programme is open to
+is OpenAI's to say (Q7.156).
+
+**What the documentation says**, read 2026-10-11 in full from its own pages, with one
+reference implementation beside it.
+
+- **The client is issued at the first sign-in.** The authorize request names
+  `dynamic_agent_client`; after the person names and authorises the agent, the
+  callback carries the client id to save, "bound to the authenticated user". There is
+  no secret and no separate registration call.
+- **The page hands back to this computer.** "Use an HTTP loopback callback on
+  `127.0.0.1`… only the port may vary." No device code and no pasted code is
+  documented. For a client on another computer the documentation's one answer is to
+  sign in locally and carry the credential file across.
+- **Tokens.** An access token good for an hour and a refresh token good for thirty
+  days, replaced at each use. A list of errors that mean signed out; anything else on
+  a refresh is a fault to fix, not a sign-out.
+- **Inference** is the public Responses endpoint with the access token as a bearer.
+  A request must not be stored, must stream, may hold no `system` message item, and
+  must omit a list of fields, the output limit and the temperature among them. Hosted
+  tools are not offered. One model is named.
+- **Refusals** carry their own codes: a plan at its limit is a 429, an account that
+  may not use its plan here a 403.
+- **Who it is for.** "Open-source and locally hosted apps. If you're interested in
+  offering it in a paid or remotely hosted app, complete the interest form." The terms
+  page it points to could not be read.
+
+**Decision.** `chatgpt` is a system of its own beside `openai`: the same address,
+another product, as Moonshot's two are (Q3.488). Its row names a sign-in flow where
+the others name nothing, and a system that names one takes no key.
+
+- **`openaiSignIn`** is the flow, every call through `IdentityTransport`: the
+  authorize address, the exchange, the identity token's signature checked against the
+  provider's keys with nothing but `node:crypto`, the refresh.
+- **`SystemSignInRuns`** holds an attempt: a listener on `127.0.0.1` at a port of its
+  own, on the path the documentation names, open for ten minutes. A second attempt for
+  a system ends the first.
+- **`system_sign_ins`** holds what a sign-in left, and who finished it. This machine's
+  own name to the provider is minted once and kept through a sign-out.
+- **`SystemCredentials`** is what the gateway asks on every request: a key, or the
+  access token, renewed a minute before it would stop working. Five requests that find
+  it stale make one call, since a refresh token is spent by its first use, and the new
+  one is stored before the new access token is.
+- **`shapeForChatgptPlan`** puts a request in the shape the programme takes after any
+  translation: forces what is required, drops what is rejected, turns a `system`
+  message into a `developer` one, and refuses what names state kept at OpenAI.
+- A plan's 429 becomes a refusal that ends the turn, with OpenAI's words: every
+  harness measured spends minutes retrying one (Q6.123–Q6.127).
+
+**From another computer.** A browser on a phone is sent back to `127.0.0.1` there,
+where nothing listens. `POST /systems/sign-in/:id/redirect` takes the address it could
+not load. Only the code and the state are read from it, and only where it is this
+attempt's own address; the code is useless without the verifier, which never left the
+daemon. **This is not in OpenAI's documentation.** It is the same redirect, carried by
+hand.
+
+**Not built.**
+
+- **Anything in the app.** No card signs in, and an app that does not know the
+  listing's `signIn` field draws a key box that is refused in words. The routes are
+  the whole of it until a real sign-in has shown the flow works.
+- **A second sign-in that reuses the issued client**, which the documentation asks
+  for, and **revoking at sign-out**, which it also asks for. Signing out here forgets
+  the tokens and tells nobody.
+- **A whole answer for a harness that asked for one.** The programme only streams, and
+  nothing here assembles a stream; such a request is refused in a sentence. claude asks
+  for one after a stream has been cut on it repeatedly.
+- **Who may spend it.** A grant on a machine lets another person start a session
+  there, on whatever is signed in. `signed_in_by` is recorded and nothing reads it.
+- **The models an account lists.** The row names the one the documentation does.
+
+**What only a real sign-in can show.** Whether this product is eligible at all; the
+identity token's actual algorithm and claims, which the documentation does not state
+and the flow takes from the reference implementation; the shape of the token
+endpoint's errors; whether function tools sent flat are accepted, where the
+documentation says to group them.
+
+**Status.** Not driven. Switched off.

@@ -50,9 +50,9 @@ so it could load the app and reach no machine at all. Q4.118, Q1.649,
 `docs/AUTHORITY.md`.
 
 **No test framework.** `typecheck`, `protocolcheck`, `authcheck`, `daemoncheck`,
-`relaycheck`, `webcheck`, `nativecheck`, `pincheck`, `deploycheck`, `docscheck`,
-`imagecheck` and `harness` are the whole automated safety net, and they are drivers
-rather than unit tests on purpose. Ten run offline in one process with no fleet, no
+`gatewaycheck`, `relaycheck`, `webcheck`, `nativecheck`, `pincheck`, `deploycheck`,
+`docscheck`, `imagecheck`, `gitfloor` and `harness` are the whole automated safety net, and they are
+drivers rather than unit tests on purpose. Eleven run offline in one process with no fleet, no
 agent and no deploy — `docscheck` is the one whose subject is prose: it
 holds this file to a budget, because the last time it was cut nothing checked
 the result and it was larger six days later. `nativecheck`'s
@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1152 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1164 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -140,6 +140,13 @@ pnpm daemoncheck                     # the daemon's HTTP surface and durable sta
                                      #   gate's every refusal and bound, the real responder with the lock
                                      #   on — a signed capability for an unknown key refused, a removed
                                      #   key's channel ended — and the four routes
+pnpm gatewaycheck                    # the model gateway: a real listener on loopback and a stand-in
+                                     #   where the vendor would be. Who may ask (a page, a rebound name
+                                     #   and a closed credential may not), what reaches the vendor — its
+                                     #   own key in its own header, and nothing of the harness's — every
+                                     #   refusal as the sentence and status a harness ends a turn on, a
+                                     #   stream, a hang-up, and the list of every place this daemon
+                                     #   speaks first
 pnpm relaycheck                      # framing, flow control, authorization, tunnel supersede,
                                      #   tunnel presence as a row and the relay's own health route,
                                      #   live-row revocation, the control plane's routes,
@@ -283,6 +290,11 @@ pnpm docscheck                       # the documentation, held to what it claims
                                      #   silently stops arriving
 pnpm imagecheck                      # the control plane's image, and both services it runs.
                                      #   NOT offline: needs docker + network
+pnpm gitfloor                        # `daemoncheck` again, on the oldest git the daemon claims to run on:
+                                     #   builds git at GIT_MIN_VERSION from its own source and puts it
+                                     #   first on PATH. Every other run of every driver is on whatever
+                                     #   git the machine has, which is a new one (Q6.128).
+                                     #   NOT offline: needs a network and a C compiler
 deploy/ci-freshness.sh               # the adapter pins against the npm registry, weekly in CI: how
                                      #   far behind each is. Report-only; exits non-zero only for a pin
                                      #   the registry no longer serves. NOT offline; changes nothing
@@ -298,6 +310,10 @@ curl -fsSL 'https://<control-plane>/install.sh' | sh   # a machine, from nothing
                                      #   than picking one. Hands off to `install.sh daemon
                                      #   --non-interactive` once the env file exists
 pnpm harness --agent codex --prompt "hi"  # drives a bare Session locally, with no daemon
+pnpm doorprobe --door codex:routed   # one way of pointing a harness at a foreign model endpoint, driven
+                                     #   against a loopback recorder and no vendor; `--list` names the
+                                     #   recipes. It measures a door before it is a table row, and it
+                                     #   spawns the real CLI as you (Q6.123–Q6.127)
 
 pnpm cp                              # the control plane + relay in one process (own package, own SQLite).
                                      #   REEMOAT_CP_RELAY_MODE=embedded is the default and is what this is;
@@ -563,6 +579,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |
 | `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |
 | `agent-systems.md` | `src/acp/systems.ts`, `src/agentask.ts`, `packages/web/src/agents.ts`, `ui/AgentBuilder.tsx` | Why a harness is not a system · which pairs of them exist, and who answers that · how a model is named to a harness that has never heard of it · what a session records and what it resolves at every launch |
+| `model-gateway.md` | `src/gateway/`, `src/acp/doors.ts`, `scripts/gatewaycheck.ts`, `scripts/doorprobe*` | What stands between a routed agent and its vendor, and why three built-in rows cannot be signed without it · whose credential an agent holds and when it ends · what is copied upstream and what stops here · why a model is held and never rewritten · which status a refusal takes, by measurement · what a door is, and which are built |
 | `agent-strip.md` | `packages/web/src/agentStrip.ts`, `agentPick.ts`, `ui/NewSession.tsx`, `ui/settings/MachineAgentsSection.tsx` | Which agents the New session row offers and in what order · what a stored position may name and what it may never be validated against · why hiding is not a refusal · reordering with no library · why a cut row has to look cut |
 | `agent-catalogue.md` | `packages/web/src/openrouter.ts`, `agents.ts`, `ui/AgentBuilder.tsx`, `src/acp/systems.ts` | The three places a model's name can come from, and which one the browser fetches · the one system whose two spellings are the same models · what the reader drops and why greying it would be worse · what has been tried in a heading and taken back out, twice |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |

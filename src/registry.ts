@@ -1509,6 +1509,7 @@ export class ManagedSession {
       agent: this.agent,
       ...this.assembled,
       cwd: this.cwd,
+      sessionKey: this.id,
       permissions: this.resolvePermission,
       elicitations: this.elicitationAllowed() ? this.resolveElicitation : null,
       runtime: this.runtime,

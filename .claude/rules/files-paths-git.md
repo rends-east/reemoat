@@ -7,6 +7,7 @@ paths:
   - src/paths.ts
   - src/mounts.ts
   - src/git.ts
+  - scripts/gitfloor.ts
   - src/browse.ts
   - packages/web/src/paths.ts
   - packages/web/src/ui/download.ts
@@ -107,11 +108,27 @@ paths:
   `custom_agent`. It carries mutable preferences (`title`, `pinned`, `ultracode`, `rank`,
   `nickname`) and derived runtime state; state it as that property, not a list. Q5.28.
 
+## The git under it
+
+- **The daemon is checked against one git, `GIT_MIN_VERSION`, and refuses a session in a
+  repository below it** (`git_too_old`, 503, both versions in the sentence) rather than
+  starting it in the checkout itself. A folder that is no repository is never asked,
+  and a session that asked for no worktree still starts. Q6.128.
+- **A switch is measured at the floor before it is passed.** `pnpm gitfloor` builds
+  that git from source and runs `daemoncheck` on it, as its own CI job; every other
+  run of every driver is on whatever git the machine has, which is a new one.
+- **Ask git rather than its version where asking is free.** `listWorktrees` asks by NUL
+  and falls back by line on git's own refusal, where a path holding a line break is
+  refused rather than cut. The version is read once an inspection, for the sentence.
+- **The number is in three files** (`src/git.ts`, `deploy/lib.sh`, and
+  `deploy/bootstrap.sh`, which is served alone); `deploycheck` holds them equal, and
+  both installers refuse below it.
+
 ## Layout
 
 | File | Holds |
 |---|---|
-| `src/git.ts` | Argv arrays, an env allowlist for determinism (not confinement), timeouts, honest truncation. Installs **no** config |
+| `src/git.ts` | Argv arrays, an env allowlist for determinism (not confinement), timeouts, honest truncation, the floor and the version it is compared with. Installs **no** config |
 | `src/worktree.ts` | Per-session worktrees: probe, create, list, inspect, remove |
 | `src/uploads.ts` | The root, streaming write, sanitizer, TTL sweep, content blocks, the three rolling budgets, `sniffImageMime`, `UploadRow`/`UploadIndex` |
 | `src/changes.ts` | Changes and one file's diff, relative to `workspace.root`: `-z` makes `status` agree with `diff` (`--relative` is the bug); `repoPrefix`/`toWorkspaceRelative` translate once (Q7.90). `probeRequestable` answers `"ok" \| "escapes_tree" \| "git_dir" \| null`, `probeContained` is its two-answer form. `markBinary` runs after the file cap via `probeBinary`, never in the parser (Q7.88) |
@@ -146,3 +163,7 @@ nginx's default `client_max_body_size` (1 MB) answers a 413 the daemon never see
   without `--path-format=absolute`. Q6.34.
 - **Even `-uall` collapses a nested repo** into one `? dir/` record, flagged `collapsed`.
   Q6.35.
+- **`worktree list -z` is 2.36's; `--path-format=absolute` and the listing's `locked`
+  and `prunable` lines are 2.31's.** An older git refuses the first with exit 129 and
+  answers the second with exit **0**, the option printed back as the first line.
+  Q6.128.

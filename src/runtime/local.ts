@@ -21,6 +21,7 @@ import {
   type LoginStatusProbe,
 } from "../acp/agents.js";
 import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "../acp/systems.js";
+import type { GatewayGrant, GatewayGrants, GrantSpec } from "../gateway/types.js";
 import { hostGit, type GitExec } from "../git.js";
 import { probeBuild } from "../stall.js";
 import type {
@@ -207,6 +208,12 @@ export interface LocalRuntimeOptions {
   secrets?: (agent: AgentId) => Record<string, string>;
   // Handed to providers/set over stdio, never merged into an environment.
   systemSecret?: (system: SystemId) => string | null;
+  // A sentence where nothing could sign for a system. Absent, it is read off systemSecret alone, which knows no sign-in.
+  systemMissing?: (system: SystemId) => string | null;
+  // Absent where the gateway is switched off: a pairing that goes through it then refuses to start.
+  gateway?: GatewayGrants;
+  // Where a routed harness keeps a home of its own; under the daemon's state root in production.
+  doorHomes?: string;
   onWarning?: (detail: string) => void;
   // For the drivers only; nothing in production sets it.
   exec?: (
@@ -223,6 +230,9 @@ export interface LocalRuntimeOptions {
 export class LocalRuntime implements SessionRuntime {
   private readonly secrets: (agent: AgentId) => Record<string, string>;
   private readonly systemSecretOf: (system: SystemId) => string | null;
+  private readonly systemMissingOf: ((system: SystemId) => string | null) | null;
+  private readonly gateway: GatewayGrants | null;
+  private readonly doorHomes: string;
   private readonly onWarning: (detail: string) => void;
   private readonly exec: (
     command: string,
@@ -250,6 +260,9 @@ export class LocalRuntime implements SessionRuntime {
   constructor(options: LocalRuntimeOptions = {}) {
     this.secrets = options.secrets ?? (() => ({}));
     this.systemSecretOf = options.systemSecret ?? (() => null);
+    this.systemMissingOf = options.systemMissing ?? null;
+    this.gateway = options.gateway ?? null;
+    this.doorHomes = options.doorHomes ?? join(homedir(), ".reemoat", "harness-homes");
     this.onWarning = options.onWarning ?? (() => {});
     this.exec = options.exec ?? ((command, args, env, stream) => runProbe(command, args, env, stream));
     this.identify = options.identify ?? cliBuild;
@@ -418,6 +431,22 @@ export class LocalRuntime implements SessionRuntime {
 
   systemSecret(system: SystemId): string | null {
     return this.systemSecretOf(system);
+  }
+
+  systemMissing(system: SystemId): string | null {
+    if (this.systemMissingOf !== null) return this.systemMissingOf(system);
+    if (this.systemSecret(system) !== null) return null;
+    const name = this.machine.system(system)?.displayName ?? system;
+    return `No key is saved for ${name} on this machine, so nothing can sign these requests.`;
+  }
+
+  openRoute(spec: GrantSpec): GatewayGrant | null {
+    return this.gateway?.open(spec) ?? null;
+  }
+
+  doorHome(agent: AgentId, sessionKey: string | null): string {
+    // Session ids and built-in harness ids are this daemon's own, and neither holds a separator.
+    return sessionKey === null ? join(this.doorHomes, agent) : join(this.doorHomes, agent, sessionKey);
   }
 
   async launch(agent: AgentId, extra: NodeJS.ProcessEnv = {}, routed = false, cwd?: string): Promise<AgentProcess> {

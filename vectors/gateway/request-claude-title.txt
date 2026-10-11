@@ -1,0 +1,104 @@
+{
+ "kind": "request",
+ "about": "The title call: no tools, no thinking, and a JSON schema the answer must fit.",
+ "source": "Claude Code 2.1.296 through claude-agent-acp 0.73.0, recorded 2026-10-11 by pnpm doorprobe (Q6.123). Structure only: prose is a placeholder, ids are zeroed, tool schemas are cut to one level.",
+ "model": "probe-model",
+ "messages": {
+  "model": "probe-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   }
+  ],
+  "system": [
+   {
+    "type": "text",
+    "text": "x-anthropic-billing-header: placeholder"
+   },
+   {
+    "type": "text",
+    "text": "system text 1"
+   },
+   {
+    "type": "text",
+    "text": "system text 2"
+   }
+  ],
+  "tools": [],
+  "metadata": {
+   "user_id": "{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000000000\"}"
+  },
+  "max_tokens": 32000,
+  "output_config": {
+   "effort": "high",
+   "format": {
+    "type": "json_schema",
+    "schema": {
+     "type": "object",
+     "properties": {
+      "title": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "title"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  "stream": true
+ },
+ "responses": {
+  "model": "probe-model",
+  "instructions": "system text 1\n\nsystem text 2",
+  "input": [
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   }
+  ],
+  "reasoning": {
+   "effort": "high",
+   "summary": "auto"
+  },
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "text": {
+   "format": {
+    "type": "json_schema",
+    "name": "output",
+    "schema": {
+     "type": "object",
+     "properties": {
+      "title": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "title"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   }
+  },
+  "max_output_tokens": 32000,
+  "prompt_cache_key": "5cf72f4c1e8cd89bb0b2ff3c9a6f82bbfcc64fec08e229cf74c48b57de3dbbdf",
+  "store": false,
+  "stream": true
+ }
+}

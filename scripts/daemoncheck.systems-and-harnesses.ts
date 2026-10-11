@@ -62,6 +62,9 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   const { AGENT_IDS: harnesses, isBuiltinAgentId } = await import("../src/acp/agents.js");
   const {
     hostable,
+    hostedProtocols,
+    isRoutable,
+    routeFor,
     routedModelEnv,
     routedPairing,
     routingHeaders,
@@ -100,7 +103,8 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   );
   check("the matrix is what the adapters allow", matrix, [
     "claude x anthropic: yes",
-    "claude x openai: no",
+    "claude x openai: yes",
+    "claude x chatgpt: yes",
     "claude x openrouter: yes",
     "claude x cursor: no",
     "claude x xai: no",
@@ -110,6 +114,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "claude x zen: no",
     "kimi x anthropic: no",
     "kimi x openai: no",
+    "kimi x chatgpt: no",
     "kimi x openrouter: no",
     "kimi x cursor: no",
     "kimi x xai: no",
@@ -119,6 +124,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "kimi x zen: no",
     "codex x anthropic: no",
     "codex x openai: yes",
+    "codex x chatgpt: no",
     "codex x openrouter: no",
     "codex x cursor: no",
     "codex x xai: no",
@@ -126,26 +132,29 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "codex x zhipu: no",
     "codex x minimax: no",
     "codex x zen: no",
-    "opencode x anthropic: no",
-    "opencode x openai: no",
+    "opencode x anthropic: yes",
+    "opencode x openai: yes",
+    "opencode x chatgpt: yes",
     "opencode x openrouter: yes",
     "opencode x cursor: no",
     "opencode x xai: no",
-    "opencode x moonshot: no",
-    "opencode x zhipu: no",
-    "opencode x minimax: no",
+    "opencode x moonshot: yes",
+    "opencode x zhipu: yes",
+    "opencode x minimax: yes",
     "opencode x zen: yes",
-    "grok x anthropic: no",
-    "grok x openai: no",
-    "grok x openrouter: no",
+    "grok x anthropic: yes",
+    "grok x openai: yes",
+    "grok x chatgpt: yes",
+    "grok x openrouter: yes",
     "grok x cursor: no",
     "grok x xai: yes",
-    "grok x moonshot: no",
-    "grok x zhipu: no",
-    "grok x minimax: no",
+    "grok x moonshot: yes",
+    "grok x zhipu: yes",
+    "grok x minimax: yes",
     "grok x zen: no",
     "cursor x anthropic: no",
     "cursor x openai: no",
+    "cursor x chatgpt: no",
     "cursor x openrouter: no",
     "cursor x cursor: yes",
     "cursor x xai: no",
@@ -154,6 +163,125 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "cursor x minimax: no",
     "cursor x zen: no",
   ]);
+
+  // One answer, two readers: a refusal hostable reports and a route applySystem sends can never be about different pairings.
+  const disagreements = harnesses.flatMap((harness) =>
+    SYSTEM_IDS.flatMap((system) =>
+      [routings[harness], null].flatMap((routing) => {
+        const route = routeFor(harness, system, routing);
+        const refusal = hostable(harness, system, routing);
+        return (route.kind === "refused" ? route.why : null) === refusal ? [] : [`${harness} x ${system}`];
+      }),
+    ),
+  );
+  check("hostable says exactly what routeFor refused", disagreements, []);
+  // What the app is sent to grey rows by: a harness's protocols against a system's. It must reach the answer hostable reaches, or a row is offered that the start refuses.
+  check(
+    "the two lists the app intersects agree with it on every pairing that is not native",
+    harnesses.flatMap((harness) =>
+      SYSTEM_IDS.flatMap((system) =>
+        [routings[harness], null].flatMap((routing) => {
+          if (SYSTEMS[system].nativeHarness === harness) return [];
+          const hosts = hostedProtocols(harness, routing);
+          const meets = Object.keys(SYSTEMS[system].endpoints).some((protocol) => (hosts as string[]).includes(protocol));
+          return meets === (hostable(harness, system, routing) === null) ? [] : [`${harness} x ${system}`];
+        }),
+      ),
+    ),
+    [],
+  );
+  check(
+    "what each harness can be pointed at another system in",
+    harnesses.map((harness) => `${harness}: ${hostedProtocols(harness, routings[harness]).join(" ") || "nothing"}`),
+    [
+      "claude: anthropic-messages openai-responses",
+      "kimi: nothing",
+      "codex: nothing",
+      "opencode: anthropic-messages openai-responses openai-chat",
+      "grok: anthropic-messages openai-responses openai-chat",
+      "cursor: nothing",
+    ],
+  );
+  check(
+    "a routed pairing is sent where the table says, in the protocol the harness accepts",
+    harnesses.flatMap((harness) =>
+      SYSTEM_IDS.flatMap((system) => {
+        const route = routeFor(harness, system, routings[harness]);
+        if (route.kind !== "routed") return [];
+        const carried = route.outbound.protocol === route.protocol ? "" : ` into ${route.outbound.protocol}`;
+        return [`${harness} x ${system}: ${route.protocol}${carried} ${route.apiType} ${route.outbound.baseUrl}`];
+      }),
+    ),
+    [
+      // The one cell the gateway translates for: claude speaks Messages alone and OpenAI's API answers Responses.
+      "claude x openai: anthropic-messages into openai-responses anthropic https://api.openai.com/v1",
+      "claude x chatgpt: anthropic-messages into openai-responses anthropic https://api.openai.com/v1",
+      "claude x openrouter: anthropic-messages anthropic https://openrouter.ai/api",
+      "claude x moonshot: anthropic-messages anthropic https://api.moonshot.ai/anthropic",
+      "claude x zhipu: anthropic-messages anthropic https://api.z.ai/api/anthropic",
+      "claude x minimax: anthropic-messages anthropic https://api.minimax.io/anthropic",
+      "opencode x anthropic: anthropic-messages anthropic https://api.anthropic.com",
+      "opencode x openai: openai-responses openai https://api.openai.com/v1",
+      "opencode x chatgpt: openai-responses openai https://api.openai.com/v1",
+      "opencode x moonshot: anthropic-messages anthropic https://api.moonshot.ai/anthropic",
+      "opencode x zhipu: anthropic-messages anthropic https://api.z.ai/api/anthropic",
+      "opencode x minimax: anthropic-messages anthropic https://api.minimax.io/anthropic",
+      "grok x anthropic: anthropic-messages anthropic https://api.anthropic.com",
+      "grok x openai: openai-responses openai https://api.openai.com/v1",
+      "grok x chatgpt: openai-responses openai https://api.openai.com/v1",
+      "grok x openrouter: anthropic-messages anthropic https://openrouter.ai/api",
+      "grok x moonshot: anthropic-messages anthropic https://api.moonshot.ai/anthropic",
+      "grok x zhipu: anthropic-messages anthropic https://api.z.ai/api/anthropic",
+      "grok x minimax: anthropic-messages anthropic https://api.minimax.io/anthropic",
+    ],
+  );
+  // A door set at the spawn asks the agent nothing, so what providers/list answered is not read; every other route goes through the gateway too.
+  check(
+    "which way each routed pairing goes",
+    harnesses.flatMap((harness) =>
+      SYSTEM_IDS.flatMap((system) => {
+        const route = routeFor(harness, system, routings[harness]);
+        return route.kind === "routed" && route.via !== "gateway" ? [`${harness} x ${system}`] : [];
+      }),
+    ),
+    [],
+  );
+  check(
+    "a native pairing is no route at all",
+    SYSTEM_IDS.flatMap((system) => {
+      const native = SYSTEMS[system].nativeHarness;
+      return native === null || routeFor(native, system, null).kind === "native" ? [] : [system];
+    }),
+    [],
+  );
+  // An app from before endpoints reads apiType against providers/list, so the label must name the first endpoint's family or it refuses a pairing this daemon routes.
+  check(
+    "the label an older app reads agrees with where each system is routed",
+    SYSTEM_IDS.filter((id) => isRoutable(SYSTEMS[id])).map((id) => {
+      const first = Object.keys(SYSTEMS[id].endpoints)[0] ?? "";
+      return `${id}: ${SYSTEMS[id].apiType} ${first}`;
+    }),
+    [
+      "anthropic: anthropic anthropic-messages",
+      "openai: openai openai-responses",
+      "chatgpt: openai openai-responses",
+      "openrouter: anthropic anthropic-messages",
+      "moonshot: anthropic anthropic-messages",
+      "zhipu: anthropic anthropic-messages",
+      "minimax: anthropic anthropic-messages",
+    ],
+  );
+  check(
+    "every endpoint is an https origin with no trailing slash, query or fragment",
+    SYSTEM_IDS.flatMap((id) =>
+      Object.values(SYSTEMS[id].endpoints).flatMap((address) => {
+        const url = new URL(address);
+        const plain = url.protocol === "https:" && url.search === "" && url.hash === "" && !address.endsWith("/");
+        return plain ? [] : [`${id}: ${address}`];
+      }),
+    ),
+    [],
+  );
 
   // Routable but un-pinnable must refuse, or the session silently runs the endpoint's default model.
   const claudeEnv = ROUTED_MODEL_ENV.claude;
@@ -173,7 +301,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   check("the secret travels as a header", routingHeaders("moonshot", "sekrit"), {
     authorization: "Bearer sekrit",
   });
-  check("and a native system has none to send", routingHeaders("anthropic", "sekrit"), {});
+  check("and a system nothing is pointed at has none to send", routingHeaders("xai", "sekrit"), {});
 
   // Decides whether a vendor credential is merged into the spawn env; all arms in one array so a constant answer fails.
   check(
@@ -182,7 +310,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
       routedPairing("claude", null),
       routedPairing("claude", "nobody:nothing"),
       routedPairing("kimi", "moonshot"),
-      routedPairing("kimi", "anthropic"),
+      routedPairing("kimi", "xai"),
       routedPairing("claude", "moonshot"),
     ],
     [false, false, false, false, true],
@@ -222,7 +350,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
       return JSON.parse(out) as NodeJS.ProcessEnv;
     };
     const routedEnv = await spawnedWith(routedPairing(probe.id, "moonshot", withProbe));
-    const nativeEnv = await spawnedWith(routedPairing(probe.id, "anthropic", withProbe));
+    const nativeEnv = await spawnedWith(routedPairing(probe.id, "xai", withProbe));
     // Computed, never literals, so a `routedPairing` that returns a constant fails.
     check(
       "a routed launch is spawned with none of the harness's own credentials",
@@ -242,7 +370,11 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   }
 
   // No `/v1` in the base: the SDK appends `/v1/messages`, and a doubled segment answers an HTML 404.
-  check("the routed base for the sixth system carries no version segment", SYSTEMS.openrouter.baseUrl, "https://openrouter.ai/api");
+  check(
+    "the routed base for the sixth system carries no version segment",
+    SYSTEMS.openrouter.endpoints["anthropic-messages"],
+    "https://openrouter.ai/api",
+  );
   check("and its key travels as a header like every other routed row", routingHeaders("openrouter", "sekrit"), {
     authorization: "Bearer sekrit",
   });
@@ -257,7 +389,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   // Only these two spellings are relatable; Moonshot's two lists are different products (Q3.488).
   check(
     "no system offers a key box it could never spend",
-    SYSTEM_IDS.filter((id) => SYSTEMS[id].baseUrl === null && SYSTEMS[id].loginVia === null),
+    SYSTEM_IDS.filter((id) => !isRoutable(SYSTEMS[id]) && SYSTEMS[id].loginVia === null),
     [],
   );
   check(
@@ -318,8 +450,8 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
 
   check(
     "a system with no routed endpoint names the CLI that reaches it",
-    hostable("codex", "anthropic", routings.codex),
-    "Anthropic can only be reached by the CLI it ships with.",
+    hostable("codex", "xai", routings.codex),
+    "xAI can only be reached by the CLI it ships with.",
   );
   check(
     "a harness that answers nothing about routing says what it does instead",

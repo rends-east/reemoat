@@ -8,6 +8,8 @@ DEPLOY_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd -- "$DEPLOY_DIR/.." && pwd -P)
 
 SERVICES="daemon control-plane relay"
+# deploycheck holds this to GIT_MIN_VERSION in src/git.ts, the oldest git the daemon is run against.
+GIT_MIN_VERSION=2.31
 
 valid_service() {
   case "$1" in
@@ -324,6 +326,20 @@ require_init() {
   echo "    $DEPLOY_DIR/compose.sh up -d" >&2
   echo "  the daemon does. Run its wrapper from your own supervisor:" >&2
   echo "    $DEPLOY_DIR/run-daemon.sh" >&2
+  exit 2
+}
+
+# A version that cannot be read passes: the daemon then says so itself, at the first session.
+require_git_floor() {
+  _v=$(git --version 2>/dev/null | sed -n 's/^git version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')
+  [ -n "$_v" ] || return 0
+  [ "${_v% *}" -gt "${GIT_MIN_VERSION%.*}" ] && return 0
+  if [ "${_v% *}" -eq "${GIT_MIN_VERSION%.*}" ] && [ "${_v#* }" -ge "${GIT_MIN_VERSION#*.}" ]; then
+    return 0
+  fi
+  echo >&2
+  echo "git here is $(git --version 2>/dev/null | sed 's/^git version //'), and a session in a repository needs $GIT_MIN_VERSION or newer." >&2
+  echo "  update git, then run this again." >&2
   exit 2
 }
 

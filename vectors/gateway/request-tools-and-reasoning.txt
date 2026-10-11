@@ -1,0 +1,361 @@
+{
+ "kind": "request",
+ "about": "A turn that called two tools at once and reasoned first: the reasoning item comes back out of its signature in place, each call and each result is an item of its own, a server tool leaves the list, and what Responses has no key for is left behind.",
+ "source": "Constructed from the Messages and Responses API references (2026-10-11): no recording holds a tool call, the recorder answers none.",
+ "model": "probe-model",
+ "messages": {
+  "model": "probe-model",
+  "max_tokens": 32000,
+  "stream": false,
+  "temperature": 1,
+  "top_p": 0.9,
+  "top_k": 40,
+  "stop_sequences": [
+   "stop"
+  ],
+  "system": "system text",
+  "thinking": {
+   "type": "enabled",
+   "budget_tokens": 8000
+  },
+  "output_config": {
+   "effort": "xhigh"
+  },
+  "tool_choice": {
+   "type": "auto",
+   "disable_parallel_tool_use": true
+  },
+  "tools": [
+   {
+    "name": "Read",
+    "description": "description",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   },
+   {
+    "type": "custom",
+    "name": "Bash",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": 5
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "base64",
+       "media_type": "image/png",
+       "data": "aGk="
+      }
+     },
+     {
+      "type": "image",
+      "source": {
+       "type": "url",
+       "url": "https://example.invalid/a.png"
+      }
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "thought",
+      "signature": "rmr1.eyJpZCI6InJzX2Rvb3Jwcm9iZSIsImVuY3J5cHRlZF9jb250ZW50IjoiUFJPQkVCTE9CeXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eSIsInN1bW1hcnkiOlt7InR5cGUiOiJzdW1tYXJ5X3RleHQiLCJ0ZXh0IjoidGhvdWdodCJ9XX0"
+     },
+     {
+      "type": "redacted_thinking",
+      "data": "opaque"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     },
+     {
+      "type": "tool_use",
+      "id": "call_1",
+      "name": "Read",
+      "input": {
+       "path": "a.txt"
+      }
+     },
+     {
+      "type": "tool_use",
+      "id": "call_2",
+      "name": "Bash",
+      "input": {
+       "command": "ls"
+      }
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result",
+      "tool_use_id": "call_1",
+      "content": "text"
+     },
+     {
+      "type": "tool_result",
+      "tool_use_id": "call_2",
+      "is_error": true,
+      "content": [
+       {
+        "type": "text",
+        "text": "text"
+       },
+       {
+        "type": "image",
+        "source": {
+         "type": "base64",
+         "media_type": "image/png",
+         "data": "aGk="
+        }
+       }
+      ],
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     },
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "call_3",
+      "name": "Read",
+      "input": {}
+     },
+     {
+      "type": "tool_use",
+      "id": "call_4",
+      "name": "Bash"
+     },
+     {
+      "type": "thinking",
+      "thinking": "thought",
+      "signature": "rmr1.eyJpZCI6InJzX3RyYWlsaW5nIiwiZW5jcnlwdGVkX2NvbnRlbnQiOiJQUk9CRUJMT0J5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5Iiwic3VtbWFyeSI6W3sidHlwZSI6InN1bW1hcnlfdGV4dCIsInRleHQiOiJ0aG91Z2h0In1dfQ"
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result",
+      "tool_use_id": "call_3",
+      "content": [
+       {
+        "type": "text",
+        "text": "text"
+       },
+       {
+        "type": "text",
+        "text": "text"
+       }
+      ]
+     },
+     {
+      "type": "tool_result",
+      "tool_use_id": "call_4"
+     }
+    ]
+   }
+  ]
+ },
+ "responses": {
+  "model": "probe-model",
+  "instructions": "system text",
+  "input": [
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     },
+     {
+      "type": "input_image",
+      "image_url": "data:image/png;base64,aGk=",
+      "detail": "auto"
+     },
+     {
+      "type": "input_image",
+      "image_url": "https://example.invalid/a.png",
+      "detail": "auto"
+     }
+    ]
+   },
+   {
+    "type": "reasoning",
+    "id": "rs_doorprobe",
+    "summary": [
+     {
+      "type": "summary_text",
+      "text": "thought"
+     }
+    ],
+    "encrypted_content": "PROBEBLOByyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+   },
+   {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "text",
+      "annotations": []
+     }
+    ]
+   },
+   {
+    "type": "function_call",
+    "call_id": "call_1",
+    "name": "Read",
+    "arguments": "{\"path\":\"a.txt\"}"
+   },
+   {
+    "type": "function_call",
+    "call_id": "call_2",
+    "name": "Bash",
+    "arguments": "{\"command\":\"ls\"}"
+   },
+   {
+    "type": "function_call_output",
+    "call_id": "call_1",
+    "output": "text"
+   },
+   {
+    "type": "function_call_output",
+    "call_id": "call_2",
+    "output": [
+     {
+      "type": "input_text",
+      "text": "text"
+     },
+     {
+      "type": "input_image",
+      "image_url": "data:image/png;base64,aGk=",
+      "detail": "auto"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "function_call",
+    "call_id": "call_3",
+    "name": "Read",
+    "arguments": "{}"
+   },
+   {
+    "type": "function_call",
+    "call_id": "call_4",
+    "name": "Bash",
+    "arguments": "{}"
+   },
+   {
+    "type": "function_call_output",
+    "call_id": "call_3",
+    "output": "text\ntext"
+   },
+   {
+    "type": "function_call_output",
+    "call_id": "call_4",
+    "output": ""
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "name": "Read",
+    "description": "description",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Bash",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      }
+     }
+    },
+    "strict": false
+   }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "reasoning": {
+   "effort": "xhigh",
+   "summary": "auto"
+  },
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 32000,
+  "temperature": 1,
+  "top_p": 0.9,
+  "store": false,
+  "stream": false
+ }
+}

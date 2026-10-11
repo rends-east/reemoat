@@ -131,6 +131,13 @@ jobs:
         if: '!cancelled()'
         run: pnpm daemoncheck
 
+      # The listener a routed agent is pointed at in place of its vendor. A step
+      # of its own for protocolcheck's reason: it is in `pnpm check`, and a driver
+      # in that chain with no step here is one that is green on a laptop only.
+      - name: gatewaycheck
+        if: '!cancelled()'
+        run: pnpm gatewaycheck
+
       - name: relaycheck
         if: '!cancelled()'
         run: pnpm relaycheck
@@ -223,6 +230,51 @@ jobs:
 
       - name: imagecheck
         run: pnpm imagecheck
+
+  # `daemoncheck` again, on the oldest git the daemon claims to run on.
+  #
+  # The step above runs that driver on this runner's git, which is always a
+  # recent one, and so does every laptop: a switch git learned last year passes
+  # everywhere it is checked and fails on the machine of whoever installed an LTS
+  # two years ago. That is how `git worktree list -z`, which is 2.36's, shipped
+  # from the first commit and was reported from a phone. Q6.128.
+  #
+  # Built from git's own source at `GIT_MIN_VERSION` rather than taken from an
+  # older distribution's image, so the one thing that differs from the `check`
+  # job is git: the same runner, the same user, the same Node. A container would
+  # also change who the driver runs as, and it asserts on what a user may not
+  # write.
+  #
+  # Its own job because it fetches a tarball and compiles it, and not
+  # `needs: check` for the reason `image` gives: this is the only signal for its
+  # class, and gating it behind the others only delays it.
+  gitfloor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # zlib's headers are git's one build dependency past a compiler, and the
+      # runner image lists no such package.
+      - run: dpkg -s zlib1g-dev >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y --no-install-recommends zlib1g-dev; }
+
+      # Keyed on the two files that decide what is built: the floor itself and
+      # the flags it is built with.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/reemoat-gitfloor
+          key: gitfloor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/git.ts', 'scripts/gitfloor.ts') }}
+
+      - name: gitfloor
+        run: pnpm gitfloor
 
   # A secret scanner, and the reason it is a job here rather than a step above.
   #

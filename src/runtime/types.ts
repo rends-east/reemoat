@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import type { AgentId, AgentLaunchConfig } from "../acp/agents.js";
 import type { SystemId } from "../acp/systems.js";
 import type { AgentHandle } from "../events.js";
+import type { GatewayGrant, GrantSpec } from "../gateway/types.js";
 import type { GitExec } from "../git.js";
 
 export type Liveness = "alive" | "dead" | "unknown";
@@ -94,6 +95,15 @@ export interface SessionRuntime {
   authMethod(agent: AgentId, routed?: boolean): string | null;
 
   systemSecret(system: SystemId): string | null;
+
+  /** A sentence where nothing on this machine could sign a request for the system; null where something can. */
+  systemMissing(system: SystemId): string | null;
+
+  /** A loopback address and a credential good for one agent process, standing for a system; null where no gateway runs. */
+  openRoute(spec: GrantSpec): GatewayGrant | null;
+
+  /** A directory of this daemon's that a harness's door may fill: one per session where a key is given, else one for the harness. */
+  doorHome(agent: AgentId, sessionKey: string | null): string;
 
   login(agent: AgentId): Promise<LoginProcess | null>;
 

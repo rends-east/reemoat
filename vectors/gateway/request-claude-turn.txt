@@ -1,0 +1,1529 @@
+{
+ "kind": "request",
+ "about": "A first turn: three system blocks of which the first is the billing line, 25 tools, adaptive thinking at high effort, and a system message inside the conversation.",
+ "source": "Claude Code 2.1.296 through claude-agent-acp 0.73.0, recorded 2026-10-11 by pnpm doorprobe (Q6.123). Structure only: prose is a placeholder, ids are zeroed, tool schemas are cut to one level.",
+ "model": "probe-model",
+ "messages": {
+  "model": "probe-model",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "text"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     },
+     {
+      "type": "text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": [
+     {
+      "type": "text",
+      "text": "text",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     }
+    ]
+   }
+  ],
+  "system": [
+   {
+    "type": "text",
+    "text": "x-anthropic-billing-header: placeholder"
+   },
+   {
+    "type": "text",
+    "text": "system text 1",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   },
+   {
+    "type": "text",
+    "text": "system text 2",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   }
+  ],
+  "tools": [
+   {
+    "name": "Agent",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "subagent_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "model": {
+       "description": "description",
+       "type": "string"
+      },
+      "effort": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "isolation": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "description",
+      "prompt"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Bash",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "command": {
+       "description": "description",
+       "type": "string"
+      },
+      "timeout": {
+       "description": "description",
+       "type": "number"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "dangerouslyDisableSandbox": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronCreate",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "cron": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "recurring": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "durable": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "cron",
+      "prompt"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronDelete",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "id": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronList",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "DesignSync",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "method": {
+       "type": "string"
+      },
+      "projectId": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "writes": {
+       "description": "description",
+       "type": "array"
+      },
+      "deletes": {
+       "description": "description",
+       "type": "array"
+      },
+      "planId": {
+       "description": "description",
+       "type": "string"
+      },
+      "files": {
+       "description": "description",
+       "type": "array"
+      },
+      "paths": {
+       "description": "description",
+       "type": "array"
+      },
+      "name": {
+       "description": "description",
+       "type": "string"
+      },
+      "assets": {
+       "description": "description",
+       "type": "array"
+      },
+      "localDir": {
+       "description": "description",
+       "type": "string"
+      },
+      "counts": {
+       "description": "description",
+       "type": "object"
+      }
+     },
+     "required": [
+      "method"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Edit",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "file_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "old_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "new_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "replace_all": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "file_path",
+      "old_string",
+      "new_string"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "EnterPlanMode",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "EnterWorktree",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "name": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ExitPlanMode",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "allowedPrompts": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "additionalProperties": {}
+    }
+   },
+   {
+    "name": "ExitWorktree",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "action": {
+       "description": "description",
+       "type": "string"
+      },
+      "discard_changes": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "action"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ListAgents",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "channel": {
+       "description": "description",
+       "type": "string"
+      },
+      "q": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Monitor",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "timeout_ms": {
+       "description": "description",
+       "type": "number"
+      },
+      "command": {
+       "description": "description",
+       "type": "string"
+      },
+      "ws": {
+       "description": "description",
+       "type": "object"
+      }
+     },
+     "required": [
+      "description",
+      "timeout_ms"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "NotebookEdit",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "notebook_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "cell_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "new_source": {
+       "description": "description",
+       "type": "string"
+      },
+      "cell_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "edit_mode": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "notebook_path",
+      "new_source"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "PushNotification",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "message": {
+       "description": "description",
+       "type": "string"
+      },
+      "status": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "message",
+      "status"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Read",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "file_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "offset": {
+       "description": "description",
+       "type": "integer"
+      },
+      "limit": {
+       "description": "description",
+       "type": "integer"
+      },
+      "pages": {
+       "description": "description",
+       "type": "string"
+      },
+      "allow_large": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "file_path"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ReportFindings",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "level": {
+       "description": "description",
+       "type": "string"
+      },
+      "findings": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "required": [
+      "findings"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ScheduleWakeup",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "delaySeconds": {
+       "description": "description",
+       "type": "number"
+      },
+      "reason": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "stop": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "noop": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "SendMessage",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "to": {
+       "description": "description",
+       "type": "string"
+      },
+      "summary": {
+       "description": "description",
+       "type": "string"
+      },
+      "message": {
+       "description": "description",
+       "type": "string"
+      },
+      "notify_when_idle": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "to",
+      "message"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Skill",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "skill": {
+       "description": "description",
+       "type": "string"
+      },
+      "args": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "skill"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskStop",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "task_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "shell_id": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "WebFetch",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "url": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "offset": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "url",
+      "prompt"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "WebSearch",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "query": {
+       "description": "description",
+       "type": "string"
+      },
+      "allowed_domains": {
+       "description": "description",
+       "type": "array"
+      },
+      "blocked_domains": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Workflow",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "script": {
+       "description": "description",
+       "type": "string"
+      },
+      "name": {
+       "description": "description",
+       "type": "string"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "title": {
+       "description": "description",
+       "type": "string"
+      },
+      "args": {
+       "description": "description"
+      },
+      "scriptPath": {
+       "description": "description",
+       "type": "string"
+      },
+      "resumeFromRunId": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Write",
+    "description": "description",
+    "input_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "file_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "content": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file_path",
+      "content"
+     ],
+     "additionalProperties": false
+    }
+   }
+  ],
+  "metadata": {
+   "user_id": "{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"\",\"session_id\":\"00000000-0000-4000-8000-000000000000\"}"
+  },
+  "max_tokens": 32000,
+  "thinking": {
+   "type": "adaptive",
+   "display": "updates"
+  },
+  "context_management": {
+   "edits": [
+    {
+     "type": "clear_thinking_20251015",
+     "keep": "all"
+    }
+   ]
+  },
+  "output_config": {
+   "effort": "high"
+  },
+  "stream": true
+ },
+ "responses": {
+  "model": "probe-model",
+  "instructions": "system text 1\n\nsystem text 2",
+  "input": [
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     },
+     {
+      "type": "input_text",
+      "text": "text"
+     },
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "developer",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "text"
+     }
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "name": "Agent",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "subagent_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "model": {
+       "description": "description",
+       "type": "string"
+      },
+      "effort": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "isolation": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "description",
+      "prompt"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Bash",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "command": {
+       "description": "description",
+       "type": "string"
+      },
+      "timeout": {
+       "description": "description",
+       "type": "number"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "run_in_background": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "dangerouslyDisableSandbox": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CronCreate",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "cron": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "recurring": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "durable": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "cron",
+      "prompt"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CronDelete",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "id": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "CronList",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "DesignSync",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "method": {
+       "type": "string"
+      },
+      "projectId": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      },
+      "writes": {
+       "description": "description",
+       "type": "array"
+      },
+      "deletes": {
+       "description": "description",
+       "type": "array"
+      },
+      "planId": {
+       "description": "description",
+       "type": "string"
+      },
+      "files": {
+       "description": "description",
+       "type": "array"
+      },
+      "paths": {
+       "description": "description",
+       "type": "array"
+      },
+      "name": {
+       "description": "description",
+       "type": "string"
+      },
+      "assets": {
+       "description": "description",
+       "type": "array"
+      },
+      "localDir": {
+       "description": "description",
+       "type": "string"
+      },
+      "counts": {
+       "description": "description",
+       "type": "object"
+      }
+     },
+     "required": [
+      "method"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Edit",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "file_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "old_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "new_string": {
+       "description": "description",
+       "type": "string"
+      },
+      "replace_all": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "file_path",
+      "old_string",
+      "new_string"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "EnterPlanMode",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "EnterWorktree",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "name": {
+       "description": "description",
+       "type": "string"
+      },
+      "path": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ExitPlanMode",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "allowedPrompts": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "additionalProperties": {}
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ExitWorktree",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "action": {
+       "description": "description",
+       "type": "string"
+      },
+      "discard_changes": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "action"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ListAgents",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "channel": {
+       "description": "description",
+       "type": "string"
+      },
+      "q": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Monitor",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "timeout_ms": {
+       "description": "description",
+       "type": "number"
+      },
+      "command": {
+       "description": "description",
+       "type": "string"
+      },
+      "ws": {
+       "description": "description",
+       "type": "object"
+      }
+     },
+     "required": [
+      "description",
+      "timeout_ms"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "NotebookEdit",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "notebook_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "cell_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "new_source": {
+       "description": "description",
+       "type": "string"
+      },
+      "cell_type": {
+       "description": "description",
+       "type": "string"
+      },
+      "edit_mode": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "notebook_path",
+      "new_source"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "PushNotification",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "message": {
+       "description": "description",
+       "type": "string"
+      },
+      "status": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "message",
+      "status"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Read",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "file_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "offset": {
+       "description": "description",
+       "type": "integer"
+      },
+      "limit": {
+       "description": "description",
+       "type": "integer"
+      },
+      "pages": {
+       "description": "description",
+       "type": "string"
+      },
+      "allow_large": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "file_path"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ReportFindings",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "level": {
+       "description": "description",
+       "type": "string"
+      },
+      "findings": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "required": [
+      "findings"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "ScheduleWakeup",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "delaySeconds": {
+       "description": "description",
+       "type": "number"
+      },
+      "reason": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "stop": {
+       "description": "description",
+       "type": "boolean"
+      },
+      "noop": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "SendMessage",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "to": {
+       "description": "description",
+       "type": "string"
+      },
+      "summary": {
+       "description": "description",
+       "type": "string"
+      },
+      "message": {
+       "description": "description",
+       "type": "string"
+      },
+      "notify_when_idle": {
+       "description": "description",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "to",
+      "message"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Skill",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "skill": {
+       "description": "description",
+       "type": "string"
+      },
+      "args": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "skill"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "TaskStop",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "task_id": {
+       "description": "description",
+       "type": "string"
+      },
+      "shell_id": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "WebFetch",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "url": {
+       "description": "description",
+       "type": "string"
+      },
+      "prompt": {
+       "description": "description",
+       "type": "string"
+      },
+      "offset": {
+       "description": "description",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "url",
+      "prompt"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "WebSearch",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "query": {
+       "description": "description",
+       "type": "string"
+      },
+      "allowed_domains": {
+       "description": "description",
+       "type": "array"
+      },
+      "blocked_domains": {
+       "description": "description",
+       "type": "array"
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Workflow",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "script": {
+       "description": "description",
+       "type": "string"
+      },
+      "name": {
+       "description": "description",
+       "type": "string"
+      },
+      "description": {
+       "description": "description",
+       "type": "string"
+      },
+      "title": {
+       "description": "description",
+       "type": "string"
+      },
+      "args": {
+       "description": "description"
+      },
+      "scriptPath": {
+       "description": "description",
+       "type": "string"
+      },
+      "resumeFromRunId": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "additionalProperties": false
+    },
+    "strict": false
+   },
+   {
+    "type": "function",
+    "name": "Write",
+    "description": "description",
+    "parameters": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+      "file_path": {
+       "description": "description",
+       "type": "string"
+      },
+      "content": {
+       "description": "description",
+       "type": "string"
+      }
+     },
+     "required": [
+      "file_path",
+      "content"
+     ],
+     "additionalProperties": false
+    },
+    "strict": false
+   }
+  ],
+  "reasoning": {
+   "effort": "high",
+   "summary": "auto"
+  },
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "max_output_tokens": 32000,
+  "prompt_cache_key": "5cf72f4c1e8cd89bb0b2ff3c9a6f82bbfcc64fec08e229cf74c48b57de3dbbdf",
+  "store": false,
+  "stream": true
+ }
+}

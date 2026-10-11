@@ -74,7 +74,7 @@ auth gate.
 
 ---
 
-## The daemon — 71 routes
+## The daemon — 75 routes
 
 Runs on your machine, reachable through the relay's encrypted channel.
 
@@ -150,7 +150,10 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | | |
 |---|---|
 | `GET /systems` | Every system, and whether a key is saved. Spawns nothing. The built-ins in their own order, then any a plugin added — each carrying `contributedBy` |
-| `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
+| `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key. A system that is signed in to takes no key, and the `DELETE` signs it out |
+| `POST /systems/:system/sign-in` | Begin signing in to a system that takes a sign-in. Answers the page to open; the daemon listens on its own computer for that page to hand back |
+| `GET /systems/sign-in/:id` | Whether that sign-in is waiting, done or failed, and why |
+| `POST /systems/sign-in/:id/redirect` · `DELETE /systems/sign-in/:id` | Finish it from another computer, with the address the browser was sent back to and could not load; or give it up |
 | `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached up to ten minutes and read again on the first request after the CLI build that published it changes. Each row carries `cli` — which build of the harness's own CLI published `models` (`version` may be `null`; `source` is `override` or `path`) — `null` where nothing was spawned, absent from daemons older than this field, and never the path it was resolved from |
 | `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
 | `GET /settings` · `PATCH /settings` | This machine's own preferences — today one: how many minutes a conversation may sit untouched before its agent is shut down, `0` never. **Not the daemon's configuration**, which is env only; this is the narrow class whose owner is the person using the machine. A stored value **overrides** `REEMOAT_IDLE_PARK_MINUTES`, which is the default for a machine nobody has set. `PATCH` rather than `PUT` because the body names only what is changing, so an older client cannot erase a key it has never heard of. Applied to the running daemon before the route answers. Without a durable store the `GET` still answers and the `PATCH` is `503` |

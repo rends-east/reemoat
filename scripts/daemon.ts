@@ -14,6 +14,12 @@ import {
 } from "../src/auth.js";
 import type { AgentId } from "../src/acp/agents.js";
 import { systemSecretFor } from "../src/acp/systems.js";
+import { SystemCredentials } from "../src/gateway/credentials.js";
+import { ModelGatewayEndpoint } from "../src/gateway/endpoint.js";
+import { SIGN_IN_FLOWS } from "../src/gateway/signin/flows.js";
+import { REAL_IDENTITY } from "../src/gateway/signin/identity.js";
+import { SystemSignInRuns } from "../src/gateway/signin/runs.js";
+import { REAL_UPSTREAM } from "../src/gateway/upstream.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { AgentInstallRuns } from "../src/agentinstall.js";
@@ -26,6 +32,15 @@ import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
 import { createKeysetTaker } from "../src/keyset.js";
 import { boundedInt } from "../src/http.js";
+import {
+  GIT_MAX_STRUCTURAL_BYTES,
+  GIT_TIMEOUT_STRUCTURAL_MS,
+  gitTooOld,
+  hostGit,
+  parseGitVersion,
+  textOf,
+  tooOldGit,
+} from "../src/git.js";
 import { atOrUnder, expandHome, resolveStateRoot } from "../src/paths.js";
 import {
   IDLE_PARK_MS,
@@ -191,6 +206,15 @@ if (deviceGate.locked && listensOn === "beyond") {
 const enrollmentWarning = enrollmentIgnored(process.env["REEMOAT_AUTH"], stores.identity.load());
 if (enrollmentWarning !== null) console.error(`warning: ${enrollmentWarning}`);
 
+// Said here once, where an operator reads it; a start says it again to whoever pressed. A missing git is a plain session, not this.
+const gitAtStart = await hostGit
+  .run(["--version"], { dir: process.cwd(), timeoutMs: GIT_TIMEOUT_STRUCTURAL_MS, maxBytes: GIT_MAX_STRUCTURAL_BYTES })
+  .then((run) => parseGitVersion(textOf(run)))
+  .catch(() => null);
+if (gitAtStart !== null && gitTooOld(gitAtStart)) {
+  console.error(`warning: ${tooOldGit([], gitAtStart.text).message}. Until it is updated, none will start.`);
+}
+
 interface AuthSetup {
   verifier: TokenVerifier;
   /** `null` under the shared secret, which has no machine and no control plane. */
@@ -267,21 +291,53 @@ if (stores.prunedSessions.length > 0) {
 // Built before the runtime, registry and restore: with contributions unknown, restore would drop every preset on a plugin's harness.
 const pluginsEnabled = process.env["REEMOAT_PLUGINS"] !== "0";
 // Switched off means every row disabled, not gone: an empty list would make session creation blame a correct request.
+// Off unless asked for: signing in to a ChatGPT plan here has not been driven with a real account, and whether this product may is OpenAI's to say (Q7.160).
+const SWITCHED_ON: ReadonlySet<string> = new Set(["on", "1", "true", "yes"]);
+const chatgptPlan = SWITCHED_ON.has((process.env["REEMOAT_CHATGPT_PLAN"] ?? "").trim().toLowerCase());
 const contributions = new Contributions(
   stores.plugins.list().map((one) => (pluginsEnabled ? one : { ...one, enabled: false })),
+  chatgptPlan ? new Set() : new Set(["chatgpt"]),
 );
+
+// Kept apart from an agent's secrets: this signs a request to a vendor and must never reach an agent's environment.
+const systemSecret = (system: string): string | null =>
+  systemSecretFor(
+    system,
+    stores.systemCredentials.get(system),
+    (agent: AgentId) => stores.credentials.envFor(agent),
+    contributions,
+  );
+// A pasted key, or the sign-in a system takes in place of one, renewed when it is due.
+const systemCredentials = new SystemCredentials({
+  machine: () => contributions,
+  keyFor: systemSecret,
+  signIns: stores.systemSignIns,
+  flows: SIGN_IN_FLOWS,
+  transport: REAL_IDENTITY,
+});
+const signInRuns = new SystemSignInRuns({
+  machine: () => contributions,
+  flows: SIGN_IN_FLOWS,
+  signIns: stores.systemSignIns,
+  transport: REAL_IDENTITY,
+});
+// Listening before anything launches: a routed agent is handed this address in place of its vendor's.
+const MODEL_GATEWAY_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no", "never"]);
+const modelGateway = MODEL_GATEWAY_OFF.has((process.env["REEMOAT_MODEL_GATEWAY"] ?? "").trim().toLowerCase())
+  ? null
+  : await ModelGatewayEndpoint.listen({
+      secretFor: (system, signal) => systemCredentials.secretFor(system, signal),
+      machine: () => contributions,
+      transport: REAL_UPSTREAM,
+    });
 
 const runtime = new LocalRuntime({
   // Read at launch rather than captured, so a replaced token applies to the next session.
   secrets: (agent) => stores.credentials.envFor(agent),
-  // Kept apart from secrets: this becomes a provider header and must never reach an agent's environment.
-  systemSecret: (system) =>
-    systemSecretFor(
-      system,
-      stores.systemCredentials.get(system),
-      (agent: AgentId) => stores.credentials.envFor(agent),
-      contributions,
-    ),
+  systemSecret,
+  systemMissing: (system) => systemCredentials.missing(system),
+  ...(modelGateway === null ? {} : { gateway: modelGateway }),
+  doorHomes: join(stateHome, "harness-homes"),
   machine: contributions,
   onWarning: (detail: string) => console.error(`runtime: ${detail}`),
 });
@@ -463,9 +519,11 @@ const { app, injectWebSocket } = createApp({
   credentials: stores.credentials,
   systems: {
     credentials: stores.systemCredentials,
+    signIns: stores.systemSignIns,
     customAgents: stores.customAgents,
     strip: stores.agentStrip,
   },
+  signInRuns,
   machineSettings: stores.machineSettings,
   asks: agentAsks,
   logins: agentLogins,
@@ -706,6 +764,8 @@ async function shutdown(signal: string): Promise<void> {
   // After the agents: a tool call in flight during their stop still gets an answer.
   peers.close();
   await peerEndpoint.close();
+  await modelGateway?.close();
+  signInRuns.shutdown();
   // After registry shutdown: stopping a session writes its exit record.
   stores.close();
   clearTimeout(hard);

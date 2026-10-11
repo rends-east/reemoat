@@ -219,6 +219,9 @@ const FOREIGN = new Set([
   "recommendedValue",
   // claude-agent-acp's 30 s floor on a cancel, cited in Q2.255 for leaving the query wedged after it.
   "forceCancelGraceMs",
+  // The OpenAI SDK's variable and kimi's own retry bound, cited in Q6.124 and Q6.125 for what each did not and did move.
+  "OPENAI_BASE_URL",
+  "KIMI_LOOP_MAX_RETRIES_PER_STEP",
 ]);
 
 // Cited by DECISIONS.md and greps to nothing. Pinned by equality so the list can only shrink; triage is outstanding.

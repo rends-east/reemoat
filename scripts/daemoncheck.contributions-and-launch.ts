@@ -544,6 +544,16 @@ process.stdout.write("\nwhat a plugin may add to a machine\n");
     hostable("codex", "acme:groq", codexRouting, machine),
     "This agent cannot run Groq models.",
   );
+  // A manifest states one address and ACP's coarse type; the catalogue files it under a wire protocol, and with no address under none.
+  check(
+    "a manifest's address is filed under the protocol its type names",
+    [machine, openaiShaped, native].map((one) => JSON.stringify(one.system("acme:groq")?.endpoints ?? null)),
+    [
+      JSON.stringify({ "anthropic-messages": SYSTEM.baseUrl }),
+      JSON.stringify({ "openai-chat": SYSTEM.baseUrl }),
+      "{}",
+    ],
+  );
   const dumb = new Contributions([
     installed("acme", { harnesses: [{ ...HARNESS, id: "plain" }], systems: [SYSTEM] }),
   ]);
@@ -620,7 +630,30 @@ process.stdout.write("\nwhat a plugin may add to a machine\n");
 process.stdout.write("\nwhat an assembled session is launched as\n");
 {
   const acp = await import("@agentclientprotocol/sdk");
-  const { SYSTEMS } = await import("../src/acp/systems.js");
+  const { BUILTIN_CATALOGUE: builtins } = await import("../src/acp/systems.js");
+  const { ModelGatewayEndpoint } = await import("../src/gateway/endpoint.js");
+
+  // A real gateway, and a vendor that records what it was sent: a routed claude is handed the first and must never be handed the second.
+  const vendorSaw: { url: string; headers: Record<string, string> }[] = [];
+  const gate = await ModelGatewayEndpoint.listen({
+    secretFor: async () => "sekrit",
+    machine: () => builtins,
+    transport: {
+      send: async (request) => {
+        vendorSaw.push({ url: request.url, headers: request.headers });
+        return { status: 200, header: () => null, body: null };
+      },
+    },
+  });
+  /** What the gateway answers a credential, asked as claude asks. */
+  const askGate = async (credential: string | undefined, model: string): Promise<number> =>
+    (
+      await fetch(`${gate.origin}/v1/messages`, {
+        method: "POST",
+        headers: { "x-api-key": credential ?? "", "content-type": "application/json" },
+        body: JSON.stringify({ model }),
+      })
+    ).status;
 
   interface Launch {
     agent: AgentId;
@@ -780,16 +813,20 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     model: "kimi-k2-thinking",
   };
   const ownLog = new MemoryEventStore();
-  const own = new SessionRegistry(ownLog, null, undefined, new RoutedRig());
+  const doorHomes = tmp("door-homes-");
+  const own = new SessionRegistry(ownLog, null, undefined, new RoutedRig({ gateway: gate, doorHomes }));
   own.setCustomAgents((id) => (id === "ca_assembled" ? preset : null));
 
   const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+
+  /** The gateway's port is the OS's choice, so it is named and every other address is drawn as sent. */
+  const pointedAt = (one: Launch): string => (one.routed === null ? "-" : one.routed === gate.origin ? "the gateway" : one.routed);
 
   /** ANTHROPIC_MODEL proves the bag kept the pairing; routed is the other half and cannot be derived from it. */
   const summary = (one: Launch | undefined): string =>
     one === undefined
       ? "(no launch)"
-      : `${one.agent} ${one.how} model=${one.env["ANTHROPIC_MODEL"] ?? "-"} routed=${one.routed ?? "-"}`;
+      : `${one.agent} ${one.how} model=${one.env["ANTHROPIC_MODEL"] ?? "-"} routed=${pointedAt(one)}`;
 
   /** The first resume at turn zero takes the empty arm, which opens a conversation; one turn later the same session resumes. */
   const bothArms = async (customAgent: string | null): Promise<Launch[]> => {
@@ -807,31 +844,40 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
 
   const assembled = await bothArms("ca_assembled");
   check("an assembled session: the start, the empty arm and the resume arm", assembled.map(summary), [
-    "claude opened model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
-    "claude opened model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
-    "claude resumed model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
+    "claude opened model=kimi-k2-thinking routed=the gateway",
+    "claude opened model=kimi-k2-thinking routed=the gateway",
+    "claude resumed model=kimi-k2-thinking routed=the gateway",
   ]);
   // Both arms get one bag from ManagedSession.launchOptions and a resume adds only agentSessionId: what a fourth launch site would break.
   /** bag alone is not enough: losing the system changes only the spawn env and whether providers/set was sent. */
   const shapeOf = (one: Launch | undefined): unknown =>
     one === undefined ? null : { agent: one.agent, env: one.env, routed: one.routed, bag: one.bag };
   check("and both arms hand the agent the same bag but for the conversation id", shapeOf(assembled[1]), shapeOf(assembled[2]));
-  // The one line that reads the table, so the literals above cannot agree only with each other.
-  check("and the endpoint it was pointed at is the table's own", assembled[2]?.routed, SYSTEMS.moonshot.baseUrl);
-
-  // Both halves: the secret is in the headers and in no environment value; either alone passes against a daemon that sends it nowhere.
-  const carried = assembled.map((one) => one.routedHeaders?.["authorization"] ?? null);
-  check("every routed launch signed its traffic with the stored key", carried, [
-    "Bearer sekrit",
-    "Bearer sekrit",
-    "Bearer sekrit",
-  ]);
+  // The agent holds a credential of this daemon's and never the vendor's: not in a header, where the adapter would put it on a command line (Q6.123), and not in the environment.
+  const carried = assembled.map((one) => one.routedHeaders ?? {});
   check(
-    "and not one of them put it in the environment the agent can print",
+    "every routed launch was handed one credential, in the header that survives the harness",
+    carried.map((headers) => Object.keys(headers).join(",")),
+    ["x-api-key", "x-api-key", "x-api-key"],
+  );
+  check(
+    "a different one for each agent process",
+    [carried.every((headers) => /^[0-9a-f]{64}$/.test(headers["x-api-key"] ?? "")), new Set(carried.map((headers) => headers["x-api-key"])).size],
+    [true, 3],
+  );
+  check(
+    "and the stored key reached no header and no environment the agent can print",
     assembled.flatMap((one) =>
-      Object.entries(one.env).flatMap(([name, value]) => (String(value).includes("sekrit") ? [name] : [])),
+      [...Object.entries(one.env), ...Object.entries(one.routedHeaders ?? {})].flatMap(([name, value]) =>
+        String(value).includes("sekrit") ? [name] : [],
+      ),
     ),
     [],
+  );
+  check(
+    "each credential ended with its agent",
+    await Promise.all(carried.map((headers) => askGate(headers["x-api-key"], "kimi-k2-thinking"))),
+    [401, 401, 401],
   );
   check("which is a bag rather than nothing at all", assembled[1]?.bag === null || assembled[1]?.bag === undefined, false);
 
@@ -847,9 +893,23 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
   const live = await own.create({ agent: "claude", cwd: tmp("repointed-"), customAgent: "ca_assembled" });
   check("a session on a preset starts routed", live.prompt("hello").kind, "accepted");
   await settle();
+  // Asked as the agent would ask, while it runs: the one path on which the table's address and the stored key are read.
+  const held = launches[0]?.routedHeaders?.["x-api-key"];
+  vendorSaw.length = 0;
+  check(
+    "while it runs its credential reaches the vendor, for the preset's model and no other",
+    [await askGate(held, "kimi-k2-thinking"), await askGate(held, "claude-haiku-4-5")],
+    [200, 400],
+  );
+  check(
+    "at the table's own address, signed with the stored key in the vendor's header and with the agent's credential left behind",
+    vendorSaw.map((one) => ({ url: one.url, authorization: one.headers["authorization"], carriesTheAgents: "x-api-key" in one.headers })),
+    [{ url: "https://api.moonshot.ai/anthropic/v1/messages", authorization: "Bearer sekrit", carriesTheAgents: false }],
+  );
   await own.stop(live.id);
+  check("and once it is stopped that credential opens nothing", await askGate(held, "kimi-k2-thinking"), 401);
   check("and one turn puts it on the resume arm for the rest of this block", launches.map(summary), [
-    "claude opened model=kimi-k2-thinking routed=https://api.moonshot.ai/anthropic",
+    "claude opened model=kimi-k2-thinking routed=the gateway",
   ]);
 
   const resumed = async (): Promise<string> => {
@@ -878,7 +938,7 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
   preset = { harness: "claude", system: "moonshot", model: "kimi-k2-0905-preview" };
   check("while a preset still naming this harness is applied", await resumed(), "(resumed)");
   check("at whatever it holds now, read fresh at the launch", launches.map(summary), [
-    "claude resumed model=kimi-k2-0905-preview routed=https://api.moonshot.ai/anthropic",
+    "claude resumed model=kimi-k2-0905-preview routed=the gateway",
   ]);
 
   await own.stop(live.id);
@@ -891,7 +951,7 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
   const pinOf = (one: Launch | undefined): string =>
     one === undefined
       ? "(no launch)"
-      : `${one.how} config=[${one.configCalls.join(" ")}] env=${one.env["ANTHROPIC_MODEL"] ?? "-"} routed=${one.routed ?? "-"}`;
+      : `${one.how} config=[${one.configCalls.join(" ")}] env=${one.env["ANTHROPIC_MODEL"] ?? "-"} routed=${pointedAt(one)}`;
 
   const notices = (id: string): { message: string; model: unknown }[] =>
     ownLog.read(id, -1, 1000, Number.MAX_SAFE_INTEGER).flatMap(({ event }) => {
@@ -973,7 +1033,7 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     ["kimi-k2-thinking", "sonnet"],
     ["opus", "sonnet"],
   );
-  const endpoint = SYSTEMS.moonshot.baseUrl;
+  const endpoint = "the gateway";
   check("a routed pairing takes neither the pin nor the refusal", routed.lines, [
     `start, offered:  opened config=[] env=kimi-k2-thinking routed=${endpoint}`,
     `resume, offered: resumed config=[] env=kimi-k2-thinking routed=${endpoint} notices=0`,
@@ -981,6 +1041,44 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     `start, gone:     (started) opened config=[] env=kimi-k2-thinking routed=${endpoint} disposed=false`,
   ]);
   check("and says nothing in the transcript about a model it never asked the agent for", notices(routed.id), []);
+
+  // A door set at the spawn tells the agent nothing after the handshake, so its model control is the only place the pairing can be read back, as on a native one.
+  const doored = await column(
+    { harness: "opencode", system: "moonshot", model: "kimi-k3" },
+    ["reemoat/kimi-k3", "opencode/big-pickle"],
+    ["opencode/big-pickle"],
+    "opencode/big-pickle",
+  );
+  check("a pairing through a door set at the spawn is held on the agent's own control", doored.lines, [
+    "start, offered:  opened config=[model-picker=reemoat/kimi-k3] env=- routed=-",
+    "resume, offered: resumed config=[model-picker=reemoat/kimi-k3] env=- routed=- notices=0",
+    "resume, gone:    (resumed) resumed config=[] env=- routed=- notices=1",
+    "start, gone:     SystemRoutingError opened config=[] env=- routed=- disposed=true",
+  ]);
+
+  preset = { harness: "opencode", system: "moonshot", model: "kimi-k3" };
+  published = { choices: ["reemoat/kimi-k3"], current: "reemoat/kimi-k3" };
+  launches.length = 0;
+  const atDoor = await own.create({ agent: "opencode", cwd: tmp("doored-"), customAgent: "ca_assembled" });
+  const handed = launches[0];
+  const inline = JSON.parse(handed?.env["OPENCODE_CONFIG_CONTENT"] ?? "{}") as {
+    provider?: { reemoat?: { options?: { baseURL?: string; apiKey?: string } } };
+  };
+  const doorKey = inline.provider?.reemoat?.options?.apiKey;
+  check(
+    "it is started at the gateway with a credential of its own, and already on the model is told nothing more",
+    [inline.provider?.reemoat?.options?.baseURL === `${gate.origin}/v1`, /^[0-9a-f]{64}$/.test(doorKey ?? ""), handed?.routed ?? null, handed?.configCalls],
+    [true, true, null, []],
+  );
+  check(
+    "in a home under this daemon's own, the same for every session of the harness",
+    handed?.env["XDG_DATA_HOME"],
+    join(doorHomes, "opencode", "data"),
+  );
+  check("the stored key is in nothing it was handed", JSON.stringify(handed?.env ?? {}).includes("sekrit"), false);
+  check("while it runs that credential reaches the vendor, for the preset's model", await askGate(doorKey, "kimi-k3"), 200);
+  await own.stop(atDoor.id);
+  check("and it ends with the agent", await askGate(doorKey, "kimi-k3"), 401);
 
   // opencode lists ids under openrouter/ while the preset stores the bare id: the pin succeeds only by respelling, and a bare listing is refused.
   const prefixed = await column(
@@ -1027,4 +1125,31 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     ],
     [true, true, true],
   );
+
+  // The same order for the gateway, and for the same reason: a routed session restored before it listens has nothing to be pointed at.
+  check(
+    "the gateway listens before the runtime that hands it out, and before the restore",
+    [
+      wiring.indexOf("ModelGatewayEndpoint.listen(") < wiring.indexOf("new LocalRuntime("),
+      wiring.indexOf("ModelGatewayEndpoint.listen(") < wiring.indexOf("registry.restore("),
+      wiring.indexOf("ModelGatewayEndpoint.listen(") > 0,
+    ],
+    [true, true, true],
+  );
+
+  // No fallback to handing the harness the vendor's key: a machine with the gateway switched off refuses the pairing in words.
+  preset = { harness: "claude", system: "moonshot", model: "kimi-k2-thinking" };
+  launches.length = 0;
+  const closed = new SessionRegistry(new MemoryEventStore(), null, undefined, new RoutedRig());
+  closed.setCustomAgents((id) => (id === "ca_assembled" ? preset : null));
+  check(
+    "with the gateway switched off a pairing that goes through it refuses to start",
+    await closed
+      .create({ agent: "claude", cwd: tmp("gateless-"), customAgent: "ca_assembled" })
+      .then(() => "(started)", (error: unknown) => (error instanceof Error ? error.message : String(error))),
+    "Moonshot is reached through this machine's model gateway, which is switched off in its configuration.",
+  );
+  check("having handed the agent no address and no key", [launches[0]?.routed ?? null, launches[0]?.routedHeaders ?? null], [null, null]);
+  await closed.shutdown();
+  await gate.close();
 }
