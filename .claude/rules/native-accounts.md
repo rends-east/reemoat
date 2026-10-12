@@ -88,6 +88,7 @@ top-level fields only). `server` is the seat's origin; `credential` comes at mos
 | `host_account_add`, `host_account_forget` | → `AccountMove{reload}` |
 | `host_set_server` | `{url}` → the address; `pending_seat` unless the seat is pending |
 | `host_set_theme` | `{theme}`; shown seat only; writes `server.json`, applies only a change (Q3.671) |
+| `host_login_item`, `host_login_item_set` | → `on\|off\|unsupported`; `{on}`, shown seat only (`native-login.md`) |
 
 Refusal prefixes: `stale_document` (reload), `not_shown`, `pending_seat`, `account_limit`.
 `AccountMove`'s Rust field `reload_page` is renamed `reload`, so the census bites.
@@ -123,8 +124,8 @@ refuses `WebviewBuilder::new`.
 Nothing but `host_boot` is sent before the boot answers, and a closed seat's page is ended
 with WebKit's `_close` (`end_page`), as `Webview::close` leaves it running (Q7.149). The page
 never branches on the arm. **A hidden webview cannot reach the screen**: switch, add,
-`host_save_file`, `host_pick_folder`, `host_open_external`, `host_copy_text`, `host_set_theme`
-are refused `not_shown` from any label but `Host.shown`.
+`host_save_file`, `host_pick_folder`, `host_open_external`, `host_copy_text`, `host_set_theme`,
+`host_login_item_set` are refused `not_shown` from any label but `Host.shown`.
 
 ## Signing in: the host proves whose it is
 
@@ -149,7 +150,7 @@ sign-in cannot offer the stored device, which is an account's.
 - **Add** (`host_account_add`): a pending seat, shown; the server step opens locked on
   `defaultServer`. A **‹** naming the account before (`switchAccount(null)`) returns, nothing
   written. **No Cancel in this flow**: one chevron per screen naming where it goes, none on a
-  first run. `host_set_server` writes `server.json` only on a first run. Q3.643.
+  first run's welcome. `host_set_server` writes `server.json` only on a first run. Q3.643.
 - **Switch**: shown caller only; stops nothing; records `current` after the switch.
 - **Forget** (Sign out, *Remove account*), caller only, in order: erase its credential;
   `config::forget_account` under `daemon::lock_roots`, **keeping the device id, the key and
@@ -179,7 +180,8 @@ sign-in cannot offer the stored device, which is an account's.
 
 ## The first launch after the update
 
-Nothing is written at startup (asserted, `seats.rs` included). `read_accounts` is pure: it
+Nothing about an account is written at startup (asserted, `seats.rs` included; the one
+write a launch makes is the login item's mark, `native-login.md`). `read_accounts` is pure: it
 derives a pre-accounts list in memory (`server` only on evidence: a `devices` entry, a bare
 claim, or `credential#<server>` read once by `lib.rs`; else `Roster.pending`), materialized by
 the first changing act. A legacy page calls `host_account_confirm`: the host moves the bare

@@ -95,6 +95,11 @@ export function loginOutcome(
   return "cannotTell";
 }
 
+/** A session only once the probe says so, or cannot say (kimi), and only where the strip has the tile. */
+export function afterLogin(outcome: LoginOutcome | null, tile: boolean): "new_session" | null {
+  return tile && (outcome === "signedIn" || outcome === "cannotTell") ? "new_session" : null;
+}
+
 export function rawTranscriptIsOpen(view: LoginView, outcome: LoginOutcome | null): boolean {
   if (view.phase !== "done" && view.phase !== "failed") return transcriptIsTheAnswer(view);
   if (view.message !== null) return false;

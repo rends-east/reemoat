@@ -1298,9 +1298,12 @@ const npmPackage = (id: string): string => {
   const boot = readFileSync(join(repoRoot, "deploy/bootstrap.sh"), "utf8");
   const bootLines = boot.split("\n");
   const bootBody = bootLines.filter((line) => !/^\s*#/.test(line));
+  const bootFn = (name: string): string => blockIn("bootstrap.sh", bootLines, name, `${name}() {`, "}");
   check("the installer defines the agent step", bootBody.filter((line) => /^install_agents\(\)/.test(line)).length, 1);
-  const callsAgents = bootBody.findIndex((line) => /^\s+install_agents$/.test(line));
-  const callsHandOff = bootBody.findIndex((line) => /^\s+hand_off$/.test(line));
+  // Read off main: reenroll hands off too, with no agents step of its own.
+  const mainCalls = bootFn("main").split("\n").map((line) => line.trim());
+  const callsAgents = mainCalls.indexOf("install_agents");
+  const callsHandOff = mainCalls.indexOf("hand_off");
   check("and calls it exactly once", bootBody.filter((line) => /^\s+install_agents$/.test(line)).length, 1);
   check(
     "before the unit is rendered and the daemon started",
@@ -1308,26 +1311,27 @@ const npmPackage = (id: string): string => {
     true,
   );
 
-  const bootFn = (name: string): string => blockIn("bootstrap.sh", bootLines, name, `${name}() {`, "}");
-
   const probeInstance = bootFn("probe_instance");
   const credentialBody = bootFn("credential_body");
-  const registerFn = bootFn("register");
+  const chooseCredential = bootFn("choose_credential");
+  // One sign-up form in the fleet, and it is the control plane's own page (Q1.625).
   check(
-    "the installer reads whether the instance publishes documents",
-    /REG_LEGAL=\$\(json_path legal\.documents/.test(probeInstance),
-    true,
+    "the installer asks for a sign-in or a key and nothing else",
+    chooseCredential.split("\n").filter((line) => /\bmenu "/.test(line)).map((line) => line.trim()),
+    ['case "$(menu "Who are you on it?" "Sign in" "API key")" in'],
   );
   check(
-    "and asks for agreement on the tty before creating an account",
-    [/\[ "\$REG_LEGAL" = true \]/.test(registerFn), registerFn.includes("$CP/terms"), /_agree.*=.*yes/.test(registerFn)],
-    [true, true, true],
+    "it creates no account: it says where one is made, and only where the instance takes sign-ups",
+    [
+      /if \[ "\$REG_ENABLED" = true \]; then\n\s+tty_say "[^"\n]*\$CP\/register/.test(chooseCredential),
+      /REG_ENABLED=\$\(json_path registration\.enabled/.test(probeInstance),
+      /\/v1\/register/.test(boot),
+      /^(register|wait_for_confirmation)\(\)/m.test(boot),
+      /REG_(EMAIL|LEGAL)/.test(boot),
+    ],
+    [true, true, false, false, false],
   );
-  check(
-    "and sends acceptedTerms only when it was asked for",
-    [/acceptedTerms = true/.test(credentialBody), /accepted === "yes"/.test(credentialBody)],
-    [true, true],
-  );
+  check("and so sends a name and a password, with no address and no consent", /email|accepted/.test(credentialBody), false);
   check("the bootstrap defaults the agent source", lineIn("bootstrap.sh", bootLines, "the agent-source default", "AGENT_SOURCE="), "AGENT_SOURCE=vendor");
   const parseFlags = bootFn("parse_flags");
   check(
@@ -1453,7 +1457,7 @@ const npmPackage = (id: string): string => {
   const callAt = installAgentsLines.findIndex((line) => line.includes("deploy/agents.sh"));
   check(
     "and installs nothing at all unless somebody named a harness",
-    [guardAt !== -1, guardAt < callAt, installAgentsFn.includes("press Install")],
+    [guardAt !== -1, guardAt < callAt, installAgentsFn.includes("none installed; the app sets one up: Settings -> Machines")],
     [true, true, true],
   );
   check(
@@ -4146,8 +4150,467 @@ process.stdout.write("\nthe one-line installer\n");
       }
     };
     const password = `p"a\\b'c\n$(x)é`;
-    check("credential_body carries a hostile password intact, with no email key", body("alice", password), { name: "alice", password });
-    check("and adds email only when one was given", body("alice", password, "a@example.test"), { name: "alice", password, email: "a@example.test" });
+    check("credential_body carries a hostile password intact", body("alice", password), { name: "alice", password });
+    check("and a third argument changes nothing", body("alice", password, "a@example.test"), { name: "alice", password });
+  }
+
+  // Starting at boot (Q4.106). Stubs first on PATH log their argv and never run what they are handed.
+  {
+    const bootBlock = (name: string): string => blockIn("bootstrap.sh", bootstrapLines, name, `${name}() {`, "}");
+    const user = (spawnSync("id", ["-un"], { encoding: "utf8" }).stdout ?? "").trim();
+    const stubs = join(sandbox, "linger-stubs");
+    mkdirSync(stubs, { recursive: true });
+    const stub = (name: string, body: string): void => {
+      writeFileSync(join(stubs, name), `#!/bin/sh\nprintf '%s\\n' "${name} $*" >> "$STUB_LOG"\n${body}\n`);
+      chmodSync(join(stubs, name), 0o755);
+    };
+    stub(
+      "loginctl",
+      `case " $* " in
+  *" show-user "*) [ -z "\${FAKE_SHOW:-}" ] || echo "$FAKE_SHOW" ;;
+  *" enable-linger "*) [ "\${FAKE_POLKIT:-deny}" = allow ] || exit 1; : > "$FAKE_LINGER_DIR/$(id -un)" ;;
+esac`,
+    );
+    // `-n` succeeds only where sudo would ask nothing; a bare sudo stands for somebody typing the password.
+    stub(
+      "sudo",
+      `case "$1" in
+  -n) [ "\${FAKE_SUDO:-password}" = nopasswd ] || exit 1 ;;
+  *) [ "\${FAKE_SUDO:-password}" != refuse ] || exit 1 ;;
+esac
+: > "$FAKE_LINGER_DIR/$(id -un)"`,
+    );
+    stub("systemctl", `[ "\${FAKE_MANAGER:-up}" = up ]`);
+    stub("sleep", ":");
+    // Two journals, as measured for an account below the regular uid range: its own has nothing and says so on stdout unless quieted.
+    stub(
+      "journalctl",
+      `case " $* " in
+  *" --user-unit "*) [ -z "\${FAKE_JOURNAL_UNIT:-}" ] || cat "$FAKE_JOURNAL_UNIT" ;;
+  *" --user "*)
+    if [ -n "\${FAKE_JOURNAL_OWN:-}" ]; then cat "$FAKE_JOURNAL_OWN"; else case " $* " in *" -q "*) ;; *) echo "-- No entries --" ;; esac; fi ;;
+esac`,
+    );
+
+    interface Fixture {
+      on?: boolean;
+      env?: Record<string, string>;
+    }
+    let fixtures = 0;
+    const drive = (script: string, fixture: Fixture = {}): Run & { acts: string[]; dir: string } => {
+      fixtures += 1;
+      const dir = join(sandbox, `linger-${fixtures}`);
+      const linger = join(dir, "linger");
+      mkdirSync(linger, { recursive: true });
+      mkdirSync(join(dir, "run"), { recursive: true });
+      writeFileSync(join(dir, "log"), "");
+      if (fixture.on === true) writeFileSync(join(linger, user), "");
+      const run = spawnSync("sh", ["-c", `set -eu\nLINGER_DIR=$FAKE_LINGER_DIR\n${script}`], {
+        cwd: deployDir,
+        encoding: "utf8",
+        env: {
+          ...baseEnv,
+          PATH: `${stubs}:${baseEnv["PATH"] ?? ""}`,
+          STUB_LOG: join(dir, "log"),
+          FAKE_LINGER_DIR: linger,
+          FAKE_RUN: join(dir, "run"),
+          ...fixture.env,
+        },
+      });
+      // What was done, not what was asked: the reads and the waits are dropped.
+      const acts = readFileSync(join(dir, "log"), "utf8")
+        .split("\n")
+        .filter((line) => line.length > 0 && !/^(sleep|systemctl) /.test(line) && !line.includes(" show-user "));
+      return { status: run.status ?? -1, out: run.stdout ?? "", err: run.stderr ?? "", acts, dir };
+    };
+
+    const plain = `loginctl --no-ask-password enable-linger ${user}`;
+    const quiet = `sudo -n loginctl enable-linger ${user}`;
+    const asked = `sudo loginctl enable-linger ${user}`;
+    const copies: Array<[string, string]> = [
+      ["bootstrap.sh", `${bootBlock("linger_on")}\n${bootBlock("linger_step")}`],
+      [
+        "lib.sh",
+        `${blockIn("lib.sh", libLines, "linger_on", "linger_on() {", "}")}\n${blockIn("lib.sh", libLines, "linger_step", "linger_step() {", "}")}`,
+      ],
+    ];
+    check("the served installer and the checkout carry the same linger functions", copies[0]?.[1] === copies[1]?.[1], true);
+    for (const [file, source] of copies) {
+      const step = (mode: string, fixture: Fixture = {}): [number, string, string[]] => {
+        const run = drive(`${source}\nlinger_step ${mode}`, fixture);
+        return [run.status, run.out, run.acts];
+      };
+      check(`${file}: lingering already on runs nothing at all`, step("asked", { on: true }), [0, "on", []]);
+      check(`${file}: logind's own yes is believed where the marker is not found`, step("asked", { env: { FAKE_SHOW: "yes" } }), [0, "on", []]);
+      check(`${file}: where the system allows it, it is turned on unprivileged and sudo is never reached`, step("asked", { env: { FAKE_POLKIT: "allow" } }), [0, "on", [plain]]);
+      check(`${file}: refused with no consent, it stays off and sudo is never run`, step("none"), [0, "off", [plain]]);
+      check(`${file}: under --yes it is sudo -n, which turns it on where sudo asks nothing`, step("yes", { env: { FAKE_SUDO: "nopasswd" } }), [0, "on", [plain, quiet]]);
+      check(`${file}: and where sudo wants a password it stays off, with no prompt opened`, step("yes"), [0, "off", [plain, quiet]]);
+      check(`${file}: asked and answered yes, it is the one command and no other`, step("asked"), [0, "on", [plain, asked]]);
+      check(`${file}: and a sudo that refuses is measured as off, not taken at its word`, step("asked", { env: { FAKE_SUDO: "refuse" } }), [0, "off", [plain, asked]]);
+    }
+
+    // The census: a new line naming sudo anywhere in these three fails until somebody has read it.
+    const SAID = [
+      /^(apt-get|dnf|pacman|apk|zypper)\)\s+die "git is not installed\. Run: sudo /,
+      /^On Ubuntu: sudo add-apt-repository /,
+      /^turned on only where sudo asks for no password$/,
+      /^sudo loginctl enable-linger \$_u" "Yes, run it" "No, I will run it myself"\)" = 1 \]; then$/,
+      /^That is what su and sudo -iu leave behind\. /,
+      /^note "\s+sudo loginctl enable-linger \$\(id -un\)" ;;$/,
+      /^if confirm "turn it on — this runs: sudo loginctl enable-linger \$\(id -un\)" y; then$/,
+      /^echo "\s+sudo loginctl enable-linger \$\(id -un\)"$/,
+    ];
+    for (const [file, lines] of [
+      ["bootstrap.sh", bootstrapLines],
+      ["install.sh", installLines],
+      ["lib.sh", libLines],
+    ] as const) {
+      const step = blockIn(file === "bootstrap.sh" ? "bootstrap.sh" : "lib.sh", file === "bootstrap.sh" ? bootstrapLines : libLines, "linger_step", "linger_step() {", "}").split("\n");
+      const outside = lines
+        .map((line) => line.trim())
+        .filter((line) => !line.startsWith("#") && /\bsudo\b/.test(line) && (file === "install.sh" || !step.map((one) => one.trim()).includes(line)));
+      check(`${file} runs sudo nowhere but linger_step: every other line naming it is a sentence`, outside.filter((line) => !SAID.some((said) => said.test(line))), []);
+    }
+    check(
+      "and linger_step runs it as exactly these two commands",
+      (copies[0]?.[1] ?? "").split("\n").map((line) => line.trim()).filter((line) => !line.startsWith("#") && /\bsudo\b/.test(line)),
+      [
+        'yes)   sudo -n loginctl enable-linger "$(id -un)" </dev/null >/dev/null 2>&1 || true ;;',
+        'asked) sudo loginctl enable-linger "$(id -un)" </dev/null >&2 || true ;;',
+      ],
+    );
+
+    const autostartSource = [
+      'note() { printf "note %s\\n" "$*"; }',
+      "say() { :; }",
+      'die() { printf "die %s\\n" "$*"; exit 2; }',
+      'nothing_installed() { printf "Nothing has been installed."; }',
+      'menu() { printf "menu\\n" >> "$STUB_LOG"; printf "%s" "${FAKE_MENU:-2}"; }',
+      'AUTOSTART=""',
+      bootBlock("linger_on"),
+      bootBlock("linger_step"),
+      bootBlock("user_manager_up"),
+      bootBlock("ensure_autostart"),
+    ].join("\n");
+    const autostart = (vars: string, fixture: Fixture = {}): [number, string, string[]] => {
+      const run = drive(`${autostartSource}\n${vars}\nensure_autostart\nprintf 'AUTOSTART=%s\\n' "$AUTOSTART"`, fixture);
+      return [run.status, (/^AUTOSTART=(.*)$/m.exec(run.out)?.[1] ?? run.out).trim(), run.acts];
+    };
+    check("on a Mac nothing is run: a login agent starts at login", autostart("PLATFORM=darwin; ASSUME_YES=0; TTY_OPEN=1"), [0, "login", []]);
+    check("where the system allows it nothing is asked", autostart("PLATFORM=linux; ASSUME_YES=0; TTY_OPEN=1", { env: { FAKE_POLKIT: "allow", FAKE_MENU: "1" } }), [0, "on", [plain]]);
+    check("with no terminal and no --yes there is no consent, so no sudo", autostart("PLATFORM=linux; ASSUME_YES=0; TTY_OPEN=0", { env: { FAKE_SUDO: "nopasswd" } }), [0, "off", [plain]]);
+    check("--yes asks nothing and tries only the sudo that asks nothing", autostart("PLATFORM=linux; ASSUME_YES=1; TTY_OPEN=1", { env: { FAKE_SUDO: "nopasswd", FAKE_MENU: "1" } }), [0, "on", [plain, quiet]]);
+    check("and leaves it off where sudo would have prompted", autostart("PLATFORM=linux; ASSUME_YES=1; TTY_OPEN=1", { env: { FAKE_MENU: "1" } }), [0, "off", [plain, quiet]]);
+    check("on a terminal it asks once, and No runs nothing", autostart("PLATFORM=linux; ASSUME_YES=0; TTY_OPEN=1", { env: { FAKE_MENU: "2" } }), [0, "off", [plain, "menu"]]);
+    check("while Yes runs the one command, after one more try without it", autostart("PLATFORM=linux; ASSUME_YES=0; TTY_OPEN=1", { env: { FAKE_MENU: "1" } }), [0, "on", [plain, "menu", plain, asked]]);
+    {
+      const run = drive(`${autostartSource}\nPLATFORM=linux; ASSUME_YES=0; TTY_OPEN=0\nensure_autostart`, { env: { FAKE_MANAGER: "down" } });
+      check(
+        "a shell with no user manager is refused here, before a machine row exists, naming the command root would run",
+        [run.status, run.out.includes(`loginctl enable-linger ${user}`), run.out.includes("Nothing has been installed.")],
+        [2, true, true],
+      );
+    }
+
+    const summarySource = ['say() { printf "%s\\n" "$*"; }', 'note() { printf "  %s\\n" "$*"; }', "dir_flag() { :; }", bootBlock("summary")].join("\n");
+    const summaryOf = (vars: string): string => drive(`${summarySource}\nCP=https://cp.example; CHECKOUT=/srv/x; LABEL=box\n${vars}\nsummary`).out;
+    check(
+      "the run ends by saying whether the daemon comes back after a reboot, with the command where it does not",
+      [
+        summaryOf("NAMED=1; AUTOSTART=on").includes("starts        by itself after a reboot"),
+        summaryOf("NAMED=1; AUTOSTART=login").includes("starts        at login"),
+        summaryOf("NAMED=1; AUTOSTART=off").includes("starts        NOT by itself after a reboot"),
+        summaryOf("NAMED=1; AUTOSTART=off").includes(`sudo loginctl enable-linger ${user}`),
+        summaryOf("NAMED=1; AUTOSTART=on").includes("sudo"),
+      ],
+      [true, true, true, true, false],
+    );
+    check(
+      "and names the machine only where this run named it",
+      [
+        summaryOf("NAMED=1; AUTOSTART=on").includes('"box" is in your machine list'),
+        summaryOf("NAMED=1; AUTOSTART=on").includes("Settings -> Machines -> box -> Agents"),
+        summaryOf("NAMED=0; AUTOSTART=on").includes("This machine is in your machine list"),
+        summaryOf("NAMED=0; AUTOSTART=on").includes("box"),
+      ],
+      [true, true, true, false],
+    );
+
+    const supervisorSource = ['die() { printf "die %s\\n" "$*"; exit 2; }', bootBlock("require_supervisor")].join("\n");
+    const supervisor = (vars: string): Run => drive(`${supervisorSource}\n${vars}\nrequire_supervisor`);
+    check("a Mac needs no systemd", supervisor("PLATFORM=darwin; SYSTEMD_RUN=/nonexistent").status, 0);
+    check("a Linux with systemd as its init passes", supervisor('PLATFORM=linux; SYSTEMD_RUN="$FAKE_RUN"').status, 0);
+    {
+      const run = supervisor("PLATFORM=linux; SYSTEMD_RUN=/nonexistent");
+      check("and one without is refused, naming the wrapper that still works there", [run.status, run.out.includes("run-daemon.sh")], [2, true]);
+    }
+    const mainOrder = bootBlock("main").split("\n").map((line) => line.trim());
+    const at = (line: string): number => mainOrder.indexOf(line);
+    check(
+      "that refusal comes before anything is installed or asked, and lingering before a machine row is spent",
+      [
+        at("require_supervisor") > 0 && at("require_supervisor") < at("ensure_git"),
+        at("choose_credential") < at("ensure_autostart") && at("ensure_autostart") < at("create_machine"),
+        mainOrder[at("existing_install || true") + 1],
+      ],
+      [true, true, 'if [ "$REENROLL" = 1 ]; then reenroll; return 0; fi'],
+    );
+    check("the hand-off no longer tries lingering after the start", /linger/.test(`${bootBlock("run_install")}${bootBlock("hand_off")}`), false);
+
+    // A code names the machine, so an install that is already here is re-enrolled where it stands (Q1.625).
+    const existingSource = [
+      'die() { printf "die %s\\n" "$*"; exit 2; }',
+      "say() { :; }",
+      "dir_flag() { :; }",
+      'menu() { printf "menu\\n" >> "$STUB_LOG"; printf 1; }',
+      "AGENT_SOURCE_GIVEN=0; AGENT_CHANNEL_GIVEN=0; AGENT_SOURCE=vendor; AGENT_CHANNEL=latest; CHECKOUT=/srv/x; REENROLL=0",
+      bootBlock("existing_install"),
+    ].join("\n");
+    const joined = (vars: string, envFile: string | null): Run & { acts: string[]; file: string } => {
+      const file = join(sandbox, `joined-${(fixtures += 1)}.env`);
+      if (envFile !== null) writeFileSync(file, envFile);
+      const run = drive(`${existingSource}\n${vars}\n_r=0; existing_install || _r=$?\nprintf 'r=%s reenroll=%s\\n' "$_r" "$REENROLL"`, { env: { REEMOAT_ENV_FILE: file } });
+      return { ...run, file };
+    };
+    const bound = "REEMOAT_AUTH='signed'\nREEMOAT_CONTROL_PLANE='https://cp.example'\nREEMOAT_ENROLL_CODE='ec_old'\n";
+    for (const tty of ["0", "1"]) {
+      const run = joined(`CP=https://cp.example; ENROLL_CODE=ec_new; TTY_OPEN=${tty}`, bound);
+      check(`given a code on a machine joined to the same control plane, nothing is asked (tty ${tty})`, [run.status, run.out.trim(), run.acts], [0, "r=1 reenroll=1", []]);
+    }
+    {
+      const run = joined("CP=https://other.example; ENROLL_CODE=ec_new; TTY_OPEN=1", bound);
+      check(
+        "a code for another control plane is refused in one sentence, and the file is not touched",
+        [run.status, run.out.includes("is joined to https://cp.example and this code is for https://other.example"), readFileSync(run.file, "utf8"), run.acts],
+        [2, true, bound, []],
+      );
+      const fresh = joined("CP=https://cp.example; ENROLL_CODE=ec_new; TTY_OPEN=0", null);
+      check("and a machine with no install carries on as a first install", [fresh.status, fresh.out.trim()], [0, "r=1 reenroll=0"]);
+      const asks = joined('CP=https://cp.example; ENROLL_CODE=""; TTY_OPEN=1', bound);
+      check("while without a code the menu is still what decides", [asks.acts, asks.out.includes("reenroll=1")], [["menu"], false]);
+    }
+    {
+      const body = /sh -c '([\s\S]*?)' "\$CHECKOUT\/deploy\/lib\.sh"/.exec(bootBlock("write_code"))?.[1];
+      const file = join(sandbox, "write-code", "daemon.env");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, "REEMOAT_AUTH='both'\nREEMOAT_CONTROL_PLANE='https://cp.example'\nREEMOAT_ENROLL_CODE='ec_old'\nREEMOAT_AGENT_SOURCE='npm'\n");
+      const run = spawnSync("sh", ["-c", body ?? "false", join(deployDir, "lib.sh")], {
+        encoding: "utf8",
+        env: { ...baseEnv, REEMOAT_ENV_FILE: file },
+        input: "ec_new",
+      });
+      check(
+        "re-enrolling writes the code and leaves every other line as it was",
+        [run.status, run.stdout, readFileSync(file, "utf8")],
+        [0, file, "REEMOAT_AUTH='both'\nREEMOAT_CONTROL_PLANE='https://cp.example'\nREEMOAT_ENROLL_CODE='ec_new'\nREEMOAT_AGENT_SOURCE='npm'\n"],
+      );
+      const reenroll = bootBlock("reenroll");
+      check(
+        "and a start that did not enroll puts the old file back before it says so",
+        [
+          reenroll.indexOf('cp -p "$_env" "$TMP/env.previous"') > 0 && reenroll.indexOf('cp -p "$_env" "$TMP/env.previous"') < reenroll.indexOf("write_code"),
+          /^ {4}3 \| 5\)\n\s+cp -p "\$TMP\/env\.previous" "\$ENV_FILE"\n\s+sh -c '\. "\$0"; svc_restart daemon'/m.test(reenroll),
+          // Found on a real run: through hand_off, install.sh's own failure ended the script before the old file was put back.
+          /svc_reload daemon' "\$CHECKOUT\/deploy\/lib\.sh" >\/dev\/null 2>&1 \|\| true/.test(reenroll) && /^\s+run_install \|\| true$/m.test(reenroll) && !/^\s+hand_off$/m.test(reenroll),
+        ],
+        [true, true, true],
+      );
+      {
+        // Found on the dev stand: an install that had enrolled was called refused because nobody could read its log, and
+        // putting the old file back over a daemon that did enroll has it ask again with a spent code.
+        const verdict = /^ {2}case "\$_rc" in\n[\s\S]*?\n {2}esac$/m.exec(reenroll)?.[0] ?? "false";
+        const after = (rc: number): string => {
+          const dir = join(sandbox, `reenroll-verdict-${rc}`);
+          mkdirSync(join(dir, "deploy"), { recursive: true });
+          writeFileSync(join(dir, "env.previous"), "old");
+          writeFileSync(join(dir, "daemon.env"), "new");
+          writeFileSync(join(dir, "deploy", "lib.sh"), "svc_restart() { printf ' restarted'; }\n");
+          const run = spawnSync(
+            "sh",
+            ["-c", `set -eu\nTMP="$1"; ENV_FILE="$1/daemon.env"; CHECKOUT="$1"\ndie() { printf ' stopped'; exit 9; }\nsummary() { printf ' summary'; }\n_rc=${rc}\n${verdict}\nsummary`, "sh", dir],
+            { encoding: "utf8", env: baseEnv },
+          );
+          return `${readFileSync(join(dir, "daemon.env"), "utf8")}:${(run.stdout ?? "").trim()}`;
+        };
+        check(
+          "the old file comes back for a code that was refused and for a daemon that is down with nothing to read, and for nothing else",
+          [0, 1, 2, 3, 4, 5].map(after),
+          ["new:summary", "new:stopped", "new:stopped", "old:stopped", "new:summary", "old:stopped"],
+        );
+        const fresh = /^ {2}hand_off\n\n([\s\S]*?)\n {2}summary\n}/m.exec(bootBlock("main"))?.[1] ?? "";
+        check(
+          "and a fresh install goes on to its summary on the same two answers",
+          [/^ {2}verify_running \|\| _rc=\$\?$/m.test(fresh), /^ {4}0 \| 4\) : ;;$/m.test(fresh), /^ {4}\*\) die "$/m.test(fresh)],
+          [true, true, true],
+        );
+      }
+      check(
+        "a code this install already holds is said to be used, before anything is written or restarted",
+        [
+          /if \[ "\$_held" = "\$ENROLL_CODE" \]; then[\s\S]*?return 0\n\s+fi/.test(reenroll),
+          reenroll.indexOf('if [ "$_held" = "$ENROLL_CODE" ]; then') < reenroll.indexOf("ensure_autostart"),
+          reenroll.indexOf('if [ "$_held" = "$ENROLL_CODE" ]; then') < reenroll.indexOf("write_code"),
+        ],
+        [true, true, true],
+      );
+    }
+    {
+      // The body sources its $0, so a stand-in lib answers for the supervisor and the log.
+      const body = /sh -c '([\s\S]*?)' "\$CHECKOUT\/deploy\/lib\.sh"/.exec(bootBlock("verify_running"))?.[1];
+      const verified = (log: string[], up: boolean, system?: string[]): { status: number; enrolled: string; logs: string; relay: boolean } => {
+        const lib = join(sandbox, `verify-${(fixtures += 1)}.sh`);
+        writeFileSync(
+          lib,
+          [
+            "svc_installed() { return 0; }",
+            `svc_pid() { ${up ? "echo 4242" : ":"}; }`,
+            `wait_healthy() { ${up ? "return 0" : "return 1"}; }`,
+            `svc_log_lines() { cat <<'LOG'\n${log.join("\n")}\nLOG\n}`,
+            'log_hint() { printf "the log"; }',
+            "unit_label() { printf reemoat-daemon; }",
+          ].join("\n"),
+        );
+        const journal = `${lib}.journal`;
+        if (system !== undefined) writeFileSync(journal, `${system.join("\n")}\n`);
+        // The stub sleep, so the short wait for the line costs nothing here.
+        const run = spawnSync("sh", ["-c", body ?? "false", lib], {
+          encoding: "utf8",
+          env: {
+            ...baseEnv,
+            PATH: `${stubs}:${baseEnv["PATH"] ?? ""}`,
+            STUB_LOG: join(sandbox, "verify-stubs.log"),
+            ...(system === undefined ? {} : { FAKE_JOURNAL_UNIT: journal }),
+          },
+        });
+        const said = `${run.stdout}\n${run.stderr}`;
+        return {
+          status: run.status ?? -1,
+          enrolled: /^ {2}enrolled {6}(.*)$/m.exec(said)?.[1] ?? "",
+          logs: /^ {2}logs {10}(.*)$/m.exec(said)?.[1] ?? "",
+          relay: /^ {2}relay /m.test(said),
+        };
+      };
+      const verify = (log: string[], up: boolean, system?: string[]): [number, string] => {
+        const answer = verified(log, up, system);
+        return [answer.status, answer.enrolled];
+      };
+      const unread = "not confirmed — this account cannot read the daemon log. The app shows the machine online once it is.";
+      check(
+        "the newest start's enrollment is read as itself",
+        verify(["enrolling with https://cp.example…", "enrolled as m_ab12cd34 (1 key(s), issuer x)", "relay: wss://r"], true),
+        [0, "m_ab12cd34"],
+      );
+      check(
+        "an older start's success does not stand in for a refused code",
+        verify(["enrolled as m_ab12cd34 (1 key(s), issuer x)", "enrolling with https://cp.example…", "enrollment failed: code_rejected"], false),
+        [3, "NO — the code has not been exchanged"],
+      );
+      // Found on a real run: a second daemon on a port another one held passed a health check the other answered, and was called enrolled.
+      check("something answering with no enrollment to read is not taken for this daemon's", verify(["listening", "relay: wss://r"], true), [3, "NO — the code has not been exchanged"]);
+      check("one that enrolled and is not up is a failure that is not a refusal", verify(["enrolling with https://cp.example…", "enrolled as m_ab12cd34 (1 key(s), issuer x)"], false), [1, "m_ab12cd34"]);
+      // Found on the dev stand, uid 501: the machine was enrolled and online, and the account's own journal had no line of it.
+      const elsewhere = verified([], true, ["enrolling with https://cp.example…", "enrolled as m_cd34ef56 (1 key(s), issuer x)", "relay: tunnel up"]);
+      check(
+        "a log the account's own journal does not hold is read out of the system one, and the hint names the command that has it",
+        [elsewhere.status, elsewhere.enrolled, elsewhere.logs],
+        [0, "m_cd34ef56", "journalctl --user-unit reemoat-daemon -n 50"],
+      );
+      check("and a refusal read there is still a refusal", verify(["-- No entries --"], false, ["enrolling with https://cp.example…", "enrollment failed: code_rejected"]), [3, "NO — the code has not been exchanged"]);
+      const nowhere = verified([], true);
+      check(
+        "a log nobody could read is not called a refusal: up is its own answer, with no claim about the relay and the hint left alone",
+        [nowhere.status, nowhere.enrolled, nowhere.relay, nowhere.logs],
+        [4, unread, false, "the log"],
+      );
+      check("the journal's own remark that it is empty is not a line of the daemon's", verify(["-- No entries --"], true), [4, unread]);
+      check("and down with nothing to read is its own answer too", verify([], false), [5, unread]);
+    }
+    {
+      // The checkout's own reader and hint, for an install.sh or deploy.sh run by the same account.
+      const libBlock = (name: string): string => blockIn("lib.sh", libLines, name, `${name}() {`, "}");
+      const journals = (own: string[], system: string[]): string => {
+        const dir = join(sandbox, `journals-${(fixtures += 1)}`);
+        mkdirSync(dir, { recursive: true });
+        const file = (name: string, lines: string[]): Record<string, string> => {
+          if (lines.length === 0) return {};
+          writeFileSync(join(dir, name), `${lines.join("\n")}\n`);
+          return { [name === "own" ? "FAKE_JOURNAL_OWN" : "FAKE_JOURNAL_UNIT"]: join(dir, name) };
+        };
+        const run = spawnSync(
+          "sh",
+          [
+            "-c",
+            [
+              "set -eu",
+              "service_backend() { echo unit; }",
+              "require_init() { :; }",
+              "INIT_SYSTEM=systemd",
+              "unit_label() { printf reemoat-daemon; }",
+              libBlock("svc_log_lines"),
+              libBlock("log_hint"),
+              "svc_log_lines daemon 300 | tr '\\n' ','",
+              "printf '| '",
+              "log_hint daemon",
+            ].join("\n"),
+          ],
+          { encoding: "utf8", env: { ...baseEnv, PATH: `${stubs}:${baseEnv["PATH"] ?? ""}`, STUB_LOG: join(dir, "log"), ...file("own", own), ...file("system", system) } },
+        );
+        return `${run.stdout}${run.stderr}`;
+      };
+      check(
+        "the checkout reads the account's own journal where it has lines, the system one where it has none, and names the command that works",
+        [journals(["a", "b"], ["c"]), journals([], ["c", "d"]), journals([], [])],
+        ["a,b,| journalctl --user -u reemoat-daemon -n 50", "c,d,| journalctl --user-unit reemoat-daemon -n 50", "| journalctl --user -u reemoat-daemon -n 50"],
+      );
+    }
+    {
+      // The toolchain is the first thing written under the state directory, and it used to leave it open to every account:
+      // the env file's own step then said so about a directory this script had made a minute earlier.
+      const makeHome = bootBlock("make_home");
+      const fresh = join(sandbox, "made-home", ".reemoat");
+      const chosen = join(sandbox, "chosen-home");
+      mkdirSync(chosen, { recursive: true });
+      chmodSync(chosen, 0o755);
+      const made = (dir: string): number => {
+        spawnSync("sh", ["-c", `set -eu\nREEMOAT_HOME="$1"\n${makeHome}\nmake_home`, "sh", dir], { encoding: "utf8", env: baseEnv });
+        return statSync(dir).mode & 0o777;
+      };
+      check("a state directory this script makes is closed to everybody else", made(fresh), 0o700);
+      check("while one that was already there keeps the mode somebody gave it", made(chosen), 0o755);
+      const toolchainMade = bootstrapLines.flatMap((line, at) => (line.trim() === 'mkdir -p "$TOOLCHAIN"' ? [bootstrapLines[at - 1]?.trim()] : []));
+      check("and it is made that way before the toolchain is unpacked into it, on both paths", toolchainMade, ["make_home", "make_home"]);
+    }
+    {
+      const run = runBootstrap(["--enroll-code", ""]);
+      check("an empty code is refused by name, not taken for no code and asked about", [run.status, run.err.includes("--enroll-code needs a value")], [2, true]);
+    }
+
+    // install.sh takes the same step before its own start, and stays quiet where lingering is already on.
+    const lingerBlock = blockIn("install.sh", installLines, "the linger step", 'if [ "$INIT_SYSTEM" = systemd ] && [ "$(service_backend "$SERVICE")" = unit ]; then', "fi");
+    const installStep = (init: string, fixture: Fixture = {}): [number, string[], string] => {
+      const run = drive(
+        `. ./lib.sh\nLINGER_DIR=$FAKE_LINGER_DIR; RUNTIME_ROOT=$FAKE_RUN; unset XDG_RUNTIME_DIR\nINIT_SYSTEM=${init}; SERVICE=daemon; LABEL=reemoat-daemon; NON_INTERACTIVE=1\n${lingerBlock}\nprintf '%s' "\${XDG_RUNTIME_DIR:-}"`,
+        fixture,
+      );
+      return [run.status, run.acts, run.out.replace(run.dir, "")];
+    };
+    check("install.sh takes the step before the start", installLines.findIndex((line) => line.startsWith('if [ "$INIT_SYSTEM" = systemd ] && [ "$(service_backend')) < installLines.indexOf("START_FAILED=0"), true);
+    check("with no systemd it runs nothing", installStep("none"), [0, [], ""]);
+    check("with lingering on it runs nothing, which is what keeps a provisioned host quiet", installStep("systemd", { on: true }), [0, [], ""]);
+    check("and without a terminal it tries unprivileged and never reaches sudo", installStep("systemd"), [0, [plain], ""]);
+    {
+      const run = drive(
+        `. ./lib.sh\nLINGER_DIR=$FAKE_LINGER_DIR; RUNTIME_ROOT=$FAKE_RUN; unset XDG_RUNTIME_DIR; mkdir -p "$FAKE_RUN/$(id -u)"\nINIT_SYSTEM=systemd; user_bus\nprintf '%s' "\${XDG_RUNTIME_DIR:-}"`,
+      );
+      check("a shell that was left no runtime directory is given the one logind made", run.out.endsWith(`/run/${process.getuid?.() ?? ""}`), true);
+    }
+    const tail = installLines.slice(installLines.lastIndexOf('if [ "$(service_backend "$SERVICE")" = unit ]; then'));
+    check(
+      "what install.sh says afterwards is measured the same way, so it says nothing where it is on",
+      [tail.some((line) => line.trim() === "if ! linger_on; then"), tail.some((line) => /loginctl show-user/.test(line))],
+      [true, false],
+    );
   }
 
   // `curl | sh` runs a truncated download's prefix, so everything sits in functions called from the last line.

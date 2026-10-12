@@ -1,19 +1,16 @@
-# One template for both services, rendered by deploy/install.sh.
+# The daemon's unit, rendered by deploy/install.sh.
 #
-# A --user unit, not a system one: both services keep all of their state under
-# homedir(), and the daemon runs your agents as whoever it runs as. Running it as
-# root would run every agent as root, on your files.
+# A --user unit, not a system one: the daemon keeps its state under homedir() and
+# runs your agents as whoever it runs as. Running it as root would run every agent
+# as root, on your files.
 #
-# The cost of --user is one real setup step, and install.sh says it out loud:
-# without `loginctl enable-linger <user>` a user unit stops when the last session
-# for that user ends, so a headless host that nobody stays logged into loses the
-# service the moment the operator disconnects.
+# The cost of --user is that it starts at boot only for a user with lingering on,
+# which install.sh turns on before the first start, or names (Q4.106).
 
 [Unit]
 Description=@DESC@
 Documentation=https://github.com/rends-east/reemoat
-# The control plane binds a listener and the daemon dials out to a relay; both
-# want an address before they start.
+# The daemon dials out to a relay and wants an address before it starts.
 After=network-online.target
 Wants=network-online.target
 
@@ -38,7 +35,7 @@ Environment=PATH=@PATH@
 Environment="REEMOAT_ENV_FILE=@ENV_FILE@"
 ExecStart=@EXEC@
 
-# Always, not on-failure: a clean exit is still an outage. Both services exit 0
+# Always, not on-failure: a clean exit is still an outage. The daemon exits 0
 # on SIGTERM, which is also what a shutdown looks like, so systemd's own stop
 # path is what distinguishes the two — not the exit code.
 Restart=always

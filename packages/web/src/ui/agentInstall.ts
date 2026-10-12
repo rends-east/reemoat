@@ -89,13 +89,42 @@ export function installResult(checking: boolean, checkFailed: boolean, available
   return available ? "installed" : "notInstalled";
 }
 
-/** The installed arm names the next step: a new harness has no tile until it is signed in. */
-export function installResultLine(result: InstallResult, name: string): string | null {
+/** Where a finished install or sign-in leads next on the same card; null where the card has no such step to offer. */
+export type Onward = "sign_in" | "new_session" | null;
+
+/** Sign-in only where this card can run one, a session only where the strip already has the tile (Q3.640). */
+export function afterInstall(input: {
+  result: InstallResult | null;
+  stance: AgentStance;
+  canSignIn: boolean;
+  tile: boolean;
+}): Onward {
+  if (input.result !== "installed") return null;
+  switch (input.stance) {
+    case "not_installed":
+      return null;
+    case "signed_in":
+    case "no_login":
+      return input.tile ? "new_session" : null;
+    case "start_refused":
+    case "signed_out":
+    case "unchecked":
+      return input.canSignIn ? "sign_in" : input.tile ? "new_session" : null;
+    default: {
+      const exhaustive: never = input.stance;
+      return exhaustive;
+    }
+  }
+}
+
+/** The installed arm names the next step only where the pane offers it. */
+export function installResultLine(result: InstallResult, name: string, onward: Onward): string | null {
   switch (result) {
     case "checking":
       return null;
     case "installed":
-      return `${name} is installed. Sign in to start a chat with it.`;
+      if (onward === "sign_in") return `${name} is installed. Sign in to start a chat with it.`;
+      return onward === "new_session" ? `${name} is installed and ready to start.` : `${name} is installed.`;
     case "notInstalled":
       return `That didn't install ${name}.`;
     case "unreachable":

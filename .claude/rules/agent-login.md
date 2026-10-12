@@ -62,7 +62,8 @@ itself start a session (Q2.200); kimi's applies per that installation's
 allocates one with `script` and is pure, so `daemoncheck` asserts both platforms:
 util-linux takes a shell string (`script -qec "<cmd>" /dev/null`), BSD takes argv. The
 command is an absolute path and must be shell-quoted; macOS `script` has no `-e` and
-does not propagate exit status, so the wizard re-probes; `script` may be missing, which
+does not propagate exit status, so the wizard re-probes (and offers **New session** only
+on that answer, `afterLogin`: `agent-install.md`); `script` may be missing, which
 `SessionRuntime.loginSupported` reports. `loginSupport(agent)` folds `script` on PATH,
 that agent's CLI resolving, and whether its flow reads stdin; `loginSupported` answers
 only the first and is still sent for an older client. Q2.202.

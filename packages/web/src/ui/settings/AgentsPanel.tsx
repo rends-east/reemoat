@@ -1,8 +1,12 @@
 import { Check, Download, ExternalLink, LogIn, LogOut, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { keepPick } from "../../agentPick";
+import { offersStripTile } from "../../agents";
 import type { DaemonClient } from "../../daemon";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
+import { newSessionFor } from "../../nav";
+import { navigate, useOrigin } from "../../router";
 import { store } from "../../store";
 import type {
   AgentAuthInfo,
@@ -15,6 +19,7 @@ import type {
 import { Badge, Button, DangerButton, Empty, FIELD, GROUP_ROW, Icon, Spinner, TwoStep } from "../bits";
 import { CommandLine } from "../CommandLine";
 import {
+  afterInstall,
   installElapsed,
   installFailure,
   installResult,
@@ -23,8 +28,10 @@ import {
   keepInstallTail,
   primaryControl,
   rawInstallIsOpen,
+  type InstallResult,
+  type Onward,
 } from "../agentInstall";
-import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
+import { afterLogin, loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
 import {
   harnessName,
   agentBadge,
@@ -193,6 +200,7 @@ function SignIn({
     }
   });
   const [installing, setInstalling] = useState(() => heldInstall(machineId, agent.id) !== null);
+  const origin = useOrigin();
   const [rechecking, setRechecking] = useState(false);
   /** The daemon said it installs nothing. The auth listing does not fold that into installable, so this is the only suppression; it only ever rises. */
   const [noInstallRoute, setNoInstallRoute] = useState(false);
@@ -258,6 +266,12 @@ function SignIn({
   // The card's one line: the stance, or why a signed-in agent offers no Sign out.
   const said = line ?? (control === "none" && stance === "signed_in" ? signOutSentence(agent.id, stored) : null);
   const refused = wholeAgent && stance === "start_refused";
+  // A card scoped to one key slot is a system's, and a system has no tile of its own.
+  const tile = keyEnv === null && offersStripTile(agent);
+  const toNewSession = (): void => {
+    keepPick(machineId, { kind: "harness", id: agent.id });
+    navigate(newSessionFor(machineId, origin), true);
+  };
 
   /** One Check again per card: for a refusal it asks the daemon to measure the start again, otherwise it re-reads. */
   const recheck = (): void => {
@@ -297,6 +311,12 @@ function SignIn({
                 available={agent.available}
                 checking={checking}
                 checkFailed={checkFailed}
+                onwardFor={(result) => afterInstall({ result, stance, canSignIn, tile })}
+                onSignIn={() => {
+                  setInstalling(false);
+                  setWizard(true);
+                }}
+                onNewSession={toNewSession}
                 onDone={onChanged}
                 onClose={() => {
                   setInstalling(false);
@@ -314,6 +334,8 @@ function SignIn({
                 loggedIn={agent.loggedIn}
                 checking={checking}
                 checkFailed={checkFailed}
+                tile={tile}
+                onNewSession={toNewSession}
                 onDone={onChanged}
                 onClose={() => {
                   setWizard(false);
@@ -693,6 +715,8 @@ function LoginWizard({
   loggedIn,
   checking,
   checkFailed,
+  tile,
+  onNewSession,
   onClose,
   onDone,
 }: {
@@ -704,6 +728,8 @@ function LoginWizard({
   loggedIn: boolean | null | undefined;
   checking: boolean;
   checkFailed: boolean;
+  tile: boolean;
+  onNewSession: () => void;
   onClose: () => void;
   onDone: () => void;
 }): ReactNode {
@@ -999,6 +1025,17 @@ function LoginWizard({
           </Button>
         )}
         {outcome === "unreachable" && <RecheckButton onClick={onDone} busy={checking} />}
+        {afterLogin(outcome, tile) === "new_session" && (
+          <Button
+            tone="primary"
+            onClick={() => {
+              close(false);
+              onNewSession();
+            }}
+          >
+            New session
+          </Button>
+        )}
         <Button tone="ghost" onClick={() => close(!done)}>
           {done ? "Close" : "Cancel"}
         </Button>
@@ -1014,6 +1051,9 @@ function InstallPane({
   available,
   checking,
   checkFailed,
+  onwardFor,
+  onSignIn,
+  onNewSession,
   onDone,
   onClose,
 }: {
@@ -1023,6 +1063,9 @@ function InstallPane({
   available: boolean;
   checking: boolean;
   checkFailed: boolean;
+  onwardFor: (result: InstallResult | null) => Onward;
+  onSignIn: () => void;
+  onNewSession: () => void;
   onDone: () => void;
   onClose: () => void;
 }): ReactNode {
@@ -1158,6 +1201,8 @@ function InstallPane({
 
   const result = run?.done === true ? installResult(checking, checkFailed, available) : null;
   const failure = run?.done === true ? installFailure(run.outcome, displayName) : null;
+  // A run that failed leads nowhere, whatever the re-read finds on the machine.
+  const onward = onwardFor(failure === null ? result : null);
   const elapsed = run === null ? null : installElapsed(run.startedAt, now);
   const step = installStep(run?.phase ?? null);
   const saying = running || failure !== null || result !== null || trouble !== null;
@@ -1188,7 +1233,7 @@ function InstallPane({
                   <Spinner /> Checking with your machine…
                 </span>
               ) : (
-                installResultLine(result, displayName)
+                installResultLine(result, displayName, onward)
               )}
             </p>
           )}
@@ -1225,6 +1270,16 @@ function InstallPane({
             }}
           >
             Stop
+          </Button>
+        )}
+        {onward === "sign_in" && (
+          <Button tone="primary" onClick={onSignIn}>
+            Sign in to {displayName}
+          </Button>
+        )}
+        {onward === "new_session" && (
+          <Button tone="primary" onClick={onNewSession}>
+            New session
           </Button>
         )}
         <Button tone="ghost" onClick={onClose}>

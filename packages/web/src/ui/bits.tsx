@@ -247,7 +247,7 @@ export function Monogram({
 export const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   no_route: "unreachable",
   no_token: "no token",
-  not_enrolled: "not enrolled",
+  not_enrolled: "not set up yet",
   cp_unreachable: "control plane unreachable",
   over_limit: "over the machine limit",
   owner_disabled: "its owner is disabled",

@@ -30,6 +30,7 @@ use crate::credential;
 use crate::daemon;
 use crate::device::{self, DeviceKey};
 use crate::local::{self, LocalDaemon};
+use crate::login;
 use crate::proxy::{self, CpAnswer, CpRequest};
 use crate::seats;
 
@@ -572,6 +573,9 @@ pub fn host_daemon_start(
         .lock()
         .map_err(|_| "the supervisor is poisoned".to_string())?
         .start(&payload, &home, &env, &spawn)?;
+    drop(_roots);
+    // This computer is a machine now, so it should come back as one after a reboot (Q7.161).
+    login::default_on(&host.config_dir, &exe_path(), true);
     Ok(daemon::DaemonState {
         status: "starting".to_string(),
         claimed: if machine_id.is_empty() {
@@ -1590,4 +1594,33 @@ pub fn host_set_theme(
         seats::show_theme(&webview.window(), theme);
     }
     wrote.map(|_| ())
+}
+
+fn carries_daemon(app: &AppHandle) -> bool {
+    CAN_HOST_DAEMON && daemon::Payload::locate(&resource_dir(app), &exe_path()).is_some()
+}
+
+/// Whether this app opens at login, as the system says it now. The seat is read for its document
+/// alone: the answer is this computer's, not an account's (Q7.161).
+#[tauri::command(async)]
+pub fn host_login_item(
+    app: AppHandle,
+    webview: tauri::Webview,
+    request: tauri::ipc::Request<'_>,
+    host: State<'_, Host>,
+) -> Result<String, String> {
+    host.seat(&webview, &request)?;
+    Ok(login::state(&exe_path(), carries_daemon(&app)).to_string())
+}
+
+/// Answers what the system says afterwards, never what was asked for.
+#[tauri::command(async)]
+pub fn host_login_item_set(
+    app: AppHandle,
+    webview: tauri::Webview,
+    host: State<'_, Host>,
+    on: bool,
+) -> Result<String, String> {
+    host.require_shown(webview.label())?;
+    login::set(&host.config_dir, &exe_path(), carries_daemon(&app), on).map(str::to_string)
 }

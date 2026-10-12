@@ -9,6 +9,7 @@ process.stdout.write("\ninstalling a harness, from this side\n");
     installElapsed,
     installFailure,
     installResult,
+    afterInstall,
     installResultLine,
     installStage,
     installStep,
@@ -196,10 +197,42 @@ process.stdout.write("\ninstalling a harness, from this side\n");
     [true, true, true, true, true],
   );
   check(
-    "the success line points at the sign-in, because the tile is not back yet",
-    installResultLine("installed", "Claude Code"),
+    "the success line points at the sign-in where the pane offers one",
+    installResultLine("installed", "Claude Code", "sign_in"),
     "Claude Code is installed. Sign in to start a chat with it.",
   );
+  check(
+    "and names no sign-in where it offers none: the sentence used to send a Mac to a wizard it does not have",
+    [installResultLine("installed", "Claude Code", "new_session"), installResultLine("installed", "Claude Code", null)],
+    ["Claude Code is installed and ready to start.", "Claude Code is installed."],
+  );
+  {
+    // Every cell: what a finished install leads to is decided here, and the pane only draws the answer (Q3.640).
+    const STANCES = ["not_installed", "start_refused", "no_login", "signed_in", "signed_out", "unchecked"] as const;
+    const RESULTS = ["checking", "installed", "notInstalled", "unreachable", null] as const;
+    const cells: Array<{ result: (typeof RESULTS)[number]; stance: (typeof STANCES)[number]; canSignIn: boolean; tile: boolean }> = [];
+    for (const result of RESULTS) for (const stance of STANCES) for (const canSignIn of [false, true]) for (const tile of [false, true]) cells.push({ result, stance, canSignIn, tile });
+    report("the grid covers every cell", cells.length === 120, `${cells.length} cells`);
+    check("nothing is offered until the machine says the harness is there", cells.filter((c) => c.result !== "installed" && afterInstall(c) !== null), []);
+    check("a sign-in is offered only where this card can run one", cells.filter((c) => afterInstall(c) === "sign_in" && !c.canSignIn), []);
+    check("and a session only where the strip already has the tile", cells.filter((c) => afterInstall(c) === "new_session" && !c.tile), []);
+    check("a harness that is signed in is never sent to sign in again", cells.filter((c) => (c.stance === "signed_in" || c.stance === "no_login") && afterInstall(c) === "sign_in"), []);
+    check(
+      "the three it does offer are all reachable",
+      [
+        afterInstall({ result: "installed", stance: "signed_out", canSignIn: true, tile: false }),
+        afterInstall({ result: "installed", stance: "signed_in", canSignIn: true, tile: true }),
+        afterInstall({ result: "installed", stance: "signed_out", canSignIn: false, tile: false }),
+        afterInstall({ result: "installed", stance: "unchecked", canSignIn: false, tile: true }),
+      ],
+      ["sign_in", "new_session", null, "new_session"],
+    );
+    check(
+      "and the sentence names the sign-in exactly where the button does",
+      cells.filter((c) => c.result === "installed").filter((c) => /Sign in/.test(installResultLine("installed", "X", afterInstall(c)) ?? "") !== (afterInstall(c) === "sign_in")),
+      [],
+    );
+  }
   check(
     "and the re-read has a definite answer either way — there is no cannot-tell here",
     [
@@ -275,8 +308,10 @@ process.stdout.write("\ninstalling a harness, from this side\n");
     if (line !== null) sentences.push(line);
   }
   for (const result of ["checking", "installed", "notInstalled", "unreachable"] as const) {
-    const line = installResultLine(result, "Claude Code");
-    if (line !== null) sentences.push(line);
+    for (const onward of ["sign_in", "new_session", null] as const) {
+      const line = installResultLine(result, "Claude Code", onward);
+      if (line !== null) sentences.push(line);
+    }
   }
   for (const phase of ["download", "install", "link"] as const) {
     const line = installStep(phase);

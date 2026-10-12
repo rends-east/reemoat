@@ -389,11 +389,14 @@ export class MachineConnection {
       }
       this.token = null;
       this.reach = "offline";
+      // The server's own word for a row whose daemon has not started: one reason, not a first and a second (Q3.709).
       this.offlineReason = isTransportFailure(error)
         ? "cp_unreachable"
         : meansDeviceKeyMissing(error)
           ? "no_device_key"
-          : "no_token";
+          : ApiError.isApiError(error) && error.code === "machine_not_enrolled"
+            ? "not_enrolled"
+            : "no_token";
       this.lastError = describe(error);
       this.onChange();
       throw error;

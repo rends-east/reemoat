@@ -405,7 +405,9 @@ async function connect(id: string, channels: never = fetchChannel) {
 
   // The code, never the status: another 409 from the same route must not read as the device half.
   const notEnrolled = await settle("m_notenrolled", { status: 409, code: "machine_not_enrolled" });
-  check("another 409 from the same route is not the device half", notEnrolled.reason, "no_token");
+  check("another 409 from the same route is not the device half, and a row not enrolled yet is said as that", notEnrolled.reason, "not_enrolled");
+  const otherConflict = await settle("m_conflict", { status: 409, code: "something_else" });
+  check("while a 409 with any other code is still a missing token", otherConflict.reason, "no_token");
   const revoked = await settle("m_revoked", { status: 403, code: "machine_revoked" });
   check("nor is a refusal that arrives under another status", revoked.reason, "no_token");
 
@@ -471,7 +473,7 @@ async function connect(id: string, channels: never = fetchChannel) {
     check(
       "and the reason it settles is keyed on the refusal's code rather than on the attempt",
       (/this\.offlineReason = [\s\S]*?;/.exec(mint)?.[0] ?? "").replace(/\s+/g, " "),
-      'this.offlineReason = isTransportFailure(error) ? "cp_unreachable" : meansDeviceKeyMissing(error) ? "no_device_key" : "no_token";',
+      'this.offlineReason = isTransportFailure(error) ? "cp_unreachable" : meansDeviceKeyMissing(error) ? "no_device_key" : ApiError.isApiError(error) && error.code === "machine_not_enrolled" ? "not_enrolled" : "no_token";',
     );
   }
 }
@@ -691,7 +693,7 @@ async function connect(id: string, channels: never = fetchChannel) {
   );
   check(
     "and a resume, after its re-list",
-    (store.match(/this\.dropMachine\(id\);\s*\}\s*this\.weighLocalMachine\(\);/g) ?? []).length,
+    (store.match(/this\.dropMachine\(id\);\s*changed = this\.registryKnown;\s*\}\s*\}\s*this\.weighLocalMachine\(\);/g) ?? []).length,
     1,
   );
   check(

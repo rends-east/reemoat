@@ -87,16 +87,16 @@ awaiting `hostReady`, and `nativeHydrating()` stops the sign-in screen drawing f
   pencil; **Continue** adopts it, then sign-in. Never the address as a *Change* line under the
   sign-in form (owner's call, 2026-09-16).
 - **Sign-in carries a leading `‹ Server`** (a `web-shell.md` back control naming its
-  destination, never the address) only on a pending sign-in with an account to return to
-  (Q5.120); not on a first run, which knowingly leaves a wrong address a one-way door (Q3.643).
+  destination, never the address) on every pending sign-in, a first run's included, and on
+  no account's (Q5.120): a wrong but reachable address is corrected there (Q3.643).
 - Entrances: `state.host.server === null` (the welcome: first run, or an add) and
   `state.pickingServer` (`‹ Server`). Another server is another account.
 - **`cp.detachSession()` runs before `setNativeServer`**, or a poll or in-flight `cpFetch`
   hands server A's token to the new base. `host_set_server` refuses all but a pending seat
   (Q5.120), so this is the belt. Never `clearSession()`. `webcheck` asserts the two indices.
 - Adopting the origin already held returns early: nothing written, erased or reloaded.
-- **A way back exists iff there is an account to go back to**, which keeps the first run
-  uncancellable and `signInReady` server-free. The screen says adding costs others nothing.
+- **The picker's own way back exists iff there is an account to go back to**, which keeps
+  the welcome uncancellable and `signInReady` server-free; Continue on the address held returns.
 - Not a `Route` arm: `parseGateScreen` is shared with the router (the web build would draw
   `/server`), and eight `Route` switches (`depthOf`, `screenOf`, `isSheet`, …) would need an arm.
 - Above the `legal` arm: a document route waits on `state.config` from `GET /v1/instance`,
@@ -157,7 +157,7 @@ disjoint); a typed `/register` falls through to `SignIn`.
 - **The close button puts the app away on macOS and Windows; only a Quit quits** (`away.rs`):
   daemons run on, back from the Dock (`Reopen`) or the Windows tray or a second launch
   (single-instance, the first plugin). ⌘Q, menus and the tray's Quit reach `RunEvent::Exit`.
-  Linux quits on close (Q6.108). Q3.697.
+  Linux quits on close (Q6.108). Q3.697. A launch at login opens put away (`native-login.md`).
 - The origin is `tauri://localhost` (macOS, Linux) or `http://tauri.localhost` (Windows,
   Android): use `controlPlaneOrigin()`, not `location.origin`; `is_our_own` in `lib.rs` names all.
 - The asset protocol falls back to `index.html`, so deep links and `location.reload()` work.

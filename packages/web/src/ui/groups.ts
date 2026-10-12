@@ -402,6 +402,8 @@ export interface BodyMachine {
   sessions: Answer;
   /** Down since the server last answered: the server is being asked which of the two it is. */
   doubted: boolean;
+  /** The app is still setting this machine up, so what it reads as now is not yet an answer. */
+  settingUp: boolean;
 }
 
 export interface ListBodyInput {
@@ -417,6 +419,13 @@ export interface ListBodyInput {
   needle: boolean;
   /** Rows the filter alone withholds. */
   hidden: number;
+  /** The app is setting this computer up: an empty registry is asked and not answered yet. */
+  settingUp: boolean;
+}
+
+/** In flight only: a setup that failed says its own sentence and withholds nothing. */
+export function settingUp(setup: { step: "creating" | "starting" | "failed" } | null): boolean {
+  return setup !== null && setup.step !== "failed";
 }
 
 export type ListBody =
@@ -436,6 +445,7 @@ export type ListBody =
 
 /** Asked or about to be: nothing can be said of it yet. */
 function unsettled(machine: BodyMachine): boolean {
+  if (machine.settingUp) return true;
   if (machine.reach === "unknown" || machine.reach === "probing") return true;
   if (machine.doubted && onTheWire(machine.reach, machine.offlineReason)) return true;
   return machine.reach === "online" && machine.sessions === "unknown";
@@ -452,7 +462,7 @@ function refusal(machine: BodyMachine): NonNullable<OfflineReason> | null {
  * from a read that answered: an unread registry or machine is a skeleton, a failed one names what was not reached.
  */
 export function listBody(input: ListBodyInput): ListBody {
-  const { device, server, registry, fleet, selected, rows, needle, hidden } = input;
+  const { device, server, registry, fleet, selected, rows, needle, hidden, settingUp: pending } = input;
   // Offline renames a failure and is none by itself; a server that answered with an error was reached, and keeps its name.
   const serverBody = (): ListBody =>
     server === "refusing"
@@ -462,7 +472,7 @@ export function listBody(input: ListBodyInput): ListBody {
         : { kind: "server", why: "unreachable" };
 
   if (fleet.length === 0) {
-    if (registry === "known") return { kind: "no_machines" };
+    if (registry === "known") return pending ? { kind: "skeleton" } : { kind: "no_machines" };
     return serverTroubled(server) ? serverBody() : { kind: "skeleton" };
   }
   if (rows > 0) return { kind: "rows" };

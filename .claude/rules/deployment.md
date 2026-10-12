@@ -16,7 +16,7 @@ paths:
 curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/install.sh | sh
                                      # a machine, nothing to enrolled; ASKS which control plane
   … | sh -s -- --url https://cp.example  # or names it (REEMOAT_CONTROL_PLANE too)
-  … | sh -s -- --enroll-code ec_…    # a code already minted, no account credential
+  … | sh -s -- --enroll-code ec_…    # a minted code: no sign-in, no new machine
   … | sh -s -- --uninstall [--purge] # remove the unit, delete nothing; --purge deletes DB, checkout,
                                      #   worktrees and ~/.reemoat/servers, naming them first (Q7.148)
 deploy/agents.sh --check | --only kimi | --refresh-only | --fail-if-locked
@@ -38,11 +38,10 @@ deploy/compose.sh logs -f control-plane   # only place the admin key survives; a
 ## The one-liner
 
 **`deploy/bootstrap.sh` is served at `/install.sh`; the names differ on purpose.** It
-gets a machine from nothing and **hands off to `install.sh`** (which configures a
-service on a checkout) rather than reimplementing unit rendering, `runtime_path` or
-the probe. An env file in place makes the install non-interactive: interview and
-refusal-to-start are gated on `cmp -s "$ENV_FILE" "$ENV_EXAMPLE"`.
-`services/premium`'s cloud-init relies on it.
+gets a machine from nothing and **hands off to `install.sh`** rather than
+reimplementing unit rendering, `runtime_path` or the probe. An env file in place makes
+the install non-interactive: interview and refusal-to-start are gated on
+`cmp -s "$ENV_FILE" "$ENV_EXAMPLE"`. `services/premium`'s cloud-init relies on it.
 
 **Which control plane: `--url`/`REEMOAT_CONTROL_PLANE`, else the origin `GET /install.sh`
 substituted, else it asks, with no default.** `deploycheck` asserts real hosts are
@@ -52,14 +51,15 @@ never a control plane, so a download URL never picks the fleet; `ci-release.sh`'
 `publish` uploads `deploy/bootstrap.sh` as `install.sh`, and `docscheck` pins the
 README's URL to `SOURCE_URL` plus that name. Q4.112.
 
-**The substituted origin is `installOrigin`, not `publicUrl(c)`**, which answers
-`http://` behind Traefik (a 301 `bootstrap.sh` will not follow). It reads
-`x-forwarded-proto` gated on `trustedProxyHops`, as `callerAddressOf` does; the four
-code-minting routes answer `controlPlaneUrl` through it; `relaycheck` pins both.
-Q1.627. The value is caller-influenced (a `Host` of ``a`id`b`` survives
-`URL.origin`), so `app.ts` quotes it with its own `shellQuote`; `webcheck` runs all
-three copies over a hostile table and `imagecheck` sends a hostile `Host` through a
-real container.
+**The substituted origin is `installOrigin`**: `cp-machines.md`, Q1.627.
+
+**The menu is sign in or API key**; sign-up is a line naming `$CP/register`. With
+`--enroll-code` on a host whose env file names `$CP`, `reenroll` moves one line and
+puts the old file back if the start did not enroll; another control plane is
+refused. `require_supervisor` refuses a Linux without systemd before any request.
+**`sudo` runs in `linger_step` alone** (same text in `lib.sh`): `enable-linger`
+unprivileged before the machine is made, measured on the marker file, then `sudo`
+behind one tty answer, or `sudo -n` under `--yes`. Q4.106, Q1.625.
 
 **One `main "$@"` on the last line**, so a truncated download runs nothing;
 `deploycheck` asserts it. **stdin is the download**: questions go to `/dev/tty`;

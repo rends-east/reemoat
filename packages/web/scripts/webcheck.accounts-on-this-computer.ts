@@ -61,6 +61,7 @@ const accountAwaitingProof = bootWith({ account: "https://app.example#u_ada", na
     [
       exits(null, OTHER),
       exits(pending, null),
+      exits(pending, ""),
       exits(pending, OTHER),
       exits(legacy, null),
       exits(legacy, OTHER),
@@ -69,7 +70,8 @@ const accountAwaitingProof = bootWith({ account: "https://app.example#u_ada", na
     ],
     [
       [false, false, false],
-      [false, false, false],
+      [true, false, false],
+      [true, false, false],
       [true, false, false],
       [false, false, true],
       [false, true, true],

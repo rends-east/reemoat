@@ -22,7 +22,7 @@ export function signInExits(boot: NativeBoot | null, back: string | null | undef
   if (slot === null) return { server: false, back: false, remove: false };
   const elsewhere = typeof back === "string" && back.length > 0;
   return {
-    server: slot === "pending" && elsewhere,
+    server: slot === "pending" && back !== undefined,
     back: slot !== "pending" && elsewhere,
     remove: slot !== "pending",
   };

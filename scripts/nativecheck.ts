@@ -535,9 +535,10 @@ check("and every command lives in commands.rs", strayCommands, []);
     "host_device_key_reset",
     "host_device_set",
     "host_local_daemon",
+    "host_login_item",
     "host_set_server",
   ];
-  const SURFACING = ["host_copy_text", "host_open_external", "host_pick_folder", "host_save_file", "host_set_theme"];
+  const SURFACING = ["host_copy_text", "host_login_item_set", "host_open_external", "host_pick_folder", "host_save_file", "host_set_theme"];
   const BOOT = ["host_boot"];
   check(
     "every command is one kind: seat-scoped, surfacing, or the boot that issues the generation",
@@ -2856,6 +2857,111 @@ process.stdout.write("\nthe window's theme, and the ink behind the page\n");
     rustSources.flatMap((file) => [...rustOf(file).matchAll(/(\w+)\.set_theme\(/g)].map((m) => `${file}: ${m[1]}`)),
     ["seats.rs: window"],
   );
+}
+
+process.stdout.write("\nopening at login, and the one thing a launch may write for it\n");
+{
+  const TAURI_SRC = join(ROOT, TAURI_DIR, "src");
+  const sources = readdirSync(TAURI_SRC).filter((file) => file.endsWith(".rs"));
+  const codeOf = (file: string): string => flat(rustCode(read(`${TAURI_DIR}/src/${file}`)));
+  const login = codeOf("login.rs");
+  const lib = codeOf("lib.rs");
+  const commands = codeOf("commands.rs");
+  const config = codeOf("config.rs");
+
+  // The system keeps the answer. A plist of this app's own would sit where `managed_unit` looks for a daemon's.
+  check(
+    "the login item is the system's own, named in one file, with its framework linked there",
+    [
+      sources.filter((file) => /SMAppService/.test(rustCode(read(`${TAURI_DIR}/src/${file}`)))),
+      /#\[link\(name = "ServiceManagement", kind = "framework"\)\]/.test(login),
+      /AnyClass::get\(c"SMAppService"\)\?/.test(login),
+    ],
+    [["login.rs"], true, true],
+  );
+  check(
+    "nothing but the daemon's own check names the directory launchd reads, and no crate does this for the app",
+    [sources.filter((file) => /LaunchAgents/.test(rustCode(read(`${TAURI_DIR}/src/${file}`)))), /autostart|auto-launch|smappservice/i.test(cargoToml)],
+    [["daemon.rs"], false],
+  );
+  check(
+    "is it on is asked of the system each time, and only enabled is a yes",
+    [/const ENABLED: isize = 1;/.test(login), /let status: isize = unsafe \{ msg_send!\[service, status\] \}; Some\(status == ENABLED\)/.test(login)],
+    [true, true],
+  );
+
+  // The default is applied once: the mark is written before the registration, and a choice somebody made writes it too.
+  const firstTime = between(login, "fn first_time(", "pub fn opened_at_login(");
+  check(
+    "the mark is written before the app registers itself, so a failure between the two never repeats it",
+    [
+      /if !matches!\(config::decide_login_item\(dir\), Ok\(true\)\) \{ return false; \} let _ = register\(\); true/.test(firstTime),
+      /if on \{ config::decide_login_item\(dir\)\?; system::register\(\)\?; \} else \{ let _ = config::decide_login_item\(dir\); system::unregister\(\)\?; \}/.test(login),
+    ],
+    [true, true],
+  );
+  check(
+    "a mark already there, or a file put aside that may have held it, decides nothing",
+    /pub fn decide_login_item\(dir: &Path\) -> Result<bool, String> \{ let mut stored = read_stored\(dir\); if stored\.login_item\.is_some\(\) \|\| unreadable_file\(dir\)\.exists\(\) \{ return Ok\(false\); \}/.test(config),
+    true,
+  );
+  check(
+    "it never touches the account list, so a file from before accounts stays one",
+    /accounts_mut|materialize_accounts/.test(between(config, "pub fn decide_login_item(", "pub enum Theme")),
+    false,
+  );
+  const callers = sources.flatMap((file) => [...codeOf(file).matchAll(/login::default_on\(/g)].map(() => file));
+  check("the default has two callers, each where this app's own supervisor started a daemon", callers.sort(), ["commands.rs", "lib.rs"]);
+  check(
+    "after a start that succeeded: the first setup, and a launch that found one configured",
+    [
+      /\.start\(&payload, &home, &env, &spawn\)\?; drop\(_roots\); login::default_on\(&host\.config_dir, &exe_path\(\), true\);/.test(commands),
+      /let started = daemon::start_configured_at_launch\([\s\S]*?\); if !started\.is_empty\(\) \{ login::default_on\(&host\.config_dir, &commands::exe_path\(\), true\); \}/.test(lib),
+    ],
+    [true, true],
+  );
+  // The one write a launch may make, off the main thread and only after a daemon of this app's own was started.
+  check(
+    "and that is all a launch writes: the mark's own writer is named nowhere in the startup files",
+    [/decide_login_item|login::set\(/.test(lib + codeOf("seats.rs")), (lib.match(/login::default_on\(/g) ?? []).length],
+    [false, 1],
+  );
+  check(
+    "never from a debug build or outside a bundle, and never from a translocated copy",
+    [
+      /cfg!\(target_os = "macos"\) && !cfg!\(debug_assertions\) && carries_daemon && bundled\(exe\)/.test(login),
+      /part\.as_os_str\(\) == "AppTranslocation"/.test(login),
+    ],
+    [true, true],
+  );
+
+  // A launch the system made at login opens with the window away; the daemons start exactly as they always do.
+  check(
+    "a login launch is read off the open event, and opens the window hidden",
+    [
+      /four\(b"oapp"\)/.test(login) && /four\(b"prdt"\)/.test(login) && /four\(b"lgit"\)/.test(login),
+      /\.map\(\|config\| seats::themed\(&config, theme\)\)\.map\(\|config\| away::at_launch\(config, login::opened_at_login\(\)\)\)/.test(lib),
+      /if PUTS_AWAY && by_login \{ config\.visible = false; \}/.test(codeOf("away.rs")),
+      /host\.set_shown\(&shown\); if config\.visible \{ window\.show\(\)\?; \}/.test(codeOf("seats.rs")),
+    ],
+    [true, true, true, true],
+  );
+
+  // The page reads and sets it through two commands; the setter is the shown seat's, as every act the system puts on screen is.
+  check(
+    "the switch is the account on screen's, and answers what the system says afterwards",
+    [
+      /host\.require_shown\(webview\.label\(\)\)\?;/.test(commands.slice(commands.indexOf("pub fn host_login_item_set("))),
+      /login::set\(&host\.config_dir, &exe_path\(\), carries_daemon\(&app\), on\)\.map\(str::to_string\)/.test(commands),
+    ],
+    [true, true],
+  );
+  const words = [...login.matchAll(/pub const (?:ON|OFF|UNSUPPORTED): &str = "([a-z]+)";/g)].map((m) => m[1]).sort();
+  const pageWords = (/export type LoginItem = ([^;]+);/.exec(read("packages/web/src/native.ts"))?.[1] ?? "")
+    .split("|")
+    .map((word) => word.trim().replace(/"/g, ""))
+    .sort();
+  check("the host's three words are the page's three", [words, pageWords], [["off", "on", "unsupported"], ["off", "on", "unsupported"]]);
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);

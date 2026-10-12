@@ -9,6 +9,7 @@ mod credential;
 mod daemon;
 mod device;
 mod local;
+mod login;
 mod proxy;
 mod seats;
 
@@ -111,6 +112,8 @@ pub fn run() {
             commands::host_save_file,
             commands::host_pick_folder,
             commands::host_set_theme,
+            commands::host_login_item,
+            commands::host_login_item_set,
         ])
         // A page load retires the previous document's generation, so a revived one is refused (Q5.120).
         // A webview's first load may be missed here, which is safe: it holds no generation yet.
@@ -138,6 +141,7 @@ pub fn run() {
             // `create: false` in `tauri.conf.json`; `seats.rs` builds it to add the navigation guard.
             let config = seats::main_config(app.handle())
                 .map(|config| seats::themed(&config, theme))
+                .map(|config| away::at_launch(config, login::opened_at_login()))
                 .ok_or("tauri.conf.json declares no window labelled main")?;
             seats::open_at_launch(app, &config, &roster, server)?;
             #[cfg(target_os = "windows")]
@@ -159,12 +163,17 @@ pub fn run() {
                     };
                     let roots = host.launch_roots(&home, &roster);
                     // Called under the root lock, so an account removed since launch is skipped.
-                    daemon::start_configured_at_launch(&payload, &home, &roots, &|root| {
-                        if !host.lists_root(&home, root) {
-                            return None;
-                        }
-                        host.supervisor_for(root).ok()
-                    });
+                    let started =
+                        daemon::start_configured_at_launch(&payload, &home, &roots, &|root| {
+                            if !host.lists_root(&home, root) {
+                                return None;
+                            }
+                            host.supervisor_for(root).ok()
+                        });
+                    // How somebody set up before this build gets the default, once (Q7.161).
+                    if !started.is_empty() {
+                        login::default_on(&host.config_dir, &commands::exe_path(), true);
+                    }
                 });
             }
             Ok(())

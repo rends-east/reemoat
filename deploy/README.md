@@ -73,10 +73,12 @@ they did not choose by pressing Enter.
 The served copy is `text/plain` so it can be read in a browser before it is piped
 into a shell; the release asset is the same file with no address in it.
 
-What it does, in order: checks this machine has git and a node ≥ 24 (installing
+What it does, in order: refuses a Linux that does not run systemd, before it asks
+for anything; checks this machine has git and a node ≥ 24 (installing
 one under `~/.reemoat/toolchain` from the official tarball, checksum-verified, if
-not); reads `GET /v1/instance` to learn whether that instance takes sign-ups;
-asks for a credential; **creates the machine before it clones anything**, so a
+not); reads `GET /v1/instance` to learn whether that instance takes sign-ups, so
+it can say where an account is made; asks for a credential; **makes the daemon
+start at boot** (below); **creates the machine before it clones anything**, so a
 refusal costs seconds rather than a clone, a ~220 MB `pnpm install` and ~700 MB of
 agent CLIs; clones the version that instance runs; `pnpm install
 --frozen-lockfile` (the daemon and the two ACP adapters — no CLI is vendored);
@@ -85,23 +87,30 @@ for none by default; writes `~/.reemoat/daemon.env`; and then hands the rest to
 `deploy/install.sh daemon --non-interactive`, which renders the unit, starts it
 and probes it. It reimplements none of that.
 
-Four ways to prove who you are, offered least-authority-first:
+Two things it asks for, and one it is only ever handed:
 
 | | |
 |---|---|
-| a setup code | `--enroll-code ec_…`, from Settings → Machines. Single-use, one hour, worth exactly one machine — and the only one that needs no account credential at all |
-| an API key | `REEMOAT_API_KEY=rk_…` (or `--api-key`, which is visible in `ps`). Used in memory to mint one code, then dropped; it is never written to disk |
-| signing in | name or email and a password, read off `/dev/tty` with echo off. The session it mints is revoked before the script exits |
-| signing up | only offered where `registration.enabled` is on. Where the instance confirms by mail it waits on **a keypress, not a timer** — `POST /v1/login` tolerates five failures in fifteen minutes before it starts blocking, so a polling loop would lock you out of the account you just made |
+| signing in | name or email and a password, read off `/dev/tty` with echo off. The session it mints is revoked before the script exits. It creates no account: where `registration.enabled` is on it prints `<control-plane>/register`, which is the one sign-up form there is |
+| an API key | pasted at the menu, or `REEMOAT_API_KEY=rk_…` (or `--api-key`, which is visible in `ps`). Used in memory to mint one code, then dropped; it is never written to disk |
+| a setup code | `--enroll-code ec_…` — a flag, never a question. The app shows the whole command for a machine that was added and never set up (Settings → Machines → the machine → **Setup command**), and `cpctl provision` prints a code. Single-use, one hour, worth exactly one machine: it signs in to nothing and creates nothing. On a host already joined to that control plane it re-enrolls the daemon in place, and a code the daemon cannot redeem puts the previous settings back |
 
 Flags: `--url`, `--api-key`, `--enroll-code`, `--label`, `--dir` (default
 `~/srv/reemoat`), `--ref`, `--node`, `--agent-source vendor|npm`,
-`--agent-channel stable|latest`, `--yes`, `--uninstall`, `--purge`, `--help`.
+`--agent-channel stable|latest`, `--install-agents a,b`, `--yes`, `--uninstall`,
+`--purge`, `--help`.
 
-**What it will not do:** no `sudo`, no package manager, nothing written to a
-shell profile. Reemoat's own state is under `~/.reemoat` and the checkout. The
+**What it will not do:** no package manager, nothing written to a shell profile,
+and `sudo` for exactly one command, which it asks about first:
+`sudo loginctl enable-linger <you>`, and only on a Linux that will not start your
+services at boot without it. It tries that unprivileged before it asks; `--yes`
+tries only a `sudo` that needs no password, and with no terminal nothing is run as
+root at all. The run's last lines say whether the daemon comes back by itself
+after a reboot, with the command where it does not. Reemoat's own state is under
+`~/.reemoat` and the checkout. The
 coding-agent CLIs are not part of `pnpm install` — nothing vendors them any more —
-but are installed by `deploy/agents.sh` — by default claude, codex, opencode and
+but are installed by `deploy/agents.sh`, when somebody chooses **Set up** in the
+app or `--install-agents` names them — claude, codex, opencode and
 cursor with each vendor's own installer into the vendors' own directories
 (`~/.local/bin`, `~/.local/share/claude`, `~/.local/share/cursor-agent`,
 `~/.codex`, `~/.opencode`), because none of those installers is relocatable, and
@@ -187,8 +196,8 @@ key the control plane prints exactly once on its first start, saving it to
 `~/.reemoat/cpctl.env`. That key is stored only as a hash, so if nobody catches
 it the only way back is deleting the database — and it is still in the service's
 log afterwards, which the installer now says out loud and chmods accordingly. It
-then offers to create the first person and prints their API key, which is what
-they paste into the app.
+then offers to create the first person and prints their user id and a one-time
+password, which they sign in to the app with and must change there.
 
 `install.sh daemon` asks how the daemon should decide who is asking. If a control plane was installed on
 the same machine, the first option registers this host and mints an enrollment
@@ -466,11 +475,16 @@ must not run as root, or every agent it spawns runs as root.
 
 That has one setup consequence per platform, and neither is optional:
 
-* **systemd** — `sudo loginctl enable-linger <user>`, or the service stops when
-  your last session ends, which on a headless host is the moment you disconnect
-  after installing it. `install.sh` checks and warns.
-* **launchd** — a `gui/` agent needs a logged-in session, so a headless Mac needs
-  automatic login enabled. Otherwise nothing comes back after a reboot.
+* **systemd** — a `--user` unit starts at boot only for a user with lingering on;
+  without it the service stops when your last session ends and does not come back
+  after a reboot. Both installers turn it on before the first start:
+  `loginctl enable-linger` unprivileged, and where the system refuses that, one
+  question and `sudo loginctl enable-linger <user>` (above). The answer is read off
+  `/var/lib/systemd/linger/<user>`, the file logind reads at boot, and both say so
+  where it is still off.
+* **launchd** — a `gui/` agent starts when that user logs in, not at boot, and
+  that is by design: agent sign-ins live in the login keychain. A headless Mac
+  needs automatic login enabled.
 
 Neither applies to the control plane any more, and that is one of the clearer
 wins in moving it into a container: a stack under `restart: unless-stopped` is

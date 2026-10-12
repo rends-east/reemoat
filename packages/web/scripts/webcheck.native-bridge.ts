@@ -254,7 +254,7 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
   report("there are install-command screens to sweep", callers.length >= 3, `${callers.length} call sites`);
   check(
     "and every one of them asks where the control plane is",
-    callers.filter((f) => !/installCommand\(controlPlaneOrigin\(\)\)/.test(stripComments(src(f)))),
+    callers.filter((f) => !/installCommand\(controlPlaneOrigin\(\)[,)]/.test(stripComments(src(f)))),
     [],
   );
 }
@@ -729,4 +729,48 @@ process.stdout.write("\na refusal about a credential that is no longer held\n");
     /\{row\.platform\}/.test("<span>{row.platform}</span>"),
     "the pattern matches a raw draw when there is one",
   );
+}
+
+// Opening at login (Q7.161): this computer's own row, drawn from the host's answer and never from the press.
+process.stdout.write("\nopening at login, as the machine screen draws it\n");
+{
+  const { loginItemOf } = await import("../src/native.js");
+  check(
+    "a word the host did not say is never read as on",
+    ["on", "off", "unsupported", "enabled", "", null, undefined, true, 1].map((answer) => loginItemOf(answer)),
+    ["on", "off", "unsupported", "unsupported", "unsupported", "unsupported", "unsupported", "unsupported", "unsupported"],
+  );
+  const nativeSrc = stripComments(src("native.ts"));
+  check(
+    "a read that failed is null, which is not off, and the setter answers what the host says afterwards",
+    [
+      /export async function loginItem\(\): Promise<LoginItem \| null> \{\s*if \(!\(await canHostDaemonHere\(\)\)\) return "unsupported";\s*try \{\s*return loginItemOf\(await invoke<string>\("host_login_item"\)\);\s*\} catch \{\s*return null;/.test(nativeSrc),
+      /return loginItemOf\(await invoke<string>\("host_login_item_set", \{ on \}\)\);/.test(nativeSrc),
+    ],
+    [true, true],
+  );
+  const machineSrc = stripComments(src("ui/settings/MachineSection.tsx"));
+  const row = machineSrc.slice(machineSrc.indexOf("function OpenAtLogin("), machineSrc.indexOf("function idleText("));
+  report("the switch was found to read", row.length > 0, `${row.length} characters`);
+  check(
+    "it is drawn on this computer's own row only, and only where the shell says it can host a daemon",
+    /\{state\.host\?\.canHostDaemon === true && machine\.id === state\.localMachineId && <OpenAtLogin \/>\}/.test(machineSrc),
+    true,
+  );
+  check(
+    "absent until the host has answered, and where it answers that it cannot",
+    /if \(answer === undefined \|\| answer === "unsupported"\) return null;/.test(row),
+    true,
+  );
+  check(
+    "one switch under one heading, with no line under it and nothing to confirm",
+    [/<Group title="This computer"/.test(row), /<SwitchRow\s+title="Open at login"/.test(row), /subline=|footer=|<TwoStep/.test(row)],
+    [true, true, false],
+  );
+  check(
+    "on is the host's last answer, the press asks for the other, and a read that failed cannot be pressed",
+    [/on=\{answer === "on"\}/.test(row), /setLoginItem\(answer !== "on"\)\s*\.then\(setAnswer\)/.test(row), /disabled=\{unread\}/.test(row)],
+    [true, true, true],
+  );
+  check("and it is asked again when the window comes back, since System Settings can change it", /document\.addEventListener\("visibilitychange", onShow\)/.test(row), true);
 }

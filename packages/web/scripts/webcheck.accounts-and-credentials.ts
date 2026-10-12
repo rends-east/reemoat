@@ -522,6 +522,7 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
       holdTimer: unknown;
       holdDue: number | null;
       nextListingAt: number;
+      listingAskedAt: number;
       listingFailures: number;
       listingOut: number | null;
       provedDown: Map<string, number>;
@@ -545,12 +546,16 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
     const fetchBefore = globalThis.fetch;
     let listing: "answers" | "fails" | "hangs" | "refuses" = "answers";
     let asked = 0;
+    let meAsked = 0;
     let fleet: unknown[] = [record];
     const out: { answer: (machines: unknown[]) => void; lose: () => void }[] = [];
     const json = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     globalThis.fetch = ((input: RequestInfo | URL): Promise<Response> => {
       const path = String(input);
-      if (path === "/v1/me") return Promise.resolve(json(me));
+      if (path === "/v1/me") {
+        meAsked += 1;
+        return Promise.resolve(json(me));
+      }
       if (path !== "/v1/machines") return Promise.reject(new TypeError("fetch failed"));
       asked += 1;
       if (listing === "answers") return Promise.resolve(json({ machines: fleet }));
@@ -791,6 +796,8 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
       for (const at of [6_000, 6_200, 10_000, 14_000, 18_000, 22_000]) {
         await later(at, async () => {
           peek.nextProbeAt.clear();
+          // The standing read is held off, so the count is of listings asked for a doubt.
+          peek.listingAskedAt = Date.now();
           void store.poll();
           await nap(10);
           laptop.fail();
@@ -806,6 +813,72 @@ process.stdout.write("\nleaving the loading screen without a reload\n");
       await again;
       check("a press on Try again asks the server and leaves machines already named as they were", [asked, doubted()], [2, []]);
       noting();
+
+      // The standing read. Nothing else reads the registry while nothing is wrong with it, so a machine an installer added
+      // elsewhere waited for a wake, and one first seen before its daemon started was probed fifteen seconds after it had.
+      {
+        const base = 40_000;
+        const added = standInFor("m_new", "added");
+        let enrolledYet = false;
+        // Not down on the wire: a row whose daemon has not started is no doubt, and asks the server nothing by itself.
+        const notYet = Object.assign(Object.create(added.connection) as object, {
+          state: () => ({ ...(added.connection as { state(): object }).state(), enrolled: enrolledYet, offlineReason: "not_enrolled" }),
+        });
+        const pass = (at: number, before: () => void = () => {}): Promise<void> =>
+          later(base + at, async () => {
+            before();
+            void store.poll();
+            await nap(10);
+            laptop.fail();
+            studio.fail();
+            added.fail();
+            await nap(20);
+          });
+        const before = [...fleet];
+        await later(base, () => void (peek.listingAskedAt = Date.now()));
+        asked = 0;
+        meAsked = 0;
+        fleet = [...before, { ...record, id: "m_new", name: "added", enrolled: false }];
+        await pass(14_000);
+        check("with nothing wrong, the registry is left unread for its interval", [asked, internals.connections.has("m_new")], [0, false]);
+        await pass(15_100);
+        check(
+          "and then read once: the machine added elsewhere is held, and the account whose count it changed is read again",
+          [asked, internals.connections.has("m_new"), meAsked],
+          [1, true, 1],
+        );
+        (internals.connections as Map<string, unknown>).set("m_new", notYet);
+        peek.emit();
+        await pass(16_000);
+        check("a pass a second later asks nothing more", asked, 1);
+
+        enrolledYet = false;
+        fleet = [...before, { ...record, id: "m_new", name: "added", enrolled: true }];
+        peek.soonTimer = null;
+        timers.length = 0;
+        await pass(30_300, () => {
+          peek.nextProbeAt.set("m_new", Date.now() + 600_000);
+          peek.probeFailures.set("m_new", 3);
+        });
+        check(
+          "a row whose daemon has enrolled since is probed now, not at the pace of one that had nothing to ask",
+          [asked, peek.nextProbeAt.has("m_new"), peek.probeFailures.has("m_new"), timers.some((timer) => timer.ms === 0)],
+          [2, false, false, true],
+        );
+
+        listing = "fails";
+        await pass(45_500);
+        check(
+          "and a standing read that fails says nothing about the server: it was looking for machines",
+          [asked, store.getSnapshot().cpError, internals.serverRaw.state],
+          [3, null, "ok"],
+        );
+        listing = "answers";
+        fleet = before;
+        internals.connections.delete("m_new");
+        peek.nextProbeAt.delete("m_new");
+        peek.emit();
+      }
 
       // A machine dropped while its probe is out: the failure is nobody's.
       peek.nextProbeAt.clear();
@@ -1257,6 +1330,7 @@ process.stdout.write("\na login transcript, read as steps\n");
     readLoginTranscript,
     transcriptIsTheAnswer,
     loginOutcome,
+    afterLogin,
     rawTranscriptIsOpen,
   } = await import("../src/ui/login.js");
 
@@ -1353,6 +1427,17 @@ process.stdout.write("\na login transcript, read as steps\n");
     ["signedIn", "notSignedIn", "cannotTell"],
   );
   check("an absent answer is cannot-tell", loginOutcome(false, false, undefined), "cannotTell");
+  // What a finished sign-in leads to: a session, and only once the probe has answered and the strip has the tile.
+  check(
+    "a sign-in the probe confirms, or cannot judge, leads to a session where there is a tile",
+    (["checking", "signedIn", "notSignedIn", "cannotTell", "unreachable", null] as const).map((outcome) => afterLogin(outcome, true)),
+    [null, "new_session", null, "new_session", null, null],
+  );
+  check(
+    "and to nothing where there is none",
+    (["checking", "signedIn", "notSignedIn", "cannotTell", "unreachable", null] as const).map((outcome) => afterLogin(outcome, false)),
+    [null, null, null, null, null, null],
+  );
   {
     const finished = readLoginTranscript(device, true, false);
     const broken = readLoginTranscript(`${device}\ncommand not found\n`, true, false);

@@ -421,9 +421,33 @@ process.stdout.write("\na URL that will not decode\n");
 // Both values are single-quoted: the control-plane URL derives from the request's Host header, so unquoted it is shell source.
 // cpctl.ts prints the same lines from its own copy; its body is run below and compared.
 
-process.stdout.write("\nthe three lines a daemon is started with\n");
+process.stdout.write("\nthe three lines cpctl prints, held to the app's quoting rule\n");
 {
-  const { enrollmentLines, enrollmentExpiryText } = await import("../src/enrollment.js");
+  const { enrollmentExpiryText } = await import("../src/enrollment.js");
+
+  // Runs a top-level function's body read off disk, because cpctl.ts and app.ts cannot be imported here.
+  // Only `: string` is stripped; any other annotation, a rename or nesting must throw rather than skip the comparison.
+  const extract = (
+    source: string,
+    name: string,
+    params: readonly string[],
+  ): ((...args: string[]) => string) => {
+    const lines = source.split("\n");
+    const start = lines.findIndex((line) => line.startsWith(`function ${name}(`));
+    if (start < 0) throw new Error(`no top-level ${name} to extract`);
+    // A top-level declaration in these files ends at a bare `}` in column 0,
+    // which is why this does not have to count braces through template literals.
+    const end = lines.indexOf("}", start);
+    if (end < 0) throw new Error(`${name} has no closing brace in column 0`);
+    const body = lines.slice(start + 1, end).join("\n").replaceAll(": string", "");
+    return new Function(...params, body) as (...args: string[]) => string;
+  };
+
+  // The app shows the installer's command now and prints no export lines of its own, so cpctl's are built here from the
+  // app's `shellQuote`, read off disk: three quoting copies stay on one hostile table.
+  const quote = extract(readFileSync(new URL("../src/enrollment.ts", import.meta.url), "utf8"), "shellQuote", ["value"]) as (value: string) => string;
+  const enrollmentLines = (controlPlaneUrl: string, code: string): string =>
+    ["export REEMOAT_AUTH=signed", `export REEMOAT_CONTROL_PLANE=${quote(controlPlaneUrl)}`, `export REEMOAT_ENROLL_CODE=${quote(code)}`].join("\n");
 
   check(
     "exactly what cpctl prints",
@@ -447,24 +471,6 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
     enrollmentLines("https://cp", "ec_a'b").split("\n")[2],
     "export REEMOAT_ENROLL_CODE='ec_a'\\''b'",
   );
-
-  // Runs a top-level function's body read off disk, because cpctl.ts and app.ts cannot be imported here.
-  // Only `: string` is stripped; any other annotation, a rename or nesting must throw rather than skip the comparison.
-  const extract = (
-    source: string,
-    name: string,
-    params: readonly string[],
-  ): ((...args: string[]) => string) => {
-    const lines = source.split("\n");
-    const start = lines.findIndex((line) => line.startsWith(`function ${name}(`));
-    if (start < 0) throw new Error(`no top-level ${name} to extract`);
-    // A top-level declaration in these files ends at a bare `}` in column 0,
-    // which is why this does not have to count braces through template literals.
-    const end = lines.indexOf("}", start);
-    if (end < 0) throw new Error(`${name} has no closing brace in column 0`);
-    const body = lines.slice(start + 1, end).join("\n").replaceAll(": string", "");
-    return new Function(...params, body) as (...args: string[]) => string;
-  };
 
   const callable = (source: string): ((url: string, code: string, baseUrl: string) => string) =>
     extract(source, "enrollmentLines", ["controlPlaneUrl", "code", "BASE_URL"]) as (
@@ -547,6 +553,39 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
       "curl -fsSL 'https://app.reemoat.com/install.sh' | sh",
     );
     check("a trailing slash does not double", installCommand("https://cp/"), installCommand("https://cp"));
+    // The setup leaf's command: the same fetch, handed a code the installer takes as a flag and never asks for (Q3.428).
+    check(
+      "with a code it is the same command, finishing the install on the host it is run on",
+      installCommand("https://app.reemoat.com", "ec_abc"),
+      "curl -fsSL 'https://app.reemoat.com/install.sh' | sh -s -- --enroll-code 'ec_abc'",
+    );
+    check(
+      "the code is data too, quoted by the same rule as the origin",
+      [installCommand("https://cp", "ec_a'b"), installCommand("https://cp", "ec_$(id)"), installCommand("https://cp", "ec_x; rm -rf ~")],
+      [
+        "curl -fsSL 'https://cp/install.sh' | sh -s -- --enroll-code 'ec_a'\\''b'",
+        "curl -fsSL 'https://cp/install.sh' | sh -s -- --enroll-code 'ec_$(id)'",
+        "curl -fsSL 'https://cp/install.sh' | sh -s -- --enroll-code 'ec_x; rm -rf ~'",
+      ],
+    );
+    check("and without one it is byte for byte what it was", installCommand("https://cp", undefined), installCommand("https://cp"));
+    {
+      const bootstrap = readFileSync(new URL("../../../deploy/bootstrap.sh", import.meta.url), "utf8");
+      const leaf = stripComments(readFileSync(new URL("../src/ui/settings/MachineSection.tsx", import.meta.url), "utf8"));
+      check(
+        "the installer still takes that flag, refuses it empty, and re-enrolls an install that is already there",
+        [/^\s+--enroll-code\) ENROLL_CODE="\$\{2:-\}"/m.test(bootstrap), bootstrap.includes('die "--enroll-code needs a value"'), /^reenroll\(\) \{$/m.test(bootstrap)],
+        [true, true, true],
+      );
+      check(
+        "the setup leaf shows that one command for the code in hand, and no export line is left in the app",
+        [
+          /value=\{installCommand\(controlPlaneOrigin\(\), minted\.code\)\}/.test(leaf),
+          srcFiles().filter((file) => /export REEMOAT_/.test(stripComments(srcFile(file)))),
+        ],
+        [true, []],
+      );
+    }
     check(
       "and the origin is data, not source",
       installCommand("http://a`id`b"),

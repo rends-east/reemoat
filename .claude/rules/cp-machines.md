@@ -128,10 +128,14 @@ machine into somebody's list. Q1.53.
 
 ## The one-line installer
 
-**Three copies of `shellQuote`, one on a route**: `packages/web/src/enrollment.ts` (the
-`export` lines and `installCommand`), `cpctl.ts`'s `enrollmentLines`, and `app.ts`'s for
-`GET /install.sh`, where the value is `publicUrl(c)`, the caller's `Host` — unquoted, RCE
-for anyone piping it into `sh`. None can import another, so **`webcheck` reads all three
+**Three copies of `shellQuote`, one on a route**: `packages/web/src/enrollment.ts`
+(`installCommand`, which prints no `export` line any more), `cpctl.ts`'s `enrollmentLines`, and `app.ts`'s for
+`GET /install.sh`, where the value is `installOrigin`, the caller's `Host` (``a`id`b``
+survives `URL.origin`) — unquoted, RCE for anyone piping it into `sh`. Not `publicUrl(c)`,
+which answers `http://` behind Traefik (a 301 `bootstrap.sh` will not follow): it reads
+`x-forwarded-proto` gated on `trustedProxyHops`, as `callerAddressOf` does, and the four
+code-minting routes answer `controlPlaneUrl` through it; `relaycheck` pins both and
+`imagecheck` sends a hostile `Host` through a real container. Q1.627. None can import another, so **`webcheck` reads all three
 off disk and runs them over one hostile table**; extraction takes `function <name>(` at
 column 0 to the next column-0 `}`, and nesting, renaming or an unstrippable annotation
 makes it **throw**. A fourth copy must join it.
@@ -144,7 +148,15 @@ mints a code). Drawn in three places — the rail's empty state below `lg`,
 three**, keeping `machineQuotaNotice` `null`-iff the door is drawn; **not** in
 `NewSession.tsx`'s `MachineLine`. `webcheck` asserts placements and the form's absence.
 `store.ts`'s poll re-lists an empty fleet every tick and re-reads `me` when the first
-machine lands.
+machine lands; with machines held it reads the registry every `FLEET_LISTING_MS` (15 s)
+while nothing is wrong, so a second machine appears by itself, and that read's failure
+writes nothing about the server (`reach.md`, Q3.716).
+
+**A machine added and never set up is finished with one command**: the machine's
+**Setup command** row (the leaf is still `setup-code`) mints a code on the tap and shows
+`installCommand(controlPlaneOrigin(), code)`, the installer with `--enroll-code`, which
+signs in to nothing and re-enrolls an install that is already there (`deployment.md`).
+Offered only before enrollment (Q3.428); the three `export` lines are `cpctl`'s alone.
 
 **No link to rent a machine; a deletion, not an unset default** (Q1.650):
 `webcheck.shell-and-enrollment.ts` asserts its names are gone, `deploycheck` that

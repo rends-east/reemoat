@@ -1,16 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  One template for both services, rendered by deploy/install.sh.
+  The daemon's LaunchAgent, rendered by deploy/install.sh.
 
-  One rather than two because the daemon's plist and the control plane's differ
-  only in a label, a program and a log name — everything a substitution can do.
-  Two files identical but for three words is how two files stop being identical
-  for a fourth reason nobody meant.
-
-  A user agent (~/Library/LaunchAgents), not a system daemon. Both services keep
-  all of their state under homedir() — databases and worktrees — so a
-  system-wide unit would run them as a user whose home is not the one holding it.
+  A user agent (~/Library/LaunchAgents), not a system daemon: its state is under
+  homedir() and agent credentials are in the login keychain, so it starts when
+  that user logs in and never before (Q4.106).
 -->
 <plist version="1.0">
 <dict>
@@ -60,14 +55,12 @@
   <true/>
 
   <!--
-    Restart whenever it stops, for any reason. This is the half that is missing
-    today: nothing brings either service back after a reboot, a logout or a
-    crash, and nobody finds out until they reach for a session that is not there.
+    Restart whenever it stops, for any reason; RunAtLoad above starts it at login.
 
-    ThrottleInterval bounds the retry when a service is failing at startup rather
+    ThrottleInterval bounds the retry when the daemon is failing at startup rather
     than running — a wrong REEMOAT_TOKEN, a port in use, or a second daemon
     against a database the first one still holds. Without it a misconfigured
-    service busy-loops.
+    daemon busy-loops.
   -->
   <key>KeepAlive</key>
   <true/>
@@ -81,8 +74,8 @@
 
     Deliberately no ProcessType: the default is Standard, while "Background"
     tells macOS this job may be throttled — which is a reasonable thing to say
-    about an indexer and a bad thing to say about a process holding WebSocket
-    tunnels for a fleet.
+    about an indexer and a bad thing to say about a process holding a relay
+    tunnel.
   -->
   <key>StandardOutPath</key>
   <string>@LOG_DIR@/@SERVICE@.log</string>

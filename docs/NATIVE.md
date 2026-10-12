@@ -507,7 +507,10 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
    its right, and **Continue** focused — Enter adopts it. Press the pencil: the box
    unlocks with its text focused and selected, and the pencil is gone. **Continue**,
    and the sign-in form is next — which names no server, that question having just
-   been answered, and on a first run offers no **‹ Server** either (Q3.643).
+   been answered, and carries a **‹ Server** back to this screen (Q3.643). Tap it:
+   the box holds the address just adopted, unlocked, with no **‹** above it;
+   **Continue** on it unchanged returns to the form, and another address is probed
+   and adopted like the first.
 3. Sign in. Then, in the webview inspector: `localStorage.length === 0` — until the
    drawer's account list is opened, which is kept as `reemoat.accountsOpen` while
    open and removed when shut. **That is the one property no offline assertion can
@@ -537,15 +540,16 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     finds the entry — the user id is in `server.json`'s `accounts` — and
     `-a 'credential#<origin>'` alone answers *item could not be found*. Then sign
     out: the account leaves this computer and the app opens on a sign-in to the same
-    server. Relaunch, and the scoped entry is gone too.
+    server, with **‹ Server** on it, nobody being signed in to that window. Relaunch,
+    and the scoped entry is gone too.
 14. **Add account** from the drawer on a second control plane — the pencil, its
     address, **Continue** — sign in, quit, relaunch, and switch back from the drawer.
     Each account keeps its own credential.
 15. On the sign-in form of an account being added, tap **‹ Server**: the server
     screen comes back with the address in the box and a **‹ a1** at its top that
-    returns to the interface — never a Cancel. A first run's sign-in form has no
-    **‹ Server** at all. A signed-out *account's* sign-in form has no **‹ Server**
-    either — its server cannot move (Q5.120) — and offers **Remove account**, and a
+    returns to the interface — never a Cancel. A first run's sign-in form has
+    **‹ Server** too (step 2). A signed-out *account's* sign-in form has no **‹ Server**
+    — its server cannot move (Q5.120) — and offers **Remove account**, and a
     **‹** naming the account shown before it where another account exists. Then tap
     **Create one**. The **system browser** opens `<server>/register` — not a window
     inside the app, and the app's own window is unchanged behind it. Same for
@@ -682,6 +686,32 @@ macOS version:
 43. A release artifact built with the repository variable set, and the config
     directory moved aside: the box holds that server, greyed, with the pencil.
     `strings <binary> | grep -F <value>` is the offline check.
+44. **Opening at login**, on a full macOS build in `/Applications` (Q7.161). A fresh
+    account with no machine: sign in, let the app set this computer up. macOS says
+    Reemoat was added to the login items; System Settings → General → Login Items
+    lists it under *Open at Login*; Settings → Machines → this computer shows **Open
+    at login** on, under *This computer*; and `ls ~/Library/LaunchAgents` is what it
+    was before.
+45. Restart the Mac and log in, with *Reopen windows when logging back in* unticked.
+    No Reemoat window appears. `pgrep -f scripts/daemon.ts` finds the daemon, and from
+    another device the machine is online and runs a turn. Click the Dock icon: the
+    window opens on the account shown last, with the keyboard in the page. Repeat with
+    *Reopen windows* ticked and write down what happens; this is the one step that
+    settles whether a login launch is recognised.
+46. Switch **Open at login** off; the row follows what the system answers. Restart:
+    Reemoat does not open, and the machine is offline until it is opened by hand, after
+    which the switch is still off. Switch it on again and restart: back as in step 45.
+47. With it on, remove Reemoat in System Settings instead. Reopen the app: the row
+    reads off, and nothing has turned it back on.
+48. An account that was set up on an older build: on the first launch of this one,
+    once its daemon has started, the item is added, once. Switch it off, quit, launch
+    again: it stays off.
+49. A machine whose daemon came from `install.sh` (its unit in
+    `~/Library/LaunchAgents`): the app adds no login item, and the unit brings the
+    daemon back at login as before.
+50. Two accounts: the switch is on each account's own *this computer* screen and they
+    agree; from the account that is not on screen, `host_login_item_set` is refused
+    `not_shown`. `tauri dev` and a copy run from the disk image: no row.
 
 ## Open measurements
 

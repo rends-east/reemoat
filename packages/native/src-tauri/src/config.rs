@@ -70,6 +70,10 @@ struct Stored {
     /// A `Value`, so a shape this build cannot read is ignored rather than quarantining the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<serde_json::Value>,
+    /// Present once opening at login has been decided here, by the app's default or by somebody.
+    /// A `Value`, so any shape reads as decided and the default is never applied twice (Q7.161).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_item: Option<serde_json::Value>,
     /// Keys from a later build, kept so an older build's write does not drop them.
     #[serde(flatten)]
     rest: BTreeMap<String, serde_json::Value>,
@@ -941,6 +945,19 @@ pub fn set_legacy_root_holder(dir: &Path, origin: &str) -> Result<(), String> {
     write_stored(dir, &stored)
 }
 
+/// True only for the call that wrote the mark: the caller may then register this app to open at
+/// login, once. A file that was put aside may have held the mark, so it decides nothing. Not an
+/// account act, so a pre-accounts file stays one (Q7.161).
+pub fn decide_login_item(dir: &Path) -> Result<bool, String> {
+    let mut stored = read_stored(dir);
+    if stored.login_item.is_some() || unreadable_file(dir).exists() {
+        return Ok(false);
+    }
+    stored.login_item = Some(serde_json::Value::from(true));
+    write_stored(dir, &stored)?;
+    Ok(true)
+}
+
 /// A palette, in the page's own spelling (Q3.671).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -985,12 +1002,12 @@ pub fn write_theme(dir: &Path, theme: Theme) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_account, claim_bare, default_server, erase_device, erase_device_key_fallback,
-        forget_account, give_up_device_key, materialize_accounts, normalize_origin, read_accounts,
-        read_device, read_device_key_fallback, read_server, read_theme, rename_account,
-        server_file, set_bound, set_signed_in, show_account, temp_name, unreadable_file,
-        write_device, write_device_key_fallback, write_server, write_theme, Bind, BindRequest,
-        Evidence, Proof, Theme, DEFAULT_SERVER,
+        bind_account, claim_bare, decide_login_item, default_server, erase_device,
+        erase_device_key_fallback, forget_account, give_up_device_key, materialize_accounts,
+        normalize_origin, read_accounts, read_device, read_device_key_fallback, read_server,
+        read_theme, rename_account, server_file, set_bound, set_signed_in, show_account, temp_name,
+        unreadable_file, write_device, write_device_key_fallback, write_server, write_theme, Bind,
+        BindRequest, Evidence, Proof, Theme, DEFAULT_SERVER,
     };
     use std::path::Path;
 
@@ -2226,6 +2243,56 @@ mod tests {
             .contains("accounts"));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&old);
+    }
+
+    #[test]
+    fn opening_at_login_is_decided_once() {
+        let dir = scratch("login-item");
+        assert_eq!(decide_login_item(&dir), Ok(true), "the first call decides");
+        let written = std::fs::read(server_file(&dir)).unwrap();
+        assert_eq!(decide_login_item(&dir), Ok(false), "and no later one does");
+        assert_eq!(
+            std::fs::read(server_file(&dir)).unwrap(),
+            written,
+            "nor writes anything"
+        );
+        assert!(write_theme(&dir, Theme::Dark).unwrap());
+        assert_eq!(
+            decide_login_item(&dir),
+            Ok(false),
+            "another setting's write keeps the mark"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deciding_it_is_not_an_account_act_and_a_file_put_aside_decides_nothing() {
+        let old = scratch("login-item-era");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            server_file(&old),
+            format!(r#"{{"server":"{A}","devices":{{"{A}":"dv_a"}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(decide_login_item(&old), Ok(true));
+        assert!(
+            read_accounts(&old, &|_| false).derived,
+            "it does not write the accounts era down"
+        );
+
+        // A file that could not be parsed is put aside, and may have held the mark.
+        let broken = scratch("login-item-broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(server_file(&broken), "{ not json").unwrap();
+        assert_eq!(decide_login_item(&broken), Ok(false));
+        assert!(unreadable_file(&broken).exists());
+        assert_eq!(
+            decide_login_item(&broken),
+            Ok(false),
+            "and stays undecided while the old bytes are there to be put back"
+        );
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&broken);
     }
 
     #[test]

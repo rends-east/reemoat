@@ -44,6 +44,7 @@ import {
   nicknameLine,
   OFFLINE_TEXT,
   Skeleton,
+  Spinner,
   StatusDot,
   resumeFailureText,
   sessionLabel,
@@ -68,6 +69,7 @@ import {
   selectMachine,
   setFilter,
   setQuery,
+  settingUp,
   subscribeGroups,
   takeRows,
   toggleFolder,
@@ -298,6 +300,7 @@ function ListBody({
     rows: folders.length + everything.length,
     needle: needle.trim().length > 0,
     hidden: hiddenHere,
+    settingUp: settingUp(state.setup),
   });
   const speaks = body.kind === "network" || body.kind === "server" || body.kind === "unreachable";
   useEffect(() => onSpeaks?.(speaks), [onSpeaks, speaks]);
@@ -322,7 +325,7 @@ function ListBody({
           <>
             {/* Below lg only: at lg `NothingSelected` draws the command in the pane. */}
             <div className="lg:hidden">
-              <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
+              <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use, and sign in there:</p>
               <div className="text-left">
                 <CommandLine command={installCommand(controlPlaneOrigin())} />
               </div>
@@ -487,6 +490,8 @@ function bodyMachine(state: AppState, machine: MachineState): BodyMachine {
     overLimit: !machine.ownerDisabled && machine.overLimit,
     sessions: state.listed.has(machine.id) ? "known" : state.sessionsFailed.has(machine.id) ? "failed" : "unknown",
     doubted: state.doubted.has(machine.id),
+    // A row just created is not this computer's yet for a moment, so one not enrolled counts too.
+    settingUp: settingUp(state.setup) && (machine.id === state.localMachineId || !machine.enrolled),
   };
 }
 
@@ -1020,6 +1025,11 @@ function SidebarFoot({ machine, disabled }: { machine: MachineId | null; disable
 
 /** `said` keeps its newlines: one host refusal ends with a command somebody retypes. */
 export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const retry = (): void => {
+    setBusy(true);
+    void store.retrySetUp().finally(() => setBusy(false));
+  };
   if (setup.step !== "failed") {
     return (
       <div className="mx-3 mb-2 shrink-0 rounded-md border border-edge-strong bg-raised px-3 py-2 text-xs text-fg">
@@ -1033,6 +1043,9 @@ export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
       {setup.said !== null && (
         <p className="mt-1 whitespace-pre-line break-words text-muted">{setup.said}</p>
       )}
+      <Button size="sm" onClick={retry} disabled={busy} ariaLabel="Try again" className="mt-2 min-w-20">
+        {busy ? <Spinner /> : "Try again"}
+      </Button>
     </div>
   );
 }

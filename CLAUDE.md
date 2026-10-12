@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1164 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1165 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -266,7 +266,9 @@ pnpm nativecheck                     # packages/native: the Boot payload's keys 
                                      #   the CSP's directives against the ones the control plane
                                      #   sends, the two version fields that are **not** release
                                      #   sites, and the one workspace line three deploy behaviours
-                                     #   depend on. Offline, and deliberately **no cargo**
+                                     #   depend on. And opening at login: the one file that names the
+                                     #   system's item, the mark written before the registration, and the
+                                     #   one write a launch makes. Offline, and deliberately **no cargo**
 pnpm pincheck                        # every place a version is written down. The agents':
                                      #   three copies each, the claude adapter's patch key a
                                      #   fourth, and the adapters actually installed.
@@ -280,7 +282,9 @@ pnpm pincheck                        # every place a version is written down. Th
                                      #   And one number that is not a version: the API-key ceiling,
                                      #   written once on each side of the wire
 pnpm deploycheck                     # deploy/: quoting, env files, PATH, a unit for both init systems,
-                                     #   and RELAY_INPUTS against the relay entry's own import closure
+                                     #   and RELAY_INPUTS against the relay entry's own import closure.
+                                     #   And starting at boot: lingering turned on before the start, every
+                                     #   mode against stubs, and `sudo` run in one function and nowhere else
 pnpm docscheck                       # the documentation, held to what it claims about itself: this
                                      #   file's size budget, that every Q<n>.<m> citation resolves,
                                      #   that every symbol DECISIONS.md cites still greps to source,
@@ -352,7 +356,8 @@ one machine for one account on one server, so the desktop app runs one daemon pe
 account it holds — a server's first account keeps `~/.reemoat` (for the server its
 `daemon.env` names) or `~/.reemoat/servers/<server>/`, and each further account on
 that server gets `~/.reemoat/servers/<server>@<user id>/` — starts every one that is
-set up when it launches, and stops them all when it quits (Q7.148, Q7.149). A daemon restart leaves every session it did not stop on purpose `interrupted` and
+set up when it launches, and stops them all when it quits (Q7.148, Q7.149). On a Mac it
+opens at login, window away, so they come back after a restart (Q7.161). A daemon restart leaves every session it did not stop on purpose `interrupted` and
 puts an agent back on each by itself — see `.claude/rules/daemon-sessions.md`.
 
 **Traffic to a remote daemon is end-to-end encrypted and there is no other
@@ -568,6 +573,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
 | `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server and an account · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
 | `native-accounts.md` | `packages/native/src-tauri/src/accounts.rs`, `seats.rs`, `commands.rs`, `config.rs`, `daemon.rs`, `packages/web/src/slot.ts`, `native.ts`, `store.ts`, `ui/MenuDrawer.tsx`, `ChooseServer.tsx`, `SignIn.tsx` | What an account is on this computer, and why its key is the server *and* the user · why the host decides which account a call is about and the page never names one · the bridge contract, in one table · a document rather than a label, and what a generation refuses · a webview per account on macOS, a rebind and a reload everywhere else · what adding, switching and signing out each keep and give up · a daemon per account, and which one keeps `~/.reemoat` · what the first launch after the update moves, and only on proof |
+| `native-login.md` | `packages/native/src-tauri/src/login.rs`, `away.rs` | How a Mac the app set up comes back after a reboot · who keeps the answer to "is it on" · what is stored instead, and why before the registration · the two moments it is switched on by itself, and the one write a launch makes · what a launch at login shows · what is still unmeasured |
 | `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `design-system.md` | `packages/web/src/ui/bits.tsx`, `ui/kit/*`, `ui/settings/*`, `scripts/webcheck.kit.ts` | Which primitive answers which question, and what to do when none does · the one height, and why it is written twice · what a dropdown draws, how wide it opens, and why a field's may not head its panel · why a label sits beside its control and never around it · the kit's one-way rule |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |

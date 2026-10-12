@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, stripComments } from "./webcheck.source.js";
 
 // Imports settings.ts, never router.ts: router.ts reads window.location and installs a popstate listener when it loads.
 
@@ -22,7 +22,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
     settingsLeafPath,
     settingsUpLabel,
   } = await import("../src/settings.js");
-  const { originFor, sheetTitle, sheetUpLabel, upFrom } = await import("../src/nav.js");
+  const { newSessionFor, originFor, sheetTitle, sheetUpLabel, upFrom } = await import("../src/nav.js");
 
   check("no segment is the index", parseSettingsSection(undefined), null);
   check("a known one is itself", parseSettingsSection("machines"), "machines");
@@ -283,6 +283,34 @@ process.stdout.write("\nwhich settings screen a URL names\n");
         "Agents",
         "New session",
       ],
+    );
+  }
+
+  // The card's own way to a session: back to the screen the trip began at, folder kept, or a fresh one for that machine.
+  check(
+    "New session from a finished setup returns to the New session it came from, and only to that machine's",
+    [
+      newSessionFor("m_1", "/new/m_1/%2Fsrv%2Fapp"),
+      newSessionFor("m_1", "/new/m_1"),
+      newSessionFor("m_1", "/new/m_10/%2Fsrv"),
+      newSessionFor("m_1", "/new"),
+      newSessionFor("m_1", "/settings/machines/m_1/agents"),
+      newSessionFor("m_1", null),
+      newSessionFor("a b", null),
+    ],
+    ["/new/m_1/%2Fsrv%2Fapp", "/new/m_1", "/new/m_1", "/new/m_1", "/new/m_1", "/new/m_1", "/new/a%20b"],
+  );
+  {
+    const panel = stripComments(srcFile("ui/settings/AgentsPanel.tsx"));
+    check(
+      "the card keeps the pick before it navigates, so the tile is chosen when the screen mounts",
+      /keepPick\(machineId, \{ kind: "harness", id: agent\.id \}\);\s*navigate\(newSessionFor\(machineId, origin\), true\);/.test(panel),
+      true,
+    );
+    check(
+      "and New session still installs nothing and signs in to nothing itself",
+      [/startInstall|InstallPane|LoginWizard|startLogin/.test(stripComments(srcFile("ui/NewSession.tsx")))],
+      [false],
     );
   }
 

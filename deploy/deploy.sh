@@ -1,5 +1,5 @@
 #!/bin/sh
-# deploy/deploy.sh [--service daemon|control-plane|all] [--ref <git-ref>] [--force]
+# deploy/deploy.sh [--service daemon|control-plane|relay|all] [--ref <git-ref>] [--force]
 # Restarts only what the change touched; CI's deploy workflow runs exactly this script with --ref.
 set -eu
 
@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h | --help)
-      echo "usage: deploy/deploy.sh [--service daemon|control-plane|all] [--ref <git-ref>] [--force]"
+      echo "usage: deploy/deploy.sh [--service daemon|control-plane|relay|all] [--ref <git-ref>] [--force]"
       exit 0
       ;;
     *)

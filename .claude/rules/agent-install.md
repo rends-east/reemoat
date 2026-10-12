@@ -73,9 +73,14 @@ paths:
   axis, so a missing harness is never offered *"Sign in to X"* onto a slot that computes
   `login.supported && agent.available` and renders nothing. The Agents list only adopts
   a run through `liveInstall`, which keeps `Installing… · 42s` under a row after a ◀.
-- **`installResultLine`'s `installed` arm names the sign-in**, because `offersTile`
-  keeps `signed_out` off the New session row and a freshly installed harness still has
-  no tile.
+- **A finished run leads on from the pane, and `afterInstall` decides where**: *Sign in
+  to X* only where this card can run a wizard (`canSignIn`, so never macOS with Claude
+  Code, whose way in is the key box), *New session* only where the strip already has the
+  tile (`offersStripTile`), else nothing. `installResultLine` names the sign-in exactly
+  where the button does; a run that failed leads nowhere, whatever the re-read finds.
+  The wizard's twin is `afterLogin` (`agent-login.md`). *New session* is `keepPick`, then
+  `navigate(newSessionFor(…), true)`: back to the New session the trip began at, folder
+  kept. Q3.640.
 
 ## Layout
 

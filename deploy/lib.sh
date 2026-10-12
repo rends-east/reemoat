@@ -10,6 +10,9 @@ REPO_ROOT=$(CDPATH= cd -- "$DEPLOY_DIR/.." && pwd -P)
 SERVICES="daemon control-plane relay"
 # deploycheck holds this to GIT_MIN_VERSION in src/git.ts, the oldest git the daemon is run against.
 GIT_MIN_VERSION=2.31
+# What logind reads at boot, and where it keeps a user's runtime directory; deploycheck points both at fixtures.
+LINGER_DIR=/var/lib/systemd/linger
+RUNTIME_ROOT=/run/user
 
 valid_service() {
   case "$1" in
@@ -327,6 +330,40 @@ require_init() {
   echo "  the daemon does. Run its wrapper from your own supervisor:" >&2
   echo "    $DEPLOY_DIR/run-daemon.sh" >&2
   exit 2
+}
+
+# The same text as bootstrap.sh, which is served alone and may be another version. deploycheck compares them.
+linger_on() {
+  [ -e "$LINGER_DIR/$(id -un)" ] && return 0
+  [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" = yes ]
+}
+
+# linger_step none|yes|asked: unprivileged first; yes adds sudo -n, asked adds sudo. Prints on or off, as measured (Q4.106).
+linger_step() {
+  if linger_on; then printf on; return 0; fi
+  loginctl --no-ask-password enable-linger "$(id -un)" </dev/null >/dev/null 2>&1 || true
+  if ! linger_on; then
+    case "$1" in
+      yes)   sudo -n loginctl enable-linger "$(id -un)" </dev/null >/dev/null 2>&1 || true ;;
+      asked) sudo loginctl enable-linger "$(id -un)" </dev/null >&2 || true ;;
+    esac
+  fi
+  if linger_on; then printf on; else printf off; fi
+}
+
+# systemctl --user finds its manager through XDG_RUNTIME_DIR, which su and sudo -iu leave unset; `wait` gives a manager lingering just started 10s.
+user_bus() {
+  [ "$INIT_SYSTEM" = systemd ] || return 0
+  _rt=${XDG_RUNTIME_DIR:-$RUNTIME_ROOT/$(id -u)}
+  _n=0
+  while [ "${1:-}" = wait ] && [ ! -S "$_rt/systemd/private" ] && [ "$_n" -lt 10 ] && linger_on; do
+    _n=$((_n + 1))
+    sleep 1
+  done
+  if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "$_rt" ]; then
+    XDG_RUNTIME_DIR=$_rt
+    export XDG_RUNTIME_DIR
+  fi
 }
 
 # A version that cannot be read passes: the daemon then says so itself, at the first session.
@@ -651,7 +688,10 @@ svc_log_lines() {
           if [ -f "$_lf" ]; then tail -n "${2:-200}" "$_lf"; fi
           ;;
         systemd)
-          journalctl --user -u "$(unit_label "$1")" -n "${2:-200}" --no-pager 2>/dev/null || true
+          _lines=$(journalctl -q --user -u "$(unit_label "$1")" -n "${2:-200}" --no-pager 2>/dev/null || true)
+          # An account below the regular uid range has no journal of its own: its unit's lines are in the system one.
+          [ -n "$_lines" ] || _lines=$(journalctl -q --user-unit "$(unit_label "$1")" -n "${2:-200}" --no-pager 2>/dev/null || true)
+          [ -z "$_lines" ] || printf '%s\n' "$_lines"
           ;;
       esac
       ;;
@@ -914,7 +954,15 @@ log_hint() {
     unit)
       case "$INIT_SYSTEM" in
         launchd) printf 'tail -n 50 %s/Library/Logs/reemoat/%s.log' "$HOME" "$1" ;;
-        systemd) printf 'journalctl --user -u %s -n 50' "$(unit_label "$1")" ;;
+        systemd)
+          # The command that has lines to show: see svc_log_lines.
+          if [ -z "$(journalctl -q --user -u "$(unit_label "$1")" -n 1 --no-pager 2>/dev/null || true)" ] \
+            && [ -n "$(journalctl -q --user-unit "$(unit_label "$1")" -n 1 --no-pager 2>/dev/null || true)" ]; then
+            printf 'journalctl --user-unit %s -n 50' "$(unit_label "$1")"
+          else
+            printf 'journalctl --user -u %s -n 50' "$(unit_label "$1")"
+          fi
+          ;;
         # Not require_init: exiting here would replace the failure being reported.
         none) printf '(no log location: this host has no supported init system)' ;;
       esac
@@ -923,3 +971,4 @@ log_hint() {
 }
 
 detect_init
+user_bus

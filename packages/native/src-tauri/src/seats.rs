@@ -257,7 +257,9 @@ mod multi {
             size,
         )?;
         host.set_shown(&shown);
-        window.show()?;
+        if config.visible {
+            window.show()?;
+        }
         for (index, slot) in launch.seats.into_iter().enumerate() {
             if index == launch.shown {
                 continue;

@@ -89,6 +89,8 @@ const DOWN_RETRY_MS = 4_000;
 const LISTING_HEDGE_MS = 1_000;
 /** The ceiling for asking after a daemon that is not dialled in, which may be a laptop asleep for the night. */
 const AWAY_RETRY_MS = 60_000;
+/** How long the registry goes unread while every machine answers: what finds a machine an installer added elsewhere. */
+const FLEET_LISTING_MS = 15_000;
 const MAX_LIVE_STREAMS = 3;
 export const MAX_HELD_TRANSCRIPTS = 12;
 /** Bytes, never an event count: the only ceiling a tab has, per session. */
@@ -602,6 +604,8 @@ class AppStore implements StreamSink {
   private listingAsked = 0;
   private listingLanded = 0;
   private nextListingAt = 0;
+  /** When any listing was last asked, whoever asked: the standing read waits its interval out from here. */
+  private listingAskedAt = 0;
   /** Taken by the next resume to start, so a resume already listing machines never spends it on the listing before the change. */
   private linksForced = false;
   private epoch = 0;
@@ -937,6 +941,13 @@ class AppStore implements StreamSink {
 
   private registryKnown = false;
 
+  /** A press on the failed notice; a run that ends without a word takes the old sentence with it. */
+  async retrySetUp(): Promise<void> {
+    const before = this.snapshot.setup;
+    await this.beginSetUp();
+    if (this.snapshot.setup === before) this.patch({ setup: null });
+  }
+
   private beginSetUp(): Promise<void> {
     this.settingUp ??= this.setUpThisComputer().finally(() => {
       this.settingUp = null;
@@ -1033,8 +1044,12 @@ class AppStore implements StreamSink {
       const state = await daemonState();
       if (state === null) return;
       if (state.status === "running") {
-        this.patch({ setup: null });
-        await this.machinesChanged("machine-added");
+        // Listed first: until then the row still reads as not enrolled, and the notice is what says why.
+        try {
+          await this.machinesChanged("machine-added");
+        } finally {
+          this.patch({ setup: null });
+        }
         return;
       }
       // Here `foreign` means our child lost to another daemon and never enrolled.
@@ -1467,25 +1482,32 @@ class AppStore implements StreamSink {
     }
   }
 
-  /** The registry read: its answer is the server fact, and a failure is `cpError` as well. */
-  private async listMachines(epoch: number): Promise<void> {
+  /**
+   * The registry read: its answer is the server fact, and a failure is `cpError` as well. A `standing` read looks for machines
+   * added elsewhere and is no evidence about the server, so its failure writes nothing (Q3.716).
+   */
+  private async listMachines(epoch: number, standing = false): Promise<void> {
     const began = monotonicNow();
     const asked = (this.listingAsked += 1);
     this.listingOut = Date.now();
+    this.listingAskedAt = this.listingOut;
     try {
       const machines = await cp.machines();
       if (epoch === this.epoch && asked > this.listingLanded) {
         this.listingLanded = asked;
         let dialled = false;
+        // The fleet itself moved under a registry already read: the machine count and limit are `me`'s.
+        let changed = false;
         for (const record of machines) {
           const id = machineId(record.id);
           const existing = this.connections.get(id);
           if (existing) {
             // Read first: the update publishes, and that weighs the machine as dialled in already.
             const wasAway = this.away.has(id);
+            const wasEnrolled = existing.state().enrolled;
             existing.update(record);
-            // Dialled in again: its probe has something to ask now, and is not left to the pace of one that had nothing.
-            if (wasAway && record.relayOnline) {
+            // Dialled in again, or enrolled at last: its probe has something to ask now, and is not left to the pace of one that had nothing.
+            if ((wasAway && record.relayOnline) || (!wasEnrolled && record.enrolled)) {
               this.probeFailures.delete(id);
               this.nextProbeAt.delete(id);
               dialled = true;
@@ -1494,11 +1516,15 @@ class AppStore implements StreamSink {
             const created = this.connect(record);
             this.connections.set(id, created);
             this.daemons.set(id, new DaemonClient(created));
+            changed = this.registryKnown;
           }
         }
         if (dialled) this.soon(0);
         for (const id of [...this.connections.keys()]) {
-          if (!machines.some((m) => m.id === id)) this.dropMachine(id);
+          if (!machines.some((m) => m.id === id)) {
+            this.dropMachine(id);
+            changed = this.registryKnown;
+          }
         }
         this.weighLocalMachine();
         // A successful listing leaves loading even with no machines; only ever upwards.
@@ -1507,7 +1533,7 @@ class AppStore implements StreamSink {
         this.registryKnown = true;
         const facts = this.serverFacts("ok", began);
         this.patch(promote ? { cpError: null, phase: "ready", ...facts } : { cpError: null, ...facts });
-        if (promote || this.snapshot.me === null) void this.refreshMe();
+        if (promote || this.snapshot.me === null || changed) void this.refreshMe();
         if (firstListing) void this.beginSetUp();
         // Only while unknown: settings screens re-read it through refreshConfig.
         if (this.snapshot.config === null) void this.loadConfig();
@@ -1515,6 +1541,7 @@ class AppStore implements StreamSink {
     } catch (error) {
       // A sign-out is the credential's, already handled inside `cpFetch`: it says nothing about the server.
       if (authFailure(error) !== null) return;
+      if (standing) return;
       // Fenced like the success: a tick's late failure must not undo a newer pass's listing, nor one asked after it that answered.
       if (epoch === this.epoch && asked > this.listingLanded) {
         // One asked since and still out is this failure's retry already, and the next is paced from it.
@@ -1653,6 +1680,17 @@ class AppStore implements StreamSink {
     const doubt = this.snapshot.cpError === null && [...this.snapshot.doubted].some((id) => !this.answeredFor.has(id));
     if ((troubled || doubt) && this.connections.size > 0 && cp.currentCredential() !== null) {
       if (this.listingFree() && (doubt || Date.now() >= this.nextListingAt)) this.askListing(epoch);
+    }
+    // Nothing else reads the registry while every machine answers, so a machine an installer added would wait for a wake.
+    // On its own clock, never `nextListingAt`: the paces above are an outage's, and this is not one.
+    if (
+      !early &&
+      this.connections.size > 0 &&
+      cp.currentCredential() !== null &&
+      this.listingFree() &&
+      Date.now() - this.listingAskedAt >= FLEET_LISTING_MS
+    ) {
+      void this.listMachines(epoch, true);
     }
 
     // With no machine known, re-list the registry: startup outage, or a first machine added by its installer.

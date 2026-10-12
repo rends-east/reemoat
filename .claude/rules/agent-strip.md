@@ -137,7 +137,9 @@ and it is not a status.
 - **The list's ◀ reads `origin`, at this one screen, for a New session origin only**;
   `originFor` keeps an origin across moves within a pop-up, so reading it at every depth
   would send settings sections to `/new`. `settingsUpLabel` has one name to give. The
-  leaf never reads it; two ◀ end on New session, driven as a sequence in `webcheck`.
+  leaf's ◀ never reads it; two ◀ end on New session, driven as a sequence in `webcheck`.
+  The leaf's **New session** button, drawn once a harness is set up, reads it only to
+  return there (`newSessionFor`) and is the other writer of `keepPick` (`agent-install.md`).
 - **Two controls per row, a handle and a menu; what varies is inside the menu**, so no
   control moves on a list you drag. The kebab is live on every row, on an old daemon
   too: `frozen` disables the drag handle and Add back / Remove, nothing else. **Set up**

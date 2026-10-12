@@ -154,21 +154,26 @@ process.stdout.write("\nthe list's body is one total function\n");
   const REASONS = [null, "no_route", "cp_unreachable", "not_enrolled", "no_token", "no_machine_key", "no_device_key", "machine_key_changed", "device_pending"] as const;
   const shapes: Machine[] = [];
   for (const reach of ["unknown", "probing"] as const) {
-    shapes.push({ name: "m", reach, offlineReason: null, ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: false });
+    shapes.push({ name: "m", reach, offlineReason: null, ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: false, settingUp: false });
   }
   for (const sessions of ["unknown", "failed", "known"] as const) {
-    shapes.push({ name: "m", reach: "online", offlineReason: null, ownerDisabled: false, overLimit: false, sessions, doubted: false });
+    shapes.push({ name: "m", reach: "online", offlineReason: null, ownerDisabled: false, overLimit: false, sessions, doubted: false, settingUp: false });
   }
   for (const reason of REASONS) {
     for (const sessions of ["unknown", "known"] as const) {
-      shapes.push({ name: "m", reach: "offline", offlineReason: reason, ownerDisabled: false, overLimit: false, sessions, doubted: false });
+      shapes.push({ name: "m", reach: "offline", offlineReason: reason, ownerDisabled: false, overLimit: false, sessions, doubted: false, settingUp: false });
     }
   }
-  shapes.push({ name: "m", reach: "offline", offlineReason: "owner_disabled", ownerDisabled: true, overLimit: false, sessions: "unknown", doubted: false });
-  shapes.push({ name: "m", reach: "offline", offlineReason: "over_limit", ownerDisabled: false, overLimit: true, sessions: "unknown", doubted: false });
+  shapes.push({ name: "m", reach: "offline", offlineReason: "owner_disabled", ownerDisabled: true, overLimit: false, sessions: "unknown", doubted: false, settingUp: false });
+  shapes.push({ name: "m", reach: "offline", offlineReason: "over_limit", ownerDisabled: false, overLimit: true, sessions: "unknown", doubted: false, settingUp: false });
   // Down since the server last answered: which of the two it is has been asked and not answered yet.
-  shapes.push({ name: "m", reach: "offline", offlineReason: "no_route", ownerDisabled: false, overLimit: false, sessions: "known", doubted: true });
-  shapes.push({ name: "m", reach: "offline", offlineReason: null, ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: true });
+  shapes.push({ name: "m", reach: "offline", offlineReason: "no_route", ownerDisabled: false, overLimit: false, sessions: "known", doubted: true, settingUp: false });
+  shapes.push({ name: "m", reach: "offline", offlineReason: null, ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: true, settingUp: false });
+
+  // This computer while the app sets it up: whatever it reads as meanwhile is not an answer yet.
+  shapes.push({ name: "m", reach: "offline", offlineReason: "not_enrolled", ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: false, settingUp: true });
+  shapes.push({ name: "m", reach: "offline", offlineReason: "no_route", ownerDisabled: false, overLimit: false, sessions: "unknown", doubted: false, settingUp: true });
+  shapes.push({ name: "m", reach: "online", offlineReason: null, ownerDisabled: false, overLimit: false, sessions: "known", doubted: false, settingUp: true });
 
   const fleets: Machine[][] = [[]];
   for (const one of shapes) fleets.push([{ ...one, name: "studio" }]);
@@ -183,6 +188,7 @@ process.stdout.write("\nthe list's body is one total function\n");
   const wireDown = (machine: Machine): boolean =>
     machine.reach === "offline" && (machine.offlineReason === null || machine.offlineReason === "no_route");
   const unsettled = (machine: Machine): boolean =>
+    machine.settingUp ||
     machine.reach === "unknown" ||
     machine.reach === "probing" ||
     (machine.doubted && wireDown(machine)) ||
@@ -196,21 +202,34 @@ process.stdout.write("\nthe list's body is one total function\n");
             for (const rows of [0, 3]) {
               for (const needle of [false, true]) {
                 for (const hidden of [0, 2]) {
-                  const input: Input = { device, server, registry, fleet, selected, rows, needle, hidden };
+                 for (const settingUp of [false, true]) {
+                  const input: Input = { device, server, registry, fleet, selected, rows, needle, hidden, settingUp };
                   const body = listBody(input);
                   asked += 1;
                   reached.set(body.kind, (reached.get(body.kind) ?? 0) + 1);
                   const read = selected === null ? fleet : [selected];
 
                   // The three sentences that claim something is empty, each only from a read that answered.
-                  if (body.kind === "no_machines" && !(registry === "known" && fleet.length === 0)) offender("no machines", input, body.kind);
+                  if (body.kind === "no_machines" && !(registry === "known" && fleet.length === 0 && !settingUp)) offender("no machines", input, body.kind);
+                  // A machine the app is still setting up is a wait, whatever it reads as meanwhile.
+                  if (fleet.length > 0 && rows === 0 && read.some((machine) => machine.settingUp) && body.kind !== "skeleton") {
+                    offender("a machine being set up is said to be something", input, body.kind);
+                  }
+                  // And the flag is about an empty registry only: once a machine is held, each one answers for itself.
+                  if (fleet.length > 0 && JSON.stringify(body) !== JSON.stringify(listBody({ ...input, settingUp: !settingUp }))) {
+                    offender("the setup flag moved a list that holds machines", input, body.kind);
+                  }
                   if (body.kind === "no_sessions" && !read.some((machine) => machine.sessions === "known")) offender("no sessions", input, body.kind);
                   if (body.kind === "no_match" && (!needle || read.some(unsettled))) offender("no match", input, body.kind);
                   // Rows are drawn whenever there are rows, whatever else is true.
                   if ((body.kind === "rows") !== (fleet.length > 0 && rows > 0)) offender("rows", input, body.kind);
                   // A shape is a wait: something is being asked, or nothing has been yet.
                   if (body.kind === "skeleton" && fleet.length > 0 && !read.some(unsettled)) offender("skeleton", input, body.kind);
-                  if (body.kind === "skeleton" && fleet.length === 0 && (registry === "known" || server === "unreachable" || server === "refusing")) {
+                  if (
+                    body.kind === "skeleton" &&
+                    fleet.length === 0 &&
+                    (registry === "known" ? !settingUp : server === "unreachable" || server === "refusing")
+                  ) {
                     offender("skeleton", input, body.kind);
                   }
                   // What was not reached is named for what it is, never one for another.
@@ -233,6 +252,7 @@ process.stdout.write("\nthe list's body is one total function\n");
                   if ((body.kind === "unreachable" || body.kind === "network") && read.some((machine) => machine.doubted && wireDown(machine))) {
                     offender("a machine named while in doubt", input, body.kind);
                   }
+                 }
                 }
               }
             }
@@ -262,7 +282,7 @@ process.stdout.write("\nthe list's body is one total function\n");
   // Differenced, never counted: a kind the grid cannot reach is a rule nothing above exercised.
   check("every kind is reached, and nothing outside the union is answered", [...reached.keys()].sort(), [...KINDS].sort());
 
-  const nothing = { fleet: [], selected: null, rows: 0, needle: false, hidden: 0 } as const;
+  const nothing = { fleet: [], selected: null, rows: 0, needle: false, hidden: 0, settingUp: false } as const;
   check(
     "with nothing held: a wait until the listing has answered or failed, then what was not reached, and no machines only from an answer",
     [
@@ -294,10 +314,11 @@ process.stdout.write("\nthe list's body is one total function\n");
     overLimit: false,
     sessions: "known",
     doubted: false,
+    settingUp: false,
     ...patch,
   });
   const tab = (machine: Machine, patch: Partial<Input> = {}): ReturnType<typeof listBody> =>
-    listBody({ device: "online", server: "ok", registry: "known", fleet: [machine], selected: machine, rows: 0, needle: false, hidden: 0, ...patch });
+    listBody({ device: "online", server: "ok", registry: "known", fleet: [machine], selected: machine, rows: 0, needle: false, hidden: 0, settingUp: false, ...patch });
   // The sentence this used to be: "No sessions here yet. New session, at the bottom of this list, starts one."
   check(
     "a machine's tab with nothing to draw says why, and calls it empty only once its sessions were read",
@@ -340,7 +361,7 @@ process.stdout.write("\nthe list's body is one total function\n");
     [{ kind: "no_match" }, { kind: "skeleton" }, { kind: "filtered", hidden: 4 }, { kind: "owner_disabled" }, { kind: "over_limit" }],
   );
   const under = (fleet: Machine[]): ReturnType<typeof listBody> =>
-    listBody({ device: "online", server: "ok", registry: "known", fleet, selected: null, rows: 0, needle: false, hidden: 0 });
+    listBody({ device: "online", server: "ok", registry: "known", fleet, selected: null, rows: 0, needle: false, hidden: 0, settingUp: false });
   check(
     "under All every machine is read: one still asked is a wait, one unreachable is named, and several are counted",
     [
@@ -360,6 +381,65 @@ process.stdout.write("\nthe list's body is one total function\n");
       { kind: "refused", name: "studio", reason: "no_token" },
     ],
   );
+
+  // Setting this computer up: the notice above the list says what is happening, and the list claims nothing meanwhile.
+  const { settingUp } = await import("../src/ui/groups.js");
+  check(
+    "a setup is in flight while it is creating or starting, and not once it has failed",
+    [settingUp(null), settingUp({ step: "creating" }), settingUp({ step: "starting" }), settingUp({ step: "failed" })],
+    [false, true, true, false],
+  );
+  check(
+    "while it runs an empty registry is a wait, never No machines yet beside the installer's command",
+    [
+      listBody({ ...nothing, device: "online", server: "ok", registry: "known", settingUp: true }),
+      listBody({ ...nothing, device: "online", server: "ok", registry: "known" }),
+      listBody({ ...nothing, device: "online", server: "unreachable", registry: "failed", settingUp: true }),
+    ],
+    [{ kind: "skeleton" }, { kind: "no_machines" }, { kind: "server", why: "unreachable" }],
+  );
+  check(
+    "and the row it just made is never called unreachable or not enrolled before its daemon has started",
+    [
+      tab(one({ reach: "offline", offlineReason: "not_enrolled", sessions: "unknown", settingUp: true })),
+      tab(one({ reach: "offline", offlineReason: null, sessions: "unknown", settingUp: true })),
+      under([one({}), one({ name: "mini", reach: "offline", offlineReason: "no_token", sessions: "unknown", settingUp: true })]),
+      tab(one({ reach: "offline", offlineReason: "not_enrolled", sessions: "unknown" })),
+    ],
+    [{ kind: "skeleton" }, { kind: "skeleton" }, { kind: "skeleton" }, { kind: "refused", name: "studio", reason: "not_enrolled" }],
+  );
+  {
+    const browserSrc = stripComments(srcFile("ui/SessionBrowser.tsx"));
+    const storeSrc = stripComments(srcFile("store.ts"));
+    check(
+      "the list, the pane and each row are told from the one state, and a row just made counts before it is this computer's",
+      [
+        /hidden: hiddenHere,\s*settingUp: settingUp\(state\.setup\),/.test(browserSrc),
+        /settingUp: settingUp\(state\.setup\) && \(machine\.id === state\.localMachineId \|\| !machine\.enrolled\),/.test(browserSrc),
+        /hidden: 0,\s*settingUp: settingUp\(state\.setup\),/.test(stripComments(srcFile("ui/AppShell.tsx"))),
+      ],
+      [true, true, true],
+    );
+    check(
+      "a failed setup can be asked for again, through the same single flight, and the notice is where",
+      [
+        /async retrySetUp\(\): Promise<void> \{\s*const before = this\.snapshot\.setup;\s*await this\.beginSetUp\(\);\s*if \(this\.snapshot\.setup === before\) this\.patch\(\{ setup: null \}\);/.test(storeSrc),
+        /store\.retrySetUp\(\)/.test(browserSrc.slice(browserSrc.indexOf("export function SetupNotice("))),
+        /ariaLabel="Try again"/.test(browserSrc.slice(browserSrc.indexOf("export function SetupNotice("))),
+      ],
+      [true, true, true],
+    );
+    check(
+      "the notice goes only once the machine has been listed again, so the row is never read in between",
+      /if \(state\.status === "running"\) \{\s*try \{\s*await this\.machinesChanged\("machine-added"\);\s*\} finally \{\s*this\.patch\(\{ setup: null \}\);/.test(storeSrc),
+      true,
+    );
+    check(
+      "and a token refused for a row not enrolled yet is that reason, not a second one a poll later",
+      /error\.code === "machine_not_enrolled"\s*\? "not_enrolled"/.test(stripComments(srcFile("machine.ts"))),
+      true,
+    );
+  }
 }
 
 process.stdout.write("\nand every screen that could call an unread list empty asks first\n");
@@ -500,10 +580,30 @@ process.stdout.write("\nand every screen that could call an unread list empty as
   check(
     "a sign-out is the credential's and says nothing about the server, and a new sign-in asks afresh",
     [
-      /if \(authFailure\(error\) !== null\) return;\s*if \(epoch === this\.epoch && asked > this\.listingLanded\) \{[^}]*this\.patch\(\{ cpError: describe\(error\), \.\.\.this\.serverFacts\(listingFailure\(error\), began, retried\) \}\);/.test(store),
+      /if \(authFailure\(error\) !== null\) return;\s*if \(standing\) return;\s*if \(epoch === this\.epoch && asked > this\.listingLanded\) \{[^}]*this\.patch\(\{ cpError: describe\(error\), \.\.\.this\.serverFacts\(listingFailure\(error\), began, retried\) \}\);/.test(store),
       /this\.patch\(\{ phase: "loading", cpError: null, \.\.\.this\.serverFacts\("unknown", monotonicNow\(\)\) \}\);/.test(store),
     ],
     [true, true],
+  );
+  // The registry is otherwise read only when something is wrong, so a machine an installer added elsewhere waited for a wake (Q3.716).
+  check(
+    "while every machine answers the registry is still read, on its own clock and never on an early pass",
+    [
+      /const FLEET_LISTING_MS = 15_000;/.test(store),
+      /if \(\s*!early &&\s*this\.connections\.size > 0 &&\s*cp\.currentCredential\(\) !== null &&\s*this\.listingFree\(\) &&\s*Date\.now\(\) - this\.listingAskedAt >= FLEET_LISTING_MS\s*\) \{\s*void this\.listMachines\(epoch, true\);/.test(store),
+      /this\.listingOut = Date\.now\(\);\s*this\.listingAskedAt = this\.listingOut;/.test(store),
+      /FLEET_LISTING_MS[^;]*nextListingAt|nextListingAt[^;]*FLEET_LISTING_MS/.test(store),
+    ],
+    [true, true, true, false],
+  );
+  check(
+    "a fleet that changed under a registry already read re-reads the account, and a row enrolled at last is probed now",
+    [
+      /const created = this\.connect\(record\);\s*this\.connections\.set\(id, created\);\s*this\.daemons\.set\(id, new DaemonClient\(created\)\);\s*changed = this\.registryKnown;/.test(store),
+      /if \(promote \|\| this\.snapshot\.me === null \|\| changed\) void this\.refreshMe\(\);/.test(store),
+      /const wasEnrolled = existing\.state\(\)\.enrolled;\s*existing\.update\(record\);\s*if \(\(wasAway && record\.relayOnline\) \|\| \(!wasEnrolled && record\.enrolled\)\) \{/.test(store),
+    ],
+    [true, true, true],
   );
   check(
     "a session listing the daemon refused is an answer of its own, and the wire failing is not",

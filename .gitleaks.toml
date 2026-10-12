@@ -94,3 +94,32 @@ regexes = [
   '''rk_ZGVwbG95Y2hlY2sta2V5''',
   '''ZGVwbG95Y2hlY2stcGFzc3dvcmQ''',
 ]
+
+[[allowlists]]
+description = """
+The cache key in the gateway's recorded request shapes. Rule: `generic-api-key`.
+
+A file in `vectors/gateway/` holds a harness's request beside what the translator
+must make of it, and Messages into Responses names `prompt_cache_key` as the SHA-256
+of the request's `metadata.user_id`. In a vector that id is a placeholder, every
+device, account and session id in it zeroed before the file was written, so these
+are the digests of two strings of zeros: one in claude's spelling, one in kimi's.
+`gatewaycheck` translates each vector again on every run and compares.
+
+Pinned to the two digests, so a vector recorded with somebody's real id produces a
+different one, and that one fires.
+"""
+regexes = [
+  '''5cf72f4c1e8cd89bb0b2ff3c9a6f82bbfcc64fec08e229cf74c48b57de3dbbdf''',
+  '''4ffda1e9adf0f49589df65b9fadbaf9699c219d5577fed9b768592a8338e9834''',
+]
+
+[[allowlists]]
+description = """
+The example identifier the did:key specification prints. Rule: `generic-api-key`.
+
+`scripts/gatewaycheck.signin.ts` offers the sign-in flow a host identifier in each of
+the three forms it accepts, and this is the third. A did:key is a public key by
+construction, and this one is nobody's.
+"""
+regexes = ['''z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK''']

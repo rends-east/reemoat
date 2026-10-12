@@ -27,6 +27,13 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **On a Mac, Reemoat opens at login, so this computer is still a machine after a
+  restart.** A Mac the app set up runs its daemon inside the app; a reboot used to
+  leave it offline until somebody opened Reemoat. It now opens at login with its
+  window put away and starts its daemons. It is switched on the first time the app
+  starts a daemon here, **Open at login** on that machine's screen switches it off,
+  and nothing switches it back on. Nothing is installed for it: it is the system's own
+  login item, listed in System Settings.
 - **A machine keeps its own list of the devices that reach it, and can be locked to
   it.** Settings → Machines → a machine → *Device access* lists every device that has
   connected through the relay, by the name it gave for itself. With *Only these devices*
@@ -75,6 +82,32 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- **Setting an agent up leads straight on.** A finished install offers **Sign in to
+  …** on the same card, and a finished sign-in offers **New session**, which opens
+  on that machine with that agent chosen — and back on the folder you had picked,
+  if that is where you came from. On a Mac, where Claude Code cannot be signed in
+  from the app, the card no longer tells you to sign in.
+- **A machine that was added and never set up is finished with one command.** Its
+  **Setup command** shows the one-line installer with the code in it, in place of
+  three `export` lines that did nothing for a daemon installed as a service.
+- **The one-line installer asks for a sign-in or an API key, and nothing else.** It
+  no longer creates accounts in the terminal — where an instance takes sign-ups it
+  prints that instance's own sign-up page — and the *Setup code* row is gone from
+  its menu. `--enroll-code` remains as a flag, and on a machine already joined to
+  the same control plane it now re-enrolls the daemon in place, putting the
+  previous settings back if the code is refused.
+- **A daemon installed on Linux starts by itself after a reboot.** The installer
+  turns lingering on before the first start. Where the system refuses that without
+  administrator rights it asks once and runs `sudo loginctl enable-linger <you>` —
+  the one command it ever runs as root. `--yes` tries only a `sudo` that needs no
+  password; with no terminal nothing is run as root. The run ends by saying whether
+  the daemon will come back after a reboot, with the command where it will not.
+- **A Linux without systemd is refused before anything is asked**, instead of after
+  the machine had been created and the checkout installed.
+- **A first sign-in can go back to the server step.** Sign-in carries **‹ Server**
+  wherever nobody is signed in to the window yet — a first run included — so an
+  address adopted by mistake is corrected there instead of by deleting the app's
+  settings. An account that has been signed out still cannot move its server.
 - **A turn the daemon ended because the agent went silent leaves no line in the
   conversation.** It used to end with a centred *"the agent stopped answering"*. Now the
   working line simply stops, in conversations already written as well.
@@ -121,6 +154,21 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- **The installer no longer leaves `~/.reemoat` readable by other accounts** on a
+  machine where it is what creates that directory. A directory that was already
+  there keeps the mode it had.
+- **The installer no longer reports a machine that enrolled as not enrolled** where
+  the account running it has no journal of its own — an account whose uid is below
+  the regular range, which is what a virtual machine often hands out. It reads the
+  system journal for that unit instead, prints the log command that works there,
+  and where no log can be read at all it says so rather than calling it a refusal.
+- **A machine added from a terminal appears in the app by itself**, where one machine
+  was already there. The list of machines is now read every fifteen seconds while
+  nothing is wrong; it used to be read only after a wake or a relaunch.
+- **Setting this computer up no longer says the opposite of what is happening.** While
+  the app sets a computer up the list waits, instead of reading *No machines yet*
+  beside the installer's command and then *unreachable: not enrolled*; and a setup
+  that failed has **Try again**.
 - **Stopping a background task made the conversation read as working, with Stop spinning
   over it until the next message.** claude acknowledges the stop with a line of its own,
   which the daemon took for the agent starting work that nothing would end. That line no

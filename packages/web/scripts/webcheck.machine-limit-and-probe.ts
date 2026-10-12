@@ -293,10 +293,11 @@ process.stdout.write("\nthe machine limit\n");
     check("a control plane that could not be reached is not reported as a bad code", /!== "dead"/.test(settle), true);
     // `foreign` inside a settle means the started child is gone and never enrolled, so it is not success.
     check("a foreign daemon does not clear the notice", /status === "foreign"/.test(settle), true);
-    check("and only a daemon this app started does", /status === "running"[\s\S]{0,120}setup: null/.test(settle), true);
+    check("and only a daemon this app started does", /status === "running"[\s\S]{0,200}setup: null/.test(settle), true);
+    // Listed before the notice goes, in a finally: until then the row still reads as not enrolled, and the notice says why.
     check(
       "and the settle loop's running arm asks nothing about the list",
-      /status === "running"\) \{\s*this\.patch\(\{ setup: null \}\);\s*await this\.machinesChanged\("machine-added"\);\s*return;\s*\}/.test(settle),
+      /status === "running"\) \{\s*try \{\s*await this\.machinesChanged\("machine-added"\);\s*\} finally \{\s*this\.patch\(\{ setup: null \}\);\s*\}\s*return;\s*\}/.test(settle),
       true,
     );
     check("a stranger in the settle loop gets its own sentence", /state\.stranger \? STRANGER_DAEMON_DETAIL : ANOTHER_DAEMON_DETAIL/.test(settle), true);
@@ -453,7 +454,7 @@ process.stdout.write("\nthe machine limit\n");
     check("a setup code is offered only before a machine has enrolled", /!machine\.enrolled &&/.test(machineSrc), true);
     check(
       "the not-enrolled state is eight words with its remedy",
-      /Not enrolled yet\.\s*\{setupOffered \? " Use the setup code above\." : ""\}/.test(machineSrc),
+      /Not enrolled yet\.\s*\{setupOffered \? " Run the setup command above\." : ""\}/.test(machineSrc),
       true,
     );
     check("and no longer names the machine or its daemon", /has not enrolled yet|Start its daemon/.test(machineSrc), false);

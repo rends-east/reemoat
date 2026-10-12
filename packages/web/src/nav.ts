@@ -99,6 +99,12 @@ export function newSessionPath(machine?: string, cwd?: string): string {
   return cwd === undefined ? base : `${base}/${encodeURIComponent(cwd)}`;
 }
 
+/** Back to the New session a trip began at, folder included; a fresh one for that machine otherwise. */
+export function newSessionFor(machine: string, origin: string | null): string {
+  const base = newSessionPath(machine);
+  return origin !== null && (origin === base || origin.startsWith(`${base}/`)) ? origin : base;
+}
+
 /** The segment is an address kept for old links; sheetTitle carries the readable name. */
 export type AgentStep = "llm" | "harness";
 

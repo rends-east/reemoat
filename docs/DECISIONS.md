@@ -62,14 +62,14 @@ bug in the file.
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 88 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 160 | `###` |
-| | | **1164** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 161 | `###` |
+| | | **1165** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1164 rather than the 584
+dividers. So the count is over **both** depths, and it says 1165 rather than the 585
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -2989,6 +2989,52 @@ outcome is swallowed — the *occasion* is the only observable thing about it.
 used in memory to mint one and then dropped; a session minted by signing in is
 revoked before the script exits, in the trap rather than on the happy path.
 
+**Amended 2026-10-11, the owner's decision: it asks for a sign-in or an API key and
+nothing else.** The installer no longer creates accounts — where the instance
+takes sign-ups it prints the control plane's own `/register`, so the fleet has one
+sign-up form — and the *Setup code* row is gone from the menu, because nothing a
+person could reach minted a code for a machine that did not exist yet.
+`--enroll-code` stays as a flag: `cpctl provision` prints a code, and the app now
+shows the whole command for a machine that was added and never set up (Q3.428).
+With it the installer holds no account credential at all, signs in to nothing and
+creates no machine. **On a host whose env file already names the same control plane
+it re-enrolls in place** (`reenroll`): nothing is asked, only the code line is
+rewritten, and the unit is reloaded. A start that did not enroll **puts the previous
+file back and restarts the daemon on it**, because a daemon handed a code it
+cannot redeem exits rather than starting on the identity it holds (`buildVerifier`)
+— without the restore, an expired code would take a healthy machine down. Another
+control plane's code is refused in one sentence, and a code the install already
+holds is said to be used, with nothing written or restarted: the daemon skips a
+code whose fingerprint it has, so there would be no line to verify by. The rule
+above is unchanged.
+
+**Measured 2026-10-12 on a real systemd host**, against a scratch control plane, and
+three things the stub-driven checks could not see were found there. The rollback
+never ran: re-enrolling went through `hand_off`, and `install.sh` failing on a
+daemon that did not come up ended the script before the old file was put back —
+`reenroll` now reloads the unit itself and lets neither step end the run. A second
+daemon on a port another one held was reported enrolled, because the health check
+was answered by the other and the log had not been written yet: `verify_running`
+takes only this daemon's own `enrolled as` line, from the newest attempt on, and
+waits a few seconds for it. And `~/.reemoat` was left open to every account by the
+toolchain step, then remarked on by the env step a minute later: `make_home` closes
+it when this script is what creates it.
+
+**Measured again the same day, on the dev stand over HTTPS, and a fourth.** A machine
+that had enrolled and was online on the relay was reported `enrolled NO`, and the
+install exited 2. The account was uid 501 — below the regular range, so journald
+keeps no journal of its own for it: `journalctl --user -u` printed `-- No entries --`
+while `journalctl --user-unit` had every line. The report predates this work and was
+only ever wrong; the rollback above is what made it dangerous, since the old file put
+back over a daemon that *did* enroll has it ask again with a spent code and exit. So
+`verify_running` has three answers rather than two: enrolled, not enrolled (a log that
+can be read and does not say so), and unread. Unread is a success when the daemon is
+up — said as *not confirmed*, with no claim about the relay — and a rollback when it
+is down, because a daemon given a code it cannot redeem exits and nothing else had
+changed. Enrolled and not up is never a rollback. It reads the system journal itself
+rather than through `svc_log_lines`, since the checkout it sources may be older than
+the script (Q4.106).
+
 **Why.** This is the same rule Q1.53 states for the provisioning key, arriving at
 the same host by a different door. A daemon host runs agents as its owner and
 `agentEnv`'s strip is hygiene rather than a fence — the agent has that uid and can
@@ -3014,6 +3060,10 @@ needs the current one). It prints the remedy and exits rather than looping.
 **Status.** Current
 
 ### Q1.626 — Waiting for a mailed confirmation, without locking somebody out of the account they just made
+
+**Superseded 2026-10-11** by Q1.625's amendment: the installer signs nobody up, so
+nothing waits on a mailed link. The throttle measurement below stands, and is why
+no script should ever poll `POST /v1/login`.
 
 **Rule.** The installer waits on **a keypress, not a timer**. It prints that the
 mail was sent, then spends exactly one `POST /v1/login` per Enter, capped at
@@ -3044,7 +3094,7 @@ cannot. `POST /v1/login` answers `401 invalid_login` for an unknown name, an
 unconfirmed address, a wrong password and an account with no password row, and
 that is deliberate — so the message says it cannot tell rather than guessing.
 
-**Status.** Current
+**Status.** Superseded by Q1.625
 
 ### Q1.627 — The installer's default origin behind a TLS-terminating proxy
 
@@ -13793,6 +13843,15 @@ the chrome the alternative above was rejected for. Open.
 and Retire. `POST /v1/machines/:id/enrollments` is untouched and still allows a
 re-mint — this is a decision about what the row offers, not about what the fleet
 permits.
+
+**Amended 2026-10-11: what the row hands over is a command, not three lines.** The
+leaf showed `export REEMOAT_AUTH…` to paste before starting a daemon by hand, which
+does nothing on a host whose daemon is a service reading its own env file — the
+state every interrupted install is in. The row is now **Setup command** and the leaf
+shows `installCommand` with the code: the one-line installer under `--enroll-code`,
+which signs in to nothing, creates no machine, and re-enrolls an install that is
+already there (Q1.625). When it is offered is unchanged. The `export` lines are
+`cpctl`'s alone now, still held to the app's quoting rule by `webcheck`.
 
 **Why.** "New setup code" on a host that is already running reads as a step you
 still owe, and a menu that offers one is a menu lying about what is left to do.
@@ -25592,6 +25651,21 @@ New session → Agents → Set up → ◀ → ◀ walk as a sequence of `originF
 Install and sign-in on the card, the two ◀ — is still to be made, and is what this
 paragraph owes next.
 
+**Amended 2026-10-11: the card leads on, and New session still does neither.** A
+finished install ended on *Close*, after which the sign-in row appeared; a finished
+sign-in ended on *Close* and two ◀. Fourteen presses stood between a machine coming
+online and a first message, and the two that named no next step were the ones
+people stopped at. The pane now offers the step itself, decided by two pure
+functions the driver walks over every cell: `afterInstall` answers *Sign in to X*
+only where this card can run a wizard — never macOS with Claude Code, where the
+old sentence sent people to a wizard that does not exist — and *New session* only
+where the strip already has the tile (`offersStripTile`); `afterLogin` answers
+*New session* once the probe confirms the sign-in or cannot judge it. *New session*
+keeps the pick and returns to the New session the trip began at, folder included
+(`newSessionFor`), or opens a fresh one for that machine. Nothing here reverses the
+decision above: New session installs nothing and signs in to nothing, which
+`webcheck` still asserts off its source.
+
 **Status.** Reversed an earlier decision
 
 #### Q3.641 — A model chip read "Newer version availa…": when is a description's head a model name?
@@ -25802,7 +25876,15 @@ and driven: `‹ Server` only on a pending window; Cancel, last, where the live
 `back` names an account; *Remove account* on a window that is an account on the
 list. [⚠ since 2026-09-24: `‹ Server` only on a pending window *with* an account to
 return to, and `back` — a **‹** at the top naming that account — where Cancel was;
-never both.] Every control is `disabled={busy}`. The two screens that never reach the
+never both.] [⚠ reversed 2026-10-11, the owner's call: **`‹ Server` is on every pending
+window again, a first run's included.** Somebody who pressed Continue on the wrong
+address had no way to another server short of deleting the app's settings, and the
+host never refused the change — a pending seat may take another origin, and
+`host_set_server` rewrites `server.json` while the list is empty (Q5.120) — so only
+`signInExits` moved: the control is drawn once the host has answered, whatever it
+answered. That reaches one more screen, the sign-in left by signing the last account
+out, which is the same seat. The picker reached this way still has no **‹** of its
+own: Continue on the address held returns to the form.] Every control is `disabled={busy}`. The two screens that never reach the
 drawer — the loading screen of a server that cannot be reached, and
 `ForcedPasswordChange` — offer *Use another account* on the same live condition
 (`UseAnotherAccount`), because on a desktop the account shown at launch is the one
@@ -29428,6 +29510,20 @@ body says unreachable too; tabs still do not.
 cannot be asked, and a remembered list for a launch with no server. Until the last lands
 this block is what every such launch draws.
 
+**Amended 2026-10-11: a setup in flight is a wait.** On a first sign-in the app sets
+this computer up by itself, and while it did the list said *No machines yet.* over the
+installer's command, then *is unreachable: no token*, then *not enrolled* a poll later —
+three false sentences beside a notice saying the opposite. `listBody` takes
+`settingUp`: an empty known registry is a skeleton while a setup runs, and so is the
+row it just made, which counts before it is this computer's (`!machine.enrolled`)
+because the listing lands a moment before `weighLocalMachine`. The grid holds it as a
+property: no body but a wait for a machine being set up, and the flag moves nothing
+once a machine is held. `settleDaemon` now lists first and clears the notice after, in
+a `finally`. A token refused with `machine_not_enrolled` is that reason at once rather
+than `no_token` first, and the reason reads *not set up yet*. **A setup that failed
+can be asked for again**: `retrySetUp`, through the same single flight, on a *Try again*
+the notice had been owed since `settingUp` was written to be released for one.
+
 **Status.** Current.
 
 #### Q3.710 — The pill's words, and why it opens by itself under a finger
@@ -29940,6 +30036,21 @@ asked of a machine in doubt, whose ask ignores the pace.
   four times a second, before this change as after it.
 - *More than one machine in the model.* The review's findings all needed two; they are
   held by checks on the store in `webcheck.accounts-and-credentials.ts` instead.
+
+**Amended 2026-10-11: the registry is read while nothing is wrong.** Every pace above
+is an outage's, so a fleet whose machines all answered was never listed again: a
+second machine added by the installer showed nothing until a wake, a pull or a
+relaunch, with the terminal saying it was done. `tick` now reads the registry every
+`FLEET_LISTING_MS` (15 s, the pace `OFFLINE_RETRY_MS` already gives a listing with no
+urgency) from whenever any listing was last asked (`listingAskedAt`), never on an
+early pass and never through `nextListingAt`. **That read's failure writes nothing**:
+it is looking for machines and is no evidence about the server, so what an outage
+looks like, and when, is unchanged — the alternative, taking it as any listing's
+failure, would draw *Connecting…* through every control-plane deploy. Its success is
+an answer like any other. A fleet that changed under a registry already read re-reads
+`me`, whose count and limit it moved, and a row whose daemon has enrolled since is
+probed at once rather than at the pace of one that had nothing to ask. Driven against
+the real store, and over the bad-network schedules with nothing drawn early.
 
 **Status.** Current. Narrows Q3.714: the server's hold is no longer the window alone, and
 the retries' ceiling is no longer the outage's.
@@ -31116,6 +31227,26 @@ mirrors has found that nobody planted.
 nothing to enrolled. It may not use `sudo`, may not touch a shell profile, and may
 not write outside `~/.reemoat` and the checkout it is told to make.
 
+**Amended 2026-10-11, the owner's decision: one command as root, asked for first.**
+`sudo loginctl enable-linger <user>`, and nothing else. The unit is a systemd
+`--user` unit, which starts at boot only for a user with lingering on, so an
+installer that may not ask left every headless Linux machine one reboot from
+offline, behind a warning printed mid-scroll after the service had already
+started. `linger_step` tries the verb unprivileged first and reads the answer off
+`/var/lib/systemd/linger/<user>` — the file logind reads at boot — never an exit
+status. Only when that leaves it off does it escalate: one question on `/dev/tty`
+naming the command, `sudo -n` alone under `--yes`, and nothing at all with no
+terminal and no `--yes`. It runs **before the machine is created**, beside two
+refusals that used to arrive after a slot was spent: a Linux that does not run
+systemd (`require_supervisor`), and a shell with no user manager to start a unit in
+(`user_manager_up`, which is what `su` and `sudo -iu` leave). The run's last lines
+say whether the daemon starts by itself after a reboot, with the command where it
+does not. `deploycheck` drives every mode against stubs, holds the executed `sudo`
+to that one function, and compares its two copies — the served script and the
+checkout's `lib.sh` can be different versions. The other two constraints stand.
+macOS is unchanged and deliberately so: a `gui/` agent starts at login, which is
+when the keychain holding the agents' sign-ins unlocks.
+
 **Why anything.** Adding a machine meant: find the repository, have Node ≥ 24 and
 pnpm 11.17.0, `pnpm install --frozen-lockfile`, run `deploy/install.sh daemon`,
 then go back to a browser for a code and paste three `export` lines. Every one of
@@ -31214,6 +31345,12 @@ function and exits having done nothing. `deploycheck` asserts the shape — it i
 fact about the file rather than about any function in it — and asserts the call is
 `/^main /` rather than `/^main\b/`, because the declaration is `main() {` at
 column 0 and a word boundary matches that too.
+
+**The one question that is not about who you are** (amended 2026-10-11): turning
+lingering on under `sudo` (Q4.106) is asked by the bootstrap on `/dev/tty`, never
+by `install.sh`, which runs `--non-interactive` under it and so only tries the
+unprivileged verb. Given `--enroll-code` there is no menu at all, on a fresh host
+or a joined one.
 
 **Two pins with no other witness.** `PNPM_VERSION` and `NODE_MAJOR` are written in
 the script and tied to the root manifest by `deploycheck`. Nothing else in this
@@ -34359,7 +34496,7 @@ a clock.
 | Machines per user | **50 is the ceiling, not the limit.** It is the anti-abuse bound — creating one is reachable by anybody with a password, and each is a row plus an enrollment code plus a tunnel credential, against a `synchronous = FULL` file in the process carrying every tunnel. The *limit* is `machines.per_user`, a setting (env-seeded, database-owned) overridable per person in `user_machine_limits`, refused above the ceiling on both write paths and clamped again on read. **Unset resolves to 50**, which is the behaviour before the setting existed and deliberately not 0 — nothing seeds `instance_settings`, so a 0 default would take the whole fleet offline on deploy. Over the limit is **derived** from rank among `machine_owners` ordered by `(created_at, machine_id)`, never stored, so lowering switches off the newest and raising switches them back on with no recompute (Q1.51). Still counted with no revoked filter, which is why a revoke has to `releaseOwner` (Q1.43); `PUT …/owner` counts rows for *other* machines, so re-labelling one you already own is never your fifty-first — and it preserves `created_at` when the owner is unchanged, or an admin re-label would move a machine to the back of its own queue |
 | Control-plane bodies | 64 KiB above THE LINE and 256 KiB below it. The two public routes are the only places in this service where somebody with **no credential** decides how many bytes it reads, and neither had ever bounded it; below the line there was no bound at all, on the reasoning that a caller past the gate has a credential — a statement about *who* is asking and not about *how much*, when every route calls `readJsonObject`, which buffers before it looks. Both answer `413 payload_too_large` in the envelope every client here parses, because `bodyLimit`'s default `onError` is `text/plain` and none of them can read it. `currentPassword`/`newPassword` are refused over 512 characters |
 | Agent commands | 256 per session; 64 characters of name, 200 of description, 100 of hint — clamped at **ingest** in `session.ts`, like `MAX_PARENT_ID_CHARS`: the agent chooses the strings, the list rides no event so `truncateEvent` never sees it, and "bounded by what the agent sent" is not a bound. Measured 2026-08-03, claude publishes **100 commands / 18.7 KiB**, longest name 24, longest hint exactly 64, descriptions median 68 and max 1135. So 256 is for an MCP server publishing hundreds of prompts rather than for trimming a real list; the hint cap sits *above* the longest real one; the description cap is the only one that bites. **The name cap is a refusal and the other two are truncations** — `clip` appends `…[truncated N bytes]`, right for prose and wrong for a name, since a command is invoked by *sending* `/<name>`; dedup running on the unclipped name while the clipped one was stored made two long names collide with `dropped` reporting none. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot entirely; only `commandsRevision`, a number, rides the poll |
-| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible; a probe or a listing nothing answered is asked again at 1 and 2s and then every 4s, one that was refused every 15s (`retryDelay`, Q3.716); 1.5s reachability probe; a drop shorter than 5s is drawn nowhere (`RECONNECT_QUIET_MS`), and a stream suspected with its route has 4s to deliver something (`STREAM_PROBATION_MS`, Q3.715); token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — each of which gets its own budget, its daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s) and never below `SLOW_ROUTE_FLOOR_MS` (90s): `POST /sessions` 215s, `/prompt` 150s, `GET /agents/capabilities` and the `/custom-agents` writes 290s, the rest 90s, each held above its chain by webcheck; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
+| Web client | 3 live sockets (LRU by most recently viewed), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling — the event count beside it is deleted, see Q3.114) — there is no render window under it, and the only cut is the newest `context_cleared`. History pages backwards at **5000** (`EVENTS_PAGE_LIMIT`) and **does not stop until it reaches the log's start, that cut, or those bytes** — there is no per-run budget and no control that offers to fetch more; `MAX_AUTO_HISTORY` (5000) is only where the loop yields the main thread. A page that fails is retried at 500ms and 2s, transport failures only, and `attachWanted` re-drives a run that gave up on the next poll a session list survives. What pays for it is `sameNode`. **60 sessions per machine per poll** — a pinned row that falls out of that window is invisible until the daemon's `listRank` keeps it, which is why pinned outranks live there. 4s list poll while visible; a probe or a listing nothing answered is asked again at 1 and 2s and then every 4s, one that was refused every 15s (`retryDelay`, Q3.716); with machines held and nothing wrong the registry is read every 15s (`FLEET_LISTING_MS`), and that read's failure writes nothing; 1.5s reachability probe; a drop shorter than 5s is drawn nowhere (`RECONNECT_QUIET_MS`), and a stream suspected with its route has 4s to deliver something (`STREAM_PROBATION_MS`, Q3.715); token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those that spawn a process — `POST /sessions`, `POST /sessions/:id/resume`, `POST /sessions/:id/config`, `GET /agents`, `/agent-auth/*` **and `POST /sessions/:id/prompt`** — each of which gets its own budget, its daemon chain plus `SLOW_ROUTE_MARGIN_MS` (30s) and never below `SLOW_ROUTE_FLOOR_MS` (90s): `POST /sessions` 215s, `/prompt` 150s, `GET /agents/capabilities` and the `/custom-agents` writes 290s, the rest 90s, each held above its chain by webcheck; the prompt is on that list unconditionally, because `request` is handed a method and a path and a deadline that depended on session state would be state leaking into the transport. A login transcript is polled every 700ms while its wizard is open, and one `GET /sessions/:id/commands` per session per revision change — for the open session only |
 | Elicitation form | 24 fields, 24 options per field, **32 KiB** on the projected total, and an option value of 512 — all four **refusals**, because `clampBlob`'s `{truncated: true, bytes}` is fine above an Approve button and useless above a form. **Prose is carried whole** — the three character caps on `message`, a field title and a description were removed in Q2.214, because with several questions on one form the *question itself* is the field's description and a 300-character cap was a cap on it. Structure is refused; the byte total is the only bound left, and it is asserted against one enormous string as well as a thousand small ones. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 characters is refused on the route and never cut, while the *log's* rendering of it is clipped, visibly. Measured 2026-08-06 against live claude: a two-question `AskUserQuestion` is 4 fields, 4 options each, longest value 19 characters, ~2.5 KiB, and the tool's own schema caps it at 4 questions — so every one of these bounds the pathological case rather than a real form |
 | Auto-resume | 3 attempts per session per **daemon life** — in memory, so a restart tries again, deliberately: a restart is new information and refusing to retry would make the deploy that fixes the bug fix nothing. 2 agents starting at once, because each is a node subprocess with a `claude` grandchild. Backoff 2s→60s with **full** jitter, since the attempts start together and a narrow band keeps them synchronised. The failure on the snapshot is capped at 64 characters of code and 512 of message — an order tighter than a pending permission's 8 KiB, because unlike a permission nothing here has to be *acted on* from the list, only recognised |
 | Shutdown | 20s for the graceful stops, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit. The sweep is a syscall per session rather than an exec, so the bound costs nothing — and it stays, because the reason a teardown is bounded does not depend on what it costs |
@@ -44699,3 +44836,79 @@ endpoint's errors; whether function tools sent flat are accepted, where the
 documentation says to group them.
 
 **Status.** Not driven. Switched off.
+
+### Q7.161 — How does a Mac the app set up as a machine come back after a reboot?
+
+**Question.** The first-run path on a Mac is the app: sign in, and the app makes this
+computer a machine and runs its daemon as a child (Q7.139, Q7.148). The close button
+puts the app away and the daemons run on (Q3.697), but a reboot or a Quit ends them,
+and nothing starts them again until somebody opens the app. From a phone the machine
+is simply offline. A daemon installed by `install.sh` has a unit that starts at login;
+this one had nothing.
+
+**Decision. The app opens at login, put away, and its daemons start as on any launch.**
+macOS only, the one profile that carries a daemon (Q4.123). It is on by default from
+the moment this app's own supervisor first starts a daemon on the computer, a switch
+on that machine's screen turns it off, and **nothing ever switches it back on**. The
+owner's decision, 2026-10-11.
+
+- **The mechanism is `SMAppService`**, the system's own login item for an app, called
+  through the `objc2` already in the crate. No dependency is added and nothing lands in
+  `~/Library/LaunchAgents` — which matters here more than elsewhere, because
+  `managed_unit` globs that directory for any `*reemoat*.plist` to find a daemon's
+  unit, at two call sites, and matches loosely on purpose. `nativecheck` already pinned
+  the bundle's minimum to 13.0 for this API.
+- **Whether it is on is asked of the system on every read** and never stored: somebody
+  can change it in System Settings, and a stored flag would then lie on the switch.
+- **What is stored is that it was decided**, once: `login_item` in `server.json`,
+  written by `decide_login_item` *before* the first registration (`first_time`), and by
+  the switch either way. A failure between the mark and the registration loses the
+  default and never repeats it. The system cannot stand in for the mark: an item
+  removed in System Settings and one never registered may read alike.
+- **The trigger is the supervisor starting a daemon**, at the two places it does:
+  `host_daemon_start`, which is the first setup, and the launch thread after
+  `start_configured_at_launch` started something, which is how somebody set up before
+  this build gets the default, once. A Mac whose daemon is `install.sh`'s unit starts
+  nothing there and registers nothing; that unit already comes back at login.
+- **That second call is a write at launch**, the only one. "Nothing is written at
+  startup" was about accounts and still holds for them; `nativecheck` pins the two
+  callers of `default_on` and keeps the mark's own writer out of the startup files.
+- **A launch the system made opens put away**: `opened_at_login` reads the launch's
+  open event inside `setup`, and `at_launch` builds the window hidden. The Dock brings
+  it back, as after a close. A wrong *no* shows the window, which is the safe mistake.
+- **The switch is the account on screen's** (`host_login_item_set`, refused `not_shown`
+  elsewhere), and answers what the system says afterwards rather than what was asked.
+  The page reads any word it does not know as unsupported (`loginItemOf`), and draws
+  the row only on this computer's own machine screen.
+
+**Measured, 2026-10-12, macOS 15.6.** Releases are unsigned and a default build is
+`adhoc,linker-signed` with no bundle seal, so the first question was whether the API
+works from such a bundle at all. It does, from a temporary directory outside
+`/Applications`: never registered reads *not found*, register answers and reads
+*enabled*, unregister reads *not registered*. A registration survives the binary being
+rebuilt (a new code hash) and the bundle being moved. A sealed ad-hoc bundle behaves
+the same. Nothing appeared in `~/Library/LaunchAgents`. The crate's own bindings were
+then run verbatim, in a debug build where `objc2` checks every message's encoding,
+with the same answers. The released profile builds and links the framework.
+
+**Rejected.**
+
+- **A LaunchAgent plist written by the app.** It trips `managed_unit` at both call
+  sites and would need an exemption by exact name from a glob that exists to stop two
+  daemons racing for one enrollment code; and it bakes a path that moves with the app.
+- **A plugin for it.** The one that exists offers a LaunchAgent or AppleScript, not
+  this API, and asks for a tauri past the pair `MEASURED_TAURI` pins.
+- **Keeping the daemon alive outside the app**, as a unit of its own. That is
+  `install.sh`'s shape and a second supervisor for the same roots; the app's daemons
+  are per account (Q7.149) and the unit has no account.
+- **A stored on/off flag.** The system has the answer and can change it without us.
+- **Asking before turning it on.** A machine that silently stops being one after a
+  reboot is the defect; the switch is one screen away and the system announces the
+  item itself.
+
+**Not measured.** The open event on a real login — a launch from a shell reads false,
+and the check is a reboot, which is the first of the hand checks in `docs/NATIVE.md`.
+What the system answers after the item is removed in System Settings. macOS 13 and 14.
+Which app is frontmost after a hidden login.
+
+**Status.** Built. The hidden start is not driven.

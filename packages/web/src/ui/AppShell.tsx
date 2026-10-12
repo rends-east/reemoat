@@ -6,7 +6,7 @@ import { machineQuotaNotice, mayAddMachine } from "../quota";
 import type { Route } from "../router";
 import type { AppState } from "../store";
 import { CommandLine } from "./CommandLine";
-import { listBody } from "./groups";
+import { listBody, settingUp } from "./groups";
 import { MachineColumn } from "./MachineColumn";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
@@ -71,6 +71,7 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
       rows: 0,
       needle: false,
       hidden: 0,
+      settingUp: settingUp(state.setup),
     });
     // The rail carries the sentence at every width; this pane adds what there is room for here (Q3.709).
     if (body.kind === "network" || body.kind === "server") {
@@ -87,7 +88,7 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
         <p className="text-sm text-muted">No machines yet.</p>
         {mayAddMachine(state.me) ? (
           <>
-            <p className="text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
+            <p className="text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use, and sign in there:</p>
             <div className="w-full max-w-lg text-left">
               <CommandLine command={installCommand(controlPlaneOrigin())} />
             </div>

@@ -266,7 +266,7 @@ const LEAF_TITLES: Record<SettingsLeaf, string> = {
   email: "Your email",
   "new-key": "New key",
   "machine-name": "Name",
-  "setup-code": "Setup code",
+  "setup-code": "Setup command",
   "plugin-install": "Install a plugin",
   domains: "Allowed domains",
   "machine-limit": "Machine limit",

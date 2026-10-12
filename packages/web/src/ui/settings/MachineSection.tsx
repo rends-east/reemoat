@@ -1,13 +1,13 @@
 import { Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
-import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
+import { enrollmentExpiryText, installCommand } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { mayLetIn, waitingText } from "../../deviceAccess";
 import { daemonRead, type MachineState } from "../../machine";
 import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
-import { inNativeShell } from "../../native";
+import { controlPlaneOrigin, inNativeShell, loginItem, setLoginItem, type LoginItem } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
 import { registryUnread } from "../Unreachable";
 import { navigate } from "../../router";
@@ -33,7 +33,6 @@ import { OneTimeSecret } from "./OneTimeSecret";
 interface SetupCode {
   machineId: MachineId;
   name: string;
-  url: string;
   code: string;
   expiresAt: number;
 }
@@ -85,7 +84,6 @@ export function MachineSection({
         handoff = {
           machineId: machine.id,
           name: machine.name,
-          url: minted.controlPlaneUrl,
           code: minted.code,
           expiresAt: minted.expiresAt,
         };
@@ -133,7 +131,7 @@ export function MachineSection({
           {/* Offered only before enrollment, and minted on the tap, never on mount: minting burns the previous code (Q3.428). */}
           {setupOffered && (
             <LinkRow
-              title="New setup code"
+              title="Setup command"
               value={minting ? <Spinner /> : undefined}
               disabled={minting}
               onClick={mint}
@@ -155,7 +153,7 @@ export function MachineSection({
           {!machine.enrolled ? (
             <Empty>
               Not enrolled yet.
-              {setupOffered ? " Use the setup code above." : ""}
+              {setupOffered ? " Run the setup command above." : ""}
             </Empty>
           ) : read === "asking" ? (
             <Empty>
@@ -223,6 +221,9 @@ export function MachineSection({
 
       {/* Outside the listable and owner gates: loopback can reach a machine the relay reports offline. */}
       <LocalPath machineId={machineId} />
+
+      {/* This computer's own row only: the daemon it brings back after a reboot is the one this app runs here (Q7.161). */}
+      {state.host?.canHostDaemon === true && machine.id === state.localMachineId && <OpenAtLogin />}
 
       {owned && (
         <Group>
@@ -405,6 +406,54 @@ function LocalPath({ machineId }: { machineId: MachineId }): ReactNode {
   );
 }
 
+/** Drawn from the host's last answer, never from the press; absent where the host cannot do it. */
+function OpenAtLogin(): ReactNode {
+  // undefined is not asked yet, null a read that failed.
+  const [answer, setAnswer] = useState<LoginItem | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const read = (): void => {
+      void loginItem().then((next) => {
+        if (!cancelled) setAnswer(next);
+      });
+    };
+    read();
+    // System Settings, or another account's window, may have changed it while this one was out of sight.
+    const onShow = (): void => {
+      if (document.visibilityState === "visible") read();
+    };
+    document.addEventListener("visibilitychange", onShow);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onShow);
+    };
+  }, []);
+
+  if (answer === undefined || answer === "unsupported") return null;
+  const unread = answer === null;
+  return (
+    <Group title="This computer" error={unread ? "This computer did not say whether Reemoat opens at login." : error}>
+      <SwitchRow
+        title="Open at login"
+        on={answer === "on"}
+        busy={busy}
+        disabled={unread}
+        onToggle={() => {
+          setBusy(true);
+          setError(null);
+          void setLoginItem(answer !== "on")
+            .then(setAnswer)
+            .catch((cause: unknown) => setError(errorText(cause)))
+            .finally(() => setBusy(false));
+        }}
+      />
+    </Group>
+  );
+}
+
 /** Whole minutes, as the daemon takes them: 0 to a week, 0 meaning never (Q2.225). */
 const IDLE_CHOICES: readonly DropdownItem<string>[] = [
   { value: "0", label: "Never", description: "At 64 agents, new sessions are refused." },
@@ -518,8 +567,8 @@ export function SetupCodeScreen({ machineId }: { machineId: MachineId }): ReactN
   if (minted === null) return null;
   return (
     <OneTimeSecret
-      label={`Start the daemon on ${minted.name} with`}
-      value={enrollmentLines(minted.url, minted.code)}
+      label={`Run on ${minted.name} to finish setup`}
+      value={installCommand(controlPlaneOrigin(), minted.code)}
       note={`Single-use, ${enrollmentExpiryText(minted.expiresAt, Date.now())}. Shown once. Replaces any earlier code.`}
       onDone={back}
     />

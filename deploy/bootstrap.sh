@@ -1,5 +1,5 @@
 #!/bin/sh
-# From nothing to an enrolled daemon via `curl … | sh`; POSIX sh with dash as the floor, no sudo, no profile edits.
+# From nothing to an enrolled daemon via `curl … | sh`; POSIX sh with dash as the floor, no profile edits, and one command as root it asks about first (Q4.106).
 # All work runs from `main` on the last line so a truncated download does nothing; stdin is the download, so questions use fd 3.
 set -eu
 
@@ -15,6 +15,9 @@ GIT_MIN_VERSION=2.31
 REEMOAT_HOME="${REEMOAT_HOME:-$HOME/.reemoat}"
 TOOLCHAIN="$REEMOAT_HOME/toolchain"
 TOOLCHAIN_MARKER="$TOOLCHAIN/.installed-by-bootstrap"
+# What logind reads at boot, and what says systemd is the init; deploycheck points both at fixtures.
+LINGER_DIR=/var/lib/systemd/linger
+SYSTEMD_RUN=/run/systemd/system
 
 CP=""
 # Taken out of the environment so no child (pnpm scripts, vendor installers) inherits the account key.
@@ -37,6 +40,10 @@ UNINSTALL=0
 PURGE=0
 TTY_OPEN=0
 SESSION_TOKEN=""
+# Whether this run named the machine: under --enroll-code the row keeps the name it has in the app.
+NAMED=0
+REENROLL=0
+AUTOSTART=""
 
 say()  { printf '%s\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
@@ -191,9 +198,12 @@ Set up a Reemoat daemon on this machine and add it to the app.
   --api-key <rk_...>    use an API key instead of signing in. Prefer the
                         REEMOAT_API_KEY environment variable — argv is visible
                         in `ps` to everybody on this machine
-  --enroll-code <ec_..> a code already minted in Settings -> Machines. Needs no
-                        account credential at all, and is the smallest thing
-                        that works
+  --enroll-code <ec_..> a setup code for a machine that already exists: the app
+                        shows one inside this command for a machine that was
+                        added and never set up, and `cpctl provision` prints
+                        one. Signs in to nothing and creates nothing; on a
+                        machine already joined to this control plane it
+                        re-enrolls the daemon in place
   --label <name>        what to call this machine. Defaults to its hostname
   --dir <path>          where to put the checkout (default ~/srv/reemoat)
   --ref <git-ref>       clone this instead of the version the control plane runs
@@ -212,12 +222,13 @@ Set up a Reemoat daemon on this machine and add it to the app.
                         re-applied by every daily refresh
   --install-agents <a,b> install these coding-agent CLIs on the way in. **Nothing
                         is installed by default**: a harness arrives on a machine
-                        when somebody presses Install in the app, which is the
+                        when somebody chooses Set up in the app, which is the
                         whole of what keeps a new one from appearing on every
                         machine in the fleet by itself. This flag is for a caller
                         with nobody to press it — a provisioner. Names are the
                         ones `deploy/agents.sh --only` takes, and it validates them
-  --yes                 do not ask to confirm anything
+  --yes                 do not ask to confirm anything. Starting at boot is then
+                        turned on only where sudo asks for no password
   --uninstall           stop and remove the service and the node this script
                         installed. Names your data; deletes none of it. Exits
                         non-zero and keeps the node if the service could not
@@ -235,7 +246,8 @@ parse_flags() {
       --url)         CP="${2:-}"; need_value "--url" "$@"; shift 2 ;;
       --api-key)     API_KEY="${2:-}"; need_value "--api-key" "$@"; shift 2
                      warn "note: --api-key is visible in \`ps\`. REEMOAT_API_KEY is the quieter way." ;;
-      --enroll-code) ENROLL_CODE="${2:-}"; need_value "--enroll-code" "$@"; shift 2 ;;
+      --enroll-code) ENROLL_CODE="${2:-}"; need_value "--enroll-code" "$@"; shift 2
+                     [ -n "$ENROLL_CODE" ] || die "--enroll-code needs a value" ;;
       --label)       LABEL="${2:-}"; need_value "--label" "$@"; shift 2 ;;
       --dir)         CHECKOUT="${2:-}"; need_value "--dir" "$@"; shift 2 ;;
       --ref)         GIT_REF="${2:-}"; need_value "--ref" "$@"; shift 2 ;;
@@ -343,6 +355,16 @@ detect_platform() {
   esac
 }
 
+# Before any request: without systemd this failed only at hand_off, after the machine row was spent.
+require_supervisor() {
+  [ "$PLATFORM" = linux ] || return 0
+  if command -v systemctl >/dev/null 2>&1 && [ -d "$SYSTEMD_RUN" ]; then return 0; fi
+  die "this Linux does not run systemd, so it has no supervisor this can install into.
+
+  The daemon itself is portable — deploy/run-daemon.sh from a checkout works
+  anywhere node does. What is missing here is systemd as the init system."
+}
+
 # Sets HTTP_STATUS (000 when curl got no answer) and HTTP_BODY.
 http_request() {
   _method="$1"; _url="$2"; _body="${3:-}"; _auth="${4:-}"
@@ -397,12 +419,15 @@ node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p
 
 # Password reaches node on stdin, NUL-separated, never argv.
 credential_body() {
-  printf '%s\0%s\0%s\0%s\0' "$1" "$2" "${3:-}" "${4:-}" | "$NODE_BIN" -e '
-    const [name, password, email, accepted] = require("fs").readFileSync(0, "utf8").split("\0");
-    const body = email ? {name, password, email} : {name, password};
-    if (accepted === "yes") body.acceptedTerms = true;
-    process.stdout.write(JSON.stringify(body));
+  printf '%s\0%s\0' "$1" "$2" | "$NODE_BIN" -e '
+    const [name, password] = require("fs").readFileSync(0, "utf8").split("\0");
+    process.stdout.write(JSON.stringify({name, password}));
   '
+}
+
+# Closed when this script is what makes it; a directory somebody already made keeps the mode they gave it.
+make_home() {
+  [ -d "$REEMOAT_HOME" ] || { mkdir -p "$REEMOAT_HOME" && chmod 700 "$REEMOAT_HOME"; }
 }
 
 # Every refusal comes after ensure_node, so it must not claim nothing was installed.
@@ -470,6 +495,7 @@ install_node() {
   verify_sha256 "$TMP/node/$_tar" "$TMP/node/SHASUMS256.txt" "$_tar" \
     || die "the node download does not match its published checksum. $(nothing_installed)"
   # Node's own files only, never the directory: $TOOLCHAIN also holds agent CLIs a live session may be on (Q4.114).
+  make_home
   mkdir -p "$TOOLCHAIN"
   for _f in bin/node bin/npm bin/npx bin/corepack lib/node_modules/npm lib/node_modules/corepack include share CHANGELOG.md LICENSE README.md; do
     rm -rf "$TOOLCHAIN/$_f"
@@ -498,6 +524,7 @@ ensure_pnpm() {
   # Always our own prefix: a system node's prefix needs sudo.
   [ -x "$_npm" ] || _npm=$(command -v npm 2>/dev/null || true)
   [ -n "$_npm" ] || die "no npm beside $NODE_BIN, so pnpm cannot be installed."
+  make_home
   mkdir -p "$TOOLCHAIN"
   : > "$TOOLCHAIN_MARKER"
   # Not corepack: it downloads pnpm at first use, making `pnpm install` a network dependency.
@@ -567,8 +594,6 @@ probe_instance() {
   esac
   INSTANCE_JSON="$HTTP_BODY"
   REG_ENABLED=$(json_path registration.enabled "$INSTANCE_JSON")
-  REG_EMAIL=$(json_path registration.requiresEmail "$INSTANCE_JSON")
-  REG_LEGAL=$(json_path legal.documents "$INSTANCE_JSON")
   SOURCE_URL=$(json_path source.url "$INSTANCE_JSON")
   SOURCE_VERSION=$(json_path source.version "$INSTANCE_JSON")
   note "control plane $CP (${SOURCE_VERSION:-?})"
@@ -591,70 +616,7 @@ sign_in() {
   esac
 }
 
-# No polling: /v1/login throttles after five 401s, so one attempt per keypress, capped at five.
-wait_for_confirmation() {
-  _name="$1"; _pass="$2"; _email="$3"
-  say ""
-  say "  Link sent to $_email. Open it, then press Enter."
-  _tries=0
-  while [ "$_tries" -lt 5 ]; do
-    _tries=$((_tries + 1))
-    tty_ask "  Enter when done" "" >/dev/null
-    _body=$(credential_body "$_name" "$_pass")
-    http_request POST "$CP/v1/login" "$_body"
-    case "$HTTP_STATUS" in
-      200) SESSION_TOKEN=$(json_path token "$HTTP_BODY"); AUTH="$SESSION_TOKEN"; say "  signed in."; return 0 ;;
-      429) die "the control plane is rate-limiting sign-ins. $(api_message "$HTTP_BODY")
-
-  Wait, then re-run this installer and choose \"sign in\"." ;;
-      000) warn "  could not reach $CP just then. Press Enter to try again." ;;
-      *)   warn "  not confirmed yet (or the password is wrong) — the server does not say which." ;;
-    esac
-  done
-  die "still not signed in after five tries, and five is the whole budget before
-  this control plane starts blocking sign-ins for the account you just made.
-
-  Open the link, then sign in to the Reemoat app pointed at $CP and add a
-  machine there — or re-run this with --api-key once you have one."
-}
-
-register() {
-  _name=$(tty_ask "  username")
-  [ -n "$_name" ] || die "no username given."
-  _email=""
-  if [ "$REG_EMAIL" = true ]; then
-    _email=$(tty_ask "  email")
-    [ -n "$_email" ] || die "this control plane confirms sign-ups by mail, so it needs an address."
-  fi
-  _pass=$(tty_secret "  password")
-  _again=$(tty_secret "  again")
-  [ "$_pass" = "$_again" ] || die "the two passwords are not the same."
-  _accepted=""
-  if [ "$REG_LEGAL" = true ]; then
-    say ""
-    say "  Before creating an account, please read:"
-    note "Terms of Use            $CP/terms"
-    note "Acceptable Use Policy   $CP/acceptable-use"
-    note "Privacy Policy          $CP/privacy"
-    _agree=$(tty_ask "  type yes to agree to all three")
-    [ "$_agree" = yes ] || die "sign-up needs agreement to the terms; nothing was created. $(nothing_installed)"
-    _accepted=yes
-  fi
-  _body=$(credential_body "$_name" "$_pass" "$_email" "$_accepted")
-  http_request POST "$CP/v1/register" "$_body"
-  case "$HTTP_STATUS" in
-    201)
-      SESSION_TOKEN=$(json_path token "$HTTP_BODY"); AUTH="$SESSION_TOKEN"
-      note "account       created"
-      return 0 ;;
-    200) wait_for_confirmation "$_name" "$_pass" "$_email"; return 0 ;;
-    403) die "this control plane is not taking sign-ups. Ask whoever runs it for an account." ;;
-    000) die "lost $CP while creating the account. $(nothing_installed)" ;;
-    *)   die "sign-up refused: $(api_message "$HTTP_BODY")" ;;
-  esac
-}
-
-# Least authority first: an enrollment code is one machine, an API key the whole account.
+# Whatever was given outright is used and nothing is asked; a terminal is asked for a sign-in or a key, never a code (Q1.625).
 choose_credential() {
   AUTH=""
   [ -n "$ENROLL_CODE" ] && return 0
@@ -662,23 +624,19 @@ choose_credential() {
   if [ "$TTY_OPEN" != 1 ]; then
     die "no terminal, so there is nothing to ask on. Give this a credential outright:
 
-      curl -fsSL $CP/install.sh | sh -s -- --enroll-code ec_...
-      REEMOAT_API_KEY=rk_... sh -c \"\$(curl -fsSL $CP/install.sh)\""
+      REEMOAT_API_KEY=rk_... sh -c \"\$(curl -fsSL $CP/install.sh)\"
+      curl -fsSL $CP/install.sh | sh -s -- --enroll-code ec_...   # a machine that already exists"
   fi
   say ""
   if [ "$REG_ENABLED" = true ]; then
-    _pick=$(menu "Who are you on it?" "Sign in" "Create an account" "API key" "Setup code")
-  else
-    _pick=$(menu "Who are you on it?" "Sign in" "API key" "Setup code")
-    # Without the register row, picks 2 and 3 shift up one; matched as strings so a non-number never reaches arithmetic.
-    case "$_pick" in 2 | 3) _pick=$((_pick + 1)) ;; esac
+    tty_say "  No account yet? Create one at $CP/register, then sign in here."
   fi
-  case "$_pick" in
+  case "$(menu "Who are you on it?" "Sign in" "API key")" in
     1) sign_in ;;
-    2) register ;;
     # Used for one enrollment code, then dropped: never written to the env file.
-    3) API_KEY=$(tty_secret "  API key"); AUTH="$API_KEY" ;;
-    4) ENROLL_CODE=$(tty_secret "  setup code") ;;
+    2) API_KEY=$(tty_secret "  API key")
+       [ -n "$API_KEY" ] || die "no API key given."
+       AUTH="$API_KEY" ;;
     # An empty answer (the menu's subshell died) must never fall through to create_machine.
     *) die "nothing was chosen." ;;
   esac
@@ -716,10 +674,67 @@ check_label() {
   esac
 }
 
+# The same text as lib.sh: this script is served alone and the checkout may be another version. deploycheck compares them.
+linger_on() {
+  [ -e "$LINGER_DIR/$(id -un)" ] && return 0
+  [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" = yes ]
+}
+
+# linger_step none|yes|asked: unprivileged first; yes adds sudo -n, asked adds sudo. Prints on or off, as measured (Q4.106).
+linger_step() {
+  if linger_on; then printf on; return 0; fi
+  loginctl --no-ask-password enable-linger "$(id -un)" </dev/null >/dev/null 2>&1 || true
+  if ! linger_on; then
+    case "$1" in
+      yes)   sudo -n loginctl enable-linger "$(id -un)" </dev/null >/dev/null 2>&1 || true ;;
+      asked) sudo loginctl enable-linger "$(id -un)" </dev/null >&2 || true ;;
+    esac
+  fi
+  if linger_on; then printf on; else printf off; fi
+}
+
+# systemctl --user finds its manager through XDG_RUNTIME_DIR, which su and sudo -iu leave unset; a manager lingering just started gets 10s.
+user_manager_up() {
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || { XDG_RUNTIME_DIR="/run/user/$(id -u)"; export XDG_RUNTIME_DIR; }
+  _n=0
+  while [ "$_n" -lt 10 ]; do
+    if systemctl --user show-environment >/dev/null 2>&1; then return 0; fi
+    [ "$AUTOSTART" = on ] || return 1
+    _n=$((_n + 1))
+    sleep 1
+  done
+  return 1
+}
+
+# Before create_machine, so a host that could never start the unit is refused before a slot is spent.
+ensure_autostart() {
+  if [ "$PLATFORM" != linux ]; then AUTOSTART=login; return 0; fi
+  _u=$(id -un)
+  if [ "$ASSUME_YES" = 1 ]; then
+    AUTOSTART=$(linger_step yes)
+  else
+    AUTOSTART=$(linger_step none)
+    if [ "$AUTOSTART" = off ] && [ "$TTY_OPEN" = 1 ]; then
+      say ""
+      if [ "$(menu "Start the daemon at boot? Linux needs one command as root for that:
+      sudo loginctl enable-linger $_u" "Yes, run it" "No, I will run it myself")" = 1 ]; then
+        AUTOSTART=$(linger_step asked)
+      fi
+    fi
+  fi
+  if [ "$AUTOSTART" = on ]; then note "autostart     at boot"; else note "autostart     only while $_u is logged in"; fi
+  user_manager_up || die "systemd is running no services for $_u in this shell, so the daemon could not be started.
+
+  That is what su and sudo -iu leave behind. Log in as $_u directly, or have root
+  run this once and then run the installer again:
+      loginctl enable-linger $_u
+  $(nothing_installed)"
+}
+
 # Before the clone and pnpm install, so a machine_limit 409 arrives before minutes of downloads.
 create_machine() {
   if [ -n "$ENROLL_CODE" ]; then
-    [ -n "$LABEL" ] || LABEL=$(sanitize_label "$(uname -n)")
+    [ -z "$LABEL" ] || warn "note: --label is ignored with --enroll-code; the machine keeps the name it has in the app."
     return 0
   fi
   [ -n "$LABEL" ] || LABEL=$(sanitize_label "$(uname -n)")
@@ -741,6 +756,7 @@ create_machine() {
         # Judged like a typed address: it is written into the env file the daemon dials for good.
         [ -z "$_url" ] || adopt_origin "$_url" "the control plane named an address that is not an http(s) origin"
         [ -n "$ENROLL_CODE" ] || die "the control plane created $MACHINE_ID but sent no enrollment code."
+        NAMED=1
         note "machine       $LABEL"
         return 0 ;;
       409)
@@ -762,7 +778,7 @@ create_machine() {
           password_change_required)
             die "this account has to change its password before it can add a machine.
 
-  Sign in at $CP/ , set a password, then run this again." ;;
+  Sign in to the Reemoat app, set a new password there, then run this again." ;;
           *) die "refused: $(api_message "$HTTP_BODY")" ;;
         esac ;;
       401) die "that credential was refused: $(api_message "$HTTP_BODY")" ;;
@@ -838,7 +854,7 @@ install_dependencies() {
 # Installs only the harnesses --install-agents names; a failure warns rather than dies. Must run before hand_off.
 # The env file carries the same --agent-source and --agent-channel; the refresh re-applies the channel, so one it lacked would be undone (Q4.115).
 install_agents() {
-  [ -n "$INSTALL_AGENTS" ] || { note "agents        none installed; open the app and press Install"; return 0; }
+  [ -n "$INSTALL_AGENTS" ] || { note "agents        none installed; the app sets one up: Settings -> Machines -> <machine> -> Agents"; return 0; }
   _only=""
   _rest=$INSTALL_AGENTS
   while [ -n "$_rest" ]; do
@@ -850,7 +866,7 @@ install_agents() {
   # Node's directory in front: agents.sh's npm installs need npm and node, which may not be on PATH yet.
   # shellcheck disable=SC2086 # `_only` is a built argument list, deliberately split.
   ( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" $_only ) || warn "
-  some agent CLIs could not be installed. Open the app and press Install to try
+  some agent CLIs could not be installed. Open the app and choose Set up to try
   again. The lines above say which and why."
 }
 
@@ -887,21 +903,33 @@ write_env_file() {
   note "settings      $ENV_FILE"
 }
 
+# Only the code moves: REEMOAT_AUTH and every other line stay what this install already runs on.
+write_code() {
+  printf '%s' "$ENROLL_CODE" | sh -c '
+    set -eu
+    _code=$(cat)
+    . "$0"
+    _env=$(env_file daemon)
+    set_env REEMOAT_ENROLL_CODE "$_code" "$_env"
+    printf "%s" "$_env"
+  ' "$CHECKOUT/deploy/lib.sh" > "$TMP/envpath" \
+    || die "could not write the daemon's environment file."
+  ENV_FILE=$(cat "$TMP/envpath")
+}
+
 # A real env file first is what makes install.sh non-interactive: its interview is gated on the file matching the example.
-hand_off() {
+run_install() {
   note "service       installing"
   # PATH prefixed so runtime_path bakes our node into the unit; </dev/null so nothing reads the rest of our download.
   PATH="$(dirname -- "$NODE_BIN"):$(dirname -- "$PNPM_BIN"):$PATH" \
-    "$CHECKOUT/deploy/install.sh" daemon --non-interactive </dev/null \
-    || die "deploy/install.sh could not install the service."
-  if [ "$PLATFORM" = linux ] && command -v loginctl >/dev/null 2>&1; then
-    # A --user unit stops at the last logout; linger is attempted, never escalated.
-    loginctl enable-linger "$(id -un)" >/dev/null 2>&1 \
-      || warn "note: the daemon will stop when you log out. To keep it running:
-      sudo loginctl enable-linger $(id -un)"
-  fi
+    "$CHECKOUT/deploy/install.sh" daemon --non-interactive </dev/null
 }
 
+hand_off() {
+  run_install || die "deploy/install.sh could not install the service."
+}
+
+# Exits 3 when the newest start did not enroll, which reenroll answers by putting the old settings back.
 verify_running() {
   sh -c '
     set -eu
@@ -912,38 +940,79 @@ verify_running() {
     else
       echo "  running       NO — the supervisor has no live process" >&2; _ok=0
     fi
-    # ⚠ **`wait_healthy`, not `http_ok` on a raw `health_probe_target`.** That
-    # function answers `ok <url>` or `skip <reason>` — a *prefixed* answer — and
-    # `wait_healthy` is what strips it, classifies the three skip cases and
-    # retries for 30s. Passing it straight to `http_ok` asked for a URL that
-    # begins `ok http://…`, which never answers: measured, every healthy install
-    # printed `answering: NO — nothing answered at ok http://127.0.0.1:7887/health`
-    # and exited 2, seconds after `install.sh` had printed `health: ok` for the
-    # same daemon on the line above.
+    # wait_healthy, not http_ok: health_probe_target answers a prefixed "ok <url>" that only wait_healthy strips.
     if wait_healthy daemon; then :; else _ok=0; fi
-    if svc_log_lines daemon 300 2>/dev/null | grep -q "enrolled as m_"; then
-      echo "  enrolled      $(svc_log_lines daemon 300 | sed -n "s/.*enrolled as \(m_[0-9a-f]*\).*/\1/p" | tail -1)"
+    # An account below the regular uid range has no journal of its own, so its unit is read out of the system one.
+    # Here and not only in lib.sh: the checkout may be older than this script (Q4.106).
+    _hint=$(log_hint daemon)
+    read_log() {
+      _log=$(svc_log_lines daemon 300 2>/dev/null | grep -v "^-- " || true)
+      if [ -z "$_log" ] && command -v journalctl >/dev/null 2>&1; then
+        _log=$(journalctl -q --user-unit "$(unit_label daemon)" -n 300 --no-pager 2>/dev/null || true)
+        [ -z "$_log" ] || _hint="journalctl --user-unit $(unit_label daemon) -n 50"
+      fi
+    }
+    # Read from the newest attempt on: an older "enrolled as" says nothing about this code. The line is waited for
+    # briefly, since a health check another daemon on this port answered passes before this one has said anything.
+    _n=0
+    while :; do
+      read_log
+      _from=$(printf "%s\n" "$_log" | grep -n "enrolling with " | tail -1 | cut -d: -f1)
+      _since=$(printf "%s\n" "$_log" | tail -n "+${_from:-1}")
+      if printf "%s\n" "$_since" | grep -Eq "enrolled as m_|enrollment failed"; then break; fi
+      [ "$_n" -lt 5 ] || break
+      _n=$((_n + 1))
+      sleep 1
+    done
+    # Three answers, not two: a log nobody could read says nothing about the code either way.
+    if printf "%s\n" "$_since" | grep -q "enrolled as m_"; then
+      _enrolled=yes
+      echo "  enrolled      $(printf "%s\n" "$_since" | sed -n "s/.*enrolled as \(m_[0-9a-f]*\).*/\1/p" | tail -1)"
+    elif [ -n "$(printf "%s" "$_log" | tr -d "[:space:]")" ]; then
+      _enrolled=no
+      echo "  enrolled      NO — the code has not been exchanged" >&2
     else
-      echo "  enrolled      NO — the code has not been exchanged" >&2; _ok=0
+      _enrolled=unread
+      echo "  enrolled      not confirmed — this account cannot read the daemon log. The app shows the machine online once it is." >&2
     fi
     # A note rather than a failure: a machine that enrolled and got no relay is
     # unreachable from a phone, and the daemon redials on its own backoff.
-    svc_log_lines daemon 300 2>/dev/null | grep -qi "relay" \
-      || echo "  relay         not up yet — it dials with backoff" >&2
-    echo "  logs          $(log_hint daemon)"
-    exit $(( 1 - _ok ))
+    if [ "$_enrolled" != unread ]; then
+      printf "%s\n" "$_log" | grep -qi "relay" \
+        || echo "  relay         not up yet — it dials with backoff" >&2
+    fi
+    echo "  logs          $_hint"
+    # 0 enrolled and up, 1 enrolled and not up, 3 not enrolled, 4 up and unread, 5 not up and unread.
+    case "$_enrolled" in
+      yes) exit $(( 1 - _ok )) ;;
+      no)  exit 3 ;;
+      *)   if [ "$_ok" = 1 ]; then exit 4; else exit 5; fi ;;
+    esac
   ' "$CHECKOUT/deploy/lib.sh"
 }
 
 summary() {
   say ""
-  say "\"$LABEL\" is on $CP — open it."
+  if [ "$NAMED" = 1 ]; then
+    _row="$LABEL"
+    say "\"$LABEL\" is in your machine list — open the Reemoat app."
+  else
+    _row="<this machine>"
+    say "This machine is in your machine list — open the Reemoat app."
+  fi
   say ""
+  case "$AUTOSTART" in
+    on)    note "starts        by itself after a reboot" ;;
+    login) note "starts        at login — when $(id -un) logs in to this Mac" ;;
+    *)     note "starts        NOT by itself after a reboot, only while $(id -un) is logged in. To change that:"
+           note "                  sudo loginctl enable-linger $(id -un)" ;;
+  esac
+  note "next          Settings -> Machines -> $_row -> Agents, and choose Set up for the agent you want"
   note "update        $CHECKOUT/deploy/deploy.sh"
   note "uninstall     curl -fsSL $CP/install.sh | sh -s -- --uninstall$(dir_flag)"
 }
 
-# Asked before a credential. Re-enrolling is never the default: it mints a second machine row and spends a slot.
+# Asked before a credential. Without a code, re-enrolling is never the default: it mints a second machine row and spends a slot.
 existing_install() {
   _env="${REEMOAT_ENV_FILE:-$HOME/.reemoat/daemon.env}"
   [ -f "$_env" ] || return 1
@@ -957,6 +1026,14 @@ existing_install() {
       re-applies that file's channel five minutes after a start and daily after that. To move
       claude now rather than in five minutes, also run $CHECKOUT/deploy/agents.sh --channel $AGENT_CHANNEL;
       on its own, the next daily run puts the env file's channel back."
+  # A code names the machine already, so nothing is asked: this install is re-enrolled where it stands.
+  if [ -n "$ENROLL_CODE" ]; then
+    [ "${_bound%/}" = "$CP" ] || die "this machine's daemon is joined to $_bound and this code is for $CP.
+
+  Run the command $_bound's app shows, or pass --url $_bound if the two are the same control plane."
+    REENROLL=1
+    return 1
+  fi
   say ""
   if [ "$TTY_OPEN" != 1 ]; then
     die "already set up here, joined to $_bound.
@@ -982,6 +1059,49 @@ update_existing() {
   say "updating $CHECKOUT"
   # Its status is returned: `existing_install || true` suppresses set -e.
   "$CHECKOUT/deploy/deploy.sh" --service daemon || return 1
+}
+
+# The checkout and its version stay put. A code the daemon cannot redeem puts the old settings back, since the daemon exits on one (Q1.625).
+reenroll() {
+  [ -d "$CHECKOUT/deploy" ] || die "this machine is set up, but there is no checkout at $CHECKOUT.
+
+  Point --dir at the checkout it was installed from."
+  _env="${REEMOAT_ENV_FILE:-$HOME/.reemoat/daemon.env}"
+  # A code this install already holds enrolls nothing: the daemon skips it, and there would be no line to verify by.
+  _held=$(sed -n "s/^REEMOAT_ENROLL_CODE='\{0,1\}\([^']*\)'\{0,1\}.*/\1/p" "$_env" | tail -1)
+  if [ "$_held" = "$ENROLL_CODE" ]; then
+    say ""
+    say "This machine already used that code, and nothing was changed."
+    say "If it is not in your machine list, get a fresh command from the app."
+    return 0
+  fi
+  note "already set up here; re-enrolling it with the new code"
+  ensure_autostart
+  cp -p "$_env" "$TMP/env.previous"
+  write_code
+  # Neither step may end the run: a daemon that does not come up is what a refused code looks like, and the answer to that is below.
+  if sh -c '. "$0"; svc_installed daemon' "$CHECKOUT/deploy/lib.sh"; then
+    note "service       reloading (sessions in flight are interrupted and come back by themselves)"
+    sh -c '. "$0"; svc_reload daemon' "$CHECKOUT/deploy/lib.sh" >/dev/null 2>&1 || true
+  else
+    run_install || true
+  fi
+  _rc=0
+  verify_running || _rc=$?
+  # Not on 1: a daemon that did enroll holds the new code's identity, and the old file would have it ask again with a spent one.
+  case "$_rc" in
+    3 | 5)
+      cp -p "$TMP/env.previous" "$ENV_FILE"
+      sh -c '. "$0"; svc_restart daemon' "$CHECKOUT/deploy/lib.sh" >/dev/null 2>&1 || true
+      die "
+  the daemon did not come up enrolled with that code. Codes are single-use and
+  last an hour. The previous settings are back and the daemon was restarted on
+  them. Get a fresh command from the app." ;;
+    0 | 4) : ;;
+    *) die "
+  the service is installed but did not come up. The log is where the reason is." ;;
+  esac
+  summary
 }
 
 do_uninstall() {
@@ -1072,6 +1192,7 @@ main() {
   # Before resolve_control_plane: uninstalling never needs a control plane.
   if [ "$UNINSTALL" = 1 ]; then do_uninstall; return 0; fi
   resolve_control_plane
+  require_supervisor
 
   ensure_git
   check_script_binary
@@ -1080,8 +1201,10 @@ main() {
 
   probe_instance
   existing_install || true
+  if [ "$REENROLL" = 1 ]; then reenroll; return 0; fi
 
   choose_credential
+  ensure_autostart
   create_machine
   revoke_session
 
@@ -1094,8 +1217,13 @@ main() {
   write_env_file
   hand_off
 
-  verify_running || die "
-  the service is installed but did not come up. The log is where the reason is."
+  _rc=0
+  verify_running || _rc=$?
+  case "$_rc" in
+    0 | 4) : ;;
+    *) die "
+  the service is installed but did not come up. The log is where the reason is." ;;
+  esac
   summary
 }
 

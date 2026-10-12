@@ -16,7 +16,7 @@ paths:
 # What could not be reached, and where it is said
 
 The client's loading and failure states. `relay.md` owns the wire and `web-shell.md` the
-list as a layout. Q3.707 to Q3.716; what is not built yet is listed at the foot of Q3.709.
+list as a layout. Q3.707 to Q3.716; what is not built is at the foot of Q3.709.
 
 ## Three facts, never one string (Q3.707)
 
@@ -119,9 +119,9 @@ it has outlasted it, counted from the cause's own start on the monotonic clock.
   it is offline, or the server answering with an error. Nothing is held on a device that
   says it is offline; `noteDevice` sets the word before weighing anything under it.
 - **Each cause carries its own date** (`Spell.since`): `server.since`, `downSince`, the
-  stream's `downSince`. A first listing and a first probe carry none and are counted from
+  stream's `downSince`. A first listing and a first probe carry none and count from
   when the screen first saw them (`troubleDue`), so a launch is one spell. **None is drawn
-  on the render that first sees it** (`TROUBLE_SIGHT_MS`): a hold that has just run out
+  on the render that first sees it** (`TROUBLE_SIGHT_MS`): a hold that just ran out
   hands over a cause already due, and the body reports that it speaks one commit late.
 - **A machine drawn as up whose sessions cannot be read is a reconnect**
   (`listFailingSince`, from the first listing that failed in transit). A probe can pass
@@ -174,8 +174,8 @@ retries are the detector. The driver holds every outage to `BACK_WITHIN_MS`
 ## The shell at once (Q3.708)
 
 `App.tsx` keeps a spinner for one wait: the host has not named an account
-(`state.host === null` in the shell). No request is out during it; past
-`STARTING_WORDS_MS` it says so. A rejected boot call is `hostBootFailed`, a failure with a
+(`state.host === null` in the shell), with no request out; past
+`STARTING_WORDS_MS` it says so. A rejected boot call is `hostBootFailed`, with a
 reload. Everything after is the shell, loading or not, so the drawer is always in reach.
 
 **What the shell may claim before the first answer: nothing.** The drawer's two
@@ -206,7 +206,7 @@ over such a link; a rule here is a property it sweeps, so drive it before changi
 - **A failed send is weighed before anything is given back**: `echoClaimed` means only the
   answer was lost. Else a failure in transit is `doubtSend`, and its event arriving takes
   the copy back out of the box, unless the reader changed it. A refusal is never in doubt.
-- Not built: an idempotency key on the prompt route, which is what exactly-once needs.
+- Not built: an idempotency key on the prompt route, which exactly-once needs.
 
 ## Bounds
 
@@ -221,6 +221,6 @@ over such a link; a rule here is a property it sweeps, so drive it before changi
 | A daemon not dialled in | the listing at 1, 2, 4 s, up to `AWAY_RETRY_MS` 60 s |
 | The host's connection, silent | pinged at `PING` 5 s, closed 5 s later; a dial has `CONNECT` 10 s |
 | A reconnect before the server is named | `SERVER_NAMED_AFTER_MS` 10 s |
-| A registry that failed, nothing held | asked on that same schedule; the poll's 4 s is for a known, empty registry |
+| The registry | failed, nothing held: that same schedule; known, empty: the poll's 4 s; machines held: every `FLEET_LISTING_MS` 15 s, its failure writing nothing |
 | A press on `Try again` | drawn for at least `RETRY_FLOOR_MS` 400 ms |
 | Words on the pre-boot wait | `STARTING_WORDS_MS` 2 s |

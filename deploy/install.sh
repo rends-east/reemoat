@@ -310,7 +310,10 @@ ask_daemon() {
       # The fleet-wide provisioning key is never asked for on the host being provisioned; only a single-use enrollment code travels here.
       echo "  this host needs an enrollment code: single-use, one hour."
       echo
-      echo "  whoever will own the machine makes one in Settings → Machines."
+      echo "  whoever will own the machine makes one, signed in with cpctl on any computer:"
+      echo "    pnpm cpctl addmachine <name>           # creates the machine, prints its code"
+      echo "  for a machine already in their list and never set up, the app has one:"
+      echo "    Settings → Machines → <machine> → Setup command"
       echo "  or an admin makes one for them, from their own machine:"
       echo "    cpctl provision <user> <name>          # with REEMOAT_CP_PROVISION_KEY"
       echo "    cpctl admin addmachine <name> --owner <userId> && cpctl admin enroll <machineId>"
@@ -523,6 +526,18 @@ else
   echo "  image:        $(cp_image_id)"
 fi
 
+# Before the start, so a unit enabled now also starts at boot (Q4.106).
+if [ "$INIT_SYSTEM" = systemd ] && [ "$(service_backend "$SERVICE")" = unit ]; then
+  if [ "$(linger_step none)" = off ] && interactive; then
+    echo
+    echo "  lingering is off for $(id -un), so $LABEL would stop at logout and not start at boot."
+    if confirm "turn it on — this runs: sudo loginctl enable-linger $(id -un)" y; then
+      linger_step asked >/dev/null
+    fi
+  fi
+  user_bus wait
+fi
+
 START_FAILED=0
 HEALTH_FAILED=0
 # Separate from START_FAILED, which gates the one-time admin key capture: a relay failure says nothing about the API.
@@ -718,19 +733,17 @@ fi
 if [ "$(service_backend "$SERVICE")" = unit ]; then
   case "$INIT_SYSTEM" in
     systemd)
-      if command -v loginctl >/dev/null 2>&1 &&
-        [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || echo no)" != "yes" ]; then
+      if ! linger_on; then
         echo
-        echo "warning: user lingering is off, so this unit stops when your last"
-        echo "         session ends. To survive logout and reboot:"
+        echo "warning: lingering is off for $(id -un), so this unit stops at logout and"
+        echo "         does not start at boot. To fix that, once:"
         echo "           sudo loginctl enable-linger $(id -un)"
       fi
       ;;
     launchd)
       echo
-      echo "note: a gui/ agent needs a logged-in user session. On a headless Mac,"
-      echo "      enable automatic login, or the service will not come back after"
-      echo "      a reboot."
+      echo "note: this starts when $(id -un) logs in, not at boot: a gui/ agent needs a"
+      echo "      login session. On a headless Mac, enable automatic login."
       ;;
   esac
 fi
