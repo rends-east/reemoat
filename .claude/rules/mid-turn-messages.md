@@ -147,7 +147,7 @@ turn being torn down. Q3.701.
 
 - `claimEcho` takes the echo in the commit its own event lands in: the first `prompt`
   past `sendFloor` with the same text and files in order — text is safe only with that
-  floor.
+  floor. One event takes one send, the oldest it could be; a later send displaces none.
 - `deliversQueued` counts a waiting message as work for the transcript only (the pump
   fans a turnless snapshot before `deliverQueued`); `Composer` still reads
   `showsWorking`.

@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 152 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 115 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 464 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 465 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 88 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 161 | `###` |
-| | | **1165** | |
+| | | **1167** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1165 rather than the 585
+dividers. So the count is over **both** depths, and it says 1167 rather than the 586
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -1788,6 +1788,11 @@ in `users` are never deleted, and what that sentence protected is now written do
 rather than enforced: an audit row's job is to say what happened, so a code may name
 a user who is gone. Refusing to delete yourself is also what makes "there is always
 an enabled admin left" true by construction.
+
+**Amended 2026-10-13.** The refusal is this route's alone now: a person deletes their
+own account through `POST /v1/me/delete`, which keeps the same invariant by refusing
+the last enabled admin, and both routes run one `removeUser` (Q1.660). That function
+also writes a revoked machine's id over its name, which carried its owner's label.
 
 **Status.** Reversed an earlier decision
 
@@ -4897,6 +4902,65 @@ daemon took, and a daemon that refuses a statement would be kicked for ever. The
 decides, and remembers what it has already chased.
 
 **Status.** Current. Reverses Q7.39.
+
+### Q1.660 — May somebody delete their own account, and what proves it is them?
+
+**Decision.** Yes: `POST /v1/me/delete`, reached from Settings → Account → *Delete
+account*, a leaf with one password field and one `DangerButton`. It runs `removeUser`,
+the same transaction `DELETE /v1/admin/users/:id` runs (Q1.307), so the two doors
+cannot drift apart: every credential, the address, the devices, the grants, and the
+person's machines revoked.
+
+**Why now.** Both app stores require that an app which signs people in can also delete
+the account from inside the app. Until this route the only delete was an admin's, about
+somebody else, and `docs/API.md` had nothing a person could do alone.
+
+**What proves it.** The current password, **whichever credential presents** — the rule
+of `POST /v1/me/password`, through the same `verifyCurrentPassword`, and for the same
+reason: a session token lifted off a device must not be able to end the account. An
+account with no password row is deleted on its key alone, as that key may already set
+its first password and take the account whole; the exception is written at the route.
+A wrong password answers `401 invalid_password`, which `authFailure` reads as being
+about the body, so the screen says so and nobody is signed out.
+
+**The last admin is refused, `409 last_admin`.** Q1.307 made "an enabled admin always
+remains" true by refusing every self-delete; that is now `soleAdmin`, read live. It is
+asked **before** the password, so the refusal costs no attempt, and **again after the
+`await`**, because two admins leaving at once both pass the first read.
+
+**A machine's row loses its name.** `machines.name` is `qualifiedName(label, id)` and so
+carries what its owner typed; `removeUser` writes the id over it in the statement that
+revokes the row. The row itself stays, revoked, as Q1.307 decided. This holds for the
+admin's delete too. ⚠ A machine somebody revoked **before** deleting the account keeps
+its name: `releaseOwner` already cut the link that would find it.
+
+**What is left on the server.** The revoked machine rows, by id; `enrollment_codes` and
+`machine_links` rows naming a user id that resolves to nobody, the first pruned by
+`pruneEnrollmentCodes`' own clock; mail already queued to the address, until the outbox
+sweeps it. Nothing else names the person.
+
+**What is not touched.** The daemon's own database and worktrees on the person's
+machines: they are that person's files on that person's computer, and the screen says
+so. A revoked machine's daemon keeps dialling and is refused, as after any revoke.
+
+**On the client.** `cp.deleteAccount` drops the credential only after the answer, and
+`store.deleteAccount` then runs `signOut`, whose `logout` has no credential left to
+send: in the shell that is `host_account_forget`, which stops this account's daemon
+and keeps its device id, key and root (`native-accounts.md`). Enter in the field
+deletes nothing; only the button does. A control plane from before the route answers
+404, said as *"This server cannot delete an account yet."*
+
+**Not built.** A page outside the app that deletes an account — Google Play asks for a
+web address as well as the in-app path, and the gate serves a closed list of nine. A
+`cpctl` verb. Removing the device key and the daemon root from the computer.
+
+**Measured 2026-10-13**, against a scratch control plane and the app in Chromium: a
+wrong password stayed on the leaf with its sentence; the right one answered 200, left
+no `users`, password, session, grant or owner row, left the machine revoked and named
+by its id, and the next sign-in answered `invalid_login`; the only admin got the
+refusal with the button back. Not rendered in WKWebView.
+
+**Status.** Current. Narrows Q1.307's "deleting yourself is refused" to the admin route.
 
 ## Session lifecycle, questions and attachments
 
@@ -26895,6 +26959,30 @@ working line stood, as it did before.
 `onEvents` claims before it settles, that the composer's echo carries its floor,
 that the transcript reads `deliversQueued`, and the foot's `calc` and slot.
 
+**Amended 2026-10-12: every send still held is drawn, not only the newest.**
+Reported by the owner: *sent a message, then another, and the first disappeared;
+after restarting the app both were in the chat.* `echo.ts` held one echo per session
+and `setEcho` replaced it. A message sent while the last one's `prompt` event was not
+yet in this tab's transcript therefore took that one's place, and the earlier message
+was drawn by nothing until its event arrived — which is never, for as long as the
+stream delivers nothing. The daemon's log holds both throughout, which is what a
+restart reads. Not measured on the machine it happened on, at the owner's word: read
+off the code, and reproduced against the real store (`promptLanded` at seq 21, a
+second `setEcho`, then the two events).
+
+`echoes` is now a list per session in the order sent (`echoesFor`), and `EventList`
+draws each under `echoId`, so one settling leaves the bubble under it alone. A send
+leaves the list by its own event, its own seq or its own refusal, and by nothing
+another send does. One event claims one send, the oldest it could be, so the same
+words sent twice are taken one at a time. `landEcho` numbers the send in place, so the
+composer finds it again by identity. `echoFor` is the newest, which is all the
+composer asks: is anything on its way.
+
+**Left.** A stream that reports itself live and delivers nothing is redialled only by
+a wake or a suspected route (Q3.715). A send the daemon numbered whose event stays out
+is evidence of exactly that, and nothing reads it yet: the echo is drawn until the
+stream comes back.
+
 #### Q3.654 — Send and Stop swap rather than jump, and only the arriving one can be pressed
 
 **Symptom.** The owner, 2026-09-24 (translated): *"The Send button turns into Stop
@@ -28773,7 +28861,8 @@ for certain — and grok reads a bogus key as signed in (`AGENT_LOGIN`).
 **Cost.** Moonshot says *cannot check* until kimi has written its credentials file,
 which is what its card already said.
 
-**Status.** Current.
+**Status.** Current. **Amended 2026-10-13** by Q3.718: an absent CLI no longer
+outranks the key on a system a key alone reaches.
 
 #### Q3.690 — A file an agent hands over, and the three ways the download failed
 
@@ -30118,6 +30207,55 @@ range. A configuration object, even an empty one, paints it.
 is Chromium and a selection never begins in a `none` block.
 
 **Status.** Current. Amends Q3.696 and narrows Q3.638 to the column it was written for.
+
+#### Q3.718 — A provider a key alone reaches said "not installed" and offered somebody else's CLI
+
+**Question.** Settings → Machines → Sign-ins → **OpenRouter**, on a machine without
+opencode, drew `OpenRouter` beside *not installed* over one button, *Install Opencode*,
+with the routing key box below the fold. On 2026-10-13 the owner asked why OpenRouter
+needs Opencode. It does not: `SYSTEMS.openrouter` names an endpoint, so any harness that
+can be pointed at it runs its models on a pasted key, and opencode is only the harness
+that also reaches it natively.
+
+**Decision.** Where a system has a CLI of its own, is routable, and that CLI is absent
+(`keyLeads`), the screen leads with the system's key box, the same `KeyOnly` card a
+system with no CLI gets, and the CLI's card follows under its own name: `Opencode`,
+*not installed*, *Install Opencode*. The Sign-ins row says *no key* or *key saved* for
+the same systems through the same predicate, so the row and its card still cannot
+disagree. Everything else is as it was: a system no key reaches alone (xAI, Cursor,
+OpenCode Zen) says *not installed* under its own name, and an installed CLI's card
+leads with the routing key after it.
+
+**Why an order and not a reworded badge.** The heading names what the reader has an
+account with (Q3.513), and *not installed* under it is a sentence about another
+program. What can be done on this screen at once is to paste a key; installing a CLI
+is the other way in, and it is drawn as that.
+
+**The order is read off the listing the screen already holds.** `SystemDetail` reads
+`GET /agent-auth` beside `GET /systems` (Q3.540), so it is known on the first paint.
+The card under the key box keeps its own read, reports every change upward, and is
+keyed, so a running install survives the listing moving the card back above the
+routing key.
+
+**What follows from the card naming its harness.** *X isn't installed on this machine*
+restates the badge above it and the button below it, so it is dropped there; the other
+arm, *Install it on the machine itself*, is said where no button is. A key the absent
+CLI still holds covers the system (`systemSecretFor`): the leading box then offers no
+Remove, the key being the card's below, whose chip reads `saved` rather than *nothing
+is reading it*, since a routed session is (`storedChip`).
+
+**Costs.** When an install finishes the screen changes order under the open pane: the
+key box above becomes the *Routing key* group below. And the two stores stay two: a key
+pasted into the leading box is the system's and signs routed requests, so once opencode
+is installed its own slot reads empty beside a saved routing key. That is the installed
+screen's shape, two key boxes and all, and this does not touch it.
+
+**Measured.** 2026-10-13, the real components over stand-in listings in Chromium, nine
+states: the CLI absent, absent with a key, absent with the CLI's own key, absent where
+nothing installs, and installed; Anthropic and xAI absent; the list with and without a
+key. Not seen in WKWebView or against a live daemon.
+
+**Status.** Current. Amends Q3.689.
 
 ## Deployment, packaging and code layout
 
@@ -44844,71 +44982,79 @@ computer a machine and runs its daemon as a child (Q7.139, Q7.148). The close bu
 puts the app away and the daemons run on (Q3.697), but a reboot or a Quit ends them,
 and nothing starts them again until somebody opens the app. From a phone the machine
 is simply offline. A daemon installed by `install.sh` has a unit that starts at login;
-this one had nothing.
+this one has nothing.
 
-**Decision. The app opens at login, put away, and its daemons start as on any launch.**
-macOS only, the one profile that carries a daemon (Q4.123). It is on by default from
-the moment this app's own supervisor first starts a daemon on the computer, a switch
-on that machine's screen turns it off, and **nothing ever switches it back on**. The
-owner's decision, 2026-10-11.
+**Decision. It does not, and nothing puts the app in the login items.** A daemon the
+app runs is the app's child: it starts with the app and stops when the app quits, so a
+Mac the app set up is a machine while the app is open and offline otherwise. **Only a
+daemon `install.sh` set up starts by itself**, from its own unit; somebody who wants
+the computer there after a restart runs the installer, and the app adopts that daemon
+as it always has. The owner's decision, 2026-10-14.
 
-- **The mechanism is `SMAppService`**, the system's own login item for an app, called
-  through the `objc2` already in the crate. No dependency is added and nothing lands in
-  `~/Library/LaunchAgents` — which matters here more than elsewhere, because
-  `managed_unit` globs that directory for any `*reemoat*.plist` to find a daemon's
-  unit, at two call sites, and matches loosely on purpose. `nativecheck` already pinned
-  the bundle's minimum to 13.0 for this API.
-- **Whether it is on is asked of the system on every read** and never stored: somebody
-  can change it in System Settings, and a stored flag would then lie on the switch.
-- **What is stored is that it was decided**, once: `login_item` in `server.json`,
-  written by `decide_login_item` *before* the first registration (`first_time`), and by
-  the switch either way. A failure between the mark and the registration loses the
-  default and never repeats it. The system cannot stand in for the mark: an item
-  removed in System Settings and one never registered may read alike.
-- **The trigger is the supervisor starting a daemon**, at the two places it does:
-  `host_daemon_start`, which is the first setup, and the launch thread after
-  `start_configured_at_launch` started something, which is how somebody set up before
-  this build gets the default, once. A Mac whose daemon is `install.sh`'s unit starts
-  nothing there and registers nothing; that unit already comes back at login.
-- **That second call is a write at launch**, the only one. "Nothing is written at
-  startup" was about accounts and still holds for them; `nativecheck` pins the two
-  callers of `default_on` and keeps the mark's own writer out of the startup files.
-- **A launch the system made opens put away**: `opened_at_login` reads the launch's
-  open event inside `setup`, and `at_launch` builds the window hidden. The Dock brings
-  it back, as after a close. A wrong *no* shows the window, which is the safe mistake.
-- **The switch is the account on screen's** (`host_login_item_set`, refused `not_shown`
-  elsewhere), and answers what the system says afterwards rather than what was asked.
-  The page reads any word it does not know as unsupported (`loginItemOf`), and draws
-  the row only on this computer's own machine screen.
+**What was built first, and taken back out.** On 2026-10-11 the answer was the
+opposite: the app opened at login with its window put away and started its daemons.
+It was built on 2026-10-12 as the system's own login item (`SMAppService`), switched
+on by itself the first time the app's supervisor started a daemon, with a switch on
+the machine's screen to turn it off and a launch the system made opening hidden. Two
+days of development builds carried it and no release did. The owner met it as an app
+that had put itself in the login items and ruled it out whole: an app nobody opened
+should not be running, and a daemon that cannot outlive the app has no business in
+the login items either. Not kept as a switch that starts off: the rule is that one
+thing starts by itself, and it is the installer's daemon.
 
-**Measured, 2026-10-12, macOS 15.6.** Releases are unsigned and a default build is
-`adhoc,linker-signed` with no bundle seal, so the first question was whether the API
-works from such a bundle at all. It does, from a temporary directory outside
-`/Applications`: never registered reads *not found*, register answers and reads
-*enabled*, unregister reads *not registered*. A registration survives the binary being
-rebuilt (a new code hash) and the bundle being moved. A sealed ad-hoc bundle behaves
-the same. Nothing appeared in `~/Library/LaunchAgents`. The crate's own bindings were
-then run verbatim, in a debug build where `objc2` checks every message's encoding,
-with the same answers. The released profile builds and links the framework.
+**What is left is one removal.** Those builds registered the app without asking, so
+this one takes the registration back rather than leave it for System Settings.
+
+- **Where the earlier build left its mark, and only there.** It wrote `login_item`
+  into `server.json` before it registered. No build writes that key now, so it is read
+  out of the keys kept for other builds (`holds_login_item`), and it is the trigger:
+  an item registered any other way is never touched.
+- **`retire`, from the launch thread alone**, before any daemon is started, sends the
+  unregistration and reads the system's answer back. The mark is removed only once the
+  system no longer says *enabled* (`taken_back`, `forget_login_item`), so a removal
+  that failed is tried at the next launch and one that worked is never repeated. An
+  item somebody already removed by hand refuses the removal and still reads as gone.
+- **Never from a debug build or outside the bundle that was registered** (`bundled`):
+  asked from anywhere else the system answers about another item, and the mark would
+  go for nothing.
+- **It is a write at launch, the only one.** "Nothing is written at startup" was about
+  accounts and still holds for them; taking the key out leaves a pre-accounts file one.
+- `nativecheck` pins that the one file naming `SMAppService` never sends a
+  registration, that no command and no window names a login item, and `retire`'s one
+  caller; `webcheck` that no bridge call and no screen does.
+
+**Measured, 2026-10-12, macOS 15.6**, for the decision that was taken back, and still
+what the removal rests on. Releases are unsigned and a default build is
+`adhoc,linker-signed` with no bundle seal. From such a bundle, in a temporary directory
+outside `/Applications`: never registered reads *not found*, register answers and
+reads *enabled*, unregister reads *not registered*. A registration survives the binary
+being rebuilt (a new code hash) and the bundle being moved, which is why a later build
+can take it back. Nothing appeared in `~/Library/LaunchAgents`.
 
 **Rejected.**
 
+- **A switch that starts off.** It keeps a second thing that can start by itself, for
+  a daemon that stops the moment the app is quit.
+- **Keeping the daemon alive outside the app**, as a unit of its own, so it alone
+  starts at login. That is `install.sh`'s shape and a second supervisor for the same
+  roots: the app's daemons are per account (Q7.149), it reads their exit codes to
+  finish a setup, and a unit has neither. Somebody who wants that runs the installer.
 - **A LaunchAgent plist written by the app.** It trips `managed_unit` at both call
-  sites and would need an exemption by exact name from a glob that exists to stop two
-  daemons racing for one enrollment code; and it bakes a path that moves with the app.
-- **A plugin for it.** The one that exists offers a LaunchAgent or AppleScript, not
-  this API, and asks for a tauri past the pair `MEASURED_TAURI` pins.
-- **Keeping the daemon alive outside the app**, as a unit of its own. That is
-  `install.sh`'s shape and a second supervisor for the same roots; the app's daemons
-  are per account (Q7.149) and the unit has no account.
-- **A stored on/off flag.** The system has the answer and can change it without us.
-- **Asking before turning it on.** A machine that silently stops being one after a
-  reboot is the defect; the switch is one screen away and the system announces the
-  item itself.
+  sites, which globs that directory for any `*reemoat*.plist` to stop two daemons
+  racing for one enrollment code, and it bakes a path that moves with the app.
+- **Unregistering whenever the system says the item is on.** It would undo an item
+  somebody added themselves, at every launch. The mark names exactly what this app did.
+- **Leaving the earlier registration to be removed by hand.** The build added it
+  without asking; the one that stops doing so is the one that can undo it.
 
-**Not measured.** The open event on a real login — a launch from a shell reads false,
-and the check is a reboot, which is the first of the hand checks in `docs/NATIVE.md`.
-What the system answers after the item is removed in System Settings. macOS 13 and 14.
-Which app is frontmost after a hidden login.
+**Costs.** A Mac the app set up is offline after every restart until the app is
+opened, which is what this entry's question was about and is now the answer. The
+removal is code with an end: `login.rs`, the two `config.rs` functions and
+`.claude/rules/native-login.md` go once no computer still runs a build of those two
+days.
 
-**Status.** Built. The hidden start is not driven.
+**Not measured.** The removal on a Mac that holds the item: the two messages are the
+ones measured above, sent from a later build of the same bundle.
+
+**Status.** Current. The decision of 2026-10-11 was built and is taken out; the
+removal is not driven on a real Mac.

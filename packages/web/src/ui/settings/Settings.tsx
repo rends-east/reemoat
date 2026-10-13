@@ -13,7 +13,7 @@ import type { AppState } from "../../store";
 import { ChevronLeft } from "lucide-react";
 import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
-import { AccountSection, EmailScreen, PasswordScreen } from "./AccountSection";
+import { AccountSection, DeleteAccountScreen, EmailScreen, PasswordScreen } from "./AccountSection";
 import { EmailSection, SmtpScreen, TestMailScreen } from "./EmailSection";
 import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
@@ -127,6 +127,8 @@ function LeafScreen({ state, route }: { state: AppState; route: SettingsRoute })
       return <PasswordScreen me={state.me} />;
     case "email":
       return <EmailScreen me={state.me} config={state.config} />;
+    case "delete-account":
+      return <DeleteAccountScreen me={state.me} />;
     case "new-key":
       return <NewKeyScreen />;
     case "machine-name":

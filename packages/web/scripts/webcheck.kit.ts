@@ -109,7 +109,7 @@ process.stdout.write("\nthe kit: a settings screen is groups of kit rows, and sa
     "every muted paragraph on a settings screen is counted, by file",
     screens.map(([name, src]) => [name, (src.match(PROSE) ?? []).length] as const).filter(([, n]) => n > 0),
     [
-      ["AccountSection.tsx", 2],
+      ["AccountSection.tsx", 3],
       ["AgentsPanel.tsx", 5],
       ["EmailSection.tsx", 3],
       ["MachineAgentsSection.tsx", 1],

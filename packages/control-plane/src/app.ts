@@ -378,7 +378,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const writeThrottle = new LoginThrottle(WRITE_THROTTLE);
 
   // Null means carry on. Recorded with fail, since a legitimate write is still a write.
-  // There are **seventeen** call sites; relaycheck compares that word with the calls.
+  // There are **eighteen** call sites; relaycheck compares that word with the calls.
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
     const key = writeKey(caller.userId, what);
@@ -1659,6 +1659,50 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({ email: current.email, verified: true });
   });
 
+  // Read live, never off the caller: asked again after an await, when another admin may have gone.
+  const soleAdmin = (userId: string): boolean =>
+    db.prepare("SELECT 1 AS hit FROM users WHERE id = ? AND is_admin = 1").get(userId) !== undefined &&
+    db
+      .prepare("SELECT 1 AS hit FROM users WHERE is_admin = 1 AND disabled_at IS NULL AND id != ? LIMIT 1")
+      .get(userId) === undefined;
+
+  // Your own account, irreversibly. currentPassword is required whenever a password row exists, even under a session, so a
+  // stolen token cannot end the account; with no row the key is the proof, as it is for a first password (Q1.660).
+  app.post("/v1/me/delete", async (c) => {
+    const writeGuard = spendWrite(c, "account_delete");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const body = await readJsonObject(c);
+    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+
+    // An enabled admin always remains (Q1.307); said before the password is asked, so the refusal costs no attempt.
+    const lastAdmin = (): Response =>
+      jsonError(c, 409, "last_admin", "you are this server's only admin; add another before deleting this account");
+    if (soleAdmin(caller.userId)) return lastAdmin();
+
+    const stored = db.prepare("SELECT hash FROM user_passwords WHERE user_id = ?").get(caller.userId);
+    if (stored !== undefined) {
+      try {
+        const refused = await verifyCurrentPassword(c, caller.userId, body["currentPassword"], String(stored["hash"]));
+        if (refused !== null) return refused;
+      } catch (error) {
+        if (error instanceof PasswordBusyError) return passwordBusy(c);
+        throw error;
+      }
+      // Two admins leaving at once both passed the first check.
+      if (soleAdmin(caller.userId)) return lastAdmin();
+    }
+
+    const removed = removeUser(db, caller.userId, Date.now());
+    return c.json({
+      deleted: true,
+      machinesRevoked: removed.machinesRevoked,
+      enrollmentCodesInvalidated: removed.codesInvalidated,
+      outstandingTokensExpireWithinSeconds: tokenTtlSeconds,
+    });
+  });
+
   // Owner plus grantees: an ownerless machine may still carry other people's grants, so no owner is not no users.
   const dependants = (machineId: string): { owner: OwnedMachine | null; grantees: string[] } => ({
     owner: ownerOf(db, machineId),
@@ -2806,89 +2850,23 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({ disabled: false });
   });
 
-  // Delete a person and every credential; their machines are revoked, since no non-revoked machine may be ownerless.
-  // enrollment_codes.created_by is left dangling on purpose as the audit trail. Disable is the reversible act.
+  // Somebody else's account; your own is `POST /v1/me/delete`. Disable is the reversible act.
   app.delete("/v1/admin/users/:id", requireAdmin, (c) => {
     const caller = c.get("caller");
     const userId = c.req.param("id");
     if (userId === caller.userId) {
-      return jsonError(c, 409, "cannot_delete_self", "you cannot delete your own account");
+      return jsonError(c, 409, "cannot_delete_self", "this deletes somebody else's account; your own is deleted from your account settings");
     }
     const target = db.prepare("SELECT name FROM users WHERE id = ?").get(userId);
     if (!target) return jsonError(c, 404, "user_not_found", "no such user");
 
-    const removedAt = Date.now();
-    db.exec("BEGIN");
-    let machinesRevoked = 0;
-    let codesInvalidated = 0;
-    try {
-      // Origins first: they are keyed by session id, so removing the sessions
-      // ahead of them would leave rows only the orphan sweep could find.
-      db.prepare(
-        "DELETE FROM user_session_origins WHERE session_id IN (SELECT id FROM user_sessions WHERE user_id = ?)",
-      ).run(userId);
-      db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM user_passwords WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
-      // Before the grants go: burnGranteeCodes finds its codes through them.
-      codesInvalidated = burnGranteeCodes(db, userId, "user_deleted", removedAt);
-      // Read before the grants go: a machine left with no owner and no grants would stay enrolled and in nobody's list.
-      const mayStrand = db
-        .prepare(
-          "SELECT g.machine_id FROM grants g JOIN machines m ON m.id = g.machine_id " +
-            "WHERE g.user_id = ? AND m.revoked_at IS NULL " +
-            "AND NOT EXISTS (SELECT 1 FROM machine_owners o WHERE o.machine_id = g.machine_id)",
-        )
-        .all(userId)
-        .map((row) => String(row["machine_id"]));
-      db.prepare("DELETE FROM grants WHERE user_id = ?").run(userId);
-      for (const machineId of mayStrand) {
-        const stillGranted = db.prepare("SELECT 1 AS hit FROM grants WHERE machine_id = ? LIMIT 1").get(machineId);
-        if (stillGranted !== undefined) continue;
-        const marked = Number(
-          db
-            .prepare("UPDATE machines SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-            .run(removedAt, machineId).changes,
-        );
-        if (marked === 1) {
-          codesInvalidated += burnMachineCodes(db, machineId, removedAt);
-          machinesRevoked += 1;
-        }
-      }
-      // foreign_keys is off, so nothing cascades: a new per-user table must be swept here.
-      deleteEmailState(db, userId);
-      db.prepare("DELETE FROM password_obligations WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM user_machine_limits WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM account_permissions WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM devices WHERE user_id = ?").run(userId);
-      codesInvalidated += burnUserCodes(db, userId, "user_deleted", removedAt);
-      for (const row of db
-        .prepare("SELECT machine_id FROM machine_owners WHERE user_id = ?")
-        .all(userId)) {
-        const machineId = String(row["machine_id"]);
-        const marked = Number(
-          db
-            .prepare("UPDATE machines SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-            .run(removedAt, machineId).changes,
-        );
-        if (marked === 1) {
-          codesInvalidated += burnMachineCodes(db, machineId, removedAt);
-          machinesRevoked += 1;
-        }
-      }
-      db.prepare("DELETE FROM machine_owners WHERE user_id = ?").run(userId);
-      db.prepare("DELETE FROM users WHERE id = ?").run(userId);
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
+    const removed = removeUser(db, userId, Date.now());
 
     return c.json({
       deleted: true,
       name: String(target["name"]),
-      machinesRevoked,
-      enrollmentCodesInvalidated: codesInvalidated,
+      machinesRevoked: removed.machinesRevoked,
+      enrollmentCodesInvalidated: removed.codesInvalidated,
       outstandingTokensExpireWithinSeconds: tokenTtlSeconds,
     });
   });
@@ -3604,6 +3582,73 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
     }
     return jsonError(c, 401, "invalid_api_key", "invalid API key");
   };
+}
+
+// A person and every credential, in one transaction, for both doors that delete one. Their machines are revoked, since no
+// non-revoked machine may be ownerless (Q1.307); enrollment_codes.created_by is left dangling on purpose as the audit trail.
+function removeUser(
+  db: DatabaseSync,
+  userId: string,
+  removedAt: number,
+): { machinesRevoked: number; codesInvalidated: number } {
+  let machinesRevoked = 0;
+  let codesInvalidated = 0;
+  // The name carries the label its owner typed, so it goes with them; the row stays as the record of the revoke.
+  const revoke = (machineId: string): void => {
+    const marked = Number(
+      db
+        .prepare("UPDATE machines SET revoked_at = ?, name = id WHERE id = ? AND revoked_at IS NULL")
+        .run(removedAt, machineId).changes,
+    );
+    if (marked !== 1) return;
+    codesInvalidated += burnMachineCodes(db, machineId, removedAt);
+    machinesRevoked += 1;
+  };
+
+  db.exec("BEGIN");
+  try {
+    // Origins first: they are keyed by session id, so removing the sessions
+    // ahead of them would leave rows only the orphan sweep could find.
+    db.prepare(
+      "DELETE FROM user_session_origins WHERE session_id IN (SELECT id FROM user_sessions WHERE user_id = ?)",
+    ).run(userId);
+    db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM user_passwords WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
+    // Before the grants go: burnGranteeCodes finds its codes through them.
+    codesInvalidated = burnGranteeCodes(db, userId, "user_deleted", removedAt);
+    // Read before the grants go: a machine left with no owner and no grants would stay enrolled and in nobody's list.
+    const mayStrand = db
+      .prepare(
+        "SELECT g.machine_id FROM grants g JOIN machines m ON m.id = g.machine_id " +
+          "WHERE g.user_id = ? AND m.revoked_at IS NULL " +
+          "AND NOT EXISTS (SELECT 1 FROM machine_owners o WHERE o.machine_id = g.machine_id)",
+      )
+      .all(userId)
+      .map((row) => String(row["machine_id"]));
+    db.prepare("DELETE FROM grants WHERE user_id = ?").run(userId);
+    for (const machineId of mayStrand) {
+      const stillGranted = db.prepare("SELECT 1 AS hit FROM grants WHERE machine_id = ? LIMIT 1").get(machineId);
+      if (stillGranted === undefined) revoke(machineId);
+    }
+    // foreign_keys is off, so nothing cascades: a new per-user table must be swept here.
+    deleteEmailState(db, userId);
+    db.prepare("DELETE FROM password_obligations WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM user_machine_limits WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM account_permissions WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM devices WHERE user_id = ?").run(userId);
+    codesInvalidated += burnUserCodes(db, userId, "user_deleted", removedAt);
+    for (const row of db.prepare("SELECT machine_id FROM machine_owners WHERE user_id = ?").all(userId)) {
+      revoke(String(row["machine_id"]));
+    }
+    db.prepare("DELETE FROM machine_owners WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return { machinesRevoked, codesInvalidated };
 }
 
 // Prepared once per database: this runs on every request below THE SECOND LINE.

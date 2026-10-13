@@ -24,6 +24,7 @@ process.stdout.write("\nwhat one agent's card says\n");
     dividerWord,
     multiSlotLine,
     systemBadge,
+    keyLeads,
   } = await import("../src/ui/agentCard.js");
   const { AGENT_IDS } = await import("../src/wire.js");
   const agentCardRaw = readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8");
@@ -191,6 +192,54 @@ process.stdout.write("\nwhat one agent's card says\n");
         ),
       ).filter((one) => one.endsWith("/sign in")),
       [],
+    );
+    // A key alone reaches a routable system, so its absent CLI is the second way in and no longer the row's state (Q3.718).
+    const reached = (routable: boolean | undefined, keySet: boolean, agent: Parameters<typeof systemBadge>[1]): string => {
+      const badge = systemBadge({ loginVia: "opencode", keySet, ...(routable === undefined ? {} : { routable }) }, agent);
+      return badge === null ? "none" : `${badge.tone}/${badge.text}`;
+    };
+    check(
+      "a system a key alone reaches is a key question while its CLI is absent, and only then",
+      [
+        reached(true, false, probed(false, null)),
+        reached(true, true, probed(false, null)),
+        reached(false, true, probed(false, null)),
+        reached(undefined, false, probed(false, null)),
+        reached(true, false, probed(true, false)),
+        reached(true, true, probed(true, true, null, true)),
+        reached(true, false, undefined),
+      ],
+      [
+        "strong/no key",
+        "plain/key saved",
+        "strong/not installed",
+        "strong/not installed",
+        "strong/not signed in",
+        "strong/would not start",
+        "none",
+      ],
+    );
+    check(
+      "which is one predicate, the screen's own: a CLI, a route, and a listing that says the CLI is not there",
+      [
+        keyLeads({ loginVia: "opencode", routable: true }, { available: false }),
+        keyLeads({ loginVia: "opencode", routable: true }, { available: true }),
+        keyLeads({ loginVia: "opencode", routable: true }, undefined),
+        keyLeads({ loginVia: "opencode", routable: false }, { available: false }),
+        keyLeads({ loginVia: "opencode" }, { available: false }),
+        keyLeads({ loginVia: null, routable: true }, { available: false }),
+      ],
+      [true, false, false, false, false, false],
+    );
+    check(
+      "and the badge asks it rather than restating it",
+      /if \(keyLeads\(system, agent\)\) return system\.keySet \? key : noKey;/.test(agentCardRaw),
+      true,
+    );
+    check(
+      "a key saved under an absent CLI says nothing is reading it, unless a routed session is",
+      [storedChip({ id: "opencode" }, "not_installed"), storedChip({ id: "opencode" }, "not_installed", true)],
+      ["saved — Opencode isn't installed, so nothing is reading it", "saved"],
     );
   }
   const noLoginLine = stanceLine({ id: "opencode" }, "no_login", false, "darwin");
@@ -489,6 +538,53 @@ process.stdout.write("\nthe sign-in screens, cut\n");
   check("which is seven words and names the subject", [STALE_READ.split(/\s+/).length, /^Machine status/.test(STALE_READ)], [7, true]);
 
   const keyForm = systemsPanel.slice(systemsPanel.indexOf("export function KeyOnly("));
+  // Q3.718: the key box first while the CLI is absent, then that CLI's own card under its own name.
+  const at = (needle: string): number => systemCard.indexOf(needle);
+  check(
+    "a system a key alone reaches leads with its key box, and its absent CLI's card follows",
+    [
+      /const leads = keyLeads\(system, agents\?\.find\(\(one\) => one\.id === system\.loginVia\)\);/.test(systemCard),
+      at("{!leads && card}") >= 0 && at("{!leads && card}") < at("(system.loginVia === null || leads) && ("),
+      at("(system.loginVia === null || leads) && (") < at("{leads && card}"),
+      at("{leads && card}") < at("{!leads && system.loginVia !== null && system.routable === true && ("),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "that card is then the harness's by name, told it follows, and its changes reach the listing the order is read from",
+    [
+      /title=\{leads \? undefined : system\.displayName\}/.test(systemCard),
+      /follows=\{leads\}/.test(systemCard),
+      /onChanged=\{refresh\}\s*\/>\s*\);/.test(systemCard),
+    ],
+    [true, true, true],
+  );
+  check(
+    "a key the harness holds is not this box's to remove, on either mount",
+    [
+      /const covered = system\.loginVia !== null && system\.keySet && system\.keyUpdatedAt === null;/.test(keyForm),
+      /const borrowed = routing && covered;/.test(keyForm),
+      /\{system\.keySet && !covered && \(/.test(keyForm),
+    ],
+    [true, true, true],
+  );
+  check(
+    "and the card under a key box keeps its distance and reads its saved keys as routed",
+    [
+      /<div className=\{follows \? "mt-8" : undefined\}>/.test(agentsPanel),
+      (agentsPanel.match(/routed=\{follows\}/g) ?? []).length,
+      /storedChip\(agent, stance, routed\)/.test(agentsPanel),
+    ],
+    [true, 2, true],
+  );
+  check(
+    "and says an absent CLI's sentence only where no Install button stands for it",
+    [
+      /const second = follows && stance === "not_installed";/.test(agentsPanel),
+      /const line = \(second \? !canInstall : wholeAgent\) \? stanceLine\(agent, stance, canSignIn, os, canInstall\) : null;/.test(agentsPanel),
+    ],
+    [true, true],
+  );
   check("the key input sits in a form that submits", [/<form[^>]*onSubmit=/.test(keyForm), /<Button type="submit"/.test(keyForm)], [true, true]);
   check("and no Enter handler is wired by hand", /onKeyDown/.test(keyForm), false);
   const routed = /`(For agents routed to \$\{system\.displayName\}[^`]*)`/.exec(systemsPanel)?.[1] ?? "";

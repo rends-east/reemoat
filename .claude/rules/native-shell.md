@@ -157,7 +157,7 @@ disjoint); a typed `/register` falls through to `SignIn`.
 - **The close button puts the app away on macOS and Windows; only a Quit quits** (`away.rs`):
   daemons run on, back from the Dock (`Reopen`) or the Windows tray or a second launch
   (single-instance, the first plugin). ⌘Q, menus and the tray's Quit reach `RunEvent::Exit`.
-  Linux quits on close (Q6.108). Q3.697. A launch at login opens put away (`native-login.md`).
+  Linux quits on close (Q6.108). Q3.697. Nothing opens the app at login (`native-login.md`).
 - The origin is `tauri://localhost` (macOS, Linux) or `http://tauri.localhost` (Windows,
   Android): use `controlPlaneOrigin()`, not `location.origin`; `is_our_own` in `lib.rs` names all.
 - The asset protocol falls back to `index.html`, so deep links and `location.reload()` work.

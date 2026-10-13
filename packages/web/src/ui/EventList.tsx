@@ -27,7 +27,7 @@ import type {
 } from "../wire";
 import { taskFinished } from "../wire";
 import { TASK_NOUNS, taskTokens, type BackgroundReporting } from "../tasks";
-import type { PendingEcho } from "../echo";
+import { echoId, type PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { PeerMessageRow } from "./PeerMessage";
 import { SentFileRow } from "./SentFile";
@@ -81,7 +81,7 @@ export function EventList({
   engaged,
   workElapsedMs,
   stale,
-  echo,
+  echoes,
   queued,
   background,
   reportsTasks,
@@ -105,7 +105,8 @@ export function EventList({
   workElapsedMs: number | null;
   /** Nothing is streaming; working cannot tell, since it reflects the last snapshot that arrived. */
   stale: boolean;
-  echo: PendingEcho | null;
+  /** Every send the log has not returned, oldest first. */
+  echoes: readonly PendingEcho[];
   /** Identity matters: it feeds QueuedContext, so the caller memoises it. */
   queued: ReadonlySet<number>;
   background: readonly BackgroundTask[];
@@ -210,9 +211,9 @@ export function EventList({
             </QueuedContext.Provider>
           </DecisionsContext.Provider>
           {/* Above the working line: a session can be drawn running before its prompt event arrives. */}
-          {echo !== null && (
-            <UserBubble text={echo.text} attachments={echo.attachments} files={files} />
-          )}
+          {echoes.map((echo) => (
+            <UserBubble key={echoId(echo)} text={echo.text} attachments={echo.attachments} files={files} />
+          ))}
           {/* WaitingFoot below has a fixed height, and with no card a slot kept for it, so its coming and going changes no height. */}
           {/* Mounted unconditionally with only its text swapping: a status region inserted with its content is often not announced. */}
           <p role="status" aria-live="polite" className="sr-only">
@@ -227,7 +228,7 @@ export function EventList({
               onOpenTasks={onOpenTasks}
             />
           ) : (
-            keepsFootSlot(askHeight, rows.at(-1), echo !== null) && <div aria-hidden={true} className="h-5" />
+            keepsFootSlot(askHeight, rows.at(-1), echoes.length > 0) && <div aria-hidden={true} className="h-5" />
           )}
           <TaskPanel
             background={background}

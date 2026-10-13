@@ -161,6 +161,9 @@ opencode runs with no credential at all, so there is no flow.
 - **One sentence**: `dividerWord` answers `null` for this stance, there is no per-slot
   caveat, and a card mounted for a system (`keyEnv`) draws that system's key only.
   Q3.513.
+- **A routable system whose own CLI is absent leads with its key box** (`keyLeads`);
+  that CLI's card follows under its own name, and the Sign-ins row asks the same
+  predicate. Q3.718.
 
 ## A harness that would not start
 

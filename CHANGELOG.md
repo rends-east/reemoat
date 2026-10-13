@@ -27,13 +27,12 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
-- **On a Mac, Reemoat opens at login, so this computer is still a machine after a
-  restart.** A Mac the app set up runs its daemon inside the app; a reboot used to
-  leave it offline until somebody opened Reemoat. It now opens at login with its
-  window put away and starts its daemons. It is switched on the first time the app
-  starts a daemon here, **Open at login** on that machine's screen switches it off,
-  and nothing switches it back on. Nothing is installed for it: it is the system's own
-  login item, listed in System Settings.
+- **You can delete your own account from the app.** Settings → Account → *Delete
+  account* asks for your password and then removes the account from the server: its
+  sign-ins, API keys, devices and address, with its machines taken off the server.
+  Conversations and files stay on your own machines. It cannot be undone, and a
+  server's only admin is asked to add another first. Until now only an admin could
+  delete an account, and only somebody else's.
 - **A machine keeps its own list of the devices that reach it, and can be locked to
   it.** Settings → Machines → a machine → *Device access* lists every device that has
   connected through the relay, by the name it gave for itself. With *Only these devices*
@@ -154,6 +153,18 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- **A provider that needs only a key no longer reads as "not installed".** On a machine
+  without Opencode, Settings → Machines → Sign-ins → OpenRouter said *not installed*
+  over one button, *Install Opencode*, as if OpenRouter needed it. The key box now
+  comes first and Opencode's own card sits under it, by its own name. Anthropic, OpenAI
+  and Moonshot are drawn the same way while their own CLI is absent, and the Sign-ins
+  list says *no key* or *key saved* for them.
+- **A message no longer leaves the conversation when another is sent after it.** The
+  app drew one sent message per conversation while waiting for it to come back from
+  the machine, so a second message sent before the first had come back took its place,
+  and the first was drawn by nothing until the connection caught up — or until the app
+  was restarted, where it never did. Both were in the machine's log all along. Every
+  message on its way is now drawn, in the order sent, until its own row arrives.
 - **The installer no longer leaves `~/.reemoat` readable by other accounts** on a
   machine where it is what creates that directory. A directory that was already
   there keeps the mode it had.

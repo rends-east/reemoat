@@ -295,7 +295,7 @@ process.stdout.write("\nwhat a navigation moves\n");
 
 process.stdout.write("\nthe message on its way out\n");
 {
-  const { clearEcho, echoFor, echoVersion, landEcho, setEcho, settleEcho } = await import("../src/echo.js");
+  const { clearEcho, echoFor, echoVersion, echoesFor, landEcho, setEcho, settleEcho } = await import("../src/echo.js");
   const a = "m/a" as never;
   const b = "m/b" as never;
 
@@ -332,12 +332,18 @@ process.stdout.write("\nthe message on its way out\n");
     const c = "m/c" as never;
     const first = sending("first");
     const second = sending("second");
+    const held = (): string[] => echoesFor(c).map((echo) => echo.text);
     setEcho(c, first);
     setEcho(c, second);
+    check("a second send leaves the first one held, above it", held(), ["first", "second"]);
     landEcho(c, first, 30);
     check("the earlier send's late answer leaves the later echo unlanded", echoFor(c)?.seq, Number.MAX_SAFE_INTEGER);
+    check("and numbers its own", echoesFor(c)[0]?.seq, 30);
+    settleEcho(c, 29);
+    check("neither is settled by an event before both", held(), ["first", "second"]);
     settleEcho(c, 30);
     check("so the earlier send's own event does not settle the later one", echoFor(c)?.text, "second");
+    check("and settles the earlier", held(), ["second"]);
     clearEcho(c, first);
     check("nor does the earlier send's refusal clear it", echoFor(c)?.text, "second");
     landEcho(c, second, 31);
@@ -346,6 +352,17 @@ process.stdout.write("\nthe message on its way out\n");
     check("and an earlier answer arriving after that does not lower it", echoFor(c)?.seq, 31);
     settleEcho(c, 31);
     check("its own event settles it", echoFor(c), null);
+
+    const refused = sending("refused");
+    const kept = sending("kept");
+    setEcho(c, refused);
+    setEcho(c, kept);
+    clearEcho(c, refused);
+    check("a refused send leaves the one sent after it held", held(), ["kept"]);
+    clearEcho(c, refused);
+    check("and is cleared once", held(), ["kept"]);
+    clearEcho(c);
+    check("a forgotten session holds none", held(), []);
   }
 
   // The snapshot has to move, or `useSyncExternalStore` never re-reads.

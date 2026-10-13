@@ -221,7 +221,7 @@ endpoints disagree on conventions; OpenRouter excepted). Per-row evidence is in
 | `packages/web/src/agents.ts` | The client's refusals, catalogue and default name, DOM-free for `webcheck` |
 | `packages/web/src/ui/AgentBuilder.tsx` | The flow. A stored preset is a third read outside the `Promise.all`, so a daemon without `GET /custom-agents` keeps the new-agent flow |
 | `packages/web/src/ui/AgentIcons.tsx` | Our glyph per harness, not vendor marks; exhaustive over shipped ones, a monogram for a plugin's |
-| `packages/web/src/ui/settings/SystemsPanel.tsx` | A system's configuration and `KeyOnly`, mounted twice, routed and not; the builder mounts none. Q3.497 |
+| `packages/web/src/ui/settings/SystemsPanel.tsx` | A system's configuration and `KeyOnly`, mounted twice, routed and not (`keyLeads` orders them, Q3.718); the builder mounts none. Q3.497 |
 
 ## Bounds
 

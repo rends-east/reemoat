@@ -96,18 +96,27 @@ export function agentBadge(stance: AgentStance): { tone: "plain" | "strong"; tex
   }
 }
 
+/** A system a key alone reaches, while its own CLI is absent: the key leads and that CLI's card follows it (Q3.718). */
+export function keyLeads(
+  system: Pick<SystemInfo, "loginVia" | "routable">,
+  agent: Pick<AgentAvailability, "available"> | undefined,
+): boolean {
+  return system.loginVia !== null && system.routable === true && agent !== undefined && !agent.available;
+}
+
 /**
  * A Sign-ins row: the harness's own probe where a CLI drives the system, so the row and its card cannot disagree.
  * undefined `agent` is a listing that failed or lacks it, which may claim only the key. Q3.689.
  */
 export function systemBadge(
-  system: Pick<SystemInfo, "loginVia" | "keySet">,
+  system: Pick<SystemInfo, "loginVia" | "keySet" | "routable">,
   agent: Pick<AgentAvailability, "available" | "loggedIn" | "login" | "lastStartRefusal"> | undefined,
 ): { tone: "plain" | "strong"; text: string } | null {
   const key = { tone: "plain", text: "key saved" } as const;
   const noKey = { tone: "strong", text: "no key" } as const;
   if (system.loginVia === null) return system.keySet ? key : noKey;
   if (agent === undefined) return system.keySet ? key : null;
+  if (keyLeads(system, agent)) return system.keySet ? key : noKey;
   const stance = agentStance(agent.available, agent.loggedIn, agent.login?.blocked, agent.lastStartRefusal != null);
   switch (stance) {
     // The probe ran with the stored key in its environment, so these outrank it.
@@ -202,10 +211,11 @@ export function multiSlotLine(agent: { id: string; label?: string }, slots: numb
   return slots > 1 ? "Either one is enough." : null;
 }
 
-export function storedChip(agent: { id: string; label?: string }, stance: AgentStance): string {
+/** `routed`: the card follows a system's key box, where a routed session spends this key with no CLI (Q3.718). */
+export function storedChip(agent: { id: string; label?: string }, stance: AgentStance, routed = false): string {
   const name = harnessName(agent);
   if (stance === "signed_out") return `saved — ${name} still isn't signed in`;
-  if (stance === "not_installed") return `saved — ${name} isn't installed, so nothing is reading it`;
+  if (stance === "not_installed") return routed ? "saved" : `saved — ${name} isn't installed, so nothing is reading it`;
   if (stance === "start_refused") return `saved — ${name} still wouldn't start`;
   return "saved";
 }

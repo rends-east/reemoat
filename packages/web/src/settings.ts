@@ -19,6 +19,7 @@ export type SettingsGroup = "server";
 export type SettingsLeaf =
   | "password"
   | "email"
+  | "delete-account"
   | "new-key"
   | "machine-name"
   | "setup-code"
@@ -128,7 +129,7 @@ export function parseSettingsRoute(
 function leafOf(section: SettingsSection | null, segment: string | undefined): SettingsLeaf | null {
   switch (section) {
     case "account":
-      return segment === "password" ? "password" : segment === "email" ? "email" : null;
+      return segment === "password" ? "password" : segment === "email" ? "email" : segment === "delete" ? "delete-account" : null;
     case "keys":
       return segment === "new" ? "new-key" : null;
     case "server":
@@ -149,6 +150,8 @@ export function settingsLeafPath(leaf: SectionLeaf): string {
       return `${settingsPath("account")}/password`;
     case "email":
       return `${settingsPath("account")}/email`;
+    case "delete-account":
+      return `${settingsPath("account")}/delete`;
     case "new-key":
       return `${settingsPath("keys")}/new`;
     case "domains":
@@ -264,6 +267,7 @@ export function settingsUp(
 const LEAF_TITLES: Record<SettingsLeaf, string> = {
   password: "Password",
   email: "Your email",
+  "delete-account": "Delete account",
   "new-key": "New key",
   "machine-name": "Name",
   "setup-code": "Setup command",

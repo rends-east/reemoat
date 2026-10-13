@@ -8,7 +8,7 @@ import { routingKeyPath, settingsPath } from "../../settings";
 import { store } from "../../store";
 import type { AgentAuthInfo, SystemInfo } from "../../wire";
 import { anyKeySet, unspokenFor } from "../../agents";
-import { boundedName, harnessName, STALE_READ, systemBadge } from "../agentCard";
+import { boundedName, harnessName, keyLeads, STALE_READ, systemBadge } from "../agentCard";
 import { Badge, Button, Empty, FIELD, SkeletonRow, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { Field } from "../kit/Field";
@@ -160,7 +160,7 @@ export function SystemDetail({
   machineId: MachineId;
   systemId: string;
 }): ReactNode {
-  const { systems, error, supported, loading, refresh } = useSystems(machineId);
+  const { systems, agents, error, supported, loading, refresh } = useSystems(machineId);
 
   if (loading && systems === null) return <Pending>Asking that machine…</Pending>;
   if (systems === null) {
@@ -175,23 +175,34 @@ export function SystemDetail({
   const system = systems.find((candidate) => candidate.id === systemId);
   if (system === undefined) return <Empty>This machine doesn&apos;t have that system.</Empty>;
 
+  const leads = keyLeads(system, agents?.find((one) => one.id === system.loginVia));
+  // Keyed, so the card keeps a running install when the listing moves it from under the key box to above it.
+  const card =
+    system.loginVia === null ? null : (
+      <AgentDetail
+        key={`${machineId}:${system.loginVia}`}
+        machineId={machineId}
+        agentId={system.loginVia}
+        title={leads ? undefined : system.displayName}
+        keyEnv={system.keyEnv ?? null}
+        follows={leads}
+        onChanged={refresh}
+      />
+    );
+
   return (
     <div>
-      {system.loginVia !== null ? (
-        <AgentDetail
-          key={`${machineId}:${system.loginVia}`}
-          machineId={machineId}
-          agentId={system.loginVia}
-          title={system.displayName}
-          keyEnv={system.keyEnv ?? null}
-        />
-      ) : (
-        <KeyOnly machineId={machineId} system={system} onChanged={refresh} />
+      {!leads && card}
+
+      {/* The whole card for a system with no CLI, and the first of two where keyLeads. */}
+      {(system.loginVia === null || leads) && (
+        <KeyOnly key="key" machineId={machineId} system={system} onChanged={refresh} />
       )}
+      {leads && card}
 
       {/* Both when a system has a CLI and is routable: the CLI's agent credential does not sign routed requests. */}
-      {system.loginVia !== null && system.routable === true && (
-        <KeyOnly machineId={machineId} system={system} onChanged={refresh} routing={true} />
+      {!leads && system.loginVia !== null && system.routable === true && (
+        <KeyOnly key="key" machineId={machineId} system={system} onChanged={refresh} routing={true} />
       )}
     </div>
   );
@@ -253,8 +264,9 @@ export function KeyOnly({
       .finally(() => setBusy(false));
   };
 
-  // Borrowed: keySet with a null keyUpdatedAt means the harness's own key covers it, so no Save or Clear over it.
-  const borrowed = routing && system.keySet && system.keyUpdatedAt === null;
+  // keySet with a null keyUpdatedAt under a CLI: that harness's own key covers the system, and this box holds none to clear.
+  const covered = system.loginVia !== null && system.keySet && system.keyUpdatedAt === null;
+  const borrowed = routing && covered;
 
   return (
     <>
@@ -302,7 +314,7 @@ export function KeyOnly({
         </Group>
       )}
 
-      {system.keySet && !borrowed && (
+      {system.keySet && !covered && (
         <Group>
           <TwoStep
             armed={confirmingRemove}

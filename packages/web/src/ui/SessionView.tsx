@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { backgroundReporting } from "../tasks";
-import { echoFor, echoVersion, subscribeEchoes } from "../echo";
+import { echoesFor, echoVersion, subscribeEchoes } from "../echo";
 import { hiddenFinished, hiddenFinishedVersion, hideFinished, subscribeHiddenFinished } from "../finishedTasks";
 import { permissionContext } from "../permission";
 import { RECONNECT_QUIET_MS } from "../reach";
@@ -389,14 +389,14 @@ function Transcript({
   const snapshot = row?.snapshot ?? null;
   const root = snapshot?.workspace.root ?? null;
   useSyncExternalStore(subscribeEchoes, echoVersion);
-  const echo = echoFor(key);
+  const echoes = echoesFor(key);
 
   // Subscribed by version: a fresh Set per call would loop `useSyncExternalStore`.
   useSyncExternalStore(subscribeHiddenFinished, hiddenFinishedVersion);
   const hiddenFinishedIds = hiddenFinished(key);
 
   // Optimistic: an echo in flight counts as working, bounded by the echo's own lifetime; `showsWorking` itself stays pure.
-  const working = echo !== null || (snapshot !== null && (showsWorking(snapshot) || deliversQueued(snapshot)));
+  const working = echoes.length > 0 || (snapshot !== null && (showsWorking(snapshot) || deliversQueued(snapshot)));
   const reporting = snapshot !== null && mayStillReport(snapshot);
   const engaged = snapshot !== null && turnInFlight(snapshot);
   const startedAt = snapshot === null ? null : workStartedAt(snapshot);
@@ -479,7 +479,7 @@ function Transcript({
             <FileAccessContext.Provider value={files}>
               <EventList
                 files={files}
-                echo={echo}
+                echoes={echoes}
                 queued={queued}
                 transcript={transcript}
                 askHeight={askHeight}

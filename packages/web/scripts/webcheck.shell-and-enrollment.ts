@@ -1257,7 +1257,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   const wire = stripComments(readFileSync(new URL("../src/wire.ts", import.meta.url), "utf8"));
   check(
     "a message on its way is drawn as work about to happen",
-    /const working = echo !== null \|\| \(snapshot !== null && \(showsWorking\(snapshot\) \|\| deliversQueued\(snapshot\)\)\);/.test(view),
+    /const working = echoes\.length > 0 \|\| \(snapshot !== null && \(showsWorking\(snapshot\) \|\| deliversQueued\(snapshot\)\)\);/.test(view),
     true,
   );
   check("and the predicate it ORs stays a pure reading of the snapshot", /echo|Echo/.test(wire), false);

@@ -85,8 +85,8 @@ System Settings → Privacy & Security. On Windows, choose **More info → Run a
 1. **Open the app.** Its first screen offers the hosted control plane at
    `app.reemoat.com`; the pencil beside it points the app at your own instead.
 2. **Sign in**, or [create an account](https://app.reemoat.com/register). On a Mac,
-   the app then sets this computer up as your first machine, and opens at login from
-   then on so it is still one after a restart.
+   the app then sets this computer up as your first machine. It is one while the app
+   is open; a daemon the installer below sets up comes back by itself after a restart.
 3. **Set up an agent.** Open Settings → Machines → your machine → Agents, and choose
    **Set up** from an agent's menu. The app installs it with the vendor's own
    installer, then walks you through signing in, with no terminal on the machine.
@@ -190,11 +190,11 @@ has the prerequisites and what is not built.
 |---|---|
 | `CLAUDE.md` | The rules as they stand — what you need in order to *change* the code |
 | `.claude/rules/` | The same, per area, loaded when you open a file it covers |
-| `docs/API.md` | The HTTP surface of both services — 146 routes, what each is for, and the conventions every one of them answers in |
+| `docs/API.md` | The HTTP surface of both services — 147 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 1165 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 1167 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

@@ -88,7 +88,6 @@ top-level fields only). `server` is the seat's origin; `credential` comes at mos
 | `host_account_add`, `host_account_forget` | → `AccountMove{reload}` |
 | `host_set_server` | `{url}` → the address; `pending_seat` unless the seat is pending |
 | `host_set_theme` | `{theme}`; shown seat only; writes `server.json`, applies only a change (Q3.671) |
-| `host_login_item`, `host_login_item_set` | → `on\|off\|unsupported`; `{on}`, shown seat only (`native-login.md`) |
 
 Refusal prefixes: `stale_document` (reload), `not_shown`, `pending_seat`, `account_limit`.
 `AccountMove`'s Rust field `reload_page` is renamed `reload`, so the census bites.
@@ -124,8 +123,8 @@ refuses `WebviewBuilder::new`.
 Nothing but `host_boot` is sent before the boot answers, and a closed seat's page is ended
 with WebKit's `_close` (`end_page`), as `Webview::close` leaves it running (Q7.149). The page
 never branches on the arm. **A hidden webview cannot reach the screen**: switch, add,
-`host_save_file`, `host_pick_folder`, `host_open_external`, `host_copy_text`, `host_set_theme`,
-`host_login_item_set` are refused `not_shown` from any label but `Host.shown`.
+`host_save_file`, `host_pick_folder`, `host_open_external`, `host_copy_text`, `host_set_theme`
+are refused `not_shown` from any label but `Host.shown`.
 
 ## Signing in: the host proves whose it is
 
@@ -159,7 +158,8 @@ sign-in cannot offer the stored device, which is an account's.
   `Host::lists_root` under that lock); show the most recent other account (a hidden caller
   closes itself) or rebind to a pending seat on the same origin. A pending caller with no
   account anywhere is refused. `nativecheck` asserts the stop here and its absence in switch,
-  add, confirm and sign-in.
+  add, confirm and sign-in. **Deleting the account** (`store.deleteAccount`) ends here too,
+  once the server has answered: nothing more is removed from this computer (Q1.660).
 - **Signed out involuntarily**: still listed, `signed_in` false; SignIn offers **‹** (live
   `back`) and *Remove account*, never `‹ Server` (`signInExits` in `slot.ts`, beside `slotOf`,
   `confirmDue`, `serverLabel`).
@@ -181,7 +181,7 @@ sign-in cannot offer the stored device, which is an account's.
 ## The first launch after the update
 
 Nothing about an account is written at startup (asserted, `seats.rs` included; the one
-write a launch makes is the login item's mark, `native-login.md`). `read_accounts` is pure: it
+write a launch may make takes an earlier build's login mark out, `native-login.md`). `read_accounts` is pure: it
 derives a pre-accounts list in memory (`server` only on evidence: a `devices` entry, a bare
 claim, or `credential#<server>` read once by `lib.rs`; else `Roster.pending`), materialized by
 the first changing act. A legacy page calls `host_account_confirm`: the host moves the bare

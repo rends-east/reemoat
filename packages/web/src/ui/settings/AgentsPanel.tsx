@@ -109,6 +109,8 @@ export function AgentDetail({
   agentId,
   title,
   keyEnv,
+  follows = false,
+  onChanged,
 }: {
   machineId: MachineId;
   agentId: AgentId;
@@ -116,8 +118,16 @@ export function AgentDetail({
   title?: string;
   /** The one credential this card is about when mounted for a system; the harness-level sentences are then left out. */
   keyEnv?: string | null;
+  /** Under a system's key box, where keyLeads: the harness's own card by its own name, a saved key spent by routing. */
+  follows?: boolean;
+  /** Told of every change, for a parent that holds its own copy of the listing. */
+  onChanged?: () => void;
 }): ReactNode {
   const { listing, error, loading, refresh } = useAgentAuth(machineId);
+  const changed = (): void => {
+    refresh();
+    onChanged?.();
+  };
 
   if (loading && listing === null) return <Pending>Asking that machine…</Pending>;
   if (listing === null) {
@@ -143,7 +153,7 @@ export function AgentDetail({
   const login = agent.login ?? { supported: listing.loginSupported, needsInput: true };
 
   return (
-    <div>
+    <div className={follows ? "mt-8" : undefined}>
       <div className="flex items-center gap-2 px-4">
         <span className="min-w-0 flex-1 truncate text-base font-semibold">{title ?? harnessName(agent)}</span>
         {loading ? (
@@ -158,10 +168,11 @@ export function AgentDetail({
         agent={agent}
         login={login}
         keyEnv={keyEnv ?? null}
+        follows={follows}
         os={listing.os}
         checking={loading}
         checkFailed={error !== null}
-        onChanged={refresh}
+        onChanged={changed}
       />
     </div>
   );
@@ -176,6 +187,7 @@ function SignIn({
   agent,
   login,
   keyEnv,
+  follows,
   os,
   checking,
   checkFailed,
@@ -185,6 +197,7 @@ function SignIn({
   agent: AgentAuthInfo;
   login: AgentLoginSupport;
   keyEnv: string | null;
+  follows: boolean;
   os: string | undefined;
   checking: boolean;
   checkFailed: boolean;
@@ -249,7 +262,9 @@ function SignIn({
   const canSignIn = login.supported && agent.available;
   const block = tokenBlockFor(stance, stored);
   const canInstall = agent.installable === true && !noInstallRoute;
-  const line = wholeAgent ? stanceLine(agent, stance, canSignIn, os, canInstall) : null;
+  // Under its own name beside a key box, an absent CLI's sentence is said only where no button says it.
+  const second = follows && stance === "not_installed";
+  const line = (second ? !canInstall : wholeAgent) ? stanceLine(agent, stance, canSignIn, os, canInstall) : null;
   const signInAbove = canSignIn && stance !== "signed_in";
   const divider = wholeAgent ? dividerWord(stance, signInAbove, block) : null;
   const caveat = wholeAgent ? credentialCaveat(agent.id, canSignIn) : null;
@@ -372,6 +387,7 @@ function SignIn({
                 agent={agent}
                 slot={slot}
                 stance={stance}
+                routed={follows}
                 caveat={caveat}
                 howTo={
                   login.blocked === "interactive_pty" && slot.envName === "CLAUDE_CODE_OAUTH_TOKEN"
@@ -403,6 +419,7 @@ function SignIn({
                     agent={agent}
                     slot={slot}
                     stance={stance}
+                    routed={follows}
                     caveat={null}
                     howTo={null}
                     editable={false}
@@ -464,6 +481,7 @@ function CredentialSlot({
   agent,
   slot,
   stance,
+  routed,
   caveat,
   howTo,
   editable,
@@ -473,6 +491,7 @@ function CredentialSlot({
   agent: { id: string; label?: string };
   slot: AgentCredentialSlot;
   stance: AgentStance;
+  routed: boolean;
   caveat: string | null;
   howTo: string | null;
   editable: boolean;
@@ -537,7 +556,7 @@ function CredentialSlot({
   );
   const saved = slot.set ? (
     <span className="flex items-center gap-1">
-      <Icon as={Check} size={11} /> {storedChip(agent, stance)}
+      <Icon as={Check} size={11} /> {storedChip(agent, stance, routed)}
     </span>
   ) : null;
 

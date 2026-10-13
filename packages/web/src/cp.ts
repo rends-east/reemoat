@@ -373,6 +373,15 @@ export async function changePassword(current: string | undefined, next: string):
   return body.sessionsRevoked;
 }
 
+/** Every sign-in goes with the account, so the credential is dropped here rather than left for a 401 to find. */
+export async function deleteAccount(current: string | undefined): Promise<void> {
+  await cpFetch<{ deleted: boolean }>("/v1/me/delete", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword: current }),
+  });
+  clearSession();
+}
+
 export function me(): Promise<Me> {
   return cpFetch<Me>("/v1/me");
 }

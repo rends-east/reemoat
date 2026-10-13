@@ -1,8 +1,9 @@
-import { LogOut } from "lucide-react";
+import { LogOut, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import {
   ageText,
   changePasswordError,
+  deleteAccountError,
   PASSWORD_MIN,
   passwordProblem,
   passwordProblemText,
@@ -19,6 +20,7 @@ import type { Me, SessionRecord } from "../../wire";
 import {
   Badge,
   Button,
+  DangerButton,
   Empty,
   FIELD,
   Monogram,
@@ -61,6 +63,10 @@ export function AccountSection({
       {/* Outside the me === null branch: Sign out must stay drawn while the control plane is down. */}
       <Group footer={nativeBoot() !== null ? "Removes this account from this computer." : undefined}>
         <ActionRow title="Sign out" glyph={LogOut} tone="danger" onClick={() => void store.signOut()} />
+      </Group>
+      {/* A plain row: the one danger control is on the leaf, beside what it costs. */}
+      <Group>
+        <LinkRow title="Delete account" onClick={() => navigate(settingsLeafPath("delete-account"))} />
       </Group>
     </div>
   );
@@ -200,6 +206,65 @@ function PasswordForm({ me, onDone }: { me: Me; onDone: () => void }): ReactNode
         <Button type="submit" tone="primary" disabled={!ready}>
           {busy ? <Spinner /> : firstTime ? "Set password" : "Change password"}
         </Button>
+        <Button disabled={busy} onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function DeleteAccountForm({ me, onDone }: { me: Me; onDone: () => void }): ReactNode {
+  const [current, setCurrent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // As on the password form: an account its API key signs in has no password to ask for.
+  const keyOnly = me.hasPassword === false;
+  const ready = !busy && (keyOnly || current.length > 0);
+
+  const remove = (): void => {
+    if (!ready) return;
+    setBusy(true);
+    setError(null);
+    // No `finally`: a success leaves this page, and the button must not come back for a second press.
+    void store.deleteAccount(keyOnly ? undefined : current).catch((cause: unknown) => {
+      setError(deleteAccountError(cause));
+      setBusy(false);
+    });
+  };
+
+  return (
+    // Enter deletes nothing; only the button does.
+    <form onSubmit={(event) => event.preventDefault()} className={fieldCol}>
+      <p className="text-xs text-muted">
+        {`This deletes the account ${me.name}, its sign-ins and API keys, and takes its machines off this server. Conversations and files stay on those machines. It cannot be undone.`}
+      </p>
+
+      <input type="text" name="username" autoComplete="username" value={me.name} readOnly tabIndex={-1} className="sr-only" />
+
+      {!keyOnly && (
+        <Field label="Password">
+          {({ id }) => (
+            <input
+              id={id}
+              type="password"
+              autoComplete="current-password"
+              value={current}
+              onChange={(event) => setCurrent(event.target.value)}
+              autoFocus
+              className={FIELD}
+            />
+          )}
+        </Field>
+      )}
+
+      {error !== null && <p className="text-sm text-danger">{error}</p>}
+
+      <div className="flex items-center gap-2">
+        <DangerButton icon={Trash2} disabled={!ready} onClick={remove}>
+          {busy ? <Spinner /> : "Delete account"}
+        </DangerButton>
         <Button disabled={busy} onClick={onDone}>
           Cancel
         </Button>
@@ -431,6 +496,11 @@ function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
 export function PasswordScreen({ me }: { me: Me | null }): ReactNode {
   if (me === null) return <MeUnread />;
   return <PasswordForm me={me} onDone={() => navigate(settingsPath("account"), true)} />;
+}
+
+export function DeleteAccountScreen({ me }: { me: Me | null }): ReactNode {
+  if (me === null) return <MeUnread />;
+  return <DeleteAccountForm me={me} onDone={() => navigate(settingsPath("account"), true)} />;
 }
 
 export function EmailScreen({ me, config }: { me: Me | null; config: InstanceConfig | null }): ReactNode {

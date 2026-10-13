@@ -792,7 +792,7 @@ export async function runSchedule(seed: number, link: LinkProfile, run: number, 
 
     if (!sent) return;
     const delivered = events.filter((stored) => stored.event.type === "prompt").length;
-    const echo = echoes.echoFor(key) !== null ? 1 : 0;
+    const echo = echoes.echoesFor(key).length;
     // `SessionView` draws the conversation only with a row and a transcript, and the echo inside it.
     const drawn = row !== undefined && transcript !== undefined ? delivered + echo : 0;
     if (drawn > 1) note("the sent message was drawn twice");
@@ -1301,6 +1301,31 @@ process.stdout.write("\na message sent into a conversation that holds nothing ye
   await unopened([other(1), prompt(5), other(6), other(7), other(8), other(9), prompt(10), other(11)], 11);
   check("and its own event in that page claims it", [internals.transcripts.has(key), echoes.echoFor(key), echoes.echoClaimed(waited)], [true, null, true]);
   internals.primed.delete(key);
+
+  // Reported 2026-10-12: the daemon had the first message and its event was not back yet when the second was sent, and the first left the screen.
+  {
+    cold([], 20);
+    const says = (seq: number, text: string): never => ({ seq, ts: seq, event: { type: "prompt", text, attachments: [] } }) as never;
+    const sending = (text: string) => ({ text, seq: Number.MAX_SAFE_INTEGER, after: echoes.sendFloor(key, 20, 20), attachments: [] });
+    const drawn = (): string[] => [
+      ...(internals.transcripts.get(key) as { events: { event: { type: string; text: string } }[] }).events
+        .filter((stored) => stored.event.type === "prompt")
+        .map((stored) => stored.event.text),
+      ...echoes.echoesFor(key).map((echo) => `${echo.text}, on its way`),
+    ];
+    const first = sending("first");
+    echoes.setEcho(key, first);
+    store.promptLanded(ref, first, 21);
+    const second = sending("second");
+    echoes.setEcho(key, second);
+    check("a message sent before the last one's event is back leaves that one drawn", drawn(), ["first, on its way", "second, on its way"]);
+    store.onEvents(ref, [says(21, "first")]);
+    check("whose own event then takes its place, where it stood", drawn(), ["first", "second, on its way"]);
+    store.promptLanded(ref, second, 22);
+    check("the second one's answer settles nothing of the first", drawn(), ["first", "second, on its way"]);
+    store.onEvents(ref, [says(22, "second")]);
+    check("and each message ends drawn once", drawn(), ["first", "second"]);
+  }
 
   echoes.clearEcho(key);
   internals.daemons.delete(machine);

@@ -77,7 +77,7 @@ process.stdout.write("\nwrapping moves nothing\n");
 
 process.stdout.write("\na message sent while the agent talks lands once, and the foot never moves under it\n");
 {
-  const { claimEcho, echoFor, isEchoOf, sendFloor, setEcho, landEcho } = await import("../src/echo.js");
+  const { claimEcho, echoFor, echoId, echoesFor, isEchoOf, sendFloor, setEcho, landEcho } = await import("../src/echo.js");
   const { deliversQueued } = await import("../src/wire.js");
   const { keepsFootSlot } = await import("../src/ui/EventList.js");
   const key = "m/claim" as never;
@@ -124,6 +124,67 @@ process.stdout.write("\na message sent while the agent talks lands once, and the
   landEcho(key, landed, 60);
   check("a landed send whose event is still on the socket does, so the same words sent again are not taken for it", sendFloor(key, 50), 60);
 
+  // Reported 2026-10-12: a message sent before the last one's event was back took its place, and the earlier one left the screen.
+  {
+    const pair = "m/pair" as never;
+    const sending = (after: number) => ({ text: "same words", seq: Number.MAX_SAFE_INTEGER, after, attachments: [] });
+    const one = sending(70);
+    setEcho(pair, one);
+    landEcho(pair, one, 71);
+    const two = sending(sendFloor(pair, 70));
+    setEcho(pair, two);
+    const held = (): string[] => echoesFor(pair).map((echo) => (echo === one ? "one" : echo === two ? "two" : "another"));
+    check("a send made while an earlier one's event is still out leaves both held, in the order sent", held(), ["one", "two"]);
+    check("each under a key of its own, so one settling leaves the other's bubble alone", echoId(one) !== echoId(two) && echoId(two) === echoId(two), true);
+    claimEcho(pair, [prompt(71, "same words")]);
+    check("the earlier one's event takes the earlier alone, the words being the same", held(), ["two"]);
+    claimEcho(pair, [prompt(72, "same words")]);
+    check("and the later one's takes the later", held(), []);
+
+    const first = sending(80);
+    const second = sending(80);
+    setEcho(pair, first);
+    setEcho(pair, second);
+    claimEcho(pair, [prompt(81, "same words")]);
+    check("one event is one send's: the same words twice, neither numbered yet, are taken one at a time", [echoesFor(pair).length, echoFor(pair) === second], [1, true]);
+    claimEcho(pair, [prompt(82, "same words"), prompt(83, "same words")]);
+    check("and a batch takes no more than was sent", echoesFor(pair).length, 0);
+
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { EventList } = await import("../src/ui/EventList.js");
+    setEcho(pair, { ...sending(90), text: "the first one" });
+    setEcho(pair, { ...sending(90), text: "the second one" });
+    const html = renderToStaticMarkup(
+      createElement(EventList, {
+        transcript: { events: [], gaps: [], heldBytes: 0, loadedFrom: 1, daemonFirstSeq: 1, clearedAt: null, loadingHistory: false, stream: null },
+        askHeight: 0,
+        onResized: () => {},
+        files: null,
+        working: true,
+        reporting: false,
+        engaged: false,
+        workElapsedMs: null,
+        stale: false,
+        echoes: echoesFor(pair),
+        queued: new Set<number>(),
+        background: [],
+        reportsTasks: "unasked",
+        tasksOpen: false,
+        onOpenTasks: () => {},
+        onCloseTasks: () => {},
+        hiddenFinished: new Set<string>(),
+        onClearFinished: () => {},
+        onStopTask: null,
+      }),
+    );
+    check(
+      "the conversation draws both, the earlier above the later",
+      [html.split("the first one").length - 1, html.split("the second one").length - 1, html.indexOf("the first one") < html.indexOf("the second one")],
+      [1, 1, true],
+    );
+  }
+
   const store = stripComments(srcFile("store.ts"));
   check("onEvents claims before it settles", /claimEcho\(key, events\);\s*settleEcho\(key,/.test(store), true);
   const composer = stripComments(srcFile("ui/Composer.tsx"));
@@ -157,7 +218,7 @@ process.stdout.write("\na message sent while the agent talks lands once, and the
     [
       /askHeight === 0 \? `calc\(\$\{TRANSCRIPT_FOOT_PX\}px - \$\{FOOT_LINE\}\)`/.test(list),
       /const FOOT_LINE = "1\.25rem";/.test(list),
-      /keepsFootSlot\(askHeight, rows\.at\(-1\), echo !== null\) && <div aria-hidden=\{true\} className="h-5" \/>/.test(list),
+      /keepsFootSlot\(askHeight, rows\.at\(-1\), echoes\.length > 0\) && <div aria-hidden=\{true\} className="h-5" \/>/.test(list),
     ],
     [true, true, true],
   );

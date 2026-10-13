@@ -197,6 +197,21 @@ export function changePasswordError(error: unknown): string {
   }
 }
 
+/** A server from before the route answers 404, said as what it is rather than as "not found". */
+export function deleteAccountError(error: unknown): string {
+  if (!ApiError.isApiError(error)) return CONTROL_PLANE_UNREACHABLE;
+  switch (error.code) {
+    case "invalid_password":
+      return "That is not your current password.";
+    case "too_many_attempts":
+      return tooManyAttemptsText(error);
+    case "last_admin":
+      return "You are this server's only admin. Add another before deleting this account.";
+    default:
+      return error.status === 404 ? "This server cannot delete an account yet." : error.message;
+  }
+}
+
 /** Only for an api_key credential: the listed prefix is the eight characters after rk_. */
 export function thisBrowsersKey(
   credential: { value: string; kind: "session" | "api_key" } | null,

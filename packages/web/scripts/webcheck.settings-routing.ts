@@ -345,8 +345,8 @@ process.stdout.write("\nwhich settings screen a URL names\n");
   const leafOf = (segments: readonly string[]): string | null => parseSettingsRoute(segments).leaf;
   check(
     "the three form screens parse to their leaf",
-    [leafOf(["account", "password"]), leafOf(["account", "email"]), leafOf(["keys", "new"])],
-    ["password", "email", "new-key"],
+    [leafOf(["account", "password"]), leafOf(["account", "email"]), leafOf(["account", "delete"]), leafOf(["keys", "new"])],
+    ["password", "email", "delete-account", "new-key"],
   );
   check(
     "and anything else under those sections falls up to the section",
@@ -1069,7 +1069,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
     "and every Cancel left, counted as a token, is a form's way back or an abort",
     swept.map(([name, src]) => [name, (src.match(/\bCancel\b/g) ?? []).length] as const).filter(([, n]) => n > 0),
     [
-      ["AccountSection.tsx", 2],
+      ["AccountSection.tsx", 3],
       ["AgentsPanel.tsx", 1],
       ["EmailSection.tsx", 1],
       ["MachineSection.tsx", 1],

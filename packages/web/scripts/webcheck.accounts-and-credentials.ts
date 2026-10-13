@@ -1610,7 +1610,7 @@ process.stdout.write("\nyour own API keys\n");
       /me === null[^;]{0,120}<Empty failed/.test(src),
   );
   check("both screens hand an unread account to the one guard, and hold no sentence of their own", draws.map(([name]) => name), []);
-  check("the account screen does on all three of its arms", account.split("<MeUnread />").length - 1, 3);
+  check("the account screen does on all four of its arms", account.split("<MeUnread />").length - 1, 4);
   const unreadSrc = stripComments(srcFile("ui/Unreachable.tsx"));
   const meUnread = unreadSrc.slice(unreadSrc.indexOf("export function MeUnread()"), unreadSrc.indexOf("function AskAgain("));
   report("the guard's body was found", meUnread.length > 0, `${meUnread.length} chars`);
@@ -1622,5 +1622,77 @@ process.stdout.write("\nyour own API keys\n");
       /<AskAgain ask=\{\(\) => store\.refreshMe\(\)\} \/>/.test(meUnread),
     ],
     [true, true, true],
+  );
+}
+
+process.stdout.write("\ndeleting your own account\n");
+{
+  const { ApiError } = await import("../src/http.js");
+  const { authFailure, CONTROL_PLANE_UNREACHABLE, deleteAccountError, tooManyAttemptsText } = await import("../src/account.js");
+  const { parseSettingsRoute, settingsLeafPath, settingsPaneTitle, settingsUp } = await import("../src/settings.js");
+
+  const route = parseSettingsRoute(settingsLeafPath("delete-account").split("/").slice(2));
+  check(
+    "it is a screen of its own under Account, titled by what it does",
+    [settingsLeafPath("delete-account"), route.section, route.leaf, settingsPaneTitle(route), settingsUp(route)?.path],
+    ["/settings/account/delete", "account", "delete-account", "Delete account", "/settings/account"],
+  );
+
+  const wrong = new ApiError(401, "invalid_password", "that is not your current password");
+  check("a wrong password is about the field, and signs nobody out", [authFailure(wrong), deleteAccountError(wrong)], [null, "That is not your current password."]);
+  const throttled = new ApiError(429, "too_many_attempts", "too many attempts", { retryAfterSeconds: 120 });
+  check("a throttle says how long", deleteAccountError(throttled), tooManyAttemptsText(throttled));
+  check(
+    "the only admin is told what to do first",
+    deleteAccountError(new ApiError(409, "last_admin", "x")),
+    "You are this server's only admin. Add another before deleting this account.",
+  );
+  check(
+    "a server from before the route is named as that, never as not found",
+    deleteAccountError(new ApiError(404, "not_found", "not found")),
+    "This server cannot delete an account yet.",
+  );
+  check("and a transport failure is the one sentence", deleteAccountError(new TypeError("Failed to fetch")), CONTROL_PLANE_UNREACHABLE);
+
+  const account = stripComments(srcFile("ui/settings/AccountSection.tsx"));
+  const row = /<LinkRow title="Delete account" onClick=\{\(\) => navigate\(settingsLeafPath\("delete-account"\)\)\} \/>/;
+  check("the account screen's row is a plain way in, below Sign out", [row.test(account), account.indexOf('title="Sign out"') < account.search(row)], [true, true]);
+  const formAt = account.indexOf("function DeleteAccountForm(");
+  const form = account.slice(formAt, account.indexOf("\n}\n", formAt));
+  report("the form's body was found", formAt !== -1 && form.length > 0, `${form.length} chars`);
+  check(
+    "the one danger control is the leaf's button, and Enter deletes nothing",
+    [
+      /<DangerButton icon=\{Trash2\} disabled=\{!ready\} onClick=\{remove\}>/.test(form),
+      /<form onSubmit=\{\(event\) => event\.preventDefault\(\)\}/.test(form),
+      /type="submit"/.test(form),
+    ],
+    [true, true, false],
+  );
+  check(
+    "it asks the password unless the account has none, and waits for one",
+    [
+      /const keyOnly = me\.hasPassword === false;/.test(form),
+      /const ready = !busy && \(keyOnly \|\| current\.length > 0\);/.test(form),
+      /store\.deleteAccount\(keyOnly \? undefined : current\)/.test(form),
+    ],
+    [true, true, true],
+  );
+  check("a refusal puts the button back, and a success never does", [/\.catch\(\(cause: unknown\) => \{\s*setError\(deleteAccountError\(cause\)\);\s*setBusy\(false\);/.test(form), /\.finally\(/.test(form)], [true, false]);
+  check("what it costs is said on the leaf, naming the account", /This deletes the account \$\{me\.name\}[^`]*It cannot be undone\./.test(form), true);
+
+  const cp = stripComments(srcFile("cp.ts"));
+  const callAt = cp.indexOf("export async function deleteAccount(");
+  const call = cp.slice(callAt, cp.indexOf("\n}\n", callAt));
+  check(
+    "the credential is dropped only after the server answered",
+    [/"\/v1\/me\/delete"/.test(call), /method: "POST"/.test(call), call.indexOf("await cpFetch") < call.indexOf("clearSession()"), /catch|finally/.test(call)],
+    [true, true, true, false],
+  );
+  const store = stripComments(srcFile("store.ts"));
+  check(
+    "and leaving is sign-out's own half, after it",
+    /async deleteAccount\(current: string \| undefined\): Promise<void> \{\s*await cp\.deleteAccount\(current\);\s*await this\.signOut\(\);\s*\}/.test(store),
+    true,
   );
 }

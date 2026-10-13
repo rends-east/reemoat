@@ -9,18 +9,6 @@ use crate::seats::MAIN;
 
 pub const PUTS_AWAY: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// A launch the system made at login opens put away: the daemons start, and the window waits for
-/// the Dock, as it does after its close button (Q7.161).
-pub fn at_launch(
-    mut config: tauri::utils::config::WindowConfig,
-    by_login: bool,
-) -> tauri::utils::config::WindowConfig {
-    if PUTS_AWAY && by_login {
-        config.visible = false;
-    }
-    config
-}
-
 pub fn on_close_requested<R: Runtime>(window: &Window<R>, api: &CloseRequestApi) {
     if !PUTS_AWAY || window.label() != MAIN {
         return;

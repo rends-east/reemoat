@@ -33,13 +33,14 @@ paths:
   no half. `403 user_disabled` only after the password verified. The body field `name`
   takes either, bounded at `MAX_EMAIL_CHARS`.
 - **What must prove the current password is decided per route, and on one per
-  credential.** `POST /v1/me/password` asks **always**. `PUT /v1/me/email` asks **only
-  an API-key caller with a password** (`caller.via`): a session changes the address
-  alone by the owner's decision, the cost written at the route, while a key can leak
-  with no person in the chain (Q1.630, amended 2026-09-05). `POST /v1/me/keys` asks
-  **never**. Both askers use `verifyCurrentPassword`, which takes the stored hash, so the
-  exception — **no password row**, where the key is the proof and may set a first
-  password — is written at each route, never carried by the helper (Q7.81). The email
+  credential.** `POST /v1/me/password` and `POST /v1/me/delete` ask **always** (Q1.660).
+  `PUT /v1/me/email` asks **only an API-key caller with a password** (`caller.via`): a
+  session changes the address alone by the owner's decision, the cost written at the
+  route, while a key can leak with no person in the chain (Q1.630, amended 2026-09-05).
+  `POST /v1/me/keys` asks **never**. Every asker uses `verifyCurrentPassword`, which takes
+  the stored hash, so the exception — **no password row**, where the key is the proof and
+  may set a first password or delete the account — is written at each route, never
+  carried by the helper (Q7.81). The email
   arm verifies before any write or mail, spending only `passwordChangeKey`. The browser
   never sends a password on the email leaf: a browser presenting a key is the legacy
   adoption and draws the server's `400` sentence. **There is no admin password reset.**

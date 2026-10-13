@@ -3055,6 +3055,7 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
     const leaver = db.prepare("SELECT revoked_at FROM machines WHERE id = 'm_leaver'").get();
     report("the machine row survives, for the audit trail", leaver !== undefined, "m_leaver still listed");
     check("but it is revoked rather than left ownerless", leaver?.["revoked_at"] !== null, true);
+    check("and keeps no name its owner gave it", db.prepare("SELECT name FROM machines WHERE id = 'm_leaver'").get()?.["name"], "m_leaver");
     // Scoped to m_leaver: the relay sections build ownerless machines by hand on purpose.
     check(
       "the deleted user left nothing live and ownerless behind",
@@ -3070,6 +3071,77 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
     check("nor does their API key", (await send("/v1/me", { headers: bearer(doomed.apiKey) })).status, 401);
     check("and signing in as them is refused", (await outcome(await login("leaver", doomed.password)))[0], 401);
     check("the name can be used again", (await post("/v1/admin/users", { name: "leaver" }, admin)).status, 201);
+  }
+
+  // Your own account, by your own hand (Q1.660).
+  {
+    const person = async (name: string, isAdmin = false): Promise<{ id: string; password: string; headers: Record<string, string> }> => {
+      const created = (await (await post("/v1/admin/users", { name, isAdmin }, admin)).json()) as { id: string; password: string };
+      db.prepare("DELETE FROM password_obligations WHERE user_id = ?").run(created.id);
+      const session = (await (await login(name, created.password)).json()) as { token: string };
+      return { id: created.id, password: created.password, headers: bearer(session.token) };
+    };
+    const still = (id: string): unknown => db.prepare("SELECT id FROM users WHERE id = ?").get(id)?.["id"];
+
+    const quitter = await person("quitter");
+    db.prepare("INSERT INTO machines (id, name, created_at) VALUES ('m_quitter', 'quitters-laptop-quitter', ?)").run(now);
+    db.prepare("INSERT INTO machine_owners (machine_id, user_id, label, created_at) VALUES ('m_quitter', ?, 'quitters-laptop', ?)").run(quitter.id, now);
+    db.prepare("INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, 'm_quitter', 'session:read', ?)").run(quitter.id, now);
+    const theirKey = (await (await post("/v1/me/keys", {}, quitter.headers)).json()) as { apiKey: string };
+
+    check("deleting an account needs somebody signed in to it", (await send("/v1/me/delete", { method: "POST" })).status, 401);
+    check("and their current password", await outcome(await post("/v1/me/delete", {}, quitter.headers)), [400, "bad_request"]);
+    check("a wrong one is refused as a wrong password, not as a dead credential", await outcome(await post("/v1/me/delete", { currentPassword: "nope" }, quitter.headers)), [401, "invalid_password"]);
+    check("an API key is no way round it", await outcome(await post("/v1/me/delete", {}, bearer(theirKey.apiKey))), [400, "bad_request"]);
+    check("and no refusal removed anything", [still(quitter.id), (await send("/v1/me", { headers: quitter.headers })).status], [quitter.id, 200]);
+
+    const owing = (await (await post("/v1/admin/users", { name: "owing" }, admin)).json()) as { id: string; password: string };
+    const owingSession = (await (await login("owing", owing.password)).json()) as { token: string };
+    check(
+      "an account owing a password change replaces it first",
+      await outcome(await post("/v1/me/delete", { currentPassword: owing.password }, bearer(owingSession.token))),
+      [403, "password_change_required"],
+    );
+    void (await send(`/v1/admin/users/${owing.id}`, { method: "DELETE", headers: admin }));
+
+    const left = await post("/v1/me/delete", { currentPassword: quitter.password }, quitter.headers);
+    const answer = (await left.json()) as { deleted?: boolean; machinesRevoked?: number };
+    check("the right password deletes it, and says what went off the network", [left.status, answer.deleted, answer.machinesRevoked], [200, true, 1]);
+    check(
+      "nothing that signed in as them is left",
+      ["users WHERE id", "user_passwords WHERE user_id", "api_keys WHERE user_id", "user_sessions WHERE user_id", "grants WHERE user_id", "machine_owners WHERE user_id"].map(
+        (from) => db.prepare(`SELECT COUNT(*) AS n FROM ${from} = ?`).get(quitter.id)?.["n"],
+      ),
+      [0, 0, 0, 0, 0, 0],
+    );
+    const theirs = db.prepare("SELECT name, revoked_at FROM machines WHERE id = 'm_quitter'").get();
+    check("their machine is revoked, and its row keeps no name they gave it", [theirs?.["revoked_at"] !== null, theirs?.["name"]], [true, "m_quitter"]);
+    check("the session that asked no longer authenticates", (await send("/v1/me", { headers: quitter.headers })).status, 401);
+    check("nor does their API key", (await send("/v1/me", { headers: bearer(theirKey.apiKey) })).status, 401);
+    check("and the name can be taken again", (await post("/v1/admin/users", { name: "quitter" }, admin)).status, 201);
+
+    const bare = newApiKey();
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES ('u_keyonly', 'keyonly', 0, ?)").run(now);
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, 'u_keyonly', ?, ?, ?)").run(newId("ak"), bare.prefix, bare.hash, now);
+    check(
+      "an account with no password is deleted on its key alone, as it may set a first one",
+      [(await post("/v1/me/delete", {}, bearer(bare.key))).status, still("u_keyonly")],
+      [200, undefined],
+    );
+
+    // Every other admin banned for the length of the check: the database is shared by the sections of this driver.
+    const lone = await person("lone", true);
+    const others = db
+      .prepare("SELECT id FROM users WHERE is_admin = 1 AND disabled_at IS NULL AND id != ?")
+      .all(lone.id)
+      .map((row) => String(row["id"]));
+    for (const id of others) db.prepare("UPDATE users SET disabled_at = ? WHERE id = ?").run(now, id);
+    check("the only admin is refused before any password is asked", await outcome(await post("/v1/me/delete", {}, lone.headers)), [409, "last_admin"]);
+    check("and with the right one", await outcome(await post("/v1/me/delete", { currentPassword: lone.password }, lone.headers)), [409, "last_admin"]);
+    check("so an enabled admin remains", still(lone.id), lone.id);
+    for (const id of others) db.prepare("UPDATE users SET disabled_at = NULL WHERE id = ?").run(id);
+    report("the other admins are back", others.length > 0, `${others.length} re-enabled`);
+    check("an admin may leave while another remains", [(await post("/v1/me/delete", { currentPassword: lone.password }, lone.headers)).status, still(lone.id)], [200, undefined]);
   }
 
   const laptop = (await (await login("ada", made.password)).json()) as { token: string };
@@ -6160,7 +6232,7 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
     );
 
     // Handlers under /v1/admin/users/:id, each sliced to its own two-space-indent closer; the helpers count as touching api_keys.
-    // The account delete is the one exemption, pinned to a bare sweep (Q1.631).
+    // The account delete is the one exemption: it reaches the table through removeUser alone, pinned to a bare sweep (Q1.631).
     const ADMIN_USER_ROUTE = /^  app\.(get|post|put|patch|delete)\("(\/v1\/admin\/users\/:id(?:\/[^"]*)?)"/gm;
     const adminUserRoutes = [...appSource.matchAll(ADMIN_USER_ROUTE)].map((found) => {
       const start = found.index ?? 0;
@@ -6173,13 +6245,19 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
     check("neither key route is registered any more", adminUserRoutes.filter((route) => route.path.includes("/keys")).map((route) => route.name), []);
     const TOUCHES_KEYS = /api_keys|apiKeyRows|revokeApiKey|touchKey|keyPrefix/;
     check(
-      "the one handler under it that touches api_keys is the account delete",
+      "no handler under it touches api_keys itself",
       adminUserRoutes.filter((route) => TOUCHES_KEYS.test(route.body)).map((route) => route.name),
+      [],
+    );
+    check(
+      "and the one that calls the sweep is the account delete",
+      adminUserRoutes.filter((route) => /removeUser\(/.test(route.body)).map((route) => route.name),
       ["delete /v1/admin/users/:id"],
     );
-    const sweep = adminUserRoutes.find((route) => route.name === "delete /v1/admin/users/:id")?.body ?? "";
+    const sweepAt = appSource.indexOf("\nfunction removeUser(");
+    const sweep = sweepAt === -1 ? "" : appSource.slice(sweepAt, appSource.indexOf("\n}\n", sweepAt));
     check(
-      "and it only sweeps — one DELETE, no SELECT or UPDATE on the table, and none of the helpers",
+      "which only sweeps — one DELETE, no SELECT or UPDATE on the table, and none of the helpers",
       [
         (sweep.match(/DELETE FROM api_keys WHERE user_id = \?/g) ?? []).length,
         /SELECT[^;]*FROM api_keys/.test(sweep),
@@ -6187,6 +6265,11 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
         /apiKeyRows|revokeApiKey|touchKey|keyPrefix/.test(sweep),
       ],
       [1, false, false, false],
+    );
+    check(
+      "and is called for two accounts only: the one an admin names, and the caller's own",
+      [...appSource.matchAll(/removeUser\(db, ([\w.]+), /g)].map((found) => found[1]).sort(),
+      ["caller.userId", "userId"],
     );
   }
 

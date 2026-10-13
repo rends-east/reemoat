@@ -286,7 +286,7 @@ like a code or a fingerprint taken out (Q1.656); a name left empty is `null`.
 
 ---
 
-## The control plane — 71 routes
+## The control plane — 72 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -314,6 +314,7 @@ these, so a new route is private by doing nothing. "Public" is not
 |---|---|
 | `GET /v1/me` | Who this credential is, and what it may reach, with `permissions: {agentMessaging}` — the account's switch |
 | `POST /v1/me/password` | Requires the current one, even under a valid session |
+| `POST /v1/me/delete` | Your own account, irreversibly: `{currentPassword}`, required whenever the account has a password, whichever credential presents. Everything `DELETE /v1/admin/users/:id` removes, with your machines revoked and reported as `machinesRevoked`. `409 last_admin` for a server's only enabled admin, `401 invalid_password` for a wrong password — about the body, not the credential |
 | `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in. Each row names the **device** it belongs to where there is one, and falls back to what the `User-Agent` says where there is not |
 | `GET` · `POST /v1/me/devices` · `DELETE /v1/me/devices/:id` | The installations registered on this account. A **device** is not a session and not a credential: a session is one bearer token with an expiry, a device is the computer or phone that keeps producing them, and holding its id proves nothing — it is read only after a session token has already resolved. Registering binds the caller's current session, adopts an id it already holds, and **ignores one it does not** rather than refusing (an id that was retired would otherwise close a sign-in loop with no exit); it refuses an API key with `409 device_needs_session`, because a key has no session for a device to hang off, and `409 device_limit` at the cap — a **refusal** rather than an eviction, so that somebody holding one live session cannot sign every device of the owner out. `POST /v1/login` carries the same block optionally and answers `deviceId`. The listing includes **recently retired** rows, because the question it exists to answer is usually asked after something has gone wrong. Retiring one ends every session bound to it and **no other device's**; `404 device_not_found` covers "no such device" and "not yours" alike. Devices are **not** an authorization subject — a grant is `(user, machine)`, so every device of one person reaches the same fleet — and `relay/authorize.ts` reads no device row, so a revocation stops that installation here on the next request and leaves a machine token already minted alone for its remaining ~300s. `SECURITY.md` carries the windows |
 | `GET` · `POST /v1/me/keys` · `DELETE /v1/me/keys/:keyId` | API keys |
@@ -340,7 +341,7 @@ password change is refused all of it by a second positional gate.
 
 | | |
 |---|---|
-| `GET` · `POST /v1/admin/users` · `DELETE /v1/admin/users/:id` | Delete is irreversible; disable is not |
+| `GET` · `POST /v1/admin/users` · `DELETE /v1/admin/users/:id` | Delete is irreversible; disable is not. Somebody else's account only: your own is `POST /v1/me/delete` |
 | `POST /v1/admin/users/:id/disable` · `/enable` · `/invite` | Suspend and restore an account, or mail an invitation |
 | `PUT` · `DELETE /v1/admin/users/:id/machine-limit` | The commercial limit, per person |
 | `GET` · `POST · PATCH /v1/admin/machines[/:id]` | Every machine in the fleet, whoever owns it |

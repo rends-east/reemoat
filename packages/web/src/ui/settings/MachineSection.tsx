@@ -7,7 +7,7 @@ import type { MachineId } from "../../ids";
 import { mayLetIn, waitingText } from "../../deviceAccess";
 import { daemonRead, type MachineState } from "../../machine";
 import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
-import { controlPlaneOrigin, inNativeShell, loginItem, setLoginItem, type LoginItem } from "../../native";
+import { controlPlaneOrigin, inNativeShell } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
 import { registryUnread } from "../Unreachable";
 import { navigate } from "../../router";
@@ -222,9 +222,6 @@ export function MachineSection({
       {/* Outside the listable and owner gates: loopback can reach a machine the relay reports offline. */}
       <LocalPath machineId={machineId} />
 
-      {/* This computer's own row only: the daemon it brings back after a reboot is the one this app runs here (Q7.161). */}
-      {state.host?.canHostDaemon === true && machine.id === state.localMachineId && <OpenAtLogin />}
-
       {owned && (
         <Group>
           <TwoStep
@@ -400,54 +397,6 @@ function LocalPath({ machineId }: { machineId: MachineId }): ReactNode {
           setOff(next);
           // Dropping the route memo applies the switch on the next request; an open socket runs until it rotates.
           store.forgetMachineRoute(machineId);
-        }}
-      />
-    </Group>
-  );
-}
-
-/** Drawn from the host's last answer, never from the press; absent where the host cannot do it. */
-function OpenAtLogin(): ReactNode {
-  // undefined is not asked yet, null a read that failed.
-  const [answer, setAnswer] = useState<LoginItem | null | undefined>(undefined);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const read = (): void => {
-      void loginItem().then((next) => {
-        if (!cancelled) setAnswer(next);
-      });
-    };
-    read();
-    // System Settings, or another account's window, may have changed it while this one was out of sight.
-    const onShow = (): void => {
-      if (document.visibilityState === "visible") read();
-    };
-    document.addEventListener("visibilitychange", onShow);
-    return () => {
-      cancelled = true;
-      document.removeEventListener("visibilitychange", onShow);
-    };
-  }, []);
-
-  if (answer === undefined || answer === "unsupported") return null;
-  const unread = answer === null;
-  return (
-    <Group title="This computer" error={unread ? "This computer did not say whether Reemoat opens at login." : error}>
-      <SwitchRow
-        title="Open at login"
-        on={answer === "on"}
-        busy={busy}
-        disabled={unread}
-        onToggle={() => {
-          setBusy(true);
-          setError(null);
-          void setLoginItem(answer !== "on")
-            .then(setAnswer)
-            .catch((cause: unknown) => setError(errorText(cause)))
-            .finally(() => setBusy(false));
         }}
       />
     </Group>

@@ -40,9 +40,10 @@ are `background-work.md`'s.
 - **A sent message not yet back is a row in the conversation**, from `echo.ts` through
   `SessionView`, never a bubble under the transcript, and drawn above the working line.
   Nothing says "sending"; a refusal puts the text back in the box with a toast. Keyed by
-  session. Settled in `store.ts` in the commit its `prompt` event lands in (`claimEcho`), on
-  the socket or in a history page, or by seq when the POST answers first. Q3.653. A request
-  that fails in transit is `reach.md`'s (Q3.713).
+  session, every send still held drawn oldest first (`echoesFor`): a later one never
+  takes an earlier one's place. Settled in `store.ts` in the commit its `prompt` event
+  lands in (`claimEcho`), on the socket or in a history page, or by seq when the POST
+  answers first. Q3.653. A request that fails in transit is `reach.md`'s (Q3.713).
 - **A queued message says so.** A `prompt` whose seq is in the snapshot's `queuedPrompts`
   draws `Waiting for the agent to finish` under the bubble; nothing for a steered one. This
   is a daemon fact, not the `pending` marker `Bubble.tsx` forbids. `QueuedContext` carries

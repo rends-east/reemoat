@@ -117,9 +117,11 @@ Q1.304, Q1.629; code-level rules in `cp-credentials.md`.
 transaction, every credential that authenticates as them — password, keys, sessions and
 origins, grants, **and their unredeemed enrollment codes** (`burnUserCodes`,
 `used_from = 'user_deleted'`) — frees the name (`users.name` is UNIQUE; a disabled row holds it for
-ever) and **revokes their machines** (`machinesRevoked`). `enrollment_codes.created_by`
-is left dangling on purpose. Deleting *yourself* is refused, so an enabled admin always
-remains. Q1.307. **`disable` does not revoke machines but burns their codes**:
+ever) and **revokes their machines** (`machinesRevoked`), each row's id written over its
+name. `enrollment_codes.created_by` is left dangling on purpose. Deleting *yourself*
+there is refused. **Your own account is `POST /v1/me/delete`** (Settings → Account): the
+same `removeUser`, behind the current password, refusing a server's last enabled admin
+(`409 last_admin`), so one always remains. Q1.307, Q1.660. **`disable` does not revoke machines but burns their codes**:
 `burnUserCodes(db, userId, "user_disabled", now)` beside `revokeAllSessions`, reporting
 `enrollmentCodesInvalidated`; `enable` does not restore them. The reason is a
 **required** `UserCodeBurnReason`, keeping the two apart in the only forensic column.

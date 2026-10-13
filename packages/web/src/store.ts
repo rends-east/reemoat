@@ -1306,6 +1306,12 @@ class AppStore implements StreamSink {
     });
   }
 
+  /** The account's sign-ins went with it, so `logout` holds no credential to send and only the leaving is left (Q1.660). */
+  async deleteAccount(current: string | undefined): Promise<void> {
+    await cp.deleteAccount(current);
+    await this.signOut();
+  }
+
   /** Revokes server-side before reloading; the shell keeps the device and daemon root (Q7.149). */
   async signOut(): Promise<void> {
     await cp.logout();

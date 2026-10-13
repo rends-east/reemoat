@@ -432,29 +432,6 @@ export function setNativeTheme(theme: "light" | "dark"): void {
   void invoke("host_set_theme", { theme }).catch(() => undefined);
 }
 
-/** Whether this app opens at login, in the host's own three words (Q7.161). */
-export type LoginItem = "on" | "off" | "unsupported";
-
-/** A word this build does not know is not a yes. */
-export function loginItemOf(answer: unknown): LoginItem {
-  return answer === "on" || answer === "off" ? answer : "unsupported";
-}
-
-/** The system's answer through the host, asked each time; null is a read that failed, which is not off. */
-export async function loginItem(): Promise<LoginItem | null> {
-  if (!(await canHostDaemonHere())) return "unsupported";
-  try {
-    return loginItemOf(await invoke<string>("host_login_item"));
-  } catch {
-    return null;
-  }
-}
-
-/** Answers what the system says afterwards, never what was asked for; a refusal throws the host's sentence. */
-export async function setLoginItem(on: boolean): Promise<LoginItem> {
-  return loginItemOf(await invoke<string>("host_login_item_set", { on }));
-}
-
 function interceptExternalLinks(): void {
   document.addEventListener(
     "click",

@@ -892,7 +892,7 @@ process.stdout.write("\na person's message, exactly as they sent it\n");
   check(
     "every place a person's words are drawn is that bubble",
     [
-      /<UserBubble text=\{echo\.text\}/.test(events),
+      /\{echoes\.map\(\(echo\) => \(\s*<UserBubble key=\{echoId\(echo\)\} text=\{echo\.text\}/.test(events),
       /<UserBubble\s+text=\{event\.text\}/.test(events),
       /role === "user"\) return <UserBubble text=\{text\} \/>/.test(events),
     ],

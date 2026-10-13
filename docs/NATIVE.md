@@ -686,32 +686,19 @@ macOS version:
 43. A release artifact built with the repository variable set, and the config
     directory moved aside: the box holds that server, greyed, with the pencil.
     `strings <binary> | grep -F <value>` is the offline check.
-44. **Opening at login**, on a full macOS build in `/Applications` (Q7.161). A fresh
-    account with no machine: sign in, let the app set this computer up. macOS says
-    Reemoat was added to the login items; System Settings → General → Login Items
-    lists it under *Open at Login*; Settings → Machines → this computer shows **Open
-    at login** on, under *This computer*; and `ls ~/Library/LaunchAgents` is what it
-    was before.
-45. Restart the Mac and log in, with *Reopen windows when logging back in* unticked.
-    No Reemoat window appears. `pgrep -f scripts/daemon.ts` finds the daemon, and from
-    another device the machine is online and runs a turn. Click the Dock icon: the
-    window opens on the account shown last, with the keyboard in the page. Repeat with
-    *Reopen windows* ticked and write down what happens; this is the one step that
-    settles whether a login launch is recognised.
-46. Switch **Open at login** off; the row follows what the system answers. Restart:
-    Reemoat does not open, and the machine is offline until it is opened by hand, after
-    which the switch is still off. Switch it on again and restart: back as in step 45.
-47. With it on, remove Reemoat in System Settings instead. Reopen the app: the row
-    reads off, and nothing has turned it back on.
-48. An account that was set up on an older build: on the first launch of this one,
-    once its daemon has started, the item is added, once. Switch it off, quit, launch
-    again: it stays off.
-49. A machine whose daemon came from `install.sh` (its unit in
-    `~/Library/LaunchAgents`): the app adds no login item, and the unit brings the
-    daemon back at login as before.
-50. Two accounts: the switch is on each account's own *this computer* screen and they
-    agree; from the account that is not on screen, `host_login_item_set` is refused
-    `not_shown`. `tauri dev` and a copy run from the disk image: no row.
+44. **Nothing opens the app at login** (Q7.161), on a full macOS build in
+    `/Applications`. A fresh account with no machine: sign in, let the app set this
+    computer up. macOS announces no login item, System Settings → General → Login
+    Items does not list Reemoat, and Settings → Machines → this computer has no row
+    about it. Restart the Mac and log in, with *Reopen windows when logging back in*
+    unticked: Reemoat is not running, and the machine is offline until it is opened.
+45. A Mac that ran a development build of 2026-10-12 or 13, with Reemoat still listed
+    under *Open at Login*: install this build over it and open it once. The item is
+    gone from System Settings, `login_item` is gone from `server.json`, and a second
+    launch changes neither. With the item removed by hand first: the mark still goes.
+46. A machine whose daemon came from `install.sh` (its unit in
+    `~/Library/LaunchAgents`): the unit brings the daemon back at login as before, and
+    the app adds nothing.
 
 ## Open measurements
 
