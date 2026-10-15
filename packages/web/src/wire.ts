@@ -296,6 +296,23 @@ export interface FileSentEvent {
   toolCallId: string | null;
 }
 
+/** One task an agent proposed through propose_tasks; `id` is the key the task it becomes is created under (Q2.259). */
+export interface TaskProposal {
+  id: string;
+  /** null is the machine the transcript is on. */
+  machineId: string | null;
+  machine: string | null;
+  project: string;
+  agent: string;
+  title: string;
+  brief: string;
+}
+
+export interface TasksProposedEvent {
+  type: "tasks_proposed";
+  proposals: TaskProposal[];
+}
+
 export interface AgentLogEvent {
   type: "agent_log";
   line: string;
@@ -332,8 +349,50 @@ export type SessionEvent =
   | AgentLogEvent
   | ContextClearedEvent
   | FileSentEvent
+  | TasksProposedEvent
   | OtherUpdateEvent
   | ErrorEvent;
+
+/** A daemon newer than this client may answer a sixth: every reader falls to `review`, which only asks to be looked at. */
+export type TaskStatus = "ready" | "running" | "needs_you" | "review" | "done";
+
+export const TASK_STATUSES: readonly TaskStatus[] = ["needs_you", "running", "review", "ready", "done"];
+
+export interface TaskSessionRef {
+  id: string;
+  agent: string;
+  nickname: string;
+  status: SessionStatus;
+  attachedAt: number;
+}
+
+export type TaskAssignee = "nobody" | "agent" | "you";
+
+/** One task as its own machine's daemon answers it; `status` is settled there, never by a client (Q2.258). */
+export interface TaskSnapshot {
+  id: string;
+  title: string;
+  brief: string;
+  status: TaskStatus;
+  summary: string | null;
+  summaryAt: number | null;
+  summaryBy: string | null;
+  agent: string;
+  customAgent: string | null;
+  /** Who holds it in the backlog: the agent named, its person, or nobody; an older daemon omits it (Q2.261, Q2.262). */
+  assignee: TaskAssignee;
+  cwd: string;
+  key: string | null;
+  createdAt: number;
+  updatedAt: number;
+  sessions: TaskSessionRef[];
+}
+
+export interface TaskList {
+  tasks: TaskSnapshot[];
+  now: number;
+  instanceId: string;
+}
 
 export interface StoredEvent {
   readonly seq: number;

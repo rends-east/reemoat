@@ -223,17 +223,17 @@ export function MachineSection({
       <LocalPath machineId={machineId} />
 
       {owned && (
-        <Group>
+        <Group fit>
           <TwoStep
             armed={confirming}
             onArm={setConfirming}
             align="end"
-            className={TWO_STEP_ROW}
+            className={confirming ? TWO_STEP_ROW : ""}
             question={<>Retire {machine.name}?</>}
             consequence="Frees the name and a slot."
             act={{ label: "Retire", danger: true, icon: Trash2 }}
             onAct={revoke}
-            rest={<DangerRow label={`Retire ${machine.name}`} icon={Trash2} onClick={() => setConfirming(true)} />}
+            rest={<DangerRow label={`Retire ${machine.name}`} icon={Trash2} whole onClick={() => setConfirming(true)} />}
           />
         </Group>
       )}

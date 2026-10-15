@@ -188,7 +188,7 @@ process.stdout.write("\nthe nickname is drawn under what the session is about, n
   check(
     "and a machine is drawn with the server mark wherever a session line names one",
     [
-      /export function MachineLabel\([\s\S]*?<Icon as=\{Server\} size=\{12\} \/>/.test(stripComments(srcFile("ui/bits.tsx"))),
+      /export function MachineLabel\([\s\S]*?<Icon as=\{Server\} size=\{small \? 10 : 12\} \/>/.test(stripComments(srcFile("ui/bits.tsx"))),
       /<MachineLabel name=\{machineName\} \/>/.test(stripComments(srcFile("ui/SessionView.tsx"))),
       /<MachineLabel name=\{row\.machine\.label \?\? "another machine"\}/.test(stripComments(srcFile("ui/MentionMenu.tsx"))),
       /on <MachineLabel name=\{current\.name\}/.test(stripComments(srcFile("ui/NewSession.tsx"))),

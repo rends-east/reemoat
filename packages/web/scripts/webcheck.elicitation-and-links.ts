@@ -549,6 +549,42 @@ process.stdout.write("\nthe question an agent asked\n");
       (asked.rows[0] as any)?.asked?.map((one: any) => [one.question, one.value]),
       [["Which agent?", "All of them"]],
     );
+    // codex's, as codex-acp 1.8.0 announces an MCP call and asks for it in Ask for approval: the call alone is named on the request.
+    const codexInput = { server: "reemoat", tool: "ask_question", arguments: { title: "Agents", questions: [{ id: "q", prompt: "Which agent?", options }] } };
+    const codexAsked = buildTail(
+      [
+        ev(1, { type: "tool_call", toolCallId: "exec-1", title: "mcp.reemoat.ask_question", kind: "execute", status: "in_progress", locations: [], rawInput: codexInput }),
+        ev(2, { type: "permission_request", permissionId: null, toolCallId: "exec-1", title: "exec-1", options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }], decision: "allow_once" }),
+        ev(3, { type: "elicitation_request", elicitationId: "e2", toolCallId: "exec-1", message: "Agents" }),
+        ev(4, { type: "elicitation_resolved", elicitationId: "e2", toolCallId: "exec-1", message: "Agents", action: "accept", answers: [{ key: "question_0", label: "Which agent?", value: "All of them" }], by: "client" }),
+        ev(5, { type: "tool_call_update", toolCallId: "exec-1", title: null, status: "completed", locations: [], rawInput: codexInput }),
+        ev(6, { type: "text", role: "agent", thought: false, text: "You picked all of them.", messageId: null }),
+      ],
+      [],
+      0,
+    );
+    check(
+      "codex's draws the same, reading the question off codex's own wrapper",
+      [codexAsked.rows.map((row: any) => (row.kind === "event" ? row.stored.event.type : row.kind)), (codexAsked.rows[0] as any)?.asked?.map((one: any) => [one.question, one.value])],
+      [["elicitation_resolved", "text"], [["Which agent?", "All of them"]]],
+    );
+    // In Full access nothing stands between codex's call and the server, and codex announced it after the card, once 44 s after.
+    const announcedLate = [
+      ev(1, { type: "elicitation_request", elicitationId: "e3", toolCallId: "exec-2", message: "Agents" }),
+      ev(2, { type: "tool_call", toolCallId: "exec-2", title: "mcp.reemoat.ask_question", kind: "execute", status: "in_progress", locations: [], rawInput: codexInput }),
+    ];
+    const answeredFirst = [
+      ev(1, { type: "elicitation_request", elicitationId: "e3", toolCallId: "exec-2", message: "Agents" }),
+      ev(2, { type: "elicitation_resolved", elicitationId: "e3", toolCallId: "exec-2", message: "Agents", action: "accept", answers: [{ key: "question_0", label: "Which agent?", value: "All of them" }], by: "client" }),
+      ev(3, { type: "tool_call", toolCallId: "exec-2", title: "mcp.reemoat.ask_question", kind: "execute", status: "in_progress", locations: [], rawInput: codexInput }),
+      ev(4, { type: "tool_call_update", toolCallId: "exec-2", title: null, status: "completed", locations: [], rawInput: codexInput }),
+    ];
+    const lateDrawn = (events: any[]) => buildTail(events, [], 0).rows.map((row: any) => (row.kind === "event" ? row.stored.event.type : row.kind));
+    check(
+      "a call announced after its card folds into it, while the card is open and after it was answered",
+      [lateDrawn(announcedLate), lateDrawn(answeredFirst), (buildTail(answeredFirst, [], 0).rows[0] as any)?.asked?.map((one: any) => [one.question, one.value])],
+      [["elicitation_request"], ["elicitation_resolved"], [["Which agent?", "All of them"]]],
+    );
     const late = buildTail(
       [
         ...cursorAsk.slice(0, 6),

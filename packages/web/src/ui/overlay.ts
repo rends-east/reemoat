@@ -36,6 +36,7 @@ export function isOverlayPath(pathname: string): boolean {
   return (
     first === "settings" ||
     first === "new" ||
+    first === "task" ||
     first === "agent" ||
     first === "p" ||
     first === "plugins"

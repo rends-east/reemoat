@@ -51,6 +51,22 @@ listener on an OS-picked port whatever `REEMOAT_HOST`/`REEMOAT_PORT` say
   always listens, the server is injected with those alone when messaging is off, and
   `callTool` answers both before `callRefusal`. `tools/list` and the instructions are per
   caller.
+- **codex asks per mode** (codex-acp 1.8.0, codex 0.162.1). Ask for approval: after the
+  `tool_call` (`{server, tool, arguments}`) a `session/request_permission` naming only the
+  call (`_meta.is_mcp_tool_approval`), answered `allow_once` off `posedCalls`. Approve for
+  me: nothing reaches us; a `Guardian Review` row (about 3 s) decides and is drawn. Full
+  access: nothing asked, and the call may be announced after `tools/call` arrives (once
+  44 s), so the card takes the `_meta.callId` the request names (`claimPosedCall`, codex
+  only) and `tail.ts` folds a call newer than its card. codex cuts an MCP call at 300 s.
+- **A person's message to codex says to use it** (`ASK_NOTE`, `<question-tool>`): codex's
+  model is shown its own `request_user_input_async`, whose question never leaves
+  codex-acp, and finds MCP tools only by search, so unprompted it took its own 4 times in
+  4. `noteFor` adds the note after the words, mention note first, on both doors, for
+  `ASK_NOTE_HARNESSES` where `takesPosedQuestions` and the launch holds this server
+  (`holdsPeerServer`); never on a peer's or a plugin's message, never in the log.
+- **Four more are the task board's** (`task-board.md`, Q2.259), served the same way
+  whatever messaging says (`serveTasks`); only what they read of *another* machine
+  answers to a switch, through `linksFor`.
 
 ## A file sent on purpose (Q2.252)
 
@@ -119,7 +135,7 @@ does not stop at `_`) and every `Human:`/`Assistant:` line. Attributes are escap
 is a sender's name or address wherever this daemon's words carry it. A remote session
 name is taken only if `isPeerName` passes. The prompt starts with `<`, so no adapter reads
 a slash command. `IMITATED_TAG` also holds the `@name` note's tag
-(`session-nicknames.md`).
+(`session-nicknames.md`) and `question-tool`.
 
 ## What stops a loop (Q2.238)
 

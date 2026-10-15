@@ -45,11 +45,13 @@ import { useFollow } from "./follow";
 import { usePast } from "./past";
 import { FileAccessContext, type FileAccess } from "./files";
 import { saveBlob } from "./download";
+import { boardSelected, groupsVersion, subscribeGroups } from "./groups";
 import { Header } from "./Header";
 import { MentionScope } from "./MentionLink";
 import { ElicitationCard } from "./ElicitationCard";
 import { PermissionCard } from "./PermissionCard";
 import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
+import { TaskBand } from "./board/TaskBand";
 import { toast } from "./Toast";
 import { TASK_PANEL_GUTTER } from "./TaskPanel";
 import { Unreachable, unreadCause } from "./Unreachable";
@@ -77,6 +79,9 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   const transcript = state.transcripts.get(key);
   const machine = state.machines.find((candidate) => candidate.id === sessionRef.machineId);
   const [renaming, setRenaming] = useState(false);
+  // Opened from the board's page, it goes back to the board (Q3.734).
+  useSyncExternalStore(subscribeGroups, groupsVersion);
+  const board = boardSelected();
 
   // Bumped by the composer on every send so the transcript returns to its foot; a counter, since two sends are two requests.
   const [tailRequest, setTailRequest] = useState(0);
@@ -119,7 +124,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
     const cause = unread ? unreadCause(state) : null;
     return (
       <div ref={back.ref} onPointerDownCapture={back.press} className="flex min-h-0 flex-1 flex-col bg-surface">
-        <Header title={<span className="text-base font-semibold">Session</span>} close backRef={back.gate} />
+        <Header title={<span className="text-base font-semibold">Session</span>} close board={board} backRef={back.gate} />
         {why === "loading" || (unread && cause === null) ? (
           <div className={`${COLUMN} px-4 py-2`}>
             <TranscriptSkeleton />
@@ -174,6 +179,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
           />
         }
         close
+        board={board}
         backRef={back.gate}
       >
         {/* At every width: Background tasks has no other door once nothing is outstanding. Q3.631. */}
@@ -187,6 +193,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
 
       {/* Above the conversation region, so the absolute ask card cannot paint over it. */}
       <ExitNotice row={row} machineName={row.machineName} />
+      <TaskBand state={state} sessionRef={sessionRef} />
 
       <div className="relative flex min-h-0 flex-1 flex-col">
         {/* Every `@name` drawn below resolves against this conversation's machine first (Q3.682). */}

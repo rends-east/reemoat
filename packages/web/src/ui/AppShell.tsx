@@ -29,6 +29,7 @@ export function AppShell({
   children: ReactNode;
 }): ReactNode {
   const activeKey = route.name === "session" ? keyOf(route.ref) : null;
+  const activeTask = route.name === "task" ? { machineId: route.machineId, taskId: route.taskId } : null;
   useKeyboard(state, route);
 
   // Only the committed width: a drag writes `--rail-w` directly through `PaneHandle`.
@@ -46,7 +47,7 @@ export function AppShell({
       {/* `overflow-hidden` so its two children scroll independently; `border-r` because `ink` on `surface` is only 1.06:1. */}
       <aside className="hidden shrink-0 overflow-hidden border-r border-edge bg-ink lg:flex lg:w-[var(--rail-w)]">
         <MachineColumn state={state} onMenu={onMenu} />
-        <SessionBrowser state={state} activeKey={activeKey} onMenu={onMenu} />
+        <SessionBrowser state={state} activeKey={activeKey} activeTask={activeTask} onMenu={onMenu} />
       </aside>
 
       {/* `min-w-0` stops long lines widening this pane; screens stretch inside it rather than using `h-full`. */}

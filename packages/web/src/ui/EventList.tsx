@@ -31,6 +31,7 @@ import { echoId, type PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { PeerMessageRow } from "./PeerMessage";
 import { SentFileRow } from "./SentFile";
+import { ProposalsCard } from "./board/Proposals";
 import { Markdown } from "./Markdown";
 import { COLUMN, Dot, Empty, Icon, Badge, shortDuration, TAP_GROW_Y, TranscriptSkeleton } from "./bits";
 import { WorkingMark } from "./Mark";
@@ -683,6 +684,9 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
 
     case "file_sent":
       return <SentFileRow file={event.file} files={files} />;
+
+    case "tasks_proposed":
+      return <ProposalsCard proposals={event.proposals} />;
 
     default:
       // An event type from a newer daemon: draw nothing rather than crash.

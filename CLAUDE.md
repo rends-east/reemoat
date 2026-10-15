@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1167 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1195 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -139,7 +139,12 @@ pnpm daemoncheck                     # the daemon's HTTP surface and durable sta
                                      #   devices a machine knows: the store against a real database, the
                                      #   gate's every refusal and bound, the real responder with the lock
                                      #   on — a signed capability for an unknown key refused, a removed
-                                     #   key's channel ended — and the four routes
+                                     #   key's channel ended — and the four routes. Plus tasks: the status
+                                     #   as a function of the sessions, swept; both stores through one
+                                     #   sequence; every malformed create with nothing created; a start
+                                     #   that is refused leaving no task; the brief in the log and the
+                                     #   note on the wire; the four tools, what each refuses, and that
+                                     #   none creates anything; another machine's board re-read row by row
 pnpm gatewaycheck                    # the model gateway: a real listener on loopback and a stand-in
                                      #   where the vendor would be. Who may ask (a page, a rebound name
                                      #   and a closed credential may not), what reaches the vendor — its
@@ -254,7 +259,13 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   And which key a machine is dialled with: every pair of the
                                      #   key held and the key the server names, a connection through
                                      #   a changed key and through a wait to be let in, and the
-                                     #   shipped channel against the real responder with its lock on
+                                     #   shipped channel against the real responder with its lock on.
+                                     #   And the task board: what is gathered, grouped, remembered and
+                                     #   skipped as pure functions, and a status settled by the task's
+                                     #   own sessions; that the board is the pager's first page, where
+                                     #   All stood, and that nothing mounts the parked dispatcher;
+                                     #   that the proposals card reaches the router only on a press;
+                                     #   which column takes a dragged card or line, and where its slot opens
 pnpm nativecheck                     # packages/native: the Boot payload's keys against NativeBoot's,
                                      #   which is the census a missing `serde(rename)` slips past in
                                      #   five checkers at once; that the frontend is a path inside the
@@ -547,6 +558,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `daemon-bounds.md` | the same globs | Every number the daemon holds and what moves each · what the log is bounded by and what it is not · what a ceiling releases rather than refuses · why this is a file of its own |
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
 | `agent-messaging.md` | `src/peers/`, `packages/web/src/peer.ts`, `ui/PeerMessage.tsx`, `ui/SentFile.tsx` | How one session's agent reaches another's · why every message is acted on, and what the idle notice stands in for · why delivery is the prompt route's and not a copy · what the envelope may carry · what stops a loop · which ended sessions another agent may wake · the two tools on that server that are not messaging, and what a sent file is |
+| `task-board.md` | `src/tasks/`, `src/peers/mcp.ts`, `packages/web/src/board.ts`, `boardStore.ts`, `dispatch.ts`, `ui/board/`, `ui/settings/DispatchSetting.tsx` | Where a task lives and who says its status · why `needs_you` is read and never written · what starting one shares with a session create · the four tools, and the one thing none of them does · what a linked machine may read of a board · how the list holds tasks without the pager learning of it · what the client gathers, remembers and skips in silence · who holds a task in the backlog · why the dispatcher is parked |
 | `session-nicknames.md` | `src/nickname.ts`, `src/registry.ts`, `src/peers/hub.ts`, `envelope.ts`, `packages/web/src/nickname.ts`, `mentions.ts`, `mentionLinks.ts`, `ui/MentionMenu.tsx`, `MentionLink.tsx`, `Composer.tsx`, `NewSession.tsx`, `SessionBrowser.tsx` | Why a session has a title and a nickname, and which one leads · what makes a nickname one session's, and why that is a reservation · what the agent gets for a person's `@name`, and why it never waits on a listing · where `@` opens and whose rows it shows · where a drawn `@name` leads, and why it is a button |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
 | `harness-tools.md` | `src/acp/agents.ts`, `scripts/daemoncheck.after-the-turn-and-config.ts` | Which of a harness's own tools this daemon withdraws, and by what it decides · the one door each harness has, and the three that have none · why a name is canonical or it withdraws the wrong tool · what is left alone on purpose · how the list is measured |

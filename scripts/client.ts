@@ -442,6 +442,8 @@ function describeEvent(event: SessionEvent): string {
       return "context cleared — the agent has forgotten everything above";
     case "file_sent":
       return `sent file  ${event.file.name}  ${event.file.bytes} bytes  ${event.file.uploadId}`;
+    case "tasks_proposed":
+      return `proposed  ${event.proposals.map((one) => clip(one.title, 60)).join(" | ")}`;
     case "other":
       return `other  ${event.sessionUpdate}`;
     case "error":

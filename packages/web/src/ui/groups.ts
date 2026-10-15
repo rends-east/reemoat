@@ -16,9 +16,8 @@ const MACHINE_KEY = "reemoat.machineTab";
 declare const folderIdBrand: unique symbol;
 export type FolderId = string & { readonly [folderIdBrand]: "FolderId" };
 
-// Both start with the separator byte and name no machine, so they never collide with a real folder id.
+// Starts with the separator byte and names no machine, so it never collides with a real folder id.
 export const PINNED_FOLDER = "\u0000pinned" as FolderId;
-export const ALL_FOLDER = "\u0000all" as FolderId;
 
 export function folderId(machine: MachineId, path: string): FolderId {
   return `${machine}\u0000${path}` as FolderId;
@@ -92,15 +91,41 @@ export function setFilter(next: Filter): void {
 }
 
 // Not null, which already means an empty fleet; never a valid MachineId.
-export const ALL_MACHINES = "all";
-export type MachineTabId = MachineId | typeof ALL_MACHINES;
+export const BOARD = "board";
+export type MachineTabId = MachineId | typeof BOARD;
 
-let selected: MachineTabId | null = (readStored<MachineTabId>(MACHINE_KEY)[0] ?? null) as MachineTabId | null;
+/** The tab that led the strip before the board took its place stored `all`, and a reader who chose it chose the first tab (Q3.724). */
+function storedTab(): MachineTabId | null {
+  const raw = readStored<string>(MACHINE_KEY)[0] ?? null;
+  return (raw === "all" ? BOARD : raw) as MachineTabId | null;
+}
+
+let selected: MachineTabId | null = storedTab();
+
+/** Whether the board's page is the list's: every screen opened from it leads back to it (Q3.734). */
+export function boardSelected(): boolean {
+  return selected === BOARD;
+}
 
 export function selectMachine(id: MachineTabId): void {
   if (selected === id) return;
   selected = id;
   write(MACHINE_KEY, [id]);
+  bump();
+}
+
+/** Tasks done more than a day ago are withheld until asked for; not persisted, as the session filter is not. */
+export type TaskFilter = "open" | "all";
+
+let taskFilter: TaskFilter = "open";
+
+export function currentTaskFilter(): TaskFilter {
+  return taskFilter;
+}
+
+export function setTaskFilter(next: TaskFilter): void {
+  if (taskFilter === next) return;
+  taskFilter = next;
   bump();
 }
 
@@ -189,13 +214,14 @@ export function takeRows<T>(list: readonly T[], left: { rows: number }, heading 
 export interface ListView {
   filter: Filter;
   machine: MachineId | null;
-  all: boolean;
+  /** The board's page: every machine's tasks and the dispatcher, and no conversation (Q3.724). */
+  board: boolean;
   query: string;
 }
 
 export function currentView(groups: SessionGroups): ListView {
-  const all = selected === ALL_MACHINES;
-  return { filter, machine: all ? null : selectedMachineIn(groups), all, query };
+  const board = selected === BOARD;
+  return { filter, machine: board ? null : selectedMachineIn(groups), board, query };
 }
 
 /** The remembered id is never overwritten by the fallback, which is the first tab in the reader's order. */
@@ -221,19 +247,13 @@ export function machineTabs(groups: SessionGroups, view: ListView): MachineTab[]
     reach: group.reach,
     blockedCount: group.blockedCount,
     liveCount: group.liveCount,
-    selected: !view.all && group.id === view.machine,
+    selected: !view.board && group.id === view.machine,
   }));
 }
 
-export function allTab(groups: SessionGroups, view: ListView): MachineTab {
-  return {
-    id: ALL_MACHINES,
-    name: "All",
-    reach: "online",
-    blockedCount: groups.groups.reduce((sum, group) => sum + group.blockedCount, 0),
-    liveCount: groups.groups.reduce((sum, group) => sum + group.liveCount, 0),
-    selected: view.all,
-  };
+/** Its count is what waits on its person there: a task, or the dispatcher's own request, never a conversation (Q3.724). */
+export function boardTab(view: ListView, waiting: number): MachineTab {
+  return { id: BOARD, name: "Board", reach: "online", blockedCount: waiting, liveCount: 0, selected: view.board };
 }
 
 export interface Folder {
@@ -250,7 +270,7 @@ export interface Folder {
 
 /** Ordered by name, never by activity; a folder whose rows all fail the needle disappears. */
 export function foldersOf(groups: SessionGroups, view: ListView): Folder[] {
-  if (view.all) return [];
+  if (view.board) return [];
   const group = groups.groups.find((candidate) => candidate.id === view.machine);
   if (group === undefined) return [];
 
@@ -288,32 +308,14 @@ export function foldersOf(groups: SessionGroups, view: ListView): Folder[] {
   });
 }
 
-/** Pinned rows are excluded: with no folders, their second copy would be a duplicate in one flat list. */
-export function allRows(groups: SessionGroups, view: ListView): SessionRow[] {
-  if (!view.all) return [];
-  const pinned = new Set(pinnedFor(groups, view).map((row) => row.key));
-  const rows: SessionRow[] = [];
-  const seen = new Set<string>();
-  for (const group of groups.groups) {
-    for (const row of matching(rowsOf(group, view.filter), view.query)) {
-      if (pinned.has(row.key) || seen.has(row.key)) continue;
-      seen.add(row.key);
-      rows.push(row);
-    }
-  }
-  return orderSessions(rows);
-}
-
-/** The single source of render order, shared with keyboard.ts; each session once even when pinned. */
+/** The single source of render order, shared with keyboard.ts; each session once even when pinned; none on the board's page. */
 export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[] {
+  if (view.board) return [];
   const searching = view.query.trim().length > 0;
   // Nothing is lifted out of its place for needing somebody: a waiting row stays where it is and says so on its dot (Q3.674).
   const out: SessionRow[] = [];
   if (searching || !isFolderCollapsed(PINNED_FOLDER)) {
     out.push(...matching(pinnedFor(groups, view), view.query));
-  }
-  if (searching || !isFolderCollapsed(ALL_FOLDER)) {
-    out.push(...allRows(groups, view));
   }
   for (const folder of foldersOf(groups, view)) {
     if (folder.collapsed) continue;
@@ -336,7 +338,8 @@ export function pinnedFor(groups: SessionGroups, view: ListView): SessionRow[] {
 }
 
 function pinnedHere(rows: readonly SessionRow[], groups: SessionGroups, view: ListView): SessionRow[] {
-  if (view.all || view.machine === null) return [...rows];
+  if (view.board) return [];
+  if (view.machine === null) return [...rows];
   const known = new Set(groups.groups.map((group) => group.id));
   return rows.filter((row) => row.ref.machineId === view.machine || !known.has(row.ref.machineId));
 }
@@ -410,9 +413,9 @@ export interface ListBodyInput {
   device: DeviceNetwork;
   server: ServerState;
   registry: Registry;
-  /** Every machine held; under All each of them is read. */
+  /** Every machine held; with none selected each of them is read. */
   fleet: readonly BodyMachine[];
-  /** The selected machine, or null under All. */
+  /** The selected machine, or null where none is: an empty fleet. */
   selected: BodyMachine | null;
   /** Rows this tab draws below Pinned, after the filter and the needle. */
   rows: number;

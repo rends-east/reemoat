@@ -4,6 +4,9 @@ import type { PeerHub, PeerListing, SendResult } from "./hub.js";
 import { ASK_INSTRUCTIONS, ASK_PENDING, ASK_TOOL, ASK_TOOL_NAME, type PoseResult } from "./ask.js";
 import { PEER_SERVER_NAME } from "./envelope.js";
 import { SEND_FILE_INSTRUCTIONS, SEND_FILE_TOOL, SEND_FILE_TOOL_NAME, sentFileText, type SendFileResult } from "./files.js";
+import type { TaskDesk } from "../tasks/desk.js";
+import { callTaskTool } from "../tasks/mcp.js";
+import { DISPATCH_INSTRUCTIONS, TASK_INSTRUCTIONS, TASK_TOOL_NAMES, TASK_TOOLS } from "../tasks/tools.js";
 
 export const PEER_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 256 * 1024;
@@ -74,9 +77,10 @@ export class PeerMcpEndpoint {
     readonly url: string,
   ) {}
 
-  static async listen(hub: PeerHub): Promise<PeerMcpEndpoint> {
+  /** Without `tasks` the four task tools are neither listed nor answered. */
+  static async listen(hub: PeerHub, tasks: TaskDesk | null = null): Promise<PeerMcpEndpoint> {
     const server = createServer((req, res) => {
-      void handle(hub, req, res).catch(() => {
+      void handle(hub, tasks, req, res).catch(() => {
         if (!res.headersSent) res.writeHead(500);
         res.end();
       });
@@ -100,7 +104,7 @@ export class PeerMcpEndpoint {
   }
 }
 
-async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handle(hub: PeerHub, tasks: TaskDesk | null, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if ((req.url ?? "").split("?")[0] !== PEER_MCP_PATH) {
     res.writeHead(404).end();
     return;
@@ -155,6 +159,8 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
             hub.listsMessaging(caller) ? INSTRUCTIONS : null,
             hub.listsQuestions(caller) ? ASK_INSTRUCTIONS : null,
             hub.listsFiles(caller) ? SEND_FILE_INSTRUCTIONS : null,
+            tasks !== null ? TASK_INSTRUCTIONS : null,
+            tasks?.isDispatch(caller) === true ? DISPATCH_INSTRUCTIONS : null,
           ]
             .filter((part): part is string => part !== null)
             .join(" "),
@@ -172,6 +178,7 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
             ...(hub.listsMessaging(caller) ? TOOLS : []),
             ...(hub.listsQuestions(caller) ? [ASK_TOOL] : []),
             ...(hub.listsFiles(caller) ? [{ ...SEND_FILE_TOOL, _meta: ALWAYS_LOAD }] : []),
+            ...(tasks !== null ? TASK_TOOLS : []),
           ],
         },
       });
@@ -180,7 +187,7 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
       // ask_question holds its POST open for the answer; a client that gives up on it leaves the card to a message, and stops a send_file copy.
       const gone = new AbortController();
       res.once("close", () => gone.abort());
-      reply(res, id, { result: await callTool(hub, caller, params, gone.signal) });
+      reply(res, id, { result: await callTool(hub, tasks, caller, params, gone.signal) });
       return;
     }
     // Includes 2026-07-28's server/discover, which claude and grok try first and fall back from on -32601 (measured).
@@ -191,15 +198,19 @@ async function handle(hub: PeerHub, req: IncomingMessage, res: ServerResponse): 
 
 async function callTool(
   hub: PeerHub,
+  tasks: TaskDesk | null,
   caller: string,
   params: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<unknown> {
   const args = isRecord(params["arguments"]) ? params["arguments"] : {};
   // Before the messaging refusal: a question is not a message, and no messaging switch withdraws it (Q2.250).
-  if (params["name"] === ASK_TOOL_NAME) return poseResult(await hub.pose(caller, args, signal));
+  if (params["name"] === ASK_TOOL_NAME) return poseResult(await hub.pose(caller, args, signal, namedCall(params)));
   // Likewise: a file goes to the caller's own person, never to another agent (Q2.252).
   if (params["name"] === SEND_FILE_TOOL_NAME) return fileResult(await hub.sendFile(caller, args, signal));
+  // And these: the board is the caller's own person's, and only what crosses to another machine answers to a switch (Q2.259).
+  const name = params["name"];
+  if (tasks !== null && typeof name === "string" && TASK_TOOL_NAMES.includes(name)) return await callTaskTool(tasks, caller, name, args);
   // An agent launched before a switch went off still holds the tools; every call is refused in words (Q2.244).
   const refusal = hub.callRefusal(caller);
   if (refusal !== null) return toolError(refusal, { code: "messaging_off" });
@@ -268,6 +279,13 @@ function sendResult(result: SendResult): unknown {
     content: [{ type: "text", text }],
     structuredContent: { id: result.id, status: result.delivery, position: result.position, to: result.to },
   };
+}
+
+/** The tool call a `tools/call` says it is: codex's MCP client puts the id its ACP announcement carries in `_meta.callId`. */
+function namedCall(params: Record<string, unknown>): string | null {
+  const meta = params["_meta"];
+  const id = isRecord(meta) ? meta["callId"] : undefined;
+  return typeof id === "string" && id.length > 0 ? id : null;
 }
 
 function poseResult(result: PoseResult): unknown {

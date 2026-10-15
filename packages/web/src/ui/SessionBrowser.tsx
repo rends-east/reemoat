@@ -2,7 +2,6 @@ import {
   Bell,
   ChevronRight,
   Folder as FolderIcon,
-  Layers,
   ListFilter,
   Menu as MenuIcon,
   Pin,
@@ -21,7 +20,7 @@ import { ConnectionPill } from "./ConnectionPill";
 import { useMachineDrag } from "./machineDrag";
 import { useMachineSwipe, type MachineSwipe } from "./machineSwipe";
 import { useTabPill, type TabPill } from "./tabPill";
-import { navigate, newPath, sessionPath } from "../router";
+import { navigate, newPath, newTaskPath, sessionPath } from "../router";
 import { machineListPath, settingsPath } from "../settings";
 import {
   elapsedSince,
@@ -51,13 +50,12 @@ import {
   shortDuration,
 } from "./bits";
 import {
-  ALL_FOLDER,
-  ALL_MACHINES,
+  BOARD,
   PINNED_FOLDER,
-  allRows,
-  allTab,
+  boardTab,
   currentFilter,
   currentQuery,
+  currentTaskFilter,
   currentView,
   foldersOf,
   groupsVersion,
@@ -69,6 +67,7 @@ import {
   selectMachine,
   setFilter,
   setQuery,
+  setTaskFilter,
   settingUp,
   subscribeGroups,
   takeRows,
@@ -81,7 +80,9 @@ import {
   type ListBody as Body,
   type ListView,
   type MachineTab,
+  type TaskFilter,
 } from "./groups";
+import { TaskListBody, useBoardWaiting, type ActiveTask } from "./board/TaskList";
 import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
 import { RenameField, SessionMenu } from "./SessionMenu";
@@ -92,11 +93,14 @@ import { WorkingMark } from "./Mark";
 export function SessionBrowser({
   state,
   activeKey = null,
+  activeTask = null,
   onMenu,
   rows = null,
 }: {
   state: AppState;
   activeKey?: SessionKey | null;
+  /** The task whose own page is open, where one is. */
+  activeTask?: ActiveTask["task"];
   /** Opens the menu drawer. Drawn only below `lg`; see `SidebarHeader`. */
   onMenu: () => void;
   /** Cut to one screen while it is drawn under a conversation for a back swipe (Q3.663). */
@@ -109,10 +113,11 @@ export function SessionBrowser({
   const view = currentView(groups);
 
   const tabs = machineTabs(groups, view);
-  const all = allTab(groups, view);
+  // The board leads the strip where All stood: every machine's tasks and the dispatcher, one page of the same pager (Q3.724).
+  const board = boardTab(view, useBoardWaiting(state));
   const pill = useTabPill();
   const swipe = useMachineSwipe({
-    tabs: [all, ...tabs],
+    tabs: [board, ...tabs],
     armed: drag.armed,
     pill,
     openMenu: onMenu,
@@ -127,6 +132,7 @@ export function SessionBrowser({
     [drag.scrollerRef, swipe.scrollerRef],
   );
   const needle = currentQuery();
+  const active: ActiveTask = { session: activeKey, task: activeTask };
   // Reported by the list itself, which has already cut and counted its rows: where its body names what is unreachable the pill says nothing.
   const [speaks, setSpeaks] = useState(false);
   // A retry the reader pressed that worked is said once; its block has unmounted and cannot say it.
@@ -137,17 +143,21 @@ export function SessionBrowser({
     return () => window.clearTimeout(timer);
   }, [said]);
   const connected = useCallback(() => setSaid("Connected"), []);
+  // The board's page names nothing as unreachable and reports nothing, so what a machine's page last reported is taken back.
+  useEffect(() => {
+    if (view.board) setSpeaks(false);
+  }, [view.board]);
   // Nothing can be started on a machine nobody has heard of: a registry that was read and is empty opens the sheet that says so.
   const nowhere = state.machines.length === 0 && state.registry !== "known";
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} unchecked={nowhere} />
+      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} unchecked={nowhere} board={view.board} />
 
       {/* Below lg only; above it `MachineColumn` draws the machines as a column. */}
       {state.machines.length > 0 && (
         <div ref={swipe.stripRef} className="lg:hidden">
-          <MachineTabs tabs={tabs} all={all} canAdd={mayAddMachine(state.me)} pill={pill} />
+          <MachineTabs tabs={tabs} board={board} canAdd={mayAddMachine(state.me)} pill={pill} />
         </div>
       )}
 
@@ -182,23 +192,27 @@ export function SessionBrowser({
               </div>
             </div>
           )}
-          <ListBody
-            state={state}
-            groups={groups}
-            view={view}
-            activeKey={activeKey}
-            drag={drag}
-            rows={rows}
-            onSpeaks={setSpeaks}
-            onConnected={connected}
-          />
+          {view.board ? (
+            <TaskListBody state={state} view={view} active={active} rows={rows} />
+          ) : (
+            <ListBody
+              state={state}
+              groups={groups}
+              view={view}
+              activeKey={activeKey}
+              drag={drag}
+              rows={rows}
+              onSpeaks={setSpeaks}
+              onConnected={connected}
+            />
+          )}
         </div>
-        <BesidePanes swipe={swipe} state={state} groups={groups} view={view} activeKey={activeKey} drag={drag} />
+        <BesidePanes swipe={swipe} state={state} groups={groups} view={view} activeKey={activeKey} drag={drag} active={active} />
         {/* Over the list and above the foot's New session, like Telegram's; a row's own target runs its full width. */}
         <ConnectionPill
           state={state}
           openKey={activeKey}
-          machines={view.all ? "all" : view.machine === null ? [] : [view.machine]}
+          machines={view.board ? "all" : view.machine === null ? [] : [view.machine]}
           placement="bottom-3 left-3"
           silent={speaks}
         />
@@ -207,7 +221,7 @@ export function SessionBrowser({
         </p>
       </div>
 
-      <SidebarFoot machine={view.machine} disabled={nowhere} />
+      <SidebarFoot machine={view.machine} disabled={nowhere} board={view.board} />
     </div>
   );
 }
@@ -220,6 +234,7 @@ function BesidePanes({
   view,
   activeKey,
   drag,
+  active,
 }: {
   swipe: MachineSwipe;
   state: AppState;
@@ -227,8 +242,10 @@ function BesidePanes({
   view: ListView;
   activeKey: SessionKey | null;
   drag: RowDrag;
+  active: ActiveTask;
 }): ReactNode {
   const besides = useSyncExternalStore(swipe.subscribe, swipe.beside);
+  const pageView = (id: string): ListView => ({ ...view, board: id === BOARD, machine: id === BOARD ? null : (id as MachineId) });
   return besides.map((beside) => (
     <div
       key={beside.id}
@@ -238,14 +255,11 @@ function BesidePanes({
       inert
       className="pointer-events-none absolute inset-0 overflow-hidden"
     >
-      <ListBody
-        state={state}
-        groups={groups}
-        view={{ ...view, all: beside.id === ALL_MACHINES, machine: beside.id === ALL_MACHINES ? null : beside.id }}
-        activeKey={activeKey}
-        drag={drag}
-        rows={beside.rows}
-      />
+      {beside.id === BOARD ? (
+        <TaskListBody state={state} view={pageView(beside.id)} active={active} rows={beside.rows} />
+      ) : (
+        <ListBody state={state} groups={groups} view={pageView(beside.id)} activeKey={activeKey} drag={drag} rows={beside.rows} />
+      )}
     </div>
   ));
 }
@@ -276,7 +290,6 @@ function ListBody({
   const left = { rows: rows ?? Number.POSITIVE_INFINITY };
   // Through the helper and the needle, so the drawn rows are exactly the ones `keyboard.ts` steps through.
   const pinned = takeRows(matching(pinnedFor(groups, view), view.query), left);
-  const everything = takeRows(allRows(groups, view), left);
   const folders = foldersOf(groups, view).flatMap((folder) =>
     left.rows <= 0 ? [] : [{ ...folder, rows: takeRows(folder.rows, left, 1) }],
   );
@@ -284,20 +297,16 @@ function ListBody({
   const needle = currentQuery();
   // Rows the filter alone withholds, so the empty state can offer them.
   const hiddenHere =
-    folders.length > 0 || everything.length > 0
-      ? 0
-      : view.all
-        ? allRows(groups, { ...view, filter: "all" }).length
-        : foldersOf(groups, { ...view, filter: "all" }).reduce((sum, one) => sum + one.rows.length, 0);
+    folders.length > 0 ? 0 : foldersOf(groups, { ...view, filter: "all" }).reduce((sum, one) => sum + one.rows.length, 0);
   // A sentence names a machine by its own label, never by what this computer calls itself (Q7.139).
-  const selected = view.all ? undefined : state.machines.find((candidate) => candidate.id === view.machine);
+  const selected = state.machines.find((candidate) => candidate.id === view.machine);
   const body = listBody({
     device: state.device,
     server: state.server.state,
     registry: state.registry,
     fleet: state.machines.map((machine) => bodyMachine(state, machine)),
     selected: selected === undefined ? null : bodyMachine(state, selected),
-    rows: folders.length + everything.length,
+    rows: folders.length,
     needle: needle.trim().length > 0,
     hidden: hiddenHere,
     settingUp: settingUp(state.setup),
@@ -357,31 +366,6 @@ function ListBody({
             pressed={drag.pressing === row.key && drag.dragging !== row.key}
             sliding={drag.sliding}
             shift={drag.shiftFor(PINNED_FOLDER, index, row.key)}
-          />
-        ))}
-      </GroupSection>
-    )}
-
-    {everything.length > 0 && (
-      <GroupSection
-        icon={Layers}
-        name="All chats"
-        id={ALL_FOLDER}
-        space={drag.spaceFor(ALL_FOLDER)}
-        sliding={drag.sliding}
-      >
-        {everything.map((row, index) => (
-          <SessionLine
-            key={row.key}
-            row={row}
-            state={state}
-            selected={row.key === activeKey}
-            indented
-            drag={drag.bind(row, ALL_FOLDER)}
-            lifted={drag.dragging === row.key}
-            pressed={drag.pressing === row.key && drag.dragging !== row.key}
-            sliding={drag.sliding}
-            shift={drag.shiftFor(ALL_FOLDER, index, row.key)}
           />
         ))}
       </GroupSection>
@@ -507,6 +491,7 @@ function SidebarHeader({
   needle,
   onMenu,
   unchecked,
+  board,
 }: {
   state: AppState;
   machines: number;
@@ -514,6 +499,7 @@ function SidebarHeader({
   onMenu: () => void;
   /** Nothing has been read yet, so nothing can be said of what is waiting. */
   unchecked: boolean;
+  board: boolean;
 }): ReactNode {
   const waiting = sessionLists(state).blocked;
   // A device asking to be let in to a machine waits on the same person, and has no session row to say so on.
@@ -522,7 +508,7 @@ function SidebarHeader({
     <div className="pt-safe flex shrink-0 items-center gap-1.5 px-3 pb-2">
       <h1 className="sr-only">Reemoat</h1>
       <IconButton icon={MenuIcon} label="Menu" size="bar" onClick={onMenu} className="-ml-1.5 lg:hidden" />
-      {machines > 0 && <ChatSearch value={needle} />}
+      {machines > 0 && <ChatSearch value={needle} board={board} />}
       {/* To the longest-waiting session; the dot is a sibling because `IconButton` takes no children, hence `pointer-events-none`. */}
       <span className="relative ml-auto inline-flex shrink-0">
         <IconButton
@@ -569,12 +555,12 @@ function TabLabel({ tab }: { tab: MachineTab }): ReactNode {
 // Order is the store's, never activity or reachability, which flicker on the poll.
 function MachineTabs({
   tabs,
-  all,
+  board,
   canAdd,
   pill,
 }: {
   tabs: MachineTab[];
-  all: MachineTab;
+  board: MachineTab;
   canAdd: boolean;
   pill: TabPill;
 }): ReactNode {
@@ -600,7 +586,7 @@ function MachineTabs({
     [pill.stripRef],
   );
   // Before paint: the new tab's own pill is hidden until the traveller reaches it, so a tap never teleports it.
-  const current = all.selected ? all.id : selected;
+  const current = board.selected ? board.id : selected;
   const shown = useRef(current);
   useLayoutEffect(() => {
     const previous = shown.current;
@@ -651,16 +637,16 @@ function MachineTabs({
         <span className="absolute top-0 left-0 h-8 w-8 rounded-full bg-raised" />
       </span>
 
-      {/* `All` stays outside the scroller so it can never scroll away. */}
+      {/* The board stays outside the scroller so it can never scroll away. */}
       <button
         type="button"
-        onClick={() => selectMachine(all.id)}
-        aria-pressed={all.selected}
+        onClick={() => selectMachine(board.id)}
+        aria-pressed={board.selected}
         className={`tap relative flex min-h-11 shrink-0 items-center px-1 text-xs whitespace-nowrap ${
-          all.selected ? "text-fg" : "text-muted hover:text-fg"
+          board.selected ? "text-fg" : "text-muted hover:text-fg"
         }`}
       >
-        <TabLabel tab={all} />
+        <TabLabel tab={board} />
       </button>
 
       {/* Outside the scroller: an absolute child of an overflow box travels with its content. */}
@@ -730,8 +716,14 @@ const FILTERS: readonly { value: Filter; label: string }[] = [
   { value: "all", label: "All" },
 ];
 
-function ChatSearch({ value }: { value: string }): ReactNode {
+const TASK_FILTERS: readonly { value: TaskFilter; label: string }[] = [
+  { value: "open", label: "Open" },
+  { value: "all", label: "All" },
+];
+
+function ChatSearch({ value, board }: { value: string; board: boolean }): ReactNode {
   const filter = currentFilter();
+  const taskFilter = currentTaskFilter();
   return (
     <>
       <span className="relative min-w-0 flex-1">
@@ -749,23 +741,38 @@ function ChatSearch({ value }: { value: string }): ReactNode {
           data-lpignore="true"
           value={value}
           onChange={(event) => setQuery(event.target.value)}
-          aria-label="Search sessions"
-          placeholder="Search"
+          aria-label={board ? "Search tasks" : "Search sessions"}
+          placeholder={board ? "Search tasks" : "Search"}
           className="w-full rounded-md border border-edge-strong bg-ink py-2 pr-2.5 pl-8 text-sm outline-none"
         />
       </span>
       {/* Lit only when the filter is off its default, since the default already withholds ended rows. */}
-      <Dropdown
-        variant="icon"
-        icon={ListFilter}
-        label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
-        lit={filter !== "active"}
-        align="right"
-        className="shrink-0"
-        items={FILTERS}
-        value={filter}
-        onChange={setFilter}
-      />
+      {board ? (
+        // Tasks done more than a day ago are withheld by default, so the control that widens it sits where the session filter does.
+        <Dropdown
+          variant="icon"
+          icon={ListFilter}
+          label={`Showing ${TASK_FILTERS.find((item) => item.value === taskFilter)?.label ?? "All"}`}
+          lit={taskFilter !== "open"}
+          align="right"
+          className="shrink-0"
+          items={TASK_FILTERS}
+          value={taskFilter}
+          onChange={setTaskFilter}
+        />
+      ) : (
+        <Dropdown
+          variant="icon"
+          icon={ListFilter}
+          label={`Showing ${FILTERS.find((item) => item.value === filter)?.label ?? "All"}`}
+          lit={filter !== "active"}
+          align="right"
+          className="shrink-0"
+          items={FILTERS}
+          value={filter}
+          onChange={setFilter}
+        />
+      )}
     </>
   );
 }
@@ -1003,20 +1010,27 @@ function SessionLine({
   );
 }
 
-function SidebarFoot({ machine, disabled }: { machine: MachineId | null; disabled: boolean }): ReactNode {
+function SidebarFoot({ machine, disabled, board }: { machine: MachineId | null; disabled: boolean; board: boolean }): ReactNode {
   return (
     // `pb-2` inside, not beside `pb-safe`, which is unlayered and would win.
     <div className="pb-safe shrink-0 px-3 pt-3">
       <div className="pb-2">
-        <Button
-          size="sm"
-          className="w-full"
-          disabled={disabled}
-          onClick={() => navigate(machine === null ? newPath() : newPath(machine))}
-        >
-          <Icon as={Plus} size={16} />
-          New session
-        </Button>
+        {board ? (
+          <Button size="sm" className="w-full" disabled={disabled} onClick={() => navigate(newTaskPath())}>
+            <Icon as={Plus} size={16} />
+            New task
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            className="w-full"
+            disabled={disabled}
+            onClick={() => navigate(machine === null ? newPath() : newPath(machine))}
+          >
+            <Icon as={Plus} size={16} />
+            New session
+          </Button>
+        )}
       </div>
       {/* No plugin rows in the rail: where a row sits is its reader's, and nothing else may move one (Q3.674). */}
     </div>

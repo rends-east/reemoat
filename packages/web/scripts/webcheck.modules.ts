@@ -39,7 +39,6 @@ export const {
   groupsVersion,
   folderNames,
   folderPathOf,
-  allRows,
   foldersOf,
   machineSubline,
   machineTabs,

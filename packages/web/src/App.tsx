@@ -4,7 +4,7 @@ import { legalPublishable } from "./legal";
 import { inNativeShell } from "./native";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, usePathname, useRoute, useUnder, type Route } from "./router";
-import { sessionLists, store } from "./store";
+import { sessionGroups, sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
 import { backRows, subscribeBack } from "./ui/backSwipe";
 import { ChooseServer } from "./ui/ChooseServer";
@@ -17,10 +17,16 @@ import { SignIn } from "./ui/SignIn";
 import { ToastHost } from "./ui/Toast";
 import { registryUnread } from "./ui/Unreachable";
 import { Button, Empty, SHEET_SCROLL, Spinner } from "./ui/bits";
+import { currentView, groupsVersion, subscribeGroups } from "./ui/groups";
+// Not lazy: the board is the first page's home at lg, and a chunk fetched on the first switch kept the pane blank (Q3.729).
+import { Board } from "./ui/board/Board";
 
 // Lazy, to keep the markdown pipeline and Settings off the sign-in path.
 const SessionView = lazy(async () => ({ default: (await import("./ui/SessionView")).SessionView }));
 const Settings = lazy(async () => ({ default: (await import("./ui/settings/Settings")).Settings }));
+// A task's page and the form behind `+` are off the first paint, as every screen but the list and the board is.
+const TaskScreen = lazy(async () => ({ default: (await import("./ui/board/TaskScreen")).TaskScreen }));
+const NewTask = lazy(async () => ({ default: (await import("./ui/board/NewTask")).NewTask }));
 const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScreen")).PluginScreen }));
 const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
 const LegalScreen = lazy(async () => ({ default: (await import("./ui/legal/LegalScreen")).LegalScreen }));
@@ -151,6 +157,11 @@ function OverlaySheet({
       {(route.name === "new" || route.name === "agent") && (
         <StartSheet state={state} route={route} />
       )}
+      {route.name === "newTask" && (
+        <Suspense fallback={spinner}>
+          <NewTask state={state} machineId={route.machineId} column={route.column} />
+        </Suspense>
+      )}
       {route.name === "plugins" && (
         <Suspense fallback={spinner}>
           <PluginsSheet state={state} route={route} />
@@ -183,6 +194,10 @@ function screenOf(route: Route): string {
       }/${route.signin ?? ""}`;
     case "new":
       return "new";
+    case "newTask":
+      return "task/new";
+    case "task":
+      return `task/${route.machineId}/${route.taskId}`;
     case "agent":
       return `agent/${route.step ?? ""}/${route.preset ?? ""}/${route.harness ?? ""}`;
     case "plugins":
@@ -258,16 +273,39 @@ function content(
           <SessionView key="session" state={state} sessionRef={route.ref} />
         </>
       );
+    case "task":
+      return (
+        <>
+          <PhoneList key="list" state={state} onMenu={onMenu} beneath />
+          <TaskScreen key="task" state={state} machineId={route.machineId} taskId={route.taskId} />
+        </>
+      );
     default:
       return (
         <>
           <PhoneList key="list" state={state} onMenu={onMenu} beneath={false} />
-          <div key="nothing" className="hidden flex-1 lg:block">
-            <NothingSelected state={state} />
-          </div>
+          <HomePane key="nothing" state={state} />
         </>
       );
   }
+}
+
+/** The pane beside the list with nothing open in it: the board while the board is the list's page, else what it always said (Q3.721). */
+function HomePane({ state }: { state: ReturnType<typeof store.getSnapshot> }): ReactNode {
+  useSyncExternalStore(subscribeGroups, groupsVersion);
+  // A fleet with no machine has no board to draw, and the pane still owes what it says then.
+  if (currentView(sessionGroups(state)).board && state.machines.length > 0) {
+    return (
+      <div className="hidden min-h-0 flex-1 flex-col lg:flex">
+        <Board state={state} />
+      </div>
+    );
+  }
+  return (
+    <div className="hidden flex-1 lg:block">
+      <NothingSelected state={state} />
+    </div>
+  );
 }
 
 /**

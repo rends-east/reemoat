@@ -69,6 +69,20 @@ import { DAEMON_VERSION } from "./version.js";
 import type { PeerHub } from "./peers/hub.js";
 import { linksFromBody, policyFromBody } from "./peers/links.js";
 import type { SqlitePeerLinkStore } from "./store/sqlite.js";
+import type { TaskChange, TaskDesk } from "./tasks/desk.js";
+import {
+  CREATED_TASK_STATUSES,
+  isTaskAssignee,
+  MAX_TASKS,
+  MAX_TASK_BRIEF_CHARS,
+  MAX_TASK_KEY_CHARS,
+  MAX_TASK_SUMMARY_CHARS,
+  MAX_TASK_TITLE_CHARS,
+  STORED_TASK_STATUSES,
+  TASK_ASSIGNEES,
+  type StoredTaskStatus,
+} from "./tasks/store.js";
+import { cleanBrief, cleanSummary, cleanTitle } from "./tasks/tools.js";
 import {
   DEFAULT_MAX_CHANGED_FILES,
   DEFAULT_MAX_DIFF_BYTES,
@@ -101,6 +115,7 @@ import { containedInResolved } from "./paths.js";
 import { inspectWorkspace, listWorktrees, removeWorkspace, WorktreeError, type RemoveRefusal } from "./worktree.js";
 import {
   awaitingHuman,
+  deriveSessionTitle,
   describeResumeFailure,
   invalidNickname,
   MAX_TITLE_CHARS,
@@ -163,6 +178,7 @@ const MAX_STRIP_REF_CHARS = 96;
 const CAPABILITY_READ_BUDGET_MS = 60_000;
 const MAX_DIR_NAME_CHARS = 255;
 const MAX_PATH_CHARS = 4_096;
+const TASK_KEY = new RegExp(`^[A-Za-z0-9_-]{1,${MAX_TASK_KEY_CHARS}}$`);
 
 /** Exported for one assertion: a file send_file keeps must never be larger than this route will serve (Q2.252). */
 export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
@@ -200,6 +216,8 @@ export interface ServerOptions {
   plugins?: PluginHost | null;
   // Absent, every /peer and /peers route answers 503.
   peers?: { hub: PeerHub; links: SqlitePeerLinkStore } | null;
+  // Absent, every /tasks route answers 503.
+  tasks?: TaskDesk | null;
   // Absent, every /devices route answers 503 and no key is ever refused.
   devices?: DeviceGate;
   /** The public half this machine answers handshakes with; a thunk, since a refused dial can promote another. */
@@ -226,6 +244,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const roots = options.roots ?? [homedir()];
   const plugins = options.plugins ?? null;
   const peers = options.peers ?? null;
+  const tasks = options.tasks ?? null;
   const devices = options.devices ?? null;
   const machineKey = options.machineKey ?? ((): string | null => null);
   const maxChangedFiles = options.maxChangedFiles ?? DEFAULT_MAX_CHANGED_FILES;
@@ -1323,13 +1342,17 @@ export function createApp(options: ServerOptions): AppBundle {
     }
   });
 
-  app.post("/sessions", write, async (c) => {
-    if (registry.isShuttingDown) {
-      return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
-    }
-    const body = await requireJson(c);
-    if (body instanceof Response) return body;
+  /** What a launch is asked for, read off a body exactly as POST /sessions reads it; a task keeps the first three (Q2.258). */
+  interface LaunchSpec {
+    agent: AgentId;
+    customAgent: string | null;
+    cwd: string;
+    worktree: WorktreePolicy | undefined;
+    branch: string | null;
+    nickname: string | null;
+  }
 
+  const launchSpecOf = (c: Context<AppEnv>, body: Record<string, unknown>): LaunchSpec | Response => {
     let customAgent: string | null = null;
     let agent: string | undefined;
     const namedPreset = body["customAgent"];
@@ -1405,9 +1428,13 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const nickname = typeof nicknameRaw === "string" ? nicknameRaw : null;
 
+    return { agent, customAgent, cwd, worktree, branch, nickname };
+  };
+
+  /** One launch and every refusal it has, for the session route and the two task routes that start an agent. */
+  const launch = async (c: Context<AppEnv>, spec: LaunchSpec): Promise<ManagedSession | Response> => {
     try {
-      const managed = await registry.create({ agent, customAgent, cwd, worktree, branch, nickname });
-      return c.json({ session: managed.snapshot() }, 201);
+      return await registry.create(spec);
     } catch (error) {
       if (error instanceof NicknameError) return nicknameRefused(c, error);
       if (error instanceof PathError) {
@@ -1439,6 +1466,19 @@ export function createApp(options: ServerOptions): AppBundle {
       const code = isAuthRequiredMessage(message) ? "agent_auth_required" : "agent_launch_failed";
       return jsonError(c, 502, code, message);
     }
+  };
+
+  app.post("/sessions", write, async (c) => {
+    if (registry.isShuttingDown) {
+      return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+    }
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const spec = launchSpecOf(c, body);
+    if (spec instanceof Response) return spec;
+    const managed = await launch(c, spec);
+    if (managed instanceof Response) return managed;
+    return c.json({ session: managed.snapshot() }, 201);
   });
 
   // Another machine's daemon, holding a link capability: the only routes session:message reaches (Q7.150).
@@ -1473,6 +1513,19 @@ export function createApp(options: ServerOptions): AppBundle {
     return taken ? c.body(null, 202) : jsonError(c, 409, "unexpected_notice", "nothing here asked to be told that");
   });
 
+  // The same link and the same two switches as /peer/agents: a board is read wherever its sessions are listed (Q2.259).
+  const boardRefused = (c: Context<AppEnv>): Response | null => {
+    if (peers === null || tasks === null) return jsonError(c, 503, "tasks_unavailable", "this daemon keeps no tasks");
+    if (linkOf(c) === null) return jsonError(c, 403, "not_a_link", "only another machine's link may ask this");
+    if (!peers.hub.allowed) return jsonError(c, 403, "messaging_off", "messages between agents are switched off on this machine");
+    if (!peers.hub.reachesOthers) return jsonError(c, 403, "messaging_isolated", "this machine's sessions message only each other");
+    return null;
+  };
+
+  app.get("/peer/tasks", message, (c) => boardRefused(c) ?? c.json({ tasks: tasks!.localRows() }));
+
+  app.get("/peer/projects", message, async (c) => boardRefused(c) ?? c.json(await tasks!.localProjects()));
+
   app.put("/peers/links", admin, async (c) => {
     if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
     const body = await readJsonObject(c);
@@ -1487,6 +1540,198 @@ export function createApp(options: ServerOptions): AppBundle {
       links: links.map((link) => ({ id: link.id, target: { id: link.targetMachineId, name: link.targetName }, expiresAt: link.expiresAt })),
       messaging: peers.hub.messagingState(),
     });
+  });
+
+  // Tasks: what somebody wants done on this machine, and the sessions doing it (Q2.258).
+  const tasksOff = (c: Context<AppEnv>): Response => jsonError(c, 503, "tasks_unavailable", "this daemon keeps no tasks");
+  const noTask = (c: Context<AppEnv>): Response => jsonError(c, 404, "task_not_found", "no such task");
+  const shuttingDown = (c: Context<AppEnv>): Response => jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+
+  app.get("/tasks", read, (c) => {
+    if (tasks === null) return tasksOff(c);
+    return c.json({ tasks: tasks.list(), now: Date.now(), instanceId });
+  });
+
+  app.post("/tasks", write, async (c) => {
+    if (tasks === null) return tasksOff(c);
+    if (registry.isShuttingDown) return shuttingDown(c);
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const spec = launchSpecOf(c, body);
+    if (spec instanceof Response) return spec;
+    if (spec.cwd.length > MAX_PATH_CHARS) return jsonError(c, 400, "bad_request", `cwd may be at most ${MAX_PATH_CHARS} characters`);
+    const brief = cleanBrief(body["brief"]);
+    if (brief === null) {
+      return jsonError(c, 400, "bad_request", `brief must be text of at most ${MAX_TASK_BRIEF_CHARS} characters`, { max: MAX_TASK_BRIEF_CHARS });
+    }
+    // A form that asks only for the text still gets a named task, by the rule that names a session.
+    const title = body["title"] === undefined || body["title"] === null ? deriveSessionTitle(brief) : cleanTitle(body["title"]);
+    if (title === null) {
+      return jsonError(c, 400, "bad_request", `title must be one line of at most ${MAX_TASK_TITLE_CHARS} characters`, { max: MAX_TASK_TITLE_CHARS });
+    }
+    const key = body["key"];
+    if (key !== undefined && key !== null && (typeof key !== "string" || !TASK_KEY.test(key))) {
+      return jsonError(c, 400, "bad_request", `key must be 1 to ${MAX_TASK_KEY_CHARS} letters, digits, hyphens or underscores`);
+    }
+    const start = body["start"];
+    if (start !== undefined && typeof start !== "boolean") return jsonError(c, 400, "bad_request", "start must be true or false");
+    const assignee = body["assignee"];
+    if (assignee !== undefined && !isTaskAssignee(assignee)) {
+      return jsonError(c, 400, "bad_request", `assignee must be one of ${TASK_ASSIGNEES.join(", ")}`, { assignees: TASK_ASSIGNEES });
+    }
+    const status = body["status"];
+    if (status !== undefined && !(CREATED_TASK_STATUSES as readonly unknown[]).includes(status)) {
+      return jsonError(c, 400, "bad_request", `status must be one of ${CREATED_TASK_STATUSES.join(", ")}`, { statuses: CREATED_TASK_STATUSES });
+    }
+    if (status !== undefined && start === true) return jsonError(c, 400, "bad_request", "a task that starts is running: name a status or a start, not both");
+
+    // Written before the launch, so a second copy of this request during a slow start finds the first by its key.
+    const made = tasks.create({
+      title,
+      brief,
+      agent: spec.agent,
+      customAgent: spec.customAgent,
+      // The agent named is the assignee unless the body names another; one that starts holds it (Q2.261, Q2.262).
+      assignee: start === true ? "agent" : (assignee ?? "agent"),
+      status: (status as StoredTaskStatus | undefined) ?? "ready",
+      cwd: spec.cwd,
+      key: key ?? null,
+    });
+    if (made === "full") {
+      return jsonError(c, 429, "too_many_tasks", `this machine holds ${MAX_TASKS} tasks and none of them is done`, { limit: MAX_TASKS });
+    }
+    if (made.existing) return c.json({ task: tasks.snapshot(made.task), existing: true });
+    if (start !== true) return c.json({ task: tasks.snapshot(made.task) }, 201);
+
+    const managed = await launch(c, spec);
+    if (managed instanceof Response) {
+      // A start that was refused leaves no task behind: sending the same request again is the retry.
+      tasks.remove(made.task.id);
+      return managed;
+    }
+    const sent = tasks.begin(made.task, managed);
+    const task = tasks.get(made.task.id) ?? made.task;
+    return c.json({ task: tasks.snapshot(task), session: managed.snapshot(), sent: sent.kind === "accepted" }, 201);
+  });
+
+  app.patch("/tasks/:id", write, async (c) => {
+    if (tasks === null) return tasksOff(c);
+    if (tasks.get(c.req.param("id")) === null) return noTask(c);
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const change: TaskChange = {};
+    if (body["title"] !== undefined) {
+      const title = cleanTitle(body["title"]);
+      if (title === null) {
+        return jsonError(c, 400, "bad_request", `title must be one line of at most ${MAX_TASK_TITLE_CHARS} characters`, { max: MAX_TASK_TITLE_CHARS });
+      }
+      change.title = title;
+    }
+    if (body["brief"] !== undefined) {
+      const brief = cleanBrief(body["brief"]);
+      if (brief === null) {
+        return jsonError(c, 400, "bad_request", `brief must be text of at most ${MAX_TASK_BRIEF_CHARS} characters`, { max: MAX_TASK_BRIEF_CHARS });
+      }
+      change.brief = brief;
+    }
+    if (body["summary"] !== undefined) {
+      const summary = cleanSummary(body["summary"] ?? "");
+      if (summary === null) {
+        return jsonError(c, 400, "bad_request", `summary must be text of at most ${MAX_TASK_SUMMARY_CHARS} characters`, { max: MAX_TASK_SUMMARY_CHARS });
+      }
+      change.summary = summary;
+    }
+    if (body["status"] !== undefined) {
+      const status = body["status"];
+      if (status === "needs_you") {
+        return jsonError(c, 400, "status_not_settable", "needs_you is what the daemon says while a request waits; it cannot be set");
+      }
+      if (!(STORED_TASK_STATUSES as readonly unknown[]).includes(status)) {
+        return jsonError(c, 400, "bad_request", `status must be one of ${STORED_TASK_STATUSES.join(", ")}`, { statuses: STORED_TASK_STATUSES });
+      }
+      change.status = status as StoredTaskStatus;
+    }
+    if (body["assignee"] !== undefined) {
+      if (!isTaskAssignee(body["assignee"])) {
+        return jsonError(c, 400, "bad_request", `assignee must be one of ${TASK_ASSIGNEES.join(", ")}`, { assignees: TASK_ASSIGNEES });
+      }
+      change.assignee = body["assignee"];
+    }
+    // Who takes the next start, weighed as a start weighs it; the sessions already on the task keep their own agent.
+    if (body["agent"] !== undefined || body["customAgent"] !== undefined || body["cwd"] !== undefined) {
+      const held = tasks.get(c.req.param("id"));
+      if (held === null) return noTask(c);
+      const names = body["agent"] !== undefined || body["customAgent"] !== undefined;
+      const spec = launchSpecOf(c, {
+        ...(names ? { agent: body["agent"], customAgent: body["customAgent"] } : { agent: held.agent, customAgent: held.customAgent }),
+        cwd: body["cwd"] ?? held.cwd,
+      });
+      if (spec instanceof Response) return spec;
+      if (spec.cwd.length > MAX_PATH_CHARS) return jsonError(c, 400, "bad_request", `cwd may be at most ${MAX_PATH_CHARS} characters`);
+      change.agent = spec.agent;
+      change.customAgent = spec.customAgent;
+      change.cwd = spec.cwd;
+      // Naming an agent assigns it, in the backlog too, where it moves nothing (Q2.261).
+      if (names) change.assignee ??= "agent";
+    }
+    if (Object.keys(change).length === 0) {
+      return jsonError(c, 400, "bad_request", "name a title, brief, summary, status, agent, assignee or cwd to change");
+    }
+    const changed = tasks.change(c.req.param("id"), change);
+    return changed === null ? noTask(c) : c.json({ task: tasks.snapshot(changed) });
+  });
+
+  // The task and its attachments; its sessions are conversations of their own and stay.
+  app.delete("/tasks/:id", write, (c) => {
+    if (tasks === null) return tasksOff(c);
+    return tasks.remove(c.req.param("id")) ? c.json({ deleted: true }) : noTask(c);
+  });
+
+  // Another attempt as much as a first one: the body may name a different agent or folder than the task holds.
+  app.post("/tasks/:id/start", write, async (c) => {
+    if (tasks === null) return tasksOff(c);
+    if (registry.isShuttingDown) return shuttingDown(c);
+    const held = tasks.get(c.req.param("id"));
+    if (held === null) return noTask(c);
+    const body = (await readJsonObject(c)) ?? {};
+    const names = body["agent"] !== undefined || body["customAgent"] !== undefined;
+    const spec = launchSpecOf(c, {
+      ...body,
+      ...(names ? {} : { agent: held.agent, customAgent: held.customAgent }),
+      cwd: body["cwd"] ?? held.cwd,
+    });
+    if (spec instanceof Response) return spec;
+    const managed = await launch(c, spec);
+    if (managed instanceof Response) return managed;
+    // Deleted while its agent started: the session is an ordinary one now, and the task is still gone.
+    const task = tasks.get(held.id);
+    if (task === null) return noTask(c);
+    if (task.status === "done") tasks.change(task.id, { status: "running" });
+    // A start is an assignment: the task holds who and where for the next one (Q2.260, Q2.261).
+    if (names || body["cwd"] !== undefined || task.assignee !== "agent") {
+      tasks.change(task.id, { agent: spec.agent, customAgent: spec.customAgent, cwd: spec.cwd, assignee: "agent" });
+    }
+    const sent = tasks.begin(tasks.get(task.id) ?? task, managed);
+    return c.json({ task: tasks.snapshot(tasks.get(task.id) ?? task), session: managed.snapshot(), sent: sent.kind === "accepted" }, 201);
+  });
+
+  app.put("/tasks/:id/sessions/:sessionId", write, (c) => {
+    if (tasks === null) return tasksOff(c);
+    const task = tasks.get(c.req.param("id"));
+    if (task === null) return noTask(c);
+    const managed = registry.get(c.req.param("sessionId"));
+    if (managed === undefined) return notFound(c);
+    return c.json({ task: tasks.snapshot(tasks.attach(task, managed)) });
+  });
+
+  app.delete("/tasks/:id/sessions/:sessionId", write, (c) => {
+    if (tasks === null) return tasksOff(c);
+    const task = tasks.get(c.req.param("id"));
+    if (task === null) return noTask(c);
+    if (!tasks.detach(task.id, c.req.param("sessionId"))) {
+      return jsonError(c, 404, "not_attached", "that session is not attached to this task");
+    }
+    return c.json({ task: tasks.snapshot(task) });
   });
 
   // With a limit, rows are ranked by listRank so a cut only drops what nobody waits on; total and truncated are always present.

@@ -62,6 +62,7 @@ import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
 import { PeerHub } from "../src/peers/hub.js";
 import { PeerMcpEndpoint } from "../src/peers/mcp.js";
+import { TaskDesk } from "../src/tasks/desk.js";
 import { createPeerNetwork } from "../src/peers/links.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
@@ -375,7 +376,10 @@ const peers = new PeerHub({
   onWarning: (detail: string) => console.error(`peers: ${detail}`),
 });
 // Always, whatever the env and the policy: a switch turned back on needs no restart, and ask_question needs neither (Q2.250).
-const peerEndpoint = await PeerMcpEndpoint.listen(peers);
+// The board is the session's own person's, so its tools are served whatever the messaging switches say (Q2.259).
+const tasks = new TaskDesk({ registry, store: stores.tasks, peers });
+peers.serveTasks();
+const peerEndpoint = await PeerMcpEndpoint.listen(peers, tasks);
 peers.setEndpoint(peerEndpoint.url);
 registry.setPeerMcpServers((sessionId, capabilities, launch) => peers.mcpServersFor(sessionId, capabilities, launch));
 registry.setPeerMessagesOff((sessionId) => peers.conversationSwitchedOff(sessionId));
@@ -388,6 +392,8 @@ registry.setCustomAgents((id) => {
 });
 // Only after openStores claimed the daemon lock: orphan reaping would otherwise SIGKILL a live daemon's agents.
 const restored = registry.restore({ reapOrphans: process.env["REEMOAT_REAP_ORPHANS"] !== "0" });
+// The startup prune removed sessions before any task was read: what was attached to them names nobody now.
+tasks.sweep();
 const autoResume = process.env["REEMOAT_AUTO_RESUME"] !== "0";
 registry.setAutoResume(autoResume);
 const elicitation = process.env["REEMOAT_ELICITATION"] !== "0";
@@ -532,6 +538,7 @@ const { app, injectWebSocket } = createApp({
   roots,
   plugins: pluginHost,
   peers: { hub: peers, links: stores.peerLinks },
+  tasks,
   devices: deviceGate,
   machineKey: liveMachineKey,
   listensOn,

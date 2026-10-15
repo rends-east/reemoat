@@ -54,7 +54,7 @@ both sides and is `undefined` at runtime. `webcheck` compares every interface in
 unlisted file hits the sweep's `continue` and is never compared, so a mirrored type from a new
 daemon file means adding that file to the source list. It asserts **`daemon ⊆ client`, never
 equality**: a field added after the first release is optional here, since an older daemon omits
-it. Currently 71 with a floor of 64 that moves with the corpus. The reader anchors names (`Me`
+it. Currently 76 with a floor of 64 that moves with the corpus. The reader anchors names (`Me`
 must not match `MemoryEventStore`), resolves `extends`, refuses an `extends` it cannot find, and
 keeps a negative control (a bare prefix such as `Session` matches nothing). Its depth counter
 (nested objects) and paren counter (parameter lists) are separate properties, each driven on a

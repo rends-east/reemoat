@@ -25,6 +25,7 @@ import {
 } from "../src/acp/agents.js";
 import { PEER_SERVER_NAME } from "../src/peers/envelope.js";
 import { SEND_FILE_TOOL_NAME } from "../src/peers/files.js";
+import { MAX_PROPOSAL_CHARS_PER_CALL, MAX_PROPOSALS_PER_CALL, TASK_TOOL_NAMES } from "../src/tasks/tools.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
@@ -742,8 +743,9 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   // Read off claude 2.1.288's own alias table, the three MCP-resource names included.
   const ALIASES = ["Task", "KillShell", "KillBash", "RunWorkflow", "ListPeers", "Brief", "ListMcpResources", "ReadMcpResource", "ReadMcpResourceDir"];
   check("and no alias is listed, since one of them names a tool that stays", ALIASES.filter((tool) => CLAUDE_WITHDRAWN_TOOLS.includes(tool)), []);
-  check("send_file is allowed under the name claude gives an MCP tool", [...CLAUDE_ALLOWED_TOOLS], [
+  check("send_file and the four task tools are allowed under the names claude gives an MCP tool", [...CLAUDE_ALLOWED_TOOLS], [
     `mcp__${PEER_SERVER_NAME}__${SEND_FILE_TOOL_NAME}`,
+    ...TASK_TOOL_NAMES.map((tool) => `mcp__${PEER_SERVER_NAME}__${tool}`),
   ]);
 
   // codex: one feature, measured 2026-10-02 on 0.160.0 to take request_plugin_install and nothing else off the list.
@@ -1752,6 +1754,19 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
     session_started: { type: "session_started", agent: "claude", sessionId: BIG, agentInfo: null, modes: null },
     // A ref is made by this daemon alone: 200 bytes of name, a 64-character id, a sniffed type.
     file_sent: { type: "file_sent", file: { uploadId: "f_0123456789abcdef", name: "n".repeat(200), mime: "image/png", bytes: 1 }, toolCallId: "t".repeat(256) },
+    // The most propose_tasks lets one call carry: its own bound is on the characters of a whole card.
+    tasks_proposed: {
+      type: "tasks_proposed",
+      proposals: Array.from({ length: MAX_PROPOSALS_PER_CALL }, (_, index) => ({
+        id: `tp_${index}`,
+        machineId: "m".repeat(64),
+        machine: "n".repeat(64),
+        project: "/".repeat(256),
+        agent: "claude",
+        title: "t".repeat(120),
+        brief: "b".repeat(Math.floor(MAX_PROPOSAL_CHARS_PER_CALL / MAX_PROPOSALS_PER_CALL) - 400),
+      })),
+    },
     // The per-item budget floors at 64 bytes, so the arm bounds an entry and never the count.
     plan: {
       type: "plan",

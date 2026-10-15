@@ -86,9 +86,10 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
       "plan",
       "context_cleared",
       "file_sent",
+      "tasks_proposed",
       "error",
     ].map((type) => drawn({ type })),
-    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true, true],
   );
   check("an ordinary turn ending is not news", drawn({ type: "turn_end", stopReason: "end_turn" }), false);
   check(

@@ -35,7 +35,7 @@ export function useKeyboard(state: AppState, route: Route): void {
       const key = event.key.toLowerCase();
       if (key !== "j" && key !== "k") return;
 
-      // The rail's own order, filter, tab and search included, from the same function.
+      // The rail's own order, filter, tab and search included, from the same function; the board's page holds no conversation.
       const groups = sessionGroups(state);
       const rows = visibleRows(groups, currentView(groups));
       if (rows.length === 0) return;

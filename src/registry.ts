@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
-import { AgentUnavailableError, QUESTION_TOOL_HARNESSES, type AgentId } from "./acp/agents.js";
+import { AgentUnavailableError, ASK_NOTE_HARNESSES, QUESTION_TOOL_HARNESSES, type AgentId } from "./acp/agents.js";
 import {
   isTerminalAsyncTaskState,
   keptOnDisk,
@@ -48,12 +48,21 @@ import {
   type SessionWorkspace,
   type StoredEvent,
   type StoredFileRef,
+  type TaskProposal,
 } from "./events.js";
 import { isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, normalizeNickname, pickNickname } from "./nickname.js";
 import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
 import type { SessionRuntime } from "./runtime/types.js";
-import { answerResult, answerText, ASK_TOOL_NAME, parseAskArguments, type PosedQuestion, type PoseResult } from "./peers/ask.js";
+import {
+  answerResult,
+  answerText,
+  ASK_NOTE,
+  ASK_TOOL_NAME,
+  parseAskArguments,
+  type PosedQuestion,
+  type PoseResult,
+} from "./peers/ask.js";
 import {
   clipElicitationMessage,
   ElicitationRefusedError,
@@ -710,7 +719,7 @@ export interface MentionNote {
 interface QueuedEntry extends QueuedPrompt {
   text: string;
   attachments: readonly UploadRow[];
-  /** The mention note's text, sent as its own block when this entry is delivered. */
+  /** The block after its words (`noteFor`), sent when this entry is delivered. */
   note: string | null;
   peer: boolean;
   /** Acceptance order, taken before the first await of sendMidTurn; never the log seq, which is 0 for a refused append and would sort first. */
@@ -2193,8 +2202,15 @@ export class ManagedSession {
 
     const turn = this.armTurn();
     const seq = this.recordPrompt(session, text, attachments, from, note, answers);
-    this.runTurn(session, text, attachments, turn, note?.text ?? null);
+    this.runTurn(session, text, attachments, turn, this.noteFor(session, from, note));
     return { kind: "accepted", turn, seq };
+  }
+
+  /** The block after a message's words: its mention note, and after a person's on ASK_NOTE_HARNESSES the note naming ask_question. */
+  private noteFor(session: Session, from: PeerOrigin | "plugin" | null, note: MentionNote | null): string | null {
+    const asks = from === null && ASK_NOTE_HARNESSES.includes(this.agent) && this.takesPosedQuestions && session.holdsPeerServer;
+    if (!asks) return note?.text ?? null;
+    return note === null ? ASK_NOTE : `${note.text}\n${ASK_NOTE}`;
   }
 
   /** The prompt route's two steps as one, for a caller with no HTTP answers to keep apart. */
@@ -2290,7 +2306,7 @@ export class ManagedSession {
     // Taken before the first await: the queue is ordered by acceptance. See QueuedEntry.order.
     const order = ++this.acceptOrder;
     const dropGeneration = this.peerDrop.generation;
-    const noteText = note?.text ?? null;
+    const noteText = this.noteFor(session, from, note);
     try {
       const seq = this.recordPrompt(session, text, attachments, from, note, answers);
 
@@ -2966,11 +2982,24 @@ export class ManagedSession {
     return { ok: true, file: sentRef(kept.row), path: source.path };
   }
 
+  /** propose_tasks: one event puts the proposals in the transcript as a card; nothing is created until its person presses (Q2.259). */
+  proposeTasks(proposals: readonly TaskProposal[]): boolean {
+    if (this.terminal || this.stopRequested) return false;
+    const appended = this.safeAppend({ type: "tasks_proposed", proposals: [...proposals] });
+    this.touchSafe();
+    return appended !== null;
+  }
+
   /**
    * ask_question's card. Answered within `waitMs` it is the call's own result, as every other harness's question is; past that
-   * the call returns and the card stays, to be answered by a message (Q2.250, Q2.251).
+   * the call returns and the card stays, to be answered by a message (Q2.250, Q2.251). `named` is the call the MCP request says it is.
    */
-  poseQuestion(posed: PosedQuestion, waitMs: number, signal: AbortSignal | null = null): Promise<PoseResult> {
+  poseQuestion(
+    posed: PosedQuestion,
+    waitMs: number,
+    signal: AbortSignal | null = null,
+    named: string | null = null,
+  ): Promise<PoseResult> {
     if (!this.takesPosedQuestions) return refusedPose("questions to the user are switched off on this machine");
     if (this.terminal || this.stopRequested) return refusedPose("this session is not running");
     // One at a time: a second card would stack answers the agent cannot tell apart.
@@ -2978,7 +3007,7 @@ export class ManagedSession {
     const built = posedForm(posed);
     if (typeof built === "string") return refusedPose(built);
     const elicitationId = this.mintElicitationId();
-    const toolCallId = this.session?.claimPosedCall() ?? null;
+    const toolCallId = this.session?.claimPosedCall(named) ?? null;
     this.openPosed(elicitationId, toolCallId, posed, built, Date.now());
     this.safeAppend({ type: "elicitation_request", elicitationId, toolCallId, message: built.message });
     this.touchSafe();

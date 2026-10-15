@@ -145,8 +145,18 @@ export const CLAUDE_WITHDRAWN_TOOLS: readonly string[] = [
   "Projects",
 ];
 
-/** claude's name for this daemon's send_file, run without a permission request: the card in the chat is the whole effect (Q2.252). */
-export const CLAUDE_ALLOWED_TOOLS: readonly string[] = ["mcp__reemoat__send_file"];
+/**
+ * claude's names for the tools of this daemon it runs without a permission request: send_file, whose card in the chat is the whole
+ * effect (Q2.252), and the four task tools, which read the person's own board, propose what only a press creates, or write the
+ * caller's own task (Q2.259).
+ */
+export const CLAUDE_ALLOWED_TOOLS: readonly string[] = [
+  "mcp__reemoat__send_file",
+  "mcp__reemoat__list_projects",
+  "mcp__reemoat__list_tasks",
+  "mcp__reemoat__propose_tasks",
+  "mcp__reemoat__task_update",
+];
 
 /** codex features switched off in every session: what they add is drawn only by codex's own terminal (Q6.118). */
 export const CODEX_WITHDRAWN_FEATURES: readonly string[] = ["tool_suggest"];
@@ -310,8 +320,11 @@ export const AGENT_LOGIN: Record<
   },
 };
 
-/** Harnesses whose model is given no question tool over ACP, so the reemoat MCP server offers ask_question (Q2.250). */
-export const QUESTION_TOOL_HARNESSES: readonly string[] = ["cursor"];
+/** Harnesses whose own question never reaches the client over ACP, so the reemoat MCP server offers ask_question (Q2.250, Q6.54). */
+export const QUESTION_TOOL_HARNESSES: readonly string[] = ["cursor", "codex"];
+
+/** Of those, the harnesses whose model reaches for its own question tool first, so a person's message carries ASK_NOTE. */
+export const ASK_NOTE_HARNESSES: readonly string[] = ["codex"];
 
 /** Environment for the sign-in wizard alone: cursor's login opens a browser on this host unless told to print the URL. */
 export const LOGIN_SPAWN_ENV: Partial<Record<BuiltinAgentId, Readonly<Record<string, string>>>> = {

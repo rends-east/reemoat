@@ -82,7 +82,7 @@ asserts the old banner and `reconnecting` line absent.
 - Only `no_route` or no reason names a machine; `over_limit`, `owner_disabled`,
   `not_enrolled`, `no_token`, the key refusals and session notices stay where drawn.
 - Reads this screen, not the fleet: the tab plus the open conversation's machine and
-  stream; under All a probe counts and an off machine does not.
+  stream; on the board a probe counts, an off machine does not.
 - **Silent where the body speaks** (`silent`, from the list's own `onSpeaks`): one place
   says it.
 - A daemon the host is starting is *Connecting…* (`localDaemonStarting`). Q3.692.

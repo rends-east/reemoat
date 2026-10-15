@@ -1014,6 +1014,8 @@ function sendWithProgress(
 // The daemon's worst case behind each slow route, first match wins; webcheck sums each chain from src/ and fails a number below it.
 function daemonChainMs(verb: string, path: string): number | null {
   if (verb === "POST" && path === "/sessions") return 185_000;
+  // A task that starts launches an agent on the session route's own chain, then prompts it.
+  if (verb === "POST" && (path === "/tasks" || /^\/tasks\/[^/]+\/start$/.test(path))) return 185_000;
   if (verb === "POST" && path === "/plugins/source") return 48_000;
   // A prompt may wait out a restart and resume an interrupted session first; unconditional so the transport needs no session state.
   if (verb === "POST" && /^\/sessions\/[^/]+\/prompt$/.test(path)) return 120_000;

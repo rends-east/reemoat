@@ -46,7 +46,7 @@ import { toast } from "./Toast";
 import { VERBATIM_FIELD } from "./composing";
 import type { MachineState } from "../machine";
 
-function canStartOn(machine: MachineState): boolean {
+export function canStartOn(machine: MachineState): boolean {
   return machine.reach === "online" && machine.scopes.includes("session:write");
 }
 
@@ -55,7 +55,7 @@ function unusableReason(machine: MachineState): string | null {
   return machine.reach === "online" ? "read-only" : reachText(machine.reach, machine.offlineReason);
 }
 
-function MachinePicker({
+export function MachinePicker({
   machines,
   value,
   onChange,

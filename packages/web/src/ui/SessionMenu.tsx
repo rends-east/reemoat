@@ -1,10 +1,13 @@
-import { Check, ListTodo, MessagesSquare, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
+import { Check, ClipboardList, ListTodo, MessagesSquare, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square, Unlink } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
 import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
-import { Icon, IconButton, MENU_PANEL, menuPlacement, menuRow, useListKeys } from "./bits";
+import { shownStatus, STATUS_LABEL, taskOfSession } from "../board";
+import { Icon, IconButton, MENU_HEADING, MENU_PANEL, menuPlacement, menuRow, useListKeys } from "./bits";
+import { attachSession, detachSession } from "./board/actions";
+import { useBoard } from "./board/useBoard";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
 import { pluginFailure, sessionActions } from "../plugins";
@@ -39,9 +42,18 @@ export function SessionMenu({
   size?: "sm" | "lg";
 }): ReactNode {
   const [open, setOpen] = useState(false);
+  // The same panel, its rows swapped for this machine's tasks: a second pop-up would be a second layer for Escape to choose between.
+  const [attaching, setAttaching] = useState(false);
   const [placement, setPlacement] = useState<"up" | "down">("down");
   const [busy, setBusy] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  const tasks = useBoard();
+  // A session is attached on its own machine only, and only where that daemon keeps tasks.
+  const attachable = tasks.supported.has(sessionRef.machineId);
+  const attachedTo = taskOfSession(tasks.tasks, sessionRef);
+  const openTasksHere = tasks.tasks.filter(
+    (entry) => entry.machineId === sessionRef.machineId && shownStatus(entry.task.status) !== "done" && entry !== attachedTo,
+  );
   const { panelRef, onKeyDown } = useListKeys(open, boxRef);
   const row = state.rowsByKey.get(keyOf(sessionRef));
   const session = row?.snapshot;
@@ -133,6 +145,7 @@ export function SessionMenu({
         // Measured at the tap so the panel never grows the rail's scroller; see menuPlacement.
         onClick={() => {
           if (!open) setPlacement(menuPlacement(boxRef.current));
+          setAttaching(false);
           setOpen(!open);
         }}
       />
@@ -146,8 +159,39 @@ export function SessionMenu({
             placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${MENU_PANEL}`}
         >
+          {attaching && (
+            <>
+              <div className={MENU_HEADING}>Attach to task</div>
+              {attachedTo !== null && (
+                <MenuItem
+                  icon={Unlink}
+                  label="Detach"
+                  note={attachedTo.task.title}
+                  onClick={() => {
+                    setOpen(false);
+                    void detachSession(attachedTo, sessionRef);
+                  }}
+                />
+              )}
+              {openTasksHere.map((entry) => (
+                <MenuItem
+                  key={entry.task.id}
+                  icon={ClipboardList}
+                  label={entry.task.title}
+                  note={STATUS_LABEL[shownStatus(entry.task.status)]}
+                  onClick={() => {
+                    setOpen(false);
+                    void attachSession(entry, sessionRef);
+                  }}
+                />
+              ))}
+              {openTasksHere.length === 0 && attachedTo === null && (
+                <p className="px-2.5 py-1.5 text-xs text-muted">No open task on this machine.</p>
+              )}
+            </>
+          )}
           {/* Close this menu first: both register on overlay.ts's LIFO stack, so Escape would close the wrong one. */}
-          {onOpenTasks !== undefined && (
+          {!attaching && onOpenTasks !== undefined && (
             <MenuItem
               icon={ListTodo}
               label="Background tasks"
@@ -158,6 +202,8 @@ export function SessionMenu({
               }}
             />
           )}
+          {!attaching && (
+            <>
           <MenuItem
             icon={Pencil}
             label="Rename"
@@ -174,6 +220,10 @@ export function SessionMenu({
               setMeta({ pinned: !pinned }, "so the pin was not changed.");
             }}
           />
+          {/* Stays open: the panel's rows become this machine's tasks. Absent on a daemon that keeps none. */}
+          {attachable && (
+            <MenuItem icon={ClipboardList} label="Attach to task" note={attachedTo?.task.title} onClick={() => setAttaching(true)} />
+          )}
           {/* The mark follows the daemon's snapshot, never the press: the store draws only a pin or a position early. */}
           {peerMessages !== undefined && (
             <MenuCheckItem
@@ -227,6 +277,8 @@ export function SessionMenu({
                 run("stop");
               }}
             />
+          )}
+            </>
           )}
         </div>
       )}

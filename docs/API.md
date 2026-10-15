@@ -74,7 +74,7 @@ auth gate.
 
 ---
 
-## The daemon — 75 routes
+## The daemon — 84 routes
 
 Runs on your machine, reachable through the relay's encrypted channel.
 
@@ -181,6 +181,21 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | `POST /sessions/:id/config` | The agent's own controls — mode, model, effort |
 | `POST /sessions/:id/meta` | Title, nickname, pin, where the row sits in the list, and `peerMessages` — whether other agents may list and message this conversation, and it them; `false` narrows the machine's switch and can never widen it, and it is on every snapshot of a daemon that has it (Q2.244). A nickname cannot be cleared: `null` is `400`, a taken one `409 nickname_taken`. `rank` is a position clock — a millisecond, `null` for "follows its age" — and it is **always** on the snapshot, so an absent field names a daemon that cannot store an order. A drop into the pinned group carries `pinned` and `rank` in one request, which is why this is not a route of its own |
 
+### Tasks
+
+What somebody wants done on this machine, and the sessions doing it (Q2.258). A daemon
+older than these answers the bare 404 every unknown route gets, which the app reads as
+"keeps no tasks". `.claude/rules/task-board.md`.
+
+| | |
+|---|---|
+| `GET /tasks` | Every task here, each with the sessions attached to it. `status` is settled on every read: `done` as written, else `needs_you` while a request waits in one of its sessions, `running` while one works, else `ready` as written (the backlog) and `review` for anything else. `assignee` is who holds it in the backlog: `agent` (the task's `agent`, named), `you` (its person) or `nobody`; an older daemon omits it |
+| `POST /tasks` | `{brief, agent \| customAgent, cwd, title?, key?, start?, assignee?, status?}`. Without `title` the task is named from the brief's first line. `assignee` is `agent` unless it says `nobody` or `you`, the agent then only what a start would launch; one that starts is its agent's whatever it says. `status` puts it in `ready` (the default), `review` or `done`, and is refused beside `start`. With `start: true` the daemon launches the agent exactly as `POST /sessions` would, attaches it and sends the brief as its first message, and answers `{task, session, sent}`; every refusal a session create has is this route's too, and a refused start leaves no task. A second create under a `key` a task already holds answers that task with `existing: true` and starts nothing. `429 too_many_tasks` only where the machine is full and no task is done |
+| `PATCH /tasks/:id` | `{title?, brief?, summary?, status?, agent?, customAgent?, assignee?, cwd?}`. `status` is `ready`, `running`, `review` or `done`; `400 status_not_settable` for `needs_you`, which only the daemon says. An agent's `task_update` says `running` or `review` only: `done` is its person's. An empty `summary` clears it. The agent and folder are who the next start launches, refused as a start refuses them (`400 invalid_agent`, `404 custom_agent_not_found`); either alone keeps the other. Naming an agent assigns it and moves nothing; `assignee` `nobody` or `you` hands the task to nobody or its person |
+| `DELETE /tasks/:id` | The task and its attachments. Its sessions stay |
+| `POST /tasks/:id/start` | A first start or another attempt: launches what the task holds, or the `agent`, `customAgent` or `cwd` the body names instead, which the task then holds, assigned, and answers as a starting create does |
+| `PUT /tasks/:id/sessions/:sessionId` · `DELETE /tasks/:id/sessions/:sessionId` | Attach a session of this machine, which moves it off any task that held it; detach it. `404 not_attached` for a session that is not on that task |
+
 ### Being asked something
 
 | | |
@@ -257,6 +272,7 @@ key, and delivered to that machine by its owner's app. `.claude/rules/agent-mess
 | | |
 |---|---|
 | `GET /peer/agents` | The sessions here another machine's agents may reach, as the rows `list_agents` shows: a folder's name, never its path. `403 not_a_link` for a capability that is not one, `403 messaging_off` while agent messaging is off here — `REEMOAT_PEER_MESSAGES=off` or the owner's switch — and `403 messaging_isolated` while this machine keeps its sessions to each other (Q2.244) |
+| `GET /peer/tasks` · `GET /peer/projects` | This machine's board as `list_tasks` prints it, and where work can run here as `list_projects` does: the agents a launch would find and the folders sessions and tasks have used, **as paths**, since a task proposed for this machine has to name one (Q2.259). Refused exactly as `GET /peer/agents` is |
 | `POST /peer/messages` | `{id, from: {ref, name, harness, hops}, to, message, notify}`. **A refusal rides a `200`** as `{ok: false, code, message}`, because the sending agent reads it: the codes are the ones `send_message` answers with. The sending machine is the one the capability names, never the body; the same `id` from one link is delivered once |
 | `POST /peer/notices` | That a session there went idle or ended without answering, for a message this machine sent with `notify`. `202`, or `409 unexpected_notice` for one nothing here asked for — a link cannot wake a session by claiming to answer it |
 | `PUT /peers/links` | `machine:admin`. The link capabilities this machine holds for reaching others, written whole by the owner's app exactly as the control plane minted them, with the control plane's `messaging`, `isolated` and `policyAt`: a `policyAt` older than the one held changes neither flag, only the links, and an absent flag leaves the held one alone. It answers `messaging: {policy, isolated, env, policyAt}`, and an answer without it is a daemon that cannot switch its own sessions off (Q1.654). Nothing reads the links back (Q3.676) |

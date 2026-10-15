@@ -1,12 +1,13 @@
 import { PassThrough } from "node:stream";
 import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
-import { QUESTION_TOOL_HARNESSES } from "../src/acp/agents.js";
+import { ASK_NOTE_HARNESSES, QUESTION_TOOL_HARNESSES } from "../src/acp/agents.js";
 import { readMcpToolCall } from "../src/acp/cursor.js";
 import { MemoryEventStore, type PersistedSession, type PromptEvent, type SessionStore } from "../src/events.js";
 import { SessionRegistry, type ManagedSession } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
-import { ASK_PENDING, ASK_TOOL_NAME, answerResult, answerText, parseAskArguments } from "../src/peers/ask.js";
+import { ASK_NOTE, ASK_PENDING, ASK_TOOL_NAME, answerResult, answerText, parseAskArguments } from "../src/peers/ask.js";
+import { defuse } from "../src/peers/envelope.js";
 import { PeerHub } from "../src/peers/hub.js";
 import { PeerMcpEndpoint } from "../src/peers/mcp.js";
 import { openStores } from "../src/store/sqlite.js";
@@ -15,7 +16,8 @@ import { tmp } from "./tmp.js";
 import { check } from "./daemoncheck.env.js";
 import { rowFor, stubAgentConfig } from "./daemoncheck.fixtures.js";
 
-// cursor's server withholds AskQuestion over ACP (Q7.154), so the reemoat MCP server offers ask_question to it alone (Q2.250).
+// cursor's server withholds AskQuestion over ACP (Q7.154), and codex's own question waits on a development flag (Q6.54) or is dropped
+// by codex-acp, so the reemoat MCP server offers ask_question to those two (Q2.250).
 process.stdout.write("\nask_question: a question an agent asks through this daemon's own tool\n");
 {
   const acp = await import("@agentclientprotocol/sdk");
@@ -71,7 +73,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     ],
     [{ server: "reemoat", tool: "ask_question" }, null, null],
   );
-  check("offered to cursor alone", [...QUESTION_TOOL_HARNESSES], ["cursor"]);
+  check("offered to cursor and codex, neither of whose own questions reaches this client", [...QUESTION_TOOL_HARNESSES], ["cursor", "codex"]);
 
   interface Agent {
     readonly prompts: string[];
@@ -80,6 +82,13 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     readonly permissionAnswers: Map<string, unknown>;
     /** What each MCP call returned, by tool name, once it did. */
     readonly toolResults: Map<string, string>;
+    /** A call's announcement held back until the driver sends it, for the request that beats it to the server. */
+    held?: () => void;
+    /** Each prompt's and each steer's text blocks, the person's words first. */
+    readonly blocks: string[][];
+    readonly steers: string[][];
+    /** Ends a turn codex was told to hold open. */
+    release?: () => void;
   }
   // Short, so the driver can outlast it; the daemon's own is ASK_WAIT_MS.
   const ASK_WAIT = 300;
@@ -87,7 +96,18 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   const agents = new Map<string, Agent>();
   let launched = 0;
 
-  const spawn = (): AgentProcess => {
+  const textBlocks = (params: any): string[] =>
+    (params?.["prompt"] ?? []).filter((block: any) => block?.type === "text").map((block: any) => block.text);
+
+  // codex-acp 1.8.0's four options on an MCP tool approval, as measured over codex 0.162.1.
+  const CODEX_MCP_OPTIONS = [
+    { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+    { optionId: "allow_session", name: "Allow for this session", kind: "allow_always" },
+    { optionId: "allow_always", name: "Always allow", kind: "allow_always" },
+    { optionId: "cancel", name: "Cancel", kind: "reject_once" },
+  ];
+
+  const spawn = (agent: AgentId): AgentProcess => {
     const toAgent = new PassThrough();
     const toClient = new PassThrough();
     const send = (m: unknown) => toClient.write(`${JSON.stringify(m)}\n`);
@@ -96,6 +116,102 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     let outbound = 1000;
     const awaiting = new Map<number, (result: unknown) => void>();
     let buffer = "";
+    const update = (payload: Record<string, unknown>) =>
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: payload } });
+    // Allowed, the harness calls the tool on the server it was handed, and the turn waits on the call.
+    const callServer = (caller: Agent | null, tool: string, meta: Record<string, unknown> | null): Promise<string> => {
+      const server = caller?.mcpServers[0];
+      if (server === undefined) return Promise.resolve("");
+      return fetch(server.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...Object.fromEntries(server.headers.map((h: any) => [h.name.toLowerCase(), h.value])),
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { ...(meta === null ? {} : { _meta: meta }), name: tool, arguments: one },
+        }),
+      })
+        .then((response) => response.json())
+        .then((reply: any) => {
+          const text = reply?.result?.content?.[0]?.text ?? "";
+          caller?.toolResults.set(tool, text);
+          return text;
+        });
+    };
+    // `APPROVE` is Ask for approval (a request naming the call and nothing else), `REVIEW` Approve for me (codex's own Guardian
+    // decides and nothing is asked), `RACE` Full access with the MCP request reaching the server before the call's announcement.
+    const codexTurn = (id: unknown, text: string): void => {
+      if (text === "HOLD") {
+        if (current !== null) current.release = () => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+        return;
+      }
+      const asks = /^(APPROVE|REVIEW|RACE) (?:(\S+)\/)?(\S+)$/.exec(text);
+      if (asks === null) {
+        send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+        return;
+      }
+      const how = asks[1]!;
+      const server = asks[2] ?? "reemoat";
+      const tool = asks[3]!;
+      const key = asks[2] === undefined ? tool : `${server}/${tool}`;
+      const callId = `exec-${how.toLowerCase()}-${server}-${tool}`;
+      const caller = current;
+      const rawInput = { server, tool, arguments: one };
+      const announce = () =>
+        update({
+          sessionUpdate: "tool_call",
+          toolCallId: callId,
+          kind: "execute",
+          title: `mcp.${server}.${tool}`,
+          status: "in_progress",
+          rawInput,
+          _meta: { is_mcp_tool_call: true },
+        });
+      const end = () => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+      const run = () => {
+        if (server !== "reemoat" || tool !== ASK_TOOL_NAME) {
+          end();
+          return;
+        }
+        void callServer(caller, tool, { callId }).then((output) => {
+          update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed", rawInput, rawOutput: { result: { content: [{ type: "text", text: output }] }, error: null } });
+          end();
+        });
+      };
+      if (how === "RACE") {
+        if (caller !== null) caller.held = announce;
+        run();
+        return;
+      }
+      announce();
+      if (how === "REVIEW") {
+        const review = "guardian_assessment:r1";
+        update({ sessionUpdate: "tool_call", toolCallId: review, kind: "think", title: "Guardian Review", status: "in_progress", rawInput: { targetItemId: callId, action: { type: "mcpToolCall", server, toolName: tool } } });
+        update({ sessionUpdate: "tool_call_update", toolCallId: review, status: "completed", content: [{ type: "content", content: { type: "text", text: "Status: Approved" } }] });
+        run();
+        return;
+      }
+      const ask = ++outbound;
+      awaiting.set(ask, (result) => {
+        caller?.permissionAnswers.set(key, result);
+        if ((result as any)?.outcome?.optionId !== "allow_once") {
+          end();
+          return;
+        }
+        update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "in_progress" });
+        run();
+      });
+      send({
+        jsonrpc: "2.0",
+        id: ask,
+        method: "session/request_permission",
+        params: { sessionId, toolCall: { toolCallId: callId, kind: "execute", status: "pending" }, _meta: { is_mcp_tool_approval: true }, options: CODEX_MCP_OPTIONS },
+      });
+    };
     toAgent.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
       for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
@@ -118,25 +234,42 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
                 protocolVersion: acp.PROTOCOL_VERSION,
                 agentCapabilities: { sessionCapabilities: { resume: {} }, mcpCapabilities: { http: true } },
                 authMethods: [],
+                // codex-acp 1.8.0 steers (mid-turn-messages.md), so a message sent into a codex turn takes that door.
+                ...(agent === "codex" ? { _meta: { steering: { supported: true } } } : {}),
               },
             });
             break;
           case acp.methods.agent.session.new:
           case acp.methods.agent.session.resume: {
             sessionId = message["params"]?.["sessionId"] ?? `c_ask_${++launched}`;
-            const state: Agent = agents.get(sessionId) ?? { prompts: [], mcpServers: [], permissionAnswers: new Map(), toolResults: new Map() };
+            const state: Agent = agents.get(sessionId) ?? {
+              prompts: [],
+              mcpServers: [],
+              permissionAnswers: new Map(),
+              toolResults: new Map(),
+              blocks: [],
+              steers: [],
+            };
             state.mcpServers = message["params"]?.["mcpServers"] ?? [];
             agents.set(sessionId, state);
             current = state;
             send({ jsonrpc: "2.0", id, result: { sessionId } });
             break;
           }
+          case "_session/steering":
+            current?.steers.push(textBlocks(message["params"]));
+            send({ jsonrpc: "2.0", id, result: { outcome: "injected" } });
+            break;
           case acp.methods.agent.session.prompt: {
-            const text = (message["params"]?.["prompt"] ?? [])
-              .filter((block: any) => block?.type === "text")
-              .map((block: any) => block.text)
-              .join("");
-            current?.prompts.push(text);
+            const blocks = textBlocks(message["params"]);
+            current?.prompts.push(blocks.join(""));
+            current?.blocks.push(blocks);
+            // The person's words are the first block; a note this daemon adds rides after them.
+            const text = blocks[0] ?? "";
+            if (agent === "codex") {
+              codexTurn(id, text);
+              break;
+            }
             // `CALL <tool>` is a tool on the reemoat server; `CALL <server>/<tool>` names another server; `ALWAYS` offers no allow-once.
             const always = text.startsWith("ALWAYS ");
             const asks = /^(?:CALL|ALWAYS) (?:(\S+)\/)?(\S+)$/.exec(text);
@@ -149,8 +282,6 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
             const tool = asks[2]!;
             const key = asks[1] === undefined ? tool : `${provider}/${tool}`;
             const callId = asks[1] === undefined ? `call-${tool}` : `call-${provider}-${tool}`;
-            const update = (payload: Record<string, unknown>) =>
-              send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: payload } });
             update({ sessionUpdate: "tool_call", toolCallId: callId, title: "MCP: tool", kind: "other", status: "pending", rawInput: {} });
             update({
               sessionUpdate: "tool_call_update",
@@ -166,23 +297,11 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
                 update({ sessionUpdate: "tool_call_update", toolCallId: callId, status: "completed" });
                 send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
               };
-              // Allowed, it then calls the tool on the server it was handed, as cursor does, and the turn waits on the call.
-              const server = caller?.mcpServers[0];
-              if (provider !== "reemoat" || tool !== ASK_TOOL_NAME || (result as any)?.outcome?.optionId !== "allow-once" || server === undefined) {
+              if (provider !== "reemoat" || tool !== ASK_TOOL_NAME || (result as any)?.outcome?.optionId !== "allow-once") {
                 finish();
                 return;
               }
-              void fetch(server.url, {
-                method: "POST",
-                headers: {
-                  "content-type": "application/json",
-                  ...Object.fromEntries(server.headers.map((h: any) => [h.name.toLowerCase(), h.value])),
-                },
-                body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: one } }),
-              })
-                .then((response) => response.json())
-                .then((reply: any) => caller?.toolResults.set(tool, reply?.result?.content?.[0]?.text ?? ""))
-                .finally(finish);
+              void callServer(caller, tool, null).finally(finish);
             });
             send({
               jsonrpc: "2.0",
@@ -226,7 +345,7 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
 
   class AskRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return (["cursor", "claude"] as const).map((id) => ({
+      return (["cursor", "codex", "claude"] as const).map((id) => ({
         id,
         displayName: id,
         available: true,
@@ -239,8 +358,8 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
     }
-    override async launch(): Promise<AgentProcess> {
-      return spawn();
+    override async launch(agent: AgentId): Promise<AgentProcess> {
+      return spawn(agent);
     }
   }
 
@@ -295,9 +414,11 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   const first = await open(true);
   const cur = await first.registry.create({ agent: "cursor", cwd: tmp("ask-cursor-"), nickname: "ask-cursor" });
   const cla = await first.registry.create({ agent: "claude", cwd: tmp("ask-claude-"), nickname: "ask-claude" });
+  const cod = await first.registry.create({ agent: "codex", cwd: tmp("ask-codex-"), nickname: "ask-codex" });
   const names = async (managed: ManagedSession) =>
     ((await first.rpc(managed, "tools/list")).result?.tools ?? []).map((tool: any) => tool.name);
   check("a cursor session is served the messaging tools and ask_question", await names(cur), ["list_agents", "send_message", ASK_TOOL_NAME]);
+  check("and so is a codex session", await names(cod), ["list_agents", "send_message", ASK_TOOL_NAME]);
   check("a claude session the messaging tools only: it has a question tool of its own", await names(cla), ["list_agents", "send_message"]);
   const instructions = (await first.rpc(cur, "initialize", { protocolVersion: "2025-06-18" })).result?.instructions ?? "";
   check("and cursor's instructions say what ask_question does", /ask_question/.test(instructions), true);
@@ -305,7 +426,13 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   const quiet = await open(false);
   const curQuiet = await quiet.registry.create({ agent: "cursor", cwd: tmp("ask-quiet-"), nickname: "ask-quiet" });
   const claQuiet = await quiet.registry.create({ agent: "claude", cwd: tmp("ask-quiet-claude-"), nickname: "ask-quiet-claude" });
+  const codQuiet = await quiet.registry.create({ agent: "codex", cwd: tmp("ask-quiet-codex-"), nickname: "ask-quiet-codex" });
   check("with messaging off a cursor session still gets the server", agentOf(curQuiet).mcpServers.map((server) => server.name), ["reemoat"]);
+  check(
+    "and so does a codex session, holding ask_question alone",
+    [agentOf(codQuiet).mcpServers.map((server) => server.name), ((await quiet.rpc(codQuiet, "tools/list")).result?.tools ?? []).map((tool: any) => tool.name)],
+    [["reemoat"], [ASK_TOOL_NAME]],
+  );
   check(
     "holding ask_question alone, with instructions that say nothing of messaging",
     [
@@ -459,6 +586,124 @@ process.stdout.write("\nask_question: a question an agent asks through this daem
   check("and on a harness that is not offered the tool, the same call asks too", claudeAsks.map((one) => one.toolCallId), ["call-ask_question"]);
   cla.answerPermission(claudeAsks[0]!.permissionId, { cancel: true });
   await settle();
+
+  process.stdout.write("  codex, in each of its three modes, as codex-acp 1.8.0 over codex 0.162.1 was measured\n");
+  const decided = (managed: ManagedSession, toolCallId: string) =>
+    eventsOf(managed, "permission_request").filter((event) => event.toolCallId === toolCallId).map((event) => event.decision);
+  const pick = async (managed: ManagedSession, option: string) => {
+    managed.answerElicitation(managed.snapshot().pendingElicitations[0]!.elicitationId, { content: { question_0: option } });
+    await settle();
+  };
+  await cod.prompt("APPROVE ask_question");
+  await settle();
+  check(
+    "Ask for approval: its request, naming the call and nothing else, is answered allow-once by the daemon and never drawn",
+    [agentOf(cod).permissionAnswers.get(ASK_TOOL_NAME), cod.snapshot().pendingPermissions.length, decided(cod, "exec-approve-reemoat-ask_question")],
+    [{ outcome: { outcome: "selected", optionId: "allow_once" } }, 0, ["allow_once"]],
+  );
+  check(
+    "the card names codex's call, and the turn waits on it",
+    [cod.snapshot().pendingElicitations.map((one) => one.toolCallId), cod.snapshot().turn !== null],
+    [["exec-approve-reemoat-ask_question"], true],
+  );
+  const codPrompts = agentOf(cod).prompts.length;
+  await pick(cod, "b");
+  check(
+    "answered, the answer is the call's own result and no message is sent",
+    [agentOf(cod).toolResults.get(ASK_TOOL_NAME), agentOf(cod).prompts.length, cod.snapshot().turn],
+    ["Your user answered:\nPick one — Beta", codPrompts, null],
+  );
+  await cod.prompt("REVIEW ask_question");
+  await settle();
+  check(
+    "Approve for me: nothing is asked, codex's own reviewer having decided, and the card still names the call",
+    [cod.snapshot().pendingPermissions.length, decided(cod, "exec-review-reemoat-ask_question"), cod.snapshot().pendingElicitations.map((one) => one.toolCallId)],
+    [0, [], ["exec-review-reemoat-ask_question"]],
+  );
+  await pick(cod, "a");
+  check("and its answer is the call's result", agentOf(cod).toolResults.get(ASK_TOOL_NAME), "Your user answered:\nPick one — Alpha");
+  await cod.prompt("RACE ask_question");
+  await settle();
+  check(
+    "Full access: the request reaches the server before the call is announced, and the card takes the call the request names",
+    [cod.snapshot().pendingElicitations.map((one) => one.toolCallId), rows.get(cod.id)?.openQuestion?.toolCallId],
+    [["exec-race-reemoat-ask_question"], "exec-race-reemoat-ask_question"],
+  );
+  agentOf(cod).held?.();
+  await settle();
+  check(
+    "the announcement landing after the card",
+    cod.log
+      .read(0, 10_000, 1 << 24)
+      .map((stored) => stored.event)
+      .filter((event) => (event.type === "tool_call" || event.type === "elicitation_request") && event.toolCallId === "exec-race-reemoat-ask_question")
+      .map((event) => event.type),
+    ["elicitation_request", "tool_call"],
+  );
+  await pick(cod, "b");
+  check("and its answer is the call's result", [agentOf(cod).toolResults.get(ASK_TOOL_NAME), cod.snapshot().turn], ["Your user answered:\nPick one — Beta", null]);
+  await cod.prompt("APPROVE send_message");
+  await settle();
+  check("any other tool on the server still asks codex's person", cod.snapshot().pendingPermissions.map((one) => one.toolCallId), ["exec-approve-reemoat-send_message"]);
+  cod.answerPermission(cod.snapshot().pendingPermissions[0]!.permissionId, { cancel: true });
+  await settle();
+  await cod.prompt("APPROVE elsewhere/ask_question");
+  await settle();
+  check(
+    "and so does a tool named ask_question on a server that is not this daemon's",
+    [cod.snapshot().pendingPermissions.map((one) => one.toolCallId), agentOf(cod).permissionAnswers.has("elsewhere/ask_question")],
+    [["exec-approve-elsewhere-ask_question"], false],
+  );
+  cod.answerPermission(cod.snapshot().pendingPermissions[0]!.permissionId, { cancel: true });
+  await settle();
+  const namedOnCursor = first.rpc(cur, "tools/call", { _meta: { callId: "call-named" }, name: ASK_TOOL_NAME, arguments: one });
+  await settle();
+  check("the call a request names is believed on codex alone", cur.snapshot().pendingElicitations.map((one) => one.toolCallId), [null]);
+  cur.answerElicitation(cur.snapshot().pendingElicitations[0]!.elicitationId, { cancel: true });
+  await namedOnCursor;
+
+  // codex's model is shown its own request_user_input_async, whose question codex-acp drops, and finds ask_question only by search.
+  process.stdout.write("  the note that points codex at ask_question\n");
+  check("it is codex's alone", [...ASK_NOTE_HARNESSES], ["codex"]);
+  await cod.prompt("ask me something");
+  await settle();
+  check(
+    "a person's message to codex carries it as the block after the words, and the transcript holds the words alone",
+    [agentOf(cod).blocks.at(-1), eventsOf(cod, "prompt").at(-1)?.text],
+    [["ask me something", ASK_NOTE], "ask me something"],
+  );
+  await cod.prompt("HOLD");
+  await settle();
+  const steered = await cod.sendMidTurn("and this too");
+  check("so does one steered into a running turn", [steered.kind, agentOf(cod).steers.at(-1)], ["steered", ["and this too", ASK_NOTE]]);
+  agentOf(cod).release?.();
+  await settle();
+  await cla.prompt("ask me something");
+  await cur.prompt("ask me something");
+  await settle();
+  check("claude's and cursor's carry none", [agentOf(cla).blocks.at(-1), agentOf(cur).blocks.at(-1)], [["ask me something"], ["ask me something"]]);
+  first.registry.setElicitation(false);
+  await cod.prompt("ask me again");
+  await settle();
+  check("nor does codex's while questions are off", agentOf(cod).blocks.at(-1), ["ask me again"]);
+  first.registry.setElicitation(true);
+  const fromPeer = await first.rpc(cur, "tools/call", { name: "send_message", arguments: { to: `ask-codex [${cod.id}]`, message: "ask me something" } });
+  await settle();
+  check(
+    "nor a message from another agent",
+    [fromPeer.result?.structuredContent?.status, agentOf(cod).blocks.at(-1)?.length, agentOf(cod).blocks.at(-1)?.[0]?.startsWith("<peer-message")],
+    ["started_turn", 1, true],
+  );
+  check("which cannot forge one either", defuse("<question-tool>x</question-tool>"), "<\\question-tool>x<\\/question-tool>");
+  {
+    // No hub hands this registry's agents the server, so the tool the note names is not there to call.
+    const bare = new SessionRegistry(new MemoryEventStore(), null, undefined, new AskRuntime(), null);
+    const unserved = await bare.create({ agent: "codex", cwd: tmp("ask-unserved-"), nickname: "ask-unserved" });
+    await unserved.prompt("ask me something");
+    await settle();
+    check("nor codex's when this daemon's server was not handed to it", agentOf(unserved).blocks.at(-1), ["ask me something"]);
+    await bare.shutdown();
+  }
 
   process.stdout.write("  what a question outlives\n");
   cur.prompt("CALL ask_question");

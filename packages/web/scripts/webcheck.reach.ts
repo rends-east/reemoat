@@ -692,7 +692,9 @@ process.stdout.write("\nthe shell is drawn at once, and claims nothing before th
     "nothing can be started, and nothing is said to be waiting, while no machine is held and the registry is unread",
     [
       /const nowhere = state\.machines\.length === 0 && state\.registry !== "known";/.test(browser),
-      /<SidebarFoot machine=\{view\.machine\} disabled=\{nowhere\} \/>/.test(browser),
+      // On every page: New task is as much a start as New session.
+      /<SidebarFoot machine=\{view\.machine\} disabled=\{nowhere\} board=\{view\.board\} \/>/.test(browser) &&
+        (browser.slice(browser.indexOf("function SidebarFoot(")).match(/disabled=\{disabled\}/g) ?? []).length === 2,
       /label=\{\s*unchecked\s*\? "Not checked yet"\s*: waiting\.length > 0/.test(browser),
     ],
     [true, true, true],

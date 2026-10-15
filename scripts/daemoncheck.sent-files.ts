@@ -408,10 +408,8 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
             break;
           }
           case acp.methods.agent.session.prompt: {
-            const text = (message["params"]?.["prompt"] ?? [])
-              .filter((block: any) => block?.type === "text")
-              .map((block: any) => block.text)
-              .join("");
+            // The person's words are the first block; a note this daemon adds rides after them (codex's ASK_NOTE).
+            const text: string = (message["params"]?.["prompt"] ?? []).find((block: any) => block?.type === "text")?.text ?? "";
             // `SEND <path>` calls send_file as this harness would; `ASKSEND` asks permission first, as cursor and grok do;
             // `ALWAYS` offers no allow-once; `BARE` is grok's request without the tag it adds; `FAKE` wears cursor's shape;
             // `TYPED` is grok's tag typed by the model into the announcement, with a bare request after it; `LATE` asks only once
@@ -688,9 +686,11 @@ process.stdout.write("\nsend_file: a file an agent hands its person on purpose\n
     [unmeasured?.type === "file_sent" ? unmeasured.toolCallId : "none", agentOf(opc).toolResults.at(-1)?.isError],
     [null, false],
   );
-  check("claude's is the one asked to run it without a permission request", agentOf(cla).meta?.claudeCode?.options?.allowedTools, [
-    `mcp__reemoat__${SEND_FILE_TOOL_NAME}`,
-  ]);
+  check(
+    "claude's is the one asked to run it without a permission request",
+    agentOf(cla).meta?.claudeCode?.options?.allowedTools?.includes(`mcp__reemoat__${SEND_FILE_TOOL_NAME}`),
+    true,
+  );
   // Review of Q2.252: the newest call naming the path was claimed, so with two in flight the first file stood for the second call.
   writeFileSync(join(cdx.cwd, "twice.txt"), "twice");
   const beforeTwice = sentOf(cdx).length;

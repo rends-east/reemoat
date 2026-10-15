@@ -143,7 +143,8 @@ Three pieces, and you can run all of them yourself.
   endpoint to point one at — and it lands in the same lists. Every agent that takes
   MCP over HTTP is also handed a `reemoat` server with two tools, `list_agents` and
   `send_message`, which is how agents reach each other, on one machine or across
-  the relay.
+  the relay, and four for the task board, with which an agent proposes work and the
+  agent doing a task reports on it.
 - **The control plane** issues identity and relays requests. It holds the accounts,
   the machines and the grants, and it signs the short-lived capabilities the app
   spends. It runs in a container, on a box of its own.
@@ -190,11 +191,11 @@ has the prerequisites and what is not built.
 |---|---|
 | `CLAUDE.md` | The rules as they stand — what you need in order to *change* the code |
 | `.claude/rules/` | The same, per area, loaded when you open a file it covers |
-| `docs/API.md` | The HTTP surface of both services — 147 routes, what each is for, and the conventions every one of them answers in |
+| `docs/API.md` | The HTTP surface of both services — 156 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 1167 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 1195 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

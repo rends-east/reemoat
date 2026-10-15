@@ -37,6 +37,7 @@ await import("./webcheck.accounts-on-this-computer.js");
 await import("./webcheck.legal-and-consent.js");
 await import("./webcheck.machine-limit-and-probe.js");
 await import("./webcheck.navigation.js");
+await import("./webcheck.board.js");
 closeWss();
 await import("./webcheck.plugin-protocol.js");
 await import("./webcheck.plugin-consent.js");

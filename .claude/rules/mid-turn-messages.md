@@ -208,7 +208,7 @@ composer keeps every old gate. It branches on that capability, never a version.
 |---|---|
 | `src/acp/client.ts` | `supportsSteering` |
 | `src/session.ts` | `STEER_METHOD`, `STEER_TIMEOUT_MS`, `SteerOutcome`, `Session.steer` — the one place the extension is spoken |
-| `src/registry.ts` | `MidTurnResult`, `QueuedPrompt`, `MAX_QUEUED_PROMPTS`, `sendMidTurn`, `armTurn`/`recordPrompt`/`runTurn`, `deliverQueued`; a mention note (Q2.246) rides as the steer's extra blocks, `QueuedEntry.note` |
+| `src/registry.ts` | `MidTurnResult`, `QueuedPrompt`, `MAX_QUEUED_PROMPTS`, `sendMidTurn`, `armTurn`/`recordPrompt`/`runTurn`, `deliverQueued`; a mention note (Q2.246) and codex's `ASK_NOTE` ride as the steer's extra block (`noteFor`), `QueuedEntry.note` |
 | `packages/web/src/attach.ts` | `canSend(…, refused)`, `refused` being `Composer`'s `sendRefused` |
 | `packages/web/src/wire.ts` | `QueuedPrompt` (named as in `registry.ts` for the hand-mirror sweep), `acceptsMidTurn`, `queuedSeqs`, both failing toward the old behaviour |
 | `scripts/daemoncheck.mid-turn-messages.ts` | Stubs that steer, that do not, and that advertise then refuse: never lost, never doubled, one `turn_end` per turn |

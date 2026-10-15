@@ -315,18 +315,18 @@ export function KeyOnly({
       )}
 
       {system.keySet && !covered && (
-        <Group>
+        <Group fit>
           <TwoStep
             armed={confirmingRemove}
             onArm={setConfirmingRemove}
             align="end"
-            className={TWO_STEP_ROW}
+            className={confirmingRemove ? TWO_STEP_ROW : ""}
             question={<>Remove the {keyName}? New sessions pointed at {system.displayName} will refuse to start.</>}
             act={{ label: "Remove", danger: true, icon: Trash2 }}
             disabled={busy || daemon === undefined}
             onAct={remove}
             rest={
-              <DangerRow label={`Remove the ${keyName}`} icon={Trash2} disabled={busy} onClick={() => setConfirmingRemove(true)} />
+              <DangerRow label={`Remove the ${keyName}`} icon={Trash2} disabled={busy} whole onClick={() => setConfirmingRemove(true)} />
             }
           />
         </Group>

@@ -503,10 +503,14 @@ process.stdout.write("\nthe machine limit\n");
     );
     check(
       "and Retire rests as the screen's one danger row, named for the machine and not locked by a mint",
-      /rest=\{\s*<DangerRow label=\{`Retire \$\{machine\.name\}`\} icon=\{Trash2\} onClick=\{\(\) => setConfirming\(true\)\} \/>\s*\}/.test(machineSrc),
+      /rest=\{\s*<DangerRow label=\{`Retire \$\{machine\.name\}`\} icon=\{Trash2\} whole onClick=\{\(\) => setConfirming\(true\)\} \/>\s*\}/.test(machineSrc),
       true,
     );
-    check("in a row's box, its answers where the question ends", /align="end"\s*className=\{TWO_STEP_ROW\}/.test(machineSrc), true);
+    check(
+      "in a box as wide as the row at rest, which widens for the question, its answers where the question ends (Q3.738)",
+      [/<Group fit>\s*<TwoStep/.test(machineSrc), /align="end"\s*className=\{confirming \? TWO_STEP_ROW : ""\}/.test(machineSrc)],
+      [true, true],
+    );
     // The code is minted on the row's tap and handed to a leaf of its own, never drawn on this screen (Q3.428, Q3.549).
     const setupScreen = machineSrc.slice(machineSrc.indexOf("export function SetupCodeScreen("));
     check(

@@ -118,6 +118,41 @@
 
   --animate-rise: rise 140ms ease-out;
 
+  /* A board card lifted by a drag, and one that has just landed (Q3.728); LIFTED in cardDrag.ts is the same transform. */
+  --animate-lift: lift 140ms cubic-bezier(0.2, 0, 0, 1) both;
+  --animate-landed: landed 900ms ease-out;
+  /* The list's lines run the column's full width, so their ring is drawn inside them. */
+  --animate-landed-in: landed-in 900ms ease-out;
+
+  @keyframes lift {
+    from {
+      transform: none;
+      box-shadow: var(--shadow-sm);
+    }
+    to {
+      transform: rotate(1.5deg) scale(1.02);
+      box-shadow: var(--shadow-xl);
+    }
+  }
+
+  @keyframes landed {
+    from {
+      box-shadow: 0 0 0 2px var(--color-brand);
+    }
+    to {
+      box-shadow: 0 0 0 2px transparent;
+    }
+  }
+
+  @keyframes landed-in {
+    from {
+      box-shadow: inset 0 0 0 2px var(--color-brand);
+    }
+    to {
+      box-shadow: inset 0 0 0 2px transparent;
+    }
+  }
+
   /* The stagger is literal [animation-delay:…] classes on the rects: Tailwind emits nothing for a computed one. */
   --animate-bar: bar 1.05s ease-in-out infinite;
 
@@ -408,6 +443,28 @@ kbd {
 
 .scroll-stable {
   scrollbar-gutter: stable;
+}
+
+/* The board's sideways bar is its way right for a mouse with no sideways wheel: drawn always and wide enough to grab (Q3.738). */
+.board-scroll {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.board-scroll::-webkit-scrollbar {
+  height: 14px;
+}
+.board-scroll::-webkit-scrollbar-track {
+  margin-inline: 20px;
+  border-radius: 9999px;
+  background: var(--color-raised);
+}
+.board-scroll::-webkit-scrollbar-thumb {
+  border: 3px solid var(--color-raised);
+  border-radius: 9999px;
+  background: var(--color-edge-strong);
+}
+.board-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
 }
 
 .hljs-comment,

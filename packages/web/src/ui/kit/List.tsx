@@ -23,6 +23,7 @@ export function Group({
   error = null,
   still = false,
   unboxed = false,
+  fit = false,
   children,
 }: {
   title?: string;
@@ -35,6 +36,8 @@ export function Group({
   still?: boolean;
   /** For content that is itself one bordered control, such as a command line or a log: no box around a box. */
   unboxed?: boolean;
+  /** The box as wide as what it holds: a destructive TwoStep's whole rest at rest, and its question once armed (Q3.738). */
+  fit?: boolean;
   children: ReactNode;
 }): ReactNode {
   return (
@@ -49,7 +52,7 @@ export function Group({
       {unboxed ? (
         children
       ) : (
-        <div className={`divide-y divide-edge rounded-lg border ${still ? "border-edge" : "border-edge-strong"}`}>
+        <div className={`divide-y divide-edge rounded-lg border ${still ? "border-edge" : "border-edge-strong"} ${fit ? "w-fit max-w-full" : ""}`}>
           {children}
         </div>
       )}
@@ -169,17 +172,20 @@ export function ActionRow({
 
 /**
  * The resting control of a destructive TwoStep, sized to its label. It never spans the row: the act lands to the right
- * of the question when armed, and a double tap on a full-width rest could land on it (Q3.218).
+ * of the question when armed, and a double tap on a full-width rest could land on it (Q3.218). `whole` is the whole of a
+ * box as wide as it (`Group`'s `fit`), drawn as a row is, and the box widens for the question (Q3.738).
  */
 export function DangerRow({
   label,
   icon,
   disabled = false,
+  whole = false,
   onClick,
 }: {
   label: string;
   icon: Glyph;
   disabled?: boolean;
+  whole?: boolean;
   onClick: () => void;
 }): ReactNode {
   return (
@@ -187,7 +193,10 @@ export function DangerRow({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`tap -mx-2 inline-flex ${CONTROL} items-center gap-2 rounded-md px-2 text-sm font-medium text-danger hover:bg-danger/10 disabled:text-faint`}
+      className={`tap items-center gap-2 text-sm font-medium text-danger hover:bg-danger/10 disabled:text-faint ${
+        // As tall as the armed row's padding round its buttons, so a one-line question moves nothing below it.
+        whole ? "flex min-h-12 rounded-lg px-4" : `-mx-2 inline-flex ${CONTROL} rounded-md px-2`
+      }`}
     >
       <Icon as={icon} size={16} />
       {label}

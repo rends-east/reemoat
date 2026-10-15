@@ -999,7 +999,7 @@ export function buildTail(
 
   const resolvedPermissions = new Set<string>();
   const resolvedElicitations = new Set<string>();
-  const askedThrough = new Set<string>();
+  const askedThrough = callsCardsStandFor(events, cut);
 
   const flush = (): void => {
     if (run === null) return;
@@ -1122,14 +1122,6 @@ export function buildTail(
 
     if (event.type === "permission_resolved") resolvedPermissions.add(event.permissionId);
     if (event.type === "elicitation_resolved") resolvedElicitations.add(event.elicitationId);
-    if (
-      (event.type === "elicitation_request" || event.type === "elicitation_resolved") &&
-      event.toolCallId !== null
-    ) {
-      askedThrough.add(event.toolCallId);
-    }
-    // A sent file's card stands for the call that sent it, as a question's does (Q2.252).
-    if (event.type === "file_sent" && event.toolCallId !== null) askedThrough.add(event.toolCallId);
 
     // Silent events must not split a text run into two Markdown blocks; `turn_end` still does.
     if (!TRANSCRIPT_SILENT.has(event.type)) flush();
@@ -1183,6 +1175,24 @@ export function buildTail(
     if (node.kind === "tool" && !node.backgrounded && node.seq < lastEdge && stillRunning(node)) node.turnEnded = true;
   }
   return { rows: foldRuns(rows, decisions), hidden: index + 1, taskFloor, turnEdges: turnEdges.reverse() };
+}
+
+/** The calls a question's or a sent file's card stands for (Q2.251, Q2.252), read whole: codex may announce one after its card. */
+function callsCardsStandFor(events: readonly StoredEvent[], cut: number): Set<string> {
+  const calls = new Set<string>();
+  for (let at = events.length - 1; at >= 0; at -= 1) {
+    const stored = events[at];
+    if (stored === undefined) continue;
+    if (stored.seq < cut) break;
+    const event = stored.event;
+    if (
+      (event.type === "elicitation_request" || event.type === "elicitation_resolved" || event.type === "file_sent") &&
+      event.toolCallId !== null
+    ) {
+      calls.add(event.toolCallId);
+    }
+  }
+  return calls;
 }
 
 /** Event types that never draw a row; `workspace` warnings are deliberately drawn nowhere. */
@@ -1256,12 +1266,13 @@ export function stopReasonText(stopReason: string): string {
 /** Matched by option label, never field key; a label shared by two questions matches neither. */
 const AMBIGUOUS = Symbol("two questions offer this answer");
 
-/** ask_question's arguments as cursor wraps an MCP call, in AskUserQuestion's words, so its answers read as every other card's. */
+/** ask_question's arguments as cursor (`toolName`, `args`) or codex (`tool`, `arguments`) wraps an MCP call, in AskUserQuestion's words. */
 function askedInput(input: unknown): unknown {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
   const wrapped = input as Record<string, unknown>;
-  const args = wrapped["args"];
-  if (wrapped["toolName"] !== "ask_question" || typeof args !== "object" || args === null) return input;
+  const args =
+    wrapped["toolName"] === "ask_question" ? wrapped["args"] : wrapped["tool"] === "ask_question" ? wrapped["arguments"] : null;
+  if (typeof args !== "object" || args === null) return input;
   const questions = (args as Record<string, unknown>)["questions"];
   if (!Array.isArray(questions)) return input;
   return {

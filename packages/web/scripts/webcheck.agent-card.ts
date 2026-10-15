@@ -527,6 +527,15 @@ process.stdout.write("\nthe sign-in screens, cut\n");
     ],
     [true, true, true, false],
   );
+  check(
+    "and its box is as wide as the button, which fills it at rest, and widens for the question once armed (Q3.738)",
+    [
+      /<Group fit>/.test(signOut),
+      /className=\{confirming \? TWO_STEP_ROW : ""\}/.test(signOut),
+      /rest=\{<DangerRow label="Sign out" icon=\{LogOut\} whole onClick=\{\(\) => setConfirming\(true\)\} \/>\}/.test(signOut),
+    ],
+    [true, true, true],
+  );
 
   const { STALE_READ } = await import("../src/ui/agentCard.js");
   check("STALE_READ is defined exactly once, in agentCard", (card.match(/export const STALE_READ\b/g) ?? []).length, 1);

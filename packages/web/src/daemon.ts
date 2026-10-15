@@ -29,6 +29,10 @@ import type {
   RootListing,
   SessionList,
   SessionSnapshot,
+  TaskAssignee,
+  TaskList,
+  TaskSnapshot,
+  TaskStatus,
   ImportAccepted,
   PluginInstalled,
   PluginListing,
@@ -38,6 +42,19 @@ import type {
 } from "./wire";
 
 /** Bound to one machine, so a session id can never reach the wrong daemon. */
+/** What `PATCH /tasks/:id` takes; an agent or a folder alone keeps the other. */
+export interface TaskChangeBody {
+  title?: string;
+  brief?: string;
+  summary?: string;
+  status?: Exclude<TaskStatus, "needs_you">;
+  agent?: string;
+  customAgent?: string | null;
+  /** Nobody or its person; naming an agent assigns it (Q2.261, Q2.262). */
+  assignee?: TaskAssignee;
+  cwd?: string;
+}
+
 export class DaemonClient {
   constructor(private readonly machine: MachineConnection) {}
 
@@ -307,6 +324,54 @@ export class DaemonClient {
       method: "POST",
       body: JSON.stringify(body),
     });
+  }
+
+  /** An older daemon has no such route and answers the bare 404 `meansRouteAbsent` reads (Q2.258). */
+  listTasks(): Promise<TaskList> {
+    return this.machine.request<TaskList>("/tasks");
+  }
+
+  /** `key` makes a create that is sent twice one task; with `start` the daemon launches the agent and hands it the brief. */
+  createTask(body: {
+    title?: string;
+    brief: string;
+    agent: string;
+    customAgent?: string | null;
+    /** Nobody or its person; the agent named is still what a start would launch. */
+    assignee?: TaskAssignee;
+    /** The column a person made it in; never beside `start`. */
+    status?: "ready" | "review" | "done";
+    cwd: string;
+    key: string;
+    start: boolean;
+  }): Promise<{ task: TaskSnapshot; session?: SessionSnapshot; sent?: boolean; existing?: boolean }> {
+    return this.machine.request("/tasks", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /** A first start or another attempt; an empty body launches what the task was created with. */
+  /** Naming an agent or a folder assigns it: the task holds them for the next start too. */
+  startTask(
+    id: string,
+    body: { agent?: string; customAgent?: string | null; cwd?: string } = {},
+  ): Promise<{ task: TaskSnapshot; session: SessionSnapshot; sent: boolean }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}/start`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /** `needs_you` is refused: the daemon alone says it. An assignee or a folder is weighed as a start weighs one. */
+  changeTask(id: string, change: TaskChangeBody): Promise<{ task: TaskSnapshot }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(change) });
+  }
+
+  deleteTask(id: string): Promise<{ deleted: boolean }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  attachSession(taskId: string, sessionId: SessionId): Promise<{ task: TaskSnapshot }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(taskId)}/sessions/${encodeURIComponent(sessionId)}`, { method: "PUT" });
+  }
+
+  detachSession(taskId: string, sessionId: SessionId): Promise<{ task: TaskSnapshot }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(taskId)}/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
   }
 
   /** The only read carrying complete model lists; the polled list truncates them. */

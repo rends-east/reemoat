@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents | 115 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 465 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 121 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 485 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 88 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 161 | `###` |
-| | | **1167** | |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 89 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 162 | `###` |
+| | | **1195** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1167 rather than the 586
+dividers. So the count is over **both** depths, and it says 1195 rather than the 594
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9450,7 +9450,8 @@ as part of the same message is read off claude-agent-acp 0.73.0 and codex-acp 1.
 each of which keeps separate text blocks separate; kimi, opencode and grok are
 unmeasured.
 
-**Status.** Current.
+**Status.** Current. Amended by Q2.263: on codex the note's block also carries `ASK_NOTE`, after the
+mention note.
 
 ### Q2.247 — What does a session keep of its files, and what happens when it is full?
 
@@ -9595,7 +9596,7 @@ neither `--allowed-tools` nor a custom header. So nothing this client sends can 
 for it, and whether the gate is the client type, the plan or Auto is unmeasured.
 
 **Decision. `ask_question`, served by the `reemoat` MCP server to the harnesses in
-`QUESTION_TOOL_HARNESSES` — cursor alone.** Its input is cursor's own AskQuestion
+`QUESTION_TOOL_HARNESSES` — cursor alone then, and codex since Q2.263.** Its input is cursor's own AskQuestion
 shape, parsed by the same `parseQuestionRequest`, drawn by the same form builder,
 so it is the card cursor's request would have drawn. Q2.14's rule stands: an agent
 with a question tool of its own is never given a second.
@@ -9639,7 +9640,8 @@ card above"*. The `rawInput` naming the tool arrived 6 ms before the permission,
 **Status.** Current, and **amended by Q2.251**: the call now waits for the answer,
 and the message is only what an answer later than that becomes. If cursor starts
 sending `cursor/ask_question`, the model has two ways to ask and both draw the same
-card.
+card. Amended by Q2.263: codex is served it too, and told so after its person's every
+message.
 
 ### Q2.251 — A Cursor question answered as every other harness's is
 
@@ -9679,7 +9681,8 @@ with the answer; it is told to write nothing, which it may not honour. Held long
 would need a client that passes a timeout, or a loop of calls each under 60 s, which
 spends a model request a minute on nobody answering — not built.
 
-**Status.** Current.
+**Status.** Current. Amended by Q2.263: on codex `claimPosedCall` takes the call the
+request names, the client folds a call logged after its card, and codex's cut is 300 s.
 
 ### Q2.252 — A file the agent hands over on purpose
 
@@ -9772,7 +9775,8 @@ app ships first, then the daemons. A daemon older than this cannot weigh a store
 **Not built.** A switch that withholds the tool; several files in one call; a
 folder; a bridge that would give an older app a button.
 
-**Status.** Current. Amended by Q2.253.
+**Status.** Current. Amended by Q2.253. Q2.263: codex's MCP approval reaches the client as
+a permission request naming only the call in Ask for approval, and in no other mode.
 
 ### Q2.253 — send_file, checked again: what a Stop, a stall, a closed folder and a typed tag could do
 
@@ -10060,6 +10064,333 @@ string and open one panel.
 
 **Compatibility.** The event is the `text` it always was, and the two halves ship in
 either order: a new line needs one of them, a line already logged needs the app's.
+
+**Status.** Current.
+
+### Q2.258 — Where does a task live, and who says what state it is in?
+
+**Question.** On 2026-10-14 the owner asked for a task board over the sessions: a task
+with a title, a brief, a status (ready, running, needs_you, review, done), a summary and
+the sessions working on it, created from a phone or a desktop alike and started by the
+machine it is for. Sessions were the only unit until then, so "what is this agent for
+and is it waiting on me" was answered one conversation at a time.
+
+**Decision. A task is a row on its own machine's daemon, and its status is read off its
+sessions rather than written by them.** Two tables, `tasks` and `task_sessions`, behind
+`TaskStore` (`SqliteTaskStore`, and `MemoryTaskStore` for the drivers); `TaskDesk` is
+every door to one. The record holds a status of four, never five: `needs_you` is not
+storable. What a reader is shown is `taskStatus(stored, sessions)`:
+
+| Shown | When |
+|---|---|
+| `done` | somebody wrote it: no session takes it back |
+| `needs_you` | a request waits in one of its sessions (`blocked`) |
+| `running` | one of them is working or starting |
+| `review` | it has a session and none is working: there is a conversation to read |
+| `ready` | no session has it yet, unless `review` was written |
+
+Amended by Q2.260: `ready` as written wins over sessions at rest, and a task with no
+session that is not `ready` reads `review`.
+
+**Why derived.** The owner's rule was that the daemon sets `needs_you` by itself. Written
+down, it has to be taken back by whatever settles the request, and a request is settled
+by an answer, a cancel, the agent withdrawing it, the agent going, or a restart, which
+drops every pending approval without an event (Q2.12). Read off `ManagedSession.status`
+it cannot be stale. `running` is the same argument from the other side: an agent that
+never reports would hold a card in Running for ever, on a board whose one question is
+which cards need a person.
+
+**Starting one is the daemon's.** `POST /tasks` with `start: true` reads its body with
+`launchSpecOf` and launches through `launch`, the two halves `POST /sessions` was split
+into for this, so a task starts with every refusal a session create has and no second
+copy of them. The row is written before the launch and removed when the launch is
+refused: the same request sent again is the retry. `TaskDesk.begin` then attaches the
+session, names it after the task where it has no title, and sends the brief as its first
+message with `taskNote` as the block after it (the mention note's seam, Q2.246), so the
+transcript holds the brief as its person's own words and the agent is still told whose
+conversation this is. `POST /tasks/:id/start` is the same launch for a task that was
+ready, and for another attempt.
+
+**A create carries a key.** A `POST` is never replayed by the transport (Q5.18), so a
+lost answer leaves the person pressing again. `TASK_KEY` names the create: a second one
+under a key a task already holds answers that task with `existing: true` and launches
+nothing. A proposal's id is its key (Q2.259), which is also how two devices agree that a
+proposal was taken.
+
+**A session works on one task.** `task_sessions` is keyed on the session, so attaching
+it elsewhere moves it; a task that was ready and now has a session is no longer waiting
+to start. Deleting a task leaves its sessions, which were conversations of their own.
+`TaskDesk.sweep` drops, once at boot, the attachments of sessions the startup prune
+removed.
+
+**Bounds.** `MAX_TASKS` per machine; past it a create takes the place of the task done
+longest ago, and is refused `429 too_many_tasks` only where none is done. A brief is a
+first prompt and is held well under the prompt route's bound; a summary is a few lines.
+
+**Rejected.**
+- *Storing `needs_you` and moving it from the registry's events.* Four more callers of
+  the request lifecycle, and the restart case has no event to hang it on.
+- *A task column on `sessions`.* The attachment would ride every snapshot and the
+  hand mirror, and the registry would learn about tasks; a table of its own leaves
+  `registry.ts` with one new method, `proposeTasks`.
+- *A plugin.* `plugins/board` is the reference plugin and draws a board of sessions, but
+  a plugin adds no tool to an agent's server and draws nothing in a transcript (Q7.105),
+  and both are what the dispatcher is made of.
+- *A status the client computes.* It holds fresher session rows than a task poll, but a
+  second copy of the rule in a client nobody can push would disagree with the daemon's
+  for as long as that build is installed.
+
+**Measured, 2026-10-14**, claude 2.1.296 on a scratch daemon behind a scratch control
+plane: `POST /tasks` with `start: true` answered the task and its session in one
+request; the agent wrote the file its brief asked for, called `task_update` unprompted
+and with no permission request, and the task read `running`, then `review` at the poll
+after the turn ended.
+
+**Driver.** `daemoncheck`: `taskStatus` over every stored status and every pair of
+session statuses, as properties; both stores through one sequence of writes, compared;
+every malformed create one at a time with nothing created; the read-only grant; the
+key; the brief in the log and the note on the wire; `needs_you` over a parked
+permission and refused as a write; a refused start leaving nothing; attach, move and
+detach; the bound and what it evicts; the sweep.
+
+**Compatibility.** The daemons ship first (`compatibility.md`): a daemon older than this
+answers the bare 404 a route it has never heard of gets, which the app reads as "keeps
+no tasks" and draws nothing for (Q3.719). No `SCHEMA_VERSION` bump: two new tables, and
+`schema.sql`'s `CREATE TABLE IF NOT EXISTS` is the migration.
+
+**Status.** Current.
+
+### Q2.259 — What may an agent do to the board?
+
+**Question.** A dispatcher was asked for with the board: a session that turns what its
+person describes into tasks across their machines. And a session working on a task has
+to be able to say how it is going.
+
+**Decision. Four tools on the `reemoat` server, none of which creates or starts
+anything.**
+
+- `list_projects` and `list_tasks` read this machine and, by the path `list_agents`
+  takes, the owner's other machines.
+- `propose_tasks` appends one `TasksProposedEvent` to the caller's own log: a card, each
+  row a `TaskProposal` with an id. A task exists only once its person presses, and the
+  press is the client's `POST /tasks` to the machine the proposal names.
+- `task_update` writes a summary and a status onto the task the caller's session is
+  attached to, and no other. It may say running, review or done; `needs_you` is the
+  daemon's (Q2.258) and `ready` is what a task is before any agent has it.
+
+**They are served whatever the messaging switches say** (`PeerHub.serveTasks`), as
+`send_file` and `ask_question` are: the board is the session's own person's. Only what
+crosses to another machine answers to a switch. `linksFor` is `list_agents`' three
+gates read live (the machine's, its isolation, the conversation's), and the receiving
+routes, `GET /peer/tasks` and `GET /peer/projects`, refuse exactly as `GET /peer/agents`
+does.
+
+**What a link can now read, stated.** `list_agents` shows another machine a folder's
+name and never its path. A proposal for another machine has to carry the folder the
+agent will run in, since the press sends it as `cwd`, so `/peer/projects` answers
+absolute paths and `/peer/tasks` titles and summaries, to agents on the same owner's
+linked machines and to nobody else. A machine that should not show them is isolated or
+has agent messaging off, which already withholds its sessions.
+
+**The dispatcher is an ordinary session.** It is whichever session is nicknamed
+`DISPATCH_NICKNAME`; the server's instructions are per caller, so that one is also sent
+`DISPATCH_INSTRUCTIONS` when its agent connects. Nothing else about it is special: it
+can be stopped, renamed, cleared, or started by hand under that nickname with any agent
+in any folder. Every session holds the four tools, because any agent may be asked what
+is on the board.
+
+**claude runs them without a permission request** (`CLAUDE_ALLOWED_TOOLS`): two read
+the person's own board, one draws a card only a press acts on, one writes the caller's
+own task. The other harnesses ask as they do for any MCP tool; `Session.noteOwnCall`
+answers only the two calls it was measured to recognise.
+
+**A card is never clipped.** `truncateEvent` passes the event through, so
+`parseProposals` refuses a call past `MAX_PROPOSALS_PER_CALL` or
+`MAX_PROPOSAL_CHARS_PER_CALL`, whole and in words: a clipped brief would start the wrong
+work. A proposal naming a machine that did not answer, or an agent its machine does not
+offer, is refused the same way with what there is.
+
+**What `task_update` answers.** The first build said what the board now reads, which
+during the agent's own turn is `running` whatever it wrote. Measured on claude 2.1.296:
+it told its person the write had not taken. It now says the task reads running while
+the agent works and what it wrote once it stops.
+
+**Rejected.**
+- *A tool that creates a task.* An agent starting agents on other machines is the thing
+  Q7.151 leaves unbuilt permissions for; a card a person presses is the permission.
+- *A dispatcher kind of session*, with its own tool list or no workspace. Every special
+  case would be a second path through launch, resume and the list.
+- *Tying the card to its tool call*, as `file_sent` is (`toolCallId`), so the harness's
+  own row for the call is not drawn above it. It is a claim per harness, and each is a
+  measurement nobody has made for these tools.
+
+**Measured, 2026-10-14**, claude 2.1.296, a session nicknamed `dispatch` on a scratch
+daemon, asked in one message for two pieces of work and what was pending: it called
+`list_projects`, `list_tasks` and `propose_tasks` in that order, proposed two tasks with
+self-contained briefs, changed no file, and answered the pending question from the
+listing. cursor, codex, grok, kimi and opencode were not driven.
+
+**Driver.** `daemoncheck`: every malformed proposal and update refused in words; the
+tools listed for every session and with messaging off; the dispatcher's instructions by
+nickname alone; `task_update` reaching only its own task; a card that creates nothing;
+another machine's rows re-read one by one, an older daemon's bare 404 and an offline
+machine named as why; the listing cached and aged on an injected clock; `linksFor` over
+all four ways it answers nobody; the two peer routes under each refusal.
+
+**Status.** Amended by Q2.260: an agent says running or review; done is its person's.
+
+### Q2.260 — Who holds a task once an agent has been on it, and who says it is done?
+
+**Question.** The owner's review on the stand, 2026-10-14, third round: "ready это что,
+почему все таски туда падают?", and the columns they asked for instead: not assigned, the
+default; running; review, where "the assignee is the user by default, and tasks go there
+after running"; done.
+
+**Decision. The status says who holds a task, and only its person closes one.**
+
+- **`ready` is a task nobody holds**, and a stored `ready` stays `ready` whatever its
+  sessions did at rest, so a person can put a task back for nobody. `running` and
+  `needs_you` still come from the sessions; anything else an agent has been on reads
+  `review`, which with no session now includes a stored `running` whose conversations
+  are gone (`taskStatus`).
+- **An agent says `running` or `review`, never `done`** (`AGENT_TASK_STATUSES`): after its
+  turn a task is its person's to look at, and `task_update` refuses `done` in words that
+  say so and writes nothing. The tool's description and `taskNote` say the same.
+- **A start that names an agent or a folder is an assignment**: `POST /tasks/:id/start`
+  writes them to the task, so the next Start and every reader take that agent.
+
+**Why no assignee column.** Who holds a task is already a function of its status and its
+sessions: nobody while it is ready, the agent working on it, else its person. A stored
+assignee would be a second answer that could disagree with the first, ready and held by
+somebody, and every database on the stand would need a migration for it.
+
+**Driver.** `daemoncheck`: the sweep over every stored status and every pair of session
+statuses, with ready and review at rest; `done` refused from an agent with nothing
+written; a second start's agent held by the task.
+
+**Status.** Current, but for "why no assignee column", reversed a day later by Q2.261.
+
+### Q2.261 — Who holds a task in the backlog, now that naming an agent does not start it?
+
+**Question.** The owner's fourth review, 2026-10-15: "rename not assigned to backlog … if a
+task is in the backlog, attaching an agent to it does not change where it is". That is
+the case Q2.260 called a disagreement: a task that is ready and held by somebody.
+
+**Decision. One stored flag, `assigned`, beside the agent the task already kept.**
+
+- **`assigned` says whether somebody named that agent** (`TaskRecord.assigned`); false is
+  nobody, and the agent stays what a start would launch. Only the backlog reads it: a
+  working task is held by the agent on it and any other by its person, as before.
+- **A create names an assignee unless it says `assigned: false`**, and one that starts is
+  assigned whatever it says. `PATCH` takes `assigned`, and naming an agent there assigns
+  it without moving the task. **Every start assigns the agent it launched.**
+- **The column is added by `migrate()` with `DEFAULT 0`**, so a task written before reads
+  as nobody's, which is how every task in the backlog was drawn then. No version bump:
+  `table_info` decides, as for the sessions table.
+- **`list_tasks` prints a task nobody holds as `not assigned`**, and another machine's row
+  that says nothing of it is read as nobody's (`remoteTasksOf`).
+
+**Why not an empty agent.** A task with no agent would need every reader of `agent`, the
+start route's fallback and `launchSpecOf` taught a value that names nothing, and the rows
+already on the owner's machine would still read as held by their placeholder agent.
+
+**Driver.** `daemoncheck`: both stores carry it; a file from before reads as nobody's; a
+create with and without it; `PATCH` naming an agent, saying nobody, and both; a start
+assigning; the refusals; the tool's line for a task nobody holds.
+
+**Status.** Amended by Q2.262: the flag holds one of three, `assignee`, and its person may
+hold a backlog task too.
+
+### Q2.262 — Who else may hold a task in the backlog, and where may a create put one?
+
+**Question.** The owner's fifth review, 2026-10-15: "a task can be put on the account's
+owner, it need not be on an agent", and "add a plus to every column, so a task can be made
+right there".
+
+**Decision. The flag holds one of three, and a create may name the column.**
+
+- **`TaskRecord.assignee` is `nobody`, `agent` or `you`** (`TASK_ASSIGNEES`), stored as
+  that list's index in the column Q2.261 added: 0 and 1 keep their meaning, so a file
+  either build wrote reads the same and nothing migrates. A code from a newer build reads
+  as nobody's, which claims nothing. Still read in the backlog alone: review and done are
+  their person's whatever it says.
+- **A create's assignee is `agent` unless it names another**, and one that starts is the
+  agent's whatever it says. `PATCH` takes `assignee`; naming an agent still assigns it.
+- **`POST /tasks` takes `status`**: `ready`, `review` or `done` (`CREATED_TASK_STATUSES`).
+  Running is a start's own, so `running` is refused, and so is any status beside `start`.
+- **`list_tasks` prints a backlog task its person holds as `your user`**, the words the
+  tools already use for them.
+
+**Why an index and not a column of words.** Two machines already run a database with the
+column, holding 0 and 1. A second column would leave the first meaning nothing, and one of
+words would need a migration for rows only a development build ever wrote.
+
+**Driver.** `daemoncheck`: both stores carry `you`, and an unknown code reads as nobody's;
+a create with each assignee, and in review and in done, starting nothing; the refusals
+(an assignee none of the three, a status a create may not take, a status beside a start);
+`PATCH` to `you`; the tool's line.
+
+**Status.** Current.
+
+### Q2.263 — Why did codex say it asked, and how does a codex session ask now?
+
+**Question.** On a codex session (2026-10-15) the owner wrote "no, ask properly, through
+the tool"; codex answered "the question was sent through the tool" and no card appeared.
+Q6.54 has codex's own question off by default. So what did it call?
+
+**What happened.** codex's own record of the thread holds a call to
+`request_user_input_async` with the owner's question and three options, answered
+`{"accepted":true}` at once. It is codex 0.162.1's own question tool, named in its base
+instructions and by no flag in `codex features list`; Q6.54's flag gates only the blocking
+`request_user_input`, which stays off. The question travels as one of codex's own
+agent-message items, marked `delivery: "async"`, whole, with no streamed text, and
+codex-acp makes agent text only from the stream, so it drops it: 1.8.0, the pin, and
+2.2.2, the newest stable.
+`tools.experimental_request_user_input.enabled = false` was measured not to withdraw it.
+And codex keeps MCP tools behind its tool search, so this server's instructions reach the
+model only in a search's result: it is shown its own tool first.
+
+**Decision.**
+
+- **`ask_question` is served to codex** as Q2.250 serves it to cursor
+  (`QUESTION_TOOL_HARNESSES`). Q2.14's rule is read as "a question tool whose question
+  reaches its person", and codex's does not.
+- **Every message its person sends says so** (`ASK_NOTE`, a `<question-tool>` block after
+  the words, `ASK_NOTE_HARNESSES`): its own tool does not reach them here, and
+  `ask_question` does. `noteFor` puts it after any mention note in one block, on the
+  prompt's door and the steer's, so a queued message, the board's brief and a late
+  answer carry it. Only where `takesPosedQuestions` and the launch holds this server
+  (`holdsPeerServer`); never on a peer's or a plugin's message, never in the log, and
+  `question-tool` is in `IMITATED_TAGS`.
+- **The card takes the call codex names.** In Full access the `tools/call` can beat the
+  call's announcement, once by 44 s, so on codex `claimPosedCall` takes the request's
+  `_meta.callId`, and the client folds a call into its card wherever the call lands in
+  the log (`callsCardsStandFor`).
+
+**How codex asks for an MCP call** (codex 0.162.1, codex-acp 1.8.0). Each is announced as
+a `tool_call` `exec-<uuid>` with `rawInput {server, tool, arguments}`. Ask for approval
+sends a `session/request_permission` 4 ms later naming only the call, which the daemon
+answers `allow_once`; Approve for me sends nothing and runs its own Guardian Review, about
+3 s; Full access asks nothing. codex's MCP client gives a call 300 s, so `ASK_WAIT_MS`
+stands; past it codex ended its turn writing nothing and the late answer went as a
+message.
+
+**Measured.** Before the note, the owner's words had codex call its own tool 4 times in 4
+and no card appear. With it: the owner's two messages, 4 runs in Approve for me, a card
+on 8 turns of 8; "ask me something" alone, 2 of 2; the pair in Ask for approval, 2 of 2.
+`request_user_input_async` was not called once, and every answer was the call's result.
+
+**What is still different.** codex asked its follow-up after an answer in prose, 7 first
+turns of 7: the note rides a person's message, never a tool's result. Approve for me draws
+the Guardian Review row above each card. A `readOnlyHint` on the tool removes the approval
+and the review, but codex then announced the call only once it returned: not taken.
+Withdrawing codex's own tool (no setting does) and codex-acp drawing its question are not
+built.
+
+**Driver.** `daemoncheck`: each mode's shapes as measured; the named call believed on
+codex alone; the note's reach and its absences (claude, cursor, questions off, a peer, a
+launch without the server); a peer cannot forge its tag. `webcheck`: codex's wrapper, and
+a call announced after its card or after its answer.
 
 **Status.** Current.
 
@@ -23926,9 +24257,9 @@ than a loss.
 argues the shape — *"The `variant` prop is gone with the split: its only remaining
 job was row density, and the mount already knows the width, so a prop that could
 disagree with the CSS no longer exists."* Two presentations over one data source
-is that argument one level up. `machineTabs`, `allTab`, `currentView` and
-`selectMachine` are untouched, so the two cannot disagree about which machine is
-selected.
+is that argument one level up. `machineTabs`, All's tab (`boardTab` since Q3.724),
+`currentView` and `selectMachine` are untouched, so the two cannot disagree about which
+machine is selected.
 
 **How the selected machine is drawn, and it took two passes.** The band is
 **full-bleed** — `bg-raised` across the whole 72px, with the chip inside it
@@ -29131,11 +29462,12 @@ conversation header painted blue.
   off every answer row and answer button; Next, Submit and Skip keep it.
 - **The All tab's rows drag**, which Q3.570 had refused: *a rank is a per-machine
   order, and a cross-machine drop would mean nothing.* It meant something all
-  along — `allRows` is `orderSessions` over every machine's rows, one rank clock,
+  along — All's flat list was `orderSessions` over every machine's rows, one rank clock,
   and Pinned under All already dragged across machines through the same `respace`
   that tolerates a daemon storing no rank. So the All group is a zone like a
   folder's (`ALL_FOLDER` in `measure`'s wanted set), a drop lands between the two
-  rows it shows, and the rank is written to the dragged row's own machine.
+  rows it shows, and the rank is written to the dragged row's own machine. Gone with
+  All itself (Q3.724).
 - **Three clicks on the header's line take the item under the pointer.** The line is
   flex, every item a block of its own, and WebKit's third click took the item *with*
   its line break — `reemoat/s_078b731c\n`, measured — so the range ran into the next
@@ -30256,6 +30588,590 @@ nothing installs, and installed; Anthropic and xAI absent; the list with and wit
 key. Not seen in WKWebView or against a live daemon.
 
 **Status.** Current. Amends Q3.689.
+
+#### Q3.719 — Where is the task list, and how does it share a screen with the sessions?
+
+**Question.** The task board (Q2.258) needed a place in a client whose primary screen
+is shaped around one list and one question, and whose list is also a pager: a swipe
+between machines, a pull to refresh, a drawer pulled from the first page, a row drag.
+The owner's condition, 2026-10-14, translated: keep the spirit of the app and do not
+break the existing swipes or the layout.
+
+**Decision. One list, in two modes.** `currentMode` in `groups.ts` says whether the
+list under the machines holds conversations or tasks; it is module state, remembered
+like the machine tab. In task mode the scroller draws `TaskListBody` where it drew the
+session rows, and so does every neighbour page (`BesidePanes`), cut to the same row
+budget. Nothing about the pager knows: the swipe, the page turn, the pill, the pull and
+the drawer were written against the scroller and the tabs, and both are untouched.
+
+- **The switch is drawn twice, as the machines are.** Below `lg` it is a toggle at the
+  head of the strip, before `All`: no `data-machine`, no pill of the kind the traveller
+  measures, nothing a hold can drag. At `lg` it is `ModeSwitch`, two segments above the
+  list. CSS decides which, never a breakpoint in JavaScript.
+- **A machine's tab cuts both lists.** One search field, which names what it searches;
+  the filter beside it becomes `currentTaskFilter`, since a finished task is withheld
+  after a day (`DONE_RECENT_MS`) as an ended session is.
+- **`j` and `k` stand down** in task mode: they step through `visibleRows`, which are
+  conversations the list is not showing.
+- **Rows are a session row's shape**: the mark, the title, a subline of the nickname,
+  the harness, the project and the machine, and the age of the conversation doing it. A
+  waiting task says so in place with its weight and the blocked dot. Grouped by status,
+  each group folding like a folder.
+
+**The client gathers the tasks itself** (`boardStore.ts`, rules in `board.ts`): one
+`GET /tasks` per machine it can reach, at `BOARD_WATCH_MS` while a board is on screen
+and `BOARD_IDLE_MS` otherwise, since only a count and a summary line need it then.
+
+- **A daemon older than tasks is skipped without a word**: its bare 404
+  (`meansRouteAbsent`) files the machine as `absent`, nothing of it is drawn, and it is
+  asked again only when another instance answers its health (`boardDue`).
+- **A machine that is offline keeps its tasks**, marked `unavailable`, from memory and,
+  across a relaunch, from `localStorage` (`rememberBoards`, `recallBoards`: bounded,
+  each brief cut to enough to recognise it). Only the drawn reach marks a row; one
+  failed read greys nothing (`reach.md`'s quiet window).
+- **No task is asked for through the server, and no machine about another's.**
+
+**Rejected.**
+- *A route of its own for the task list.* The conversation's chevron goes to a fixed
+  address, the list, and would land on sessions; a second screen would also be a second
+  pager to keep in step with the first.
+- *Tasks as one more page of the pager*, left of `All`. The drawer is pulled from the
+  first page, and a page is a machine.
+- *Asking one daemon for the whole fleet's tasks.* Session data never routes through
+  anything but the machine it is on, and a phone would lose every board when that one
+  machine slept.
+
+**Measured, 2026-10-14**, the built client in Chromium behind a stand-in for the host,
+against two real daemons through a real relay: a sideways swipe turned
+All → machine → machine and back in both modes, the neighbour page drawing tasks in
+task mode; a rightward pull on the first page opened the drawer in task mode. **Not
+seen in WKWebView**, which is the engine the product ships: check it there before
+relying on any of the above for a touch defect.
+
+**Driver.** `webcheck.board.ts`: the gathering rules as pure functions (order, the
+unavailable mark, absent, the groups, the day's cut, the search, the paces, what is
+remembered and what is believed of a row), and off `SessionBrowser.tsx` that both the
+page and its neighbours draw the task list, that the toggle is no tab, and that the two
+switches are never on screen together. Three assertions in other sections changed with
+the code: the strip's inset is spelled three times, the search names what it searches,
+and the foot takes the mode.
+
+**Status.** Reversed by Q3.724, the same day: there is no mode, and the task list is the
+board's page of the pager, where All stood. What is gathered and how is unchanged.
+
+#### Q3.720 — Where is the dispatcher, and what does Settings choose?
+
+**Decision.** The dispatcher is the session nicknamed `DISPATCH_NICKNAME` (Q2.259), so
+the client finds it among the sessions it already lists (`dispatchSession`): on the
+chosen machine before any other, live before ended, newest before older. A phone and a
+desktop agree with nothing stored between them. It heads the task list as a row of its
+own; where none exists the row is the one press that starts it (`startDispatcher`): a
+session create under that nickname with the machine's default agent, by the call New
+session opens on (`defaultRow`), in its first folder, then pinned and titled.
+
+**Settings → Machines → Dispatch** (`DispatchSetting`) names the machine one is started
+on, and which one is preferred where two exist. It is this device's choice, in
+`localStorage`, as the order of the machines is; unset, a dispatcher is wherever one
+runs, and a new one starts on this computer's machine, else the first that can start
+anything (`dispatchHome`).
+
+**Rejected.** *A setting on the server or on a daemon.* The control plane holds none of
+an agent's work and would have to ship first; a per-machine flag cannot say "this one
+and not that one". *Asking for an agent and a folder first.* The owner asked for a
+dispatcher, not a session to configure; it is an ordinary session, so one started by
+hand under the nickname, with any agent in any folder, is the dispatcher too.
+
+**Status.** Amended by Q3.724: it is drawn on the board and in no list of conversations,
+and it is no longer pinned. Parked by Q3.735: nothing draws it, and Settings has no row.
+
+#### Q3.721 — Where is the board?
+
+**Decision.** At `lg`, in the pane a conversation would take, while the list holds
+tasks and nothing is open (`HomePane`): five columns, one per status, each card opening
+exactly what its row opens. It is the list's own view drawn a second time, the same
+tab, needle and filter read from the same module state, so there is no board state to
+disagree with the list. Below `lg` there is no board: a phone has one column, and the
+list is already grouped by status.
+
+**Why not a view switch.** The mockups carried a list/board toggle and a board that
+took the whole window. The rail is one `<aside>` on one stored width that `AppShell`
+alone lays out; a route that hid half of it would be a second layout, and the pane
+with nothing selected was the one empty rectangle in the app.
+
+**Not built.** Dragging a card between columns: a status is mostly not anybody's to
+set (Q2.258), and the two that are, done and reopened, are buttons on the task's page.
+
+**Status.** Amended by Q3.724: the board is the pane while the board is the list's page.
+Amended by Q3.727 (four columns of who holds a task) and Q3.728 (a card is dragged).
+
+#### Q3.722 — What does the form behind `+` ask?
+
+**Decision.** `NewTask`, a pop-up of its own at `/task/new`: the machine, a project on
+it, an agent it offers, and the text. Two buttons, **Add** and **Start**; the daemon
+names the task from its first line, by the rule that names a session.
+
+- **A project is a folder work has already run in**: the folders of that machine's
+  sessions and tasks, then the ones its daemon remembers, with *Another folder* opening
+  a path field for one that is none of those.
+- **The agent is a dropdown of what would start**, in the strip's order and opening on
+  the row New session opens on, through the same `orderStrip`, `startableHere` and
+  `defaultRow`.
+- **The draft outlives the sheet**, as New session's nickname does: module state.
+
+**Why not New session with a text box.** That screen carries the folder in its address
+across a trip into the agent builder and back (`newSessionFor`), and a second mode
+would need the same trip to keep a mode too. It also asks for a nickname and walks a
+directory tree, neither of which a task needs.
+
+**Status.** Current.
+
+#### Q3.723 — What is drawn of a task in a conversation?
+
+**Decision.** Three things, each small.
+
+- **`TaskBand`**, above the conversation and outside its scroller: the status, the
+  summary its agent last wrote, and the way to the task's page. A conversation attached
+  to no task draws nothing. Opening a task opens the conversation doing it
+  (`leadSession`: the one waiting, else working, else newest), so this band is the
+  whole of "the task" on that screen.
+- **`TaskScreen`**, the task's own page, for one with no conversation yet and for what
+  can be done to any: start or start another attempt, mark done or reopen, delete. The
+  actions sit above the brief, which may run to pages.
+- **`ProposalsCard`**, for `tasks_proposed`: a row per proposal with **Add** and
+  **Start**, and both for all that are left. A row is settled by the board
+  (`taskOfProposal`, the proposal's id being the task's key), never by this client's
+  memory, so a proposal taken on a phone reads as taken on a desktop. The card reaches
+  the router only on a press: the transcript is imported where there is no address bar.
+
+**Attach to task** is one row of the session menu, offered only where that machine's
+daemon keeps tasks; pressed, the same panel lists that machine's open tasks.
+
+**Compatibility.** An app older than this draws nothing for `tasks_proposed`
+(`compatibility.md` rule 2), and the dispatcher's own words still say what it proposed.
+
+**Status.** Amended by Q3.725: a task opens as its own page rather than as its
+conversation, and a proposal's assignee and folder can be changed before the press.
+
+#### Q3.724 — Where is the board, now that it is a page rather than a mode?
+
+**Question.** The owner tried Q3.719 to Q3.723 on the stand, 2026-10-14, and answered
+in five points, three of them about place: the dispatcher is not a session, it is only
+for tasks; once it was open there was no way back to the board; and, translated, "make
+the tasks common to every machine: instead of All make Board, where the whole board and
+the dispatcher are, and take the switch at the top away".
+
+**Decision. The board is the pager's first page, where All stood.** `BOARD` is its tab
+id (a stored `all` reads as it, `storedTab`); `boardTab` draws it at the head of the
+strip and of the desktop column, its count what waits on its person there: tasks, and
+the dispatcher's own request (`useBoardWaiting`). On that page the list is the
+dispatcher's row and every machine's tasks by status (`TaskListBody`, `boardView` naming
+no machine); a machine's page holds that machine's conversations and nothing else.
+`ListMode`, `ModeSwitch` and the strip's toggle are gone, and so is All's flat list of
+every machine's conversations: the bell, the machine tabs' counts and the board answer
+what it answered.
+
+- **The pager is unchanged.** The board is one more page the swipe, the pill, the pull
+  and the drawer already knew how to handle, since All was one; `machineSwipe.ts` and
+  `tabPill.ts` were not touched.
+- **At lg the board's entry is also the way back to the board**: pressed from a
+  conversation or a task's page it goes home, where the pane draws the board.
+- **The dispatcher is the board's.** `sessionGroups` files no session under the
+  nickname (`isDispatcher`), so no list of conversations holds it, pinned or not, and
+  `startDispatcher` no longer pins it. At lg its conversation opens beside the board,
+  which stays in view (`dispatch` on `SessionView`, a close at lg only); below lg it is a
+  conversation whose chevron lands on the board's page.
+
+**Rejected.** *Keeping All beside Board.* The owner named the board as All's
+replacement, and a flat list of every conversation was the one view that grew with the
+fleet without saying what needed anybody. *A dispatcher object of the daemon's.* It is
+an agent; an agent is a session, and only the client's drawing of it changed.
+
+**Measured, 2026-10-14**, Chromium, the built client against two real daemons through a
+real relay: the swipe turned Board → machine → machine and back, the drawer opened from
+the board's page, the dispatcher opened beside the board at lg and its close returned
+to it, and no session list drew it. **Not seen in WKWebView.**
+
+**Status.** Amended by Q3.730: the dispatcher is drawn over the board as any conversation is.
+Its dispatcher half is parked by Q3.735.
+
+#### Q3.725 — What does a task's page look like, and who does a task?
+
+**Question.** Point three of the same answer: copy the look of a ticket in Jira,
+Multica and the like, with particular attention to the assignee, since it was
+effectively impossible to choose either the machine or the agent.
+
+**Decision. A task opens as its own page, laid out as a tracker's ticket**
+(`TaskScreen`): the title, edited in place; the actions above everything that may run
+long; a description edited in place; the latest report with who wrote it and when; and
+an activity list of every conversation the task has had, each one press from its
+transcript, ending at when the task was made. Beside it at lg, and under the title on a
+phone, one box of properties in the settings kit's rows: **Status**, **Assignee**,
+**Project**, created and updated.
+
+- **The assignee is a machine and an agent in one choice** (`AssigneeDropdown`): every
+  machine that can take a task, each as a group of the agents New session would offer
+  there in that machine's order (`useRosters`, through `orderStrip` and
+  `startableHere`); a machine that cannot says why on its row. It is the same control in
+  the New task form, on the page and on each row of a proposals card, so a proposal's
+  assignee and folder are changed before its press (proposal editing was Q7.162's).
+- **A change on the same machine is `PATCH /tasks/:id`**, which now takes `agent`,
+  `customAgent` and `cwd`, weighed by the same `launchSpecOf` a start uses: it is who
+  the next start launches, and the conversations already on the task keep theirs.
+- **Another machine moves a task nobody has started** (`moveTask`): made there under
+  its own key, then deleted here, so the proposal it came from still finds it; the folder
+  is the same path where that machine uses it, else one of the same name, else its
+  newest (`folderOn`). A task with a conversation stays where its conversations are.
+- **The status is a choice among five**, two of them, needs you and running, listed and
+  refused with the reason, since its sessions say those.
+
+**Why not the mockups' conversation-first opening** (Q3.723): the owner asked for a
+ticket, and every conversation is one press from it. **Why not Multica's split of agent
+and runtime**: there an agent is bound to one machine when it is made; here an agent is a
+harness any machine may offer, so the machine is part of the choice.
+
+**Measured, 2026-10-14**, Chromium against the scratch daemons: Codex chosen for a task
+on one machine wrote `agent: codex` there; Claude Code on the other moved it, under its
+key, and the page followed; a proposal's assignee changed in the card made the task on
+the machine chosen and not the one proposed.
+
+**Status.** Amended by Q3.727: the assignee may also be nobody or its person, and picking an agent starts it.
+
+#### Q3.726 — Why did a task the agent had finished still read running?
+
+**Question.** Point four: the agent said the task was done, and the band above the
+conversation said running. The daemon was right: read on the stand, the task had
+`done` from the agent's `task_update` four seconds after its start. The client was
+behind it: the band never held the board at the list's pace, so it waited for the idle
+one (`BOARD_IDLE_MS`, 30 seconds), and its person pressed Start again inside that window,
+which is how the task got a second conversation.
+
+**Decision. A status is as fresh as the sessions it is read from.**
+
+- **`liveTaskStatus`** settles the daemon's status again by what this client last heard
+  of the task's own sessions, whose stream and list poll are fresher than the board's
+  read; `useLiveTasks` draws every list, card and band from it. Done is a person's or an
+  agent's word, and only the board says it.
+- **The board is asked again at once** when a task's session changes status
+  (`sessionsKey` in `boardStore.ts`) and when a conversation that is open finishes a
+  `task_update` call (`updatesTask`, in any harness's spelling of the name).
+- **The band holds the board at the list's pace** while it draws a task
+  (`useBoardWatch(entry !== null)`).
+
+**Measured, 2026-10-14**, against a real claude: the band read Running two seconds
+after Start and Done two seconds after that, the moment the agent's call returned.
+
+**Status.** Current.
+
+#### Q3.727 — What are the board's columns, and who is a task's assignee?
+
+**Question.** The same review (Q2.260), points two and six: what Ready is, and columns of
+not assigned, running, review and done, with Not assigned "the default, and an option
+everywhere".
+
+**Decision. Four columns, each who holds a task, and an assignee read off the task.**
+
+- **`BOARD_COLUMNS`**: Not assigned, Running, Review, Done. `columnOf` keeps a task that
+  waits on its person in Running, where its agent still is, marked Needs you on its card
+  and in bold in the list. The list's groups are the same four.
+- **`taskHolder`**: nobody while it is ready, the agent on it while one works, its person,
+  drawn as You, otherwise. Stored nowhere (Q2.260).
+- **Picking an agent starts it**, which is what assigning one means (`assignTask`):
+  nobody puts the task back, You takes it for review, an agent on another machine moves a
+  task nobody started there and starts it. While an agent works the assignee is not
+  changed and Status offers only Done: its conversation is where it is stopped.
+- **Not assigned is in every assignee control** and the default of both that create one:
+  New task and each proposal row, whose one press is named by it, Add or Start. You is
+  offered on the task's page only, since a new task for yourself would land in Review.
+- **A task nobody holds still lives on a machine** and keeps an agent for a later Start:
+  the one proposed, or that machine's first.
+
+**Why the columns are holders.** Each of the owner's four names who has the ball, and
+the trackers they pointed at draw the assignee on the card for the same reason. Ready
+meant "not started", which with assigning as starting is the same task as "nobody's".
+
+**Status.** Amended by Q3.732: the first column is Backlog, where naming an agent moves
+nothing, and Needs you is no longer drawn on a card.
+
+#### Q3.728 — How is a card dragged between columns?
+
+**Question.** Point three: tasks can be dragged; work out the drag's animations.
+
+**Decision.** `useCardDrag`, on the rail's row drag's terms where they apply:
+
+- **A mouse arms on movement** past `MOUSE_SLOP`, never on the press, and is followed on
+  window from then, since the card it left may unmount. A finger drags nothing: the board
+  is drawn at lg, beside a list a finger already scrolls.
+- **The card is lifted into a copy** above every scroller, tilted 1.5 degrees and raised
+  (`LIFTED`, `animate-lift`), following the pointer frame by frame through a ref.
+- **The column under the pointer**, by x and within `LANE_REACH` of its edges so a gap does
+  not flicker, takes the brand's tint and ring; a refused one fades (`dropRefused`: a card
+  an agent is on may only be marked done). Its slot opens where the board's own order will
+  put the card (`columnOrder`), drawn as the card will be there and faded; the place it was
+  lifted from closes once another column would take it.
+- **Let go**, the copy flies into the slot in `SETTLE_MS` and the card wears a ring that
+  fades (`animate-landed`). Its own column, none, a refused one, Escape through overlay.ts
+  or a lost pointer send it back the same way. A page hidden mid-flight pauses its
+  animations, so the card lands `SETTLE_MS` plus 250 ms late instead.
+- **The other cards slide** to where the next render puts them (`FlipBoundary`, measured
+  before the DOM changes and only when the order does); one arriving from another column
+  fades in, since a slide would pass behind its column's scroller. Nothing moves under
+  reduced motion.
+- **Into Running asks which agent starts it** (`AgentMenu`, since Q3.732: what New
+  session offers, grouped by machine, the task's own machine only once it has a
+  conversation); Escape or a press outside sends the card back.
+- **What a press asked for is drawn at once** and held until its answer
+  (`board.hold`, `liveBoard`'s `asked`), whatever a read in between says, as new as the
+  press so Done does not hide it as done long ago; a refusal slides it back and toasts.
+
+**Not built.** An order inside a column: nothing stores one, the newest leads, and a
+drop lands where that order puts it, which the slot shows before the release.
+
+**Measured, 2026-10-14.** Chromium, frame by frame: the lifted copy, the slot in the
+column under it, the flight, the ring. WKWebView, with real mouse events: the slot opened
+in the column under the pointer, the cursor was the closed hand, the drop was kept. Its
+animations were not seen: the stand's screen was locked, which occludes the window and
+pauses them, and that is how the late landing above was found.
+
+**Status.** Amended by Q3.732: into Running a card the backlog named an agent for starts
+it without asking, and a press that moves its own card carries nothing. Q3.733 drags the
+list's lines too.
+
+#### Q3.729 — Why did the board's entry fill late?
+
+**Question.** Point eight: going to Board from the menu, it "does not fill at once, as a
+folder does, as if waiting for something to load".
+
+**Measured, 2026-10-14.** In WKWebView, from a conversation, the board's heading was drawn
+315 ms after the press the first time and 5 to 12 ms after it every other time: the board
+was a lazy chunk, and React reveals a boundary that showed its fallback about 300 ms
+later. In Chromium every entry, a machine's as much as the board's, filled 40 ms after the
+press and then eased in over 150 ms (`transition-colors`).
+
+**Decision.** The board is imported with the shell, so the first switch draws it in 12 ms;
+the entry's fill has no transition; and at lg a push or a pop begins no view transition,
+since it slides nothing there and WebKit holds the old frame while it captures one. The
+last could not be measured: WebKit skips a transition in a hidden page, and the stand's
+was hidden.
+
+**Status.** Current.
+
+#### Q3.730 — How is the dispatcher drawn?
+
+**Question.** Point one: "dispatch is an ordinary session, drawn over the board like a
+chat; it can just be closed".
+
+**Decision.** An ordinary conversation in the pane, over the board as any is: titled
+Dispatch, its close returns to the board at lg, its chevron below. Q3.724's split is gone,
+and so is the board's pressed Dispatch button. It is still in no list of conversations
+(Q3.724): its row heads the board's list and the button opens it.
+
+**Status.** Superseded by Q3.735: the dispatcher is parked.
+
+#### Q3.731 — What does a card look like?
+
+**Question.** Points four, five and seven: separate the columns more plainly, drop the
+running animation, give every card one size, and draw the assignee as Multica, Jira and
+Plane do.
+
+**Read, 2026-10-14.** Multica: key and an agent badge on top, the title on two lines, the
+assignee's round mark and name at the bottom left, the time at the right; lanes tinted,
+rounded, borderless. Jira: a round avatar at the bottom right, a grey silhouette when
+nobody holds it, grey rounded lanes, agents as hexagons. Plane: one row of pills, an
+outlined people icon for nobody. Linear: the avatar top right, an outlined person for
+nobody.
+
+**Decision.** Multica's layout, the agent tracker among them, at one height (`h-30`):
+the project top left and Needs you top right; the title on two lines; at the bottom the
+holder's round mark and name (`HolderAvatar`: a dashed person for nobody, the person's
+initial for You, the harness's mark for an agent), then the machine and the age, its
+conversation's or since the task changed. Each column is a rounded lane of its own
+colour with room between, its header a mark, a name and a count. No mark moves: Running's
+is a still dot. `bg-chip` stays the code chip's own.
+
+**Status.** Amended by Q3.732: no project line and no Needs you; the age is the task's own,
+beside the title, and the machine is a small caption under the holder's name. Amended by
+Q3.737: the title is one line, the card one line lower, and the columns keep their width.
+
+#### Q3.732 — What does the backlog hold, and what does a card's assignee do?
+
+**Question.** The owner's fourth review, 2026-10-15: rename Not assigned to Backlog, where
+naming an agent moves nothing; a card's assignee is pressed to assign or reassign; the
+machine wears a machine's mark, only under an assignee, then "very small, right under the
+agent"; no creator on top, the time beside the title; no Needs you on a card; and a card
+taken back out of Running "flies in from the top left".
+
+**Decision.**
+
+- **Backlog is `ready`, holding nobody or the agent somebody named** (`taskHolder` reads
+  `assigned`, Q2.261). There, picking an agent names it and moves nothing (`assignTask`);
+  anywhere else picking one starts it, nobody puts the task back in the backlog, and You
+  takes it for review. A press is drawn at once as before, an assignee included
+  (`liveBoard`'s `asked` carries one).
+- **A card's assignee is its own control** over the card's press, opening `AgentMenu`, the
+  Dropdown's rows portaled out of the lane's scroller. Never while an agent works. You is
+  offered once an agent has been on it.
+- **Let go in Running**, a card the backlog named an agent for starts it (`startHere`); any
+  other asks who, waiting in Running as nobody's until picked (`useTaskDrop`).
+- **The card**: the title on two lines with the task's age beside it; the holder's mark and
+  name; under the name, in the smallest step and faint, the machine (`MachineLabel`'s
+  small one), only when somebody holds it. The top line was the project, which on a home
+  folder reads as the user's name: gone, with Needs you.
+- **The top left was a press on the card itself**: the agent menu's outside press cancels
+  the pick, the card slides back and remounts, and the drag that same press armed measured
+  the removed node, all zeros. `useCardDrag` now carries nothing whose node is gone.
+- **A landed card's ring is outside its border**, and the lane's scroller cut its top off
+  the first card: the scroller has the ring's room above it.
+
+**Status.** Amended by Q3.736 and Q3.737: You is offered in every column, a pick on another
+machine is drawn there at once, and the title is one line.
+
+#### Q3.733 — What does the list on the board's page do now?
+
+**Question.** Points three, seven and nine of the same review: drag tasks in the list too;
+the running mark was to stop only on the board; a task in the list opens straight into
+its conversation, with the backlog folded.
+
+**Decision.**
+
+- **A line opens the conversation doing it** (`leadRef`), and a task nobody started opens
+  its page.
+- **The backlog starts folded**: its id is held while it is open (`openFolder`), so the
+  folded-ids set needs no default.
+- **A working task's mark breathes as a session's does** (`animate-blink`), everywhere but
+  the board, which passes `still`.
+- **Lines are dragged between groups as cards are between columns**: `useCardDrag` on the
+  list's axis, the same drop (`useTaskDrop`), a folded group taking a line into its
+  heading. Every group is drawn once any task is, empty ones included: drawing them only
+  for the drag pushed the groups below down under the pointer.
+- **The agent menu opens by the card in the area that took the drop**: the list and the
+  board draw one task twice, and the document's first match was the list's line.
+
+**Status.** Amended by Q3.737: done starts folded too.
+
+#### Q3.734 — How does a screen opened from the board lead back to it?
+
+**Question.** Point ten: "from every state in the board folder you can go to the board:
+a back button top left. Remove board/."
+
+**Decision.** `Header`'s `board` draws the chevron at lg too, labelled for the board, and
+goes there (`selectMachine` then `/`). The page of a task always passes it, a conversation
+while the board is the list's page (`boardSelected`). Two chevrons, the second at lg
+only: the first is the back swipe's gate, which a wide screen must not open. The crumb
+`Board / project` is gone.
+
+**Status.** Amended by Q3.736: a task's page opened from a conversation leads back to it.
+
+#### Q3.735 — Where is the dispatcher now?
+
+**Question.** The owner, 2026-10-15: "remove dispatch altogether for now, keep only the MCP
+tool for creating tasks … let it hang, it is not needed now, we will do it later".
+
+**Decision. Parked: nothing draws it, and its code stays for later.**
+
+- No row in the board's list, no button on the board, no Settings row, and the board's tab
+  counts tasks alone. `SessionView` lost its `dispatch` arm.
+- **A session under the nickname is an ordinary conversation again**, listed and pinned as
+  any is (`sessionGroups` no longer files it away), so one already on a machine is not
+  lost.
+- **Kept**: `dispatch.ts`, `Dispatch.tsx` and `DispatchSetting.tsx`, unmounted; the
+  daemon's tools and its instructions for that nickname. An agent in any conversation
+  still proposes tasks, and the card's press creates them (Q2.259): reading "keep the tool"
+  as the propose tool unchanged is mine.
+
+**Status.** Current.
+
+#### Q3.736 — Who may hold a task, how is a pick on another machine drawn, and where does a task's page lead back to?
+
+**Question.** The owner's fifth review, 2026-10-15: "I pick claude code on mac, local is
+drawn first, then mac appears after a while, as if loading: write what I picked at once";
+"from a conversation I follow the link on top to the task, press back there, and land not
+in the conversation, where I logically should, but on the board"; "a task can be put on
+the account's owner, it need not be on an agent".
+
+**Decision.**
+
+- **You is in every assignee control**: the card's menu, the task's page, New task and a
+  proposal's row, in every column. In the backlog it names its person and moves nothing
+  (`assignee: you`, Q2.262), drawn with the person's mark and the machine under it. Start
+  stays an agent's, so Running in the page's status says "assign an agent first".
+- **A pick on another machine is drawn there at once.** "local" was the machine the task
+  still lived on: the press held the agent picked and drew the card where it was until the
+  copy over there was made. `Asked.machine` carries the drawn name of where it is going
+  (`drawnMoving`), and the backlog's move, which held nothing, is held too. Nothing the
+  task here says answers it, since it is deleted once made there.
+- **A task's page opened from a conversation leads back to it.** The entry keeps where it
+  came from, as `origin` does for a pop-up (`originFor`, `screenAt`), through a move to
+  another machine too; `Header`'s `back` names it, "Back to the conversation". From the
+  board or the list it still leads to the board. Never `history.back()`: a reload keeps
+  the entry, and a cold link has none.
+
+**Status.** Current.
+
+#### Q3.737 — What does the fifth review change on the board itself?
+
+**Question.** The same review: done folded in the list as the backlog is; a plus in every
+column, to make a task right there; "after a task is made the chat with the agent does not
+open, it just appears on the board"; cards one line lower, the title on one line "always
+written to the end, as in Plane", each column a little wider, the board running off to the
+right and scrolled there.
+
+**Decision.**
+
+- **Done starts folded in the list too** (`FOLDED_FIRST`, each held by `openFolder` while
+  open).
+- **Each column has a +** opening New task for it (`newTaskInPath`, "New task in Review").
+  Running's offers agents alone, the machine's first already chosen, and starts it; every
+  other adds the task there whoever is picked, an agent only named, review's and done's
+  starting at You (`status`, Q2.262). Added, it lands back on the board.
+- **A start opens the conversation it made** wherever it is pressed: let go in Running,
+  picked on a card or in the agent menu, the page's status (`openStarted`), unless its
+  person went elsewhere while it started. New task's own Start already did, in Chromium and
+  in WKWebView; what left the board in place was a start from the board itself, and the
+  owner's two tasks were made on one machine and started on the other, two seconds apart.
+- **A card is one line lower**: the title on one line, cut where the line ends, the age
+  beside it (`truncate`, `h-25`). **The columns keep their width** (`w-76`), so the board
+  scrolls sideways past the pane, which a drag already rolls.
+
+**Measured, 2026-10-15.** Chromium and WKWebView on the scratch stack: four columns of
+304 px in a 1008 px pane scrolling to 1292, a card of 100 px with an ellipsis, a + in each,
+backlog and done folded; a named card let go in Running with real mouse events opened its
+conversation; Running's + started Claude Code and opened it; a pick on the other machine
+drew that machine from the first frame; a task's page opened from its conversation led
+back to it.
+
+**Status.** Current.
+
+#### Q3.738 — The board's bar, a second press on an assignee, and a lone destructive row's box
+
+**Question.** The owner's sixth review, 2026-10-15: "the slider at the bottom of the board
+should be wider and easier to see"; "a second press on the assignee closes the menu the
+first one opened"; and of a machine's Claude sign-in, "the Sign out button either as wide as
+its box, or the box as wide as the button".
+
+**Decision.**
+
+- **The board's sideways bar is drawn always, 14 px, in the palette's inks**
+  (`board-scroll`): the thin rule every scroller takes made a hairline, and on a Mac an
+  overlay one that hides until a scroll. Both standard properties go back to `auto` there,
+  since either one set turns off `::-webkit-scrollbar` styling.
+- **A second press on the assignee whose menu is open closes it**, and another card's moves
+  it there: the press stops at the button, so the menu's outside press never saw it, and
+  the menu, placed once on mount, stayed where the first card was.
+- **The box is as wide as the button** (`Group`'s `fit`, `DangerRow`'s `whole`), on all
+  three rows where a destructive act stands alone in its box: an agent's sign-out, a
+  machine's retirement, a provider's key. A button as wide as its box was the other offer,
+  and it is the one Q3.218 refuses: armed, the act lands right of the question, where a
+  double press on a wide rest would fall. At rest the button fills the box; armed, the box
+  widens for the question, which starts where the button was. 48 px tall, a one-line
+  question's armed row, so that moves nothing below it.
+
+**Measured, 2026-10-15.** WKWebView: the bar takes 14 px of the board where an overlay one
+takes none (its snapshot draws no scrollbar). Chromium with scrollbars drawn: the track and
+thumb in light and dark. The menu: open, closed, open, then over the other card. Sign out:
+the box 113 px at rest with the button 111 px in it; armed, the question begins at the
+button's left edge.
+
+**Status.** Current.
 
 ## Deployment, packaging and code layout
 
@@ -36349,8 +37265,13 @@ The model-initiated question is nevertheless **off by default**, behind codex's 
 this mode" and asks in prose instead. `codex features enable
 default_mode_request_user_input` turns it on and nothing in this daemon does —
 flipping a vendor's development flag would be deciding on their behalf about a
-feature they have not shipped. `tool_call_mcp_elicitation` *is* stable and on, so
-MCP tool approvals arrive as elicitations with no flag at all.
+feature they have not shipped. `tool_call_mcp_elicitation` *is* stable and on, and
+codex-acp hands its MCP tool approvals to the client as a `session/request_permission`
+naming only the call (Q2.263).
+
+**Status.** Amended by Q2.263: 0.162.1 has a second tool of its own,
+`request_user_input_async`, on with no flag, whose question codex-acp drops; a codex
+session is served `ask_question` and told to use it.
 
 ### Q6.55 — What does a codex permission request look like?
 
@@ -36370,6 +37291,9 @@ is no target, so the card reads "Allow Codex to run this command?" and the uuid
 never reaches a heading — asserted in `webcheck`, negatively as well as positively.
 The quotes are drawn as sent: trimming them would be this client editing a command
 somebody is about to approve.
+
+**Status.** Amended by Q2.263: an MCP tool's approval names only the call, with no
+`rawInput` either.
 
 ### Q6.56 — Does codex have an equivalent of `CLAUDE_CODE_EXECUTABLE`?
 
@@ -37536,7 +38460,9 @@ the harness's tools, and are left as they are.
 tool that belongs here can arrive unannounced. The measurement is two commands and
 is worth repeating at a release; nothing automates it, a census needing a login.
 
-**Status.** Current.
+**Status.** Current. Amended by Q2.263: codex 0.162.1 also hands its model
+`request_user_input_async`, which no setting found withdraws and whose question codex-acp
+drops, so the person's every message points it at `ask_question` instead.
 
 ### Q6.119 — How a backgrounded subagent looks on claude's wire, and where it ends
 
@@ -38192,6 +39118,25 @@ macOS, and on 2.31.0 on Linux in a container. Not measured: the CI job itself, w
 was written on a laptop and has never run, including whether the runner image carries
 zlib's headers (the job installs them where it does not). Nothing below 2.31 is
 measured past the refusal.
+
+### Q6.129 — "Failed to refresh OAuth token: another Claude Code process is refreshing it": whose process?
+
+**Behaviour.** Claude Code's own, on the same computer. Every `claude` a user runs there
+shares one sign-in and one lock, `.oauth_refresh.lock` in its config folder, taken with
+`proper-lockfile` (stale after 60 s, refreshed every 5 s) before the token is refreshed. A
+process that cannot take it, because another holds it or one died holding it, ends its turn
+with this sentence; read off 2.1.300's binary, which also says "usually transient; retry in a
+minute". The agents a daemon runs are such processes, and so are the person's own in a
+terminal: the daemon inherits the sign-in (`agent-login.md`) and keeps no copy of it.
+
+**Consequence.** It says nothing about the token being used elsewhere: the lock is a file
+on that computer. The settings screen's "signed in" is `claude auth status`, which says a
+sign-in exists and not that a refresh will succeed now. And this error is not
+`authentication_failed`, so `isAuthFailure` does not replace the agent. Met by the owner on
+2026-10-15 on another machine than the Mac mini, after the app had been replaced, which
+stops a daemon and every agent of it; signing out and in again was the way past it.
+
+**Status.** Current.
 
 ## Open questions and deliberate non-goals
 
@@ -45058,3 +46003,32 @@ ones measured above, sent from a later build of the same bundle.
 
 **Status.** Current. The decision of 2026-10-11 was built and is taken out; the
 removal is not driven on a real Mac.
+
+### Q7.162 — What about tasks is knowingly not built?
+
+**Position.** The board (Q2.258 to Q2.261, Q3.719 to Q3.735) is a first cut, and these
+are its edges, each left on purpose or on the owner's word.
+
+- **Teams and executors**: named agents per project, and who may be handed what. Out of
+  scope by the owner's word, 2026-10-14; a proposal names a harness.
+- **Jobs and task ids** as the mockups and the trackers draw them (`MUL-12`). A task is
+  named by its title and found by search; its address is its session's nickname.
+- **The bell as a queue to work through**, and **Hand off**. The bell still opens the
+  longest-waiting session.
+- **A proposal's title and brief** are taken as written; its assignee and folder can be
+  changed first (Q3.725).
+- **Moving a task that has a conversation** to another machine: its conversations live
+  where it is (Q3.725).
+- **An order inside a column**, and **a finger dragging a card** or a line (Q3.728,
+  Q3.733).
+- **The dispatcher**, parked on the owner's word, 2026-10-15 (Q3.735).
+- **A person other than this account's as a task's holder.** You is whoever is looking.
+- **How long a task has waited.** The age on a card and a line is the task's own (Q3.732);
+  nothing records when a task began to need its person.
+- **The other five harnesses.** claude was driven end to end; the rest ask permission
+  for each of the four tools as for any MCP tool, and none was measured.
+- **`pnpm client` verbs** for tasks.
+- **WKWebView's animations.** The board, its drag and its timings were driven there; its
+  animations were not seen, the stand's screen being locked (Q3.728, Q3.729).
+
+**Status.** Not built.

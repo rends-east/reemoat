@@ -1,3 +1,4 @@
+import { STATUS_LABEL } from "./board";
 import type { Route } from "./router";
 import { isOverlayPath } from "./ui/overlay";
 import { marketUpFrom } from "./market";
@@ -20,12 +21,14 @@ export function depthOf(route: Route): number {
     case "gate":
       return 0;
     case "session":
+    case "task":
       return 1;
     case "legal":
       return 1;
     case "plugin":
       return 1;
     case "new":
+    case "newTask":
       return 1;
     case "agent":
       return route.step === null ? 2 : 3;
@@ -57,9 +60,12 @@ export function sheetKind(route: Route): string | null {
       return "plugins";
     case "plugin":
       return "plugin";
+    case "newTask":
+      return "task";
     case "home":
     case "gate":
     case "session":
+    case "task":
     case "legal":
       return null;
   }
@@ -69,6 +75,7 @@ export function isSheet(route: Route): boolean {
   return (
     route.name === "settings" ||
     route.name === "new" ||
+    route.name === "newTask" ||
     route.name === "agent" ||
     route.name === "plugin" ||
     route.name === "plugins"
@@ -125,6 +132,8 @@ export function sheetTitle(route: Route): string | null {
       return null;
     case "new":
       return "New session";
+    case "newTask":
+      return route.column === null ? "New task" : `New task in ${STATUS_LABEL[route.column]}`;
     case "agent":
       switch (route.step) {
         case "llm":
@@ -138,6 +147,7 @@ export function sheetTitle(route: Route): string | null {
     case "home":
     case "gate":
     case "session":
+    case "task":
     case "legal":
       return null;
   }
@@ -188,10 +198,12 @@ export function upFrom(route: Route, under: string, origin: string | null = null
     case "gate":
       return null;
     case "session":
+    case "task":
       return "/";
     case "legal":
       return "/";
     case "new":
+    case "newTask":
     case "plugin":
       return under;
     // Not under, which would close the whole stack; origin wins only when another pop-up opened the builder.
@@ -215,8 +227,17 @@ export function overlayKind(pathname: string): string {
   return pathname.split("/")[1] ?? "";
 }
 
-/** Set only when one overlay opens a different one; walking deeper inside one keeps held. */
+/** A conversation or a task's page, read off a path by the segments the router parses them by. */
+export function screenAt(pathname: string): "session" | "task" | null {
+  const parts = pathname.split("/").filter((part) => part.length > 0);
+  if (parts[0] !== "m" || parts[1] === undefined || parts[3] === undefined) return null;
+  return parts[2] === "s" ? "session" : parts[2] === "t" ? "task" : null;
+}
+
+/** Set only when one overlay opens a different one, or a conversation its task's page; walking deeper inside one keeps held. */
 export function originFor(here: string, target: string, held: string | null): string | null {
+  // A task's page leads back to the conversation it was opened from, through a move to another machine too (Q3.736).
+  if (screenAt(target) === "task") return screenAt(here) === "session" ? here : screenAt(here) === "task" ? held : null;
   if (!isOverlayPath(target)) return null;
   if (!isOverlayPath(here)) return null;
   return overlayKind(here) === overlayKind(target) ? held : here;

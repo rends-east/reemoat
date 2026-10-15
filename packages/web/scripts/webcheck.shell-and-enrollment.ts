@@ -314,8 +314,14 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
   const cursorPattern = new RegExp(
     `\\bcursor\\s*[:=]\\s*["'\`]?(?:${CURSOR_VALUES})\\b|\\bcursor-(?:${CURSOR_VALUES})\\b`,
   );
-  // The session title is the second, on the owner's word: a name edited in place shows the text caret (Q3.665).
-  const CURSOR_ALLOWED: readonly string[] = ["src/ui/MentionLink.tsx", "src/ui/PaneHandle.tsx", "src/ui/SessionView.tsx"];
+  // The session title is the second, on the owner's word: a name edited in place shows the text caret (Q3.665). The board's
+  // card drag holds the closed hand while it carries a card (Q3.728).
+  const CURSOR_ALLOWED: readonly string[] = [
+    "src/ui/MentionLink.tsx",
+    "src/ui/PaneHandle.tsx",
+    "src/ui/SessionView.tsx",
+    "src/ui/board/cardDrag.ts",
+  ];
   const cursorOffenders = files
     .filter((file) => cursorPattern.test(stripped(readFileSync(file, "utf8"))))
     .map((file) => file.slice(file.indexOf("/packages/web/") + "/packages/web/".length));
@@ -342,7 +348,8 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
       .filter((file) => rawUtility.test(readFileSync(file, "utf8")))
       .map((file) => file.slice(file.indexOf("/packages/web/") + "/packages/web/".length))
       .sort(),
-    [...CURSOR_ALLOWED].sort(),
+    // The card drag sets the cursor as a style on the document while it carries a card, so it writes no utility.
+    CURSOR_ALLOWED.filter((file) => file !== "src/ui/board/cardDrag.ts").sort(),
   );
 
   // `navigator.clipboard` exists only in a secure context, so only ui/clipboard.ts may name it, and it keeps an execCommand fallback.
@@ -1135,7 +1142,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   const headerSrc = stripComments(readFileSync(new URL("../src/ui/Header.tsx", import.meta.url), "utf8"));
   check(
     "and on a phone it is the top bar's size, as the conversation's back is: a thumb's target, not a chip",
-    [/size="bar"/.test(phoneTrigger), /label="Back to sessions"[\s\S]{0,120}?size="bar"/.test(headerSrc)],
+    [/size="bar"/.test(phoneTrigger), /label=\{label\}\s+onClick=\{leave\}\s+size="bar"/.test(headerSrc)],
     [true, true],
   );
   check("and the column's needs no breakpoint, being inside the lg aside", /\blg:/.test(deskTrigger), false);
@@ -1145,7 +1152,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     ["the phone's tab strip", browser],
     ["the desktop column", column],
   ] as const) {
-    check(`${what} is drawn from the tab list and the All tab beside it`, [/machineTabs\(/.test(code), /allTab\(/.test(code)], [true, true]);
+    check(`${what} is drawn from the tab list and the board's tab beside it`, [/machineTabs\(/.test(code), /boardTab\(/.test(code)], [true, true]);
     check(`${what} selects through the store`, /selectMachine\(/.test(code), true);
     check(`${what} reveals the selection on a change rather than every render`, /\}, \[selected/.test(code), true);
   }
@@ -1164,7 +1171,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     ],
     [true, false, true],
   );
-  check("and the fill it moved onto carries a transition of its own", /transition-colors/.test(column), true);
+  check("and the fill lands at once: one that eased in read as the board still loading (Q3.729)", /transition-colors/.test(column), false);
   check(
     "and the count on top of it keeps a ring, or the two fills merge",
     /bg-brand px-1 text-2xs font-semibold text-on-brand ring-2 ring-ink/.test(column),
@@ -1237,7 +1244,7 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [/!tabs\.some\(\(tab\) => tab\.id === going\.id\)\) end\(\)/.test(machineDrag), /\}, \[tabs, end\]\)/.test(machineDrag)],
     [true, true],
   );
-  check("All is refused rather than being absent by luck", /id === ALL_MACHINES/.test(machineDrag), true);
+  check("the board is refused rather than being absent by luck", /id === BOARD/.test(machineDrag), true);
   check("and the class that would take scrolling from the list is never used", /touch-none/.test(machineDrag), false);
   const sheet = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
   const tapAt = sheet.indexOf(".tap {");
@@ -1370,7 +1377,8 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   const tabInset = String(tabPad + pillPad);
   report("all three insets were found to compare", [tabPad, pillPad, plusPad].every(Number.isFinite), `tab px-${tabPad} + pill px-${pillPad}, + px-${plusPad}`);
   check("a label sits as far in as the + does, tab and pill together", tabPad + pillPad, plusPad);
-  check("and All and every machine tab spell it the same way", (strip.match(new RegExp(`items-center px-${tabPad} text-xs`, "g")) ?? []).length, 2);
+  // Two again since the board took All's place and the Tasks toggle went (Q3.724).
+  check("and the board and every machine tab spell it the same way", (strip.match(new RegExp(`items-center px-${tabPad} text-xs`, "g")) ?? []).length, 2);
   check("the cut edge fades by twice a tab's inset", /w-8 bg-gradient-to-l/.test(strip) && Number(tabInset) * 2 === 8, true);
   const { MACHINE_COLUMN_PX: columnPx } = await import("../src/ui/rail.js");
   // 80 is the owner's Telegram-width column (Q3.666); the phone's tabs still never move it.
@@ -1461,22 +1469,21 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   report("the refusal sweep can see one", /label="Search everything/.test('label="Search everything — not built yet"'), "positive control");
   check(
     "the header's search is the one that works, and there is no second, dead one",
-    [/label="Search everything/.test(browser), /aria-label="Search sessions"/.test(browser)],
-    [false, true],
+    [
+      /label="Search everything/.test(browser),
+      // One field on every page: it names what the list under it holds.
+      /aria-label=\{board \? "Search tasks" : "Search sessions"\}/.test(browser),
+      (browser.match(/type="search"/g) ?? []).length,
+    ],
+    [false, true, 1],
   );
-  // Q3.696: All is one group across machines whose ranks share one clock, so its rows drag as a folder's do.
+  // Q3.724 took Q3.696's group away with All: no list draws every machine's conversations, so no drag spans two machines.
   {
     const rowDrag = stripComments(readFileSync(new URL("../src/ui/rowDrag.ts", import.meta.url), "utf8"));
-    const allGroup = browser.slice(browser.indexOf('name="All chats"'), browser.indexOf("</GroupSection>", browser.indexOf('name="All chats"')));
     check(
-      "the All tab's rows carry the drag, and the drag measures their group",
-      [
-        /drag=\{drag\.bind\(row, ALL_FOLDER\)\}/.test(allGroup),
-        /shift=\{drag\.shiftFor\(ALL_FOLDER, index, row\.key\)\}/.test(allGroup),
-        /space=\{drag\.spaceFor\(ALL_FOLDER\)\}/.test(allGroup),
-        /new Set<string>\(\[PINNED_FOLDER, ALL_FOLDER, folderId\(/.test(rowDrag),
-      ],
-      [true, true, true, true],
+      "no group of conversations spans machines, and the drag measures a pin's group or a folder's",
+      [/name="All chats"/.test(browser), /ALL_FOLDER/.test(browser + rowDrag), /new Set<string>\(\[PINNED_FOLDER, folderId\(/.test(rowDrag)],
+      [false, false, true],
     );
   }
   // Q3.717: the header takes no selection, so Q3.696's third-click handler went with it; a scripted range there is drawn by nothing.

@@ -458,18 +458,18 @@ function SignOutButton({
   };
 
   return (
-    <Group>
+    <Group fit>
       <TwoStep
         armed={confirming}
         onArm={setConfirming}
         align="end"
-        className={TWO_STEP_ROW}
+        className={confirming ? TWO_STEP_ROW : ""}
         question={<>Sign {harnessName(agent)} out on this machine?</>}
         act={{ label: "Sign out", danger: true, icon: LogOut }}
         disabled={daemon === undefined}
         onAct={run}
         onFailure={(cause) => toast("error", `Couldn't sign ${harnessName(agent)} out — ${errorText(cause)}.`)}
-        rest={<DangerRow label="Sign out" icon={LogOut} onClick={() => setConfirming(true)} />}
+        rest={<DangerRow label="Sign out" icon={LogOut} whole onClick={() => setConfirming(true)} />}
       />
     </Group>
   );

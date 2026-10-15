@@ -6,7 +6,7 @@ import { isTypingInto } from "../keys";
 import { moveRow } from "../agentStrip";
 import { setMachineOrder, dropSlot } from "../machineOrder";
 import { HAPTIC_MS, MOUSE_SLOP, PRESS_MS, PRESS_SLOP, driftFor, useTouchGesture } from "./rowDrag";
-import { ALL_MACHINES, type MachineTab, type MachineTabId } from "./groups";
+import { BOARD, type MachineTab, type MachineTabId } from "./groups";
 
 /** The keys each axis takes, exposed on the entry itself since it has no handle to name. */
 const SHORTCUTS = {
@@ -262,8 +262,8 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
     const node = from.closest<HTMLElement>("[data-machine]");
     if (node === null) return;
     const id = (node.dataset["machine"] ?? "") as MachineTabId;
-    // All carries a data-machine but is not a machine; this membership test is what refuses it.
-    if (id === ALL_MACHINES || !latest.current.some((tab) => tab.id === id)) return;
+    // The board carries a data-machine but is not a machine; this membership test is what refuses it.
+    if (id === BOARD || !latest.current.some((tab) => tab.id === id)) return;
     // Set at touchstart: iOS decides on its long-press callout there.
     node.style.webkitUserSelect = "none";
     node.style.userSelect = "none";

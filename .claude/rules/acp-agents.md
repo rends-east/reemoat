@@ -45,9 +45,10 @@ paths:
   (claude `_askUserQuestionCustomAnswer`, codex `codex.isOtherAnswer`, each with a
   `questionId`): both agents use that text instead of the selection, so the card sends
   one answer. Q3.592.
-- codex's own question is behind `default_mode_request_user_input`, off and never
-  flipped; `tool_call_mcp_elicitation` is on, so MCP approvals arrive as elicitations.
-  Q6.54.
+- codex: `request_user_input` waits on `default_mode_request_user_input`, never flipped
+  (Q6.54); 0.162.1's `request_user_input_async` is on, its question an `agentMessage`
+  codex-acp drops. So it gets `ask_question` and a note naming it (`ASK_NOTE`); an MCP
+  approval is a permission (`agent-messaging.md`).
 - **Gated, not merely undeclared**: `LaunchOptions.elicitation` is required, the handler
   always registered and `methodNotFound` when declined, `REEMOAT_ELICITATION=0`
   withdraws it. Q2.18.

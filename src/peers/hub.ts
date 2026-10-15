@@ -236,7 +236,7 @@ export class PeerHub {
   private readonly policyStore: PeerPolicyStore | null;
   private policy: PeerPolicy;
   private readonly network: PeerNetwork | null;
-  private readonly machineId: string | null;
+  readonly machineId: string | null;
   private readonly outbox: PeerOutbox | null;
   private outboxTimer: NodeJS.Timeout | null = null;
   private pumping: Promise<void> | null = null;
@@ -244,6 +244,7 @@ export class PeerHub {
   private readonly warn: ((detail: string) => void) | null;
   private readonly askWaitMs: number;
   private endpoint: string | null = null;
+  private tasksServed = false;
   // One per launch: a bearer stops naming the session when its process ends or a new one is handed out.
   private readonly tokenBySession = new Map<string, string>();
   private readonly sessionByToken = new Map<string, string>();
@@ -348,7 +349,7 @@ export class PeerHub {
     const session = this.registry.get(sessionId);
     const messaging = this.allowed && session?.peerMessages !== false;
     // Also served with messaging off: a question or a file is for the session's own person, which no messaging switch is about (Q2.250, Q2.252).
-    if (!messaging && session?.takesPosedQuestions !== true && session?.sendsFiles !== true) return [];
+    if (!messaging && session?.takesPosedQuestions !== true && session?.sendsFiles !== true && !this.tasksServed) return [];
     const bearer = launch?.bearer ?? null;
     const token = bearer?.token ?? randomBytes(32).toString("base64url");
     this.tokenBySession.set(sessionId, token);
@@ -396,6 +397,23 @@ export class PeerHub {
     return this.registry.get(callerId)?.sendsFiles === true;
   }
 
+  /** Once a task desk is open: its tools are for the session's own person, so the server is injected whatever messaging says (Q2.259). */
+  serveTasks(): void {
+    this.tasksServed = true;
+  }
+
+  /** The linked machines a caller's agent may read a board from: list_agents' own switches, read live (Q2.244). */
+  linksFor(callerId: string): PeerLink[] {
+    if (this.network === null || !this.reachesOthers || this.callRefusal(callerId) !== null) return [];
+    const at = this.now();
+    return this.network.links().filter((link) => link.expiresAt > at);
+  }
+
+  askLink(link: PeerLink, path: string, timeoutMs: number): Promise<PeerAnswer> {
+    if (this.network === null) return Promise.resolve({ ok: false, status: 0, code: "no_network", relayUrl: null });
+    return this.network.request(link, { method: "GET", path }, timeoutMs);
+  }
+
   /** send_file: a file from this machine, put in the caller's own transcript (Q2.252). */
   async sendFile(callerId: string, args: Record<string, unknown>, signal: AbortSignal | null = null): Promise<SendFileResult> {
     const session = this.registry.get(callerId);
@@ -404,12 +422,17 @@ export class PeerHub {
   }
 
   /** ask_question: shown to the caller's own person as a card, answered in the call or later as their message (Q2.250, Q2.251). */
-  async pose(callerId: string, args: Record<string, unknown>, signal: AbortSignal | null = null): Promise<PoseResult> {
+  async pose(
+    callerId: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal | null = null,
+    named: string | null = null,
+  ): Promise<PoseResult> {
     const session = this.registry.get(callerId);
     if (session === undefined) return { ok: false, message: "this session no longer exists" };
     const posed = parseAskArguments(args);
     if (typeof posed === "string") return { ok: false, message: posed };
-    return await session.poseQuestion(posed, this.askWaitMs, signal);
+    return await session.poseQuestion(posed, this.askWaitMs, signal, named);
   }
 
   /** Why a caller holding a valid bearer may not use the tools now; a tool error, never a 401, which an MCP client reads as a sign-in. */

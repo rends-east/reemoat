@@ -80,14 +80,14 @@ Shaped around **does anything anywhere need me**, answered on the rows:
   glyph-sized mark: bell dot, blocked count and dot, selected machine's 28px chip, switch
   knob (Q3.694). `raised` is state; a popover's chosen row gets a trailing check (Q3.684).
   Q3.209, Q3.624.
-- **One search control, the live one** (menu, field, filter, bell). Fleet-wide search will
-  be its scope under `All`. Reverses Q3.211.
+- **One search control, the live one** (menu, field, filter, bell); the board's searches
+  tasks (Q3.724). Reverses Q3.211.
 - **The menu is a left drawer, the only non-route**: `MenuDrawer`, portaled,
   `useDismissible("sheet")`, never `"menu"` (`j`/`k` would walk the list behind). Two
   triggers and a pull (Q3.657), state in `App`; `usePathname()` lets Android's Back close
   it. No ✕ (owner's call; VoiceOver on iOS has no exit), pinned. Q3.628.
 - **`visibleRows` in `groups.ts` is the single render order**, shared with `keyboard.ts`,
-  deduplicated by key; `orderSessions` applies in `rowsOf`, `underFilter`, `allRows`. The
+  deduplicated by key, empty on the board; `orderSessions` in `rowsOf`, `underFilter`. The
   JSX must call `pinnedFor` and `orphansFor` (asserted off `SessionBrowser.tsx`, mounted
   twice: `lg` aside and `lg:hidden` screen); a new group owes the same. Q3.101.
 - **Pinning moves**: `place` in `store.ts` pushes to `pinned`, returns `null`;
@@ -100,7 +100,7 @@ Shaped around **does anything anywhere need me**, answered on the rows:
   `touchstart`, never `pointerdown`; a mouse captures at `arm`, never the press. Only
   `target.index === origin.index` is a no-op. ⋮ on every row. Q3.574, Q3.576, Q3.577. An
   empty machine still gets a tab and create button; Pinned is cut to the selected machine,
-  all under All. Q3.550.
+  none on the board (Q3.724). Q3.550.
 - **Paths**: `displayCwd` cuts the longest of the daemon's `REEMOAT_ROOTS` (`~/thing`,
   fetched once into `rootsByMachine`), else `shortPath`, never an invented prefix. A row
   shows its machine, no path (Q3.681). Q3.441.

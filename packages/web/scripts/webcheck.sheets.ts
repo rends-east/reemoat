@@ -367,7 +367,7 @@ process.stdout.write("\nthe pill that marks a machine, and how it travels\n");
   const css = stripComments(srcFile("index.css"));
   check(
     "at rest the pill is the selected tab's own, so a scroll, a reorder, a resize or a first render moves it with the tab",
-    [/className=\{`inline-flex h-8 items-center gap-1\.5 rounded-full px-3 \$\{tab\.selected \? "bg-raised" : ""\}`\}/.test(browser), /<TabLabel tab=\{all\} \/>/.test(browser), /<TabLabel tab=\{tab\} \/>/.test(browser)],
+    [/className=\{`inline-flex h-8 items-center gap-1\.5 rounded-full px-3 \$\{tab\.selected \? "bg-raised" : ""\}`\}/.test(browser), /<TabLabel tab=\{board\} \/>/.test(browser), /<TabLabel tab=\{tab\} \/>/.test(browser)],
     [true, true, true],
   );
   check(
@@ -719,7 +719,7 @@ process.stdout.write("\na conversation dragged back to the list\n");
   check(
     "the list under it is the list's own element on both routes, so landing remounts nothing",
     [
-      /<PhoneList key="list" state=\{state\} onMenu=\{onMenu\} beneath \/>\s*<SessionView key="session"/.test(app),
+      /<PhoneList key="list" state=\{state\} onMenu=\{onMenu\} beneath \/>\s*<SessionView\s+key="session"/.test(app),
       /<PhoneList key="list" state=\{state\} onMenu=\{onMenu\} beneath=\{false\} \/>/.test(app),
       /if \(beneath && rows === null\) return null;/.test(app),
       /data-back-under=\{beneath \? "" : undefined\}/.test(app),
@@ -743,7 +743,9 @@ process.stdout.write("\na conversation dragged back to the list\n");
       /export function navigateDrawn\(path: string\): void \{\s+go\(path, false, undefined, true\);/.test(router),
       /export function navigate\(path: string, replace = false, alongside\?: \(\) => void\): void \{\s+go\(path, replace, alongside, false\);/.test(router),
       /if \(\s*drawn \|\|\s+move === null \|\|/.test(router),
-      /onClick=\{\(\) => navigate\("\/"\)\}/.test(header),
+      /const leave = back !== null \? \(\) => navigate\(back\.to\) : board \? toBoard : \(\) => navigate\("\/"\);/.test(header) &&
+        /onClick=\{leave\}/.test(header) &&
+        /const toBoard = \(\): void => \{\s+selectMachine\(BOARD\);\s+navigate\("\/"\);/.test(header),
     ],
     [true, true, true, true],
   );

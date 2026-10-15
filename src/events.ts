@@ -30,6 +30,7 @@ export type SessionEvent =
   | AgentLogEvent
   | ContextClearedEvent
   | FileSentEvent
+  | TasksProposedEvent
   | OtherUpdateEvent
   | ErrorEvent;
 
@@ -324,6 +325,24 @@ export interface FileSentEvent {
   type: "file_sent";
   file: StoredFileRef;
   toolCallId: string | null;
+}
+
+/** One task an agent proposes through propose_tasks; `id` is what the task it becomes is keyed on (Q2.259). */
+export interface TaskProposal {
+  id: string;
+  /** null is the machine this log is on. */
+  machineId: string | null;
+  machine: string | null;
+  project: string;
+  agent: string;
+  title: string;
+  brief: string;
+}
+
+/** Proposals shown to the session's own person; nothing is created until they press. */
+export interface TasksProposedEvent {
+  type: "tasks_proposed";
+  proposals: TaskProposal[];
 }
 
 export interface AgentLogEvent {
@@ -814,6 +833,15 @@ function locationBytes(locations: readonly FileLocation[]): number {
   return total;
 }
 
+function proposalBytes(proposals: readonly TaskProposal[]): number {
+  let total = 0;
+  for (const one of proposals) {
+    total += 96 + one.id.length + (one.machineId?.length ?? 0) + (one.machine?.length ?? 0);
+    total += one.project.length + one.agent.length + one.title.length + one.brief.length;
+  }
+  return total;
+}
+
 export function estimateBytes(event: SessionEvent): number {
   switch (event.type) {
     case "text":
@@ -833,6 +861,8 @@ export function estimateBytes(event: SessionEvent): number {
       return 64 + event.agentSessionId.length + event.previousAgentSessionId.length;
     case "file_sent":
       return 64 + refBytes([event.file]) + (event.toolCallId?.length ?? 0);
+    case "tasks_proposed":
+      return 64 + proposalBytes(event.proposals);
     case "file_change":
       return 128 + event.path.length + event.newText.length + (event.oldText?.length ?? 0);
     case "tool_call":
@@ -1011,6 +1041,8 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "context_cleared":
     // A ref is bounded where it is made (200 bytes of name), and a clipped one names no file.
     case "file_sent":
+    // Bounded where it is made (propose_tasks refuses past its own limits): a clipped proposal would start the wrong work.
+    case "tasks_proposed":
     case "session_started":
     case "status":
     case "turn_end":

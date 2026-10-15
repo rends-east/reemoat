@@ -1,13 +1,15 @@
-import { Layers, Plus } from "lucide-react";
+import { Plus, SquareKanban } from "lucide-react";
 import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { mayAddMachine } from "../quota";
-import { navigate } from "../router";
+import { navigate, usePathname } from "../router";
 import { settingsPath } from "../settings";
 import { sessionGroups, type AppState } from "../store";
 import { Icon, Monogram } from "./bits";
 import { useMachineDrag, type MachineDrag } from "./machineDrag";
+import { useBoardWaiting } from "./board/TaskList";
 import {
-  allTab,
+  BOARD,
+  boardTab,
   currentView,
   groupsVersion,
   machineTabs,
@@ -22,8 +24,9 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
   const groups = sessionGroups(state);
   const view = currentView(groups);
   const tabs = machineTabs(groups, view);
-  const all = allTab(groups, view);
-  const selected = view.all ? null : view.machine;
+  const board = boardTab(view, useBoardWaiting(state));
+  const selected = view.board ? null : view.machine;
+  const path = usePathname();
   const scroller = useRef<HTMLDivElement | null>(null);
   const drag = useMachineDrag({ axis: "y", tabs });
 
@@ -59,7 +62,15 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
         </button>
       </div>
       <div ref={hold} className="min-h-0 flex-1 overflow-y-auto">
-        <MachineEntry tab={all} glyph={<Icon as={Layers} size={16} />} />
+        {/* The board, wherever the pane is: a conversation or a task's page is left for the board itself (Q3.724). */}
+        <MachineEntry
+          tab={board}
+          glyph={<Icon as={SquareKanban} size={16} />}
+          onSelect={() => {
+            selectMachine(BOARD);
+            if (path !== "/") navigate("/");
+          }}
+        />
         {tabs.map((tab, index) => (
           <MachineEntry key={tab.id} tab={tab} index={index} drag={drag} />
         ))}
@@ -90,19 +101,19 @@ function MachineEntry({
   glyph,
   index,
   drag,
+  onSelect = () => selectMachine(tab.id),
 }: {
   tab: MachineTab;
   glyph?: ReactNode;
-  /** Absent on `All`, which is not a machine and may not be reordered. */
+  /** Absent on the board, which is not a machine and may not be reordered. */
   index?: number;
   drag?: MachineDrag;
+  onSelect?: () => void;
 }): ReactNode {
   // Selection fills the mark, never the tile, so it cannot misalign with the session list's selected row (Q3.209, Q3.694).
-  // The colour transition sits on the chip because .tap's transition is not inherited by it.
+  // At once and with no fade: a fill that eased in read as the board still loading (Q3.729).
   const tile = tab.selected ? "" : "hover:bg-raised/60";
-  const chip = tab.selected
-    ? "bg-brand text-on-brand transition-colors"
-    : "bg-raised text-muted transition-colors";
+  const chip = tab.selected ? "bg-brand text-on-brand" : "bg-raised text-muted";
   const movable = drag !== undefined && index !== undefined;
   const shift = movable ? drag.shiftFor(index) : 0;
   const lifted = movable && drag.dragging === tab.id;
@@ -110,7 +121,7 @@ function MachineEntry({
   return (
     <button
       type="button"
-      onClick={() => selectMachine(tab.id)}
+      onClick={onSelect}
       aria-pressed={tab.selected}
       title={tab.name}
       style={shift === 0 ? undefined : { transform: `translateY(${String(shift)}px)` }}

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
+import { BOARD_COLUMNS, type BoardColumn } from "./board";
 import { parseGateScreen, type GateScreen } from "./gate";
 import { parseLegalDoc, type LegalDoc } from "./legal";
 import { parseMarketRoute, type MarketRoute } from "./market";
@@ -23,6 +24,10 @@ export type Route =
   | { name: "home" }
   | { name: "session"; ref: SessionRef }
   | { name: "new"; machineId: MachineId | null; cwd: string | null }
+  /** A task that has no conversation to open to, or whose own page was asked for; the id is its machine's (Q3.719). */
+  | { name: "task"; machineId: MachineId; taskId: string }
+  /** `column` is a column's own +, which makes the task there (Q3.737); null is New task, which an agent picked starts. */
+  | { name: "newTask"; machineId: MachineId | null; column: BoardColumn | null }
   | {
       name: "agent";
       machineId: MachineId;
@@ -62,6 +67,13 @@ function parse(pathname: string): Route {
       cwd: parts[2] === undefined ? null : decodeSegment(parts[2]),
     };
   }
+  if (parts[0] === "task" && parts[1] === "new") {
+    if (parts[2] === "in") {
+      const column = BOARD_COLUMNS.find((one) => one === parts[3]) ?? null;
+      return { name: "newTask", machineId: null, column };
+    }
+    return { name: "newTask", machineId: parts[2] === undefined ? null : machineId(decodeSegment(parts[2])), column: null };
+  }
   if (parts[0] === "agent" && parts[1] !== undefined) {
     const marker = parts[2] === "edit" || parts[2] === "from" ? parts[2] : null;
     const named = marker !== null && parts[3] !== undefined ? decodeSegment(parts[3]) : null;
@@ -94,6 +106,9 @@ function parse(pathname: string): Route {
       machineId: machineId(decodeSegment(parts[1])),
       pluginId: decodeSegment(parts[2]),
     };
+  }
+  if (parts[0] === "m" && parts[1] !== undefined && parts[2] === "t" && parts[3] !== undefined) {
+    return { name: "task", machineId: machineId(decodeSegment(parts[1])), taskId: decodeSegment(parts[3]) };
   }
   if (parts[0] === "m" && parts[1] !== undefined && parts[2] === "s" && parts[3] !== undefined) {
     return {
@@ -150,7 +165,9 @@ function announce(alongside?: () => void, drawn = false): void {
     drawn ||
     move === null ||
     typeof document.startViewTransition !== "function" ||
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+    // At lg a push or a pop slides nothing (index.css), yet WebKit holds the old frame while it captures one: none is begun (Q3.729).
+    ((move === "push" || move === "pop") && window.matchMedia("(min-width: 64rem)").matches)
   ) {
     tell();
     alongside?.();
@@ -220,6 +237,19 @@ export function agentFromHarnessPath(
   cwd?: string | null,
 ): string {
   return fromPath(machine, harness, cwd);
+}
+
+export function taskPath(machine: MachineId, taskId: string): string {
+  return `/m/${encodeURIComponent(machine)}/t/${encodeURIComponent(taskId)}`;
+}
+
+export function newTaskPath(machine?: MachineId | null): string {
+  return machine === undefined || machine === null ? "/task/new" : `/task/new/${encodeURIComponent(machine)}`;
+}
+
+/** A column's own +: the task is made in that column (Q3.737). */
+export function newTaskInPath(column: BoardColumn): string {
+  return `/task/new/in/${column}`;
 }
 
 export function sessionPath(ref: SessionRef): string {

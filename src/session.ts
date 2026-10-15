@@ -479,6 +479,11 @@ export class Session {
     return this.client.acceptsImages();
   }
 
+  /** Whether this launch was handed this daemon's MCP server, so a note may name its tools. */
+  get holdsPeerServer(): boolean {
+    return this.mcpServers.some((server) => server.name === PEER_SERVER_NAME);
+  }
+
   onCommandsChanged(listener: (commands: AgentCommands) => void): () => void {
     this.commandListeners.add(listener);
     return () => this.commandListeners.delete(listener);
@@ -1251,8 +1256,16 @@ export class Session {
     return cursorPlanResponse(answer);
   }
 
-  /** The ask_question call now reaching this daemon's server, once: it is the one whose permission was just answered. */
-  claimPosedCall(): string | null {
+  /**
+   * The ask_question call now reaching this daemon's server, once: the one whose permission was just answered, or on codex the
+   * one its MCP request names, since with no approval in front that request can arrive before the call is announced.
+   */
+  claimPosedCall(named: string | null = null): string | null {
+    if (named !== null && this.agent === "codex") {
+      const bound = boundToolCallId(named);
+      if (this.unclaimedPosedCall === bound) this.unclaimedPosedCall = null;
+      return bound;
+    }
     const claimed = this.unclaimedPosedCall;
     this.unclaimedPosedCall = null;
     return claimed;

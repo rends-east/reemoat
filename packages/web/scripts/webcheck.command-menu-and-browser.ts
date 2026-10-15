@@ -9,7 +9,6 @@ import {
   MAX_MACHINE_ORDER,
   RANK_STEP,
   dropSlot,
-  allRows,
   canReorder,
   commandsPlan,
   configProse,
@@ -991,14 +990,15 @@ process.stdout.write("\nwhat is actually on screen\n");
   ]);
   selectMachine("m_b" as never);
   check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_b/kept", "m_b/other"]);
-  selectMachine("all" as never);
-  check("and under All every pin is drawn", keys(visibleRows(groups, currentView(groups))).slice(0, 2), ["m_a/far", "m_b/kept"]);
+  selectMachine("board" as never);
+  // Q3.724: a pin is a conversation, and the board's page holds tasks and the dispatcher.
+  check("and on the board's page no pin is drawn", keys(visibleRows(groups, currentView(groups))), []);
   selectMachine("m_b" as never);
   check("the keyboard's siblings for a pinned row are the pins on screen", keys(siblingsOf(byKey("m_b/kept"), groups)), ["m_b/kept"]);
   selectMachine("m_a" as never);
   check("and on the other tab they are that tab's", keys(siblingsOf(byKey("m_a/far"), groups)), ["m_a/far"]);
-  selectMachine("all" as never);
-  check("while All walks every pin, because All draws every pin", keys(siblingsOf(byKey("m_b/kept"), groups)), ["m_a/far", "m_b/kept"]);
+  selectMachine("board" as never);
+  check("while the board walks no pin, because it draws none", keys(siblingsOf(byKey("m_b/kept"), groups)), []);
   selectMachine("m_a" as never);
   check("a blocked row keeps the place its reader gave it", keys(foldersOf(groups, currentView(groups))[0]?.rows ?? []), ["m_a/live", "m_a/blocked"]);
   // Q3.695: counted for the tab and the machine's chip; the folder's own header draws no count.
@@ -1056,7 +1056,7 @@ process.stdout.write("\nwhat is actually on screen\n");
     machines: [machineOf("m_a", "alpha"), machineOf("m_b", "beta")],
   } as never);
   const filters = ["active", "ended", "all"] as const;
-  const machines = ["m_a", "m_b", "all"] as const;
+  const machines = ["m_a", "m_b", "board"] as const;
   const needles = ["", "web", "zzz-matches-nothing"];
   const moved: string[] = [];
   for (const f of filters) {
@@ -1078,19 +1078,14 @@ process.stdout.write("\nwhat is actually on screen\n");
     [false, false],
   );
 
-  selectMachine("all" as never);
+  selectMachine("board" as never);
   {
     const view = currentView(groups);
-    check("All selects no machine in particular", view.machine, null);
-    check("and says so", view.all, true);
+    check("the board selects no machine in particular", view.machine, null);
+    check("and says so", view.board, true);
     check("it draws no folders", foldersOf(groups, view).length, 0);
-    check("the flat list leaves out what is pinned", keys(allRows(groups, view)).includes("m_b/kept"), false);
-    check("and holds the rest of the fleet in the order its reader gave it", keys(allRows(groups, { ...view, filter: "all" })), [
-      "m_b/done",
-      "m_a/live",
-      "m_b/other",
-      "m_a/blocked",
-    ]);
+    // Q3.724: the board took All's place, and its page holds tasks and the dispatcher, never a conversation.
+    check("and walks no conversation, pinned or not, under any filter", keys(visibleRows(groups, { ...view, filter: "all" })), []);
   }
   selectMachine("m_a" as never);
   setQuery("");
@@ -1102,7 +1097,7 @@ process.stdout.write("\nwhat is actually on screen\n");
     ],
     machines: [],
   } as never);
-  const orphanView = (filter: "active" | "ended" | "all") => ({ filter, machine: null, all: false, query: "" });
+  const orphanView = (filter: "active" | "ended" | "all") => ({ filter, machine: null, board: false, query: "" });
   check("an ended orphan is not in the active slice", keys(visibleRows(withOrphans, orphanView("active"))), ["m_x/gone-live"]);
   check("and a live orphan is not in the ended slice", keys(visibleRows(withOrphans, orphanView("ended"))), ["m_x/gone-done"]);
   check("both are there unfiltered", visibleRows(withOrphans, orphanView("all")).length, 2);
@@ -1146,7 +1141,7 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
   check(
     "the render order carries that same list, on every filter",
     (["all", "active", "ended"] as const).map((filter) =>
-      visibleRows(groups, { filter, machine: null, all: false, query: "" })
+      visibleRows(groups, { filter, machine: null, board: false, query: "" })
         .map((r: { key: string }) => r.key)
         .join(","),
     ),
@@ -1374,7 +1369,7 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
   check("the rail's pinned section goes through the helper too", /\bpinnedFor\(groups, view\)/.test(browser), true);
   check("and never reaches past that one either", /groups\.pinned/.test(browser), false);
 
-  const needled = { filter: "all", machine: null, all: false, query: "web" } as const;
+  const needled = { filter: "all", machine: null, board: false, query: "web" } as const;
   check(
     "under a needle the render order still carries exactly the helper's rows",
     visibleRows(groups, needled)

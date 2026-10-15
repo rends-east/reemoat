@@ -43,6 +43,7 @@ import {
   type StoredEvent,
 } from "../events.js";
 import { describeError } from "../http.js";
+import { STORED_TASK_STATUSES, TASK_ASSIGNEES, type StoredTaskStatus, type TaskAttachment, type TaskRecord, type TaskStore } from "../tasks/store.js";
 import { parseManifest } from "../plugins/manifest.js";
 import {
   checkPluginWrite,
@@ -167,6 +168,7 @@ export interface StoreBundle {
   peerLinks: SqlitePeerLinkStore;
   peerOutbox: SqlitePeerOutboxStore;
   peerSeen: SqlitePeerSeenStore;
+  tasks: SqliteTaskStore;
   /** Ids the prune deleted: the caller removes their upload directories, which the prune runs too early to reach. */
   prunedSessions: string[];
   close(): void;
@@ -234,6 +236,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const peerLinks = new SqlitePeerLinkStore(db);
   const peerOutbox = new SqlitePeerOutboxStore(db);
   const peerSeen = new SqlitePeerSeenStore(db);
+  const tasks = new SqliteTaskStore(db);
 
   return {
     db,
@@ -254,6 +257,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     peerLinks,
     peerOutbox,
     peerSeen,
+    tasks,
     prunedSessions,
     close() {
       try {
@@ -337,6 +341,10 @@ function migrate(db: DatabaseSync): void {
   if (!has("root_kid")) db.exec("ALTER TABLE identity ADD COLUMN root_kid TEXT");
   if (!has("root_jwk")) db.exec("ALTER TABLE identity ADD COLUMN root_jwk TEXT");
   if (!has("keyset_version")) db.exec("ALTER TABLE identity ADD COLUMN keyset_version INTEGER");
+
+  // A task from before it reads as nobody's, which is how every task in the backlog was drawn then (Q2.261).
+  const taskColumns = db.prepare("PRAGMA table_info(tasks)").all();
+  if (!taskColumns.some((column) => column["name"] === "assigned")) db.exec("ALTER TABLE tasks ADD COLUMN assigned INTEGER NOT NULL DEFAULT 0");
 
   migrateCredentialsToV6(db);
   migrateMachineKeysToOneLive(db);
@@ -2259,5 +2267,122 @@ function outboxEntryOf(row: Record<string, unknown>): OutboxEntry {
     nextAt: Number(row["next_at"]),
     attempts: Number(row["attempts"]),
     lastError: row["last_error"] === null ? null : String(row["last_error"]),
+  };
+}
+
+/** A row whose status this build does not know reads as `running`, which the sessions then settle (Q2.258). */
+export class SqliteTaskStore implements TaskStore {
+  private readonly listStmt: StatementSync;
+  private readonly getStmt: StatementSync;
+  private readonly byKeyStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly deleteStmt: StatementSync;
+  private readonly attachmentsStmt: StatementSync;
+  private readonly attachStmt: StatementSync;
+  private readonly detachStmt: StatementSync;
+  private readonly detachAllStmt: StatementSync;
+
+  constructor(private readonly db: DatabaseSync) {
+    const columns = "id, title, brief, status, summary, summary_at, summary_by, agent, custom_agent, assigned, cwd, key, created_at, updated_at";
+    this.listStmt = db.prepare(`SELECT ${columns} FROM tasks ORDER BY created_at, id`);
+    this.getStmt = db.prepare(`SELECT ${columns} FROM tasks WHERE id = ?`);
+    this.byKeyStmt = db.prepare(`SELECT ${columns} FROM tasks WHERE key = ? ORDER BY created_at, id LIMIT 1`);
+    this.saveStmt = db.prepare(
+      `INSERT INTO tasks (${columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ` +
+        "ON CONFLICT(id) DO UPDATE SET title = excluded.title, brief = excluded.brief, status = excluded.status, " +
+        "summary = excluded.summary, summary_at = excluded.summary_at, summary_by = excluded.summary_by, agent = excluded.agent, " +
+        "custom_agent = excluded.custom_agent, assigned = excluded.assigned, cwd = excluded.cwd, key = excluded.key, " +
+        "updated_at = excluded.updated_at",
+    );
+    this.deleteStmt = db.prepare("DELETE FROM tasks WHERE id = ?");
+    this.attachmentsStmt = db.prepare("SELECT session_id, task_id, attached_at FROM task_sessions ORDER BY attached_at, session_id");
+    this.attachStmt = db.prepare(
+      "INSERT INTO task_sessions (session_id, task_id, attached_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(session_id) DO UPDATE SET task_id = excluded.task_id, attached_at = excluded.attached_at",
+    );
+    this.detachStmt = db.prepare("DELETE FROM task_sessions WHERE session_id = ?");
+    this.detachAllStmt = db.prepare("DELETE FROM task_sessions WHERE task_id = ?");
+  }
+
+  list(): TaskRecord[] {
+    return this.listStmt.all().map(readTask);
+  }
+
+  get(id: string): TaskRecord | null {
+    const row = this.getStmt.get(id);
+    return row === undefined ? null : readTask(row);
+  }
+
+  byKey(key: string): TaskRecord | null {
+    const row = this.byKeyStmt.get(key);
+    return row === undefined ? null : readTask(row);
+  }
+
+  save(task: TaskRecord): void {
+    this.saveStmt.run(
+      task.id,
+      task.title,
+      task.brief,
+      task.status,
+      task.summary,
+      task.summaryAt,
+      task.summaryBy,
+      task.agent,
+      task.customAgent,
+      TASK_ASSIGNEES.indexOf(task.assignee),
+      task.cwd,
+      task.key,
+      task.createdAt,
+      task.updatedAt,
+    );
+  }
+
+  remove(id: string): void {
+    this.db.exec("BEGIN");
+    try {
+      this.detachAllStmt.run(id);
+      this.deleteStmt.run(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  attachments(): TaskAttachment[] {
+    return this.attachmentsStmt.all().map((row) => ({
+      taskId: String(row["task_id"]),
+      sessionId: String(row["session_id"]),
+      attachedAt: Number(row["attached_at"]),
+    }));
+  }
+
+  attach(taskId: string, sessionId: string, at: number): void {
+    this.attachStmt.run(sessionId, taskId, at);
+  }
+
+  detach(sessionId: string): void {
+    this.detachStmt.run(sessionId);
+  }
+}
+
+function readTask(row: Record<string, unknown>): TaskRecord {
+  const status = String(row["status"]);
+  return {
+    id: String(row["id"]),
+    title: String(row["title"]),
+    brief: String(row["brief"]),
+    status: (STORED_TASK_STATUSES as readonly string[]).includes(status) ? (status as StoredTaskStatus) : "running",
+    summary: row["summary"] == null ? null : String(row["summary"]),
+    summaryAt: row["summary_at"] == null ? null : Number(row["summary_at"]),
+    summaryBy: row["summary_by"] == null ? null : String(row["summary_by"]),
+    agent: String(row["agent"]),
+    customAgent: row["custom_agent"] == null ? null : String(row["custom_agent"]),
+    // A code from a newer build reads as nobody's, which claims nothing about who holds it.
+    assignee: TASK_ASSIGNEES[Number(row["assigned"])] ?? "nobody",
+    cwd: String(row["cwd"]),
+    key: row["key"] == null ? null : String(row["key"]),
+    createdAt: Number(row["created_at"]),
+    updatedAt: Number(row["updated_at"]),
   };
 }

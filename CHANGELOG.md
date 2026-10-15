@@ -27,6 +27,39 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **Tasks, and a board of them.** *Board* leads the machines where *All* stood: on it,
+  every machine's tasks; a machine's own page holds its conversations. A task is a title,
+  a description, who holds it and the conversations working on it, kept on a machine.
+  **Four columns**: *Backlog*, *Running* while an agent works on it, *Review* once the
+  agent is finished, when it is yours to look at, and *Done*, which only you say. **In the
+  backlog an assignee is named and nothing moves**: a machine and an agent in one choice,
+  from what each machine offers, *You*, or *Not assigned*, the default everywhere; a task
+  nobody has started moves to another machine with its agent, drawn there at once. Picking
+  an agent anywhere else starts it, and *You* takes a task back for review. **Starting an
+  agent on a task opens its conversation.** On a desktop the board is four lanes of
+  same-sized cards, a fixed width each and scrolled sideways on a bar that is always
+  drawn, each card with its title on one line, its age beside it and who holds it, with
+  the machine it is on under their name; **the assignee on a card is pressed to assign or
+  reassign**, **each column's + makes a task in it**, and **a card is dragged between
+  columns**: it lifts, the column it would land in opens a slot, and it settles there, or
+  back. Into *Running* the agent the backlog
+  named starts at once, and otherwise one is asked for. The list beside the board drags
+  the same way, opens a task straight into its conversation, and keeps the backlog and
+  *Done* folded. A task opens as a ticket: status, assignee and project beside it, the
+  description and the title edited in place, the agent's latest report and every
+  conversation the task has had; every screen opened from the board leads back to it from
+  its top left, and a ticket opened from a conversation back to that conversation. **New
+  task** asks for a title, an assignee, a project and the description, and *Add* or
+  *Start* is the one press. *Needs you* is said by the machine itself while a request
+  waits in one of a task's conversations, and a status follows its conversations at
+  once. A machine that is offline keeps its tasks, marked unavailable; a machine whose
+  daemon predates tasks simply shows none. An existing conversation joins a task from
+  its menu, *Attach to task*.
+- **Agents propose tasks.** Any agent can answer with a card of proposed tasks, each with
+  its project and brief, not assigned until you pick an agent or yourself; nothing is
+  created before a press. Agents get four tools for this on the `reemoat` server: `list_projects`,
+  `list_tasks`, `propose_tasks`, and `task_update`, with which the agent working on a task
+  keeps its summary current and hands it to you for review.
 - **You can delete your own account from the app.** Settings → Account → *Delete
   account* asks for your password and then removes the account from the server: its
   sign-ins, API keys, devices and address, with its machines taken off the server.
@@ -81,6 +114,9 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- **A lone *Sign out*, *Retire* or *Remove the key* is a button as wide as its box.** The
+  box no longer stretches across the screen around a small button; asked to confirm, it
+  widens for the question, which starts where the button was.
 - **Setting an agent up leads straight on.** A finished install offers **Sign in to
   …** on the same card, and a finished sign-in offers **New session**, which opens
   on that machine with that agent chosen — and back on the folder you had picked,
@@ -153,6 +189,10 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- **Codex's questions reach you.** Asked to ask something, Codex used a question tool of
+  its own whose question never reached the app, and then said it had asked. Codex is
+  now given the same question tool Cursor has, a card with a button per answer, and is
+  told with every message you send that its own does not reach you.
 - **A provider that needs only a key no longer reads as "not installed".** On a machine
   without Opencode, Settings → Machines → Sign-ins → OpenRouter said *not installed*
   over one button, *Install Opencode*, as if OpenRouter needed it. The key box now

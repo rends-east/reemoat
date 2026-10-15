@@ -62,6 +62,11 @@ export const ASK_TOOL = {
   },
 };
 
+/** After a person's every message to a harness in ASK_NOTE_HARNESSES: its model is shown its own question tool and not this one. */
+export const ASK_NOTE =
+  "<question-tool>\nAdded by Reemoat, not written by your user: request_user_input_async does not reach your user in this app. " +
+  "To ask them anything, call ask_question on the reemoat MCP server.\n</question-tool>";
+
 export const ASK_PENDING =
   "Your user has not answered yet, and the card stays open. End your turn now and write nothing: their answer arrives as " +
   "your user's next message.";

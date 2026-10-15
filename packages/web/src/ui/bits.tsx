@@ -76,10 +76,10 @@ export function sessionLabel(
 }
 
 /** A machine where a session line names it: the server mark, then the name, which is what truncates. Q3.681. */
-export function MachineLabel({ name, className = "" }: { name: string; className?: string }): ReactNode {
+export function MachineLabel({ name, small = false, className = "" }: { name: string; small?: boolean; className?: string }): ReactNode {
   return (
-    <span className={`flex min-w-0 items-center gap-1 ${className}`}>
-      <Icon as={Server} size={12} />
+    <span className={`flex min-w-0 items-center ${small ? "gap-0.5" : "gap-1"} ${className}`}>
+      <Icon as={Server} size={small ? 10 : 12} />
       <span className="truncate">{name}</span>
     </span>
   );

@@ -22,7 +22,7 @@ local component.**
 | Go deeper | `LinkRow` |
 | Do one thing | `ActionRow` (`tone="danger"` for a one-tap act that ends something) |
 | Act on a record | `RowMenu` with `RowAction`s; a destructive act confirms through `TwoStep` |
-| Destroy something | a `TwoStep` whose rest is a `DangerRow`, or a `DangerButton` (the glyph is required) |
+| Destroy something | a `TwoStep` whose rest is a `DangerRow`, or a `DangerButton` (the glyph is required); alone in its box, the box takes the rest's width and the rest fills it (`Group`'s `fit`, `DangerRow`'s `whole`; never the rest the box's width, Q3.218, Q3.738) |
 | A set of records | a table (`TABLE`/`TD`) inside a `Group` |
 
 ## One height

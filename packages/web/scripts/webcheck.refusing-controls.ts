@@ -213,17 +213,17 @@ process.stdout.write("\nno authorization on the Configure agent screen\n");
       "one box in both arms, a row of its Group, with the named row at rest",
       [
         /align="end"/.test(asking),
-        /className=\{TWO_STEP_ROW\}/.test(asking),
+        /className=\{confirmingRemove \? TWO_STEP_ROW : ""\}/.test(asking),
         /\bjustify-(?:center|end)\b/.test(keyOnly),
         /act=\{\{ label: "Remove", danger: true, icon: Trash2 \}\}/.test(asking),
-        /rest=\{\s*<DangerRow label=\{`Remove the \$\{keyName\}`\} icon=\{Trash2\} disabled=\{busy\} onClick=\{\(\) => setConfirmingRemove\(true\)\} \/>/.test(asking),
+        /rest=\{\s*<DangerRow label=\{`Remove the \$\{keyName\}`\} icon=\{Trash2\} disabled=\{busy\} whole onClick=\{\(\) => setConfirmingRemove\(true\)\} \/>/.test(asking),
         /setConfirmingRemove\(false\)/.test(keyOnly),
       ],
       [true, true, false, true, true, false],
     );
     check(
       "and the box says what it holds without the filler line under the name",
-      [/Key only —/.test(keyOnly), /<Field\s/.test(keyOnly), /<Group>\s*<TwoStep/.test(keyOnly)],
+      [/Key only —/.test(keyOnly), /<Field\s/.test(keyOnly), /<Group fit>\s*<TwoStep/.test(keyOnly)],
       [false, true, true],
     );
     const removal = keyOnly.slice(keyOnly.indexOf("const remove = "), keyOnly.indexOf("const borrowed = "));

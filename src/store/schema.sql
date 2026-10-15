@@ -240,3 +240,29 @@ CREATE TABLE IF NOT EXISTS peer_seen (
   PRIMARY KEY (source_machine_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_peer_seen_at ON peer_seen (seen_at);
+
+
+-- What somebody wants done here. status never holds needs_you: that is read off the task's sessions (Q2.258).
+CREATE TABLE IF NOT EXISTS tasks (
+  id            TEXT    NOT NULL PRIMARY KEY,
+  title         TEXT    NOT NULL,
+  brief         TEXT    NOT NULL,
+  status        TEXT    NOT NULL,
+  summary       TEXT,
+  summary_at    INTEGER,
+  summary_by    TEXT,
+  agent         TEXT    NOT NULL,
+  custom_agent  TEXT,
+  -- Who holds it in the backlog, as an index into TASK_ASSIGNEES: 0 nobody, 1 the agent named, 2 its person (Q2.262).
+  assigned      INTEGER NOT NULL DEFAULT 0,
+  cwd           TEXT    NOT NULL,
+  key           TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+-- A session works on one task, so the session is the key and attaching it again moves it.
+CREATE TABLE IF NOT EXISTS task_sessions (
+  session_id    TEXT    NOT NULL PRIMARY KEY,
+  task_id       TEXT    NOT NULL,
+  attached_at   INTEGER NOT NULL
+);

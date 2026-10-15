@@ -120,8 +120,10 @@ are `background-work.md`'s.
   the chosen label, never by parsing `question_0` / `<question>__other`; a label two
   questions share matches neither. Joined in `tail.ts` as `EventNode.asked`; `null` draws as
   before (call outside the window, `rawInput` the `{truncated, bytes}` stand-in, or not an
-  `AskUserQuestion`). cursor's `ask_question` reads alike (`askedInput`); its call, the
-  daemon's yes and a late answer's `answers` prompt draw nothing. Q2.251.
+  `AskUserQuestion`). cursor's and codex's `ask_question` read alike (`askedInput`); the
+  call, the daemon's yes and a late answer's `answers` prompt draw nothing, and the call
+  folds wherever it lands (`callsCardsStandFor`: codex may announce it after the card).
+  Q2.251.
 - **Consecutive plan updates are one card where the newest landed**: `planFloor` in
   `buildTail`, consecutive over emitted nodes (one compare on `collected.length`). `flush()`
   runs first, so a message between two plans keeps both. `plan` stays out of

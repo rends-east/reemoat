@@ -96,7 +96,7 @@ presentations.
   synthesised `click`. Q3.576.
 - A reorder never **selects the tab it dropped** (`onClickCapture` eats the `click`),
   **scrolls the list** (default `touch-action` until `arm`, `preventDefault` only while
-  armed), or **moves `All`** (it has its own `data-machine`, so indices are over `tabs`; a node not in
+  armed), or **moves the board** (in the column it has its own `data-machine`, so indices are over `tabs`; a node not in
   it refuses to arm).
 - `dropSlot` (the pointer passing a neighbour's midpoint), not `dropIndex`, which divides by
   one row and drifts on a strip of unequal widths. Q3.574's `origin.index` and `target.index`
@@ -123,7 +123,7 @@ that opens a session). The scroller also carries `[touch-action:pan-y_pinch-zoom
 arbitrary value rather than two utilities, `pinch-zoom` kept. The platform's Back keeps a
 24 px band at each edge; `html { overscroll-behavior: none }` stops only the rubber-band.
 
-`[All, …machines]`, clamped, never wrapping; toward no neighbour the list does not move
+`[Board, …machines]`, clamped, never wrapping; toward no neighbour the list does not move
 (`pageOffset`). The commit is `selectMachine` only: no route, no history entry, no view
 transition (`announce`/`data-nav` and `navMove` are for screens).
 
@@ -204,7 +204,7 @@ and `transition` is not inherited), never `transition-transform`: neighbours sli
 
 ## The tabs' own numbers
 
-`All`, a machine tab and the `+` share one inset. `min-w-22` (two 44 px floors) is on the
+The board's tab, a machine tab and the `+` share one inset. `min-w-22` (two 44 px floors) is on the
 non-`lone` arm only; the lone case keeps `flex-1`. The tab's `px-1` plus its pill's `px-3`
 make the `+`'s `px-4`, and `webcheck` requires the sum; the pill hugs the label, the tab keeps
 its target. The edge fade `w-8` is twice the inset, asserted as the relation.
@@ -225,8 +225,8 @@ traveller that hands back at the identical rect. The swipe drives it by progress
 a tap, key or fallback drives it from `MachineTabs`' layout effect, before the new pill
 paints, never while a turn carries it.
 
-- Strip coordinates, because All does not scroll (Q3.610); each end clipped to the
-  scroller's visible box (`clipSpan`), so it reaches All and never leaves the strip.
+- Strip coordinates, because the board's tab does not scroll (Q3.610); each end clipped to the
+  scroller's visible box (`clipSpan`), so it reaches the board's tab and never leaves the strip.
 - Three pieces, transforms only (`pillPieces`): two caps and a stretching middle; snapped,
   promoted only for the trip, `transition` at `none`.
 - The strip follows: `scrollToShow` shows the whole target, by progress in the drag and in
