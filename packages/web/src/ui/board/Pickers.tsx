@@ -51,7 +51,8 @@ export function assignedLabel(assigned: Assigned & { harness: string }, offer: A
 
 type Shape =
   | { variant: "row"; title: string; subline?: string }
-  | { variant: "field"; id?: string; labelledBy?: string; describedBy?: string };
+  | { variant: "field"; id?: string; labelledBy?: string; describedBy?: string }
+  | { variant: "chip"; label: string };
 
 export interface AgentChoices {
   items: DropdownItem<string>[];
@@ -191,6 +192,8 @@ export function AssigneeDropdown({
       busy={busy}
       trigger={trigger}
     />
+  ) : shape.variant === "chip" ? (
+    <Dropdown variant="chip" label={shape.label} items={items} value={chosen} onChange={pick} disabled={disabled} busy={busy} trigger={trigger} />
   ) : (
     <Dropdown
       id={shape.id}
@@ -251,6 +254,8 @@ export function ProjectDropdown({
   );
   return shape.variant === "row" ? (
     <Dropdown variant="row" title={shape.title} items={items} value={value} onChange={onChange} disabled={disabled} busy={busy} trigger={trigger} />
+  ) : shape.variant === "chip" ? (
+    <Dropdown variant="chip" label={shape.label} items={items} value={value} onChange={onChange} disabled={disabled} busy={busy} trigger={trigger} />
   ) : (
     <Dropdown
       id={shape.id}

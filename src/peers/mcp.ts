@@ -6,7 +6,7 @@ import { PEER_SERVER_NAME } from "./envelope.js";
 import { SEND_FILE_INSTRUCTIONS, SEND_FILE_TOOL, SEND_FILE_TOOL_NAME, sentFileText, type SendFileResult } from "./files.js";
 import type { TaskDesk } from "../tasks/desk.js";
 import { callTaskTool } from "../tasks/mcp.js";
-import { DISPATCH_INSTRUCTIONS, TASK_INSTRUCTIONS, TASK_TOOL_NAMES, TASK_TOOLS } from "../tasks/tools.js";
+import { BOARD_AGENT_INSTRUCTIONS, BOARD_APPLY_TOOL, DISPATCH_INSTRUCTIONS, TASK_INSTRUCTIONS, TASK_TOOL_NAMES, TASK_TOOLS } from "../tasks/tools.js";
 
 export const PEER_MCP_PATH = "/mcp";
 const MAX_BODY_BYTES = 256 * 1024;
@@ -161,6 +161,7 @@ async function handle(hub: PeerHub, tasks: TaskDesk | null, req: IncomingMessage
             hub.listsFiles(caller) ? SEND_FILE_INSTRUCTIONS : null,
             tasks !== null ? TASK_INSTRUCTIONS : null,
             tasks?.isDispatch(caller) === true ? DISPATCH_INSTRUCTIONS : null,
+            tasks?.isBoardAgent(caller) === true ? BOARD_AGENT_INSTRUCTIONS : null,
           ]
             .filter((part): part is string => part !== null)
             .join(" "),
@@ -179,6 +180,7 @@ async function handle(hub: PeerHub, tasks: TaskDesk | null, req: IncomingMessage
             ...(hub.listsQuestions(caller) ? [ASK_TOOL] : []),
             ...(hub.listsFiles(caller) ? [{ ...SEND_FILE_TOOL, _meta: ALWAYS_LOAD }] : []),
             ...(tasks !== null ? TASK_TOOLS : []),
+            ...(tasks?.isBoardAgent(caller) === true ? [BOARD_APPLY_TOOL] : []),
           ],
         },
       });

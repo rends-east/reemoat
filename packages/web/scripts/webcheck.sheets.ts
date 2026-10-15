@@ -682,14 +682,14 @@ process.stdout.write("\na conversation dragged back to the list\n");
     [24, false, true, true, true],
   );
   check(
-    "the conversation carries the gesture on both of its roots, opaque, with the press read before a menu can close",
+    "the conversation carries the gesture on both of its roots, opaque, with the press read before a menu can close, under either header the second draws",
     [
       (view.match(/ref=\{back\.ref\}/g) ?? []).length,
       (view.match(/onPointerDownCapture=\{back\.press\}/g) ?? []).length,
       (view.match(/backRef=\{back\.gate\}/g) ?? []).length,
       (view.match(/flex min-h-0 flex-1 flex-col bg-surface/g) ?? []).length,
     ],
-    [2, 2, 2, 2],
+    [2, 2, 3, 2],
   );
   check(
     "it runs only while the back chevron is laid out, so the breakpoint stays in CSS",

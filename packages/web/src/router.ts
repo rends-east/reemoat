@@ -28,8 +28,8 @@ export type Route =
   | { name: "task"; machineId: MachineId; taskId: string }
   /** `column` is a column's own +, which makes the task there (Q3.737); null is New task, which an agent picked starts. */
   | { name: "newTask"; machineId: MachineId | null; column: string | null }
-  /** The account's board as YAML and as a form, a screen of its own. */
-  | { name: "boardConfig" }
+  /** Edit board: the config agent's conversation, its YAML docked beside it, or starting it over (Q3.743). */
+  | { name: "boardConfig"; pane: BoardPane }
   | {
       name: "agent";
       machineId: MachineId;
@@ -99,7 +99,10 @@ function parse(pathname: string): Route {
   if (parts[0] === "settings") {
     return { name: "settings", ...parseSettingsRoute(parts.slice(1), decodeSegment) };
   }
-  if (parts[0] === "board" && parts.length === 1) return { name: "boardConfig" };
+  if (parts[0] === "board" && parts.length === 1) return { name: "boardConfig", pane: "chat" };
+  if (parts[0] === "board" && parts.length === 2 && (parts[1] === "yaml" || parts[1] === "start-over")) {
+    return { name: "boardConfig", pane: parts[1] };
+  }
   if (parts[0] === "plugins") {
     return { name: "plugins", ...parseMarketRoute(parts.slice(1), decodeSegment) };
   }
@@ -255,8 +258,10 @@ export function newTaskInPath(column: string): string {
   return `/task/new/in/${encodeURIComponent(column)}`;
 }
 
-export function boardConfigPath(): string {
-  return "/board";
+export type BoardPane = "chat" | "yaml" | "start-over";
+
+export function boardConfigPath(pane: BoardPane = "chat"): string {
+  return pane === "chat" ? "/board" : `/board/${pane}`;
 }
 
 export function sessionPath(ref: SessionRef): string {

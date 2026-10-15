@@ -4,6 +4,7 @@ import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 export * from "./apply.js";
 export * from "./config.js";
 export * from "./engine.js";
+export * from "./guide.js";
 export * from "./presets.js";
 export * from "./rules.js";
 export * from "./simulate.js";

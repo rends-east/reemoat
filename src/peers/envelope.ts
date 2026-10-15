@@ -16,6 +16,7 @@ const IMITATED_TAGS = [
   "peer-notice",
   "session-mentions",
   "board-task",
+  "board-config",
   "question-tool",
   "system-reminder",
   "system",

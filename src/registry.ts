@@ -13,6 +13,7 @@ import { modelScopesControls, questionElicitation } from "./acp/cursor.js";
 import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "./acp/systems.js";
 import { resolveCwd } from "./browse.js";
 import {
+  type BoardAppliedEvent,
   type BoardProposedEvent,
   MemoryEventStore,
   SessionLog,
@@ -22,6 +23,7 @@ import {
   type MachineSettingKey,
   isAuthFailure,
   isPersistedGiveUp,
+  isSessionPurpose,
   oldestAvailable,
   type AgentCommands,
   type AgentConfig,
@@ -44,6 +46,7 @@ import {
   type ResumeGiveUp,
   type SessionEvent,
   type SessionExit,
+  type SessionPurpose,
   type SessionStatus,
   type SessionStore,
   type SessionWorkspace,
@@ -51,7 +54,8 @@ import {
   type StoredFileRef,
   type TaskProposal,
 } from "./events.js";
-import { isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, normalizeNickname, pickNickname } from "./nickname.js";
+import { BOARD_AGENT_NICKNAME, isNickname, MAX_NICKNAME_CHARS, MIN_NICKNAME_CHARS, normalizeNickname, pickNickname } from "./nickname.js";
+import { BOARD_AGENT_NOTE } from "./board/agentNote.js";
 import { LocalRuntime } from "./runtime/local.js";
 import { probeExists } from "./stall.js";
 import type { SessionRuntime } from "./runtime/types.js";
@@ -147,9 +151,9 @@ export class SessionLimitError extends Error {
   }
 }
 
-export type NicknameRefusal = "nickname_taken" | "invalid_nickname";
+export type NicknameRefusal = "nickname_taken" | "nickname_reserved" | "invalid_nickname";
 
-/** nickname_taken is a 409 and invalid_nickname a 400; both are thrown before anything is created or changed (Q2.245). */
+/** nickname_taken and nickname_reserved are 409s and invalid_nickname a 400; all are thrown before anything is created or changed (Q2.245). */
 export class NicknameError extends Error {
   constructor(
     readonly code: NicknameRefusal,
@@ -169,6 +173,19 @@ export function invalidNickname(): NicknameError {
 
 function nicknameTaken(nickname: string): NicknameError {
   return new NicknameError("nickname_taken", `another session on this machine is already called ${nickname}`);
+}
+
+function nicknameReserved(nickname: string): NicknameError {
+  return new NicknameError("nickname_reserved", `${nickname} is the board's config agent, started from Edit board`);
+}
+
+/** The config agent talks to its person alone: messaging stays off on it for good (Q2.270). */
+export class BoardAgentIsolatedError extends Error {
+  readonly code = "board_agent_isolated";
+  constructor() {
+    super("the config agent takes no messages from other sessions, and sends none");
+    this.name = "BoardAgentIsolatedError";
+  }
 }
 
 const CANCELLED: acp.RequestPermissionResponse = { outcome: { outcome: "cancelled" } };
@@ -582,6 +599,8 @@ export interface SessionSnapshot {
   pinned: boolean;
   /** This conversation's own switch; the machine's is echoed by PUT /peers/links (Q2.244). */
   peerMessages: boolean;
+  /** null for an ordinary conversation; a client draws a session with one in no list (Q2.270). */
+  purpose: SessionPurpose | null;
   /** A position clock in milliseconds; null means createdAt. */
   rank: number | null;
   /** null means cannot tell, never 0%. */
@@ -883,6 +902,8 @@ export type PeerMcpServers = (sessionId: string, capabilities: acp.McpCapabiliti
 export interface ManagedSessionOptions {
   /** Already reserved or backfilled by the registry, which alone keeps it unique. */
   nickname: string;
+  /** Messaging is off on a session that has one, whatever its row says (Q2.270). */
+  purpose?: SessionPurpose | null;
   sessionStore?: SessionStore | null;
   makeRoomForWake?: () => Promise<void>;
   restore?: ManagedSessionInit;
@@ -1019,6 +1040,7 @@ export class ManagedSession {
   private nicknameValue: string;
   private pinnedValue: boolean;
   private peerMessagesOffValue: boolean;
+  private purposeValue: SessionPurpose | null;
   private rankValue: number | null;
 
   private ultracodeChoice: boolean | null;
@@ -1109,7 +1131,8 @@ export class ManagedSession {
     this.nicknameValue = options.nickname;
     this.pinnedValue = init.pinned ?? false;
     this.rankValue = init.rank ?? null;
-    this.peerMessagesOffValue = init.peerMessagesOff ?? false;
+    this.purposeValue = options.purpose ?? null;
+    this.peerMessagesOffValue = (init.peerMessagesOff ?? false) || this.purposeValue !== null;
     // The one live-agent state restored from disk; the revision moves with it, since a client skips the fetch at revision 0.
     if (init.agentState != null) {
       this.agentConfigState = init.agentState.config;
@@ -1190,6 +1213,10 @@ export class ManagedSession {
 
   get peerMessages(): boolean {
     return !this.peerMessagesOffValue;
+  }
+
+  get purpose(): SessionPurpose | null {
+    return this.purposeValue;
   }
 
   get rank(): number | null {
@@ -1389,6 +1416,7 @@ export class ManagedSession {
       nickname: this.nicknameValue,
       pinned: this.pinnedValue,
       peerMessages: !this.peerMessagesOffValue,
+      purpose: this.purposeValue,
       // Always emitted, null included: a client reads an absent rank as a daemon that cannot store an order.
       rank: this.rankValue,
       contextUsage:
@@ -1834,6 +1862,13 @@ export class ManagedSession {
     return this.snapshot();
   }
 
+  /** Only through SessionRegistry, which keeps the nickname free and the config agent's own. */
+  setPurpose(purpose: SessionPurpose, nickname: string): void {
+    this.purposeValue = purpose;
+    this.nicknameValue = nickname;
+    this.touchSafe();
+  }
+
   /** A tap on a session a prompt would revive is recorded and applied at resume; it never starts an agent. */
   private get configIsDeferred(): boolean {
     if (this.exitRecord === null) return false;
@@ -2212,11 +2247,12 @@ export class ManagedSession {
     return { kind: "accepted", turn, seq };
   }
 
-  /** The block after a message's words: its mention note, and after a person's on ASK_NOTE_HARNESSES the note naming ask_question. */
+  /** The block after a message's words: its mention note, after a person's on ASK_NOTE_HARNESSES the note naming ask_question, and to the config agent what it is for. */
   private noteFor(session: Session, from: PeerOrigin | "plugin" | null, note: MentionNote | null): string | null {
     const asks = from === null && ASK_NOTE_HARNESSES.includes(this.agent) && this.takesPosedQuestions && session.holdsPeerServer;
-    if (!asks) return note?.text ?? null;
-    return note === null ? ASK_NOTE : `${note.text}\n${ASK_NOTE}`;
+    const parts = [note?.text ?? null, asks ? ASK_NOTE : null, from === null && this.purposeValue === "board" ? BOARD_AGENT_NOTE : null];
+    const kept = parts.filter((part): part is string => part !== null);
+    return kept.length === 0 ? null : kept.join("\n");
   }
 
   /** The prompt route's two steps as one, for a caller with no HTTP answers to keep apart. */
@@ -3004,6 +3040,12 @@ export class ManagedSession {
     return appended !== null;
   }
 
+  /** board_apply: the card for a board already written, appended whatever the session's state, since the write stands (Q2.270). */
+  boardApplied(event: Omit<BoardAppliedEvent, "type">): void {
+    this.safeAppend({ type: "board_applied", ...event });
+    this.touchSafe();
+  }
+
   /**
    * ask_question's card. Answered within `waitMs` it is the call's own result, as every other harness's question is; past that
    * the call returns and the card stays, to be answered by a message (Q2.250, Q2.251). `named` is the call the MCP request says it is.
@@ -3287,6 +3329,7 @@ export class ManagedSession {
           ? reduceAgentState(this.agentConfigState, this.agentCommandsState, this.backgroundTasksState)
           : null,
       openQuestion: this.openQuestionRow(),
+      purpose: this.purposeValue,
     };
   }
 }
@@ -3326,6 +3369,8 @@ export interface CreateSessionOptions {
   worktreeRoot?: string;
   /** Absent or null picks a free one from NICKNAMES. */
   nickname?: string | null;
+  /** Never read from a request body: only BoardAgents names one (Q2.270). */
+  purpose?: SessionPurpose | null;
 }
 
 export type WorktreePolicy = "auto" | "require" | "never";
@@ -3764,7 +3809,7 @@ export class SessionRegistry {
     return taken;
   }
 
-  private reserveNickname(requested: string | null | undefined): string {
+  private reserveNickname(requested: string | null | undefined, purpose: SessionPurpose | null): string {
     const taken = this.takenNicknames();
     let nickname: string;
     if (requested == null) {
@@ -3772,6 +3817,7 @@ export class SessionRegistry {
     } else {
       const normalized = normalizeNickname(requested);
       if (normalized === null) throw invalidNickname();
+      if (normalized === BOARD_AGENT_NICKNAME && purpose !== "board") throw nicknameReserved(normalized);
       if (taken.has(normalized)) throw nicknameTaken(normalized);
       nickname = normalized;
     }
@@ -3779,18 +3825,34 @@ export class SessionRegistry {
     return nickname;
   }
 
-  /** The only door a nickname changes through. */
+  /** The only door a nickname changes through; the config agent keeps its own, and its messaging off (Q2.270). */
   setMeta(managed: ManagedSession, change: SessionMetaChange): SessionSnapshot {
+    if (change.peerMessages === true && managed.purpose !== null) throw new BoardAgentIsolatedError();
     if (change.nickname === undefined) return managed.setMeta(change);
     const nickname = normalizeNickname(change.nickname);
     if (nickname === null) throw invalidNickname();
+    if (managed.purpose === "board" && nickname !== managed.nickname) throw nicknameReserved(managed.nickname);
+    if (nickname === BOARD_AGENT_NICKNAME && managed.purpose !== "board") throw nicknameReserved(nickname);
     if (this.takenNicknames(managed).has(nickname)) throw nicknameTaken(nickname);
     return managed.setMeta({ ...change, nickname });
   }
 
+  /** A replaced config agent: stopped, out of every list, and its nickname free for the next one (Q2.270). */
+  async retireBoardAgent(managed: ManagedSession): Promise<void> {
+    if (managed.purpose !== "board") return;
+    managed.setPurpose("board_retired", pickNickname(this.takenNicknames(managed)));
+    await managed.stop();
+  }
+
+  /** A replacement that was refused puts the retired one back; it stays stopped, and a message wakes it. */
+  reinstateBoardAgent(managed: ManagedSession): void {
+    if (managed.purpose !== "board_retired" || this.takenNicknames(managed).has(BOARD_AGENT_NICKNAME)) return;
+    managed.setPurpose("board", BOARD_AGENT_NICKNAME);
+  }
+
   /** The nickname is reserved before the first await, so the loser of two creates asking for one name makes no worktree (Q2.245). */
   async create(options: CreateSessionOptions): Promise<ManagedSession> {
-    const nickname = this.reserveNickname(options.nickname);
+    const nickname = this.reserveNickname(options.nickname, options.purpose ?? null);
     try {
       return await this.createReserved(options, nickname);
     } finally {
@@ -3870,6 +3932,7 @@ export class SessionRegistry {
 
     const managed = new ManagedSession(id, options.agent, workspace, this.store, {
       nickname,
+      purpose: options.purpose ?? null,
       customAgent: options.customAgent ?? null,
       // Re-read through `this` at every call, never captured — see the field.
       resolveCustomAgent: (id) => this.resolveCustomAgentBy(id),
@@ -3907,11 +3970,15 @@ export class SessionRegistry {
     // Oldest first, so of two rows holding one nickname the older keeps it (Q2.245).
     for (const row of [...this.sessionStore.list()].sort((a, b) => a.createdAt - b.createdAt)) {
       if (this.sessions.has(row.id)) continue;
-      const nickname =
-        row.nickname !== null && isNickname(row.nickname) && !taken.has(row.nickname) ? row.nickname : pickNickname(taken);
+      // An unknown purpose from a newer build reads as an ordinary conversation, the side that hides nothing.
+      const purpose = isSessionPurpose(row.purpose) ? row.purpose : null;
+      // Only the config agent holds its name: a row given it before the name was reserved is named afresh.
+      const kept = row.nickname !== null && isNickname(row.nickname) && !taken.has(row.nickname) && (row.nickname !== BOARD_AGENT_NICKNAME || purpose === "board");
+      const nickname = kept ? row.nickname! : pickNickname(taken);
       taken.add(nickname);
       const managed = ManagedSession.restore(row, this.store, {
         nickname,
+        purpose,
         sessionStore: this.sessionStore,
         makeRoomForWake: () => this.makeRoomForWake(),
         runtime: this.runtime,
@@ -4131,10 +4198,11 @@ export class SessionRegistry {
     return [...this.sessions.values()].sort((a, b) => a.createdAt - b.createdAt);
   }
 
-  /** Distinct requested cwds, most recent first, for the picker; never worktree paths. */
+  /** Distinct requested cwds, most recent first, for the picker; never worktree paths, nor the config agent's own folder. */
   recentCwds(limit = 10): string[] {
     const seen: string[] = [];
     for (const session of [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt)) {
+      if (session.purpose !== null) continue;
       if (!seen.includes(session.requestedCwd)) seen.push(session.requestedCwd);
       if (seen.length >= limit) break;
     }

@@ -24,6 +24,7 @@ await import("./daemoncheck.sent-files.js");
 await import("./daemoncheck.tasks.js");
 await import("./daemoncheck.board.js");
 await import("./daemoncheck.board-fleet.js");
+await import("./daemoncheck.board-agent.js");
 await import("./daemoncheck.plugin-manifest-and-store.js");
 await import("./daemoncheck.plugin-surfaces.js");
 await import("./daemoncheck.plugin-install-and-rollback.js");

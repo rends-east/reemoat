@@ -17,6 +17,7 @@ import {
   type FlowColumn,
   type ViewColumn,
 } from "@reemoat/board";
+import { drawnInNoList } from "./boardAgent";
 import type { MachineId, SessionId, SessionRef } from "./ids";
 import type { Reach } from "./machine";
 import type { SessionRow } from "./store";
@@ -515,7 +516,7 @@ export function needOf(entry: BoardTask, live: (machineId: MachineId, sessionId:
 export function chatsWithoutTask(rows: readonly SessionRow[], tasks: readonly BoardTask[]): SessionRow[] {
   const held = new Set<string>();
   for (const entry of tasks) for (const session of entry.task.sessions) held.add(`${entry.machineId}\u0000${session.id}`);
-  return rows.filter((row) => !held.has(`${row.ref.machineId}\u0000${row.ref.sessionId}`));
+  return rows.filter((row) => !drawnInNoList(row.snapshot) && !held.has(`${row.ref.machineId}\u0000${row.ref.sessionId}`));
 }
 
 /** A task in For you: since when it has been its person's, and what it waits on them for, where it needs them. */

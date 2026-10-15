@@ -1,8 +1,10 @@
-import { formatBoardError, parseBoard, simulate, type Board } from "@reemoat/board";
+import { BOARD_GUIDE, formatBoardError, parseBoard, simulate, type Board } from "@reemoat/board";
 import { machineAddress, type ProjectListing, type TaskDesk, type TaskListing } from "./desk.js";
 import {
+  BOARD_APPLY_TOOL_NAME,
   BOARD_CHECK_TOOL_NAME,
   BOARD_GET_TOOL_NAME,
+  BOARD_GUIDE_TOOL_NAME,
   BOARD_PROPOSE_TOOL_NAME,
   BOARD_SIMULATE_TOOL_NAME,
   LIST_PROJECTS_TOOL_NAME,
@@ -14,7 +16,7 @@ import {
 
 const SUMMARY_LINE_CHARS = 240;
 
-/** One of the four task tools, answered as an MCP tool result; a refusal is a sentence for the model, never an HTTP error. */
+/** One of the task and board tools, answered as an MCP tool result; a refusal is a sentence for the model, never an HTTP error. */
 export async function callTaskTool(desk: TaskDesk, callerId: string, name: string, args: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case LIST_PROJECTS_TOOL_NAME:
@@ -55,6 +57,8 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
       };
     }
     case BOARD_GET_TOOL_NAME: {
+      // What the config agent writes over must be the newest any machine holds, or board_apply refuses it a moment later.
+      if (desk.isBoardAgent(callerId)) await desk.pullNewestBoard();
       const state = desk.engine.current;
       return {
         content: [{ type: "text", text: `Revision ${state.revision}.\n\n${boardWords(state.board)}\n\nThe YAML:\n${state.text}` }],
@@ -100,6 +104,23 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
           },
         ],
         structuredContent: { status: "shown", revision: result.revision },
+      };
+    }
+    case BOARD_GUIDE_TOOL_NAME:
+      return { content: [{ type: "text", text: BOARD_GUIDE }] };
+    case BOARD_APPLY_TOOL_NAME: {
+      const result = await desk.applyBoard(callerId, args);
+      if (!result.ok) return toolError(result.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Applied as revision ${result.revision}, here and sent to ${result.sent === 1 ? "one linked machine" : `${result.sent} linked machines`}. ` +
+              "Your user sees it as a card with the change and an Undo.",
+          },
+        ],
+        structuredContent: { status: "applied", revision: result.revision, hash: result.hash },
       };
     }
     default:

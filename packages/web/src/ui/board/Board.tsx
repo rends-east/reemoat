@@ -16,7 +16,7 @@ import {
 } from "../../board";
 import { boardConfigPath, navigate, newTaskInPath, newTaskPath, sessionPath } from "../../router";
 import { elapsedSince, sessionGroups, type AppState, type SessionRow } from "../../store";
-import { humanRequests } from "../../wire";
+import { humanRequests, needsHuman } from "../../wire";
 import { AgentMark } from "../AgentIcons";
 import { Button, Icon, IconButton, MachineLabel, nicknameLine, sessionLabel, shortDuration, StatusDot } from "../bits";
 import { currentView, groupsVersion, subscribeGroups } from "../groups";
@@ -90,6 +90,8 @@ export function Board({ state }: { state: AppState }): ReactNode {
   });
   const order = lanes.map((one) => `${one.column.id}:${one.items.map((item) => `${item.kind[0]}${item.key}`).join(",")}`).join("|");
   const writable = configured.size > 0;
+  // Its conversation is drawn in no list, so a question from it is said here, on the one way in (Q3.743).
+  const agentWaits = state.sessions.some((row) => row.snapshot.purpose === "board" && needsHuman(row.snapshot));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -117,6 +119,7 @@ export function Board({ state }: { state: AppState }): ReactNode {
         <Button size="sm" tone="ghost" onClick={() => navigate(boardConfigPath())}>
           <Icon as={SlidersHorizontal} size={14} />
           {writable ? "Edit board" : "Board settings"}
+          {agentWaits && <span className="h-1.5 w-1.5 rounded-full bg-fg" title="The config agent is waiting for you" />}
         </Button>
         <Button size="sm" onClick={() => navigate(newTaskPath())}>
           <Icon as={Plus} size={14} />

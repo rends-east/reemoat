@@ -446,6 +446,8 @@ function describeEvent(event: SessionEvent): string {
       return `proposed  ${event.proposals.map((one) => clip(one.title, 60)).join(" | ")}`;
     case "board_proposed":
       return `board proposed  on revision ${event.revision}  ${clip(event.why, 80)}`;
+    case "board_applied":
+      return `board applied  revision ${event.previousRevision} → ${event.revision}  ${clip(event.why, 80)}`;
     case "other":
       return `other  ${event.sessionUpdate}`;
     case "error":

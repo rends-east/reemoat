@@ -39,6 +39,7 @@ await import("./webcheck.machine-limit-and-probe.js");
 await import("./webcheck.navigation.js");
 await import("./webcheck.board.js");
 await import("./webcheck.board-editor.js");
+await import("./webcheck.board-agent.js");
 await import("./webcheck.task-feed.js");
 closeWss();
 await import("./webcheck.plugin-protocol.js");

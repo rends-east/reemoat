@@ -36,6 +36,9 @@ subtitle (`nicknameLine`). `sessionLabel` and Rename are unchanged. Q3.677.
 - **Always present**: an unnamed create takes `pickNickname`; `restore()` names older rows
   synchronously, oldest first (the older duplicate keeps its name). Never cleared; `/meta`
   refuses `null`.
+- **`config` is reserved** for the board's config agent (`BOARD_AGENT_NICKNAME`, Q2.270):
+  `409 nickname_reserved` to any other create or rename, never picked, and renamed at
+  `restore()` on a row that took it before. The web mirror's field refuses it too.
 - **It is the peer name** (`nameOf`); nothing derives a name from the title. `peerName`
   stays in `envelope.ts` for older daemons' slugs.
 

@@ -1,6 +1,7 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { LinkSync, linkCandidate, type LinkCandidate, type LinkScope, type LinkSyncStatus } from "./agentLinks";
 import { forgetAttachments } from "./attach";
+import { drawnInNoList } from "./boardAgent";
 import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
 import { claimEcho, clearEcho, landEcho, settleEcho, type PendingEcho } from "./echo";
 import { forgetHiddenFinished } from "./finishedTasks";
@@ -2283,6 +2284,8 @@ export function sessionLists(state: AppState): SessionLists {
   const countByMachine = new Map<MachineId, number>();
 
   for (const row of state.sessions) {
+    // Opened from Edit board alone, so filed nowhere else: every list, count and walk below reads these three (Q3.743).
+    if (drawnInNoList(row.snapshot)) continue;
     if (countsAsLive(row.snapshot)) {
       countByMachine.set(row.ref.machineId, (countByMachine.get(row.ref.machineId) ?? 0) + 1);
     }

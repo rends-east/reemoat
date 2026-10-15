@@ -10,6 +10,8 @@ export const BOARD_GET_TOOL_NAME = "board_get";
 export const BOARD_CHECK_TOOL_NAME = "board_check";
 export const BOARD_SIMULATE_TOOL_NAME = "board_simulate";
 export const BOARD_PROPOSE_TOOL_NAME = "board_propose";
+export const BOARD_GUIDE_TOOL_NAME = "board_guide";
+export const BOARD_APPLY_TOOL_NAME = "board_apply";
 
 export const TASK_TOOL_NAMES: readonly string[] = [
   LIST_PROJECTS_TOOL_NAME,
@@ -20,10 +22,15 @@ export const TASK_TOOL_NAMES: readonly string[] = [
   BOARD_CHECK_TOOL_NAME,
   BOARD_SIMULATE_TOOL_NAME,
   BOARD_PROPOSE_TOOL_NAME,
+  BOARD_GUIDE_TOOL_NAME,
+  BOARD_APPLY_TOOL_NAME,
 ];
 
 /** What an agent says a proposed board changes: one paragraph on the card above the diff. */
 export const MAX_BOARD_WHY_CHARS = 600;
+
+/** An applied board and the one it replaced, together, under the log's 128 KiB event; past it the card carries no Undo. */
+export const MAX_APPLIED_BOARD_CHARS = 120_000;
 
 export const MAX_PROPOSALS_PER_CALL = 12;
 /** Under the log's 128 KiB per event with room for the rest of the row: a proposals card is never clipped. */
@@ -39,8 +46,13 @@ export const TASK_INSTRUCTIONS =
   "Your user keeps a board of tasks across their machines. list_tasks shows it and list_projects shows where work can run. " +
   "propose_tasks puts tasks in front of your user as a card; a task and its agent start only when they press, so propose and then stop. " +
   "When this conversation is itself working on a task, task_update keeps that task's summary current for them. " +
-  "The board's columns, who runs them and where a task goes next are one YAML document: board_get reads it, board_check and " +
-  "board_simulate try a draft, and board_propose shows your user a change they apply with a press.";
+  "The board's columns, who runs them and where a task goes next are one YAML document: board_guide says how one is written, " +
+  "board_get reads it, board_check and board_simulate try a draft, and board_propose shows your user a change they apply with a press.";
+
+/** To the config agent alone, beside the note on every message of its person's, for a harness that reads a server's instructions (Q2.270). */
+export const BOARD_AGENT_INSTRUCTIONS =
+  "You are the config agent of your user's board, and the one session that applies a board itself: board_guide is how a board is " +
+  "written, board_get what it is now, and board_apply writes your draft to every machine of theirs. No other session can reach you.";
 
 export const DISPATCH_NICKNAME = "dispatch";
 
@@ -188,7 +200,36 @@ export const TASK_TOOLS = [
     },
     _meta: ALWAYS_LOAD,
   },
+  {
+    name: BOARD_GUIDE_TOOL_NAME,
+    description:
+      "How a board is written: every field, what each does, the bounds, whole example boards, and how to change one safely. " +
+      "Read it before writing a board.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+    _meta: ALWAYS_LOAD,
+  },
 ];
+
+/** Listed to the config agent alone; any other caller is refused in words (Q2.270). */
+export const BOARD_APPLY_TOOL = {
+  name: BOARD_APPLY_TOOL_NAME,
+  description:
+    "Apply a board: written on this machine and sent to every linked machine of your user's, and shown to them as a card with the " +
+    "change and an Undo. Write the whole board, keeping what you do not mean to change, comments included; check it with " +
+    "board_check first. Refused, with nothing applied, when the board moved since the revision you read.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: `The whole board, as YAML; at most ${MAX_BOARD_BYTES / 1024} KiB.` },
+      revision: { type: "integer", description: "The revision board_get showed, which this draft was written on." },
+      why: { type: "string", description: `What it changes and why, in a few sentences; at most ${MAX_BOARD_WHY_CHARS} characters.` },
+    },
+    required: ["text", "revision", "why"],
+    additionalProperties: false,
+  },
+  _meta: ALWAYS_LOAD,
+};
 
 export interface ProposedTask {
   title: string;

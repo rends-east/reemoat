@@ -37,6 +37,16 @@ export const SEES = ["brief", "summary", "report", "last_message", "diff_stat", 
 export type Sees = (typeof SEES)[number];
 export const DEFAULT_SEES: readonly Sees[] = ["report", "last_message"];
 
+/** Every key each level of a board takes: what parseBoard refuses an unknown field against, and what the guide documents. */
+export const BOARD_FIELDS = {
+  top: ["version", "intake", "budget", "roles", "columns"],
+  role: ["agent", "model", "on", "min_confidence"],
+  column: ["id", "title", "show", "run", "next", "decide", "sees", "holder", "limit", "final"],
+  run: ["role", "skill", "args", "prompt", "conversation", "done_when"],
+  exit: ["to", "means", "label"],
+  judge: ["rules"],
+} as const;
+
 export interface Role {
   name: string;
   /** A harness, an assembled agent or a plugin's classifier, without the machine. */
@@ -177,7 +187,7 @@ export function parseBoard(text: string): ParsedBoard {
     refuse(root, "", "a board is a map with version and columns");
     return { ok: false, errors: sorted(errors) };
   }
-  const top = fields(root, "", ["version", "intake", "budget", "roles", "columns"], refuse);
+  const top = fields(root, "", BOARD_FIELDS.top, refuse);
 
   const version = top.get("version");
   if (version === undefined) refuse(root, "version", "version is required; write version: 1");
@@ -313,7 +323,7 @@ function readRole(node: Node | null, path: string, name: string, refuse: Refuse)
     refuse(node, path, "a role is a map with at least agent");
     return null;
   }
-  const f = fields(node, path, ["agent", "model", "on", "min_confidence"], refuse);
+  const f = fields(node, path, BOARD_FIELDS.role, refuse);
   const agentPair = f.get("agent");
   const raw = agentPair === undefined ? null : stringOf(agentPair.value);
   if (agentPair === undefined) {
@@ -400,7 +410,7 @@ function readColumns(pair: Pair | undefined, root: YAMLMap, roles: Role[], refus
       refuse(item as Node, path, "a column is a map with id and title");
       return null;
     }
-    const f = fields(item, path, ["id", "title", "show", "run", "next", "decide", "sees", "holder", "limit", "final"], refuse);
+    const f = fields(item, path, BOARD_FIELDS.column, refuse);
     const idPair = f.get("id");
     const id = idPair === undefined ? null : stringOf(idPair.value);
     if (idPair === undefined) refuse(item, join(path, "id"), "id is required");
@@ -525,7 +535,7 @@ function readRun(pair: Pair, path: string, roles: Role[], refuse: Refuse): Run |
     refuse(node as Node, path, "run is a map; write run: {} for the task's own agent");
     return null;
   }
-  const f = empty ? new Map<string, Pair>() : fields(node as YAMLMap, path, ["role", "skill", "args", "prompt", "conversation", "done_when"], refuse);
+  const f = empty ? new Map<string, Pair>() : fields(node as YAMLMap, path, BOARD_FIELDS.run, refuse);
   let ok = true;
   const run: Run = { role: null, skill: null, args: null, prompt: null, conversation: "continue", doneWhen: "report" };
 
@@ -638,7 +648,7 @@ function readExits(
       if (to !== null) exits.push({ name, to, means: null, label: name });
       continue;
     }
-    const f = fields(value, where, ["to", "means", "label"], refuse);
+    const f = fields(value, where, BOARD_FIELDS.exit, refuse);
     const toPair = f.get("to");
     if (toPair === undefined) {
       refuse(value, `${where}.to`, "to is required: the column this exit leads to");
@@ -696,7 +706,7 @@ function readDecide(
         refuse(one, where, "a map in decide is {rules: [...]}");
         continue;
       }
-      const rulesPair = fields(one, where, ["rules"], refuse).get("rules")!;
+      const rulesPair = fields(one, where, BOARD_FIELDS.judge, refuse).get("rules")!;
       const rules = parseRules(rulesPair.value as Node | null, `${where}.rules`, exits, ids, refuse);
       if (rules !== null) judges.push({ kind: "rules", rules });
       continue;

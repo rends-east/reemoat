@@ -317,6 +317,29 @@ export interface TasksProposedEvent {
   proposals: TaskProposal[];
 }
 
+/** A board an agent wrote for its person: nothing changes until they press Apply (Q2.268). */
+export interface BoardProposedEvent {
+  type: "board_proposed";
+  id: string;
+  text: string;
+  /** The board it was written against; Apply is offered only while the account's board is still that one. */
+  revision: number;
+  hash: string;
+  why: string;
+}
+
+/** A board the config agent applied itself; Undo writes `previousText` back while the board is still this one (Q2.270). */
+export interface BoardAppliedEvent {
+  type: "board_applied";
+  id: string;
+  text: string;
+  revision: number;
+  hash: string;
+  previousRevision: number;
+  previousText: string | null;
+  why: string;
+}
+
 export interface AgentLogEvent {
   type: "agent_log";
   line: string;
@@ -354,6 +377,8 @@ export type SessionEvent =
   | ContextClearedEvent
   | FileSentEvent
   | TasksProposedEvent
+  | BoardProposedEvent
+  | BoardAppliedEvent
   | OtherUpdateEvent
   | ErrorEvent;
 
@@ -760,6 +785,8 @@ export interface SessionSnapshot {
   rank?: number | null;
   // The conversation's own switch; absent from a daemon that cannot turn it off. Q2.244.
   peerMessages?: boolean;
+  // The board's config agent, current or replaced, drawn from Edit board alone; absent from an older daemon. Q2.270.
+  purpose?: "board" | "board_retired" | null;
   resume?: SessionResumeState;
 }
 

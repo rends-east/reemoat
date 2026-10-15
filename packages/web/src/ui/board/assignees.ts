@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { orderStrip } from "../../agentStrip";
+import { drawnInNoList } from "../../boardAgent";
 import { offersStripTile, startableHere } from "../../agents";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
@@ -162,7 +163,7 @@ export function projectsOn(
   const add = (path: string): void => {
     if (path.length > 0 && !seen.includes(path)) seen.push(path);
   };
-  for (const row of state.sessions) if (row.ref.machineId === machineId) add(folderPathOf(row));
+  for (const row of state.sessions) if (row.ref.machineId === machineId && !drawnInNoList(row.snapshot)) add(folderPathOf(row));
   for (const path of taskFolders) add(path);
   for (const path of offer?.recent ?? []) add(path);
   for (const path of offer?.roots ?? []) add(path);

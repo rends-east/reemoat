@@ -353,6 +353,8 @@ function migrate(db: DatabaseSync): void {
 
   if (!hasSession("open_question_json")) db.exec("ALTER TABLE sessions ADD COLUMN open_question_json TEXT");
 
+  if (!hasSession("purpose")) db.exec("ALTER TABLE sessions ADD COLUMN purpose TEXT");
+
 
   const identityColumns = db.prepare("PRAGMA table_info(identity)").all();
   const has = (name: string): boolean => identityColumns.some((column) => column["name"] === name);
@@ -833,13 +835,13 @@ export class SqliteSessionStore implements SessionStore {
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
          turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, nickname, pinned, rank,
-         ultracode, custom_agent, agent_state_json, peer_messages_off, open_question_json,
+         ultracode, custom_agent, agent_state_json, peer_messages_off, open_question_json, purpose,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
          :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :nickname, :pinned, :rank,
-         :ultracode, :custom_agent, :agent_state_json, :peer_messages_off, :open_question_json,
+         :ultracode, :custom_agent, :agent_state_json, :peer_messages_off, :open_question_json, :purpose,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
        ON CONFLICT(id) DO UPDATE SET
@@ -850,6 +852,7 @@ export class SqliteSessionStore implements SessionStore {
          rank             = excluded.rank,
          peer_messages_off = excluded.peer_messages_off,
          open_question_json = excluded.open_question_json,
+         purpose          = excluded.purpose,
          ultracode        = excluded.ultracode,
          agent_state_json = excluded.agent_state_json,
          agent_session_id = excluded.agent_session_id,
@@ -1129,6 +1132,7 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     agent_state_json: row.agentState === null ? null : JSON.stringify(row.agentState),
     peer_messages_off: row.peerMessagesOff ? 1 : 0,
     open_question_json: row.openQuestion == null ? null : JSON.stringify(row.openQuestion),
+    purpose: row.purpose ?? null,
     workspace_json: JSON.stringify(row.workspace),
     workspace_mode: row.workspace.mode,
     workspace_root: row.workspace.root,
@@ -1329,6 +1333,7 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       agentState: toAgentState(row["agent_state_json"]),
       peerMessagesOff: Number(row["peer_messages_off"] ?? 0) !== 0,
       openQuestion: toOpenQuestion(row["open_question_json"]),
+      purpose: row["purpose"] == null ? null : String(row["purpose"]),
     };
   } catch {
     return null;

@@ -51,8 +51,8 @@ old `status` by the phase table for a client from before the board. Q2.258, Q2.2
 
 ## The tools (Q2.259, Q2.268)
 
-`list_projects`, `list_tasks`, `propose_tasks`, `task_update`, and the board's own four
-(`board_get`, `board_check`, `board_simulate`, `board_propose`), in `src/tasks/tools.ts`
+`list_projects`, `list_tasks`, `propose_tasks`, `task_update`, and the board's own
+(`board_get`, `board_check`, `board_simulate`, `board_propose`, `board_guide`), in `src/tasks/tools.ts`
 (pure: definitions, parsing, wording), answered by `callTaskTool`.
 
 - **Served whatever messaging says** (`PeerHub.serveTasks`; `callTool` answers them
@@ -61,9 +61,9 @@ old `status` by the phase table for a client from before the board. Q2.258, Q2.2
   `GET /peer/agents` does (`boardRefused`).
 - **Those two routes answer paths**, where `list_agents` shows a folder's name: a
   proposal for another machine names the `cwd` its press sends. Stated in Q2.259.
-- **No tool creates, starts or applies anything.** `propose_tasks` appends one
-  `tasks_proposed`, `board_propose` one `board_proposed`; the press is the client's. An agent starting agents elsewhere is what
-  Q7.151 leaves unbuilt.
+- **No tool creates or starts anything; one applies**, the config agent's `board_apply`
+  (`board-engine.md`). `propose_tasks` appends `tasks_proposed`, `board_propose`
+  `board_proposed`; the press is the client's. Agents elsewhere: Q7.151.
 - **`task_update` reaches the caller's own task and no other** (`taskOf`): `running` or
   `review`, and an `outcome` checked against the column's exits; `done` is its person's,
   refused in words with nothing written (Q2.260). Its answer says the task reads running *while the agent works*: told only the
@@ -78,8 +78,8 @@ old `status` by the phase table for a client from before the board. Q2.258, Q2.2
   `remoteProjectsOf`): a row this build cannot hold is dropped, an unknown status is
   printed as it came. A bare 404 is "too old for tasks", never an error. Cached
   `REMOTE_BOARD_TTL_MS`, as `list_agents` is.
-- **claude runs all eight without a permission request** (`CLAUDE_ALLOWED_TOOLS`,
-  pinned by value in `daemoncheck`). The other harnesses ask.
+- **claude runs them all without asking** (`CLAUDE_ALLOWED_TOOLS`, pinned by value in
+  `daemoncheck`). The other harnesses ask.
 - **The dispatcher is a session** nicknamed `DISPATCH_NICKNAME`; the server's
   instructions are per caller, so it alone is sent `DISPATCH_INSTRUCTIONS`. No other
   daemon code path knows it, and the client draws it nowhere now (Q3.735).

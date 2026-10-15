@@ -31,6 +31,7 @@ import { echoId, type PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { PeerMessageRow } from "./PeerMessage";
 import { SentFileRow } from "./SentFile";
+import { BoardChangeCard } from "./board/BoardChange";
 import { ProposalsCard } from "./board/Proposals";
 import { Markdown } from "./Markdown";
 import { COLUMN, Dot, Empty, Icon, Badge, shortDuration, TAP_GROW_Y, TranscriptSkeleton } from "./bits";
@@ -74,6 +75,7 @@ const ASK_CLEARANCE = 20;
 
 export function EventList({
   transcript,
+  empty = null,
   askHeight,
   onResized,
   files,
@@ -97,6 +99,8 @@ export function EventList({
   askHeight: number;
   /** Must be referentially stable: it rides a context past the memoised TailRow. */
   onResized: () => void;
+  /** What a conversation with nothing in it says instead of the usual line: Edit board's account of a board (Q3.743). */
+  empty?: ReactNode;
   files: FileAccess | null;
   working: boolean;
   reporting: boolean;
@@ -195,7 +199,7 @@ export function EventList({
         </p>
       )}
 
-      {notice?.kind === "empty" && <Empty>Nothing yet — send the first message below.</Empty>}
+      {notice?.kind === "empty" && (empty ?? <Empty>Nothing yet — send the first message below.</Empty>)}
 
       <ResizedContext.Provider value={onResized}>
         <div className="space-y-1.5">
@@ -687,6 +691,10 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
 
     case "tasks_proposed":
       return <ProposalsCard proposals={event.proposals} />;
+
+    case "board_proposed":
+    case "board_applied":
+      return <BoardChangeCard event={event} />;
 
     default:
       // An event type from a newer daemon: draw nothing rather than crash.

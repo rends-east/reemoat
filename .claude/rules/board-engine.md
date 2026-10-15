@@ -6,6 +6,8 @@ paths:
   - scripts/daemoncheck.board.ts
   - scripts/daemoncheck.board-fleet.ts
   - plugins/**
+  - packages/web/src/boardAgent.ts
+  - packages/web/src/ui/board/BoardAgent.tsx
 ---
 
 # The configurable board: its YAML, its engine, and tasks between machines
@@ -107,6 +109,28 @@ A stop holds the agent's last message; a reply is a comment, which goes into a w
 run's conversation as its person's message, else into the next run's note. On a task in a
 column that waits on its person (not the intake, not a closing one) it also sends the task
 back to its last run's column (`sentBackTo`), so the agent has it at once. 200 kept.
+
+## The config agent (Q2.270, Q3.743)
+
+One session per account that writes the board for its person; Edit board is its conversation (`BoardChat`).
+
+- **A purpose on the row, never a nickname alone**: `purpose: "board"`, set only by
+  `BoardAgents.start` (`POST /board/agent`), in `$REEMOAT_HOME/board-agent` with no worktree.
+  `replace` retires the one there is (`board_retired`, stopped, its nickname freed) and puts
+  it back if the new one is refused. The app finds the newest by asking every machine.
+- **`config` is its alone** (`BOARD_AGENT_NICKNAME`): refused to any other create or rename,
+  kept by it, taken back at `restore()` from a row that held it before.
+- **Isolated both ways**: messaging is off on any session with a purpose and `/meta` will not
+  turn it on, so it is in no listing, takes no message and holds no messaging tool. It is the
+  one session holding `board_apply`; a message from another agent would be a way to rewrite
+  the board.
+- **`board_apply`** reads every linked board first (`pullNewestBoard`), writes against the
+  revision the agent read, appends `board_applied` with the board it replaced (Undo), and
+  spreads. Any session gets `board_guide` (`BOARD_GUIDE`, `boardcheck` holds its fields and
+  bounds); this one also gets `BOARD_AGENT_NOTE` after each of its person's messages.
+- **A board spreads**: any change here goes once to every linked machine (`spreadBoard`,
+  `POST /peer/board`, `adopt` keeps only the newer), over the machine's links (`boardLinks`),
+  never a conversation's.
 
 ## Between machines (Q2.269)
 

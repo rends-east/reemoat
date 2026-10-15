@@ -147,8 +147,8 @@ export const CLAUDE_WITHDRAWN_TOOLS: readonly string[] = [
 
 /**
  * claude's names for the tools of this daemon it runs without a permission request: send_file, whose card in the chat is the whole
- * effect (Q2.252), and the four task tools, which read the person's own board, propose what only a press creates, or write the
- * caller's own task (Q2.259).
+ * effect (Q2.252), the task tools, which read the person's own board, propose what only a press creates, or write the caller's own
+ * task (Q2.259), and board_apply, the config agent's alone, whose card carries an Undo (Q2.270).
  */
 export const CLAUDE_ALLOWED_TOOLS: readonly string[] = [
   "mcp__reemoat__send_file",
@@ -160,6 +160,8 @@ export const CLAUDE_ALLOWED_TOOLS: readonly string[] = [
   "mcp__reemoat__board_check",
   "mcp__reemoat__board_simulate",
   "mcp__reemoat__board_propose",
+  "mcp__reemoat__board_guide",
+  "mcp__reemoat__board_apply",
 ];
 
 /** codex features switched off in every session: what they add is drawn only by codex's own terminal (Q6.118). */

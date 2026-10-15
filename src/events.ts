@@ -32,6 +32,7 @@ export type SessionEvent =
   | FileSentEvent
   | TasksProposedEvent
   | BoardProposedEvent
+  | BoardAppliedEvent
   | OtherUpdateEvent
   | ErrorEvent;
 
@@ -363,6 +364,19 @@ export interface BoardProposedEvent {
   why: string;
 }
 
+/** A board the config agent applied itself, with the one it replaced for the card's Undo (Q2.270). */
+export interface BoardAppliedEvent {
+  type: "board_applied";
+  id: string;
+  text: string;
+  revision: number;
+  hash: string;
+  previousRevision: number;
+  /** null where the two would not fit one event: the card then offers no Undo. */
+  previousText: string | null;
+  why: string;
+}
+
 export interface AgentLogEvent {
   type: "agent_log";
   line: string;
@@ -572,6 +586,16 @@ export interface PersistedSession {
   agentState: AgentStateMemory | null;
   /** Absent on a row an older build wrote, and on a test's hand-made one. */
   openQuestion?: OpenQuestionRow | null;
+  /** A plain string, since a newer build may write other values; read through isSessionPurpose. */
+  purpose?: string | null;
+}
+
+/** What a session is for when it is not an ordinary conversation: the board's config agent, current or replaced (Q2.270). */
+export const SESSION_PURPOSES = ["board", "board_retired"] as const;
+export type SessionPurpose = (typeof SESSION_PURPOSES)[number];
+
+export function isSessionPurpose(value: unknown): value is SessionPurpose {
+  return typeof value === "string" && (SESSION_PURPOSES as readonly string[]).includes(value);
 }
 
 /** An ask_question still waiting for its person, kept on the row so a restart draws the card again (Q2.250). */
@@ -884,6 +908,8 @@ export function estimateBytes(event: SessionEvent): number {
       return 64 + proposalBytes(event.proposals);
     case "board_proposed":
       return 128 + event.id.length + event.text.length + event.hash.length + event.why.length;
+    case "board_applied":
+      return 160 + event.id.length + event.text.length + event.hash.length + (event.previousText?.length ?? 0) + event.why.length;
     case "file_change":
       return 128 + event.path.length + event.newText.length + (event.oldText?.length ?? 0);
     case "tool_call":
@@ -1066,6 +1092,7 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "tasks_proposed":
     // Bounded where it is made (a board is at most 64 KiB, the reason a few hundred characters): a clipped board would be another.
     case "board_proposed":
+    case "board_applied":
     case "session_started":
     case "status":
     case "turn_end":

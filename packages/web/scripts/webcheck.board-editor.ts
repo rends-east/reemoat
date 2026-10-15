@@ -81,14 +81,18 @@ process.stdout.write("\nthe board's screen: the YAML, refused by line, saved to 
     [/BoardForm|aria-label="Edit as"|setView\(/.test(screen), /from "yaml"|parseDocument\(|new Document\(/.test(screen), /from "\.\.\/\.\.\/boardSave"/.test(screen)],
     [false, false, true],
   );
+  // The write is its own module, which the transcript's board card spends too (Q3.743).
+  const write = stripComments(srcFile("ui/board/boardWrite.ts"));
   check(
     "a save writes each machine against its own revision and draws the board that machine took before its next read",
     [
-      /daemon\.putBoard\(text, target\.revision\)/.test(screen),
-      /boardStore\.applyBoard\(target\.id, \{ revision: written\.revision, hash: written\.hash, text: written\.text, board: read\.board \}\);/.test(screen),
-      /plan\.targets\.map\(\(target\) => writeOne\(target, text\)\)/.test(screen),
+      /daemon\.putBoard\(text, target\.revision\)/.test(write),
+      /boardStore\.applyBoard\(target\.id, \{ revision: written\.revision, hash: written\.hash, text: written\.text, board: read\.board \}\);/.test(write),
+      /plan\.targets\.map\(\(target\) => writeOne\(target, text\)\)/.test(write),
+      /void writeEverywhere\(plan, text\)/.test(screen),
+      /from "\.\.\/\.\.\/router"/.test(write),
     ],
-    [true, true, true],
+    [true, true, true, true, false],
   );
   check(
     "a draft the account's board moved under is kept and the screen says so; an untouched one follows it",
@@ -106,4 +110,27 @@ process.stdout.write("\nthe board's screen: the YAML, refused by line, saved to 
     [true, true, true, true],
   );
   check("nothing opens over the screen: no sheet, no dialog, no menu of its own", /<Sheet|role="dialog"|createPortal/.test(screen), false);
+  // Edit board is the config agent's conversation; the YAML is its second surface, opened from the header (Q3.743).
+  const chat = stripComments(srcFile("ui/board/BoardChat.tsx"));
+  check(
+    "with no conversation yet it says what a board is and links the guide in a new browsing context; the YAML is docked beside it, and the frame is not the editor's",
+    [
+      /Your board is one YAML document all your machines share\. @config writes it for you\./.test(chat),
+      /<a className=\{LINK\} href=\{BOARD_DOCS_URL\} target="_blank" rel="noreferrer">/.test(chat),
+      /<BoardEditor state=\{state\} onClose=\{onClose\} \/>/.test(chat),
+      /const panel = yaml \? <YamlPanel state=\{state\} onClose=\{closeYaml\} \/> : null;/.test(chat),
+      /createPortal/.test(chat),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    "the YAML docks where Background tasks docks, with its gutter and its handle, and only one of the two is open",
+    [
+      /\$\{TASK_PANEL_WIDTH\} \$\{TASK_PANEL_INSET\}/.test(chat),
+      /<PaneHandle\s+pane=\{taskPane\}/.test(chat),
+      /docked: yaml, onOpenTasks/.test(chat),
+      /if \(yaml\) navigate\(boardConfigPath\(\)\);/.test(chat),
+    ],
+    [true, true, true, true],
+  );
 }

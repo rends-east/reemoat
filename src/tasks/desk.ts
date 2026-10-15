@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { boardHash, columnById, formatBoardError, isFlow, parseBoard, type Phase } from "@reemoat/board";
+import { BoardAgents } from "../board/agent.js";
 import { BoardEngine, type Advanced, type BoardJudges, type FleetMachine, type TaskView } from "../board/engine.js";
 import type { SessionStatus, TaskProposal } from "../events.js";
 import type { PeerAnswer } from "../peers/channel.js";
@@ -28,6 +29,7 @@ import {
   isAgentRef,
   isProjectPath,
   parseProposals,
+  MAX_APPLIED_BOARD_CHARS,
   MAX_BOARD_WHY_CHARS,
   parseTaskUpdate,
   type ProposedTask,
@@ -38,6 +40,8 @@ export const REMOTE_BOARD_TIMEOUT_MS = 3_000;
 export const REMOTE_BOARD_TTL_MS = 15_000;
 const REMOTE_BOARD_CONCURRENCY = 8;
 export const MAX_LISTED_PROJECTS = 100;
+/** One try per linked machine; one that misses a board reads it the next time the two talk (Q2.266). */
+const BOARD_SPREAD_TIMEOUT_MS = 3_000;
 const MAX_REMOTE_TASKS = MAX_TASKS;
 const MAX_REMOTE_AGENTS = 64;
 const MAX_REMOTE_ID_CHARS = 64;
@@ -121,6 +125,8 @@ export interface TaskPeers {
   askLink(link: PeerLink, path: string, timeoutMs: number): Promise<PeerAnswer>;
   /** Links a task's run may cross, and one request over one; absent on a desk with no network. */
   handoffLinks?(): PeerLink[];
+  /** Links the account's board travels over: the machine's switches alone, since the config agent's own messaging is off (Q2.270). */
+  boardLinks?(): PeerLink[];
   request?(link: PeerLink, request: { method: "GET" | "POST"; path: string; body?: unknown }, timeoutMs?: number): Promise<PeerAnswer>;
 }
 
@@ -193,6 +199,8 @@ export interface TaskDeskOptions {
   tickMs?: number;
   /** Who a role's question goes to; absent, every role abstains. */
   judges?: BoardJudges | null;
+  /** The folder the config agent runs in; absent, this desk starts none (Q2.270). */
+  boardAgentRoot?: string;
 }
 
 export type MoveResult = { ok: true; task: TaskRecord } | { ok: false; code: "task_moved" | "task_working" | "no_column" | "no_exit"; message: string };
@@ -205,9 +213,11 @@ export class TaskDesk {
   private readonly now: () => number;
   private readonly remote = new Map<string, { at: number; answer: Promise<Remote<unknown>> }>();
   readonly engine: BoardEngine;
+  readonly boardAgents: BoardAgents | null;
 
   constructor(options: TaskDeskOptions) {
     this.registry = options.registry;
+    this.boardAgents = options.boardAgentRoot === undefined ? null : new BoardAgents({ registry: options.registry, root: options.boardAgentRoot });
     this.store = options.store;
     this.peers = options.peers ?? null;
     this.now = options.now ?? Date.now;
@@ -527,6 +537,76 @@ export class TaskDesk {
       dropped += 1;
     }
     return dropped;
+  }
+
+  /** Whether this caller is the config agent: the session board_apply is listed to, and the only one it answers. */
+  isBoardAgent(callerId: string): boolean {
+    return this.registry.get(callerId)?.purpose === "board";
+  }
+
+  /** board_apply: the newest board a linked machine holds is read first, then this draft written over the revision the agent read, and spread (Q2.270). */
+  async applyBoard(
+    callerId: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: true; revision: number; hash: string; sent: number } | { ok: false; message: string }> {
+    const session = this.registry.get(callerId);
+    if (session === undefined) return { ok: false, message: "this session no longer exists" };
+    if (session.purpose !== "board") return { ok: false, message: "only the board's config agent applies a board; show your user a change with board_propose" };
+    const text = args["text"];
+    const revision = args["revision"];
+    const why = args["why"];
+    if (typeof text !== "string" || text.trim().length === 0) return { ok: false, message: "text is the whole board, as YAML" };
+    if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 0) return { ok: false, message: "revision is the one board_get showed" };
+    if (typeof why !== "string" || why.trim().length === 0 || why.length > MAX_BOARD_WHY_CHARS) {
+      return { ok: false, message: `why says what it changes, in at most ${MAX_BOARD_WHY_CHARS} characters` };
+    }
+    await this.pullNewestBoard();
+    const before = this.engine.current;
+    const put = this.engine.putBoard(text, revision);
+    if (!put.ok && put.kind === "conflict") {
+      return { ok: false, message: `the board is at revision ${put.state.revision} now, not ${revision}; nothing was applied. Read it again with board_get and make the change on that text` };
+    }
+    if (!put.ok && put.kind === "invalid") return { ok: false, message: `the board does not parse; nothing was applied:\n${put.errors.map(formatBoardError).join("\n")}` };
+    if (!put.ok) return { ok: false, message: "the board was not taken" };
+    if (!put.changed) return { ok: false, message: "that is the board as it is now; there is nothing to apply" };
+    session.boardApplied({
+      id: `ba_${randomBytes(9).toString("base64url")}`,
+      text: put.state.text,
+      revision: put.state.revision,
+      hash: put.state.hash,
+      previousRevision: before.revision,
+      previousText: before.text.length + put.state.text.length <= MAX_APPLIED_BOARD_CHARS ? before.text : null,
+      why: why.trim(),
+    });
+    return { ok: true, revision: put.state.revision, hash: put.state.hash, sent: this.spreadBoard() };
+  }
+
+  /** A board this machine just took, sent once to every linked machine, which keeps it only where it is the newer; answers how many were sent to. */
+  spreadBoard(): number {
+    const peers = this.peers;
+    if (peers === null || peers.boardLinks === undefined || peers.request === undefined) return 0;
+    const state = this.engine.current;
+    const links = peers.boardLinks();
+    for (const link of links) {
+      void peers
+        .request(link, { method: "POST", path: "/peer/board", body: { revision: state.revision, hash: state.hash, text: state.text } }, BOARD_SPREAD_TIMEOUT_MS)
+        // A miss costs nothing here: that machine reads the board the next time the two talk.
+        .catch(() => undefined);
+    }
+    return links.length;
+  }
+
+  /** Every linked machine's board read now, never from the cache, and the newest adopted. */
+  async pullNewestBoard(): Promise<void> {
+    const peers = this.peers;
+    if (peers === null || peers.boardLinks === undefined) return;
+    const answers = await Promise.all(peers.boardLinks().map((link) => peers.askLink(link, "/peer/board", REMOTE_BOARD_TIMEOUT_MS)));
+    for (const answer of answers) {
+      if (!answer.ok || answer.status !== 200) continue;
+      const body = answer.body as { revision?: unknown; hash?: unknown; text?: unknown } | null;
+      if (typeof body?.revision !== "number" || typeof body.hash !== "string" || typeof body.text !== "string") continue;
+      this.engine.adopt({ revision: body.revision, hash: body.hash, text: body.text, at: this.now() });
+    }
   }
 
   /** Whether this caller is the dispatcher: an ordinary session, known only by its nickname. */

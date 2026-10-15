@@ -125,6 +125,7 @@ import {
   invalidNickname,
   MAX_TITLE_CHARS,
   NicknameError,
+  BoardAgentIsolatedError,
   SessionLimitError,
   StartTimeoutError,
   type ElicitationAnswerBody,
@@ -367,7 +368,7 @@ export function createApp(options: ServerOptions): AppBundle {
     (await readJsonObject(c)) ?? jsonError(c, 400, "bad_request", "expected a JSON object body");
 
   const nicknameRefused = (c: Context<AppEnv>, error: NicknameError): Response =>
-    error.code === "nickname_taken"
+    error.code !== "invalid_nickname"
       ? jsonError(c, 409, error.code, error.message)
       : jsonError(c, 400, error.code, error.message, { min: MIN_NICKNAME_CHARS, max: MAX_NICKNAME_CHARS });
 
@@ -1546,6 +1547,22 @@ export function createApp(options: ServerOptions): AppBundle {
     return c.json({ revision: state.revision, hash: state.hash, text: state.text });
   });
 
+  // A board another machine just took, kept only where it is the newer, as one read off GET /peer/board would be (Q2.270).
+  app.post("/peer/board", message, async (c) => {
+    const refused = boardRefused(c);
+    if (refused !== null) return refused;
+    const body = await readJsonObject(c);
+    const revision = body?.["revision"];
+    const hash = body?.["hash"];
+    const text = body?.["text"];
+    if (typeof revision !== "number" || !Number.isInteger(revision) || typeof hash !== "string" || typeof text !== "string") {
+      return jsonError(c, 400, "bad_request", "send the board as {revision, hash, text}");
+    }
+    const adopted = tasks!.engine.adopt({ revision, hash, text, at: Date.now() });
+    const state = tasks!.engine.current;
+    return c.json({ adopted, revision: state.revision, hash: state.hash });
+  });
+
   // A task's run moving here, its code, and a role asked here: a link with task:handoff, and tasks moving on this machine (Q2.269).
   const handoff = requireScope("task:handoff");
   const moveRefused = (c: Context<AppEnv>): Response | null => {
@@ -1913,7 +1930,39 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 400, "board_invalid", formatBoardError(put.errors[0]!), { errors: put.errors.map((one) => ({ ...one, text: formatBoardError(one) })) });
     }
     if (!put.ok) return jsonError(c, 400, "bad_request", "the board was not taken");
+    if (put.changed) tasks.spreadBoard();
     return c.json({ version: 1, revision: put.state.revision, hash: put.state.hash, text: put.state.text, changed: put.changed });
+  });
+
+  // The config agent: one session per account, started and found here, drawn by the app from Edit board alone (Q2.270).
+  const boardAgentOf = (c: Context<AppEnv>, session: ManagedSession | null): Response => c.json({ session: session?.snapshot() ?? null });
+
+  app.get("/board/agent", read, (c) => {
+    if (tasks?.boardAgents == null) return tasksOff(c);
+    return boardAgentOf(c, tasks.boardAgents.current());
+  });
+
+  app.post("/board/agent", write, async (c) => {
+    if (tasks?.boardAgents == null) return tasksOff(c);
+    if (registry.isShuttingDown) return jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const replace = body["replace"];
+    if (replace !== undefined && typeof replace !== "boolean") return jsonError(c, 400, "bad_request", "replace must be a boolean");
+    // The folder is this daemon's own; the agent is weighed as any launch's.
+    const spec = launchSpecOf(c, { agent: body["agent"], customAgent: body["customAgent"], cwd: "." });
+    if (spec instanceof Response) return spec;
+    try {
+      const started = await tasks.boardAgents.start({ agent: spec.agent, customAgent: spec.customAgent }, replace === true);
+      return c.json({ session: started.session.snapshot() }, started.created ? 201 : 200);
+    } catch (error) {
+      return launchRefused(c, error);
+    }
+  });
+
+  app.delete("/board/agent", write, async (c) => {
+    if (tasks?.boardAgents == null) return tasksOff(c);
+    return c.json({ retired: await tasks.boardAgents.retire() });
   });
 
   app.put("/tasks/:id/sessions/:sessionId", write, (c) => {
@@ -2444,6 +2493,7 @@ export function createApp(options: ServerOptions): AppBundle {
       return c.json({ session: registry.setMeta(managed, change) });
     } catch (error) {
       if (error instanceof NicknameError) return nicknameRefused(c, error);
+      if (error instanceof BoardAgentIsolatedError) return jsonError(c, 409, error.code, error.message);
       throw error;
     }
   }));

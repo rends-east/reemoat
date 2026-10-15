@@ -99,6 +99,11 @@ import { toast } from "./Toast";
 // Outside the store: a draft outlives an unmount without waking every subscriber per keystroke.
 const drafts = new Map<string, string>();
 
+/** A message typed before its conversation existed and refused after it did: the conversation's box opens holding it. */
+export function holdDraft(key: string, text: string): void {
+  if (text.length > 0) drafts.set(key, text);
+}
+
 // A prompt the daemon has not answered, by session: a Stop pressed meanwhile waits for it, since until then there is no turn to cancel.
 const sendsInFlight = new Map<string, Promise<void>>();
 

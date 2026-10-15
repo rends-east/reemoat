@@ -35,6 +35,7 @@ import {
   MAX_PROPOSAL_CHARS_PER_CALL,
   MAX_PROPOSALS_PER_CALL,
   TASK_TOOL_NAMES,
+  BOARD_APPLY_TOOL_NAME,
   parseProposals,
   parseTaskUpdate,
 } from "../src/tasks/tools.js";
@@ -671,7 +672,9 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   const tool = async (managed: ManagedSession, name: string, args: unknown = {}) => (await rpc(managed, "tools/call", { name, arguments: args })).result;
   const names = async (managed: ManagedSession): Promise<string[]> => ((await rpc(managed, "tools/list")).result?.tools ?? []).map((t: any) => t.name);
 
-  check("every session is served them, after the tools it already had", await names(runner), ["list_agents", "send_message", ...TASK_TOOL_NAMES]);
+  // board_apply is the config agent's alone (Q2.270): every other session is served the rest.
+  const SERVED = TASK_TOOL_NAMES.filter((name) => name !== BOARD_APPLY_TOOL_NAME);
+  check("every session is served them, after the tools it already had", await names(runner), ["list_agents", "send_message", ...SERVED]);
   const instructions = (await rpc(runner, "initialize", {})).result?.instructions ?? "";
   check("with instructions that say what the board is", /board of tasks/.test(instructions), true);
   check("and no word of dispatching for a session that is not the dispatcher", /dispatcher/.test(instructions), false);
@@ -679,7 +682,7 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   check(
     "the dispatcher is an ordinary session known by its nickname, and is told what it is for",
     [await names(dispatch), /You are this user's dispatcher/.test((await rpc(dispatch, "initialize", {})).result?.instructions ?? "")],
-    [["list_agents", "send_message", ...TASK_TOOL_NAMES], true],
+    [["list_agents", "send_message", ...SERVED], true],
   );
 
   // Said mid-turn the board still reads running, and an agent told only that reported the write as a failure (measured on claude).
@@ -954,7 +957,7 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   quietRegistry.setPeerMcpServers((id, caps) => quietHub.mcpServersFor(id, caps));
   const quiet = await quietRegistry.create({ agent: "claude", cwd: work, nickname: "quiet" });
   const quietTools = ((await rpc(quiet, "tools/list", {}, quietEndpoint.url)).result?.tools ?? []).map((t: any) => t.name);
-  check("a session still holds the task tools: the board is its own person's, which no messaging switch is about", quietTools, [...TASK_TOOL_NAMES]);
+  check("a session still holds the task tools: the board is its own person's, which no messaging switch is about", quietTools, [...SERVED]);
   const quietCard = (await rpc(quiet, "tools/call", { name: "propose_tasks", arguments: { tasks: [one] } }, quietEndpoint.url)).result;
   check("and may still propose", [quietCard.isError === true, eventsOf(quiet).some((event) => event.type === "tasks_proposed")], [false, true]);
 

@@ -23,8 +23,9 @@ export function depthOf(route: Route): number {
       return 0;
     case "session":
     case "task":
-    case "boardConfig":
       return 1;
+    case "boardConfig":
+      return route.pane === "chat" ? 1 : 2;
     case "legal":
       return 1;
     case "plugin":
@@ -206,8 +207,9 @@ export function upFrom(route: Route, under: string, origin: string | null = null
       return null;
     case "session":
     case "task":
-    case "boardConfig":
       return "/";
+    case "boardConfig":
+      return route.pane === "chat" ? "/" : "/board";
     case "legal":
       return "/";
     case "new":

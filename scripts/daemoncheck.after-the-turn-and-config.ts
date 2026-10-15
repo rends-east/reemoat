@@ -25,7 +25,7 @@ import {
 } from "../src/acp/agents.js";
 import { PEER_SERVER_NAME } from "../src/peers/envelope.js";
 import { SEND_FILE_TOOL_NAME } from "../src/peers/files.js";
-import { MAX_PROPOSAL_CHARS_PER_CALL, MAX_PROPOSALS_PER_CALL, TASK_TOOL_NAMES } from "../src/tasks/tools.js";
+import { MAX_APPLIED_BOARD_CHARS, MAX_BOARD_WHY_CHARS, MAX_PROPOSAL_CHARS_PER_CALL, MAX_PROPOSALS_PER_CALL, TASK_TOOL_NAMES } from "../src/tasks/tools.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
@@ -1756,6 +1756,17 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
     file_sent: { type: "file_sent", file: { uploadId: "f_0123456789abcdef", name: "n".repeat(200), mime: "image/png", bytes: 1 }, toolCallId: "t".repeat(256) },
     // The most propose_tasks lets one call carry: its own bound is on the characters of a whole card.
     board_proposed: { type: "board_proposed", id: "bp_1", text: "version: 1\n", revision: 0, hash: "0".repeat(64), why: "x" },
+    // The most board_apply writes: the two boards together under MAX_APPLIED_BOARD_CHARS, else no previous one at all.
+    board_applied: {
+      type: "board_applied",
+      id: "ba_1",
+      text: "t".repeat(MAX_APPLIED_BOARD_CHARS / 2),
+      revision: 2,
+      hash: "0".repeat(64),
+      previousRevision: 1,
+      previousText: "p".repeat(MAX_APPLIED_BOARD_CHARS / 2),
+      why: "w".repeat(MAX_BOARD_WHY_CHARS),
+    },
     tasks_proposed: {
       type: "tasks_proposed",
       proposals: Array.from({ length: MAX_PROPOSALS_PER_CALL }, (_, index) => ({

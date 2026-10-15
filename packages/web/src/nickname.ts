@@ -5,6 +5,9 @@ export const MAX_NICKNAME_CHARS = 32;
 
 export const NICKNAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
+/** The board's config agent's, which the daemon refuses to any other session (Q2.270). */
+export const BOARD_AGENT_NICKNAME = "config";
+
 export const NICKNAMES: readonly string[] = [
   "ada", "alba", "alma", "amos", "anya", "arlo", "asha", "aura", "basil", "bea",
   "bruno", "cara", "cleo", "cora", "dara", "dina", "eden", "elio", "elsa", "emil",
@@ -48,13 +51,15 @@ function withoutAt(raw: string): string {
 
 /** What the field holds, as it will be sent. */
 export function typedNickname(raw: string): string | null {
-  return normalizeNickname(withoutAt(raw));
+  const name = normalizeNickname(withoutAt(raw));
+  return name === BOARD_AGENT_NICKNAME ? null : name;
 }
 
 /** Why the field cannot be sent, or null exactly when `typedNickname` answers a name. */
 export function nicknameProblem(raw: string): string | null {
   const value = withoutAt(raw).trim().toLowerCase();
   if (value.length === 0) return "A session needs a nickname — type one, or roll the dice.";
+  if (value === BOARD_AGENT_NICKNAME) return "That one is the board's config agent.";
   if (isNickname(value)) return null;
   if (value.length > MAX_NICKNAME_CHARS) return `At most ${MAX_NICKNAME_CHARS} characters.`;
   if (/[^a-z0-9-]/.test(value)) return "Only latin letters, digits and hyphens.";

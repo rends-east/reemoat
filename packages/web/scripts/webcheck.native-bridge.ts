@@ -219,6 +219,8 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
       ["ui/Markdown.tsx", "target"],
       ["ui/SignIn.tsx", "`${authority}/forgot`"],
       ["ui/SignIn.tsx", "`${authority}/register`"],
+      ["ui/board/BoardChat.tsx", "BOARD_DOCS_URL"],
+      ["ui/board/BoardChat.tsx", "BOARD_DOCS_URL"],
       ["ui/gate/Gate.tsx", "legalPath(doc)"],
       ["ui/legal/LegalScreen.tsx", "credit.workUrl"],
       ["ui/legal/LegalScreen.tsx", "credit.licenceUrl"],

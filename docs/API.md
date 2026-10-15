@@ -74,7 +74,7 @@ auth gate.
 
 ---
 
-## The daemon — 93 routes
+## The daemon — 97 routes
 
 Runs on your machine, reachable through the relay's encrypted channel.
 
@@ -195,7 +195,8 @@ older than these answers the bare 404 every unknown route gets, which the app re
 | `DELETE /tasks/:id` | The task and its attachments. Its sessions stay |
 | `POST /tasks/:id/start` | A first start or another attempt: launches what the task holds, or the `agent`, `customAgent` or `cwd` the body names instead, which the task then holds, assigned, and answers as a starting create does |
 | `PUT /tasks/:id/sessions/:sessionId` · `DELETE /tasks/:id/sessions/:sessionId` | Attach a session of this machine, which moves it off any task that held it; detach it. `404 not_attached` for a session that is not on that task |
-| `GET /board` · `PUT /board` | The account's board as YAML, its revision and hash, and what it parses to; a board never written is the default at revision 0. `PUT` takes the YAML as the body with the revision it was read at in `If-Match`: `409 board_revision` names the current one, `400 board_invalid` every line it fails on, and the same text again is no new revision. Q2.266 |
+| `GET /board` · `PUT /board` | The account's board as YAML, its revision and hash, and what it parses to; a board never written is the default at revision 0. `PUT` takes the YAML as the body with the revision it was read at in `If-Match`: `409 board_revision` names the current one, `400 board_invalid` every line it fails on, and the same text again is no new revision. A change is sent on to every linked machine. Q2.266, Q2.270 |
+| `GET /board/agent` · `POST /board/agent` · `DELETE /board/agent` | The board's config agent on this machine: `{session}` or `null`. `POST {agent, customAgent?, replace?}` answers the one there is (`200`) or starts it (`201`), refused as a session create is; `replace` retires the one there is first. `DELETE` retires it, `{retired}`. Q2.270 |
 | `POST /tasks/:id/move` | A person's move: `{to}` a column or `{exit}` of the task's column, `from` the column they saw it in (`409 task_moved` otherwise), `stop: true` to cancel its agent's turn first. While the run's agent works only a final column takes it (`409 task_working`). Into a work column it makes a run, which starts by itself. Q2.264 |
 | `GET /tasks/:id/comments` · `POST /tasks/:id/comments` | The task's feed and its history. A question is read off its session each time and answered through the session's own routes; `POST {text}` goes into a working run's conversation as its person's message, else into the next run's note. Q2.265 |
 
@@ -277,6 +278,7 @@ key, and delivered to that machine by its owner's app. `.claude/rules/agent-mess
 | `GET /peer/agents` | The sessions here another machine's agents may reach, as the rows `list_agents` shows: a folder's name, never its path. `403 not_a_link` for a capability that is not one, `403 messaging_off` while agent messaging is off here — `REEMOAT_PEER_MESSAGES=off` or the owner's switch — and `403 messaging_isolated` while this machine keeps its sessions to each other (Q2.244) |
 | `GET /peer/tasks` · `GET /peer/projects` | This machine's board as `list_tasks` prints it, and where work can run here as `list_projects` does: the agents a launch would find and the folders sessions and tasks have used, **as paths**, since a task proposed for this machine has to name one (Q2.259). Refused exactly as `GET /peer/agents` is |
 | `GET /peer/board` | The board this machine runs, for a linked machine behind it. Every board answer between daemons carries `boardRevision` and `boardHash`. Q2.266 |
+| `POST /peer/board` | A board a linked machine just took, `{revision, hash, text}`, kept only where it is the newer: `{adopted, revision, hash}`. Q2.270 |
 | `POST /peer/tasks/:id/handoff` · `GET /peer/tasks/:id/code` · `POST /peer/judge` | A task's run moving here at a higher epoch; its code since a commit, as a git bundle in 512 KiB pieces; a role asked here for another machine's board. A link capability with `task:handoff`, and tasks moving on this machine (`403 tasks_stay`). Q2.269 |
 | `POST /peer/messages` | `{id, from: {ref, name, harness, hops}, to, message, notify}`. **A refusal rides a `200`** as `{ok: false, code, message}`, because the sending agent reads it: the codes are the ones `send_message` answers with. The sending machine is the one the capability names, never the body; the same `id` from one link is delivered once |
 | `POST /peer/notices` | That a session there went idle or ended without answering, for a message this machine sent with `notify`. `202`, or `409 unexpected_notice` for one nothing here asked for — a link cannot wake a session by claiming to answer it |

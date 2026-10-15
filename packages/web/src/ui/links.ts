@@ -20,3 +20,6 @@ export function openableHref(href: string | undefined): string | null {
   }
   return OPENABLE.has(parsed.protocol) ? trimmed : null;
 }
+
+/** The board's documentation, linked from Edit board before the page exists, on the owner's word (Q3.743, Q7.165). */
+export const BOARD_DOCS_URL = "https://reemoat.com/docs/board";

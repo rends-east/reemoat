@@ -1,7 +1,10 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { parseDocument } from "yaml";
 import {
   applyStep,
+  BOARD_FIELDS,
+  BOARD_GUIDE,
   boardHash,
   DEFAULT_BOARD_TEXT,
   firstMatch,
@@ -19,10 +22,13 @@ import {
   renderTemplate,
   REVIEW_LOOP_LOCAL_TEXT,
   REVIEW_LOOP_TEXT,
+  RULE_FACTS,
   runMessage,
   runNote,
+  SEES,
   simulate,
   step,
+  TEMPLATE_NAMES,
   withReport,
   withVerdict,
   type Board,
@@ -627,6 +633,55 @@ process.stdout.write("\nthe walk on paper is step's own\n");
   );
   const looping = parsed(REVIEW_LOOP_LOCAL_TEXT.replace("budget: 8", "budget: 2"));
   check("the budget stops a walk too", simulate(looping, ["move build", "report", "outcome fix", "report", "outcome fix"]).trail.at(-1), "needs you: the board moved this task as many times in a row as it may without you");
+}
+
+process.stdout.write("\nthe guide the config agent writes by\n");
+{
+  const examples = [...BOARD_GUIDE.matchAll(/```yaml\n([\s\S]*?)```/g)].map((match) => match[1]!);
+  check("the guide carries the default, the review loop and one of its own", [examples.length, examples[0] === DEFAULT_BOARD_TEXT, examples[1] === REVIEW_LOOP_TEXT], [3, true, true]);
+  for (const [index, text] of examples.entries()) check(`its example board ${index + 1} parses`, refusals(text), "PARSED");
+
+  const named = (key: string): boolean =>
+    BOARD_GUIDE.includes(`\`${key}\``) || new RegExp(`(^|[\\s{,])${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`, "m").test(BOARD_GUIDE);
+  const levels = Object.entries(BOARD_FIELDS) as [string, readonly string[]][];
+  check("every field the parser takes is named in it", levels.flatMap(([level, keys]) => keys.filter((key) => !named(key)).map((key) => `${level}.${key}`)), []);
+  check("every rule fact, prompt name and sees value is named in it", [...Object.keys(RULE_FACTS), "visits.<column>", ...TEMPLATE_NAMES, ...SEES].filter((one) => !named(one)), []);
+  check("nothing in it was interpolated from nothing", ["undefined", "NaN", "[object Object]"].filter((word) => BOARD_GUIDE.includes(word)), []);
+  const bytes = Buffer.byteLength(BOARD_GUIDE);
+  check("it is at most 24 KiB", bytes <= 24 * 1024 ? "within" : `${bytes} bytes`, "within");
+
+  // The walk the guide quotes is the one this driver walks, so the sentence around it cannot go stale.
+  const quoted = /walks as `(\[[^`]*\])`/.exec(BOARD_GUIDE);
+  const script = quoted === null ? [] : (JSON.parse(quoted[1]!) as string[]);
+  check("the walk it quotes ends the unpinned review loop in Done", [simulate(LOOP, script).column, simulate(LOOP, script).refused], ["done", []]);
+  check("and stalls where the reviewer is pinned, as it says", simulate(PINNED, script).trail.at(-1), "waits: waiting for claude@server");
+
+  // A bound is interpolated from the parser's constant, never written by hand: past the fenced examples and every ${…}, guide.ts holds no digit.
+  const source = readFileSync(new URL("../src/guide.ts", import.meta.url), "utf8").replace(/\$\{FENCE\}[\s\S]*?\$\{FENCE\}/g, "");
+  let prose = "";
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] !== "$" || source[i + 1] !== "{") {
+      prose += source[i];
+      continue;
+    }
+    let depth = 0;
+    for (; i < source.length; i += 1) {
+      const char = source[i]!;
+      if (char === '"' || char === "'") {
+        // A quoted string's braces are text, as in ${code("{{")}.
+        for (i += 1; i < source.length && source[i] !== char; i += 1) if (source[i] === "\\") i += 1;
+      } else if (char === "{") depth += 1;
+      else if (char === "}" && --depth === 0) break;
+    }
+    if (depth !== 0) prose += "\nan interpolation that never closes 0\n";
+  }
+  const handWritten = prose
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .map((line) => line.replace(/^\d+\. /, "").replace(/YAML 1\.2/g, ""))
+    .filter((line) => /\d/.test(line))
+    .map((line) => line.trim());
+  check("guide.ts writes no number by hand outside its examples", handWritten, []);
 }
 
 process.stdout.write(failures === 0 ? "\nall green\n" : `\n${failures} failure(s)\n`);

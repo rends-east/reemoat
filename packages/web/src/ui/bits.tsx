@@ -1248,6 +1248,12 @@ type DropdownTrigger =
       title: string;
       subline?: string | null;
       trigger: ReactNode;
+    }
+  | {
+      /** A chip on a composer's control row: borderless, its chevron the mark of a control, `label` naming it to a reader. */
+      variant: "chip";
+      label: string;
+      trigger: ReactNode;
     };
 
 /** The one popover picker, for any control whose option count can exceed about five; placement is measured at the tap. */
@@ -1292,7 +1298,7 @@ export function Dropdown<T extends string>(
   const heading = props.variant === "icon" ? props.heading : undefined;
   // A field's panel is its trigger's width; an icon's or a row's grows to its longest row from 10rem, from the trigger's end.
   const width =
-    props.variant === "icon"
+    props.variant === "icon" || props.variant === "chip"
       ? `w-max min-w-40 max-w-[min(20rem,calc(100vw-2rem))] ${align === "right" ? "right-0" : "left-0"}`
       : props.variant === "row"
         ? "right-2 w-max min-w-40 max-w-[min(20rem,calc(100vw-2rem))]"
@@ -1320,6 +1326,22 @@ export function Dropdown<T extends string>(
           </span>
           <span className="flex min-w-0 max-w-[55%] items-center gap-1.5 truncate text-sm text-muted">{props.trigger}</span>
           {busy ? <Spinner /> : <Icon as={ChevronsUpDown} size={16} className="text-faint" />}
+        </button>
+      ) : props.variant === "chip" ? (
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={toggle}
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={`tap press relative inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-md px-2 text-2xs text-muted ${TAP_GROW_Y} ${
+            disabled ? "text-faint" : "hover:bg-raised hover:text-fg active:bg-raised"
+          }`}
+        >
+          <span className="sr-only">{props.label}: </span>
+          <span className="flex min-w-0 items-center gap-1.5 truncate">{props.trigger}</span>
+          {busy ? <Spinner /> : <Icon as={ChevronDown} size={12} className="shrink-0 text-faint" />}
         </button>
       ) : props.variant === "icon" ? (
         <IconButton
@@ -1361,7 +1383,7 @@ export function Dropdown<T extends string>(
           tabIndex={-1}
           role="listbox"
           aria-labelledby={labelledBy}
-          aria-label={props.variant === "icon" ? props.label : props.variant === "row" ? props.title : undefined}
+          aria-label={props.variant === "icon" || props.variant === "chip" ? props.label : props.variant === "row" ? props.title : undefined}
           className={`absolute ${width} ${MENU_PANEL} ${placement === "up" ? "bottom-full mb-1" : "top-full mt-1"}`}
         >
           {heading !== undefined && <p className={MENU_HEADING}>{heading}</p>}

@@ -393,6 +393,21 @@ export class DaemonClient {
     });
   }
 
+  /** This machine's config agent, or null; an older daemon answers the bare 404 `meansRouteAbsent` reads (Q2.270). */
+  boardAgent(): Promise<{ session: SessionSnapshot | null }> {
+    return this.machine.request("/board/agent");
+  }
+
+  /** The one there is, else a new one; `replace` retires the one there is first. Answers launch refusals as createSession does. */
+  startBoardAgent(body: { agent: string; customAgent?: string | null; replace?: boolean }): Promise<{ session: SessionSnapshot }> {
+    return this.machine.request("/board/agent", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /** Another machine's config agent replaced this one's. */
+  retireBoardAgent(): Promise<{ retired: boolean }> {
+    return this.machine.request("/board/agent", { method: "DELETE" });
+  }
+
   /** A first start or another attempt; an empty body launches what the task was created with. */
   /** Naming an agent or a folder assigns it: the task holds them for the next start too. */
   startTask(

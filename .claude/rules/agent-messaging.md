@@ -167,7 +167,8 @@ Account, machine, conversation — each only narrows; all three and the env must
   daemon keeps the newer `policyAt`; an absent `messaging` changes nothing; its copy is no
   fence (`machine:admin` can push one).
 - The third is `peer_messages_off` (`POST /sessions/:id/meta`): not listed, refused both
-  ways (`conversation_messaging_off`), no tools at the next launch.
+  ways (`conversation_messaging_off`), no tools at the next launch. **On for good on a
+  session with a purpose**, the board's config agent (`409 board_agent_isolated`, Q2.270).
 - **Every gate reads `allowed` live**: `mcpServersFor`, `callTool`, `localRows`, `send`,
   `receive`, `receiveNotice`, the outbox pump, the idle notices. A new path needs it too.
 - A running agent keeps its tool names and gets a sentence; never revoke its bearer (a

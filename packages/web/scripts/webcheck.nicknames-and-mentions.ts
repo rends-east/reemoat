@@ -31,6 +31,11 @@ process.stdout.write("\na session's nickname, the same on both sides of the wire
   );
   report("the list is long enough to roll from", web.NICKNAMES.length >= 100, `${web.NICKNAMES.length} names`);
   check(
+    "the config agent's name is the daemon's, is a name, is never rolled, and the field refuses it",
+    [web.BOARD_AGENT_NICKNAME, web.isNickname(web.BOARD_AGENT_NICKNAME), web.NICKNAMES.includes(web.BOARD_AGENT_NICKNAME), web.typedNickname("@Config"), web.nicknameProblem("config")],
+    [daemon.BOARD_AGENT_NICKNAME, true, false, null, "That one is the board's config agent."],
+  );
+  check(
     "every name on it is one, once, and none is a harness",
     [
       web.NICKNAMES.filter((name) => !web.isNickname(name)),

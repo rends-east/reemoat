@@ -701,6 +701,21 @@ process.stdout.write("\nmachine groups\n");
   check("and its machine's header does not promise a row it will not draw", pinnedBlocked.groups[0]!.blockedCount, 0);
   check("and the render order names it once", visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key), ["m_a/pb"]);
 
+  // Opened from Edit board alone (Q3.743): waiting, pinned or replaced, the config agent is in no list, count or walk.
+  const configured = sessionGroups({
+    sessions: [
+      row("cfg", "m_a", { status: "blocked", pendingPermissions: [{ raisedAt: 5, title: "Edit" }], pinned: true, purpose: "board" }),
+      row("old", "m_a", { status: "running", purpose: "board_retired" }),
+      row("odd", "m_a", { status: "running", purpose: "something-newer" }),
+    ],
+    machines: [machineOf("m_a", "alpha")],
+  } as never);
+  check(
+    "the config agent is filed nowhere, the one it replaced neither, and a purpose this build does not know is drawn as any session",
+    [configured.pinned.length, configured.groups[0]!.blockedCount, configured.groups[0]!.liveCount, visibleRows(configured, currentView(configured)).map((r: { key: string }) => r.key)],
+    [0, 0, 1, ["m_a/odd"]],
+  );
+
   setQuery("zzz-matches-nothing");
   check(
     "a needle hides a pinned blocked row as it hides any other: the search is its reader's (Q3.674)",

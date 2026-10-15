@@ -3,6 +3,9 @@
 export const MIN_NICKNAME_CHARS = 2;
 export const MAX_NICKNAME_CHARS = 32;
 
+/** Held by the board's config agent alone: refused to any other create or rename, and never picked (Q2.270). */
+export const BOARD_AGENT_NICKNAME = "config";
+
 /** No underscore: `PeerHub.resolve` reads an underscored word as a session id. Passes every daemon's `isPeerName`. */
 export const NICKNAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 

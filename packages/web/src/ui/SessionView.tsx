@@ -13,11 +13,12 @@ import { echoesFor, echoVersion, subscribeEchoes } from "../echo";
 import { hiddenFinished, hiddenFinishedVersion, hideFinished, subscribeHiddenFinished } from "../finishedTasks";
 import { permissionContext } from "../permission";
 import { RECONNECT_QUIET_MS } from "../reach";
+import { drawnInNoList } from "../boardAgent";
 import { keyOf, type SessionRef } from "../ids";
 import { ApiError } from "../http";
 import { describe, missingRowReason } from "../machine";
 import { displayCwd, downloadablePath, folderLabel, INLINE_DOWNLOADS, relativeTo } from "../paths";
-import { navigate } from "../router";
+import { boardConfigPath, navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
 import { monotonicNow } from "../wake";
@@ -73,7 +74,29 @@ const EMPTY_TASKS: readonly BackgroundTask[] = [];
 /** The card frame's own 8px under the panel, and the pill's 12px off whatever it floats over. */
 const PILL_OVER_CARD_PX = 20;
 
-export function SessionView({ state, sessionRef }: { state: AppState; sessionRef: SessionRef }): ReactNode {
+/** A screen that draws a conversation under a header of its own: Edit board, around its config agent (Q3.743). */
+export interface SessionChrome {
+  title: ReactNode;
+  subtitle: ReactNode;
+  /** The header's trailing controls, handed the door to Background tasks, which this view owns. */
+  actions: (openTasks: () => void) => ReactNode;
+  /** The screen's own panel is docked where Background tasks docks: while it is, that one stays closed. */
+  docked: boolean;
+  /** Background tasks is opening, so the screen's own panel goes. */
+  onOpenTasks: () => void;
+  /** Said where the conversation has nothing in it yet. */
+  empty: ReactNode;
+}
+
+export function SessionView({
+  state,
+  sessionRef,
+  chrome = null,
+}: {
+  state: AppState;
+  sessionRef: SessionRef;
+  chrome?: SessionChrome | null;
+}): ReactNode {
   const key = keyOf(sessionRef);
   const row = state.rowsByKey.get(key);
   const transcript = state.transcripts.get(key);
@@ -106,7 +129,15 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   // Held here because at xl the docked panel must move this whole column; reset on a switch, since this pane is not remounted.
   const [tasksOpen, setTasksOpen] = useState(false);
   useEffect(() => setTasksOpen(false), [key]);
-  const openTasks = useCallback(() => setTasksOpen(true), []);
+  const docked = chrome?.docked === true;
+  useEffect(() => {
+    if (docked) setTasksOpen(false);
+  }, [docked]);
+  const onChromeTasks = chrome?.onOpenTasks;
+  const openTasks = useCallback(() => {
+    onChromeTasks?.();
+    setTasksOpen(true);
+  }, [onChromeTasks]);
   const closeTasks = useCallback(() => setTasksOpen(false), []);
   // Opaque, because below lg a back swipe draws the list under it (Q3.663).
   const back = useBackSwipe();
@@ -151,45 +182,52 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
     <div
       ref={back.ref}
       onPointerDownCapture={back.press}
-      className={`flex min-h-0 flex-1 flex-col bg-surface ${tasksOpen ? TASK_PANEL_GUTTER : ""}`}
+      className={`flex min-h-0 flex-1 flex-col bg-surface ${tasksOpen || docked ? TASK_PANEL_GUTTER : ""}`}
     >
-      <Header
-        title={
-          <>
-            <SessionTitle
-              row={row}
+      {chrome !== null ? (
+        <Header title={chrome.title} subtitle={chrome.subtitle} close board backRef={back.gate}>
+          {chrome.actions(openTasks)}
+        </Header>
+      ) : (
+        <Header
+          title={
+            <>
+              <SessionTitle
+                row={row}
+                roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+                renaming={renaming}
+                onRenaming={setRenaming}
+              />
+              {session.pinned === true && (
+                <span className="inline-flex w-3 shrink-0 justify-center text-muted" title="Pinned">
+                  <Icon as={Pin} size={12} />
+                  <span className="sr-only">Pinned</span>
+                </span>
+              )}
+            </>
+          }
+          subtitle={
+            <WorkspaceLine
+              nickname={nicknameLine(session)}
+              machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
+              workspace={session.workspace}
               roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
-              renaming={renaming}
-              onRenaming={setRenaming}
             />
-            {session.pinned === true && (
-              <span className="inline-flex w-3 shrink-0 justify-center text-muted" title="Pinned">
-                <Icon as={Pin} size={12} />
-                <span className="sr-only">Pinned</span>
-              </span>
-            )}
-          </>
-        }
-        subtitle={
-          <WorkspaceLine
-            nickname={nicknameLine(session)}
-            machineName={machineDisplayName({ id: sessionRef.machineId, name: row.machineName }, state.localMachineId)}
-            workspace={session.workspace}
-            roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+          }
+          close
+          board={board || drawnInNoList(session)}
+          back={drawnInNoList(session) ? { to: boardConfigPath(), label: "Back to Edit board" } : null}
+          backRef={back.gate}
+        >
+          {/* At every width: Background tasks has no other door once nothing is outstanding. Q3.631. */}
+          <SessionMenu
+            onOpenTasks={openTasks}
+            onRename={() => setRenaming(true)}
+            sessionRef={sessionRef}
+            state={state}
           />
-        }
-        close
-        board={board}
-        backRef={back.gate}
-      >
-        {/* At every width: Background tasks has no other door once nothing is outstanding. Q3.631. */}
-        <SessionMenu
-          onOpenTasks={openTasks}
-          onRename={() => setRenaming(true)}
-          sessionRef={sessionRef}
-          state={state}
-        />
-      </Header>
+        </Header>
+      )}
 
       {/* Above the conversation region, so the absolute ask card cannot paint over it. */}
       <ExitNotice row={row} machineName={row.machineName} />
@@ -201,6 +239,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
           <Transcript
             sessionRef={sessionRef}
             state={state}
+            empty={chrome?.empty ?? null}
             tailRequest={tailRequest}
             stale={stale}
             askHeight={askHeight}
@@ -375,6 +414,7 @@ function WorkspaceLine({
 function Transcript({
   sessionRef,
   state,
+  empty,
   tailRequest,
   stale,
   askHeight,
@@ -384,6 +424,7 @@ function Transcript({
 }: {
   sessionRef: SessionRef;
   state: AppState;
+  empty: ReactNode;
   tailRequest: number;
   stale: boolean;
   askHeight: number;
@@ -485,6 +526,7 @@ function Transcript({
           {transcript !== undefined && (
             <FileAccessContext.Provider value={files}>
               <EventList
+                empty={empty}
                 files={files}
                 echoes={echoes}
                 queued={queued}

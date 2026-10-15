@@ -420,6 +420,13 @@ export class PeerHub {
     return this.network.links().filter((link) => link.expiresAt > at);
   }
 
+  /** Links the account's board travels over: the machine's switches alone, never a conversation's (Q2.270). */
+  boardLinks(): PeerLink[] {
+    if (this.network === null || !this.reachesOthers) return [];
+    const at = this.now();
+    return this.network.links().filter((link) => link.expiresAt > at);
+  }
+
   /** Links a task's run may cross: tasks move here, and the link's own capability says so (Q2.269). */
   handoffLinks(): PeerLink[] {
     if (this.network === null || !this.movesTasks) return [];

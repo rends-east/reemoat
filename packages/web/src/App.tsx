@@ -29,7 +29,7 @@ const Settings = lazy(async () => ({ default: (await import("./ui/settings/Setti
 // A task's page and the form behind `+` are off the first paint, as every screen but the list and the board is.
 const TaskScreen = lazy(async () => ({ default: (await import("./ui/board/TaskScreen")).TaskScreen }));
 const NewTask = lazy(async () => ({ default: (await import("./ui/board/NewTask")).NewTask }));
-const BoardEditor = lazy(async () => ({ default: (await import("./ui/board/BoardEditor")).BoardEditor }));
+const BoardChat = lazy(async () => ({ default: (await import("./ui/board/BoardChat")).BoardChat }));
 const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScreen")).PluginScreen }));
 const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
 const LegalScreen = lazy(async () => ({ default: (await import("./ui/legal/LegalScreen")).LegalScreen }));
@@ -290,7 +290,7 @@ function content(
       return (
         <>
           <PhoneList key="list" state={state} onMenu={onMenu} beneath />
-          <BoardEditor key="board" state={state} />
+          <BoardChat key="board" state={state} pane={route.pane} />
         </>
       );
     default:

@@ -1,27 +1,23 @@
+import { ChevronLeft, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { formatBoardError, parseBoard, type BoardError } from "@reemoat/board";
-import { board as boardStore } from "../../boardStore";
-import { offsetOf, outcomeSentence, saveOutcome, savePlan, type SaveOutcome } from "../../boardSave";
-import type { MachineId } from "../../ids";
-import { machinesAsDrawn, store, type AppState } from "../../store";
-import { Button, GROUP_ROW, Spinner } from "../bits";
+import { offsetOf, outcomeSentence } from "../../boardSave";
+import type { AppState } from "../../store";
+import { Button, GROUP_ROW, IconButton, Spinner } from "../bits";
 import { VERBATIM_FIELD } from "../composing";
-import { Header } from "../Header";
 import { Group } from "../kit/List";
 import { Notice } from "../kit/Status";
+import { planFor, writeEverywhere, writeOne, type WriteResult } from "./boardWrite";
 import { useBoard, useBoardWatch } from "./useBoard";
 
-interface Result {
-  id: MachineId;
-  name: string;
-  outcome: SaveOutcome;
-}
+type Result = WriteResult;
 
 /**
- * The account's board as its YAML, pasted or typed, and nothing else (Q3.742). Saving writes it to every reachable machine that
- * runs the board, each against the revision it was read at, and says what each answered.
+ * The account's board as its YAML, pasted or typed (Q3.742): Edit board's second surface, beside its config agent (Q3.743).
+ * Saving writes it to every reachable machine that runs the board, each against the revision it was read at, and says what each
+ * answered. The frame it sits in, a panel or a whole screen, is the caller's.
  */
-export function BoardEditor({ state }: { state: AppState }): ReactNode {
+export function BoardEditor({ state, onClose }: { state: AppState; onClose: () => void }): ReactNode {
   const snap = useBoard();
   useBoardWatch();
   const account = snap.board;
@@ -41,16 +37,7 @@ export function BoardEditor({ state }: { state: AppState }): ReactNode {
 
   const parsed = useMemo(() => parseBoard(draft), [draft]);
   const errors = parsed.ok ? [] : parsed.errors;
-  const plan = savePlan(
-    machinesAsDrawn(state).map(({ machine, name }) => ({
-      id: machine.id,
-      name,
-      reach: machine.reach,
-      writable: machine.scopes.includes("session:write"),
-      read: snap.read.has(machine.id),
-    })),
-    snap.configured,
-  );
+  const plan = planFor(state, snap.read, snap.configured);
   const readOnly = snap.configured.size === 0;
   const movedUnder = dirty && account.text !== base;
 
@@ -66,29 +53,13 @@ export function BoardEditor({ state }: { state: AppState }): ReactNode {
     box.setSelectionRange(at, at);
   };
 
-  const writeOne = async (target: { id: MachineId; name: string; revision: number }, text: string): Promise<Result> => {
-    const daemon = store.daemonFor(target.id);
-    if (daemon === undefined) return { id: target.id, name: target.name, outcome: { kind: "skipped", why: "unreachable" } };
-    const outcome = await daemon.putBoard(text, target.revision).then(
-      (written) => {
-        const read = parseBoard(written.text);
-        if (read.ok) boardStore.applyBoard(target.id, { revision: written.revision, hash: written.hash, text: written.text, board: read.board });
-        boardStore.refresh(target.id);
-        return saveOutcome({ ok: true, written });
-      },
-      (cause: unknown) => saveOutcome({ ok: false, cause }),
-    );
-    return { id: target.id, name: target.name, outcome };
-  };
-
   const save = (): void => {
     if (saving || !parsed.ok || plan.targets.length === 0) return;
     const text = draft;
     setSaving(true);
-    void Promise.all(plan.targets.map((target) => writeOne(target, text)))
+    void writeEverywhere(plan, text)
       .then((written) => {
-        const skipped: Result[] = plan.skipped.map((one) => ({ id: one.id, name: one.name, outcome: { kind: "skipped", why: one.why } }));
-        setResults([...written, ...skipped]);
+        setResults(written);
         // Taken by any machine, it is the account's board now: the draft is no longer a draft.
         if (written.some((one) => one.outcome.kind === "saved")) setBase(text);
       })
@@ -107,8 +78,11 @@ export function BoardEditor({ state }: { state: AppState }): ReactNode {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-surface">
-      <Header title={<span className="truncate text-sm font-semibold">Board</span>} close board>
+    <>
+      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-edge px-3 pt-[max(0.5rem,env(safe-area-inset-top))] pb-2 md:pt-2">
+        {/* A whole screen below md, where the way out is the chevron; a docked card from md, closed by its ✕. */}
+        <IconButton icon={ChevronLeft} label="Back to Edit board" onClick={onClose} size="bar" className="-ml-1 md:hidden" />
+        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">YAML</h2>
         {dirty && !readOnly && (
           <Button size="sm" tone="ghost" disabled={saving} onClick={() => load(account.text)}>
             Discard
@@ -119,73 +93,77 @@ export function BoardEditor({ state }: { state: AppState }): ReactNode {
             {saving ? <Spinner /> : "Save"}
           </Button>
         )}
-      </Header>
-
-      <div className="w-full px-4 pt-1 pb-10 lg:px-8">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-          {readOnly && <Notice>No machine runs the configurable board yet.</Notice>}
-          {movedUnder && (
-            <Notice tone="warn">
-              <span className="flex flex-wrap items-center gap-2">
-                <span className="min-w-0 flex-1">The board changed since you started editing.</span>
-                <Button size="sm" onClick={() => load(account.text)}>
-                  Load it
-                </Button>
-              </span>
-            </Notice>
-          )}
-
-          <textarea
-            {...VERBATIM_FIELD}
-            ref={textRef}
-            aria-label="The board as YAML"
-            placeholder="Paste the board's YAML"
-            value={draft}
-            readOnly={readOnly}
-            onChange={(event) => setDraft(event.target.value)}
-            rows={Math.min(40, Math.max(12, draft.split("\n").length + 1))}
-            className="w-full resize-y rounded-md border border-edge-strong bg-surface px-3 py-2 font-mono text-xs leading-5 outline-none"
-          />
-
-          {errors.length > 0 && (
-            <Group title="What is wrong" count={String(errors.length)} still>
-              {errors.map((error) => (
-                <button
-                  key={`${error.line}:${error.col}:${error.path}:${error.message}`}
-                  type="button"
-                  onClick={() => goTo(error)}
-                  className={`tap ${GROUP_ROW} hover:bg-raised`}
-                >
-                  <span className="min-w-0 flex-1 text-sm text-danger">
-                    <span className="font-mono text-2xs">{formatBoardError(error).split(": ")[0]}</span>
-                    <span>: {error.message}</span>
-                  </span>
-                </button>
-              ))}
-            </Group>
-          )}
-
-          {results !== null && (
-            <Group title="Last save" still>
-              {results.map((result) => (
-                <SaveRow
-                  key={result.id}
-                  result={result}
-                  busy={saving}
-                  onUse={(text) => {
-                    setBase(text);
-                    setDraft(text);
-                    setResults(null);
-                  }}
-                  onOverwrite={(revision) => overwrite(result, revision)}
-                  onGoTo={goTo}
-                />
-              ))}
-            </Group>
-          )}
-        </div>
+        {/* Wrapped: `hidden` beside the button's own display utility loses by emission order. */}
+        <span className="hidden md:flex">
+          <IconButton icon={X} label="Close the YAML" onClick={onClose} size="lg" />
+        </span>
       </div>
-    </div>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-4">
+        {readOnly && <Notice>No machine runs the configurable board yet.</Notice>}
+        {movedUnder && (
+          <Notice tone="warn">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1">The board changed since you started editing.</span>
+              <Button size="sm" onClick={() => load(account.text)}>
+                Load it
+              </Button>
+            </span>
+          </Notice>
+        )}
+
+        <textarea
+          {...VERBATIM_FIELD}
+          ref={textRef}
+          aria-label="The board as YAML"
+          placeholder="Paste the board's YAML"
+          value={draft}
+          readOnly={readOnly}
+          onChange={(event) => setDraft(event.target.value)}
+          rows={Math.min(40, Math.max(12, draft.split("\n").length + 1))}
+          // Unwrapped: a long comment wrapped to the left edge reads as a key at the top level.
+          wrap="off"
+          className="w-full flex-1 resize-none rounded-md border border-edge-strong bg-surface px-3 py-2 font-mono text-xs leading-5 outline-none"
+        />
+
+        {errors.length > 0 && (
+          <Group title="What is wrong" count={String(errors.length)} still>
+            {errors.map((error) => (
+              <button
+                key={`${error.line}:${error.col}:${error.path}:${error.message}`}
+                type="button"
+                onClick={() => goTo(error)}
+                className={`tap ${GROUP_ROW} hover:bg-raised`}
+              >
+                <span className="min-w-0 flex-1 text-sm text-danger">
+                  <span className="font-mono text-2xs">{formatBoardError(error).split(": ")[0]}</span>
+                  <span>: {error.message}</span>
+                </span>
+              </button>
+            ))}
+          </Group>
+        )}
+
+        {results !== null && (
+          <Group title="Last save" still>
+            {results.map((result) => (
+              <SaveRow
+                key={result.id}
+                result={result}
+                busy={saving}
+                onUse={(text) => {
+                  setBase(text);
+                  setDraft(text);
+                  setResults(null);
+                }}
+                onOverwrite={(revision) => overwrite(result, revision)}
+                onGoTo={goTo}
+              />
+            ))}
+          </Group>
+        )}
+      </div>
+    </>
   );
 }
 

@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 127 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 489 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 128 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 490 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 89 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 164 | `###` |
-| | | **1207** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 165 | `###` |
+| | | **1210** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1207 rather than the 602
+dividers. So the count is over **both** depths, and it says 1210 rather than the 604
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -10529,7 +10529,8 @@ itself, so it cannot disagree with a daemon; the proposal is one `board_proposed
 against the revision it was written on, applied only by its person's press.
 `propose_tasks` takes a column and a role, and an agent and a machine are optional.
 
-**Status.** Current.
+**Status.** Current. No client drew the card until Q3.743; the config agent alone applies
+without a press (Q2.270).
 
 ### Q2.269 — How does a task's run move to another machine, and its code with it?
 
@@ -10556,6 +10557,64 @@ reviewer pinned to the server sees the coder's commit; its own commit comes back
 continues its own conversation on its worktree moved forward; a stale epoch and a link
 without the scope are refused; a move to a machine that is away waits, and goes once it is
 back. Not through a relay: the bundle's weight and time there are Q7.163's.
+
+**Status.** Current.
+
+### Q2.270 — Who writes the board for its person, and what may reach that agent?
+
+**Question.** The owner, 2026-10-15: Edit board gains a chat with an agent that writes the
+config on request. It reads the board, has a skill for writing one, and applies it; it is one
+session, always there to come back to; the nickname `config` is reserved for it; it is reached
+from Edit board alone; and there is a simple way to recreate it, to move it to another
+machine. Asked, they chose: it applies a board itself, with an Undo on the card; a replaced
+one's conversation goes; and no other session talks to it, either way, for safety.
+
+**Decision.**
+
+- **A session with a purpose.** `purpose: "board"` on the row (`purpose`, added by
+  `migrate()`), set only by `BoardAgents.start` behind `POST /board/agent` and never read
+  from a request body. It runs in `$REEMOAT_HOME/board-agent` with no worktree, titled
+  `Board config`, one per machine: a second press finds it, `replace` retires it first and
+  puts it back if the new one is refused (`reinstateBoardAgent`). `GET` and `DELETE` on the
+  same route find and retire it.
+- **Its nickname is held.** `BOARD_AGENT_NICKNAME` is refused to any other create or rename
+  (`409 nickname_reserved`) and never picked; the agent keeps its own; a row that held it
+  before it was reserved is named afresh at `restore()`.
+- **Nothing reaches it and it reaches nothing.** Messaging is off on a session with a
+  purpose whatever its row says, and `/meta` refuses turning it on (`409
+  board_agent_isolated`). The existing gates do the rest: it is in no `list_agents` and no
+  `@` listing, takes no `send_message`, and holds no messaging tool. The reason is
+  `board_apply`: an agent that could message it could have it rewrite the board. A plugin's
+  `sessions.prompt` still reaches it, a plugin being installed by its person and acting for
+  them.
+- **The skill** is `BOARD_GUIDE` in `@reemoat/board`: every field named and every bound
+  interpolated from the parser's own constants, both held by `boardcheck`. It reaches the
+  agent three ways: `board_guide`, served to every session; `BOARD_AGENT_NOTE` after each of
+  its person's messages (`noteFor`), the one door all six harnesses read; and
+  `BOARD_AGENT_INSTRUCTIONS` on its MCP server.
+- **`board_apply` is its alone**, and the one exception to "no tool applies anything"
+  (Q2.259, Q2.268): listed to it, refused in words to any other caller. Before writing it
+  reads every linked machine's board (`pullNewestBoard`), so a draft on a revision another
+  machine moved is refused rather than written over. Written, it is `board_applied` in the
+  conversation, with the board it replaced while both fit `MAX_APPLIED_BOARD_CHARS`, for the
+  card's Undo. claude runs it without asking (`CLAUDE_ALLOWED_TOOLS`).
+- **A board now travels.** A change on a daemon, by `PUT /board` or `board_apply`, is sent
+  once to every linked machine (`spreadBoard`, `POST /peer/board`, `boardLinks`: the
+  machine's switches, never a conversation's), which keeps it only where it is the newer
+  (`adopt`). One that misses it still reads it the next time the two talk.
+
+**Rejected.** *A skill file in the agent's folder* (`.claude/skills`, `AGENTS.md`): which
+harness reads which is unmeasured, and the note reaches all six. *Knowing it by nickname
+alone*, as the dispatcher is: a person may have named a session `config` before, and a
+purpose on the row cannot be typed. *A press for every change*: the owner asked for an agent
+that applies; the card's Undo is the press afterwards. *Deleting a replaced one*: nothing
+removes a live row, and the inactive-row prune takes it in time.
+
+**Measured.** `daemoncheck`, two daemons in one process on stub agents: the nickname refused
+at create and at rename; messaging refused and its tools absent; the note on its person's
+message and on no other session's; an apply on a moved revision refused, one on the current
+one applied, sent, and kept by the other machine; a replacement that will not start putting
+the old one back; and a restart renaming a hand-named `config`.
 
 **Status.** Current.
 
@@ -31452,7 +31511,68 @@ the `yaml` package's Document API so comments survived, and two presets to start
 The owner removed it on seeing it, 2026-10-15: the YAML alone, and a skill that writes and
 changes a board comes later.
 
-**Status.** Current.
+**Status.** Current, except where: since 2026-10-16 the YAML is Edit board's second surface,
+docked beside the config agent's conversation at `/board/yaml` rather than the screen itself
+(Q3.743). The editor is unchanged.
+
+#### Q3.743 — Where is the config agent, and how is it started over?
+
+**Question.** The same request as Q2.270: a couple of sentences on Edit board about how a
+board works, with a link to documentation not written yet, and the agent's chat reached from
+there alone. Then the owner, 2026-10-16, on the first build: the group it was drawn as looked
+bad and worked worse, and the screen was to be redone for UX.
+
+**Decision.** **Edit board is the config agent's conversation** (`BoardChat`, the owner's
+pick of four directions drawn as mockups, then three of their calls on it):
+
+- **The conversation, under a header of its own.** `SessionView` draws it with a
+  `SessionChrome`: `Edit board`, `@config · <agent> on <machine>`, a `YAML` button and a menu
+  of *Read the guide*, *Background tasks* and *Start over…*. History scrolls up as in any
+  conversation; a change is a `BoardChangeCard` in it (*Changed the board*, the diff, Undo).
+  There is no group, no second box and no column preview (the owner: Columns out).
+- **No conversation yet**: a heading, the two sentences with `BOARD_DOCS_URL` (Q7.165), and the
+  composer with the agent as a chip (`AssigneeDropdown`'s `chip` shape, a `Dropdown` variant).
+  The first message starts the agent (`startConfigAgent`) and then goes as any message does; a
+  refused start leaves the text in the box, a send refused after the start hands it to the
+  conversation's own box (`holdDraft`). No example prompts (the owner's call).
+- **Nothing is sent before every machine has answered once** (`useBoardAgent`'s `settled`):
+  typed into the first second, a message would start a second agent, the newer, and the real
+  one would be retired as superseded. The screen says *Finding @config…* meanwhile.
+- **Its machine away**: the composer is off, the screen names the machine, and *Start over
+  here…* leads to the confirmation. A message typed on a phone never replaces the agent (the
+  owner's call over a live box).
+- **The YAML is a panel**, `/board/yaml`: docked where Background tasks docks from `md`, with
+  its gutter, width and handle (`TASK_PANEL_GUTTER`, `taskPane`), the whole screen below.
+  One of the two is open at a time. The editor is Q3.742's.
+- **Starting over is a screen of its own**, `/board/start-over`: the agent row and a
+  `DangerButton`, the consequence said there. Picking an agent arms nothing; the earlier
+  build's picker armed the question by itself.
+- **Found by asking, not by the list.** While the screen is open every machine running the
+  board is asked `GET /board/agent` at `BOARD_WATCH_MS`; the newest wins (`boardAgentOf`), and
+  an older one on another machine is retired once that machine answers (`supersededAgents`).
+  A phone and a desktop agree with nothing stored; only where its machine is away does this
+  device's memory say where it was.
+- **Drawn in no list.** `sessionLists` skips a session with either purpose (`drawnInNoList`);
+  opened by its own address its conversation still leads back to Edit board, and a question
+  from it puts a dot on the board's Edit board.
+- **Starting over is the recreation model.** A new one starts where it is picked, and the one
+  it replaces is retired at once where its machine is reachable, else when it answers. **The
+  memory is the board**: the guide has the agent keep the reason for each choice as a YAML
+  comment, so a new agent anywhere picks up where the last left off. The conversation does
+  not move.
+- **The board card** (`BoardChangeCard`) draws `board_applied` with an Undo and
+  `board_proposed` with an Apply. Either press writes every machine as Save does
+  (`writeEverywhere`), and only while the account's board is the one the card was written
+  against.
+
+**What was taken out.** The first build's **Config agent** group above the YAML: a
+*Conversation* row, an *Agent* row, and *Start over* as a standing danger row. It named the
+agent twice in two adjacent rows, put the rarest destructive act on screen at every visit,
+let a picker arm it, and sent the person to another screen to ask and back again to see the
+result. The mockups' column strip went too, and the phone's way in is still not built
+(Q7.165).
+
+**Status.** Current. Not seen in WKWebView.
 
 ## Deployment, packaging and code layout
 
@@ -46348,5 +46468,15 @@ menu stays the way), machines as a filter in place of pages, and For you as a ph
 first screen. **Yours**, cards a column holds for its person, is computed and not drawn.
 Nothing of Q3.740 to Q3.742 was seen in WKWebView; Chromium and `webcheck` are the
 evidence. `@reemoat/board`, and with it `yaml`, is in the app's main bundle.
+
+**Status.** Not built.
+
+### Q7.165 — What of the config agent is not built?
+
+**Position.** The documentation page `BOARD_DOCS_URL` names: the owner wanted the link
+before the page, and `BOARD_GUIDE` is its draft. The conversation moving with the agent: a
+new one starts with the board alone. A way in on a phone: Edit board is reached from the
+board's bar, drawn at lg. `board_simulate` cannot walk past a role pinned with `on`, so the
+guide tells the agent to walk a copy without the pin.
 
 **Status.** Not built.

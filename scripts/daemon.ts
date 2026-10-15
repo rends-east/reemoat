@@ -384,6 +384,8 @@ const tasks = new TaskDesk({
   store: stores.tasks,
   peers,
   configs: stores.boards,
+  // An empty folder this daemon owns, as the ask root is: the config agent writes a board, never a file (Q2.270).
+  boardAgentRoot: join(stateHome, "board-agent"),
   customAgents: () => stores.customAgents.list().map((one) => ({ id: one.id, name: one.name, harness: one.harness })),
   onWarning: (detail: string) => console.error(`board: ${detail}`),
   // A role is asked on a bare session that belongs to no list, or by a plugin's classifier; the host opens below, so both are read late.
@@ -415,6 +417,7 @@ const restored = registry.restore({ reapOrphans: process.env["REEMOAT_REAP_ORPHA
 tasks.sweep();
 // Every task looked at once: a run a restart cut reads as its turn's end, and ends or stops by its report (Q2.264).
 tasks.resume();
+await tasks.boardAgents?.settle();
 const autoResume = process.env["REEMOAT_AUTO_RESUME"] !== "0";
 registry.setAutoResume(autoResume);
 const elicitation = process.env["REEMOAT_ELICITATION"] !== "0";
