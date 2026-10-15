@@ -323,6 +323,12 @@ html {
   overscroll-behavior: none;
 }
 
+/* Under the shell the document never scrolls: a WKWebView still moved the whole app past a scroller's end (Q3.739). */
+html:has([data-shell]),
+html:has([data-shell]) body {
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   background: var(--color-ink);
@@ -443,28 +449,6 @@ kbd {
 
 .scroll-stable {
   scrollbar-gutter: stable;
-}
-
-/* The board's sideways bar is its way right for a mouse with no sideways wheel: drawn always and wide enough to grab (Q3.738). */
-.board-scroll {
-  scrollbar-width: auto;
-  scrollbar-color: auto;
-}
-.board-scroll::-webkit-scrollbar {
-  height: 14px;
-}
-.board-scroll::-webkit-scrollbar-track {
-  margin-inline: 20px;
-  border-radius: 9999px;
-  background: var(--color-raised);
-}
-.board-scroll::-webkit-scrollbar-thumb {
-  border: 3px solid var(--color-raised);
-  border-radius: 9999px;
-  background: var(--color-edge-strong);
-}
-.board-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--color-muted);
 }
 
 .hljs-comment,

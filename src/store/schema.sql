@@ -266,3 +266,35 @@ CREATE TABLE IF NOT EXISTS task_sessions (
   task_id       TEXT    NOT NULL,
   attached_at   INTEGER NOT NULL
 );
+-- A task's history: each move, run, stop and verdict, under the board revision it happened at (Q2.264).
+CREATE TABLE IF NOT EXISTS task_events (
+  task_id       TEXT    NOT NULL,
+  seq           INTEGER NOT NULL,
+  at            INTEGER NOT NULL,
+  payload       TEXT    NOT NULL,
+  PRIMARY KEY (task_id, seq)
+);
+-- A task's feed: the agent's questions as windows on its sessions, its stops and reports, and its person's comments (Q2.265).
+CREATE TABLE IF NOT EXISTS task_comments (
+  task_id       TEXT    NOT NULL,
+  id            TEXT    NOT NULL,
+  at            INTEGER NOT NULL,
+  payload       TEXT    NOT NULL,
+  PRIMARY KEY (task_id, id)
+);
+-- What is left of a task another machine took, so a reader can follow it there.
+CREATE TABLE IF NOT EXISTS task_tombstones (
+  id            TEXT    NOT NULL PRIMARY KEY,
+  epoch         INTEGER NOT NULL,
+  moved_to      TEXT    NOT NULL,
+  at            INTEGER NOT NULL,
+  workdir       TEXT,
+  branch        TEXT
+);
+-- The account's board, as the YAML it was written in, one row per revision.
+CREATE TABLE IF NOT EXISTS board_configs (
+  revision      INTEGER NOT NULL PRIMARY KEY,
+  hash          TEXT    NOT NULL,
+  text          TEXT    NOT NULL,
+  at            INTEGER NOT NULL
+);

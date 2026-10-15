@@ -123,6 +123,11 @@ jobs:
         if: '!cancelled()'
         run: pnpm protocolcheck
 
+      # The board's parser and its engine, by table: what every daemon and the app run a task by.
+      - name: boardcheck
+        if: '!cancelled()'
+        run: pnpm boardcheck
+
       - name: authcheck
         if: '!cancelled()'
         run: pnpm authcheck

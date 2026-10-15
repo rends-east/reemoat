@@ -1,5 +1,5 @@
 import { useContext, useState, useSyncExternalStore, type ReactNode } from "react";
-import { shownStatus, STATUS_LABEL, taskOfProposal, type BoardTask } from "../../board";
+import { columnTitle, taskOfProposal, type BoardTask } from "../../board";
 import { errorText, meansRouteAbsent } from "../../http";
 import type { MachineId } from "../../ids";
 import { store, type AppState } from "../../store";
@@ -36,7 +36,7 @@ export function ProposalsCard({ proposals }: { proposals: readonly TaskProposal[
   // The conversation's own machine: a proposal that names none is for it.
   const here = useContext(MentionScope).here as MachineId | null;
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const { tasks } = useBoard();
+  const { tasks, configured } = useBoard();
   // Which press is out for a row: `true` is a start.
   const [busy, setBusy] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map());
@@ -56,7 +56,10 @@ export function ProposalsCard({ proposals }: { proposals: readonly TaskProposal[
     if (edited === null) return Promise.resolve();
     const { project } = edited;
     const agent = pickedAgent(edited);
-    const start = agent !== null;
+    const machineId = agent?.machineId ?? edited.machineId;
+    // A column the proposal names is the board's to run: a work column starts its run by itself, so nothing else starts it.
+    const column = configured.has(machineId) && typeof proposal.column === "string" ? proposal.column : null;
+    const start = agent !== null && column === null;
     setBusy((held) => new Map(held).set(proposal.id, start));
     setErrors((held) => {
       const next = new Map(held);
@@ -67,11 +70,13 @@ export function ProposalsCard({ proposals }: { proposals: readonly TaskProposal[
     return import("./actions")
       .then(async ({ createTask }) => {
         await createTask({
-          machineId: agent?.machineId ?? edited.machineId,
+          machineId,
           title: proposal.title,
           brief: proposal.brief,
-          // A task no agent holds keeps the agent its proposer named as what a start would launch (Q2.261, Q2.262).
-          agent: agent === null ? proposal.agent : agent.kind === "custom" ? "" : agent.id,
+          // A task no agent holds keeps the agent its proposer named as what a start would launch (Q2.261, Q2.262); one left to a
+          // column's role still names one, the machine's first.
+          agent: agent === null ? (proposal.agent ?? heldRoster(machineId)?.agents[0]?.id ?? "claude") : agent.kind === "custom" ? "" : agent.id,
+          ...(column === null ? {} : { column }),
           customAgent: agent?.kind === "custom" ? agent.id : null,
           assignee: agent !== null ? "agent" : edited.assignee === "you" ? "you" : "nobody",
           cwd: project,
@@ -146,7 +151,7 @@ function ProposalRow({
   onCreate: () => void;
 }): ReactNode {
   const [whole, setWhole] = useState(false);
-  const { tasks } = useBoard();
+  const { tasks, board: account } = useBoard();
   const agent = edited === null ? null : pickedAgent(edited);
   return (
     <div className="flex flex-col gap-2 rounded-lg bg-raised/50 px-3 py-2.5">
@@ -199,7 +204,7 @@ function ProposalRow({
       )}
       <div className="flex min-h-9 flex-wrap items-center justify-end gap-2">
         <span role="status" className={`min-w-0 flex-1 text-2xs wrap-anywhere ${error === null ? "text-muted" : "text-danger"}`}>
-          {error ?? (made !== null ? `${STATUS_LABEL[shownStatus(made.task.status)]} on the board` : busy === true ? "this can take up to 45 seconds" : "")}
+          {error ?? (made !== null ? `${columnTitle(account.board, made.column)} on the board` : busy === true ? "this can take up to 45 seconds" : "")}
         </span>
         {made !== null ? (
           <Button size="sm" onClick={() => void import("./actions").then(({ openTask }) => openTask(made))}>

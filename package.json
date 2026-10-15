@@ -31,7 +31,7 @@
     "doorprobe": "tsx scripts/doorprobe.ts",
     "daemon": "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE:-64} tsx scripts/daemon.ts",
     "client": "tsx scripts/client.ts",
-    "check": "pnpm typecheck && pnpm protocolcheck && pnpm authcheck && pnpm daemoncheck && pnpm gatewaycheck && pnpm relaycheck && pnpm webcheck && pnpm nativecheck && pnpm pincheck && pnpm deploycheck && pnpm docscheck",
+    "check": "pnpm typecheck && pnpm protocolcheck && pnpm boardcheck && pnpm authcheck && pnpm daemoncheck && pnpm gatewaycheck && pnpm relaycheck && pnpm webcheck && pnpm nativecheck && pnpm pincheck && pnpm deploycheck && pnpm docscheck",
     "typecheck": "tsc --noEmit && pnpm --filter @reemoat/web typecheck",
     "authcheck": "tsx scripts/authcheck.ts",
     "gatewaycheck": "tsx scripts/gatewaycheck.ts",
@@ -39,6 +39,7 @@
     "deploycheck": "tsx scripts/deploycheck.ts",
     "docscheck": "tsx scripts/docscheck.ts",
     "protocolcheck": "tsx scripts/protocolcheck.ts",
+    "boardcheck": "tsx packages/board/scripts/boardcheck.ts",
     "relaycheck": "tsx scripts/relaycheck.ts",
     "pincheck": "tsx scripts/pincheck.ts",
     "imagecheck": "tsx scripts/imagecheck.ts",
@@ -62,9 +63,11 @@
     "@noble/ciphers": "2.4.0",
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
+    "@reemoat/board": "workspace:*",
     "@reemoat/protocol": "workspace:*",
     "hono": "^4.13.2",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

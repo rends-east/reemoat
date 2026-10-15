@@ -49,10 +49,10 @@ list rather than an SPA fallback, so the product is not in the image to be serve
 so it could load the app and reach no machine at all. Q4.118, Q1.649,
 `docs/AUTHORITY.md`.
 
-**No test framework.** `typecheck`, `protocolcheck`, `authcheck`, `daemoncheck`,
+**No test framework.** `typecheck`, `protocolcheck`, `boardcheck`, `authcheck`, `daemoncheck`,
 `gatewaycheck`, `relaycheck`, `webcheck`, `nativecheck`, `pincheck`, `deploycheck`,
 `docscheck`, `imagecheck`, `gitfloor` and `harness` are the whole automated safety net, and they are
-drivers rather than unit tests on purpose. Eleven run offline in one process with no fleet, no
+drivers rather than unit tests on purpose. Twelve run offline in one process with no fleet, no
 agent and no deploy — `docscheck` is the one whose subject is prose: it
 holds this file to a budget, because the last time it was cut nothing checked
 the result and it was larger six days later. `nativecheck`'s
@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1195 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1207 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -96,6 +96,10 @@ pnpm protocolcheck                   # packages/protocol: the Noise handshake ag
                                      #   table. The only driver whose subject somebody else wrote. And the
                                      #   codes two screens compare, pinned as vectors because the two ends
                                      #   that derive them ship apart
+pnpm boardcheck                      # packages/board: every parseBoard refusal on its own, YAML's strictness,
+                                     #   and step, place and phase by table, the reference review loop walked
+                                     #   by hand and on paper (`simulate`). What every daemon and the app run
+                                     #   a task by, with no daemon
 pnpm authcheck                       # token verification and enrollment — and a key set announced on
                                      #   the dial: every refusal one at a time with the half that says
                                      #   nothing moved, a statement replayed at a lower version, a root
@@ -559,6 +563,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
 | `agent-messaging.md` | `src/peers/`, `packages/web/src/peer.ts`, `ui/PeerMessage.tsx`, `ui/SentFile.tsx` | How one session's agent reaches another's · why every message is acted on, and what the idle notice stands in for · why delivery is the prompt route's and not a copy · what the envelope may carry · what stops a loop · which ended sessions another agent may wake · the two tools on that server that are not messaging, and what a sent file is |
 | `task-board.md` | `src/tasks/`, `src/peers/mcp.ts`, `packages/web/src/board.ts`, `boardStore.ts`, `dispatch.ts`, `ui/board/`, `ui/settings/DispatchSetting.tsx` | Where a task lives and who says its status · why `needs_you` is read and never written · what starting one shares with a session create · the four tools, and the one thing none of them does · what a linked machine may read of a board · how the list holds tasks without the pager learning of it · what the client gathers, remembers and skips in silence · who holds a task in the backlog · why the dispatcher is parked |
+| `board-engine.md` | `packages/board/`, `src/board/`, `src/tasks/`, `plugins/` | What the board's YAML refuses and how daemons agree on one · a task's flow, and what a reader is shown of it · where a run goes, what it is sent, and what ends it · who picks the exit · the feed · a run and its code moving to another machine, and what gates it |
 | `session-nicknames.md` | `src/nickname.ts`, `src/registry.ts`, `src/peers/hub.ts`, `envelope.ts`, `packages/web/src/nickname.ts`, `mentions.ts`, `mentionLinks.ts`, `ui/MentionMenu.tsx`, `MentionLink.tsx`, `Composer.tsx`, `NewSession.tsx`, `SessionBrowser.tsx` | Why a session has a title and a nickname, and which one leads · what makes a nickname one session's, and why that is a reservation · what the agent gets for a person's `@name`, and why it never waits on a listing · where `@` opens and whose rows it shows · where a drawn `@name` leads, and why it is a button |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
 | `harness-tools.md` | `src/acp/agents.ts`, `scripts/daemoncheck.after-the-turn-and-config.ts` | Which of a harness's own tools this daemon withdraws, and by what it decides · the one door each harness has, and the three that have none · why a name is canonical or it withdraws the wrong tool · what is left alone on purpose · how the list is measured |

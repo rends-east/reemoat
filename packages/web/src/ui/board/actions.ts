@@ -1,14 +1,19 @@
-import { columnOf, shownStatus, taskKey, type AskedAssignee, type BoardTask } from "../../board";
+import { columnById, columnForStatus } from "@reemoat/board";
+import { isFinal, shownStatus, taskKey, type AskedAssignee, type Board, type BoardTask } from "../../board";
 import { board } from "../../boardStore";
 import type { TaskChangeBody } from "../../daemon";
 import { ApiError, errorText } from "../../http";
 import { refOf, sessionId, type MachineId, type SessionRef } from "../../ids";
 import { navigate, sessionPath, taskPath } from "../../router";
 import { machinesAsDrawn, store } from "../../store";
-import type { SessionSnapshot, TaskAssignee, TaskSnapshot, TaskStatus } from "../../wire";
+import type { SessionSnapshot, TaskAssignee, TaskCommentView, TaskFeed, TaskSnapshot, TaskStatus } from "../../wire";
 import { toast } from "../Toast";
 
 const NOT_CONNECTED = "That machine is not connected right now.";
+
+function drawnBoard(): Board {
+  return board.getSnapshot().board.board;
+}
 
 export interface NewTaskInput {
   machineId: MachineId;
@@ -18,8 +23,11 @@ export interface NewTaskInput {
   customAgent?: string | null;
   /** Nobody or its person makes a task no agent holds; `agent` is then only what a later start would launch. */
   assignee?: TaskAssignee;
-  /** The column it is made in, where that is not the backlog; never with `start` (Q3.737). */
+  /** The column it is made in on an older daemon, where that is not the backlog; never with `start` (Q3.737). */
   status?: "review" | "done";
+  /** The column it is made in on a daemon that runs the board; into a work column its run starts by itself. */
+  column?: string;
+  labels?: string[];
   cwd: string;
   /** A proposal's id, or one minted for this form: the same key sent again makes no second task. */
   key?: string;
@@ -37,6 +45,8 @@ export async function createTask(input: NewTaskInput): Promise<{ task: TaskSnaps
     ...(input.customAgent === undefined || input.customAgent === null ? {} : { customAgent: input.customAgent }),
     ...(input.assignee === undefined ? {} : { assignee: input.assignee }),
     ...(input.status === undefined ? {} : { status: input.status }),
+    ...(input.column === undefined ? {} : { column: input.column }),
+    ...(input.labels === undefined || input.labels.length === 0 ? {} : { labels: input.labels }),
     cwd: input.cwd,
     key: input.key ?? taskKey(),
     start: input.start,
@@ -50,9 +60,9 @@ export async function startTask(entry: BoardTask): Promise<void> {
   if (session !== null) navigate(sessionPath(session));
 }
 
-/** The agent a task holds starts on it, drawn in Running at once; answers the conversation it made (Q3.732). */
-export async function startHere(entry: BoardTask): Promise<SessionRef | null> {
-  const release = board.hold(entry.machineId, entry.task.id, { status: "running" });
+/** The agent a task holds starts on it, drawn in the first work column at once; answers the conversation it made (Q3.732). */
+export async function startHere(entry: BoardTask, column: string): Promise<SessionRef | null> {
+  const release = board.hold(entry.machineId, entry.task.id, { column });
   try {
     return await startOn(entry, {});
   } finally {
@@ -79,6 +89,65 @@ async function startOn(entry: BoardTask, body: { agent?: string; customAgent?: s
   }
 }
 
+/** Where a person moves a task: a column of the board, or one of the exits its card offers. */
+export type MoveTo = { to: string } | { exit: string; to: string };
+
+/**
+ * A person's move on a daemon that runs the board: from the column they saw it in, drawn there at once until the answer
+ * (Q3.728). `stop` stops the agent's turn first, the answer to `409 task_working`. Rejects with the daemon's refusal: the
+ * caller offers Stop and move on `task_working`, and reads the board again on `task_moved`.
+ */
+export async function moveTo(entry: BoardTask, target: MoveTo, stop = false): Promise<void> {
+  const daemon = store.daemonFor(entry.machineId);
+  if (daemon === undefined) throw new Error(NOT_CONNECTED);
+  const release = board.hold(entry.machineId, entry.task.id, { column: target.to });
+  try {
+    const from = entry.task.column ?? entry.column;
+    const body = "exit" in target ? { exit: target.exit, from } : { to: target.to, from };
+    board.apply(entry.machineId, (await daemon.moveTask(entry.task.id, stop ? { ...body, stop: true } : body)).task);
+  } catch (cause: unknown) {
+    if (ApiError.isApiError(cause) && cause.code === "task_moved") board.refresh(entry.machineId);
+    throw cause;
+  } finally {
+    release();
+  }
+}
+
+/** The refusal a move answers while the task's agent works: its person may stop the agent and move it. */
+export function refusedWhileWorking(cause: unknown): boolean {
+  return ApiError.isApiError(cause) && cause.code === "task_working";
+}
+
+/** The task moved on its own between what was drawn and the press: nothing happened, and the board is read again. */
+export function movedMeanwhile(cause: unknown): boolean {
+  return ApiError.isApiError(cause) && cause.code === "task_moved";
+}
+
+/**
+ * The status an older daemon takes for a column of the drawn board: its intake is the backlog, a final column done, a work
+ * column a start, any other its person's review.
+ */
+export function legacyTarget(drawn: Board, column: string): Exclude<TaskStatus, "needs_you"> {
+  if (column === drawn.intake) return "ready";
+  if (isFinal(drawn, column)) return "done";
+  return columnById(drawn, column)?.kind === "work" ? "running" : "review";
+}
+
+/** A person's word on a task's feed: into the run's conversation while one works, else into the next run's note. */
+export async function addComment(entry: Pick<BoardTask, "machineId" | "task">, text: string): Promise<TaskCommentView> {
+  const daemon = store.daemonFor(entry.machineId);
+  if (daemon === undefined) throw new Error(NOT_CONNECTED);
+  const { comment } = await daemon.addTaskComment(entry.task.id, text);
+  board.refresh(entry.machineId);
+  return comment;
+}
+
+export async function readFeed(entry: Pick<BoardTask, "machineId" | "task">): Promise<TaskFeed> {
+  const daemon = store.daemonFor(entry.machineId);
+  if (daemon === undefined) throw new Error(NOT_CONNECTED);
+  return await daemon.taskFeed(entry.task.id);
+}
+
 /** `harness` draws an assembled agent's glyph before its daemon answers. */
 export type AssignTo = "nobody" | "you" | { machineId: MachineId; kind: "harness" | "custom"; id: string; harness?: string };
 
@@ -90,36 +159,40 @@ export interface Assigned {
 }
 
 /**
- * Hands a task to whoever was picked (Q3.727, Q3.732, Q3.736). In the backlog that names who will do it, an agent or its
- * person, and moves nothing. Anywhere else nobody puts it back in the backlog, its person takes it for review, and an agent
- * starts on it at once. Drawn as it is going to be until its daemon answers, on the machine it is going to (Q3.728). An agent on
- * another machine moves a task nobody has started there.
+ * Hands a task to whoever was picked (Q3.727, Q3.732, Q3.736). In the intake that names who will do it, an agent or its
+ * person, and moves nothing; so does every pick on a daemon that runs the board, where the column says who holds it and a
+ * person moves it. On an older daemon anywhere else nobody puts it back in the backlog, its person takes it for review, and
+ * an agent starts on it at once. Drawn as it is going to be until its daemon answers, on the machine it is going to (Q3.728).
+ * An agent on another machine moves a task nobody has started there.
  */
 export async function assignTask(entry: BoardTask, to: AssignTo, cwd: string): Promise<Assigned> {
   const here: Assigned = { machineId: entry.machineId, taskId: entry.task.id, session: null };
   const kept = { agent: entry.task.agent, customAgent: entry.task.customAgent };
-  if (columnOf(shownStatus(entry.task.status)) === "ready") {
+  const drawn = drawnBoard();
+  if (entry.configured || entry.column === drawn.intake) {
     if (typeof to === "string") await changeTask(entry, { assignee: to }, { assignee: to, ...kept });
-    else if (to.machineId !== entry.machineId) return await drawnMoving(entry, to, false, () => moveTask(entry, to, cwd));
-    else await changeTask(entry, { ...agentOf(to), ...(cwd === entry.task.cwd ? {} : { cwd }) }, drawnAs(entry, to));
+    else if (to.machineId !== entry.machineId && entry.task.sessions.length === 0) {
+      return await drawnMoving(entry, to, null, () => moveToMachine(entry, to, cwd));
+    } else await changeTask(entry, { ...agentOf(to), ...(cwd === entry.task.cwd ? {} : { cwd }) }, drawnAs(entry, to));
     return here;
   }
   if (typeof to === "string") {
     await changeTask(entry, to === "you" ? { status: "review", assignee: "you" } : { status: "ready", assignee: "nobody" }, { assignee: to, ...kept });
     return here;
   }
+  const working = columnForStatus(drawn, "running");
   const run =
     to.machineId === entry.machineId
       ? async (): Promise<Assigned> => ({ ...here, session: await startOn(entry, { ...agentOf(to), ...(cwd === entry.task.cwd ? {} : { cwd }) }) })
-      : () => moveTask(entry, to, cwd, true);
-  return await drawnMoving(entry, to, true, run);
+      : () => moveToMachine(entry, to, cwd, true);
+  return await drawnMoving(entry, to, working, run);
 }
 
-/** Drawn with the agent picked, in Running where it starts, and on its machine where that is another, until the press is answered. */
-async function drawnMoving(entry: BoardTask, to: Exclude<AssignTo, string>, starts: boolean, run: () => Promise<Assigned>): Promise<Assigned> {
+/** Drawn with the agent picked, in the column it starts in, and on its machine where that is another, until the press is answered. */
+async function drawnMoving(entry: BoardTask, to: Exclude<AssignTo, string>, column: string | null, run: () => Promise<Assigned>): Promise<Assigned> {
   const going = to.machineId === entry.machineId ? undefined : machinesAsDrawn(store.getSnapshot()).find((one) => one.machine.id === to.machineId);
   const release = board.hold(entry.machineId, entry.task.id, {
-    ...(starts ? { status: "running" } : {}),
+    ...(column === null ? {} : { column }),
     assignee: drawnAs(entry, to),
     ...(going === undefined ? {} : { machine: going.name }),
   });
@@ -157,19 +230,22 @@ function startedAnyway(machineId: MachineId, cause: unknown): SessionRef | null 
   return typeof detail?.sessionId === "string" ? refOf(machineId, sessionId(detail.sessionId)) : null;
 }
 
-/** Never `needs_you`: the daemon alone says that. */
+/** An older daemon's move, by its status. Never `needs_you`: the daemon alone says that. */
 export async function setTaskStatus(entry: BoardTask, status: Exclude<TaskStatus, "needs_you">): Promise<void> {
   await changeTask(entry, { status });
 }
 
 /**
  * A title, a brief, a folder or who does it next; the conversations already on the task keep their own agent. A status is
- * drawn at once, and so is an assignee the caller says how to draw (Q3.728, Q3.732).
+ * drawn at once in its column, and so is an assignee the caller says how to draw (Q3.728, Q3.732).
  */
 export async function changeTask(entry: BoardTask, change: TaskChangeBody, drawn?: AskedAssignee): Promise<void> {
   const daemon = store.daemonFor(entry.machineId);
   if (daemon === undefined) throw new Error(NOT_CONNECTED);
-  const asked = { ...(change.status === undefined ? {} : { status: change.status }), ...(drawn === undefined ? {} : { assignee: drawn }) };
+  const asked = {
+    ...(change.status === undefined ? {} : { column: columnForStatus(drawnBoard(), change.status) }),
+    ...(drawn === undefined ? {} : { assignee: drawn }),
+  };
   const release = Object.keys(asked).length === 0 ? null : board.hold(entry.machineId, entry.task.id, asked);
   try {
     board.apply(entry.machineId, (await daemon.changeTask(entry.task.id, change)).task);
@@ -182,7 +258,7 @@ export async function changeTask(entry: BoardTask, change: TaskChangeBody, drawn
  * Hands a task nobody has started to an agent on another machine: made there under its key, then taken off this one, so a
  * proposal it came from still finds it (Q3.725). With `start` that agent starts on it there. Answers where it went.
  */
-export async function moveTask(
+export async function moveToMachine(
   entry: BoardTask,
   to: { machineId: MachineId; kind: "harness" | "custom"; id: string },
   cwd: string,
@@ -234,7 +310,46 @@ export function detachSession(entry: BoardTask, ref: SessionRef): Promise<void> 
   );
 }
 
+/**
+ * A conversation with no task, let go in a column, becomes a task holding it (stage 7). Made where it is, attached, then moved:
+ * a column that works starts a run on its own, which would open a conversation of its own were the chat not on the task first.
+ * An older daemon takes the column's status.
+ */
+export async function taskFromChat(
+  chat: { ref: SessionRef; title: string; agent: string; cwd: string },
+  column: string,
+  configured: boolean,
+): Promise<{ machineId: MachineId; taskId: string }> {
+  const daemon = store.daemonFor(chat.ref.machineId);
+  if (daemon === undefined) throw new Error(NOT_CONNECTED);
+  const drawn = drawnBoard();
+  const works = columnById(drawn, column)?.kind === "work";
+  const legacy = legacyTarget(drawn, column);
+  const made = await createTask({
+    machineId: chat.ref.machineId,
+    title: chat.title.slice(0, 120),
+    brief: chat.title,
+    agent: chat.agent,
+    assignee: "agent",
+    ...(configured ? { column: works ? drawn.intake : column } : legacy === "review" || legacy === "done" ? { status: legacy } : {}),
+    cwd: chat.cwd,
+    start: false,
+  });
+  const attached = await daemon.attachSession(made.task.id, chat.ref.sessionId);
+  board.apply(chat.ref.machineId, attached.task);
+  if (configured && works) {
+    const entry = board.getSnapshot().tasks.find((one) => one.machineId === chat.ref.machineId && one.task.id === made.task.id);
+    if (entry !== undefined) await moveTo(entry, { to: column });
+  }
+  return { machineId: chat.ref.machineId, taskId: made.task.id };
+}
+
 /** A task opens as its own page, which names the conversation doing it and goes there in one press (Q3.725). */
 export function openTask(entry: Pick<BoardTask, "machineId" | "task">): void {
   navigate(taskPath(entry.machineId, entry.task.id));
+}
+
+/** Whether a task stands in a column that closes it; an older daemon's by its status. */
+export function closed(entry: BoardTask): boolean {
+  return isFinal(drawnBoard(), entry.column) || (!entry.configured && shownStatus(entry.task.status) === "done");
 }

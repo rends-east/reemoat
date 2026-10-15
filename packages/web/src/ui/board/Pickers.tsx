@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { projectName, taskHolder, type BoardTask } from "../../board";
+import { DEFAULT_BOARD } from "@reemoat/board";
+import { cardHolder, projectName, type Board, type BoardTask } from "../../board";
 import type { MachineId } from "../../ids";
 import { displayCwd } from "../../paths";
 import type { AppState } from "../../store";
@@ -33,9 +34,9 @@ export type AssigneeChoice = Assigned | "nobody" | "you";
 export const NOBODY = "\u0000nobody";
 export const YOU = "\u0000you";
 
-/** What a task's assignee control holds: the backlog's named agent or nobody, an agent at work, else its person (Q3.732). */
-export function assigneeChoiceOf(entry: BoardTask): AssigneeChoice {
-  const holder = taskHolder(entry.task);
+/** What a task's assignee control holds: as its card names it (`cardHolder`). */
+export function assigneeChoiceOf(entry: BoardTask, board: Board = DEFAULT_BOARD): AssigneeChoice {
+  const holder = cardHolder(entry, board);
   if (holder.kind !== "agent") return holder.kind;
   const custom = holder.customAgent;
   return { machineId: entry.machineId, kind: custom === null ? "harness" : "custom", id: custom ?? holder.agent };

@@ -1,17 +1,29 @@
 import { isAbsolute } from "node:path";
+import { COLUMN_ID, EXIT_NAME, MAX_BOARD_BYTES, MAX_SIMULATED_EVENTS, ROLE_NAME } from "@reemoat/board";
 import { MAX_TASK_BRIEF_CHARS, MAX_TASK_SUMMARY_CHARS, MAX_TASK_TITLE_CHARS, TASK_STATUSES, type StoredTaskStatus, type TaskStatus } from "./store.js";
 
 export const LIST_PROJECTS_TOOL_NAME = "list_projects";
 export const LIST_TASKS_TOOL_NAME = "list_tasks";
 export const PROPOSE_TASKS_TOOL_NAME = "propose_tasks";
 export const TASK_UPDATE_TOOL_NAME = "task_update";
+export const BOARD_GET_TOOL_NAME = "board_get";
+export const BOARD_CHECK_TOOL_NAME = "board_check";
+export const BOARD_SIMULATE_TOOL_NAME = "board_simulate";
+export const BOARD_PROPOSE_TOOL_NAME = "board_propose";
 
 export const TASK_TOOL_NAMES: readonly string[] = [
   LIST_PROJECTS_TOOL_NAME,
   LIST_TASKS_TOOL_NAME,
   PROPOSE_TASKS_TOOL_NAME,
   TASK_UPDATE_TOOL_NAME,
+  BOARD_GET_TOOL_NAME,
+  BOARD_CHECK_TOOL_NAME,
+  BOARD_SIMULATE_TOOL_NAME,
+  BOARD_PROPOSE_TOOL_NAME,
 ];
+
+/** What an agent says a proposed board changes: one paragraph on the card above the diff. */
+export const MAX_BOARD_WHY_CHARS = 600;
 
 export const MAX_PROPOSALS_PER_CALL = 12;
 /** Under the log's 128 KiB per event with room for the rest of the row: a proposals card is never clipped. */
@@ -26,7 +38,9 @@ export const AGENT_TASK_STATUSES: readonly StoredTaskStatus[] = ["running", "rev
 export const TASK_INSTRUCTIONS =
   "Your user keeps a board of tasks across their machines. list_tasks shows it and list_projects shows where work can run. " +
   "propose_tasks puts tasks in front of your user as a card; a task and its agent start only when they press, so propose and then stop. " +
-  "When this conversation is itself working on a task, task_update keeps that task's summary current for them.";
+  "When this conversation is itself working on a task, task_update keeps that task's summary current for them. " +
+  "The board's columns, who runs them and where a task goes next are one YAML document: board_get reads it, board_check and " +
+  "board_simulate try a draft, and board_propose shows your user a change they apply with a press.";
 
 export const DISPATCH_NICKNAME = "dispatch";
 
@@ -77,13 +91,18 @@ export const TASK_TOOLS = [
               title: { type: "string", description: `What the task is, in a few words; at most ${MAX_TASK_TITLE_CHARS} characters.` },
               brief: { type: "string", description: "The whole first message to the agent that will do it." },
               project: { type: "string", description: "The project folder, an absolute path as list_projects printed it." },
-              agent: { type: "string", description: "The agent to run it, one that machine offers in list_projects." },
+              agent: {
+                type: "string",
+                description: "The agent to run it, one that machine offers in list_projects. Leave it out to let the column's role decide.",
+              },
               machine: {
                 type: "string",
                 description: "The machine as list_projects printed it, `name [id]`. Leave it out for the machine you are on.",
               },
+              column: { type: "string", description: "The board column to put it in, by id as board_get shows it. Leave it out for the intake." },
+              role: { type: "string", description: "A role from the board whose agent is to run it, by name. Leave it out for the column's own." },
             },
-            required: ["title", "brief", "project", "agent"],
+            required: ["title", "brief", "project"],
             additionalProperties: false,
           },
         },
@@ -98,42 +117,89 @@ export const TASK_TOOLS = [
     description:
       "Report on the task this conversation is working on, which is the only task it changes. `summary` replaces what your user reads on the " +
       "board: what is done, what is next, and what you need from them, in a few lines. `status` is `review` when the work is ready for " +
-      "them to look at, and `running` to take that back; they mark the task done themselves. Call it when you finish a step and before you " +
-      "stop. Refused in words when this conversation is attached to no task.",
+      "them to look at, and `running` to take that back; they mark the task done themselves. Where the note on your task lists exits, " +
+      "`outcome` names the one this column's work goes out by. Call it when you finish a step and before you stop. Refused in words when " +
+      "this conversation is attached to no task.",
     inputSchema: {
       type: "object",
       properties: {
         summary: { type: "string", description: `At most ${MAX_TASK_SUMMARY_CHARS} characters.` },
         status: { type: "string", enum: [...AGENT_TASK_STATUSES] },
+        outcome: { type: "string", description: "One of the exits the note on your task lists, by name." },
       },
+      additionalProperties: false,
+    },
+    _meta: ALWAYS_LOAD,
+  },
+  {
+    name: BOARD_GET_TOOL_NAME,
+    description:
+      "Read your user's board: its YAML exactly as written, comments included, its revision, and each column with what runs there " +
+      "and where it leads. Read it before writing a change.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true },
+    _meta: ALWAYS_LOAD,
+  },
+  {
+    name: BOARD_CHECK_TOOL_NAME,
+    description: "Check a draft of the board's YAML: every line it fails on, or what it would hold. Changes nothing.",
+    inputSchema: {
+      type: "object",
+      properties: { text: { type: "string", description: `The whole board, as YAML; at most ${MAX_BOARD_BYTES / 1024} KiB.` } },
+      required: ["text"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    _meta: ALWAYS_LOAD,
+  },
+  {
+    name: BOARD_SIMULATE_TOOL_NAME,
+    description:
+      "Walk one task through a board on paper, by the rules the daemons run it by. It starts in the intake; each script line is " +
+      "what happens next: `report` (the run's agent reports), `outcome <exit>` (it names an exit), `silent` (its turn ends with no " +
+      "report), `<role> <exit|stay|none> [confidence]` (a role's answer when asked), `move <column>` or `press <exit>` (your user). " +
+      "Answers every step taken. Changes nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        script: { type: "array", items: { type: "string" }, maxItems: MAX_SIMULATED_EVENTS },
+        text: { type: "string", description: "A draft of the board to walk; leave it out for the board as it is." },
+      },
+      required: ["script"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+    _meta: ALWAYS_LOAD,
+  },
+  {
+    name: BOARD_PROPOSE_TOOL_NAME,
+    description:
+      "Show your user a new board: a card in this chat with the change against the board as it is, and an Apply they press. " +
+      "Nothing changes until then, and you change nothing yourself. Write the whole board, keeping what you do not mean to change, " +
+      "comments included; check it with board_check first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The whole board, as YAML." },
+        why: { type: "string", description: `What it changes and why, in a few sentences; at most ${MAX_BOARD_WHY_CHARS} characters.` },
+      },
+      required: ["text", "why"],
       additionalProperties: false,
     },
     _meta: ALWAYS_LOAD,
   },
 ];
 
-/** The block sent after a task's brief: the brief stays the person's words, and this says whose it is. */
-export function taskNote(title: string): string {
-  return (
-    "<board-task>\n" +
-    `Added by Reemoat, not written by your user: this conversation was started for the task "${noteText(title)}" on their task board, ` +
-    "and the message above is its brief. Keep the task current with task_update: a short summary of what is done, what is next and " +
-    "what you need from them, whenever you finish a step and before you stop, and status review once the work is ready to be looked at.\n" +
-    "</board-task>"
-  );
-}
-
-function noteText(value: string): string {
-  return value.replace(/[<>"\r\n\t]/g, " ");
-}
-
 export interface ProposedTask {
   title: string;
   brief: string;
   project: string;
-  agent: string;
+  /** null leaves it to the column's role, or the role named. */
+  agent: string | null;
   /** As the model wrote it; null is the machine the caller is on. */
   machine: string | null;
+  column: string | null;
+  role: string | null;
 }
 
 /** The proposals as the model wrote them, or the refusal, worded for the model. */
@@ -158,8 +224,16 @@ export function parseProposals(args: Record<string, unknown>): ProposedTask[] | 
       return `${where}.project must be an absolute path, as list_projects printed it`;
     }
     const agent = one["agent"];
-    if (typeof agent !== "string" || !isAgentRef(agent.trim())) {
-      return `${where}.agent must be an agent that machine offers, as list_projects printed it`;
+    if (agent !== undefined && agent !== null && (typeof agent !== "string" || !isAgentRef(agent.trim()))) {
+      return `${where}.agent must be an agent that machine offers, as list_projects printed it, or left out`;
+    }
+    const column = one["column"];
+    if (column !== undefined && column !== null && (typeof column !== "string" || !COLUMN_ID.test(column))) {
+      return `${where}.column must be a column's id, as board_get shows it, or left out`;
+    }
+    const role = one["role"];
+    if (role !== undefined && role !== null && (typeof role !== "string" || !ROLE_NAME.test(role))) {
+      return `${where}.role must be a role's name, as board_get shows it, or left out`;
     }
     const machine = one["machine"];
     if (machine !== undefined && machine !== null && (typeof machine !== "string" || machine.length > MAX_TASK_MACHINE_CHARS)) {
@@ -167,7 +241,15 @@ export function parseProposals(args: Record<string, unknown>): ProposedTask[] | 
     }
     const named = typeof machine === "string" ? machine.trim() : "";
     chars += title.length + brief.length + project.length;
-    out.push({ title, brief, project: project.trim(), agent: agent.trim(), machine: named.length === 0 ? null : named });
+    out.push({
+      title,
+      brief,
+      project: project.trim(),
+      agent: typeof agent === "string" ? agent.trim() : null,
+      machine: named.length === 0 ? null : named,
+      column: typeof column === "string" ? column : null,
+      role: typeof role === "string" ? role : null,
+    });
   }
   if (chars > MAX_PROPOSAL_CHARS_PER_CALL) return "these briefs are too long for one card; propose fewer tasks per call";
   return out;
@@ -208,12 +290,18 @@ export function isAgentRef(value: string): boolean {
 export interface TaskUpdateArgs {
   summary: string | null;
   status: StoredTaskStatus | null;
+  /** An exit's name, checked against the task's column by the desk. */
+  outcome: string | null;
 }
 
 export function parseTaskUpdate(args: Record<string, unknown>): TaskUpdateArgs | string {
   const summary = args["summary"];
   const status = args["status"];
-  if (summary === undefined && status === undefined) return "give a summary, a status, or both";
+  const outcome = args["outcome"];
+  if (summary === undefined && status === undefined && outcome === undefined) return "give a summary, a status, an outcome, or some of them";
+  if (outcome !== undefined && (typeof outcome !== "string" || !EXIT_NAME.test(outcome.trim()))) {
+    return "outcome is the name of one of the exits the note on your task lists";
+  }
   let cleaned: string | null = null;
   if (summary !== undefined) {
     cleaned = cleanSummary(summary);
@@ -223,7 +311,11 @@ export function parseTaskUpdate(args: Record<string, unknown>): TaskUpdateArgs |
   if (status !== undefined && !(AGENT_TASK_STATUSES as readonly unknown[]).includes(status)) {
     return `status must be one of ${AGENT_TASK_STATUSES.join(", ")}`;
   }
-  return { summary: cleaned, status: status === undefined ? null : (status as StoredTaskStatus) };
+  return {
+    summary: cleaned,
+    status: status === undefined ? null : (status as StoredTaskStatus),
+    outcome: typeof outcome === "string" ? outcome.trim() : null,
+  };
 }
 
 export function statusWords(status: TaskStatus | string): string {

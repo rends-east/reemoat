@@ -1,0 +1,25 @@
+{
+  "name": "@reemoat/board",
+  "version": "0.13.0",
+  "description": "The configurable task board: the YAML a board is written in, and the pure rules both the daemons and the app run it by.",
+  "license": "AGPL-3.0-only",
+  "author": "rends-east",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rends-east/reemoat.git",
+    "directory": "packages/board"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "yaml": "2.9.1"
+  }
+}

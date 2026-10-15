@@ -4,7 +4,8 @@
 export const CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 
 /** `content-type` must be listed: it is what makes every JSON POST preflight. */
-export const CORS_ALLOW_HEADERS = ["authorization", "content-type"] as const;
+// if-match carries the revision a board was read at (`PUT /board`, Q2.266).
+export const CORS_ALLOW_HEADERS = ["authorization", "content-type", "if-match"] as const;
 
 export const CORS_MAX_AGE_SECONDS = 600;
 

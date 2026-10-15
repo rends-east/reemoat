@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
-import { BOARD_COLUMNS, type BoardColumn } from "./board";
+import { COLUMN_ID } from "@reemoat/board";
 import { parseGateScreen, type GateScreen } from "./gate";
 import { parseLegalDoc, type LegalDoc } from "./legal";
 import { parseMarketRoute, type MarketRoute } from "./market";
@@ -27,7 +27,9 @@ export type Route =
   /** A task that has no conversation to open to, or whose own page was asked for; the id is its machine's (Q3.719). */
   | { name: "task"; machineId: MachineId; taskId: string }
   /** `column` is a column's own +, which makes the task there (Q3.737); null is New task, which an agent picked starts. */
-  | { name: "newTask"; machineId: MachineId | null; column: BoardColumn | null }
+  | { name: "newTask"; machineId: MachineId | null; column: string | null }
+  /** The account's board as YAML and as a form, a screen of its own. */
+  | { name: "boardConfig" }
   | {
       name: "agent";
       machineId: MachineId;
@@ -69,8 +71,8 @@ function parse(pathname: string): Route {
   }
   if (parts[0] === "task" && parts[1] === "new") {
     if (parts[2] === "in") {
-      const column = BOARD_COLUMNS.find((one) => one === parts[3]) ?? null;
-      return { name: "newTask", machineId: null, column };
+      const id = parts[3] === undefined ? "" : decodeSegment(parts[3]);
+      return { name: "newTask", machineId: null, column: COLUMN_ID.test(id) ? id : null };
     }
     return { name: "newTask", machineId: parts[2] === undefined ? null : machineId(decodeSegment(parts[2])), column: null };
   }
@@ -97,6 +99,7 @@ function parse(pathname: string): Route {
   if (parts[0] === "settings") {
     return { name: "settings", ...parseSettingsRoute(parts.slice(1), decodeSegment) };
   }
+  if (parts[0] === "board" && parts.length === 1) return { name: "boardConfig" };
   if (parts[0] === "plugins") {
     return { name: "plugins", ...parseMarketRoute(parts.slice(1), decodeSegment) };
   }
@@ -248,8 +251,12 @@ export function newTaskPath(machine?: MachineId | null): string {
 }
 
 /** A column's own +: the task is made in that column (Q3.737). */
-export function newTaskInPath(column: BoardColumn): string {
-  return `/task/new/in/${column}`;
+export function newTaskInPath(column: string): string {
+  return `/task/new/in/${encodeURIComponent(column)}`;
+}
+
+export function boardConfigPath(): string {
+  return "/board";
 }
 
 export function sessionPath(ref: SessionRef): string {

@@ -73,6 +73,10 @@ import type { TaskChange, TaskDesk } from "./tasks/desk.js";
 import {
   CREATED_TASK_STATUSES,
   isTaskAssignee,
+  labelsOf,
+  MAX_COMMENT_CHARS,
+  MAX_TASK_LABEL_CHARS,
+  MAX_TASK_LABELS,
   MAX_TASKS,
   MAX_TASK_BRIEF_CHARS,
   MAX_TASK_KEY_CHARS,
@@ -83,6 +87,7 @@ import {
   type StoredTaskStatus,
 } from "./tasks/store.js";
 import { cleanBrief, cleanSummary, cleanTitle } from "./tasks/tools.js";
+import { columnById, formatBoardError } from "@reemoat/board";
 import {
   DEFAULT_MAX_CHANGED_FILES,
   DEFAULT_MAX_DIFF_BYTES,
@@ -1436,36 +1441,41 @@ export function createApp(options: ServerOptions): AppBundle {
     try {
       return await registry.create(spec);
     } catch (error) {
-      if (error instanceof NicknameError) return nicknameRefused(c, error);
-      if (error instanceof PathError) {
-        return jsonError(c, pathErrorStatus(error, 400), error.code, error.message);
-      }
-      if (error instanceof WorktreeError) {
-        return worktreeError(c, error);
-      }
-      if (error instanceof SystemRoutingError) {
-        return jsonError(c, 502, "system_not_routable", error.message);
-      }
-      if (error instanceof SessionLimitError) {
-        // retryAfterSeconds rides the detail: clients parse the body, never the headers.
-        return jsonError(c, 429, error.reason, error.message, {
-          retryAfterSeconds: error.retryAfterSeconds,
-        });
-      }
-      if (error instanceof AgentUnavailableError) {
-        return jsonError(c, 503, "agent_unavailable", error.message);
-      }
-      if (error instanceof StartTimeoutError) {
-        return jsonError(c, 504, "agent_start_timeout", error.message, {
-          sessionId: error.sessionId,
-          timeoutMs: error.timeoutMs,
-        });
-      }
-      const message = describeError(error);
-      // Through isAuthRequiredMessage, so a remembered refusal gets the same code as the first.
-      const code = isAuthRequiredMessage(message) ? "agent_auth_required" : "agent_launch_failed";
-      return jsonError(c, 502, code, message);
+      return launchRefused(c, error);
     }
+  };
+
+  /** A launch's refusal in the words and status the session route has always answered it in; the board's starts throw the same errors. */
+  const launchRefused = (c: Context<AppEnv>, error: unknown): Response => {
+    if (error instanceof NicknameError) return nicknameRefused(c, error);
+    if (error instanceof PathError) {
+      return jsonError(c, pathErrorStatus(error, 400), error.code, error.message);
+    }
+    if (error instanceof WorktreeError) {
+      return worktreeError(c, error);
+    }
+    if (error instanceof SystemRoutingError) {
+      return jsonError(c, 502, "system_not_routable", error.message);
+    }
+    if (error instanceof SessionLimitError) {
+      // retryAfterSeconds rides the detail: clients parse the body, never the headers.
+      return jsonError(c, 429, error.reason, error.message, {
+        retryAfterSeconds: error.retryAfterSeconds,
+      });
+    }
+    if (error instanceof AgentUnavailableError) {
+      return jsonError(c, 503, "agent_unavailable", error.message);
+    }
+    if (error instanceof StartTimeoutError) {
+      return jsonError(c, 504, "agent_start_timeout", error.message, {
+        sessionId: error.sessionId,
+        timeoutMs: error.timeoutMs,
+      });
+    }
+    const message = describeError(error);
+    // Through isAuthRequiredMessage, so a remembered refusal gets the same code as the first.
+    const code = isAuthRequiredMessage(message) ? "agent_auth_required" : "agent_launch_failed";
+    return jsonError(c, 502, code, message);
   };
 
   app.post("/sessions", write, async (c) => {
@@ -1522,9 +1532,57 @@ export function createApp(options: ServerOptions): AppBundle {
     return null;
   };
 
-  app.get("/peer/tasks", message, (c) => boardRefused(c) ?? c.json({ tasks: tasks!.localRows() }));
+  // Every board answer names the board this machine runs, so a machine behind reads the newer one (Q2.266).
+  const boardStamp = () => ({ boardRevision: tasks!.engine.current.revision, boardHash: tasks!.engine.current.hash });
 
-  app.get("/peer/projects", message, async (c) => boardRefused(c) ?? c.json(await tasks!.localProjects()));
+  app.get("/peer/tasks", message, (c) => boardRefused(c) ?? c.json({ tasks: tasks!.localRows(), ...boardStamp() }));
+
+  app.get("/peer/projects", message, async (c) => boardRefused(c) ?? c.json(await tasks!.peerProjects()));
+
+  app.get("/peer/board", message, (c) => {
+    const refused = boardRefused(c);
+    if (refused !== null) return refused;
+    const state = tasks!.engine.current;
+    return c.json({ revision: state.revision, hash: state.hash, text: state.text });
+  });
+
+  // A task's run moving here, its code, and a role asked here: a link with task:handoff, and tasks moving on this machine (Q2.269).
+  const handoff = requireScope("task:handoff");
+  const moveRefused = (c: Context<AppEnv>): Response | null => {
+    const refused = boardRefused(c);
+    if (refused !== null) return refused;
+    if (!peers!.hub.movesTasks) return jsonError(c, 403, "tasks_stay", "tasks do not move to or from this machine");
+    return null;
+  };
+
+  app.post("/peer/tasks/:id/handoff", handoff, async (c) => {
+    const refused = moveRefused(c);
+    if (refused !== null) return refused;
+    const link = linkOf(c)!;
+    const taken = await tasks!.engine.receiveHandoff({ machine: link.sourceMachineId, label: link.sourceLabel }, await readJsonObject(c));
+    if (!taken.ok) return jsonError(c, taken.status, taken.code, taken.message, boardStamp());
+    return c.json({ accepted: true, ...boardStamp() });
+  });
+
+  app.get("/peer/tasks/:id/code", handoff, async (c) => {
+    const refused = moveRefused(c);
+    if (refused !== null) return refused;
+    const have = c.req.query("have") ?? "";
+    const offset = Number(c.req.query("offset") ?? "0");
+    if ((have.length > 0 && !/^[0-9a-f]{40,64}$/.test(have)) || !Number.isInteger(offset) || offset < 0) {
+      return jsonError(c, 400, "bad_request", "have is a commit and offset a byte position");
+    }
+    const piece = await tasks!.engine.codePiece(c.req.param("id"), have.length === 0 ? null : have, offset);
+    return c.json({ ...(piece.body as Record<string, unknown>), ...boardStamp() }, piece.status);
+  });
+
+  app.post("/peer/judge", handoff, async (c) => {
+    const refused = moveRefused(c);
+    if (refused !== null) return refused;
+    const answer = await tasks!.engine.judgeHere(await readJsonObject(c));
+    if (typeof answer === "string") return jsonError(c, 400, "bad_request", answer);
+    return c.json({ ...answer, ...boardStamp() });
+  });
 
   app.put("/peers/links", admin, async (c) => {
     if (peers === null) return jsonError(c, 503, "peers_unavailable", "messages between agents are not served here");
@@ -1546,10 +1604,24 @@ export function createApp(options: ServerOptions): AppBundle {
   const tasksOff = (c: Context<AppEnv>): Response => jsonError(c, 503, "tasks_unavailable", "this daemon keeps no tasks");
   const noTask = (c: Context<AppEnv>): Response => jsonError(c, 404, "task_not_found", "no such task");
   const shuttingDown = (c: Context<AppEnv>): Response => jsonError(c, 503, "shutting_down", "the daemon is shutting down");
+  // While a task is on its way to another machine no edit lands here: the copy sent would no longer be the task (Q2.269).
+  const movingRefused = (c: Context<AppEnv>): Response | null =>
+    tasks !== null && tasks.moving(c.req.param("id") ?? "") ? jsonError(c, 409, "task_moving", "the task is on its way to another machine") : null;
 
   app.get("/tasks", read, (c) => {
     if (tasks === null) return tasksOff(c);
-    return c.json({ tasks: tasks.list(), now: Date.now(), instanceId });
+    const board = tasks.engine.current;
+    // board: 1 says this daemon runs the configurable board; an older one says nothing, and is drawn on the default (Q2.264).
+    return c.json({
+      tasks: tasks.list(),
+      now: Date.now(),
+      instanceId,
+      board: 1,
+      boardRevision: board.revision,
+      boardHash: board.hash,
+      // What went elsewhere, so a reader follows it rather than drawing a copy twice (Q2.269).
+      tombstones: tasks.tombstones(),
+    });
   });
 
   app.post("/tasks", write, async (c) => {
@@ -1584,6 +1656,15 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 400, "bad_request", `status must be one of ${CREATED_TASK_STATUSES.join(", ")}`, { statuses: CREATED_TASK_STATUSES });
     }
     if (status !== undefined && start === true) return jsonError(c, 400, "bad_request", "a task that starts is running: name a status or a start, not both");
+    // The board's own word for where it goes, over an older client's status (Q2.264).
+    const column = body["column"];
+    if (column !== undefined && column !== null) {
+      const target = typeof column === "string" ? columnById(tasks.engine.current.board, column) : null;
+      if (target === null || target.kind === "view") return jsonError(c, 400, "bad_request", "column names a column of the board that holds tasks");
+      if (start === true || status !== undefined) return jsonError(c, 400, "bad_request", "name a column, a status or a start, not two of them");
+    }
+    const labels = labelsOf(body["labels"]);
+    if (labels === null) return jsonError(c, 400, "bad_request", `labels are up to ${MAX_TASK_LABELS} words of ${MAX_TASK_LABEL_CHARS} characters`);
 
     // Written before the launch, so a second copy of this request during a slow start finds the first by its key.
     const made = tasks.create({
@@ -1594,27 +1675,36 @@ export function createApp(options: ServerOptions): AppBundle {
       // The agent named is the assignee unless the body names another; one that starts holds it (Q2.261, Q2.262).
       assignee: start === true ? "agent" : (assignee ?? "agent"),
       status: (status as StoredTaskStatus | undefined) ?? "ready",
+      column: typeof column === "string" ? column : null,
       cwd: spec.cwd,
       key: key ?? null,
+      labels,
     });
     if (made === "full") {
       return jsonError(c, 429, "too_many_tasks", `this machine holds ${MAX_TASKS} tasks and none of them is done`, { limit: MAX_TASKS });
     }
     if (made.existing) return c.json({ task: tasks.snapshot(made.task), existing: true });
-    if (start !== true) return c.json({ task: tasks.snapshot(made.task) }, 201);
+    if (start !== true) {
+      // Put in a column that works, its run starts on its own (Q2.264).
+      void tasks.engine.kick(made.task.id);
+      return c.json({ task: tasks.snapshot(made.task) }, 201);
+    }
 
-    const managed = await launch(c, spec);
-    if (managed instanceof Response) {
+    const started = await tasks.startNow(made.task, { nickname: spec.nickname, worktree: spec.worktree });
+    if (started.started === null) {
       // A start that was refused leaves no task behind: sending the same request again is the retry.
       tasks.remove(made.task.id);
-      return managed;
+      return started.refused === null ? jsonError(c, 409, "task_not_started", "the board did not start this task") : launchRefused(c, started.refused);
     }
-    const sent = tasks.begin(made.task, managed);
-    const task = tasks.get(made.task.id) ?? made.task;
-    return c.json({ task: tasks.snapshot(task), session: managed.snapshot(), sent: sent.kind === "accepted" }, 201);
+    const task = tasks.get(made.task.id) ?? started.task;
+    return c.json({ task: tasks.snapshot(task), session: started.started.snapshot(), sent: true }, 201);
   });
 
   app.patch("/tasks/:id", write, async (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
+    }
     if (tasks === null) return tasksOff(c);
     if (tasks.get(c.req.param("id")) === null) return noTask(c);
     const body = await requireJson(c);
@@ -1650,6 +1740,15 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 400, "bad_request", `status must be one of ${STORED_TASK_STATUSES.join(", ")}`, { statuses: STORED_TASK_STATUSES });
       }
       change.status = status as StoredTaskStatus;
+      const held = tasks.get(c.req.param("id"));
+      if (held !== null && tasks.statusRefused(held, change.status)) {
+        return jsonError(c, 409, "task_working", "its agent is at work: only done takes it now, or stop the agent first");
+      }
+    }
+    if (body["labels"] !== undefined) {
+      const labels = labelsOf(body["labels"]);
+      if (labels === null) return jsonError(c, 400, "bad_request", `labels are up to ${MAX_TASK_LABELS} words of ${MAX_TASK_LABEL_CHARS} characters`);
+      change.labels = labels;
     }
     if (body["assignee"] !== undefined) {
       if (!isTaskAssignee(body["assignee"])) {
@@ -1675,7 +1774,7 @@ export function createApp(options: ServerOptions): AppBundle {
       if (names) change.assignee ??= "agent";
     }
     if (Object.keys(change).length === 0) {
-      return jsonError(c, 400, "bad_request", "name a title, brief, summary, status, agent, assignee or cwd to change");
+      return jsonError(c, 400, "bad_request", "name a title, brief, summary, status, agent, assignee, labels or cwd to change");
     }
     const changed = tasks.change(c.req.param("id"), change);
     return changed === null ? noTask(c) : c.json({ task: tasks.snapshot(changed) });
@@ -1683,12 +1782,20 @@ export function createApp(options: ServerOptions): AppBundle {
 
   // The task and its attachments; its sessions are conversations of their own and stay.
   app.delete("/tasks/:id", write, (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
+    }
     if (tasks === null) return tasksOff(c);
     return tasks.remove(c.req.param("id")) ? c.json({ deleted: true }) : noTask(c);
   });
 
   // Another attempt as much as a first one: the body may name a different agent or folder than the task holds.
   app.post("/tasks/:id/start", write, async (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
+    }
     if (tasks === null) return tasksOff(c);
     if (registry.isShuttingDown) return shuttingDown(c);
     const held = tasks.get(c.req.param("id"));
@@ -1701,30 +1808,134 @@ export function createApp(options: ServerOptions): AppBundle {
       cwd: body["cwd"] ?? held.cwd,
     });
     if (spec instanceof Response) return spec;
-    const managed = await launch(c, spec);
-    if (managed instanceof Response) return managed;
+    if (tasks.engine.runBusy(held)) return jsonError(c, 409, "task_working", "its agent is at work: stop it first, or move the task to done");
+    // A start is an assignment: the task holds who and where for this run and the next (Q2.260, Q2.261).
+    const assigned = tasks.change(held.id, { agent: spec.agent, customAgent: spec.customAgent, cwd: spec.cwd, assignee: "agent" }) ?? held;
+    const started = await tasks.startNow(assigned, { nickname: spec.nickname, worktree: spec.worktree });
+    if (started.started === null) {
+      // Refused, the task is put back as it was: the same request again is the retry.
+      if (tasks.get(held.id) !== null) tasks.restore(held, "a start was refused");
+      return started.refused === null ? jsonError(c, 409, "task_not_started", "the board did not start this task") : launchRefused(c, started.refused);
+    }
     // Deleted while its agent started: the session is an ordinary one now, and the task is still gone.
     const task = tasks.get(held.id);
     if (task === null) return noTask(c);
-    if (task.status === "done") tasks.change(task.id, { status: "running" });
-    // A start is an assignment: the task holds who and where for the next one (Q2.260, Q2.261).
-    if (names || body["cwd"] !== undefined || task.assignee !== "agent") {
-      tasks.change(task.id, { agent: spec.agent, customAgent: spec.customAgent, cwd: spec.cwd, assignee: "agent" });
+    return c.json({ task: tasks.snapshot(task), session: started.started.snapshot(), sent: true }, 201);
+  });
+
+  // A person's move: by column or by exit, from where they saw it. Into a column that works, its run starts (Q2.264).
+  app.post("/tasks/:id/move", write, async (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
     }
-    const sent = tasks.begin(tasks.get(task.id) ?? task, managed);
-    return c.json({ task: tasks.snapshot(tasks.get(task.id) ?? task), session: managed.snapshot(), sent: sent.kind === "accepted" }, 201);
+    if (tasks === null) return tasksOff(c);
+    if (registry.isShuttingDown) return shuttingDown(c);
+    const held = tasks.get(c.req.param("id"));
+    if (held === null) return noTask(c);
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const to = body["to"];
+    const exit = body["exit"];
+    const from = body["from"];
+    const stop = body["stop"];
+    if ((to === undefined) === (exit === undefined)) return jsonError(c, 400, "bad_request", "name a column with to, or an exit with exit");
+    if ((to !== undefined && typeof to !== "string") || (exit !== undefined && typeof exit !== "string")) {
+      return jsonError(c, 400, "bad_request", "to and exit are names");
+    }
+    if (from !== undefined && from !== null && typeof from !== "string") return jsonError(c, 400, "bad_request", "from is the column the task was seen in");
+    if (stop !== undefined && typeof stop !== "boolean") return jsonError(c, 400, "bad_request", "stop must be true or false");
+    if (stop === true) await tasks.stopRun(held.id);
+    const moved = tasks.move(held.id, { to: to ?? null, exit: exit ?? null, from: from ?? null });
+    if (!moved.ok) {
+      const status = moved.code === "task_moved" || moved.code === "task_working" ? 409 : 400;
+      return jsonError(c, status, moved.code === "no_column" || moved.code === "no_exit" ? "bad_request" : moved.code, moved.message, {
+        column: tasks.get(held.id)?.flow.column ?? null,
+      });
+    }
+    return c.json({ task: tasks.snapshot(moved.task) });
+  });
+
+  // The feed: questions read off their sessions, stops, reports and comments; and the history beside it (Q2.265).
+  app.get("/tasks/:id/comments", read, (c) => {
+    if (tasks === null) return tasksOff(c);
+    if (tasks.get(c.req.param("id")) === null) return noTask(c);
+    return c.json({ comments: tasks.feed(c.req.param("id")), events: tasks.history(c.req.param("id")) });
+  });
+
+  app.post("/tasks/:id/comments", write, async (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
+    }
+    if (tasks === null) return tasksOff(c);
+    if (tasks.get(c.req.param("id")) === null) return noTask(c);
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+    const text = typeof body["text"] === "string" ? body["text"].trim() : "";
+    if (text.length === 0 || text.length > MAX_COMMENT_CHARS || text.includes("\0")) {
+      return jsonError(c, 400, "bad_request", `text is a comment of at most ${MAX_COMMENT_CHARS} characters`, { max: MAX_COMMENT_CHARS });
+    }
+    const comment = await tasks.comment(c.req.param("id"), text);
+    return comment === null ? noTask(c) : c.json({ comment }, 201);
+  });
+
+  // The account's board, as YAML: read whole, written whole against the revision it was read at (Q2.266).
+  app.get("/board", read, (c) => {
+    if (tasks === null) return tasksOff(c);
+    const state = tasks.engine.current;
+    return c.json({ version: 1, revision: state.revision, hash: state.hash, text: state.text, board: state.board });
+  });
+
+  app.put("/board", write, async (c) => {
+    if (tasks === null) return tasksOff(c);
+    const type = c.req.header("content-type") ?? "";
+    let text: string;
+    if (/^application\/json\b/i.test(type)) {
+      const body = await readJsonObject(c);
+      if (body === null || typeof body["text"] !== "string") return jsonError(c, 400, "bad_request", "send the board's YAML as text");
+      text = body["text"];
+    } else {
+      text = await c.req.text();
+    }
+    const match = c.req.header("if-match");
+    const revision = match === undefined ? null : Number(match.replace(/^W\//, "").replace(/"/g, ""));
+    if (revision !== null && !Number.isInteger(revision)) return jsonError(c, 400, "bad_request", "If-Match names the revision the board was read at");
+    const put = tasks.engine.putBoard(text, revision);
+    if (!put.ok && put.kind === "conflict") {
+      return jsonError(c, 409, "board_revision", `the board is at revision ${put.state.revision} now`, {
+        revision: put.state.revision,
+        hash: put.state.hash,
+        text: put.state.text,
+      });
+    }
+    if (!put.ok && put.kind === "invalid") {
+      return jsonError(c, 400, "board_invalid", formatBoardError(put.errors[0]!), { errors: put.errors.map((one) => ({ ...one, text: formatBoardError(one) })) });
+    }
+    if (!put.ok) return jsonError(c, 400, "bad_request", "the board was not taken");
+    return c.json({ version: 1, revision: put.state.revision, hash: put.state.hash, text: put.state.text, changed: put.changed });
   });
 
   app.put("/tasks/:id/sessions/:sessionId", write, (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
+    }
     if (tasks === null) return tasksOff(c);
     const task = tasks.get(c.req.param("id"));
     if (task === null) return noTask(c);
     const managed = registry.get(c.req.param("sessionId"));
     if (managed === undefined) return notFound(c);
-    return c.json({ task: tasks.snapshot(tasks.attach(task, managed)) });
+    const attached = tasks.attach(task, managed);
+    void tasks.engine.kick(attached.id);
+    return c.json({ task: tasks.snapshot(attached) });
   });
 
   app.delete("/tasks/:id/sessions/:sessionId", write, (c) => {
+    if (tasks !== null) {
+      const moving = movingRefused(c);
+      if (moving !== null) return moving;
+    }
     if (tasks === null) return tasksOff(c);
     const task = tasks.get(c.req.param("id"));
     if (task === null) return noTask(c);

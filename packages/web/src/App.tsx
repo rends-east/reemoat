@@ -20,6 +20,8 @@ import { Button, Empty, SHEET_SCROLL, Spinner } from "./ui/bits";
 import { currentView, groupsVersion, subscribeGroups } from "./ui/groups";
 // Not lazy: the board is the first page's home at lg, and a chunk fetched on the first switch kept the pane blank (Q3.729).
 import { Board } from "./ui/board/Board";
+import { columnTitle } from "./board";
+import { board } from "./boardStore";
 
 // Lazy, to keep the markdown pipeline and Settings off the sign-in path.
 const SessionView = lazy(async () => ({ default: (await import("./ui/SessionView")).SessionView }));
@@ -27,6 +29,7 @@ const Settings = lazy(async () => ({ default: (await import("./ui/settings/Setti
 // A task's page and the form behind `+` are off the first paint, as every screen but the list and the board is.
 const TaskScreen = lazy(async () => ({ default: (await import("./ui/board/TaskScreen")).TaskScreen }));
 const NewTask = lazy(async () => ({ default: (await import("./ui/board/NewTask")).NewTask }));
+const BoardEditor = lazy(async () => ({ default: (await import("./ui/board/BoardEditor")).BoardEditor }));
 const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScreen")).PluginScreen }));
 const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
 const LegalScreen = lazy(async () => ({ default: (await import("./ui/legal/LegalScreen")).LegalScreen }));
@@ -127,7 +130,8 @@ function OverlaySheet({
 }): ReactNode {
   const under = useUnder();
   const [reported, setReported] = useState<string | null>(null);
-  const titled = sheetTitle(route);
+  const account = useSyncExternalStore(board.subscribe, board.getSnapshot).board.board;
+  const titled = sheetTitle(route, (column) => columnTitle(account, column));
   // Both take the origin, or the label names somewhere the up button does not go.
   const origin = useOrigin();
   const upLabel = sheetUpLabel(route, origin);
@@ -198,6 +202,8 @@ function screenOf(route: Route): string {
       return "task/new";
     case "task":
       return `task/${route.machineId}/${route.taskId}`;
+    case "boardConfig":
+      return "board";
     case "agent":
       return `agent/${route.step ?? ""}/${route.preset ?? ""}/${route.harness ?? ""}`;
     case "plugins":
@@ -280,6 +286,13 @@ function content(
           <TaskScreen key="task" state={state} machineId={route.machineId} taskId={route.taskId} />
         </>
       );
+    case "boardConfig":
+      return (
+        <>
+          <PhoneList key="list" state={state} onMenu={onMenu} beneath />
+          <BoardEditor key="board" state={state} />
+        </>
+      );
     default:
       return (
         <>
@@ -290,7 +303,7 @@ function content(
   }
 }
 
-/** The pane beside the list with nothing open in it: the board while the board is the list's page, else what it always said (Q3.721). */
+/** The pane beside the list with nothing open in it: the board, wherever the list stands (Q3.721, stage 7). */
 function HomePane({ state }: { state: ReturnType<typeof store.getSnapshot> }): ReactNode {
   useSyncExternalStore(subscribeGroups, groupsVersion);
   // A fleet with no machine has no board to draw, and the pane still owes what it says then.

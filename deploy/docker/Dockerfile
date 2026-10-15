@@ -62,6 +62,8 @@ COPY packages/web/package.json ./packages/web/
 # missing manifest fails the install rather than the build — a different and much
 # more confusing error than the one a missing source directory gives.
 COPY packages/protocol/package.json ./packages/protocol/
+# The board package is a workspace member too, for the same reason.
+COPY packages/board/package.json ./packages/board/
 
 # ---------------------------------------------------------------------------
 # gate — vite, in its own stage so its toolchain never reaches the runtime image
@@ -109,6 +111,8 @@ COPY packages/web/src ./packages/web/src
 # workspace specifier is invisible to it by design. `imagecheck` is what catches
 # this; nothing else can.
 COPY packages/protocol/src ./packages/protocol/src
+# The board package the same way: the app's board, and with it the store the gate shares, read it as source.
+COPY packages/board/src ./packages/board/src
 # `public/` is copied to the root of the build output by Vite, and `gate.html`
 # names every file in it. Its own line rather than the one above, because that
 # COPY takes a file list and this is a directory — and it is the second half of

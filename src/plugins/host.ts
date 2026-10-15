@@ -186,6 +186,22 @@ export class PluginHost {
     return [...this.live.values()].map((plugin) => plugin.summary()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  /** Every classifier an enabled plugin adds, named `<pluginId>:<id>` here and by its own id on a board. */
+  classifiers(): { id: string; name: string }[] {
+    return this.options.records
+      .list()
+      .filter((record) => record.enabled)
+      .flatMap((record) => record.manifest.contributes.classifiers.map((one) => ({ id: `${record.id}:${one.id}`, name: one.id })));
+  }
+
+  /** One classifier's answer to a board's question, as its plugin gave it; the board reads it. */
+  async classify(id: string, input: unknown): Promise<unknown> {
+    const at = id.indexOf(":");
+    const plugin = at <= 0 ? null : this.find(id.slice(0, at));
+    if (plugin === null || !plugin.record.enabled) throw new PluginApiError("plugin_unavailable", "that classifier's plugin is not installed or is switched off");
+    return plugin.request("classify", id.slice(at + 1), input);
+  }
+
   find(id: string): LivePlugin | null {
     return this.live.get(id) ?? null;
   }
@@ -944,6 +960,11 @@ class LivePlugin {
   }
 
   async invoke(kind: PluginInvokeKind, name: string, input: unknown): Promise<PluginResult> {
+    return this.shape(kind, name, await this.request(kind, name, input));
+  }
+
+  /** The export's answer as it came, for a caller that reads it itself: a classifier's verdict. */
+  async request(kind: PluginInvokeKind, name: string, input: unknown): Promise<unknown> {
     const failure = await this.ensureStarted(kind === "hook" ? "supervised" : "passive");
     if (failure !== null) throw new PluginApiError("plugin_unavailable", failure);
     const generation = this.generation;
@@ -998,7 +1019,7 @@ class LivePlugin {
       throw new PluginApiError("plugin_request_too_large", `a plugin is sent at most ${MAX_PLUGIN_MESSAGE_BYTES} bytes in one message`);
     }
     if (!answer.message.ok) throw new PluginApiError("plugin_failed", clip(answer.message.error, MAX_FAILURE_CHARS));
-    return this.shape(kind, name, answer.message.value);
+    return answer.message.value;
   }
 
   private shape(kind: PluginInvokeKind, name: string, value: unknown): PluginResult {

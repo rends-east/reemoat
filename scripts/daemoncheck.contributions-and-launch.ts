@@ -255,6 +255,34 @@ process.stdout.write("\nwhat a plugin may add to a machine\n");
   };
   check("declared below the rung it needs", atApi(4).includes("need plugin API 5"), true);
   check("and at it", atApi(5), "ok");
+  // A classifier is a board's judge and nothing else (Q2.267): api 6, ids like an exit's, at most eight.
+  const classifiers = (api: number, list: unknown): string => {
+    const answer = parseManifest(JSON.stringify({ id: "jev", name: "Jev", version: "1.0.0", api, scopes: [], contributes: { classifiers: list } }));
+    return answer.ok ? JSON.stringify(answer.manifest.contributes.classifiers) : answer.message;
+  };
+  check(
+    "a classifier is declared at api 6 by id and name, and refused below it or misshapen",
+    [
+      classifiers(6, [{ id: "jev", name: " Jev " }]),
+      classifiers(5, [{ id: "jev", name: "Jev" }]),
+      classifiers(6, [{ id: "Jev", name: "Jev" }]),
+      classifiers(6, [{ id: "jev", name: "" }]),
+      classifiers(6, [{ id: "jev", name: "a" }, { id: "jev", name: "b" }]),
+      classifiers(6, Array.from({ length: 9 }, (_, i) => ({ id: `c${i}`, name: "c" }))),
+      classifiers(6, "jev"),
+      classifiers(5, []),
+    ],
+    [
+      '[{"id":"jev","name":"Jev"}]',
+      "contributes.classifiers needs plugin API 6; this manifest declares 5",
+      "contributes.classifiers[0].id must be 1–32 of a-z, 0-9 and -",
+      "contributes.classifiers[0].name must be 1–40 characters",
+      "contributes.classifiers names jev twice",
+      "contributes.classifiers may name at most 8",
+      "contributes.classifiers must be an array",
+      "[]",
+    ],
+  );
   // The gate fires on a non-empty block only, keeping parseManifest idempotent: the record store re-validates on every read.
   check(
     "an empty block at an older rung is not a contribution",

@@ -36,7 +36,7 @@ export type ChildMessage =
   | { t: "done"; id: number; ok: false; error: string }
   | { t: "call"; id: number; method: string; args: unknown };
 
-export type PluginInvokeKind = "view" | "action" | "hook";
+export type PluginInvokeKind = "view" | "action" | "hook" | "classify";
 
 export interface PluginProcess {
   send(message: HostMessage): boolean;

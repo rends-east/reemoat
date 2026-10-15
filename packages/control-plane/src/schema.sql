@@ -324,7 +324,9 @@ CREATE TABLE IF NOT EXISTS account_permissions (
   user_id             TEXT PRIMARY KEY,
   agent_messaging_off INTEGER NOT NULL,
   -- A stamp above every earlier one in either permissions table, so a daemon can refuse a stale copy (Q1.654).
-  updated_at          INTEGER NOT NULL
+  updated_at          INTEGER NOT NULL,
+  -- Whether a task's run may move between its machines (Q2.269). Also added by migrate().
+  tasks_move_off      INTEGER NOT NULL DEFAULT 0
 );
 
 -- The same for one machine, beneath its owner's account row. No row means on.
@@ -333,7 +335,9 @@ CREATE TABLE IF NOT EXISTS machine_permissions (
   agent_messaging_off INTEGER NOT NULL,
   updated_at          INTEGER NOT NULL,
   -- Its sessions message only each other; kept while it is off. Also added by migrate() (Q2.244).
-  isolated            INTEGER NOT NULL DEFAULT 0
+  isolated            INTEGER NOT NULL DEFAULT 0,
+  -- Whether a task's run may move to or from it (Q2.269). Also added by migrate().
+  tasks_move_off      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS machine_last_seen (

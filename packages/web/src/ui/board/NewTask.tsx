@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import type { BoardColumn } from "../../board";
+import { columnById } from "@reemoat/board";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { navigate, sessionPath, taskPath, useUnder } from "../../router";
@@ -8,7 +8,7 @@ import { Button, FIELD, SHEET_FOOT, SHEET_SCREEN } from "../bits";
 import { VERBATIM_FIELD } from "../composing";
 import { BOARD, selectMachine } from "../groups";
 import { Field } from "../kit/Field";
-import { createTask } from "./actions";
+import { createTask, legacyTarget } from "./actions";
 import { takingMachines, useRosters, type Assignee } from "./assignees";
 import { ANOTHER_FOLDER, AssigneeDropdown, folderOn, ProjectDropdown } from "./Pickers";
 import { useBoard } from "./useBoard";
@@ -20,10 +20,16 @@ let briefDraft = "";
 /**
  * The form behind New task, in a tracker's order: what it is, who does it and where, then what to tell them. Nobody does it
  * until somebody is picked, and an agent picked here starts on it at once (Q3.722, Q3.725, Q3.727). Opened by a column's +, it
- * makes the task in that column: Running's starts an agent, every other adds it there whoever is picked (Q3.737).
+ * makes the task in that column: a column that works starts its run, every other adds it there whoever is picked (Q3.737).
  */
-export function NewTask({ state, machineId: fromRoute, column }: { state: AppState; machineId: MachineId | null; column: BoardColumn | null }): ReactNode {
-  const { tasks, supported, read } = useBoard();
+export function NewTask({ state, machineId: fromRoute, column: asked }: { state: AppState; machineId: MachineId | null; column: string | null }): ReactNode {
+  const { tasks, supported, read, configured, board: account } = useBoard();
+  const drawn = account.board;
+  const at = asked === null ? null : columnById(drawn, asked);
+  // A column the board no longer has, or a view of conversations, is New task's own.
+  const column = at === null || at.kind === "view" ? null : at;
+  const works = column?.kind === "work";
+  const theirs = column !== null && column.kind === "wait" && (column.holder === "you" || column.final);
   const machines = takingMachines(state, supported, read).filter((machine) => machine.refused === null);
   // The machine the sheet was opened for, else this computer, else the first that can take a task.
   const preferred =
@@ -32,8 +38,8 @@ export function NewTask({ state, machineId: fromRoute, column }: { state: AppSta
     machines[0]?.id ??
     null;
   const under = useUnder();
-  // Review and done are their person's, so their + starts as You.
-  const [picked, setPicked] = useState<Assignee | "nobody" | "you">(column === "review" || column === "done" ? "you" : "nobody");
+  // A column its person holds, or one that closes the task, starts as You.
+  const [picked, setPicked] = useState<Assignee | "nobody" | "you">(theirs ? "you" : "nobody");
   const assignee = typeof picked === "string" ? null : picked;
   // A task no agent holds still lives on a machine: the one the sheet was opened for, else this computer, else the first that can take it.
   const machineId = assignee?.machineId ?? preferred;
@@ -52,12 +58,15 @@ export function NewTask({ state, machineId: fromRoute, column }: { state: AppSta
   // first agent, as New session would open on it.
   const fallback = machineId === null ? null : (offers.get(machineId)?.agents[0] ?? null);
   const runs = assignee ?? fallback;
-  const start = column === "running" || (column === null && assignee !== null);
-  const ready = machineId !== null && cwd.length > 0 && brief.trim().length > 0 && (!start || runs !== null);
+  const flows = machineId !== null && configured.has(machineId);
+  // A daemon that runs the board starts a work column's run by itself; an older one is started, as Running's + always was.
+  const legacy = column === null ? null : legacyTarget(drawn, column.id);
+  const start = flows ? column === null && assignee !== null : legacy === "running" || (column === null && assignee !== null);
+  const ready = machineId !== null && cwd.length > 0 && brief.trim().length > 0 && (!(start || works) || runs !== null);
 
   const create = (): void => {
     if (busy !== null || machineId === null) return;
-    setBusy(start ? "start" : "add");
+    setBusy(start || works ? "start" : "add");
     setError(null);
     void createTask({
       machineId,
@@ -65,8 +74,8 @@ export function NewTask({ state, machineId: fromRoute, column }: { state: AppSta
       brief,
       agent: runs === null ? "claude" : runs.kind === "custom" ? "" : runs.id,
       customAgent: runs?.kind === "custom" ? runs.id : null,
-      assignee: start || assignee !== null ? "agent" : (picked as "nobody" | "you"),
-      ...(column === "review" || column === "done" ? { status: column } : {}),
+      assignee: start || works || assignee !== null ? "agent" : (picked as "nobody" | "you"),
+      ...(column !== null && flows ? { column: column.id } : legacy === "review" || legacy === "done" ? { status: legacy } : {}),
       cwd,
       start,
     })
@@ -106,16 +115,16 @@ export function NewTask({ state, machineId: fromRoute, column }: { state: AppSta
           {({ id, labelledBy, describedBy }) => (
             <AssigneeDropdown
               state={state}
-              value={column === "running" ? runs : picked}
-              harness={(column === "running" ? runs : assignee)?.harness ?? null}
+              value={works ? runs : picked}
+              harness={(works ? runs : assignee)?.harness ?? null}
               onChange={(next) => {
                 setPicked(next);
                 // Another machine's folders are another list.
                 if ((typeof next === "string" ? preferred : next.machineId) !== machineId) setProject(null);
               }}
-              // Running is an agent at work, so its + names one.
-              nobody={column !== "running"}
-              you={column !== "running"}
+              // A column that works is an agent at work, so its + names one.
+              nobody={!works}
+              you={!works}
               shape={{ variant: "field", id, labelledBy, describedBy }}
             />
           )}
@@ -177,7 +186,7 @@ export function NewTask({ state, machineId: fromRoute, column }: { state: AppSta
         </span>
         {/* One press: an agent picked on New task starts, as Running's + does; anything else is added. */}
         <Button tone="primary" disabled={!ready || busy !== null} onClick={create}>
-          {busy === "start" ? "Starting the agent…" : busy === "add" ? "Adding…" : start ? "Start" : "Add"}
+          {busy === "start" ? "Starting the agent…" : busy === "add" ? "Adding…" : start || works ? "Start" : "Add"}
         </Button>
       </div>
     </div>

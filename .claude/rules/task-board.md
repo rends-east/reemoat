@@ -15,32 +15,25 @@ paths:
 # Tasks, the board, and the dispatcher
 
 A task is what somebody wants done on one machine, and the sessions doing it. Q2.258 to
-Q2.262 are the daemon's half, Q3.719 to Q3.737 the client's, Q7.162 what is not built.
+Q2.262 are the daemon's half, Q3.719 to Q3.737 the client's, Q7.162 what is not built;
+the configurable board is `board-engine.md` and Q3.739 to Q3.742.
 `web-shell.md` owns the list as a layout and `machine-gestures.md` its pager;
 `agent-messaging.md` owns the `reemoat` server these tools are served on.
 
 ## The daemon
 
-**A task is a row on its own machine, and its status is read, never written by a
-session.** `TaskStore` (`SqliteTaskStore`, `MemoryTaskStore`, driven through one sequence
-and compared) holds a status of four. `taskStatus(stored, sessions)` is what every reader
-is shown: `done` as written; else `needs_you` while a session of its is `blocked`,
-`running` while one works or starts; else `ready` as written, a task nobody holds even
-over sessions at rest, and `review` for anything else. Q2.258, Q2.260.
+**A task is a row on its owner's machine, standing in a column of the account's board**
+(`board-engine.md`). What a reader is shown is read, never written: `phase`, and the
+old `status` by the phase table for a client from before the board. Q2.258, Q2.264.
 
 - **`needs_you` is not storable**: `PATCH` answers `400 status_not_settable`, and
-  `task_update` refuses it in words. A restart drops pending approvals with no event
-  (Q2.12), so a stored one could not be taken back.
-- **A status this build has never heard of reads as `running`** on the way out of
-  SQLite, which the sessions then settle (`compatibility.md` rule 2).
-- **Starting is `POST /sessions`' own launch.** `launchSpecOf` reads the body and `launch`
-  carries every refusal; both task routes that start an agent go through them, never a
-  copy. The row is written before the launch and removed when it is refused, so the
-  same request again is the retry.
-- **`TaskDesk.begin`**: attach, name the session after the task where it has no title,
-  then `prompt(brief, [], null, note)`. The brief is the `prompt` event's `text`, a
-  person's words; `taskNote` rides as the block after it, the mention note's seam
-  (Q2.246), and its tag is in `IMITATED_TAGS`.
+  `task_update` refuses it in words. A status from an older client is a move to the
+  column it stands for (`columnForStatus`), refused `409 task_working` while the agent
+  works, except to a final column.
+- **Starting is `POST /sessions`' own launch**, made by the engine: a start is a person's
+  move into the first work column, and `TaskDesk.startNow` waits for its run.
+  `launchRefused` answers a refusal as the session route does; a refused create leaves
+  no task, so the same request again is the retry.
 - **A create carries a key** (`TASK_KEY`): a second one under a key a task holds answers
   that task with `existing: true`. A proposal's id is its key.
 - **`PATCH` takes the assignee and the folder** (`agent`, `customAgent`, `cwd`), weighed
@@ -56,9 +49,10 @@ over sessions at rest, and `review` for anything else. Q2.258, Q2.260.
   `assigned` added by `migrate()` with `DEFAULT 0`, so an older task reads as nobody's.
 - Nothing in `registry.ts` knows a task but `proposeTasks`, which appends the card.
 
-## The four tools (Q2.259)
+## The tools (Q2.259, Q2.268)
 
-`list_projects`, `list_tasks`, `propose_tasks`, `task_update`, in `src/tasks/tools.ts`
+`list_projects`, `list_tasks`, `propose_tasks`, `task_update`, and the board's own four
+(`board_get`, `board_check`, `board_simulate`, `board_propose`), in `src/tasks/tools.ts`
 (pure: definitions, parsing, wording), answered by `callTaskTool`.
 
 - **Served whatever messaging says** (`PeerHub.serveTasks`; `callTool` answers them
@@ -67,12 +61,12 @@ over sessions at rest, and `review` for anything else. Q2.258, Q2.260.
   `GET /peer/agents` does (`boardRefused`).
 - **Those two routes answer paths**, where `list_agents` shows a folder's name: a
   proposal for another machine names the `cwd` its press sends. Stated in Q2.259.
-- **No tool creates or starts anything.** `propose_tasks` appends one `tasks_proposed`;
-  the press is the client's `POST /tasks`. An agent starting agents elsewhere is what
+- **No tool creates, starts or applies anything.** `propose_tasks` appends one
+  `tasks_proposed`, `board_propose` one `board_proposed`; the press is the client's. An agent starting agents elsewhere is what
   Q7.151 leaves unbuilt.
-- **`task_update` reaches the caller's own task and no other** (`taskOf`), and says
-  `running` or `review`; `done` is its person's, refused in words with nothing written
-  (Q2.260). Its answer says the task reads running *while the agent works*: told only the
+- **`task_update` reaches the caller's own task and no other** (`taskOf`): `running` or
+  `review`, and an `outcome` checked against the column's exits; `done` is its person's,
+  refused in words with nothing written (Q2.260). Its answer says the task reads running *while the agent works*: told only the
   shown status, claude reported the write as failed.
 - **`list_tasks` prints a backlog task nobody holds as `not assigned`**, its person's as
   `your user`; another machine's row that says nothing of it reads as nobody's.
@@ -84,7 +78,7 @@ over sessions at rest, and `review` for anything else. Q2.258, Q2.260.
   `remoteProjectsOf`): a row this build cannot hold is dropped, an unknown status is
   printed as it came. A bare 404 is "too old for tasks", never an error. Cached
   `REMOTE_BOARD_TTL_MS`, as `list_agents` is.
-- **claude runs all four without a permission request** (`CLAUDE_ALLOWED_TOOLS`,
+- **claude runs all eight without a permission request** (`CLAUDE_ALLOWED_TOOLS`,
   pinned by value in `daemoncheck`). The other harnesses ask.
 - **The dispatcher is a session** nicknamed `DISPATCH_NICKNAME`; the server's
   instructions are per caller, so it alone is sent `DISPATCH_INSTRUCTIONS`. No other
@@ -94,8 +88,8 @@ over sessions at rest, and `review` for anything else. Q2.258, Q2.260.
 
 **The board is the pager's first page, where All stood** (Q3.724). `BOARD` is its tab
 (`boardTab`, a stored `all` reads as it); on it the scroller and a neighbour's page
-(`BesidePanes`) draw `TaskListBody`: every machine's tasks by status, on the session
-list's own row budget, all four groups once any task is drawn. A machine's page holds its
+(`BesidePanes`) draw `TaskListBody`: every machine's tasks by the board's columns, on the session
+list's own row budget, every group once any task is drawn. A machine's page holds its
 conversations alone. There is no mode and no switch: `ListMode` and `ModeSwitch` are gone, and so is
 All's flat list. Nothing in `machineSwipe.ts` or `tabPill.ts` may learn of the board.
 
@@ -104,8 +98,7 @@ All's flat list. Nothing in `machineSwipe.ts` or `tabPill.ts` may learn of the b
   drawn at lg too (`Header`'s `board`, `boardSelected`; Q3.734). A task's page opened from
   a conversation leads back to it (`originFor`, `Header`'s `back`; Q3.736).
 - **A line opens the conversation doing it** (`leadRef`), else the task's page. The
-  backlog and done start folded (`FOLDED_FIRST`; `openFolder` is held while one is
-  open). A working task's mark breathes here and above a conversation, never on the
+  intake and the closing columns start folded (`foldedFirst`). A working task's mark breathes here and above a conversation, never on the
   board (`still`). Q3.733.
 - **`j`/`k` walk nothing on the board's page** (`visibleRows` answers `[]`). One search
   field, which names what it searches.
@@ -139,23 +132,32 @@ All's flat list. Nothing in `machineSwipe.ts` or `tabPill.ts` may learn of the b
 - **A proposal's row is settled by the board** (`taskOfProposal`), never by component
   state, so another device agrees.
 
-**Columns** (Q3.727, Q3.732): `BOARD_COLUMNS`, Backlog (`ready`), Running, Review, Done;
-`columnOf` keeps `needs_you` in Running. `taskHolder` is read off the task: in the backlog
-the agent named, You or nobody (`assignee`), the agent on it, else You.
+**Columns are the account's board** (Q3.740): the newest any `board: 1` daemon holds
+(`accountBoard`, by `newerBoard`), read with this build's own `parseBoard`; before any is
+read, the one this device last drew. A task stands in `columnOn`: its daemon's column,
+the intake for a column the board lacks, and for a daemon without `board: 1` the column
+its status stands for (`columnForStatus`). Copies merge by `(id, epoch)` and a tombstone
+hides its machine's copy (`boardTasks`, `followTombstone`). Conversations stay in the
+list: the board draws no view column (`flowColumns`). The pane switches between the board
+and *For you* (`MeBody`): one list of the tasks its person has a part in (Q3.739). A
+drop is a move with `from`; `409 task_working` offers *Stop and move*.
 
-- **In the backlog picking an agent or You names it and moves nothing** (`assignTask`);
-  anywhere else an agent starts, nobody puts the task back in the backlog, You takes it for
-  review. Not assigned and You are in every assignee control; Not assigned is the default
-  of New task and a proposal row, one press each, Add or Start. **A start opens the
-  conversation it made** (`openStarted`, Q3.737) unless its person went elsewhere. While
-  an agent works the assignee is locked and Status offers Done alone.
+- **Picking an agent or You names it and moves nothing** (`assignTask`); on an older
+  daemon outside the backlog an agent starts, nobody puts it back, You takes it for review.
+  Not assigned and You are in every assignee control, Not assigned the default of New task
+  and a proposal row. **A start opens the conversation it made** (`openStarted`, Q3.737).
+  While an agent works the assignee is locked and Status offers Done alone.
 - **A press is drawn at once** (`board.hold`, `liveBoard`'s `asked`: a status, an assignee,
   the machine it moves to) and held until its answer, as new as the press; a refusal
-  releases it.
+  releases it. A card let go in a working column is queued for its run's agent
+  (`pressedInto`).
+- **A card names the task's assignee in every column** (`cardHolder`; the run's agent where
+  one works or is queued), pressed anywhere but while it works. `taskHolder` is who it
+  waits on, For you's and the Holder row's.
 
 **A task opens as its own page** (Q3.725), `TaskScreen` at `/m/:machine/t/:task`, a
-tracker's ticket: title and description edited in place, actions above them, the latest
-report, the activity (each conversation one press away), and one `Group` of properties:
+tracker's ticket: title and description edited in place, actions above them, history and
+activity folded, every comment last (Q3.741), and one `Group` of properties:
 Status, Assignee, Project, created, updated; Start once an agent is assigned. No crumb.
 `TaskBand` sits above a task's conversation and outside its scroller, and leads to the
 page. `/task/new` is a sheet, `/task/new/in/:column` a column's + (`newTaskInPath`), so

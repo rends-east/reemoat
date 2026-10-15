@@ -29,7 +29,11 @@ import type {
   RootListing,
   SessionList,
   SessionSnapshot,
+  BoardDocument,
+  BoardWritten,
   TaskAssignee,
+  TaskCommentView,
+  TaskFeed,
   TaskList,
   TaskSnapshot,
   TaskStatus,
@@ -341,11 +345,52 @@ export class DaemonClient {
     assignee?: TaskAssignee;
     /** The column a person made it in; never beside `start`. */
     status?: "ready" | "review" | "done";
+    /** A column of the board, on a daemon that runs one; never beside `start` or `status`. Into a work column its run starts. */
+    column?: string;
+    labels?: string[];
     cwd: string;
     key: string;
     start: boolean;
   }): Promise<{ task: TaskSnapshot; session?: SessionSnapshot; sent?: boolean; existing?: boolean }> {
     return this.machine.request("/tasks", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /**
+   * A person's move, by column or by exit, from the column they saw it in: `409 task_moved` when it is no longer there,
+   * `409 task_working` while its agent works and the column is not final, which `stop` answers by stopping the turn first.
+   */
+  moveTask(
+    id: string,
+    body: ({ to: string } | { exit: string }) & { from?: string | null; stop?: boolean },
+  ): Promise<{ task: TaskSnapshot }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}/move`, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /** The feed and the history; an older daemon answers the bare 404 `meansRouteAbsent` reads. */
+  taskFeed(id: string): Promise<TaskFeed> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}/comments`);
+  }
+
+  /** Into the run's conversation while one works, else into the next run's note. */
+  addTaskComment(id: string, text: string): Promise<{ comment: TaskCommentView }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}/comments`, { method: "POST", body: JSON.stringify({ text }) });
+  }
+
+  /** The account's board as this daemon holds it; an older daemon answers the bare 404 `meansRouteAbsent` reads. */
+  board(): Promise<BoardDocument> {
+    return this.machine.request("/board");
+  }
+
+  /**
+   * The YAML whole, written against the revision this daemon was read at: `409 board_revision` carries the one it holds now,
+   * `400 board_invalid` every refusal.
+   */
+  putBoard(text: string, revision: number): Promise<BoardWritten> {
+    return this.machine.request("/board", {
+      method: "PUT",
+      headers: { "if-match": String(revision) },
+      body: new Blob([text], { type: "text/yaml" }),
+    });
   }
 
   /** A first start or another attempt; an empty body launches what the task was created with. */

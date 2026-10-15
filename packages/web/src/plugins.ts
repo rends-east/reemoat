@@ -1,4 +1,5 @@
 import { ApiError } from "./http";
+import { classifierLine } from "./pluginArchive";
 import type { MachineId } from "./ids";
 import { PLUGIN_SETTINGS_BLOCK_TYPES, PLUGIN_SETTINGS_FIELD_KINDS } from "./wire";
 import type {
@@ -160,6 +161,7 @@ export function consentBroken(
       hooks: readonly string[];
       harnesses?: readonly { id: string; command: string; args: readonly string[] }[];
       systems?: readonly { id: string; baseUrl: string | null }[];
+      classifiers?: readonly { id: string; name: string }[];
     };
   },
 ): string | null {
@@ -177,6 +179,7 @@ export function consentBroken(
       ...(installed.contributes.systems ?? []).map(
         (one) => `system ${one.id} sends keys to ${one.baseUrl ?? "nowhere"}`,
       ),
+      ...(installed.contributes.classifiers ?? []).map((one) => classifierLine(one.name.length > 0 ? one.name : one.id)),
     ],
     shown.adds,
   );

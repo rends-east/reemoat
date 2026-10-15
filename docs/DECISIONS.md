@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 121 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 485 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 127 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 489 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 89 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 162 | `###` |
-| | | **1195** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 164 | `###` |
+| | | **1207** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1195 rather than the 594
+dividers. So the count is over **both** depths, and it says 1207 rather than the 602
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -10106,7 +10106,7 @@ into for this, so a task starts with every refusal a session create has and no s
 copy of them. The row is written before the launch and removed when the launch is
 refused: the same request sent again is the retry. `TaskDesk.begin` then attaches the
 session, names it after the task where it has no title, and sends the brief as its first
-message with `taskNote` as the block after it (the mention note's seam, Q2.246), so the
+message with taskNote's block after it (`runNote` since Q2.264; the mention note's seam, Q2.246), so the
 transcript holds the brief as its person's own words and the agent is still told whose
 conversation this is. `POST /tasks/:id/start` is the same launch for a task that was
 ready, and for another attempt.
@@ -10255,7 +10255,7 @@ after running"; done.
   are gone (`taskStatus`).
 - **An agent says `running` or `review`, never `done`** (`AGENT_TASK_STATUSES`): after its
   turn a task is its person's to look at, and `task_update` refuses `done` in words that
-  say so and writes nothing. The tool's description and `taskNote` say the same.
+  say so and writes nothing. The tool's description and the note (`runNote` since Q2.264) say the same.
 - **A start that names an agent or a folder is an assignment**: `POST /tasks/:id/start`
   writes them to the task, so the next Start and every reader take that agent.
 
@@ -10391,6 +10391,171 @@ built.
 codex alone; the note's reach and its absences (claude, cursor, questions off, a peer, a
 launch without the server); a peer cannot forge its tag. `webcheck`: codex's wrapper, and
 a call announced after its card or after its answer.
+
+**Status.** Current.
+
+### Q2.264 — Why does a board written in YAML replace the four columns, and where does it run?
+
+**Question.** The board of Q2.258 had four columns and moved nothing by itself: a task read
+running while an agent worked and review after. The owner's spec (2026-10-15) asks for a
+board somebody writes: which columns there are, what runs in each, where a task goes next,
+moved while no app is open.
+
+**Decision.**
+
+- **The engine runs in the daemons.** Every transition is one pure function,
+  `step(task, board, world)`, in `@reemoat/board`; `BoardEngine` asks it on every event of a
+  task's sessions, on every write to the task and on a 30 s tick for what waits, and applies
+  what it answers (`applyStep`), at most `MAX_STEPS_PER_EVENT` in a row, one pass at a time
+  per task. The control plane holds no task and no board.
+- **A task's place is a `TaskFlow`** in one `flow_json` column beside `board_column` and
+  `epoch`: the column, the entry number, the run, the verdicts, a question for its person,
+  what it waits for, the budget left. `migrate()` adds them; no `SCHEMA_VERSION`.
+- **A row from before stands where its status said, with no run** (`flowOf`,
+  `LEGACY_COLUMNS`), and `status` is still written as the default board's nearest
+  (`storedStatusOf`), so a rolled-back daemon reads something true.
+- **What a reader is shown is read**: `phase` from the sessions, then the run, then the
+  column, and the old `status` from it by the spec's table (`legacyStatus`), except that a
+  final column is done whatever its sessions do, which kept Q2.258's "done is its person's
+  word" true for older clients. The holder in a working column is the run's executor, and
+  before the run is placed the agent it is for (`runRole`), with no machine: it read
+  *nobody* there, and the owner saw an assigned task drawn as Not assigned (2026-10-15).
+  A daemon with no name of its own calls itself `local` there (`claude@local`).
+- **A run started on a task nobody was named on makes its agent the assignee**, so the task
+  put back in the intake still names who worked it: an assignee is there or not, and a move
+  does not take one away. Naming an agent on a task a working column stopped for want of
+  one starts its run where it stands, and a run that then waits clears that ask.
+- **The default board is today's**, written out (`DEFAULT_BOARD_TEXT`), at revision 0.
+- **A run ends on its report over a settled session.** `turnsEnded` past the turns the run
+  began after, the session idle and `parkable` but for its age, or parked: with a report it
+  ends, without one it stops, once per turn, and the agent's last message goes to the task's
+  feed. A turn a restart cut is ended too, so a run that had reported reaches its exit when
+  the daemon is back; one that had not stops.
+- **A run opens a conversation with the brief and continues one with the return hint.** The
+  spec says the brief on a task's first run; a new conversation on a later run knows nothing
+  of the task, and Q2.258's driver held that a second start is handed the brief. The hint
+  rides in the note then (`runMessage`, `runNote`).
+- **One worktree per task per machine**, on `reemoat/t-<id>`, made by the first run; every
+  later run works in it. A run's end commits what it left as
+  `board: <column> #<n> <executor>` and counts the diff for the rules.
+- **The old requests are moves.** A start is a person's move into the first work column and
+  waits for its run (`startNow`); a status is a move to its column (`columnForStatus`),
+  refused `409 task_working` while the agent works unless to a final column; an attach moves
+  a backlog task on with no run, so its conversation is sent nothing.
+
+**What changed for the default board, as the spec allowed.** A task in Review whose
+conversation comes alive stays in Review, working. A turn that ends with no report leaves
+the task in Running, needing its person, where it went to Review. `daemoncheck.tasks` says
+both, and reads the stored column where it read the stored status.
+
+**Driver.** `boardcheck`: `step`, `place`, `phase` and the old status by table, the reference
+loop walked by hand. `daemoncheck`: the loop on stub agents with fix and ship, a question
+that holds the run, a stop answered from the feed, the budget, the limit, a dropped column,
+and a restart mid-run that still reaches its exit with its commit.
+
+**Status.** Current.
+
+### Q2.265 — Where does a task's agent ask, and where does its person answer?
+
+**Decision.** A task has a feed: questions, stops, reports and its person's comments.
+
+- **A question is a window, never a copy.** A request appearing in one of the task's
+  sessions adds an entry naming the session and the request; its state is read off the
+  session each time (`TaskDesk.feed`), so the feed and the chat answer one request through
+  one route, and an answer, a withdrawal or the agent going closes the entry by itself.
+- **A stop holds the agent's last message** (`lastAgentMessage`); replying is commenting.
+- **A comment goes into a working run's conversation** as its person's message, mid-turn
+  too, and otherwise waits in the next run's note. Any of it gives the budget back.
+- **A comment on a task that waits on its person sends it back to work** (`sentBackTo`):
+  from a column held by you that is neither the intake nor a closing one, to the column its
+  last run was in, by you, the comment in the new run's note and the hint with no exit's
+  parentheses. The owner wrote "Сделай заново" on a task in Review, saw *for the next run*
+  and nothing happen: a comment on a task an agent worked is that agent's to act on
+  (2026-10-15). The intake, a closing column and a parked one keep it as a note.
+- `GET` and `POST /tasks/:id/comments`; the history rides the same `GET`. 200 kept of each.
+
+**Status.** Current.
+
+### Q2.266 — How strict is the board's YAML, and how do the daemons agree on one?
+
+**Decision.**
+
+- **`yaml` 2.9.1, YAML 1.2 core**: `yes` is a word. A repeated key, any anchor or alias and
+  any tag are refused; the tag separately, because the core schema turns `!!binary` into
+  bytes by itself (measured on 2.9.1, and `boardcheck` holds it). `parseBoard` answers every
+  refusal at once with its line, column and path; an unknown field anywhere is one.
+- **A revision and a hash over the text, byte for byte.** `PUT /board` takes the YAML with
+  the revision it was read at in `If-Match` (`409 board_revision`, `400 board_invalid` with
+  every line); the same text again is no revision. 20 kept.
+- **Of two copies the higher revision wins, then the smaller hash** (`newerBoard`). Every
+  board answer between daemons carries `boardRevision` and `boardHash`, and one behind
+  reads `GET /peer/board` (`pullBoard`, `adopt`).
+- **A board this build cannot parse leaves it on the default**, never stopped.
+
+**Status.** Current. The spec's 16 columns were raised to 32 on the owner's word, 2026-10-15
+(`MAX_COLUMNS`).
+
+### Q2.267 — Who picks the exit, and what does a role that is asked see?
+
+**Decision.** There is no judge as a thing: `decide` is a ladder of `self` (the run's own
+`task_update` outcome), `{rules}`, roles and `human`, asked in order until one names an exit
+or `stay`. One exit after a run is taken with no ladder.
+
+- **A role is asked once, with one contract**: the exits and what each means, and the
+  answer as one JSON object (`judgePrompt`), read strictly (`parseVerdict`). An answer in
+  prose, an exit the column lacks, 120 s without one, or a confidence under the role's floor
+  is an abstention (`judged`); a confidence never given is not weighed. The context is the
+  column's `sees`, within the 8 KiB an ask carries, cut from the end of the list.
+- **A harness role is one `AgentAskRuns` ask**; a classifier is a plugin's new contribution
+  (`ClassifierContribution`, api 6) answering through its `ask` export in 10 s. A role whose
+  agent runs elsewhere is asked there (`POST /peer/judge`), with the context gathered here.
+- **A classifier only decides**: named to run a column it is `judge_only`.
+- **The budget**: every automatic move spends one; anything its person does gives all back.
+
+**Rejected.** A judge entity of its own, configured apart from roles: the spec's own word,
+and a role already says who, with which model and where.
+
+**Not built.** The reference classifier `plugins/jev` (TypeSafe's System One API, a
+`choice` question whose criteria are the exits): writing it was refused by this session's
+permission check, as a plugin that sends a task's brief and diff off the machine. Q7.163.
+
+**Status.** Current.
+
+### Q2.268 — How does an agent help write the board?
+
+**Decision.** Four tools beside the task tools: `board_get`, `board_check`,
+`board_simulate`, `board_propose`. The walk on paper is `simulate`, which applies `step`
+itself, so it cannot disagree with a daemon; the proposal is one `board_proposed` card
+against the revision it was written on, applied only by its person's press.
+`propose_tasks` takes a column and a role, and an agent and a machine are optional.
+
+**Status.** Current.
+
+### Q2.269 — How does a task's run move to another machine, and its code with it?
+
+**Decision.** A task lives where its run is.
+
+- **A run goes where `place` puts it**: the conversation it continues, the first machine
+  a pinned role names, the machine holding the code, this one. The fleet is what each
+  machine's `/peer/projects` answers: what it runs, and its projects by identity (the
+  origin's name, `projectIdentity`), found among the folders its sessions and tasks used.
+- **The task goes as a handoff** at the next epoch, retried 30 s to 10 min apart for a day,
+  then its person's (`handoff_failed`); edits wait (`409 task_moving`). The receiver takes it
+  where nothing it holds is newer, after reading a newer board, and only where that board's
+  role allows it. The sender keeps a tombstone (`retire` leaves the sessions attached, so
+  a run can come back to its conversation), and `GET /tasks` lists the tombstones.
+- **The code is a branch and moves as commits**: `git bundle` since what the receiver has,
+  in 512 KiB pieces under one answer's 1 MiB, 64 MiB at most; a worktree moves forward only,
+  over a clean tree. A folder that is no repository does not move.
+- **Gates**: a link minted with `task:handoff`, only where both ends' `tasksMove` switch is
+  on, and the receiving machine's own policy (`movesTasks`). Links are still minted only
+  where messaging is on.
+
+**Measured.** Two daemons in one process, two clones of one origin (`daemoncheck`): the
+reviewer pinned to the server sees the coder's commit; its own commit comes back; the coder
+continues its own conversation on its worktree moved forward; a stale epoch and a link
+without the scope are refused; a move to a machine that is away waits, and goes once it is
+back. Not through a relay: the bundle's weight and time there are Q7.163's.
 
 **Status.** Current.
 
@@ -30870,7 +31035,7 @@ everywhere".
 
 **Decision. Four columns, each who holds a task, and an assignee read off the task.**
 
-- **`BOARD_COLUMNS`**: Not assigned, Running, Review, Done. `columnOf` keeps a task that
+- **`BOARD_COLUMNS`**: Not assigned, Running, Review, Done. columnOf (gone since Q3.740) keeps a task that
   waits on its person in Running, where its agent still is, marked Needs you on its card
   and in bold in the list. The list's groups are the same four.
 - **`taskHolder`**: nobody while it is ready, the agent on it while one works, its person,
@@ -30991,6 +31156,8 @@ is a still dot. `bg-chip` stays the code chip's own.
 **Status.** Amended by Q3.732: no project line and no Needs you; the age is the task's own,
 beside the title, and the machine is a small caption under the holder's name. Amended by
 Q3.737: the title is one line, the card one line lower, and the columns keep their width.
+Amended 2026-10-15 on the owner's word: a working task's mark blinks again, as a working
+session's dot does; a column's own mark stays still.
 
 #### Q3.732 — What does the backlog hold, and what does a card's assignee do?
 
@@ -31035,7 +31202,7 @@ its conversation, with the backlog folded.
 
 - **A line opens the conversation doing it** (`leadRef`), and a task nobody started opens
   its page.
-- **The backlog starts folded**: its id is held while it is open (`openFolder`), so the
+- **The backlog starts folded**: its id is held while it is open (openFolder (gone since Q3.740)), so the
   folded-ids set needs no default.
 - **A working task's mark breathes as a session's does** (`animate-blink`), everywhere but
   the board, which passes `still`.
@@ -31117,7 +31284,7 @@ right and scrolled there.
 
 **Decision.**
 
-- **Done starts folded in the list too** (`FOLDED_FIRST`, each held by `openFolder` while
+- **Done starts folded in the list too** (FOLDED_FIRST (gone since Q3.740), each held by openFolder (gone since Q3.740) while
   open).
 - **Each column has a +** opening New task for it (`newTaskInPath`, "New task in Review").
   Running's offers agents alone, the machine's first already chosen, and starts it; every
@@ -31170,6 +31337,120 @@ takes none (its snapshot draws no scrollbar). Chromium with scrollbars drawn: th
 thumb in light and dark. The menu: open, closed, open, then over the other card. Sign out:
 the box 113 px at rest with the button 111 px in it; armed, the question begins at the
 button's left edge.
+
+**Status.** Current.
+
+#### Q3.739 — Does the list of sessions stay, and where is "For you"?
+
+**Question.** The spec (2026-10-15, stage 7) removes the left list of sessions and the
+machine pager as navigation: every chat with no task in a Chats column on the board,
+machines a filter, and a view of what waits on its person ("Me") in their place.
+
+**What happened.** It was built that way the same day: the `lg` aside held the Me view
+with *Needs you* and *Yours*, a phone paged the columns, and the board drew a Chats lane.
+**The owner reversed it on seeing it, 2026-10-15**: bring the panel with folders back, the
+board's screen keeps the list on its left as before, no Chats column on the board, no
+*Yours* for now, no bar under the columns, and the app had moved up and down.
+
+**Decision.**
+
+- **The shell is Q3.724's again**: the machine column and the list, the board as the
+  pager's first page drawing every task by the board's columns (`TaskListBody`, now on
+  `taskGroups` of the account's board), a machine's page its folders.
+- **The board draws no view of conversations** (`flowColumns`); they stay in the list.
+- **"For you" is a switch beside the board in its pane** (`MeBody`), one list of lines
+  (`meTasks`): every task that needs its person on every machine, then every open task they
+  hold (a column held by you, a backlog task assigned to you), each oldest first by
+  `waitingSince`. A line opens the task; no headings, no conversation that asks, nothing
+  answered in a row. The owner asked for the held ones the same evening (three tasks in
+  Review were theirs and For you was empty), then for the list to be just that.
+- **At `lg` the board's page folds the list away** (`boardListOpen`, closed until opened):
+  the board draws the same tasks. A narrow tab on the rail's edge (`BoardListToggle`),
+  taller than wide and barely rounded, as a sidebar's collapse handle is, slides it open
+  and shut; the machine column stays. A phone keeps the list as it is.
+- **The document under the shell never scrolls** (`data-shell`, `overflow: hidden` on
+  `html` and `body` while it is mounted) and `main` and the list end their scroll chains
+  (`overscroll-contain`). In the app the whole shell had moved up past the end of a task's
+  page, leaving the page's ground under it: a WKWebView does not hold `overscroll-behavior`
+  on the root alone. The gate's pages are documents and keep their scroll.
+- **No bar under the columns or in them** (`no-scrollbar`): the board and each column
+  scroll with none. Reverses Q3.738's always-drawn bar.
+
+**Measured.** In Chromium against a scratch control plane and daemon (the shell's Tauri
+stand-in), at 1440×900 and 390×844, on the board and on For you: the document is exactly
+the viewport's height, a wheel moves nothing, and no element outside a scroller reaches
+past the window's foot. A long task page in Playwright's WebKit as well, before and after
+the lock: the document is the window's height and does not move. In a WKWebView (a
+`swiftc` harness, a trackpad gesture sent past `main`'s end): without `overscroll-contain`
+`main` stays at its end and the gesture goes on to the root; with it `main` stretches
+itself (`scrollTop` 1960 of 1900) and nothing reaches the root. A snapshot does not hold
+the root's own stretch, so the lock on `html` is not measured there.
+
+**Status.** Current. Reverses the spec's stage 7 on the owner's word.
+
+#### Q3.740 — How does the app draw a board somebody wrote?
+
+**Decision.**
+
+- **One account board**: the newest any `board: 1` daemon holds (`accountBoard` by
+  `newerBoard`), its text read again with this build's own `parseBoard`; one this build
+  cannot read is no copy. Before any is read, the board this device last drew.
+- **A task stands where its daemon says** (`columnOn`); a column the drawn board lacks
+  sends it to the intake, and a daemon without `board: 1` is drawn by the column its old
+  status stands for (`columnForStatus`).
+- **Copies merge by `(id, epoch)`**, the higher epoch winning, and a tombstone hides its own
+  machine's copy (`boardTasks`, `followTombstone`).
+- **A card is one height**: its phase or the daemon's reason, who it names (`cardHolder`, by
+  its agent's name, never `agent@machine`, the machine drawn under it),
+  and at most two exits as buttons (`exitsOf`); the rest are on the task's page. It names
+  the task's own assignee in every column, and the run's agent (`claude@local`) only where
+  one works or is queued in a working column: an assignee is there or it is not, and a
+  move does not change it (the owner, 2026-10-15). The assignee is a control on every card
+  but one whose agent works, so a task stopped in Running for want of an agent is assigned
+  where it stands and its run starts. The card lifts on hover wherever it is, and the
+  assignee control draws no box of its own: a pointer rings its mark and underlines its
+  name.
+- **A drop is a move with `from`.** `409 task_working` opens *Stop and move* at the card,
+  `409 task_moved` reads the board again. Until it is answered the card is drawn as its
+  daemon will answer (`pressedInto`): in a working column queued for the agent its run is
+  for, in a waiting one held by that column's holder. It had read *Not assigned* there,
+  which was also the daemon's word while the run was unplaced (Q2.264).
+
+**Status.** Current. Amends Q3.727 and Q3.732: the columns are the board's.
+
+#### Q3.741 — What does a task's page add for the feed and the history?
+
+**Decision.** Under the description, the history and the activity, each a block of its own
+(`TaskBlock`): a box, its name and count on a tinted header, folded until opened. Then the
+comments, last and in no box: one reply box, which answers the newest open stop where there
+is one, and under it every comment, newest first, none hidden; a comment says whether it
+went to the agent or waits for the next run. A question is the session's own card while its
+session holds it and *Closed* after. A Holder row joins Assignee; *Reopen* goes to the
+intake; *Delete task* is the page's lone destructive row, under the properties, its box as
+wide as its button (Q3.738). Your comments carry a border, never `bg-bubble`, which is
+`Bubble.tsx`'s alone.
+
+**What changed, on the owner's word (2026-10-15).** The feed read oldest first with the box
+at its foot, and history and activity were plain text below it: the agent's question was
+reached by scrolling past both. A first answer boxed the comments too, showed three and
+folded the rest; the owner wanted them out of the box, at the foot, all of them. *Latest
+report* went (every report is in the feed), and so did *Mark done*: a column is the way to
+close a task.
+
+**Status.** Current.
+
+#### Q3.742 — How is the board edited?
+
+**Decision.** On its own screen (`/board`), never in place, **as its YAML and nothing
+else**: pasted or typed, every `parseBoard` refusal listed on its line with the caret put
+there. A save writes `PUT /board` to every reachable `board: 1` machine, each with its own
+revision in `If-Match` (`savePlan`), and a conflict offers its board or saving over it.
+With no `board: 1` machine the screen says so in one line and edits nothing.
+
+**What was taken out.** A form beside the text, each control an edit of the YAML through
+the `yaml` package's Document API so comments survived, and two presets to start from.
+The owner removed it on seeing it, 2026-10-15: the YAML alone, and a skill that writes and
+changes a board comes later.
 
 **Status.** Current.
 
@@ -46030,5 +46311,42 @@ are its edges, each left on purpose or on the owner's word.
 - **`pnpm client` verbs** for tasks.
 - **WKWebView's animations.** The board, its drag and its timings were driven there; its
   animations were not seen, the stand's screen being locked (Q3.728, Q3.729).
+
+**Status.** Not built. Amended by Q2.264 to Q2.269: the columns are the board's own, and a
+task's run moves between machines with its conversations' code (Q7.163 is that work's edges).
+
+### Q7.163 — What about the configurable board is knowingly not built or not measured?
+
+**Position.** The board of Q2.264 to Q2.269 is built and driven on stub agents; these are
+its edges.
+
+- **The reference classifier `plugins/jev`.** The contribution, the host's `classify` and
+  the engine's use of it are built and driven with an in-process stand-in; the plugin that
+  calls TypeSafe was refused by this session's permission check, as code that sends a
+  task's context off the machine, and is the owner's to approve (Q2.267).
+- **Whether a note after a slash command reaches claude** (`/review` and the block after
+  it). Read, not run: claude-agent-acp 0.73.0 hands both blocks to the CLI as one message;
+  whether the CLI then runs the command and keeps the block is not measured: without it, `self` abstains on a skill's run and the next judge
+  decides, which is the ladder working rather than failing.
+- **A bundle's weight and time through a relay.** The 64 MiB bound and the 512 KiB pieces
+  are measured only in one process (Q2.269).
+- **Two copies settling by listings.** A higher epoch wins on a handoff; a copy read off
+  another machine's `/peer/tasks` does not yet retire an older one here.
+- **The switch to move tasks in the app's settings.** The control plane and the daemon
+  carry `tasksMove`; nothing in the app sets it yet, and its default is on, as messaging's is.
+- **Out of the spec's scope**: a limit across the fleet, copies of tasks in waiting
+  columns, machine tags, several boards, an order inside a column, a finger dragging a
+  card, timers in columns.
+
+**Status.** Not built.
+
+### Q7.164 — What of the spec's stage 7 is not built?
+
+**Position.** Reversed on the owner's word (Q3.739), so these are not built: a Chats
+column, a chat dragged into a column becoming a task (*Attach to task* in a conversation's
+menu stays the way), machines as a filter in place of pages, and For you as a phone's
+first screen. **Yours**, cards a column holds for its person, is computed and not drawn.
+Nothing of Q3.740 to Q3.742 was seen in WKWebView; Chromium and `webcheck` are the
+evidence. `@reemoat/board`, and with it `yaml`, is in the app's main bundle.
 
 **Status.** Not built.

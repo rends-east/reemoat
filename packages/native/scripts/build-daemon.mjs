@@ -240,6 +240,15 @@ function copySource(runtime) {
     recursive: true,
     dereference: true,
   });
+
+  // The board the same way; its `yaml` and `@noble/hashes` come from the root manifest, which `pincheck` holds to its own.
+  const board = join(stageDir, "node_modules", "@reemoat", "board");
+  mkdirSync(board, { recursive: true });
+  cpSync(join(repoRoot, "packages", "board", "package.json"), join(board, "package.json"));
+  cpSync(join(repoRoot, "packages", "board", "src"), join(board, "src"), {
+    recursive: true,
+    dereference: true,
+  });
 }
 
 /** A shim, not a link (the bundler copies no symlink) or a second 122 MB copy of the runtime. */

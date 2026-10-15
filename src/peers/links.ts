@@ -80,9 +80,11 @@ export function policyFromBody(body: unknown): PeerPolicyDelivery | null | strin
   const record = body as Record<string, unknown>;
   const messaging = record["messaging"];
   const isolated = record["isolated"];
-  if (messaging === undefined && isolated === undefined) return null;
+  const tasks = record["tasksMove"];
+  if (messaging === undefined && isolated === undefined && tasks === undefined) return null;
   if (messaging !== undefined && typeof messaging !== "boolean") return "messaging must be true or false";
   if (isolated !== undefined && typeof isolated !== "boolean") return "isolated must be true or false";
+  if (tasks !== undefined && typeof tasks !== "boolean") return "tasksMove must be true or false";
   const at = record["policyAt"];
   if (at !== undefined && (typeof at !== "number" || !Number.isFinite(at) || at < 0)) {
     return "policyAt must be a non-negative number";
@@ -90,6 +92,7 @@ export function policyFromBody(body: unknown): PeerPolicyDelivery | null | strin
   return {
     ...(messaging === undefined ? {} : { on: messaging }),
     ...(isolated === undefined ? {} : { isolated }),
+    ...(tasks === undefined ? {} : { tasks }),
     at: at ?? 0,
   };
 }

@@ -1,16 +1,24 @@
 import { randomBytes } from "node:crypto";
+import { boardHash, columnById, formatBoardError, isFlow, parseBoard, type Phase } from "@reemoat/board";
+import { BoardEngine, type Advanced, type BoardJudges, type FleetMachine, type TaskView } from "../board/engine.js";
 import type { SessionStatus, TaskProposal } from "../events.js";
 import type { PeerAnswer } from "../peers/channel.js";
 import { address, parseAddress } from "../peers/envelope.js";
-import type { ManagedSession, PromptResult, SessionRegistry } from "../registry.js";
+import { AgentUnavailableError } from "../acp/agents.js";
+import type { ManagedSession, SessionRegistry, WorktreePolicy } from "../registry.js";
 import type { PeerLink } from "../store/sqlite.js";
 import {
   isTaskAssignee,
   MAX_TASKS,
   MAX_TASK_SUMMARY_CHARS,
   MAX_TASK_TITLE_CHARS,
+  MemoryBoardConfigStore,
+  TOMBSTONE_KEEP_MS,
+  type BoardConfigStore,
   type StoredTaskStatus,
   type TaskAssignee,
+  type TaskComment,
+  type TaskEvent,
   type TaskRecord,
   type TaskStatus,
   type TaskStore,
@@ -20,8 +28,8 @@ import {
   isAgentRef,
   isProjectPath,
   parseProposals,
+  MAX_BOARD_WHY_CHARS,
   parseTaskUpdate,
-  taskNote,
   type ProposedTask,
 } from "./tools.js";
 
@@ -44,12 +52,24 @@ export interface TaskSessionRef {
   attachedAt: number;
 }
 
-/** A task as every reader is shown it: the record, the status its sessions settle, and the sessions themselves. Flat, for the hand mirror in wire.ts. */
+/** A task as every reader is shown it: the record, where it stands on the board, and its sessions. Flat, for the hand mirror in wire.ts. */
 export interface TaskSnapshot {
   id: string;
   title: string;
   brief: string;
+  /** What a client from before the board reads, by the phase table (Q2.264). */
   status: TaskStatus;
+  column: string;
+  phase: Phase;
+  epoch: number;
+  run: TaskView["run"];
+  code: TaskView["code"];
+  waitingSince: number | null;
+  holder: string;
+  exits: TaskView["exits"];
+  reason: string | null;
+  budget: number;
+  labels: string[];
   summary: string | null;
   summaryAt: number | null;
   summaryBy: string | null;
@@ -69,10 +89,13 @@ export interface NewTask {
   agent: string;
   customAgent: string | null;
   assignee: TaskAssignee;
-  /** Where it is put: the backlog, or a column a person dropped it into (Q2.262). */
+  /** Where an older client puts it: the backlog, or a column a person dropped it into (Q2.262). */
   status: StoredTaskStatus;
+  /** Where this one puts it, which wins over the status. */
+  column?: string | null;
   cwd: string;
   key: string | null;
+  labels?: string[];
 }
 
 export interface TaskChange {
@@ -87,6 +110,7 @@ export interface TaskChange {
   /** Nobody or its person; the agent it names stays what a start would launch. */
   assignee?: TaskAssignee;
   cwd?: string;
+  labels?: string[];
 }
 
 /** The other machines' half, handed in: the hub's links and its switches (Q2.244). */
@@ -95,6 +119,9 @@ export interface TaskPeers {
   /** Linked machines this caller's agent may ask now: none where messaging is off, isolated, or off for the conversation. */
   linksFor(callerId: string): PeerLink[];
   askLink(link: PeerLink, path: string, timeoutMs: number): Promise<PeerAnswer>;
+  /** Links a task's run may cross, and one request over one; absent on a desk with no network. */
+  handoffLinks?(): PeerLink[];
+  request?(link: PeerLink, request: { method: "GET" | "POST"; path: string; body?: unknown }, timeoutMs?: number): Promise<PeerAnswer>;
 }
 
 export interface BoardMachine {
@@ -108,6 +135,19 @@ export interface ProjectRows {
   machine: BoardMachine;
   agents: string[];
   projects: string[];
+}
+
+/** What a machine's /peer/projects says beyond the rows list_projects prints: what the board needs to place a run there. */
+export interface ProjectsAnswer {
+  agents: string[];
+  projects: string[];
+  classifiers: string[];
+  /** Each project's identity, its origin's name, where it has one. */
+  repos: string[];
+  /** 1 where the daemon runs the configurable board; an older one says nothing. */
+  board: number | null;
+  boardRevision: number | null;
+  boardHash: string | null;
 }
 
 export interface ProjectListing {
@@ -135,7 +175,7 @@ export interface TaskListing {
 
 export type ProposeResult = { ok: true; proposals: TaskProposal[] } | { ok: false; message: string };
 /** `recorded` is the status the agent wrote, where it wrote one: what the task reads once nothing is working on it. */
-export type TaskUpdateResult = { ok: true; task: TaskSnapshot; recorded: StoredTaskStatus | null } | { ok: false; message: string };
+export type TaskUpdateResult = { ok: true; task: TaskSnapshot; recorded: StoredTaskStatus | null; working: boolean } | { ok: false; message: string };
 
 type Remote<T> = T | { reason: string };
 
@@ -144,18 +184,18 @@ export interface TaskDeskOptions {
   store: TaskStore;
   peers?: TaskPeers | null;
   now?: () => number;
+  /** The board's revisions; a desk with none runs the default board. */
+  configs?: BoardConfigStore;
+  machineName?: string;
+  customAgents?: () => readonly { id: string; name: string; harness: string }[];
+  onWarning?: (detail: string) => void;
+  /** 0 runs no timer, for the drivers. */
+  tickMs?: number;
+  /** Who a role's question goes to; absent, every role abstains. */
+  judges?: BoardJudges | null;
 }
 
-/**
- * A task's status as shown: done is its person's word, running and needs_you are what its sessions do now, and otherwise
- * where it was put: the backlog while it is ready, review once an agent has been on it (Q2.258, Q2.260).
- */
-export function taskStatus(stored: StoredTaskStatus, sessions: readonly SessionStatus[]): TaskStatus {
-  if (stored === "done") return "done";
-  if (sessions.includes("blocked")) return "needs_you";
-  if (sessions.some((status) => status === "running" || status === "starting")) return "running";
-  return stored === "ready" ? "ready" : "review";
-}
+export type MoveResult = { ok: true; task: TaskRecord } | { ok: false; code: "task_moved" | "task_working" | "no_column" | "no_exit"; message: string };
 
 /** Every task on this machine and every door to one: the routes, the four tools, and what a linked machine may read. */
 export class TaskDesk {
@@ -164,12 +204,75 @@ export class TaskDesk {
   private readonly peers: TaskPeers | null;
   private readonly now: () => number;
   private readonly remote = new Map<string, { at: number; answer: Promise<Remote<unknown>> }>();
+  readonly engine: BoardEngine;
 
   constructor(options: TaskDeskOptions) {
     this.registry = options.registry;
     this.store = options.store;
     this.peers = options.peers ?? null;
     this.now = options.now ?? Date.now;
+    this.engine = new BoardEngine({
+      registry: options.registry,
+      store: options.store,
+      configs: options.configs ?? new MemoryBoardConfigStore(),
+      machineId: options.peers?.machineId ?? null,
+      ...(options.machineName === undefined ? {} : { machineName: options.machineName }),
+      ...(options.customAgents === undefined ? {} : { customAgents: options.customAgents }),
+      ...(options.onWarning === undefined ? {} : { onWarning: options.onWarning }),
+      now: this.now,
+      ...(options.tickMs === undefined ? {} : { tickMs: options.tickMs }),
+      judges: options.judges ?? null,
+      fleet: options.peers?.handoffLinks === undefined ? null : () => this.fleet(),
+      send: options.peers?.request === undefined ? null : (machine, request, timeoutMs) => this.send(machine, request, timeoutMs),
+    });
+    this.engine.start();
+  }
+
+  /** The owner's machines a run may go to, from their own listings: what each runs and which projects it has (Q2.269). */
+  private async fleet(): Promise<FleetMachine[]> {
+    const peers = this.peers;
+    if (peers === null || peers.handoffLinks === undefined) return [];
+    const out: FleetMachine[] = [];
+    const links = peers.handoffLinks();
+    const answers = await Promise.all(links.map((link) => this.askLink(peers, link, "/peer/projects", remoteProjectsOf)));
+    links.forEach((link, index) => {
+      const answer = answers[index]!;
+      // An older daemon says nothing of the board, and is no place for a run: it would not know what to do with one.
+      if ("reason" in answer || answer.board !== 1) return;
+      out.push({
+        offer: {
+          key: link.targetMachineId,
+          name: link.targetName,
+          online: true,
+          agents: [
+            ...answer.agents.map((id) => ({ id, name: id, kind: "harness" as const, harness: null })),
+            ...answer.classifiers.map((id) => ({ id, name: id.includes(":") ? id.slice(id.indexOf(":") + 1) : id, kind: "classifier" as const, harness: null })),
+          ],
+          projects: answer.repos,
+          running: 0,
+        },
+        boardRevision: answer.boardRevision,
+        boardHash: answer.boardHash,
+      });
+    });
+    // A machine holding a newer board than this one is read from: the account has one board (Q2.266).
+    const state = this.engine.current;
+    const newer = out.find((one) => one.boardRevision !== null && one.boardHash !== null && (one.boardRevision > state.revision || (one.boardRevision === state.revision && one.boardHash < state.hash)));
+    if (newer !== undefined) await this.engine.pullBoard(newer.offer.key);
+    return out;
+  }
+
+  private async send(machine: string, request: { method: "GET" | "POST"; path: string; body?: unknown }, timeoutMs?: number) {
+    const peers = this.peers;
+    const link = peers?.handoffLinks?.().find((one) => one.targetMachineId === machine);
+    if (peers == null || link === undefined || peers.request === undefined) return { ok: false as const, status: 0, code: "no_link" };
+    const answer = await peers.request(link, request, timeoutMs);
+    return answer.ok ? { ok: true as const, status: answer.status, body: answer.body } : { ok: false as const, status: answer.status, code: answer.code };
+  }
+
+  /** Once the daemon has restored its sessions: every task is looked at again, a run cut by the restart included. */
+  resume(): void {
+    this.engine.kickAll();
   }
 
   list(): TaskSnapshot[] {
@@ -199,11 +302,12 @@ export class TaskDesk {
     }
     const all = this.store.list();
     if (all.length >= MAX_TASKS) {
-      const oldestDone = all.filter((task) => task.status === "done").sort((a, b) => a.updatedAt - b.updatedAt)[0];
+      const oldestDone = all.filter((task) => this.isClosed(task)).sort((a, b) => a.updatedAt - b.updatedAt)[0];
       if (oldestDone === undefined) return "full";
       this.store.remove(oldestDone.id);
     }
     const at = this.now();
+    const column = input.column ?? this.engine.columnForStatus(input.status);
     const task: TaskRecord = {
       id: `t_${randomBytes(9).toString("base64url")}`,
       title: input.title,
@@ -219,26 +323,101 @@ export class TaskDesk {
       key: input.key,
       createdAt: at,
       updatedAt: at,
+      flow: { ...this.engine.initialFlow(column), labels: input.labels ?? [] },
     };
     this.store.save(task);
+    this.engine.event(task, "created", `created in ${this.columnTitle(column)}`);
     return { task, existing: false };
   }
 
-  /** A session just launched for the task: attached, named after it, and handed the brief as its first message. */
-  begin(task: TaskRecord, managed: ManagedSession): PromptResult {
-    this.attach(task, managed);
-    if (managed.title === null) this.registry.setMeta(managed, { title: task.title });
-    return managed.prompt(task.brief, [], null, { text: taskNote(task.title), mentions: [] });
+  private columnTitle(id: string): string {
+    return columnById(this.engine.current.board, id)?.title ?? id;
   }
 
-  /** Attaching moves a session off whatever task held it, and a task with a session is no longer waiting to start. */
+  /** In a final column: closed, and the first to make room for a new task. */
+  isClosed(task: TaskRecord): boolean {
+    const column = columnById(this.engine.current.board, task.flow.column);
+    return column !== null && column.kind === "wait" && column.final;
+  }
+
+  /** The board's first work column, where a start puts a task. */
+  firstWorkColumn(): string | null {
+    return this.engine.current.board.columns.find((column) => column.kind === "work")?.id ?? null;
+  }
+
+  /** A start: into the first work column by its person's hand, and its run started before this answers. */
+  async startNow(task: TaskRecord, launch: { nickname: string | null; worktree: WorktreePolicy | undefined } | null = null): Promise<Advanced & { task: TaskRecord }> {
+    const to = this.firstWorkColumn();
+    if (to === null) return { task, started: null, refused: new Error("this board has no column that runs an agent") };
+    if (launch !== null) this.engine.nextLaunch(task.id, launch);
+    const moved = this.engine.move(task, to, "start");
+    const advanced = await this.engine.kick(moved.id);
+    const latest = this.store.get(task.id) ?? moved;
+    if (advanced.started !== null || advanced.refused !== null) return { ...advanced, task: latest };
+    // Nothing started and nothing refused: the board is waiting for an agent this machine cannot run, which a person's start is told.
+    let hint: string | null = null;
+    try {
+      const own = (await this.registry.sessionRuntime.availability()).find((one) => one.id === latest.agent);
+      if (own !== undefined && !own.available) hint = own.hint ?? `${latest.agent} is not available here`;
+    } catch {
+      // A probe that failed says nothing; the board's own words stand in.
+    }
+    const why = hint ?? latest.flow.wait?.detail ?? latest.flow.ask?.detail ?? "the board did not start this task";
+    return { ...advanced, refused: hint !== null ? new AgentUnavailableError(why) : new Error(why), task: latest };
+  }
+
+  /** A person's move, by column or by exit; refused when the task is no longer where they saw it, or its run is at work. */
+  move(id: string, target: { to?: string | null; exit?: string | null; from?: string | null }): MoveResult {
+    const task = this.store.get(id);
+    if (task === null) return { ok: false, code: "no_column", message: "no such task" };
+    if (target.from != null && target.from !== task.flow.column) {
+      return { ok: false, code: "task_moved", message: `the task is in ${this.columnTitle(task.flow.column)} now` };
+    }
+    const board = this.engine.current.board;
+    let to = target.to ?? null;
+    let exit = target.exit ?? null;
+    if (exit !== null) {
+      const column = columnById(board, task.flow.column);
+      const found = isFlow(column) ? column.exits.find((one) => one.name === exit) : undefined;
+      if (found === undefined) return { ok: false, code: "no_exit", message: `${this.columnTitle(task.flow.column)} has no exit ${JSON.stringify(exit)}` };
+      to = found.to;
+    }
+    const column = to === null ? null : columnById(board, to);
+    if (to === null || !isFlow(column)) return { ok: false, code: "no_column", message: "name a column that holds tasks" };
+    if (this.engine.runBusy(task) && !(column.kind === "wait" && column.final)) {
+      return { ok: false, code: "task_working", message: "its agent is at work: only a final column takes it now, or stop it first" };
+    }
+    const moved = this.engine.move(task, to, exit);
+    void this.engine.kick(moved.id);
+    return { ok: true, task: moved };
+  }
+
+  /** The session at work on the run, stopped so the task can be moved. */
+  async stopRun(id: string): Promise<void> {
+    const run = this.store.get(id)?.flow.run;
+    const managed = run?.session == null ? undefined : this.registry.get(run.session);
+    if (managed !== undefined) await managed.cancelTurn().catch(() => undefined);
+  }
+
+  /** Attaching moves a session off whatever task held it; a task in the intake moves on, and its conversation is sent nothing. */
   attach(task: TaskRecord, managed: ManagedSession): TaskRecord {
     const at = this.now();
     this.store.attach(task.id, managed.id, at);
-    if (task.status !== "ready") return task;
-    const started: TaskRecord = { ...task, status: "running", updatedAt: at };
-    this.store.save(started);
-    return started;
+    const links = { ...task.flow.links, [managed.id]: { column: null, executor: { agent: managed.agent, customAgent: managed.customAgent, machine: this.engine.machineKey } } };
+    let flow = { ...task.flow, links };
+    const to = this.firstWorkColumn();
+    if (task.flow.column === this.engine.current.board.intake && to !== null) {
+      // A conversation that already is the work: the task stands in the work column with no run, as one there before the board did.
+      flow = { ...flow, column: to, entry: flow.entry + 1, enteredAt: at, visits: { ...flow.visits, [to]: (flow.visits[to] ?? 0) + 1 }, run: null, ask: null, wait: null };
+    }
+    const git = managed.workspace.git;
+    if (flow.code === null && flow.workdir === null && git !== null && git.branch !== null) {
+      flow = { ...flow, workdir: managed.workspace.root, code: { repo: git.repoRoot, branch: git.branch, base: git.baseCommit ?? "", head: null, holder: this.engine.machineKey } };
+    }
+    const next: TaskRecord = { ...task, flow, updatedAt: at };
+    this.store.save(next);
+    if (flow.column !== task.flow.column) this.engine.event(next, "moved", `a conversation was attached, so it moved to ${this.columnTitle(flow.column)}`);
+    return this.store.get(task.id) ?? next;
   }
 
   /** False when that session is not on that task. */
@@ -249,25 +428,86 @@ export class TaskDesk {
     return true;
   }
 
+  /** A person's edit, or the summary an agent wrote; a status from an older client moves the task to the column it stands for. */
   change(id: string, change: TaskChange, by: string | null = null): TaskRecord | null {
-    const task = this.store.get(id);
+    let task = this.store.get(id);
     if (task === null) return null;
+    if (by === null) task = this.engine.touched(task);
+    if (change.status !== undefined) {
+      const to = this.engine.columnForStatus(change.status);
+      if (to !== task.flow.column) task = this.engine.move(task, to, null);
+    }
     const at = this.now();
     const next: TaskRecord = { ...task, updatedAt: at };
     if (change.title !== undefined) next.title = change.title;
     if (change.brief !== undefined) next.brief = change.brief;
-    if (change.status !== undefined) next.status = change.status;
     if (change.agent !== undefined) next.agent = change.agent;
     if (change.customAgent !== undefined) next.customAgent = change.customAgent;
     if (change.assignee !== undefined) next.assignee = change.assignee;
     if (change.cwd !== undefined) next.cwd = change.cwd;
+    if (change.labels !== undefined) next.flow = { ...next.flow, labels: change.labels };
     if (change.summary !== undefined) {
       next.summary = change.summary.length === 0 ? null : change.summary;
       next.summaryAt = next.summary === null ? null : at;
       next.summaryBy = next.summary === null ? null : by;
     }
-    this.store.save(next);
-    return next;
+    this.store.save({ ...next, status: this.store.get(id)?.status ?? next.status });
+    void this.engine.kick(id);
+    return this.store.get(id) ?? next;
+  }
+
+  /** Whether a status an older client sends would move a task its agent is at work on somewhere other than a final column. */
+  statusRefused(task: TaskRecord, status: StoredTaskStatus): boolean {
+    const to = this.engine.columnForStatus(status);
+    if (to === task.flow.column || !this.engine.runBusy(task)) return false;
+    const column = columnById(this.engine.current.board, to);
+    return !(column !== null && column.kind === "wait" && column.final);
+  }
+
+  /** Put a task back as it was before a refused start: its record whole, and a line saying so. */
+  restore(before: TaskRecord, why: string): void {
+    this.store.save(before);
+    this.engine.event(before, "note", why);
+  }
+
+  /** What went to another machine in the last month: where, and at which epoch. */
+  tombstones(): { id: string; epoch: number; movedTo: string; at: number }[] {
+    const since = this.now() - TOMBSTONE_KEEP_MS;
+    return this.store
+      .tombstones()
+      .filter((stone) => stone.at >= since && this.store.get(stone.id) === null)
+      .map((stone) => ({ id: stone.id, epoch: stone.epoch, movedTo: stone.movedTo, at: stone.at }));
+  }
+
+  /** A task on its way to another machine takes no edit here: the copy being sent would no longer be the task (Q2.269). */
+  moving(id: string): boolean {
+    return this.store.get(id)?.flow.handoff != null;
+  }
+
+  history(id: string): TaskEvent[] {
+    return this.store.events(id);
+  }
+
+  comments(id: string): TaskComment[] {
+    return this.store.comments(id);
+  }
+
+  async comment(id: string, text: string): Promise<TaskComment | null> {
+    const task = this.store.get(id);
+    return task === null ? null : this.engine.addComment(task, text);
+  }
+
+  /** The feed, each question read off its session: open with the request as the session holds it, or closed. */
+  feed(id: string): (TaskComment & { state: "open" | "closed" | null; pending: unknown })[] {
+    return this.store.comments(id).map((comment) => {
+      if (comment.kind !== "question" || comment.request === null || comment.sessionId === null) return { ...comment, state: null, pending: null };
+      const snapshot = this.registry.get(comment.sessionId)?.snapshot();
+      const held =
+        comment.request.kind === "permission"
+          ? snapshot?.pendingPermissions.find((one) => one.permissionId === comment.request!.id)
+          : snapshot?.pendingElicitations.find((one) => (one as { elicitationId?: string }).elicitationId === comment.request!.id);
+      return { ...comment, state: held === undefined ? "closed" : "open", pending: held ?? null };
+    });
   }
 
   remove(id: string): boolean {
@@ -279,8 +519,10 @@ export class TaskDesk {
   /** Once, after restore: the prune removes sessions before anything here is open, and their attachments name nobody. */
   sweep(): number {
     let dropped = 0;
+    const away = new Set(this.store.tombstones().map((stone) => stone.id));
     for (const attachment of this.store.attachments()) {
-      if (this.registry.get(attachment.sessionId) !== undefined && this.store.get(attachment.taskId) !== null) continue;
+      const held = this.store.get(attachment.taskId) !== null || away.has(attachment.taskId);
+      if (this.registry.get(attachment.sessionId) !== undefined && held) continue;
       this.store.detach(attachment.sessionId);
       dropped += 1;
     }
@@ -292,18 +534,58 @@ export class TaskDesk {
     return this.registry.get(callerId)?.nickname === DISPATCH_NICKNAME;
   }
 
-  /** task_update: the caller's own task and no other. */
+  /** task_update: the caller's own task and no other. Its outcome is checked against the exits of the column the task is in. */
   update(callerId: string, args: Record<string, unknown>): TaskUpdateResult {
     const parsed = parseTaskUpdate(args);
     if (typeof parsed === "string") return { ok: false, message: parsed };
     const task = this.taskOf(callerId);
     if (task === null) return { ok: false, message: "this conversation is attached to no task, so there is nothing to update" };
-    const change: TaskChange = {};
-    if (parsed.summary !== null) change.summary = parsed.summary;
-    if (parsed.status !== null) change.status = parsed.status;
-    const changed = this.change(task.id, change, callerId);
-    if (changed === null) return { ok: false, message: "that task no longer exists" };
-    return { ok: true, task: this.snapshot(changed), recorded: parsed.status };
+    if (parsed.outcome !== null) {
+      const column = columnById(this.engine.current.board, task.flow.column);
+      const exits = isFlow(column) ? column.exits.map((exit) => exit.name) : [];
+      if (!exits.includes(parsed.outcome)) {
+        return {
+          ok: false,
+          message:
+            exits.length === 0
+              ? `the task's column, ${this.columnTitle(task.flow.column)}, has no exits to name; say status review when the work is done`
+              : `outcome must be one of ${exits.join(", ")}: the exits of the task's column, ${this.columnTitle(task.flow.column)}`,
+        };
+      }
+    }
+    let written = task;
+    if (parsed.summary !== null) {
+      const at = this.now();
+      const summary = parsed.summary.length === 0 ? null : parsed.summary;
+      written = { ...written, summary, summaryAt: summary === null ? null : at, summaryBy: summary === null ? null : callerId, updatedAt: at };
+      this.store.save(written);
+    }
+    written = this.engine.report(written, callerId, {
+      summary: parsed.summary,
+      outcome: parsed.outcome,
+      review: parsed.status === null ? null : parsed.status === "review",
+    });
+    const recorded = parsed.status ?? (parsed.outcome !== null ? "review" : null);
+    const status = this.registry.get(callerId)?.status;
+    return { ok: true, task: this.snapshot(written), recorded, working: status === "running" || status === "starting" };
+  }
+
+  /** board_propose: the whole board as the agent wrote it, checked, as one card; nothing changes until its person applies it. */
+  proposeBoard(callerId: string, args: Record<string, unknown>): { ok: true; revision: number } | { ok: false; message: string } {
+    const session = this.registry.get(callerId);
+    if (session === undefined) return { ok: false, message: "this session no longer exists" };
+    const text = args["text"];
+    const why = args["why"];
+    if (typeof text !== "string" || text.trim().length === 0) return { ok: false, message: "text is the whole board, as YAML" };
+    if (typeof why !== "string" || why.trim().length === 0 || why.length > MAX_BOARD_WHY_CHARS) {
+      return { ok: false, message: `why says what it changes, in at most ${MAX_BOARD_WHY_CHARS} characters` };
+    }
+    const parsed = parseBoard(text);
+    if (!parsed.ok) return { ok: false, message: `the board does not parse; nothing was shown:\n${parsed.errors.map(formatBoardError).join("\n")}` };
+    const current = this.engine.current;
+    if (boardHash(text) === current.hash) return { ok: false, message: "that is the board as it is now; there is nothing to apply" };
+    const shown = session.proposeBoard({ id: `bp_${randomBytes(9).toString("base64url")}`, text, revision: current.revision, hash: current.hash, why: why.trim() });
+    return shown ? { ok: true, revision: current.revision } : { ok: false, message: "this session is not running" };
   }
 
   /** propose_tasks: one card in the caller's own transcript; the task and its agent start on a press, never here (Q2.259). */
@@ -313,18 +595,30 @@ export class TaskDesk {
     const parsed = parseProposals(args);
     if (typeof parsed === "string") return { ok: false, message: parsed };
     const listing = await this.listProjects(callerId);
+    const board = this.engine.current.board;
     const proposals: TaskProposal[] = [];
     for (const one of parsed) {
       const target = resolveMachine(one, listing, this.peers?.machineId ?? null);
       if (typeof target === "string") return { ok: false, message: target };
-      if (!target.agents.includes(one.agent)) {
+      if (one.column !== null && !isFlow(columnById(board, one.column))) {
+        const columns = board.columns.filter(isFlow).map((column) => column.id);
+        return { ok: false, message: `the board has no column ${one.column} to put a task in; it has ${columns.join(", ")}` };
+      }
+      const role = one.role === null ? null : (board.roles.find((held) => held.name === one.role) ?? null);
+      if (one.role !== null && role === null) {
+        const roles = board.roles.map((held) => held.name);
+        return { ok: false, message: roles.length === 0 ? `the board has no roles; leave role out` : `the board has no role ${one.role}; it has ${roles.join(", ")}` };
+      }
+      // A role's own agent where none is named: the machine it may be pinned to is the role's to keep.
+      const agent = one.agent ?? role?.agent ?? null;
+      if (agent !== null && !target.agents.includes(agent)) {
         const where = target.machine.isThis ? "this machine" : (target.machine.label ?? "that machine");
         return {
           ok: false,
           message:
             target.agents.length === 0
               ? `${where} has no agent ready to run a task`
-              : `${where} offers ${target.agents.join(", ")}; ${one.agent} is not one of them`,
+              : `${where} offers ${target.agents.join(", ")}; ${agent} is not one of them`,
         };
       }
       proposals.push({
@@ -332,9 +626,11 @@ export class TaskDesk {
         machineId: target.machine.id,
         machine: target.machine.label,
         project: one.project,
-        agent: one.agent,
+        agent,
         title: one.title,
         brief: one.brief,
+        ...(one.column === null ? {} : { column: one.column }),
+        ...(one.role === null ? {} : { role: one.role }),
       });
     }
     if (!session.proposeTasks(proposals)) return { ok: false, message: "this session is not running" };
@@ -346,7 +642,7 @@ export class TaskDesk {
     const unreachable: ProjectListing["unreachable"] = [];
     for (const [link, answer] of await this.askLinks(callerId, "/peer/projects", remoteProjectsOf)) {
       if ("reason" in answer) unreachable.push({ machine: link.targetName, reason: answer.reason });
-      else machines.push({ machine: machineOf(link), ...answer });
+      else machines.push({ machine: machineOf(link), agents: answer.agents, projects: answer.projects });
     }
     return { machines, unreachable };
   }
@@ -373,6 +669,18 @@ export class TaskDesk {
       summary: task.summary,
       sessions: task.sessions.map((session) => session.nickname),
     }));
+  }
+
+  /** What /peer/projects answers: the rows, and what the board needs to place a run here (Q2.269). */
+  async peerProjects(): Promise<ProjectsAnswer> {
+    const rows = await this.localProjects();
+    const repos: string[] = [];
+    for (const folder of rows.projects) {
+      const identity = await this.engine.projectOf(folder);
+      if (identity !== null && !repos.includes(identity)) repos.push(identity);
+    }
+    const state = this.engine.current;
+    return { ...rows, classifiers: this.engine.classifierIds(), repos, board: 1, boardRevision: state.revision, boardHash: state.hash };
   }
 
   /** Folders work has run in or is waiting to, newest first, and the agents a launch here would find. */
@@ -415,7 +723,24 @@ export class TaskDesk {
   }
 
   private snapshotOf(task: TaskRecord, sessions: TaskSessionRef[]): TaskSnapshot {
-    return { ...task, status: taskStatus(task.status, sessions.map((session) => session.status)), sessions };
+    const { flow: _flow, ...record } = task;
+    const view = this.engine.view(task);
+    return {
+      ...record,
+      status: view.status,
+      column: view.column,
+      phase: view.phase,
+      epoch: view.epoch,
+      run: view.run,
+      code: view.code,
+      waitingSince: view.waitingSince,
+      holder: view.holder,
+      exits: view.exits,
+      reason: view.reason,
+      budget: view.budget,
+      labels: view.labels,
+      sessions,
+    };
   }
 
   private async askLinks<T>(
@@ -498,14 +823,21 @@ function shortString(value: unknown, max: number): value is string {
 }
 
 /** What another machine says it offers, re-read: a row this build cannot hold is dropped, never trusted. */
-function remoteProjectsOf(body: unknown): { agents: string[]; projects: string[] } | null {
-  const answer = body as { agents?: unknown; projects?: unknown } | null;
-  if (answer === null || typeof answer !== "object" || !Array.isArray(answer.agents) || !Array.isArray(answer.projects)) return null;
+function remoteProjectsOf(body: unknown): ProjectsAnswer | null {
+  const answer = body as Record<string, unknown> | null;
+  if (answer === null || typeof answer !== "object" || !Array.isArray(answer["agents"]) || !Array.isArray(answer["projects"])) return null;
+  const names = (value: unknown, test: (one: string) => boolean, max: number): string[] =>
+    Array.isArray(value) ? value.filter((one): one is string => typeof one === "string" && test(one)).slice(0, max) : [];
+  const revision = answer["boardRevision"];
+  const hash = answer["boardHash"];
   return {
-    agents: answer.agents.filter((one): one is string => typeof one === "string" && isAgentRef(one)).slice(0, MAX_REMOTE_AGENTS),
-    projects: answer.projects
-      .filter((one): one is string => typeof one === "string" && isProjectPath(one))
-      .slice(0, MAX_LISTED_PROJECTS),
+    agents: names(answer["agents"], isAgentRef, MAX_REMOTE_AGENTS),
+    projects: names(answer["projects"], isProjectPath, MAX_LISTED_PROJECTS),
+    classifiers: names(answer["classifiers"], isAgentRef, MAX_REMOTE_AGENTS),
+    repos: names(answer["repos"], (one) => one.length > 0 && one.length <= 512 && !/[\u0000-\u001f]/.test(one), MAX_LISTED_PROJECTS),
+    board: answer["board"] === 1 ? 1 : null,
+    boardRevision: typeof revision === "number" && Number.isInteger(revision) && revision >= 0 ? revision : null,
+    boardHash: typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) ? hash : null,
   };
 }
 

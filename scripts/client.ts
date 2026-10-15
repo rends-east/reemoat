@@ -444,6 +444,8 @@ function describeEvent(event: SessionEvent): string {
       return `sent file  ${event.file.name}  ${event.file.bytes} bytes  ${event.file.uploadId}`;
     case "tasks_proposed":
       return `proposed  ${event.proposals.map((one) => clip(one.title, 60)).join(" | ")}`;
+    case "board_proposed":
+      return `board proposed  on revision ${event.revision}  ${clip(event.why, 80)}`;
     case "other":
       return `other  ${event.sessionUpdate}`;
     case "error":

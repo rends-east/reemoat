@@ -3,16 +3,18 @@ import { decodeToken, jwkToPublicKey, looksLikeSignedToken, parseClaims, verifyS
 
 // Who is asking. No network access here: a daemon verifies with keys it already holds, so a control-plane outage cannot reach a session.
 
-export type Scope = "session:read" | "session:write" | "machine:admin" | "session:message";
+export type Scope = "session:read" | "session:write" | "machine:admin" | "session:message" | "task:handoff";
 
 /** Every scope a grant can hold. */
 export const ALL_SCOPES: readonly Scope[] = ["session:read", "session:write", "machine:admin"];
 
 /** Carried only by a link capability, never by a grant: another machine's agents talking to this one's (Q7.150). */
 export const LINK_SCOPE: Scope = "session:message";
+/** Also a link's alone: a task's run may move to the machine it names, and its code with it (Q2.269). */
+export const HANDOFF_SCOPE: Scope = "task:handoff";
 
 function isScope(value: string): value is Scope {
-  return value === LINK_SCOPE || (ALL_SCOPES as readonly string[]).includes(value);
+  return value === LINK_SCOPE || value === HANDOFF_SCOPE || (ALL_SCOPES as readonly string[]).includes(value);
 }
 
 export const AUTH_LEEWAY_MS = 60_000;

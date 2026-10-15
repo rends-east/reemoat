@@ -1,6 +1,7 @@
 import { AGENT_IDS, AGENT_LOGIN, DAEMON_ENV_PREFIX, SESSION_SCOPED_ENV } from "../acp/agents.js";
 import { SYSTEM_IDS, SYSTEMS } from "../acp/systems.js";
 import {
+  type ClassifierContribution,
   negotiatePluginApi,
   PLUGIN_API_MIN_VERSION,
   PLUGIN_API_VERSION,
@@ -216,6 +217,11 @@ function readNet(raw: unknown, scopes: readonly PluginScope[]): string[] | strin
 
 /** Below this api a contributions block is refused rather than ignored, since the harness is the plugin. */
 export const CONTRIBUTION_API = 5;
+/** Classifiers arrived with api 6, and an older daemon would not know to offer them. */
+export const CLASSIFIER_API = 6;
+export const MAX_CLASSIFIERS = 8;
+const MAX_CLASSIFIER_NAME_CHARS = 40;
+const CLASSIFIER_ID = /^[a-z0-9-]{1,32}$/;
 
 function readContributions(
   raw: unknown,
@@ -265,13 +271,37 @@ function readContributions(
   const systems = readSystems(source["systems"], scopes, harnesses, presenting);
   if (typeof systems === "string") return systems;
 
-  return { screen, settings, actions, hooks, harnesses, systems };
+  if (api < CLASSIFIER_API && adds("classifiers")) return `contributes.classifiers needs plugin API ${CLASSIFIER_API}; this manifest declares ${api}`;
+  const classifiers = readClassifiers(source["classifiers"]);
+  if (typeof classifiers === "string") return classifiers;
+
+  return { screen, settings, actions, hooks, harnesses, systems, classifiers };
 }
 
 function declaredNothing(scopes: readonly PluginScope[]): PluginContributions | string {
   const missing = SCOPE_NEEDS_BLOCK.find((one) => scopes.includes(one.scope));
   if (missing !== undefined) return missing.sentence;
-  return { screen: null, settings: false, actions: [], hooks: [], harnesses: [], systems: [] };
+  return { screen: null, settings: false, actions: [], hooks: [], harnesses: [], systems: [], classifiers: [] };
+}
+
+function readClassifiers(raw: unknown): ClassifierContribution[] | string {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return "contributes.classifiers must be an array";
+  if (raw.length > MAX_CLASSIFIERS) return `contributes.classifiers may name at most ${MAX_CLASSIFIERS}`;
+  const out: ClassifierContribution[] = [];
+  for (const [index, one] of raw.entries()) {
+    if (typeof one !== "object" || one === null || Array.isArray(one)) return `contributes.classifiers[${index}] must be an object`;
+    const entry = one as Record<string, unknown>;
+    const id = entry["id"];
+    if (typeof id !== "string" || !CLASSIFIER_ID.test(id)) return `contributes.classifiers[${index}].id must be 1–32 of a-z, 0-9 and -`;
+    if (out.some((held) => held.id === id)) return `contributes.classifiers names ${id} twice`;
+    const name = entry["name"];
+    if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_CLASSIFIER_NAME_CHARS) {
+      return `contributes.classifiers[${index}].name must be 1–${MAX_CLASSIFIER_NAME_CHARS} characters`;
+    }
+    out.push({ id, name: name.trim() });
+  }
+  return out;
 }
 
 // Biconditional, like net: a block with no scope would be invisible to an older consent screen.

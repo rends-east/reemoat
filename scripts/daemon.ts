@@ -377,7 +377,26 @@ const peers = new PeerHub({
 });
 // Always, whatever the env and the policy: a switch turned back on needs no restart, and ask_question needs neither (Q2.250).
 // The board is the session's own person's, so its tools are served whatever the messaging switches say (Q2.259).
-const tasks = new TaskDesk({ registry, store: stores.tasks, peers });
+// Declared before the board, whose judges read it; opened after restore, below.
+let pluginHost: PluginHost | null = null;
+const tasks = new TaskDesk({
+  registry,
+  store: stores.tasks,
+  peers,
+  configs: stores.boards,
+  customAgents: () => stores.customAgents.list().map((one) => ({ id: one.id, name: one.name, harness: one.harness })),
+  onWarning: (detail: string) => console.error(`board: ${detail}`),
+  // A role is asked on a bare session that belongs to no list, or by a plugin's classifier; the host opens below, so both are read late.
+  judges: {
+    ask: async (agent: string, prompt: string, model: string | null, signal: AbortSignal) =>
+      (await agentAsks.ask(agent as AgentId, prompt, model ?? undefined, signal)).text,
+    classifiers: () => pluginHost?.classifiers() ?? [],
+    classify: async (id: string, input: unknown) => {
+      if (pluginHost === null) throw new Error("plugins are switched off on this machine");
+      return pluginHost.classify(id, input);
+    },
+  },
+});
 peers.serveTasks();
 const peerEndpoint = await PeerMcpEndpoint.listen(peers, tasks);
 peers.setEndpoint(peerEndpoint.url);
@@ -394,6 +413,8 @@ registry.setCustomAgents((id) => {
 const restored = registry.restore({ reapOrphans: process.env["REEMOAT_REAP_ORPHANS"] !== "0" });
 // The startup prune removed sessions before any task was read: what was attached to them names nobody now.
 tasks.sweep();
+// Every task looked at once: a run a restart cut reads as its turn's end, and ends or stops by its report (Q2.264).
+tasks.resume();
 const autoResume = process.env["REEMOAT_AUTO_RESUME"] !== "0";
 registry.setAutoResume(autoResume);
 const elicitation = process.env["REEMOAT_ELICITATION"] !== "0";
@@ -481,7 +502,6 @@ const agentInstalls =
       });
 
 // Opened after restore so the host sees every restored session; plugin starts are not awaited.
-let pluginHost: PluginHost | null = null;
 if (pluginsEnabled) {
   try {
     pluginHost = await PluginHost.open({

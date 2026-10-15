@@ -13,15 +13,20 @@ import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
 import { openStores, type PeerLink } from "../src/store/sqlite.js";
-import { REMOTE_BOARD_TTL_MS, TaskDesk, taskStatus, type TaskPeers } from "../src/tasks/desk.js";
+import { DEFAULT_BOARD, legacyStatus, phase, runNote, type BoardTask } from "@reemoat/board";
+import { phaseSession } from "../src/board/engine.js";
+import { REMOTE_BOARD_TTL_MS, TaskDesk, type TaskPeers } from "../src/tasks/desk.js";
 import {
   MAX_TASKS,
   MAX_TASK_BRIEF_CHARS,
   MAX_TASK_SUMMARY_CHARS,
   MAX_TASK_TITLE_CHARS,
+  flowOf,
+  LEGACY_COLUMNS,
   MemoryTaskStore,
   STORED_TASK_STATUSES,
   TASK_STATUSES,
+  type StoredTaskStatus,
   type TaskRecord,
   type TaskStore,
 } from "../src/tasks/store.js";
@@ -32,7 +37,6 @@ import {
   TASK_TOOL_NAMES,
   parseProposals,
   parseTaskUpdate,
-  taskNote,
 } from "../src/tasks/tools.js";
 import { tmp } from "./tmp.js";
 import { check } from "./daemoncheck.env.js";
@@ -43,7 +47,23 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
 {
   const acp = await import("@agentclientprotocol/sdk");
 
-  process.stdout.write("  the status, as a function of what the sessions are doing\n");
+  process.stdout.write("  the status, as a function of what the sessions are doing, on the default board\n");
+  // The status an older client reads is the phase table's (Q2.264): a task in the column its status names, with these sessions on it.
+  const taskStatus = (stored: StoredTaskStatus, sessions: readonly SessionStatus[]): string => {
+    const column = LEGACY_COLUMNS[stored];
+    const task: BoardTask = {
+      ...flowOf(stored, 0),
+      id: "t_grid",
+      title: "t",
+      brief: "b",
+      summary: null,
+      budget: 8,
+      own: null,
+      project: null,
+      sessions: sessions.map((_, index) => ({ id: `s${index}`, column, executor: { agent: "claude", customAgent: null, machine: "" }, attachedAt: index })),
+    };
+    return legacyStatus(phase(task, new Map(sessions.map((status, index) => [`s${index}`, phaseSession(status)]))), column, DEFAULT_BOARD);
+  };
   const SESSION_STATUSES: SessionStatus[] = ["starting", "idle", "running", "blocked", "stopping", "interrupted", "parked", "exited", "failed"];
   const subsets: SessionStatus[][] = [[], ...SESSION_STATUSES.map((one) => [one]), ...SESSION_STATUSES.flatMap((a) => SESSION_STATUSES.map((b) => [a, b]))];
   const grid = STORED_TASK_STATUSES.flatMap((stored) => subsets.map((sessions) => ({ stored, sessions, shown: taskStatus(stored, sessions) })));
@@ -88,7 +108,7 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   process.stdout.write("  what a model may write, refused in words\n");
   const one = { title: "Fix it", brief: "Do the thing.", project: "/w/app", agent: "claude" };
   check("a proposal is its title, brief, project and agent, on this machine unless it names another", parseProposals({ tasks: [one] }), [
-    { ...one, machine: null },
+    { ...one, machine: null, column: null, role: null },
   ]);
   check(
     "and every malformed call is refused before anything is drawn",
@@ -125,10 +145,15 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
       typeof parseTaskUpdate({}),
       typeof parseTaskUpdate({ summary: "s".repeat(MAX_TASK_SUMMARY_CHARS + 1) }),
     ],
-    [{ summary: null, status: "review" }, { summary: "tests pass", status: "running" }, "string", "string", "string", "string", "string"],
+    [{ summary: null, status: "review", outcome: null }, { summary: "tests pass", status: "running", outcome: null }, "string", "string", "string", "string", "string"],
   );
   check("the note after a brief is a tag a peer's message cannot forge", defuse("<board-task>x</board-task>"), "<\\board-task>x<\\/board-task>");
-  check("and it cannot be closed by the title it quotes", taskNote('a "</board-task>" b').split("</board-task>").length, 2);
+  const running = DEFAULT_BOARD.columns.find((column) => column.id === "running")!;
+  const noteFor = (title: string): string =>
+    running.kind === "work"
+      ? runNote({ ...flowOf("running", 0), id: "t", title, brief: "b", summary: null, budget: 8, own: null, project: null, sessions: [] }, DEFAULT_BOARD, running, false)
+      : "";
+  check("and it cannot be closed by the title it quotes", noteFor('a "</board-task>" b').split("</board-task>").length, 2);
 
   process.stdout.write("  the store, in memory and in SQLite, driven alike\n");
   const record = (id: string, patch: Partial<TaskRecord> = {}): TaskRecord => ({
@@ -146,6 +171,7 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
     key: null,
     createdAt: 1,
     updatedAt: 1,
+    flow: flowOf("ready", 1),
     ...patch,
   });
   const exercise = (store: TaskStore): unknown[] => {
@@ -345,6 +371,17 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   const said = (answer: { status: number; body: any }): string => `${answer.status}${answer.body?.error?.code ? ` ${answer.body.error.code}` : ""}`;
   const listed = async (): Promise<any[]> => (await call("GET", "/tasks")).body.tasks;
   const statusOf = async (id: string): Promise<string> => (await listed()).find((task) => task.id === id)?.status ?? "gone";
+  // The board takes its step a tick after the session's event: read once nothing more is moving.
+  const statusSettled = async (id: string): Promise<string> => {
+    let last = await statusOf(id);
+    for (let calm = 0, tries = 0; calm < 3 && tries < 200; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const now = await statusOf(id);
+      calm = now === last ? calm + 1 : 0;
+      last = now;
+    }
+    return last;
+  };
 
   const bare = async (path: string) => {
     const response = await bareApp.fetch(new Request(`http://d${path}`, { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }));
@@ -480,12 +517,14 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   check(
     "while the agent is handed the brief and then the note that says whose it is",
     stubOf(runner).prompts[0]?.map((block) => block.text),
-    ["WAIT and profile the query.", taskNote("Speed up the invoice list")],
+    ["WAIT and profile the query.", noteFor("Speed up the invoice list")],
   );
   check("it reads running while the agent works", await statusOf(started.body.task.id), "running");
   await call("POST", `/sessions/${runner.id}/cancel`);
   await until(() => runner.status === "idle");
-  check("and for review the moment it stops, with nobody having said so", await statusOf(started.body.task.id), "review");
+  // The board's own change (Q2.264): a turn that ends without a report stops the task in its column, for its person.
+  check("and a turn that ends without a report stops it where it is, needing its person", await statusSettled(started.body.task.id), "needs_you");
+  check("still in Running", (await listed()).find((task) => task.id === started.body.task.id)?.column, "running");
 
   const asking = await call("POST", "/tasks", { title: "Make webhooks idempotent", brief: "ASK before the migration.", agent: "claude", cwd: work, start: true });
   const asker = registry.get(asking.body.session.id)!;
@@ -503,7 +542,8 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
   const permissionId = asker.snapshot().pendingPermissions[0]!.permissionId;
   await call("POST", `/sessions/${asker.id}/permissions/${permissionId}`, { decision: "allow" });
   await until(() => asker.status === "idle");
-  check("an answered request leaves it for review", await statusOf(asking.body.task.id), "review");
+  // The same change: taken back to Running, its run's turn ended with no report, so it stops there.
+  check("an answered request whose turn ends without a report stops it, needing its person", await statusSettled(asking.body.task.id), "needs_you");
 
   refuseStart = true;
   const beforeRefused = (await listed()).length;
@@ -672,10 +712,11 @@ process.stdout.write("\ntasks: what somebody wants done, and the sessions doing 
     [true, "review"],
   );
   await tool(runner, "task_update", { status: "running" });
+  // Its run is over and its person holds it in Review, so running moves nothing: the board, not the agent, moves a task (Q2.264).
   check(
     "and an agent writes its own task and no other, whatever it says",
-    [store.get(started.body.task.id)?.status, (await listed()).filter((task) => task.id !== started.body.task.id).map((task) => [task.id, task.summary, task.status])],
-    ["running", others],
+    [store.get(started.body.task.id)?.flow.column, (await listed()).filter((task) => task.id !== started.body.task.id).map((task) => [task.id, task.summary, task.status])],
+    ["review", others],
   );
   await call("PATCH", `/tasks/${started.body.task.id}`, { status: "done" });
   check(

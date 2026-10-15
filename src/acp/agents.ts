@@ -156,6 +156,10 @@ export const CLAUDE_ALLOWED_TOOLS: readonly string[] = [
   "mcp__reemoat__list_tasks",
   "mcp__reemoat__propose_tasks",
   "mcp__reemoat__task_update",
+  "mcp__reemoat__board_get",
+  "mcp__reemoat__board_check",
+  "mcp__reemoat__board_simulate",
+  "mcp__reemoat__board_propose",
 ];
 
 /** codex features switched off in every session: what they add is drawn only by codex's own terminal (Q6.118). */

@@ -43,7 +43,24 @@ import {
   type StoredEvent,
 } from "../events.js";
 import { describeError } from "../http.js";
-import { STORED_TASK_STATUSES, TASK_ASSIGNEES, type StoredTaskStatus, type TaskAttachment, type TaskRecord, type TaskStore } from "../tasks/store.js";
+import {
+  flowOf,
+  MAX_BOARD_REVISIONS,
+  MAX_TASK_COMMENTS,
+  MAX_TASK_EVENTS,
+  STORED_TASK_STATUSES,
+  TASK_ASSIGNEES,
+  type BoardConfigStore,
+  type BoardRevision,
+  type StoredTaskStatus,
+  type TaskAttachment,
+  type TaskComment,
+  type TaskEvent,
+  type TaskFlow,
+  type TaskRecord,
+  type TaskStore,
+  type TaskTombstone,
+} from "../tasks/store.js";
 import { parseManifest } from "../plugins/manifest.js";
 import {
   checkPluginWrite,
@@ -169,6 +186,7 @@ export interface StoreBundle {
   peerOutbox: SqlitePeerOutboxStore;
   peerSeen: SqlitePeerSeenStore;
   tasks: SqliteTaskStore;
+  boards: SqliteBoardConfigStore;
   /** Ids the prune deleted: the caller removes their upload directories, which the prune runs too early to reach. */
   prunedSessions: string[];
   close(): void;
@@ -237,6 +255,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const peerOutbox = new SqlitePeerOutboxStore(db);
   const peerSeen = new SqlitePeerSeenStore(db);
   const tasks = new SqliteTaskStore(db);
+  const boards = new SqliteBoardConfigStore(db);
 
   return {
     db,
@@ -258,6 +277,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     peerOutbox,
     peerSeen,
     tasks,
+    boards,
     prunedSessions,
     close() {
       try {
@@ -345,6 +365,13 @@ function migrate(db: DatabaseSync): void {
   // A task from before it reads as nobody's, which is how every task in the backlog was drawn then (Q2.261).
   const taskColumns = db.prepare("PRAGMA table_info(tasks)").all();
   if (!taskColumns.some((column) => column["name"] === "assigned")) db.exec("ALTER TABLE tasks ADD COLUMN assigned INTEGER NOT NULL DEFAULT 0");
+  // Where a task stands on its board; a row from before it reads as standing in its status's column, with no run (Q2.264).
+  if (!taskColumns.some((column) => column["name"] === "board_column")) db.exec("ALTER TABLE tasks ADD COLUMN board_column TEXT");
+  if (!taskColumns.some((column) => column["name"] === "epoch")) db.exec("ALTER TABLE tasks ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0");
+  if (!taskColumns.some((column) => column["name"] === "flow_json")) db.exec("ALTER TABLE tasks ADD COLUMN flow_json TEXT");
+  const stoneColumns = db.prepare("PRAGMA table_info(task_tombstones)").all();
+  if (!stoneColumns.some((column) => column["name"] === "workdir")) db.exec("ALTER TABLE task_tombstones ADD COLUMN workdir TEXT");
+  if (!stoneColumns.some((column) => column["name"] === "branch")) db.exec("ALTER TABLE task_tombstones ADD COLUMN branch TEXT");
 
   migrateCredentialsToV6(db);
   migrateMachineKeysToOneLive(db);
@@ -2282,18 +2309,52 @@ export class SqliteTaskStore implements TaskStore {
   private readonly detachStmt: StatementSync;
   private readonly detachAllStmt: StatementSync;
 
+  private readonly eventsStmt: StatementSync;
+  private readonly addEventStmt: StatementSync;
+  private readonly trimEventsStmt: StatementSync;
+  private readonly nextEventStmt: StatementSync;
+  private readonly commentsStmt: StatementSync;
+  private readonly saveCommentStmt: StatementSync;
+  private readonly trimCommentsStmt: StatementSync;
+  private readonly stonesStmt: StatementSync;
+  private readonly stoneStmt: StatementSync;
+  private readonly forgetEventsStmt: StatementSync;
+  private readonly forgetStoneStmt: StatementSync;
+  private readonly forgetCommentsStmt: StatementSync;
+
   constructor(private readonly db: DatabaseSync) {
-    const columns = "id, title, brief, status, summary, summary_at, summary_by, agent, custom_agent, assigned, cwd, key, created_at, updated_at";
+    const columns =
+      "id, title, brief, status, summary, summary_at, summary_by, agent, custom_agent, assigned, cwd, key, created_at, updated_at, board_column, epoch, flow_json";
     this.listStmt = db.prepare(`SELECT ${columns} FROM tasks ORDER BY created_at, id`);
     this.getStmt = db.prepare(`SELECT ${columns} FROM tasks WHERE id = ?`);
     this.byKeyStmt = db.prepare(`SELECT ${columns} FROM tasks WHERE key = ? ORDER BY created_at, id LIMIT 1`);
     this.saveStmt = db.prepare(
-      `INSERT INTO tasks (${columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ` +
+      `INSERT INTO tasks (${columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ` +
         "ON CONFLICT(id) DO UPDATE SET title = excluded.title, brief = excluded.brief, status = excluded.status, " +
         "summary = excluded.summary, summary_at = excluded.summary_at, summary_by = excluded.summary_by, agent = excluded.agent, " +
         "custom_agent = excluded.custom_agent, assigned = excluded.assigned, cwd = excluded.cwd, key = excluded.key, " +
-        "updated_at = excluded.updated_at",
+        "updated_at = excluded.updated_at, board_column = excluded.board_column, epoch = excluded.epoch, flow_json = excluded.flow_json",
     );
+    this.eventsStmt = db.prepare("SELECT seq, payload FROM task_events WHERE task_id = ? ORDER BY seq");
+    this.nextEventStmt = db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM task_events WHERE task_id = ?");
+    this.addEventStmt = db.prepare("INSERT INTO task_events (task_id, seq, at, payload) VALUES (?, ?, ?, ?)");
+    this.trimEventsStmt = db.prepare("DELETE FROM task_events WHERE task_id = ? AND seq <= ?");
+    this.commentsStmt = db.prepare("SELECT payload FROM task_comments WHERE task_id = ? ORDER BY at, id");
+    this.saveCommentStmt = db.prepare(
+      "INSERT INTO task_comments (task_id, id, at, payload) VALUES (?, ?, ?, ?) ON CONFLICT(task_id, id) DO UPDATE SET payload = excluded.payload",
+    );
+    this.trimCommentsStmt = db.prepare(
+      "DELETE FROM task_comments WHERE task_id = ? AND id NOT IN (SELECT id FROM task_comments WHERE task_id = ? ORDER BY at DESC, id DESC LIMIT ?)",
+    );
+    this.stonesStmt = db.prepare("SELECT id, epoch, moved_to, at, workdir, branch FROM task_tombstones ORDER BY at, id");
+    this.stoneStmt = db.prepare(
+      "INSERT INTO task_tombstones (id, epoch, moved_to, at, workdir, branch) VALUES (?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch, moved_to = excluded.moved_to, at = excluded.at, " +
+        "workdir = excluded.workdir, branch = excluded.branch",
+    );
+    this.forgetStoneStmt = db.prepare("DELETE FROM task_tombstones WHERE id = ?");
+    this.forgetEventsStmt = db.prepare("DELETE FROM task_events WHERE task_id = ?");
+    this.forgetCommentsStmt = db.prepare("DELETE FROM task_comments WHERE task_id = ?");
     this.deleteStmt = db.prepare("DELETE FROM tasks WHERE id = ?");
     this.attachmentsStmt = db.prepare("SELECT session_id, task_id, attached_at FROM task_sessions ORDER BY attached_at, session_id");
     this.attachStmt = db.prepare(
@@ -2334,6 +2395,9 @@ export class SqliteTaskStore implements TaskStore {
       task.key,
       task.createdAt,
       task.updatedAt,
+      task.flow.column,
+      task.flow.epoch,
+      JSON.stringify(task.flow),
     );
   }
 
@@ -2342,6 +2406,8 @@ export class SqliteTaskStore implements TaskStore {
     try {
       this.detachAllStmt.run(id);
       this.deleteStmt.run(id);
+      this.forgetEventsStmt.run(id);
+      this.forgetCommentsStmt.run(id);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -2364,15 +2430,129 @@ export class SqliteTaskStore implements TaskStore {
   detach(sessionId: string): void {
     this.detachStmt.run(sessionId);
   }
+
+  events(taskId: string): TaskEvent[] {
+    return this.eventsStmt.all(taskId).flatMap((row) => {
+      const payload = readJson(row["payload"]);
+      return payload === null ? [] : [{ ...(payload as Omit<TaskEvent, "seq">), seq: Number(row["seq"]) }];
+    });
+  }
+
+  addEvent(taskId: string, event: Omit<TaskEvent, "seq">): TaskEvent {
+    const seq = Number(this.nextEventStmt.get(taskId)?.["next"] ?? 1);
+    this.addEventStmt.run(taskId, seq, event.at, JSON.stringify(event));
+    this.trimEventsStmt.run(taskId, seq - MAX_TASK_EVENTS);
+    return { ...event, seq };
+  }
+
+  comments(taskId: string): TaskComment[] {
+    return this.commentsStmt.all(taskId).flatMap((row) => {
+      const payload = readJson(row["payload"]);
+      return payload === null ? [] : [payload as TaskComment];
+    });
+  }
+
+  saveComment(taskId: string, comment: TaskComment): void {
+    this.saveCommentStmt.run(taskId, comment.id, comment.at, JSON.stringify(comment));
+    this.trimCommentsStmt.run(taskId, taskId, MAX_TASK_COMMENTS);
+  }
+
+  tombstones(): TaskTombstone[] {
+    return this.stonesStmt.all().map((row) => ({
+      id: String(row["id"]),
+      epoch: Number(row["epoch"]),
+      movedTo: String(row["moved_to"]),
+      at: Number(row["at"]),
+      workdir: row["workdir"] == null ? null : String(row["workdir"]),
+      branch: row["branch"] == null ? null : String(row["branch"]),
+    }));
+  }
+
+  tombstone(stone: TaskTombstone): void {
+    this.stoneStmt.run(stone.id, stone.epoch, stone.movedTo, stone.at, stone.workdir, stone.branch);
+  }
+
+  retire(id: string): void {
+    this.db.exec("BEGIN");
+    try {
+      this.deleteStmt.run(id);
+      this.forgetEventsStmt.run(id);
+      this.forgetCommentsStmt.run(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  forgetTombstone(id: string): void {
+    this.forgetStoneStmt.run(id);
+  }
+}
+
+export class SqliteBoardConfigStore implements BoardConfigStore {
+  private readonly listStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly trimStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.listStmt = db.prepare("SELECT revision, hash, text, at FROM board_configs ORDER BY revision");
+    this.saveStmt = db.prepare(
+      "INSERT INTO board_configs (revision, hash, text, at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(revision) DO UPDATE SET hash = excluded.hash, text = excluded.text, at = excluded.at",
+    );
+    this.trimStmt = db.prepare("DELETE FROM board_configs WHERE revision NOT IN (SELECT revision FROM board_configs ORDER BY revision DESC LIMIT ?)");
+  }
+
+  current(): BoardRevision | null {
+    return this.list().at(-1) ?? null;
+  }
+
+  list(): BoardRevision[] {
+    return this.listStmt.all().map((row) => ({
+      revision: Number(row["revision"]),
+      hash: String(row["hash"]),
+      text: String(row["text"]),
+      at: Number(row["at"]),
+    }));
+  }
+
+  save(revision: BoardRevision): void {
+    this.saveStmt.run(revision.revision, revision.hash, revision.text, revision.at);
+    this.trimStmt.run(MAX_BOARD_REVISIONS);
+  }
+}
+
+function readJson(value: unknown): unknown {
+  if (typeof value !== "string") return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    // A row this build cannot read is skipped, never a reason to fail the listing.
+    return null;
+  }
+}
+
+/** A flow this build cannot read, or none at all, stands where the row's status says, with no run. */
+function readFlow(row: Record<string, unknown>, status: StoredTaskStatus, at: number): TaskFlow {
+  const base = flowOf(status, at);
+  const stored = readJson(row["flow_json"]);
+  if (stored === null || typeof stored !== "object" || Array.isArray(stored)) {
+    return row["board_column"] == null ? base : { ...base, column: String(row["board_column"]) };
+  }
+  const flow = { ...base, ...(stored as Partial<TaskFlow>) };
+  if (typeof flow.column !== "string") flow.column = base.column;
+  return flow;
 }
 
 function readTask(row: Record<string, unknown>): TaskRecord {
   const status = String(row["status"]);
+  const stored = (STORED_TASK_STATUSES as readonly string[]).includes(status) ? (status as StoredTaskStatus) : "running";
   return {
     id: String(row["id"]),
     title: String(row["title"]),
     brief: String(row["brief"]),
-    status: (STORED_TASK_STATUSES as readonly string[]).includes(status) ? (status as StoredTaskStatus) : "running",
+    status: stored,
     summary: row["summary"] == null ? null : String(row["summary"]),
     summaryAt: row["summary_at"] == null ? null : Number(row["summary_at"]),
     summaryBy: row["summary_by"] == null ? null : String(row["summary_by"]),
@@ -2384,5 +2564,6 @@ function readTask(row: Record<string, unknown>): TaskRecord {
     key: row["key"] == null ? null : String(row["key"]),
     createdAt: Number(row["created_at"]),
     updatedAt: Number(row["updated_at"]),
+    flow: readFlow(row, stored, Number(row["updated_at"])),
   };
 }

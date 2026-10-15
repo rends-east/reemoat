@@ -689,6 +689,9 @@ export class MachineConnection {
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     const contentType = contentTypeFor(init.body);
     if (contentType !== null) headers["content-type"] = contentType;
+    // The one header a caller may add: a write against the revision it read (PUT /board).
+    const ifMatch = new Headers(init.headers).get("if-match");
+    if (ifMatch !== null) headers["if-match"] = ifMatch;
 
     if (route.kind === "relay") {
       const answer = await this.overChannel(route, {

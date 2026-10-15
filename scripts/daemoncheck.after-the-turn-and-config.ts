@@ -743,7 +743,7 @@ process.stdout.write("\nultracode, which claude offers and ACP has no field for\
   // Read off claude 2.1.288's own alias table, the three MCP-resource names included.
   const ALIASES = ["Task", "KillShell", "KillBash", "RunWorkflow", "ListPeers", "Brief", "ListMcpResources", "ReadMcpResource", "ReadMcpResourceDir"];
   check("and no alias is listed, since one of them names a tool that stays", ALIASES.filter((tool) => CLAUDE_WITHDRAWN_TOOLS.includes(tool)), []);
-  check("send_file and the four task tools are allowed under the names claude gives an MCP tool", [...CLAUDE_ALLOWED_TOOLS], [
+  check("send_file and the task and board tools are allowed under the names claude gives an MCP tool", [...CLAUDE_ALLOWED_TOOLS], [
     `mcp__${PEER_SERVER_NAME}__${SEND_FILE_TOOL_NAME}`,
     ...TASK_TOOL_NAMES.map((tool) => `mcp__${PEER_SERVER_NAME}__${tool}`),
   ]);
@@ -1755,6 +1755,7 @@ process.stdout.write("\nwhich events can still be too big for one WebSocket mess
     // A ref is made by this daemon alone: 200 bytes of name, a 64-character id, a sniffed type.
     file_sent: { type: "file_sent", file: { uploadId: "f_0123456789abcdef", name: "n".repeat(200), mime: "image/png", bytes: 1 }, toolCallId: "t".repeat(256) },
     // The most propose_tasks lets one call carry: its own bound is on the characters of a whole card.
+    board_proposed: { type: "board_proposed", id: "bp_1", text: "version: 1\n", revision: 0, hash: "0".repeat(64), why: "x" },
     tasks_proposed: {
       type: "tasks_proposed",
       proposals: Array.from({ length: MAX_PROPOSALS_PER_CALL }, (_, index) => ({

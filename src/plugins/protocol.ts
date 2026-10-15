@@ -4,7 +4,7 @@
  * Newest plugin api this daemon speaks. Bump it for any new manifest field, scope or method;
  * manifest.ts negotiates api before reading scopes and contributes, and the bump relies on that order.
  */
-export const PLUGIN_API_VERSION = 5;
+export const PLUGIN_API_VERSION = 6;
 
 export const PLUGIN_API_MIN_VERSION = 1;
 
@@ -80,6 +80,13 @@ export interface HarnessContribution {
   authHint: string | null;
 }
 
+/** A classifier a plugin adds: a role on a board may name it to pick an exit, and it can do nothing else (Q2.267). */
+export interface ClassifierContribution {
+  /** Local; a board names it by this id, and the daemon by `<pluginId>:<id>`. */
+  id: string;
+  name: string;
+}
+
 /** A system a plugin adds; contributions.ts turns it into a SYSTEMS row. */
 export interface SystemContribution {
   id: string;
@@ -107,6 +114,8 @@ export interface PluginContributions {
   harnesses: readonly HarnessContribution[];
   /** Systems this plugin adds. Empty unless `scopes` holds `system`. */
   systems: readonly SystemContribution[];
+  /** Classifiers this plugin adds, each answered by its `ask` export. */
+  classifiers: readonly ClassifierContribution[];
 }
 
 export interface PluginManifest {

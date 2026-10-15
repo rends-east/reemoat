@@ -31,6 +31,7 @@ export type SessionEvent =
   | ContextClearedEvent
   | FileSentEvent
   | TasksProposedEvent
+  | BoardProposedEvent
   | OtherUpdateEvent
   | ErrorEvent;
 
@@ -334,15 +335,32 @@ export interface TaskProposal {
   machineId: string | null;
   machine: string | null;
   project: string;
-  agent: string;
+  /** The agent named, or the one the role named runs; null leaves it to the column the task goes in. */
+  agent: string | null;
   title: string;
   brief: string;
+  /** The board column it goes in; absent or null is the intake (Q2.268). */
+  column?: string | null;
+  role?: string | null;
 }
 
 /** Proposals shown to the session's own person; nothing is created until they press. */
 export interface TasksProposedEvent {
   type: "tasks_proposed";
   proposals: TaskProposal[];
+}
+
+/** A board an agent wrote for its person: nothing changes until they press Apply on the card (Q2.268). */
+export interface BoardProposedEvent {
+  type: "board_proposed";
+  id: string;
+  /** The YAML as the agent wrote it; parseBoard took it. */
+  text: string;
+  /** The revision and hash it was written against: the card draws its diff from that board, and Apply sends that revision. */
+  revision: number;
+  hash: string;
+  /** What the agent says it changes, one paragraph. */
+  why: string;
 }
 
 export interface AgentLogEvent {
@@ -837,7 +855,8 @@ function proposalBytes(proposals: readonly TaskProposal[]): number {
   let total = 0;
   for (const one of proposals) {
     total += 96 + one.id.length + (one.machineId?.length ?? 0) + (one.machine?.length ?? 0);
-    total += one.project.length + one.agent.length + one.title.length + one.brief.length;
+    total += one.project.length + (one.agent?.length ?? 0) + one.title.length + one.brief.length;
+    total += (one.column?.length ?? 0) + (one.role?.length ?? 0);
   }
   return total;
 }
@@ -863,6 +882,8 @@ export function estimateBytes(event: SessionEvent): number {
       return 64 + refBytes([event.file]) + (event.toolCallId?.length ?? 0);
     case "tasks_proposed":
       return 64 + proposalBytes(event.proposals);
+    case "board_proposed":
+      return 128 + event.id.length + event.text.length + event.hash.length + event.why.length;
     case "file_change":
       return 128 + event.path.length + event.newText.length + (event.oldText?.length ?? 0);
     case "tool_call":
@@ -1043,6 +1064,8 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "file_sent":
     // Bounded where it is made (propose_tasks refuses past its own limits): a clipped proposal would start the wrong work.
     case "tasks_proposed":
+    // Bounded where it is made (a board is at most 64 KiB, the reason a few hundred characters): a clipped board would be another.
+    case "board_proposed":
     case "session_started":
     case "status":
     case "turn_end":

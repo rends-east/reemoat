@@ -66,7 +66,8 @@ process.stdout.write("\nwhat a call site may append to a shared class string\n")
     ["align-items", /(?<![\w:-])items-(?:start|end|center|baseline|stretch)\b/g],
     ["justify-content", /(?<![\w:-])justify-(?:start|end|center|between|around|evenly)\b/g],
     ["font-size", /(?<![\w:-])text-(?:2xs|xs|sm|base|lg|xl|2xl|3xl)\b/g],
-    ["display", /(?<![\w:-])(?:flex|grid|block|inline-flex|inline-block|hidden)\b/g],
+    // The whole token: `\b` stops at a hyphen, so `flex-wrap` read as the display utility `flex`.
+    ["display", /(?<![\w:-])(?:flex|grid|block|inline-flex|inline-block|hidden)(?![\w-])/g],
     ["white-space", /(?<![\w:-])whitespace-[a-z-]+\b/g],
     ["text-align", /(?<![\w:-])text-(?:left|center|right)\b/g],
   ];

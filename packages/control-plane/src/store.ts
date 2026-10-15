@@ -164,6 +164,7 @@ function migrate(db: DatabaseSync): void {
   const apiKeys = columnsOf("PRAGMA table_info(api_keys)");
   const userSessions = columnsOf("PRAGMA table_info(user_sessions)");
   const machinePermissions = columnsOf("PRAGMA table_info(machine_permissions)");
+  const accountPermissions = columnsOf("PRAGMA table_info(account_permissions)");
   const has = (name: string): boolean => machines.has(name);
 
   addColumn(db, has("daemon_version"), "ALTER TABLE machines ADD COLUMN daemon_version TEXT");
@@ -187,6 +188,8 @@ function migrate(db: DatabaseSync): void {
     machinePermissions.has("isolated"),
     "ALTER TABLE machine_permissions ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0",
   );
+  addColumn(db, machinePermissions.has("tasks_move_off"), "ALTER TABLE machine_permissions ADD COLUMN tasks_move_off INTEGER NOT NULL DEFAULT 0");
+  addColumn(db, accountPermissions.has("tasks_move_off"), "ALTER TABLE account_permissions ADD COLUMN tasks_move_off INTEGER NOT NULL DEFAULT 0");
   // Here rather than in schema.sql: that file runs before this function, so an index on an added column fails on every existing database.
   db.exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_device ON user_sessions (device_id)");
 }

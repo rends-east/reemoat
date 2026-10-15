@@ -34,6 +34,7 @@ export function PermissionCard({
   agent,
   more,
   onHeight,
+  inline = false,
 }: {
   // Not called ref: React reserves that prop name.
   sessionRef: SessionRef;
@@ -43,6 +44,8 @@ export function PermissionCard({
   /** Other requests waiting behind this one. Drawn by the card, not counted here. */
   more: number;
   onHeight?: (px: number) => void;
+  /** Drawn in flow, in a task's feed: the same request, answered by the same routes (AskCard's `inline`). */
+  inline?: boolean;
 }): ReactNode {
   const [busy, setBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -145,6 +148,7 @@ export function PermissionCard({
   return (
     <AskCard
       onHeight={onHeight}
+      inline={inline}
       title={asked?.question ?? permissionHeadline(agent, pending.title, context)}
       detail={waited === null ? null : <span className="tabular-nums">waiting {waited}</span>}
       agent={agent}

@@ -916,12 +916,12 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "nothing pushed yet reads as on, at zero: what every machine was before the switch",
     guarded.messagingState(),
-    { policy: true, isolated: false, env: true, policyAt: 0 },
+    { policy: true, isolated: false, env: true, policyAt: 0, tasks: true },
   );
   const firstPush = await askGuard(owner, "PUT", "/peers/links", { links: [guardLink], messaging: true, policyAt: 50 });
   check("the app's push carries the policy, and the answer says what is in force", [firstPush.status, firstPush.body?.messaging], [
     200,
-    { policy: true, isolated: false, env: true, policyAt: 50 },
+    { policy: true, isolated: false, env: true, policyAt: 50, tasks: true },
   ]);
   check(
     "and nothing reads the links back any more: the screen that did is gone (Q3.676)",
@@ -950,7 +950,7 @@ process.stdout.write("\nmessages between agents\n");
   const leadPromptsBeforeOff = agentOf(lead).prompts.length;
   const plainPromptsBeforeOff = agentOf(plain).prompts.length;
   const switchedOff = await askGuard(owner, "PUT", "/peers/links", { links: [guardLink], messaging: false, policyAt: 100 });
-  check("switched off by the owner's app", [switchedOff.status, switchedOff.body?.messaging], [200, { policy: false, isolated: false, env: true, policyAt: 100 }]);
+  check("switched off by the owner's app", [switchedOff.status, switchedOff.body?.messaging], [200, { policy: false, isolated: false, env: true, policyAt: 100, tasks: true }]);
   check(
     "what was held for another machine is dropped, and its sender told in one line",
     [guardOutbox.count(), errorsOf(lead).some((m) => m.includes("was not sent: agent messaging was switched off"))],
@@ -1016,7 +1016,7 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "a restarted daemon reads the policy back",
     new PeerHub({ registry, enabled: true, policy: settingsStore }).messagingState(),
-    { policy: false, isolated: false, env: true, policyAt: 100 },
+    { policy: false, isolated: false, env: true, policyAt: 100, tasks: true },
   );
   check(
     "and PATCH /settings, which a shared machine's grant reaches, cannot name it",
@@ -1033,13 +1033,13 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "an older delivery does not turn it back on, and its links are still taken",
     [stale.status, stale.body?.messaging, guardLinks.list().length],
-    [200, { policy: false, isolated: false, env: true, policyAt: 100 }, 0],
+    [200, { policy: false, isolated: false, env: true, policyAt: 100, tasks: true }, 0],
   );
   const unsaid = await askGuard(owner, "PUT", "/peers/links", { links: [guardLink] });
   check(
     "an app that says nothing about the policy leaves it alone",
     [unsaid.body?.messaging, guardLinks.list().length],
-    [{ policy: false, isolated: false, env: true, policyAt: 100 }, 1],
+    [{ policy: false, isolated: false, env: true, policyAt: 100, tasks: true }, 1],
   );
   check(
     "a policy that is not a boolean is refused",
@@ -1054,7 +1054,7 @@ process.stdout.write("\nmessages between agents\n");
   check("and a refused body changed nothing", [guarded.allowed, guardLinks.list().length], [false, 1]);
 
   const backOn = await askGuard(owner, "PUT", "/peers/links", { links: [guardLink], messaging: true, policyAt: 200 });
-  check("a newer delivery turns it back on", [backOn.body?.messaging, guarded.allowed], [{ policy: true, isolated: false, env: true, policyAt: 200 }, true]);
+  check("a newer delivery turns it back on", [backOn.body?.messaging, guarded.allowed], [{ policy: true, isolated: false, env: true, policyAt: 200, tasks: true }, true]);
   const relisted = await callGuarded(leadBearer, "list_agents", {});
   check(
     "and the bearer an agent already held works again, with no restart",
@@ -1068,7 +1068,7 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "REEMOAT_PEER_MESSAGES=off is a ceiling a delivered on does not lift",
     [ceiling.allowed, ceiling.messagingState(), ceiling.mcpServersFor(lead.id, { http: true })],
-    [false, { policy: true, isolated: false, env: false, policyAt: 500 }, []],
+    [false, { policy: true, isolated: false, env: false, policyAt: 500, tasks: true }, []],
   );
 
   const plainBearer = mint(plain);
@@ -1239,7 +1239,7 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "isolated by the owner's app, and still on",
     [isolated.status, isolated.body?.messaging, guarded.allowed, guarded.reachesOthers],
-    [200, { policy: true, isolated: true, env: true, policyAt: 300 }, true, false],
+    [200, { policy: true, isolated: true, env: true, policyAt: 300, tasks: true }, true, false],
   );
   check(
     "what it held for another machine is dropped, its sender told in one line",
@@ -1383,17 +1383,17 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "a restarted daemon reads isolation back",
     [reIsolated.body?.messaging?.isolated, new PeerHub({ registry, enabled: true, policy: settingsStore }).messagingState()],
-    [true, { policy: true, isolated: true, env: true, policyAt: 500 }],
+    [true, { policy: true, isolated: true, env: true, policyAt: 500, tasks: true }],
   );
   const saysNothingOfIt = await pushIso({ messaging: false, policyAt: 600 });
-  check("an app that says nothing of isolation leaves it alone", saysNothingOfIt.body?.messaging, { policy: false, isolated: true, env: true, policyAt: 600 });
+  check("an app that says nothing of isolation leaves it alone", saysNothingOfIt.body?.messaging, { policy: false, isolated: true, env: true, policyAt: 600, tasks: true });
   const onlyIsolation = await pushIso({ isolated: false, policyAt: 700 });
-  check("and one that says only that leaves the switch alone", onlyIsolation.body?.messaging, { policy: false, isolated: false, env: true, policyAt: 700 });
+  check("and one that says only that leaves the switch alone", onlyIsolation.body?.messaging, { policy: false, isolated: false, env: true, policyAt: 700, tasks: true });
   const staleIsolation = await askGuard(owner, "PUT", "/peers/links", { links: [], messaging: true, isolated: true, policyAt: 650 });
   check(
     "an older delivery changes neither flag, and its links are still taken",
     [staleIsolation.body?.messaging, guardLinks.list().length],
-    [{ policy: false, isolated: false, env: true, policyAt: 700 }, 0],
+    [{ policy: false, isolated: false, env: true, policyAt: 700, tasks: true }, 0],
   );
   await askGuard(owner, "PUT", "/peers/links", { links: [guardLink] });
   check("isolation that is not a boolean is refused", (await pushIso({ isolated: "yes", policyAt: 800 })).status, 400);
@@ -1409,13 +1409,13 @@ process.stdout.write("\nmessages between agents\n");
   check(
     "a policy stored before isolation existed reads as not isolated",
     new PeerHub({ registry, enabled: true, policy: olderStore }).messagingState(),
-    { policy: false, isolated: false, env: true, policyAt: 42 },
+    { policy: false, isolated: false, env: true, policyAt: 42, tasks: true },
   );
   olderStore.writePolicy("peerMessagesPolicy", JSON.stringify({ on: false, isolated: "yes", at: 42 }));
   check(
     "and one it cannot read is unset, never half read",
     new PeerHub({ registry, enabled: true, policy: olderStore }).messagingState(),
-    { policy: true, isolated: false, env: true, policyAt: 0 },
+    { policy: true, isolated: false, env: true, policyAt: 0, tasks: true },
   );
   olderDb.close();
 

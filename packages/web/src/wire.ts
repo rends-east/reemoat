@@ -303,9 +303,13 @@ export interface TaskProposal {
   machineId: string | null;
   machine: string | null;
   project: string;
-  agent: string;
+  /** null leaves who does it to the column's role; an older daemon always names one. */
+  agent: string | null;
   title: string;
   brief: string;
+  /** The board column it goes in; absent or null is the intake. */
+  column?: string | null;
+  role?: string | null;
 }
 
 export interface TasksProposedEvent {
@@ -368,12 +372,54 @@ export interface TaskSessionRef {
 
 export type TaskAssignee = "nobody" | "agent" | "you";
 
+/** What is with a task now, derived by its daemon; a newer daemon may name another, which reads as `waiting`. */
+export type TaskPhase = "needs_you" | "working" | "judging" | "moving" | "queued" | "waiting";
+
+export type TaskRunState = "pending" | "working" | "ended" | "failed";
+
+/** The run of a work column, as its daemon answers it; `executor` is `claude@mac`. */
+export interface TaskRunView {
+  n: number;
+  column: string;
+  state: TaskRunState;
+  executor: string | null;
+  session: string | null;
+  startedAt: number | null;
+}
+
+export interface TaskCodeView {
+  branch: string;
+  head: string | null;
+  holder: string;
+}
+
+/** An exit its person may press now: a button on the card. */
+export interface TaskExitButton {
+  name: string;
+  label: string;
+  to: string;
+}
+
 /** One task as its own machine's daemon answers it; `status` is settled there, never by a client (Q2.258). */
 export interface TaskSnapshot {
   id: string;
   title: string;
   brief: string;
   status: TaskStatus;
+  /** The board's fields; an older daemon omits every one of them and is drawn on the default columns by `status`. */
+  column?: string;
+  phase?: TaskPhase;
+  epoch?: number;
+  run?: TaskRunView | null;
+  code?: TaskCodeView | null;
+  waitingSince?: number | null;
+  /** `you`, `nobody`, or the executor of its run. */
+  holder?: string;
+  exits?: TaskExitButton[];
+  /** Why it needs you, or what it waits for. */
+  reason?: string | null;
+  budget?: number;
+  labels?: string[];
   summary: string | null;
   summaryAt: number | null;
   summaryBy: string | null;
@@ -388,10 +434,80 @@ export interface TaskSnapshot {
   sessions: TaskSessionRef[];
 }
 
+/** What is left on a machine of a task that went to another. */
+export interface TaskTombstoneView {
+  id: string;
+  epoch: number;
+  movedTo: string;
+  at: number;
+}
+
 export interface TaskList {
   tasks: TaskSnapshot[];
   now: number;
   instanceId: string;
+  /** 1 on a daemon that runs the configurable board; absent on an older one. */
+  board?: number;
+  boardRevision?: number;
+  boardHash?: string;
+  tombstones?: TaskTombstoneView[];
+}
+
+/** `GET /board`: the account's board as one daemon holds it. `board` is that daemon's own parse, kept as unknown here. */
+export interface BoardDocument {
+  version: number;
+  revision: number;
+  hash: string;
+  text: string;
+  board?: unknown;
+}
+
+export interface BoardWritten {
+  version: number;
+  revision: number;
+  hash: string;
+  text: string;
+  changed: boolean;
+}
+
+export type TaskCommentKind = "question" | "stop" | "report" | "comment";
+
+/** One entry of a task's feed. A question is a window on a request its session holds; `pending` is that request while open. */
+export interface TaskCommentView {
+  id: string;
+  at: number;
+  kind: TaskCommentKind;
+  /** `you`, or the session whose agent wrote it. */
+  author: string;
+  text: string;
+  sessionId: string | null;
+  request: { kind: "permission" | "elicitation"; id: string } | null;
+  entry: number;
+  delivered: boolean;
+  state: "open" | "closed" | null;
+  pending: unknown;
+}
+
+/** One line of a task's history; `text` is already a sentence. */
+export interface TaskEventView {
+  seq: number;
+  at: number;
+  kind: string;
+  entry: number;
+  revision: number;
+  text: string;
+  column: string | null;
+  to: string | null;
+  exit: string | null;
+  by: string | null;
+  confidence: number | null;
+  executor: string | null;
+  session: string | null;
+}
+
+export interface TaskFeed {
+  comments: TaskCommentView[];
+  events: TaskEventView[];
 }
 
 export interface StoredEvent {
@@ -1166,6 +1282,8 @@ export interface PeerMessagingState {
   /** Its own `REEMOAT_PEER_MESSAGES`, which no push can override. */
   env: boolean;
   policyAt: number;
+  /** Tasks move between machines (stage 6's switch); an older daemon omits it. */
+  tasks?: boolean;
 }
 
 export type PeerStatus = "working" | "idle" | "waiting_for_user" | "asleep" | "starting";
@@ -1339,6 +1457,12 @@ export interface SystemContribution {
   keyEnv: string | null;
 }
 
+/** A judge for the task board a plugin adds, answered by its `ask` export (api 6). */
+export interface ClassifierContribution {
+  id: string;
+  name: string;
+}
+
 export interface PluginContributions {
   screen: { title: string } | null;
   settings: boolean;
@@ -1346,6 +1470,7 @@ export interface PluginContributions {
   hooks: PluginHook[];
   harnesses?: HarnessContribution[];
   systems?: SystemContribution[];
+  classifiers?: ClassifierContribution[];
 }
 
 export type PluginState = "running" | "stopped" | "failed" | "starting";

@@ -368,6 +368,19 @@ check(
   rootVersion,
 );
 
+// Copied into the payload beside protocol, so its dependencies must be the root's own, at the root's versions.
+const boardPkg = read("packages/board/package.json");
+check("@reemoat/board names the version the workspace is at", capture(boardPkg, VERSION_IN_MANIFEST), rootVersion);
+const boardDeps = (JSON.parse(boardPkg) as { dependencies?: Record<string, string> }).dependencies ?? {};
+const rootDeps = (JSON.parse(packageJson) as { dependencies?: Record<string, string> }).dependencies ?? {};
+check(
+  "every dependency of @reemoat/board is the root's, at the same exact version",
+  Object.entries(boardDeps)
+    .filter(([name, version]) => rootDeps[name] !== version || !/^\d+\.\d+\.\d+$/.test(version))
+    .map(([name, version]) => `${name}: ${version} on the board, ${rootDeps[name] ?? "absent"} on the root`),
+  [],
+);
+
 check(
   "the daemon names the version the workspace is at",
   capture(read("src/version.ts"), /^export const DAEMON_VERSION = "([^"]+)";$/m),

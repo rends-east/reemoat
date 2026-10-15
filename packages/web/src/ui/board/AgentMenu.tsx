@@ -124,3 +124,65 @@ export function AgentMenu({
     document.body,
   );
 }
+
+/**
+ * A short question over the board, under a card: a drop its daemon refused while the task's agent works, which its person
+ * may answer by stopping the agent and moving it (Q3.728). Placed and dismissed as the agent menu is.
+ */
+export function ChoiceMenu({
+  anchor,
+  heading,
+  choices,
+  onCancel,
+}: {
+  anchor: () => DOMRect | null;
+  heading: string;
+  choices: readonly { label: string; description?: string; onPick: () => void }[];
+  onCancel: () => void;
+}): ReactNode {
+  const [at, setAt] = useState<{ left: number; top: number; width: number; up: boolean } | null>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const { panelRef, onKeyDown } = useListKeys(at !== null, boxRef);
+  useDismissible("menu", onCancel, true);
+
+  useLayoutEffect(() => {
+    const box = anchor();
+    if (box === null) {
+      onCancel();
+      return;
+    }
+    const width = Math.max(box.width, MENU_WIDTH_PX);
+    const up = window.innerHeight - box.bottom < MENU_MAX_PX + 16 && box.top > window.innerHeight - box.bottom;
+    setAt({ left: Math.max(8, Math.min(box.left, window.innerWidth - width - 8)), top: up ? box.top : box.bottom, width, up });
+  }, []);
+
+  useEffect(() => {
+    const away = (event: Event): void => {
+      if (boxRef.current?.contains(event.target as Node) !== true) onCancel();
+    };
+    window.addEventListener("pointerdown", away);
+    return () => window.removeEventListener("pointerdown", away);
+  }, [onCancel]);
+
+  if (at === null) return null;
+  return createPortal(
+    <div
+      ref={boxRef}
+      className={`fixed ${LAYER.menu}`}
+      style={{ left: at.left, top: at.top, width: at.width, transform: at.up ? "translateY(calc(-100% - 6px))" : "translateY(6px)" }}
+    >
+      <div ref={panelRef} role="menu" aria-label={heading} tabIndex={-1} onKeyDown={onKeyDown} className={`${MENU_PANEL} animate-rise`}>
+        <p className={MENU_HEADING}>{heading}</p>
+        {choices.map((choice) => (
+          <button key={choice.label} type="button" role="menuitem" onClick={choice.onPick} className={`${menuRow("start")} text-fg hover:bg-raised`}>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{choice.label}</span>
+              {choice.description !== undefined && <span className="block text-2xs text-faint">{choice.description}</span>}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>,
+    document.body,
+  );
+}

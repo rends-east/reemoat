@@ -107,6 +107,20 @@ export function boardSelected(): boolean {
   return selected === BOARD;
 }
 
+const BOARD_LIST_KEY = "reemoat.boardList";
+let boardList = readStored<string>(BOARD_LIST_KEY)[0] === "open";
+
+/** Whether the board's page keeps its list beside it at `lg`: closed until opened, since the board draws the same tasks. */
+export function boardListOpen(): boolean {
+  return boardList;
+}
+
+export function toggleBoardList(): void {
+  boardList = !boardList;
+  write(BOARD_LIST_KEY, boardList ? ["open"] : []);
+  bump();
+}
+
 export function selectMachine(id: MachineTabId): void {
   if (selected === id) return;
   selected = id;

@@ -4,7 +4,7 @@ import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
 import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
-import { shownStatus, STATUS_LABEL, taskOfSession } from "../board";
+import { columnTitle, isFinal, taskOfSession } from "../board";
 import { Icon, IconButton, MENU_HEADING, MENU_PANEL, menuPlacement, menuRow, useListKeys } from "./bits";
 import { attachSession, detachSession } from "./board/actions";
 import { useBoard } from "./board/useBoard";
@@ -52,7 +52,7 @@ export function SessionMenu({
   const attachable = tasks.supported.has(sessionRef.machineId);
   const attachedTo = taskOfSession(tasks.tasks, sessionRef);
   const openTasksHere = tasks.tasks.filter(
-    (entry) => entry.machineId === sessionRef.machineId && shownStatus(entry.task.status) !== "done" && entry !== attachedTo,
+    (entry) => entry.machineId === sessionRef.machineId && !isFinal(tasks.board.board, entry.column) && entry !== attachedTo,
   );
   const { panelRef, onKeyDown } = useListKeys(open, boxRef);
   const row = state.rowsByKey.get(keyOf(sessionRef));
@@ -178,7 +178,7 @@ export function SessionMenu({
                   key={entry.task.id}
                   icon={ClipboardList}
                   label={entry.task.title}
-                  note={STATUS_LABEL[shownStatus(entry.task.status)]}
+                  note={columnTitle(tasks.board.board, entry.column)}
                   onClick={() => {
                     setOpen(false);
                     void attachSession(entry, sessionRef);

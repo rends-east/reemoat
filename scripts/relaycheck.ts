@@ -7074,7 +7074,7 @@ process.stdout.write("\nlinks between machines one person owns\n");
   check(
     "an owner with one machine is answered an empty list rather than a refusal",
     await (await mintLinks(`alone`, loner)).json(),
-    { links: [], messaging: true, isolated: false, policyAt: 0 },
+    { links: [], messaging: true, isolated: false, tasksMove: true, policyAt: 0 },
   );
 
   const minted = await linksFrom(source);
@@ -7111,7 +7111,16 @@ process.stdout.write("\nlinks between machines one person owns\n");
     "srcl",
     "sub",
   ]);
-  check("one scope, which no grant stores", claims["scp"], ["session:message"]);
+  check("two scopes, which no grant stores: messages, and a task's run moving where both ends allow it", claims["scp"], ["session:message", "task:handoff"]);
+  // Off on the target, its links keep messaging and lose the handoff; the next mint is the one that says so (Q2.269).
+  db.prepare("INSERT INTO machine_permissions (machine_id, agent_messaging_off, isolated, tasks_move_off, updated_at) VALUES (?, 0, 0, 1, ?)").run(target, now);
+  const without = await linksFrom(source);
+  check(
+    "a target that lets no task in is linked for messages alone",
+    without.map((link) => [link.target.id, payloadOf(link.token)["scp"]]).find(([id]) => id === target),
+    [target, ["session:message"]],
+  );
+  db.prepare("DELETE FROM machine_permissions WHERE machine_id = ?").run(target);
   check(
     "bound to the source machine's pinned key, not to any device",
     claims["cnf"],

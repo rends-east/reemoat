@@ -1,4 +1,5 @@
-import { STATUS_LABEL } from "./board";
+import { DEFAULT_BOARD } from "@reemoat/board";
+import { columnTitle } from "./board";
 import type { Route } from "./router";
 import { isOverlayPath } from "./ui/overlay";
 import { marketUpFrom } from "./market";
@@ -22,6 +23,7 @@ export function depthOf(route: Route): number {
       return 0;
     case "session":
     case "task":
+    case "boardConfig":
       return 1;
     case "legal":
       return 1;
@@ -66,6 +68,7 @@ export function sheetKind(route: Route): string | null {
     case "gate":
     case "session":
     case "task":
+    case "boardConfig":
     case "legal":
       return null;
   }
@@ -121,8 +124,11 @@ export function isAgentStep(value: string): value is AgentStep {
   return (AGENT_STEPS as readonly string[]).includes(value);
 }
 
-/** Rail pop-ups name themselves, single-column ones name the screen; null only for a plugin view (Q3.427, Q3.432, Q3.473, Q3.484). */
-export function sheetTitle(route: Route): string | null {
+/**
+ * Rail pop-ups name themselves, single-column ones name the screen; null only for a plugin view (Q3.427, Q3.432, Q3.473, Q3.484).
+ * A column's + is named by the column's title on the account's board, handed in; the default preset's otherwise.
+ */
+export function sheetTitle(route: Route, titleOf: (column: string) => string = (column) => columnTitle(DEFAULT_BOARD, column)): string | null {
   switch (route.name) {
     case "settings":
       return "Settings";
@@ -133,7 +139,7 @@ export function sheetTitle(route: Route): string | null {
     case "new":
       return "New session";
     case "newTask":
-      return route.column === null ? "New task" : `New task in ${STATUS_LABEL[route.column]}`;
+      return route.column === null ? "New task" : `New task in ${titleOf(route.column)}`;
     case "agent":
       switch (route.step) {
         case "llm":
@@ -148,6 +154,7 @@ export function sheetTitle(route: Route): string | null {
     case "gate":
     case "session":
     case "task":
+    case "boardConfig":
     case "legal":
       return null;
   }
@@ -199,6 +206,7 @@ export function upFrom(route: Route, under: string, origin: string | null = null
       return null;
     case "session":
     case "task":
+    case "boardConfig":
       return "/";
     case "legal":
       return "/";

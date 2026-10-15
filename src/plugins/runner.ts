@@ -14,6 +14,8 @@ interface PluginModule {
   settings?: (ctx: unknown) => unknown;
   action?: (ctx: unknown, event: unknown) => unknown;
   hook?: (ctx: unknown, event: unknown) => unknown;
+  /** A classifier's answer: `{exit, confidence}` for the exits it is shown. */
+  ask?: (ctx: unknown, input: unknown) => unknown;
 }
 
 let plugin: PluginModule | null = null;
@@ -67,6 +69,10 @@ async function dispatch(kind: PluginInvokeKind, name: string, input: unknown): P
     // A void action result means say nothing; the host re-reads the screen.
     if (result === undefined || result === null) return null;
     return result;
+  }
+  if (kind === "classify") {
+    if (typeof module.ask !== "function") throw new Error("this plugin exports no ask");
+    return (await module.ask(ctx, input)) ?? null;
   }
   if (typeof module.hook !== "function") return null;
   await module.hook(ctx, input);

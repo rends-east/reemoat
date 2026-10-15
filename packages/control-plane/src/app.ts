@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { ALL_SCOPES, AUTH_LEEWAY_MS, LINK_SCOPE, type Scope } from "../../../src/auth.js";
+import { ALL_SCOPES, AUTH_LEEWAY_MS, HANDOFF_SCOPE, LINK_SCOPE, type Scope } from "../../../src/auth.js";
 import { bearerToken, boundedInt, describeError, gzipResponses, jsonError, readJsonObject } from "../../../src/http.js";
 import {
   RELAY_PROTOCOL_MIN_VERSION,
@@ -2157,17 +2157,26 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   };
 
   // Off revokes in the write's own transaction, so the relay refuses every outstanding link token before any daemon hears (Q1.654).
+  // tasksMove alone is a write of that switch: links keep messaging, and the next mint drops task:handoff from them (Q2.269).
   app.put("/v1/me/permissions", async (c) => {
     const writeGuard = spendWrite(c, "permissions");
     if (writeGuard !== null) return writeGuard;
 
     const caller = c.get("caller");
-    const on = readAgentMessaging(await readJsonObject(c));
-    if (on === null) return jsonError(c, 400, "bad_request", "agentMessaging must be true or false");
+    const body = await readJsonObject(c);
+    const tasksMove = body?.["tasksMove"];
+    if (tasksMove !== undefined && typeof tasksMove !== "boolean") return jsonError(c, 400, "bad_request", "tasksMove must be true or false");
+    const held = accountMessaging(db, caller.userId);
+    const named = readAgentMessaging(body);
+    if (named === null && (body?.["agentMessaging"] !== undefined || tasksMove === undefined)) {
+      return jsonError(c, 400, "bad_request", "agentMessaging must be true or false");
+    }
+    const on = named ?? held.on;
+    const tasks = typeof tasksMove === "boolean" ? tasksMove : held.tasks;
     const at = nextPolicyAt(db);
     db.exec("BEGIN");
     try {
-      writeAccountMessaging(db, caller.userId, on, at);
+      writeAccountMessaging(db, caller.userId, on, at, tasks);
       if (!on) {
         db.prepare(
           "UPDATE machine_links SET revoked_at = ? WHERE revoked_at IS NULL AND (" +
@@ -2180,7 +2189,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       db.exec("ROLLBACK");
       throw error;
     }
-    return c.json({ agentMessaging: on, policyAt: at });
+    return c.json({ agentMessaging: on, tasksMove: tasks, policyAt: at });
   });
 
   // The machine's own row; what its daemon enforces is this and its owner's account row together (Q2.244).
@@ -2192,15 +2201,16 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const body = await readJsonObject(c);
     const owned = ownedMachine(c);
     if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
-    const given = { on: body?.["agentMessaging"], isolated: body?.["isolated"] };
+    const given = { on: body?.["agentMessaging"], isolated: body?.["isolated"], tasks: body?.["tasksMove"] };
     const wellTyped = Object.values(given).every((value) => value === undefined || typeof value === "boolean");
-    if (!wellTyped || (given.on === undefined && given.isolated === undefined)) {
-      return jsonError(c, 400, "bad_request", "give agentMessaging or isolated, each true or false");
+    if (!wellTyped || (given.on === undefined && given.isolated === undefined && given.tasks === undefined)) {
+      return jsonError(c, 400, "bad_request", "give agentMessaging, isolated or tasksMove, each true or false");
     }
     const held = machineMessaging(db, owned.id);
     const next = {
       on: typeof given.on === "boolean" ? given.on : held.on,
       isolated: typeof given.isolated === "boolean" ? given.isolated : held.isolated,
+      tasks: typeof given.tasks === "boolean" ? given.tasks : held.tasks,
     };
     const at = nextPolicyAt(db);
     db.exec("BEGIN");
@@ -2221,6 +2231,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({
       agentMessaging: next.on,
       isolated: next.isolated,
+      tasksMove: next.tasks,
       policyAt: messagingPolicy(db, owned.userId, owned.id).at,
     });
   });
@@ -2251,8 +2262,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     }
     // Ahead of the key check: a machine that cannot hold a link still has to be told it may not message (Q1.654).
     const policy = messagingPolicy(db, caller.userId, source.id);
-    if (!policy.on) return c.json({ links: [], messaging: false, isolated: policy.isolated, policyAt: policy.at });
-    if (policy.isolated) return c.json({ links: [], messaging: true, isolated: true, policyAt: policy.at });
+    if (!policy.on) return c.json({ links: [], messaging: false, isolated: policy.isolated, tasksMove: policy.tasks, policyAt: policy.at });
+    if (policy.isolated) return c.json({ links: [], messaging: true, isolated: true, tasksMove: policy.tasks, policyAt: policy.at });
+    // Both ends, the account over each machine: a task's run moves only where its owner lets it go and its target lets it in.
+    const tasksBetween = (target: string): boolean => policy.tasks && machineMessaging(db, target).tasks;
     const standing = machineStanding(db, source.id);
     if (standing !== null && standing.ownerDisabled) {
       return jsonError(c, 403, "owner_disabled", "this machine's owner has been disabled, so it is switched off");
@@ -2340,8 +2353,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           iat: seconds,
           nbf: seconds,
           exp: seconds + LINK_TOKEN_TTL_SECONDS,
-          // The only scope a link carries, and no grant ever stores it: an older daemon drops it and refuses every route.
-          scp: [LINK_SCOPE],
+          // Scopes a link alone carries, and no grant ever stores: an older daemon drops them and refuses every route.
+          // task:handoff only where both ends let tasks move (Q2.269).
+          scp: tasksBetween(target.id) ? [LINK_SCOPE, HANDOFF_SCOPE] : [LINK_SCOPE],
           cnf: { jkt },
           lnk: linkIds[index]!,
           src: source.id,
@@ -2356,6 +2370,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       }),
       messaging: true,
       isolated: false,
+      tasksMove: policy.tasks,
       policyAt: policy.at,
     });
   });

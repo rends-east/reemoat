@@ -1,19 +1,30 @@
-/** Every machine's tasks, gathered by this client itself: no machine is asked about another's, and none is asked through the server (Q3.719). */
+/** Every machine's tasks and the account's board, gathered by this client itself: no machine is asked about another's, and none is asked through the server (Q3.719). */
 
 import {
+  accountBoard,
   boardDue,
   boardSignature,
   boardTasks,
+  BOARD_STORAGE_KEY,
+  DEFAULT_ACCOUNT_BOARD,
+  readBoardDocument,
+  readStamp,
   readTask,
   readTasks,
+  readTombstones,
+  recallAccountBoard,
   recallBoards,
+  rememberAccountBoard,
   rememberBoards,
   taskRefKey,
   TASKS_STORAGE_KEY,
+  type AccountBoard,
   type Asked,
   type BoardMachine,
+  type BoardStamp,
   type BoardTask,
   type HeldBoard,
+  type HeldConfig,
 } from "./board";
 import { meansRouteAbsent } from "./http";
 import { keyOf, refOf, sessionId, type MachineId } from "./ids";
@@ -28,8 +39,15 @@ export interface BoardSnapshot {
   read: ReadonlySet<MachineId>;
   /** Machines whose daemon keeps tasks: nothing about a task is offered on one that does not. */
   supported: ReadonlySet<MachineId>;
+  /** Machines whose daemon runs the configurable board, with the revision it says it holds. */
+  configured: ReadonlyMap<MachineId, BoardStamp>;
+  /** Each configured machine's copy of the board, where it has been read. */
+  copies: ReadonlyMap<MachineId, HeldConfig>;
+  /** The account's board: the newest copy, else what this device last drew, else the default preset. */
+  board: AccountBoard;
   /** What a press asked of a task and when, by `taskRefKey`, until its daemon answers (Q3.728). */
   asked: ReadonlyMap<string, Asked>;
+  held: ReadonlyMap<MachineId, HeldBoard>;
 }
 
 function recall(): Map<MachineId, HeldBoard> {
@@ -41,12 +59,24 @@ function recall(): Map<MachineId, HeldBoard> {
   }
 }
 
+function recallBoard(): AccountBoard {
+  try {
+    return recallAccountBoard(window.localStorage.getItem(BOARD_STORAGE_KEY));
+  } catch {
+    // Private mode: the default preset stands until a daemon answers.
+    return DEFAULT_ACCOUNT_BOARD;
+  }
+}
+
 class BoardStore {
   private readonly held = recall();
   private readonly askedAt = new Map<MachineId, number>();
   private readonly asking = new Set<MachineId>();
   private readonly answered = new Set<MachineId>();
+  private readonly copies = new Map<MachineId, HeldConfig>();
+  private readonly fetchingCopy = new Set<MachineId>();
   private readonly listeners = new Set<() => void>();
+  private remembered = recallBoard();
   private watchers = 0;
   private timer: number | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -56,7 +86,16 @@ class BoardStore {
   private readonly sessionsKey = new Map<MachineId, string>();
   private readonly asked = new Map<string, Asked & { press: number }>();
   private presses = 0;
-  private snapshot: BoardSnapshot = { tasks: [], read: new Set(), supported: new Set(), asked: new Map() };
+  private snapshot: BoardSnapshot = {
+    tasks: [],
+    read: new Set(),
+    supported: new Set(),
+    configured: new Map(),
+    copies: new Map(),
+    board: this.remembered,
+    asked: new Map(),
+    held: new Map(),
+  };
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -97,12 +136,27 @@ class BoardStore {
         ? { ...one, sessions: one.sessions.filter((session) => !moved.has(session.id)) }
         : one,
     );
-    this.held.set(machine, { tasks: [...rest, task], at: Date.now(), read: "known", daemon: board?.daemon ?? null });
+    this.held.set(machine, {
+      tasks: [...rest, task],
+      at: Date.now(),
+      read: "known",
+      daemon: board?.daemon ?? null,
+      config: board?.config ?? null,
+      tombstones: board?.tombstones ?? [],
+    });
+    this.publish();
+  }
+
+  /** A board a machine just took, drawn before its next read says so. */
+  applyBoard(machine: MachineId, copy: HeldConfig): void {
+    this.copies.set(machine, copy);
+    const held = this.held.get(machine);
+    if (held !== undefined) this.held.set(machine, { ...held, config: { revision: copy.revision, hash: copy.hash } });
     this.publish();
   }
 
   /**
-   * Draws a task as a press asked, in a status or with an assignee, until that press is answered, whatever a read in between
+   * Draws a task as a press asked, in a column or with an assignee, until that press is answered, whatever a read in between
    * says; the returned release is called once the answer is applied, or the refusal toasted. A later press on the same task
    * outlives an earlier release.
    */
@@ -146,7 +200,10 @@ class BoardStore {
     const before = this.held.size;
     for (const id of [...this.held.keys()]) {
       const gone = state.phase === "signed_out" || (state.registry === "known" && !state.machines.some((machine) => machine.id === id));
-      if (gone) this.held.delete(id);
+      if (gone) {
+        this.held.delete(id);
+        this.copies.delete(id);
+      }
     }
     if (this.held.size !== before) {
       this.machinesKey = "";
@@ -192,13 +249,23 @@ class BoardStore {
         .listTasks()
         .then(
           (list) => {
-            this.held.set(machine.id, { tasks: readTasks(list.tasks), at: Date.now(), read: "known", daemon: instance });
+            const config = readStamp(list);
+            this.held.set(machine.id, {
+              tasks: readTasks(list.tasks),
+              at: Date.now(),
+              read: "known",
+              daemon: instance,
+              config,
+              tombstones: readTombstones(list.tombstones),
+            });
             this.answered.add(machine.id);
+            if (config === null) this.copies.delete(machine.id);
+            else this.readCopy(machine.id, config);
           },
           (cause: unknown) => {
             const board = this.held.get(machine.id);
             if (meansRouteAbsent(cause)) {
-              this.held.set(machine.id, { tasks: [], at: Date.now(), read: "absent", daemon: instance });
+              this.held.set(machine.id, { tasks: [], at: Date.now(), read: "absent", daemon: instance, config: null, tombstones: [] });
               this.answered.add(machine.id);
             } else if (board !== undefined && board.read !== "absent") {
               // What it last said stands; a refusal or a lost answer is not news about its tasks.
@@ -213,19 +280,80 @@ class BoardStore {
     }
   }
 
+  /** A configured machine's board, read again only when the revision or hash it names is not the copy held. */
+  private readCopy(machine: MachineId, stamp: BoardStamp): void {
+    const copy = this.copies.get(machine);
+    if ((copy !== undefined && copy.revision === stamp.revision && copy.hash === stamp.hash) || this.fetchingCopy.has(machine)) return;
+    const daemon = store.daemonFor(machine);
+    if (daemon === undefined) return;
+    this.fetchingCopy.add(machine);
+    void daemon
+      .board()
+      .then(
+        (answer) => {
+          const read = readBoardDocument(answer);
+          // A board this build cannot read is no copy: the others, or the default, stand (compatibility.md rule 2).
+          if (read === null) this.copies.delete(machine);
+          else this.copies.set(machine, read);
+        },
+        () => {
+          // A failed read leaves the copy held; the next list that names another revision asks again.
+        },
+      )
+      .finally(() => {
+        this.fetchingCopy.delete(machine);
+        this.publish();
+      });
+  }
+
   private publish(remember = true): void {
-    const tasks = boardTasks(machinesOf(store.getSnapshot()), this.held);
+    const machines = machinesOf(store.getSnapshot());
+    const present = new Set(machines.map((machine) => machine.id));
+    const copies = new Map([...this.copies].filter(([id]) => present.has(id)));
+    const read = accountBoard(copies.values());
+    // Before any copy is read, what this device last drew stands in for the default.
+    const board = read.revision === null ? this.remembered : read;
+    const tasks = boardTasks(machines, this.held, board.board);
     const supported = [...this.held].filter(([, held]) => held.read !== "absent").map(([id]) => id);
+    const configured = new Map(
+      [...this.held].flatMap(([id, held]): [MachineId, BoardStamp][] => (held.config === null || !present.has(id) ? [] : [[id, held.config]])),
+    );
     // A poll that changed nothing redraws nothing: every session row's menu reads this store.
     const asked = new Map([...this.asked].map(([key, { press: _, ...held }]): [string, Asked] => [key, held]));
     const pressed = [...this.asked].map(([key, held]) => `${key}:${held.press}`).join(",");
-    const key = `${boardSignature(tasks)}\u0002${[...this.answered].join(",")}\u0002${supported.join(",")}\u0002${pressed}`;
+    const copiesKey = [...copies].map(([id, copy]) => `${id}:${copy.revision}:${copy.hash}`).join(",");
+    const configuredKey = [...configured].map(([id, stamp]) => `${id}:${stamp.revision}:${stamp.hash}`).join(",");
+    const stones = [...this.held].map(([id, held]) => `${id}:${held.tombstones.map((one) => `${one.id}@${one.epoch}>${one.movedTo}`).join(";")}`).join(",");
+    const key = [
+      boardSignature(tasks),
+      [...this.answered].join(","),
+      supported.join(","),
+      pressed,
+      copiesKey,
+      configuredKey,
+      `${board.revision ?? ""}:${board.hash ?? ""}`,
+      stones,
+    ].join("\u0002");
     if (key === this.drawnKey) return;
     this.drawnKey = key;
-    this.snapshot = { tasks, read: new Set(this.answered), supported: new Set(supported), asked };
+    this.snapshot = {
+      tasks,
+      read: new Set(this.answered),
+      supported: new Set(supported),
+      configured,
+      copies,
+      board,
+      asked,
+      held: new Map(this.held),
+    };
     if (remember) {
       try {
         window.localStorage.setItem(TASKS_STORAGE_KEY, rememberBoards(this.held));
+        const written = rememberAccountBoard(board);
+        if (written !== null && (board.hash !== this.remembered.hash || board.revision !== this.remembered.revision)) {
+          window.localStorage.setItem(BOARD_STORAGE_KEY, written);
+          this.remembered = board;
+        }
       } catch {
         // Over quota or private mode: the board in memory is whole, and only a relaunch forgets it.
       }

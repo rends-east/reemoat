@@ -227,7 +227,7 @@ UNITS="^deploy/$INIT_SYSTEM/"
 
 # Everything the image COPYs: a missed input means no rebuild, and a stale image reported as unchanged.
 # packages/protocol is here because the gate bundle imports it; tsconfig.json because tsx resolves it in the container.
-CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/protocol/|^packages/web/|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
+CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/protocol/|^packages/board/|^packages/web/|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
 
 # The relay's own inputs, ANDed with the image fingerprint below; deploycheck fails if the relay's import closure leaves this pattern.
 # schema.sql is here because the relay holds prepared statements against the migrated tables.

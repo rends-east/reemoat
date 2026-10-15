@@ -1,3 +1,4 @@
+import { HANDOFF_SCOPE } from "../auth.js";
 import { createHash, randomBytes } from "node:crypto";
 import { basename } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
@@ -194,12 +195,15 @@ export interface PeerPolicy {
   /** Its sessions message each other and nothing on another machine (Q2.244). */
   isolated: boolean;
   at: number;
+  /** Whether a task's run may move to or from another machine over these links (Q2.269). */
+  tasks: boolean;
 }
 
 /** One delivery: a flag it leaves out is left as it is, which is how an older app says nothing about it. */
 export interface PeerPolicyDelivery {
   on?: boolean;
   isolated?: boolean;
+  tasks?: boolean;
   at: number;
 }
 
@@ -208,6 +212,8 @@ export interface PeerMessagingState {
   isolated: boolean;
   env: boolean;
   policyAt: number;
+  /** Tasks move between machines: an older daemon omits it. */
+  tasks: boolean;
 }
 
 export type PeerPolicyStore = Pick<SqliteMachineSettingsStore, "readPolicy" | "writePolicy">;
@@ -284,15 +290,20 @@ export class PeerHub {
     return this.allowed && !this.policy.isolated;
   }
 
+  /** Whether a task's run may come here from another machine or go from here to one: the links, and its own switch (Q2.269). */
+  get movesTasks(): boolean {
+    return this.reachesOthers && this.policy.tasks;
+  }
+
   messagingState(): PeerMessagingState {
-    return { policy: this.policy.on, isolated: this.policy.isolated, env: this.enabled, policyAt: this.policy.at };
+    return { policy: this.policy.on, isolated: this.policy.isolated, env: this.enabled, policyAt: this.policy.at, tasks: this.policy.tasks };
   }
 
   /** A delivery older than the one applied changes nothing; answers whether this one did (Q1.654). */
   setPolicy(next: PeerPolicyDelivery): boolean {
     if (next.at < this.policy.at) return false;
     const was = this.policy;
-    this.policy = { on: next.on ?? was.on, isolated: next.isolated ?? was.isolated, at: next.at };
+    this.policy = { on: next.on ?? was.on, isolated: next.isolated ?? was.isolated, tasks: next.tasks ?? was.tasks, at: next.at };
     this.policyStore?.writePolicy(POLICY_KEY, JSON.stringify(this.policy));
     if (was.on && !this.policy.on) this.switchedOff();
     else if (this.policy.on && !was.isolated && this.policy.isolated) this.isolatedFromOthers();
@@ -407,6 +418,18 @@ export class PeerHub {
     if (this.network === null || !this.reachesOthers || this.callRefusal(callerId) !== null) return [];
     const at = this.now();
     return this.network.links().filter((link) => link.expiresAt > at);
+  }
+
+  /** Links a task's run may cross: tasks move here, and the link's own capability says so (Q2.269). */
+  handoffLinks(): PeerLink[] {
+    if (this.network === null || !this.movesTasks) return [];
+    const at = this.now();
+    return this.network.links().filter((link) => link.expiresAt > at && carriesScope(link.token, HANDOFF_SCOPE));
+  }
+
+  request(link: PeerLink, request: { method: "GET" | "POST"; path: string; body?: unknown }, timeoutMs?: number): Promise<PeerAnswer> {
+    if (this.network === null) return Promise.resolve({ ok: false, status: 0, code: "no_network", relayUrl: null });
+    return this.network.request(link, request, timeoutMs);
   }
 
   askLink(link: PeerLink, path: string, timeoutMs: number): Promise<PeerAnswer> {
@@ -1246,20 +1269,34 @@ function refuse(code: PeerRefusal, message: string): { ok: false; code: PeerRefu
  * Anything unreadable is the default, on and not isolated at 0: the state before this feature, and what a machine nobody
  * has set is. A value written before isolation existed has no `isolated`, and reads as not isolated.
  */
+/** Whether a link's capability names a scope, read off its own claims: the relay and the target hold the same token. */
+function carriesScope(token: string, scope: string): boolean {
+  try {
+    const claims = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as { scp?: unknown };
+    return Array.isArray(claims.scp) && claims.scp.includes(scope);
+  } catch {
+    // Unreadable claims grant nothing.
+    return false;
+  }
+}
+
 function storedPolicy(raw: string | null): PeerPolicy {
-  const unset: PeerPolicy = { on: true, isolated: false, at: 0 };
+  const unset: PeerPolicy = { on: true, isolated: false, at: 0, tasks: true };
   if (raw === null) return unset;
   try {
-    const parsed = JSON.parse(raw) as { on?: unknown; isolated?: unknown; at?: unknown };
+    const parsed = JSON.parse(raw) as { on?: unknown; isolated?: unknown; at?: unknown; tasks?: unknown };
     const isolated = parsed.isolated ?? false;
+    // A policy written before the switch existed says nothing of it, and nothing said is on, as with messaging (Q2.244).
+    const tasks = parsed.tasks ?? true;
     if (
       typeof parsed.on === "boolean" &&
       typeof isolated === "boolean" &&
+      typeof tasks === "boolean" &&
       typeof parsed.at === "number" &&
       Number.isFinite(parsed.at) &&
       parsed.at >= 0
     ) {
-      return { on: parsed.on, isolated, at: parsed.at };
+      return { on: parsed.on, isolated, at: parsed.at, tasks };
     }
   } catch {
     // Unreadable is unset.

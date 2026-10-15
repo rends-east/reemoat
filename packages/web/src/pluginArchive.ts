@@ -295,9 +295,15 @@ export function readManifestText(json: string): ArchivePeek {
         ...readContributedRows(contributes["systems"], (one) => {
           return `system ${text(one["id"])} sends keys to ${normalUrl(one["baseUrl"])}`;
         }),
+        ...readContributedRows(contributes["classifiers"], (one) => classifierLine(text(one["name"]) || text(one["id"]))),
       ],
     },
   };
+}
+
+/** One line per judge a plugin adds; the consent screen and `consentBroken` build it alike. */
+export function classifierLine(name: string): string {
+  return `a judge for the task board: ${name}`;
 }
 
 // Normalised as `parseManifest` stores it, so the line shown is the string `consentGap` compares.

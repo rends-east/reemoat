@@ -4,7 +4,9 @@
 // a card. Once armed the pointer is followed on window, since the card it left may unmount.
 
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { columnOrder, taskHolder, type BoardColumn, type BoardTask, type TaskHolder } from "../../board";
+import { columnById } from "@reemoat/board";
+import { cardHolder, columnOrder, pressedInto, taskHolder, type Board, type BoardTask, type TaskHolder } from "../../board";
+import type { SessionRow } from "../../store";
 import { useDismissible } from "../overlay";
 import { driftFor, MOUSE_SLOP } from "../rowDrag";
 import { reducedMotion, SETTLE_EASE, SETTLE_MS } from "./Flip";
@@ -12,17 +14,23 @@ import { reducedMotion, SETTLE_EASE, SETTLE_MS } from "./Flip";
 /** The lifted copy's tilt and size, which the settle eases back from. */
 export const LIFTED = "rotate(1.5deg) scale(1.02)";
 
-/** A card an agent is on may only be marked done: the agent is stopped from its conversation, which hands the task back. */
-export function dropRefused(from: BoardColumn, to: BoardColumn): boolean {
-  return from === "running" && to !== "running" && to !== "done";
+/** What is carried: a task, or a conversation no task holds, which a column it is let go in makes a task of (stage 7). */
+export type DragCard = { kind: "task"; entry: BoardTask } | { kind: "chat"; row: SessionRow };
+
+/**
+ * Only the view of conversations refuses a card: a task is not a conversation. Any other column takes one; a task whose
+ * agent works there is asked whether to stop it once its daemon says so (Q3.728).
+ */
+export function dropRefused(view: string, to: string): boolean {
+  return to === view;
 }
 
 export interface Carried {
-  entry: BoardTask;
+  card: DragCard;
   key: string;
-  from: BoardColumn;
+  from: string;
   /** The column under the pointer, or null between and outside them. */
-  over: BoardColumn | null;
+  over: string | null;
   width: number;
   height: number;
   /** Set once let go: the copy is flying into its slot, or back to where it was lifted from. */
@@ -30,9 +38,9 @@ export interface Carried {
 }
 
 /** The column the carried card would land in now: its own, none, and a refused one all send it back. */
-export function landsIn(carried: Carried): BoardColumn | null {
+export function landsIn(carried: Carried, view: string): string | null {
   const { over, from } = carried;
-  return over === null || over === from || dropRefused(from, over) ? null : over;
+  return over === null || over === from || dropRefused(view, over) ? null : over;
 }
 
 /** The key a card, a list line and a slot of one task share. */
@@ -40,39 +48,58 @@ export function cardKey(entry: Pick<BoardTask, "machineId" | "task">): string {
   return `${entry.machineId}/${entry.task.id}`;
 }
 
+/** A conversation's card, never one a task's could share. */
+export function chatKey(row: Pick<SessionRow, "key">): string {
+  return `chat:${row.key}`;
+}
+
 /** One column's rows as drawn this moment: its cards, the carried one's ghost where it was lifted, and the slot it would land in. */
-export type DragItem = { kind: "card" | "ghost"; entry: BoardTask; key: string } | { kind: "slot"; entry: BoardTask; key: string; holder: TaskHolder };
+export type DragItem = { kind: "card" | "ghost"; card: DragCard; key: string } | { kind: "slot"; card: DragCard; key: string; holder: TaskHolder };
+
+/** Who a card let go in a column is drawn as holding it there: as its card will name it, or by an older daemon's status. */
+export function slotHolder(board: Board, card: DragCard, column: string): TaskHolder {
+  const at = columnById(board, column);
+  if (card.kind === "chat") return { kind: "agent", agent: card.row.snapshot.agent, customAgent: null, nickname: card.row.snapshot.nickname ?? null };
+  const { task } = card.entry;
+  if (card.entry.configured) return cardHolder({ configured: true, task: { ...task, ...pressedInto(board, task, column) } }, board);
+  if (column === board.intake) return taskHolder({ ...task, column, phase: "waiting", holder: undefined }, board);
+  if (at?.kind === "wait") return { kind: at.holder };
+  return task.assignee === "agent" ? { kind: "agent", agent: task.agent, customAgent: task.customAgent, nickname: null } : { kind: "nobody" };
+}
 
 /**
  * The ghost stays where the card was lifted until another column would take it; the slot opens where the board's order puts it,
- * drawn as it will be there: Review's already shows its person, and Running shows nobody until one is picked, unless the backlog
- * named the agent that starts (Q3.732).
+ * drawn as it will be there (Q3.732). A conversation made a task is the newest task there, so it opens at the top.
  */
-export function laneItems(column: BoardColumn, tasks: readonly BoardTask[], carried: Carried | null): DragItem[] {
-  const lands = carried === null ? null : landsIn(carried);
-  const items: DragItem[] = tasks.flatMap((entry): DragItem[] => {
-    const key = cardKey(entry);
-    if (carried === null || carried.key !== key) return [{ kind: "card", entry, key }];
-    return lands === null ? [{ kind: "ghost", entry, key }] : [];
+export function laneItems(column: string, cards: readonly DragCard[], carried: Carried | null, board: Board, view: string): DragItem[] {
+  const lands = carried === null ? null : landsIn(carried, view);
+  const items: DragItem[] = cards.flatMap((card): DragItem[] => {
+    const key = card.kind === "task" ? cardKey(card.entry) : chatKey(card.row);
+    if (carried === null || carried.key !== key) return [{ kind: "card", card, key }];
+    return lands === null ? [{ kind: "ghost", card, key }] : [];
   });
   if (carried === null || lands !== column) return items;
-  const landed = { ...carried.entry, task: { ...carried.entry.task, status: column } };
-  const named = carried.from === "ready" && carried.entry.task.assignee === "agent";
-  const holder: TaskHolder = column === "running" && !named ? { kind: "nobody" } : taskHolder(landed.task);
-  const at = items.filter((item) => columnOrder(item.entry, landed) < 0).length;
-  items.splice(at, 0, { kind: "slot", entry: landed, key: carried.key, holder });
+  const holder = slotHolder(board, carried.card, column);
+  const { card } = carried;
+  const landed: DragCard = card.kind === "task" ? { kind: "task", entry: { ...card.entry, column } } : card;
+  const at =
+    landed.kind === "task"
+      ? items.filter((item) => item.card.kind === "task" && columnOrder(item.card.entry, landed.entry) < 0).length
+      : 0;
+  items.splice(at, 0, { kind: "slot", card: landed, key: carried.key, holder });
   return items;
 }
 
 export interface CardDrag {
   carried: Carried | null;
   boardRef: (node: HTMLElement | null) => void;
-  laneRef: (column: BoardColumn) => (node: HTMLElement | null) => void;
+  laneRef: (column: string) => (node: HTMLElement | null) => void;
   previewRef: (node: HTMLElement | null) => void;
   bind: (
-    entry: BoardTask,
-    column: BoardColumn,
+    card: DragCard,
+    column: string,
     key: string,
+    still?: boolean,
   ) => {
     onPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
     onClickCapture: (event: React.MouseEvent<HTMLElement>) => void;
@@ -81,8 +108,8 @@ export interface CardDrag {
 }
 
 interface Press {
-  entry: BoardTask;
-  column: BoardColumn;
+  card: DragCard;
+  column: string;
   key: string;
   pointerId: number;
   x: number;
@@ -102,20 +129,22 @@ function scrollerOf(node: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
-/** `x` is the board's columns side by side; `y` is the list's groups one under another, a folded one taking a card under its heading. */
-export function useCardDrag(onDrop: (entry: BoardTask, from: BoardColumn, to: BoardColumn) => void, axis: "x" | "y" = "x"): CardDrag {
+/** `x` is the board's columns side by side; `y` is a list's groups one under another, a folded one taking a card under its heading. `view` is the column that takes no card. */
+export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) => void, view: string, axis: "x" | "y" = "x"): CardDrag {
   const [carried, setCarried] = useState<Carried | null>(null);
   const held = useRef<Carried | null>(null);
   held.current = carried;
   const dropped = useRef(onDrop);
   dropped.current = onDrop;
+  const viewRef = useRef(view);
+  viewRef.current = view;
 
   const press = useRef<Press | null>(null);
   const pointer = useRef({ x: 0, y: 0, grabX: 0, grabY: 0 });
-  const lastOver = useRef<BoardColumn | null>(null);
+  const lastOver = useRef<string | null>(null);
   const board = useRef<HTMLElement | null>(null);
-  const lanes = useRef(new Map<BoardColumn, HTMLElement>());
-  const laneRefs = useRef(new Map<BoardColumn, (node: HTMLElement | null) => void>());
+  const lanes = useRef(new Map<string, HTMLElement>());
+  const laneRefs = useRef(new Map<string, (node: HTMLElement | null) => void>());
   const preview = useRef<HTMLElement | null>(null);
   const rolling = useRef<number | null>(null);
   const suppress = useRef(false);
@@ -129,7 +158,7 @@ export function useCardDrag(onDrop: (entry: BoardTask, from: BoardColumn, to: Bo
   };
 
   // On one axis alone, within the other's extent: columns stand side by side, and a slot that closed in each gap would flicker.
-  const columnAt = (x: number, y: number): BoardColumn | null => {
+  const columnAt = (x: number, y: number): string | null => {
     const area = board.current?.getBoundingClientRect();
     if (area === undefined) return null;
     if (axis === "x" ? y < area.top || y > area.bottom : x < area.left || x > area.right) return null;
@@ -191,7 +220,7 @@ export function useCardDrag(onDrop: (entry: BoardTask, from: BoardColumn, to: Bo
     press.current = null;
     setCarried((before) => {
       if (before === null || before.settling !== null) return before;
-      const lands = back ? null : landsIn(before);
+      const lands = back ? null : landsIn(before, viewRef.current);
       return { ...before, over: lands ?? before.from, settling: lands === null ? "back" : "in" };
     });
   }, []);
@@ -208,7 +237,7 @@ export function useCardDrag(onDrop: (entry: BoardTask, from: BoardColumn, to: Bo
     suppress.current = true;
     lastOver.current = at.column;
     document.documentElement.style.cursor = "grabbing";
-    setCarried({ entry: at.entry, key: at.key, from: at.column, over: at.column, width: box.width, height: box.height, settling: null });
+    setCarried({ card: at.card, key: at.key, from: at.column, over: at.column, width: box.width, height: box.height, settling: null });
     rolling.current = requestAnimationFrame(roll);
   };
 
@@ -267,8 +296,8 @@ export function useCardDrag(onDrop: (entry: BoardTask, from: BoardColumn, to: Bo
     const head = slot === null && now.over !== null ? (lanes.current.get(now.over)?.querySelector<HTMLElement>("[data-lane-head]") ?? null) : null;
     const target = slot ?? head;
     const land = (): void => {
-      const lands = now.settling === "in" ? landsIn(now) : null;
-      if (lands !== null) dropped.current(now.entry, now.from, lands);
+      const lands = now.settling === "in" ? landsIn(now, viewRef.current) : null;
+      if (lands !== null) dropped.current(now.card, now.from, lands);
       setCarried(null);
     };
     if (node === null || target === null || reducedMotion()) {
@@ -329,13 +358,13 @@ export function useCardDrag(onDrop: (entry: BoardTask, from: BoardColumn, to: Bo
       // Placed before its first paint, or it flashes at the corner of the window for a frame.
       if (node !== null) place();
     }, []),
-    bind: (entry, column, key) => ({
+    bind: (card, column, key, still = false) => ({
       onPointerDown: (event) => {
-        if (event.button !== 0 || event.pointerType === "touch" || held.current !== null || entry.unavailable) return;
+        if (event.button !== 0 || event.pointerType === "touch" || held.current !== null || still) return;
         // A drag let go over another card leaves its click to an ancestor, so the flag is cleared by the next press, not by a click.
         suppress.current = false;
         stopFollowing();
-        const at: Press = { entry, column, key, pointerId: event.pointerId, x: event.clientX, y: event.clientY, node: event.currentTarget };
+        const at: Press = { card, column, key, pointerId: event.pointerId, x: event.clientX, y: event.clientY, node: event.currentTarget };
         press.current = at;
         follow(at);
       },

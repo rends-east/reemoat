@@ -1,5 +1,10 @@
+import { formatBoardError, parseBoard, simulate, type Board } from "@reemoat/board";
 import { machineAddress, type ProjectListing, type TaskDesk, type TaskListing } from "./desk.js";
 import {
+  BOARD_CHECK_TOOL_NAME,
+  BOARD_GET_TOOL_NAME,
+  BOARD_PROPOSE_TOOL_NAME,
+  BOARD_SIMULATE_TOOL_NAME,
   LIST_PROJECTS_TOOL_NAME,
   LIST_TASKS_TOOL_NAME,
   PROPOSE_TASKS_TOOL_NAME,
@@ -36,7 +41,7 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
       const result = desk.update(callerId, args);
       if (!result.ok) return toolError(result.message);
       // The board reads running for as long as this turn does, whatever was just written: said, or the agent reports a failure.
-      const pending = result.recorded !== null && result.recorded !== result.task.status;
+      const pending = result.working && result.recorded !== null && result.recorded !== result.task.status;
       return {
         content: [
           {
@@ -47,6 +52,54 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
           },
         ],
         structuredContent: { status: "recorded", task: { id: result.task.id, status: result.recorded ?? result.task.status } },
+      };
+    }
+    case BOARD_GET_TOOL_NAME: {
+      const state = desk.engine.current;
+      return {
+        content: [{ type: "text", text: `Revision ${state.revision}.\n\n${boardWords(state.board)}\n\nThe YAML:\n${state.text}` }],
+        structuredContent: { revision: state.revision, hash: state.hash, text: state.text },
+      };
+    }
+    case BOARD_CHECK_TOOL_NAME: {
+      const text = args["text"];
+      if (typeof text !== "string") return toolError("text is the whole board, as YAML");
+      const parsed = parseBoard(text);
+      if (!parsed.ok) {
+        const lines = parsed.errors.map(formatBoardError);
+        return { content: [{ type: "text", text: `It does not parse:\n${lines.join("\n")}` }], structuredContent: { ok: false, errors: lines } };
+      }
+      return { content: [{ type: "text", text: `It parses.\n\n${boardWords(parsed.board)}` }], structuredContent: { ok: true, errors: [] } };
+    }
+    case BOARD_SIMULATE_TOOL_NAME: {
+      const script = args["script"];
+      if (!Array.isArray(script) || script.some((line) => typeof line !== "string")) return toolError("script is a list of lines");
+      const text = args["text"];
+      let board = desk.engine.current.board;
+      if (text !== undefined) {
+        if (typeof text !== "string") return toolError("text is a draft of the whole board, as YAML");
+        const parsed = parseBoard(text);
+        if (!parsed.ok) return toolError(`the draft does not parse:\n${parsed.errors.map(formatBoardError).join("\n")}`);
+        board = parsed.board;
+      }
+      const walked = simulate(board, script as string[]);
+      const lines = [...walked.trail, `Ends in ${board.columns.find((one) => one.id === walked.column)?.title ?? walked.column}, ${walked.phase.replace("_", " ")}.`];
+      if (walked.refused.length > 0) lines.push(`Lines that did not apply:\n${walked.refused.map((one) => `- ${one}`).join("\n")}`);
+      return { content: [{ type: "text", text: lines.join("\n") }], structuredContent: walked };
+    }
+    case BOARD_PROPOSE_TOOL_NAME: {
+      const result = desk.proposeBoard(callerId, args);
+      if (!result.ok) return toolError(result.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Shown to your user as a card with the change against revision ${result.revision}. It is applied only when they press Apply: ` +
+              "apply none of it yourself, and do not ask whether they pressed.",
+          },
+        ],
+        structuredContent: { status: "shown", revision: result.revision },
       };
     }
     default:
@@ -100,6 +153,40 @@ function tasksResult(listing: TaskListing): unknown {
       unreachable: listing.unreachable,
     },
   };
+}
+
+/** The board in words for a model: each column, what runs there, how it ends, and where it leads. */
+function boardWords(board: Board): string {
+  const lines: string[] = [`New tasks land in ${board.intake}. ${board.budget} automatic moves in a row before a person must act.`];
+  for (const role of board.roles) {
+    lines.push(
+      `Role ${role.name}: ${role.agent}${role.model === null ? "" : ` with ${role.model}`}${role.on === null ? "" : ` on ${role.on.join(", ")}`}` +
+        `${role.minConfidence === null ? "" : `, abstaining below ${role.minConfidence}`}.`,
+    );
+  }
+  for (const column of board.columns) {
+    if (column.kind === "view") {
+      lines.push(`- ${column.id} "${column.title}": a view of the conversations no task holds.`);
+      continue;
+    }
+    const exits = column.exits.map((exit) => `${exit.name} → ${exit.to}`).join(", ");
+    const judges = column.decide.map((judge) => (judge.kind === "role" ? judge.role : judge.kind)).join(", ");
+    if (column.kind === "work") {
+      const run = column.run;
+      const what = run.skill !== null ? `/${run.skill}` : run.prompt !== null ? "its own prompt" : "the brief or the return hint";
+      lines.push(
+        `- ${column.id} "${column.title}": runs ${run.role ?? "the task's own agent"} with ${what} in ${run.conversation === "new" ? "a new" : "its last"} ` +
+          `conversation, done on ${run.doneWhen === "turn" ? "its turn's end" : "its report"}${column.limit === null ? "" : `, ${column.limit} at once`}; ` +
+          `${exits.length === 0 ? "no exits" : `exits ${exits}, decided by ${judges}`}.`,
+      );
+    } else {
+      lines.push(
+        `- ${column.id} "${column.title}": waits${column.holder === "you" ? " for your user" : ""}${column.final ? ", and closes the task" : ""}; ` +
+          `${exits.length === 0 ? "no exits" : `exits ${exits}, decided by ${judges}`}.`,
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 function oneLine(text: string): string {

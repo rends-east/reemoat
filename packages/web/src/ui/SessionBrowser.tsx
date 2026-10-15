@@ -180,7 +180,7 @@ export function SessionBrowser({
         <div
           ref={listRef}
           data-session-list=""
-          className="relative min-h-0 flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom]"
+          className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain [touch-action:pan-y_pinch-zoom]"
         >
           {drag.unpinning && (
             <div

@@ -65,6 +65,7 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
         // Synthesised empty: toRecord re-parses this output on every read, so an api gate must fire on a non-empty block, not a present key.
         harnesses: [],
         systems: [],
+        classifiers: [],
       },
     },
   });

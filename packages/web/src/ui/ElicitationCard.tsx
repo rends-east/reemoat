@@ -58,12 +58,15 @@ export function ElicitationCard({
   pending,
   more,
   onHeight,
+  inline = false,
 }: {
   sessionRef: SessionRef;
   pending: PendingElicitationSnapshot;
   /** Other requests waiting behind this one. Drawn by the card, not counted here. */
   more: number;
   onHeight?: (px: number) => void;
+  /** Drawn in flow, in a task's feed: the same request, answered by the same routes (AskCard's `inline`). */
+  inline?: boolean;
 }): ReactNode {
   const [fields, setFields] = useState<ElicitationField[] | null>(null);
   const [busy, setBusy] = useState<"accept" | "decline" | "cancel" | null>(null);
@@ -240,6 +243,7 @@ export function ElicitationCard({
   return (
     <AskCard
       onHeight={onHeight}
+      inline={inline}
       typing={typing}
       title={title}
       detail={

@@ -60,6 +60,7 @@ export function AskCard({
   size = "normal",
   onHeight,
   typing = false,
+  inline = false,
 }: {
   title: string;
   detail?: ReactNode;
@@ -82,6 +83,8 @@ export function AskCard({
   onHeight?: (px: number) => void;
   /** Somebody is writing their own answer: under a finger the rows recede, so the box and its words are what they read (Q3.695). */
   typing?: boolean;
+  /** In flow, in a task's feed: never folded, and it takes no key, no focus and no Escape, which belong to the conversation's own card. */
+  inline?: boolean;
 }): ReactNode {
   const headingId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -108,7 +111,7 @@ export function AskCard({
 
   // Off while collapsed and under any other layer: inert does not stop a window keydown.
   useEffect(() => {
-    if (collapsed || busy) return;
+    if (collapsed || busy || inline) return;
     const onKey = (event: KeyboardEvent): void => {
       if (!decisionShortcutsEnabled(currentLayers())) return;
       const index = optionShortcut(event, event.target, options.length);
@@ -124,7 +127,7 @@ export function AskCard({
   });
 
   // Escape folds the card away; it never cancels.
-  useDismissible("ask", () => onToggle(true), !collapsed);
+  useDismissible("ask", () => onToggle(true), !collapsed && !inline);
 
   const moreNow = useRef(more);
   useEffect(() => {
@@ -133,6 +136,7 @@ export function AskCard({
 
   // Restores focus only if this card held it, and not when another card takes its place.
   useEffect(() => {
+    if (inline) return;
     const previous = document.activeElement;
     return () => {
       const active = document.activeElement;
@@ -146,7 +150,7 @@ export function AskCard({
   // A frame later, once the composer has released the caret; the panel rather than an option, so the request is announced.
   useEffect(() => {
     const panel = panelRef.current;
-    if (panel === null) return;
+    if (panel === null || inline) return;
     const frame = requestAnimationFrame(() => {
       if (panel.contains(document.activeElement)) return;
       if (focusWorthKeeping(document.activeElement)) return;
@@ -159,8 +163,8 @@ export function AskCard({
   const [spoken, setSpoken] = useState("");
   const waiting = `${title} — ${agent === undefined || agent.length === 0 ? "the agent" : agent} is waiting for an answer`;
   useEffect(() => {
-    setSpoken(waiting);
-  }, [waiting]);
+    if (!inline) setSpoken(waiting);
+  }, [waiting, inline]);
 
   // No grown target: at this spacing it would reach onto the neighbour's face.
   const toggle = (
@@ -177,8 +181,8 @@ export function AskCard({
   // Cancel only on the open card: a one-line bar must not end a tool call.
   const controls = (withCancel: boolean): ReactNode => (
     <div className="flex shrink-0 items-center gap-1">
-      {more > 0 && <MoreWaiting count={more} />}
-      {toggle}
+      {more > 0 && !inline && <MoreWaiting count={more} />}
+      {!inline && toggle}
       {withCancel && cancel}
     </div>
   );
@@ -204,8 +208,8 @@ export function AskCard({
 
   // No z-index: a positive one would outrank the composer's menus, trapped in its backdrop-blur context.
   return (
-    <div className={`pointer-events-none absolute inset-0 ${COLUMN} flex flex-col justify-end px-4 pb-2`}>
-      {collapsed ? (
+    <div className={inline ? "relative w-full" : `pointer-events-none absolute inset-0 ${COLUMN} flex flex-col justify-end px-4 pb-2`}>
+      {collapsed && !inline ? (
         <div
           ref={panelRef}
           role="dialog"
@@ -227,7 +231,7 @@ export function AskCard({
           role="dialog"
           aria-labelledby={headingId}
           tabIndex={-1}
-          className={`animate-rise pointer-events-auto flex w-full ${BOX_MAX[size]} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl outline-none`}
+          className={`pointer-events-auto flex w-full ${inline ? "" : `animate-rise ${BOX_MAX[size]} shadow-2xl`} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface outline-none`}
         >
           <div className="flex shrink-0 items-start gap-1 px-3 pt-2.5 pb-2">
             <div className="mt-1 min-w-0 flex-1">

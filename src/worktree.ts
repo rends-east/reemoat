@@ -126,6 +126,8 @@ export interface CreateWorkspaceOptions {
   worktreeRoot: string;
   branchPrefix: string;
   branchHint?: string | null;
+  /** A branch that already exists, checked out as it is rather than made: a task's code that came from another machine (Q2.269). */
+  from?: string | null;
   runner: GitExec;
 }
 
@@ -477,17 +479,32 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
     );
   }
 
-  const branch = await pickBranch(options, repoRoot, warnings, runner);
+  const existing = options.from?.trim() || null;
+  const branch = existing ?? (await pickBranch(options, repoRoot, warnings, runner));
   // A sha, never HEAD: the source checkout's HEAD may move before the add.
-  const baseCommit = info.headCommit;
+  let baseCommit = info.headCommit;
 
   try {
-    await runner.run(
-      // Independent of the user's worktree.guessRemote and branch.autoSetupMerge.
-      ["worktree", "add", "--no-track", "--no-guess-remote", "-b", branch, "--", root, baseCommit],
-      { dir: repoRoot, timeoutMs: GIT_TIMEOUT_MUTATE_MS, maxBytes: GIT_MAX_LIST_BYTES },
-    );
+    if (existing !== null) {
+      await runner.run(["check-ref-format", "--branch", existing], structural(repoRoot));
+      baseCommit = textOf(
+        await runner.run(["rev-parse", "--verify", "-q", `refs/heads/${existing}`], { dir: repoRoot, timeoutMs: GIT_TIMEOUT_MUTATE_MS, maxBytes: GIT_MAX_LIST_BYTES }),
+      ).trim();
+      // No -b: the branch is the one that came, and this worktree is where it is checked out here.
+      await runner.run(["worktree", "add", "--no-guess-remote", "--", root, existing], {
+        dir: repoRoot,
+        timeoutMs: GIT_TIMEOUT_MUTATE_MS,
+        maxBytes: GIT_MAX_LIST_BYTES,
+      });
+    } else {
+      await runner.run(
+        // Independent of the user's worktree.guessRemote and branch.autoSetupMerge.
+        ["worktree", "add", "--no-track", "--no-guess-remote", "-b", branch, "--", root, baseCommit],
+        { dir: repoRoot, timeoutMs: GIT_TIMEOUT_MUTATE_MS, maxBytes: GIT_MAX_LIST_BYTES },
+      );
+    }
   } catch (error) {
+    if (error instanceof WorktreeError) throw error;
     throw classifyAddFailure(error, branch, options.branchPrefix, root);
   }
 
@@ -505,7 +522,8 @@ export async function createWorkspace(options: CreateWorkspaceOptions): Promise<
       mode: "worktree",
       root,
       requestedCwd: options.cwd,
-      git: { repoRoot, commonDir, branch, createdBranch: true, baseCommit },
+      // A branch that came from elsewhere is never this session's to delete.
+      git: { repoRoot, commonDir, branch, createdBranch: existing === null, baseCommit },
       plainReason: null,
       createdAt: Date.now(),
     },

@@ -79,6 +79,9 @@
 # source by the gate build, because `machine.ts` imports it and there is no build
 # step — the package is consumed as source. Nothing in the runtime image reads it.
 !packages/protocol/package.json
+# The board package, for the gate's sake as the crypto package is: its manifest for --frozen-lockfile, its source for the build.
+!packages/board/package.json
+!packages/board/src
 !packages/protocol/src
 !packages/web/package.json
 !packages/web/tsconfig.json

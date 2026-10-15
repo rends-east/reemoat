@@ -1134,6 +1134,13 @@ check(
   ),
   true,
 );
+check(
+  "the board package is carried the same way, manifest and sources",
+  /join\(stageDir, "node_modules", "@reemoat", "board"\)/.test(stage) &&
+    /cpSync\(join\(repoRoot, "packages", "board", "package\.json"\), join\(board, "package\.json"\)\)/.test(stage) &&
+    /cpSync\(join\(repoRoot, "packages", "board", "src"\), join\(board, "src"\), \{\s*recursive: true,\s*dereference: true,\s*\}\)/.test(stage),
+  true,
+);
 // Value imports only: `import type` is erased and requires nothing at runtime.
 const importsProtocolAtLoad = (source: string): boolean =>
   source

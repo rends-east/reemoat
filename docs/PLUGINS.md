@@ -702,6 +702,34 @@ somebody has to scroll.
 - **An icon.** A contributed harness is drawn as a letter in the app's own weight.
 - **A binary inside the archive.** `PATH` only.
 
+## Deciding where a task goes: a classifier
+
+From plugin API 6 a plugin may add a **classifier**: something a role on a task board
+names as its agent, which is asked where a task goes next and can do nothing else.
+
+```json
+"api": 6,
+"contributes": { "classifiers": [{ "id": "jev", "name": "Jev" }] }
+```
+
+A board then writes `roles: { quick: { agent: jev, min_confidence: 0.8 } }` and puts
+`quick` in a column's `decide`. When the ladder reaches it, the daemon calls your `ask`
+export with the column's exits and what the column lets a judge see:
+
+```js
+export async function ask(ctx, { exits, context }) {
+  // exits: [{ name, means, label }]; context: { brief?, summary?, report?, last_message?, diff_stat?, diff? }
+  return { exit: "ship", confidence: 0.91 }; // or { exit: "stay" }, or { exit: null }
+}
+```
+
+An exit the column does not have, any other shape, a throw, or no answer in **10 seconds**
+is an abstention, and so is a confidence under the role's `min_confidence`; the next
+judge on the ladder decides. Named to *run* a column, a classifier is no executor, and the
+task waits for its person. It reaches a service with `ctx.net.fetch` like any plugin, so
+the hosts it calls are in `net` and its person sees them before installing it. Up to 8
+per plugin; an id is 1 to 32 of a-z, 0-9 and -.
+
 ## What a plugin is trusted with
 
 Said plainly, because the alternative is somebody assuming otherwise.

@@ -27,6 +27,17 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **A board you write.** The board's columns, what runs in each, who decides where a task
+  goes next and on which machine are one YAML document, with every refusal named by its
+  line. Today's four columns are its default. The daemons move tasks by it whether or not
+  the app is open: a run starts on entry, ends on its agent's report, and leaves by its
+  one exit or by a ladder of judges — the agent itself, rules, another model asked once,
+  a plugin's classifier, then you. A question holds the task and is answered from the
+  task's feed or its chat alike; a turn that ends with no report stops it for you. A run
+  pinned to another machine takes the task there with its code, as commits on the task's
+  branch, and back. Agents can read, check, walk and propose a board.
+  `pnpm boardcheck` drives the rules by table.
+
 - **Tasks, and a board of them.** *Board* leads the machines where *All* stood: on it,
   every machine's tasks; a machine's own page holds its conversations. A task is a title,
   a description, who holds it and the conversations working on it, kept on a machine.

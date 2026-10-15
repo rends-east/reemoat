@@ -13,6 +13,7 @@ import { modelScopesControls, questionElicitation } from "./acp/cursor.js";
 import { BUILTIN_CATALOGUE, type MachineCatalogue, type SystemId } from "./acp/systems.js";
 import { resolveCwd } from "./browse.js";
 import {
+  type BoardProposedEvent,
   MemoryEventStore,
   SessionLog,
   clampBlob,
@@ -1229,6 +1230,11 @@ export class ManagedSession {
 
   get terminal(): boolean {
     return this.exitRecord !== null;
+  }
+
+  /** Turns this session has ended, a cut one included: the board reads a run's end off it (Q2.264). */
+  get turnsEnded(): number {
+    return this.turn === null ? this.turnCounter : this.turnCounter - 1;
   }
 
   get resumable(): boolean {
@@ -2990,6 +2996,14 @@ export class ManagedSession {
     return appended !== null;
   }
 
+  /** board_propose: one card with the board the agent wrote; nothing is applied until its person presses Apply (Q2.268). */
+  proposeBoard(event: Omit<BoardProposedEvent, "type">): boolean {
+    if (this.terminal || this.stopRequested) return false;
+    const appended = this.safeAppend({ type: "board_proposed", ...event });
+    this.touchSafe();
+    return appended !== null;
+  }
+
   /**
    * ask_question's card. Answered within `waitMs` it is the call's own result, as every other harness's question is; past that
    * the call returns and the card stays, to be answered by a message (Q2.250, Q2.251). `named` is the call the MCP request says it is.
@@ -3304,6 +3318,8 @@ export interface CreateSessionOptions {
   worktree?: WorktreePolicy;
   /** Client-supplied branch name. Validated by git before use. */
   branch?: string | null;
+  /** An existing branch to check out rather than make one: the board's code from another machine. */
+  from?: string | null;
   /** Who asked, when not a person: passed to observers, never stored, and never read from a request body. */
   origin?: string | null;
   /** Overrides the daemon-wide worktree root; the offline drivers use it. */
@@ -3847,6 +3863,7 @@ export class SessionRegistry {
       worktreeRoot: options.worktreeRoot ?? this.policy.worktreeRoot,
       branchPrefix: this.policy.branchPrefix,
       branchHint: options.branch ?? null,
+      from: options.from ?? null,
       // Runs the repository's own hooks and filters, as this user.
       runner: this.runtime.git(),
     });
