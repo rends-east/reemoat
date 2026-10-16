@@ -197,7 +197,7 @@ function boardWords(board: Board): string {
       const what = run.skill !== null ? `/${run.skill}` : run.prompt !== null ? "its own prompt" : "the brief or the return hint";
       lines.push(
         `- ${column.id} "${column.title}": runs ${run.role ?? "the task's own agent"} with ${what} in ${run.conversation === "new" ? "a new" : "its last"} ` +
-          `conversation, done on ${run.doneWhen === "turn" ? "its turn's end" : "its report"}${column.limit === null ? "" : `, ${column.limit} at once`}; ` +
+          `conversation${run.code === "none" ? " in an empty folder, with no code" : ""}, done on ${run.doneWhen === "turn" ? "its turn's end" : "its report"}${column.limit === null ? "" : `, ${column.limit} at once`}; ` +
           `${exits.length === 0 ? "no exits" : `exits ${exits}, decided by ${judges}`}.`,
       );
     } else {

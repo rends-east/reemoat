@@ -4,6 +4,7 @@ import {
   applyStep,
   boardHash,
   columnById,
+  columnCode,
   columnForStatus,
   columnHolder,
   DEFAULT_BOARD,
@@ -64,7 +65,7 @@ import {
   type TaskRecord,
   type TaskStore,
 } from "../tasks/store.js";
-import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { branchFor, TaskCodeOps } from "./code.js";
@@ -165,6 +166,8 @@ export interface BoardEngineOptions {
   /** The owner's other machines a run may go to; absent, every run stays here. */
   fleet?: (() => Promise<FleetMachine[]>) | null;
   send?: FleetSend | null;
+  /** Where a run of a `code: none` column gets its empty folder; absent, such a run fails to start. */
+  codelessRoot?: string | null;
 }
 
 export class BoardEngine {
@@ -742,7 +745,7 @@ export class BoardEngine {
         const run = task.run!;
         let ended = task;
         const workdir = record.flow.workdir;
-        if (workdir !== null && task.code !== null && run.executor !== null) {
+        if (workdir !== null && task.code !== null && run.executor !== null && columnCode(board, run.column) === "task") {
           const committed = await this.code.controlCommit(workdir, `board: ${run.column} #${run.n} ${this.label(run.executor)}`);
           const diff = run.startHead !== null && committed.head !== null ? await this.code.diffStat(workdir, run.startHead, committed.head) : null;
           ended = { ...task, run: { ...run, diff }, code: { ...task.code, head: committed.head, holder: this.machineKey } };
@@ -811,7 +814,17 @@ export class BoardEngine {
           return false;
         }
         const name = this.fleetName(next.to);
-        const written = this.writeTask(record, applyStep(task, board, next, now));
+        let leaving = record;
+        if (columnCode(board, task.column) === "task") {
+          const ready = await this.codeLeaves(record, name);
+          if (typeof ready === "string") {
+            const written = this.writeTask(record, applyStep(task, board, { kind: "ask", reason: "code_dirty", detail: ready }, now));
+            this.event(written, "asked", ready);
+            return false;
+          }
+          leaving = ready;
+        }
+        const written = this.writeTask(leaving, applyStep(this.boardTask(leaving), board, next, now));
         this.save({ ...written, flow: { ...written.flow, handoff: { to: next.to, name, since: now, tries: 0, nextAt: now, epoch: written.flow.epoch + 1 } } });
         this.event(written, "moved", `the run goes to ${this.label(next.executor)}: ${next.reason}`, { executor: this.label(next.executor) });
         await this.sendHandoff(record.id);
@@ -829,8 +842,21 @@ export class BoardEngine {
   private async launch(record: TaskRecord, next: Step & { kind: "start" }): Promise<{ managed: ManagedSession; started: { session: string; startSeq: number; logFrom: number; startHead: string | null } }> {
     let managed: ManagedSession;
     let workdir = record.flow.workdir;
+    const codeless = columnCode(this.state.board, record.flow.column) === "none";
     if (next.session !== null && this.registry.get(next.session) !== undefined) {
       managed = this.registry.get(next.session)!;
+    } else if (codeless) {
+      const asked = this.launchWith.get(record.id);
+      this.launchWith.delete(record.id);
+      managed = await this.registry.create({
+        agent: next.executor.agent,
+        customAgent: next.executor.customAgent,
+        cwd: await this.codelessFolder(record.id),
+        worktree: "never",
+        nickname: asked?.nickname ?? null,
+        origin: "board",
+      });
+      if (managed.title === null) this.registry.setMeta(managed, { title: record.title });
     } else {
       const first = workdir === null && record.flow.runs === 0 && record.flow.code === null;
       // Code that came from another machine is checked out here once, on its own branch, in this machine's copy of the project.
@@ -872,7 +898,7 @@ export class BoardEngine {
     if (next.model !== null) await this.pickModel(record, managed, next.model);
     const startSeq = managed.turnsEnded;
     const logFrom = managed.log.stats().lastSeq;
-    const startHead = workdir === null ? null : await this.code.head(workdir);
+    const startHead = codeless || workdir === null ? null : await this.code.head(workdir);
     const ready = await this.registry.readyForMessage(managed, "person");
     if (ready !== "ready") throw new Error(ready === "workspace_missing" ? "its folder is gone" : "its folder is not answering");
     const note = { text: next.note, mentions: [] };
@@ -1041,10 +1067,39 @@ export class BoardEngine {
     return out;
   }
 
+  /** Where a run without code works: one empty folder per task, made by this daemon and kept for the task's next such run. */
+  private async codelessFolder(taskId: string): Promise<string> {
+    const root = this.options.codelessRoot;
+    if (root == null) throw new Error("this daemon has no folder for a run without code");
+    const folder = join(root, taskId);
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    return folder;
+  }
+
   // Between machines (Q2.269).
 
   private fleetName(machine: string): string {
     return this.fleetCache.find((one) => one.offer.key === machine)?.offer.name ?? machine;
+  }
+
+  /**
+   * Before a run that needs the code leaves for another machine: what is left in the worktree is committed, and then all of it
+   * must be on the task's branch, or it stays here for its person (Q2.271). Only the machine holding the code can tell.
+   */
+  private async codeLeaves(record: TaskRecord, to: string): Promise<TaskRecord | string> {
+    const code = record.flow.code;
+    const workdir = record.flow.workdir;
+    if (code === null || code.holder !== this.machineKey || workdir === null) return record;
+    const before = await this.code.head(workdir);
+    const committed = await this.code.controlCommit(workdir, `board: before the move to ${to}`);
+    if (committed.refused !== null) return `the task's code here could not be committed, so it does not go to ${to}: ${committed.refused}`;
+    const unsaved = await this.code.unsaved(workdir, code.branch);
+    if (unsaved !== null) return `the task's code here is not all on its branch, so it does not go to ${to}: ${unsaved}`;
+    if (committed.head === null || committed.head === code.head) return record;
+    const moved: TaskRecord = { ...record, flow: { ...record.flow, code: { ...code, head: committed.head } } };
+    this.save(moved);
+    if (committed.head !== before) this.event(moved, "note", `what was left in the task's worktree was committed before the move to ${to}`);
+    return moved;
   }
 
   /** What crosses with the task: its record and flow, the feed's last entries and some history, under the board it was placed by. */
@@ -1169,7 +1224,7 @@ export class BoardEngine {
       const record = this.store.get(id);
       const code = record?.flow.code;
       if (record == null || code == null || this.options.send == null) return;
-      const fail = (reason: "code_diverged" | "code_not_portable", detail: string): void => {
+      const fail = (reason: "code_diverged" | "code_not_portable" | "code_dirty", detail: string): void => {
         const latest = this.store.get(id);
         if (latest === null) return;
         this.writeTask(latest, applyStep(this.boardTask(latest), this.state.board, { kind: "ask", reason, detail }, this.now()));
@@ -1193,7 +1248,10 @@ export class BoardEngine {
           if (latest !== null) this.writeTask(latest, applyStep(this.boardTask(latest), this.state.board, { kind: "wait", reason: "code_holder_offline", detail: `waiting for ${this.fleetName(code.holder)}, which has the code` }, this.now()));
           return;
         }
-        const body = answer.body as { current?: unknown; head?: unknown; size?: unknown; piece?: unknown; done?: unknown; error?: { message?: unknown } } | null;
+        const body = answer.body as { current?: unknown; head?: unknown; size?: unknown; piece?: unknown; done?: unknown; error?: { code?: unknown; message?: unknown } } | null;
+        if (body?.error?.code === "code_dirty") {
+          return fail("code_dirty", `the task's code on ${this.fleetName(code.holder)} is not all on its branch: ${String(body.error.message)}`);
+        }
         if (answer.status !== 200 || body === null) return fail("code_diverged", `the code could not be fetched: ${String(body?.error?.message ?? answer.status)}`);
         if (typeof body.head === "string") head = body.head;
         if (body.current === true) break;
@@ -1219,7 +1277,12 @@ export class BoardEngine {
         }
       }
       const latest = this.store.get(id);
-      if (latest !== null) this.save({ ...latest, flow: { ...latest.flow, moving: null } });
+      if (latest !== null) {
+        // The holder's branch is the code: a commit made there after its run ended is the head now, or this machine asks for it forever.
+        const held = latest.flow.code;
+        const settled = held !== null && head !== null && held.head !== head ? { ...held, head } : held;
+        this.save({ ...latest, flow: { ...latest.flow, code: settled, moving: null } });
+      }
     } finally {
       this.syncing.delete(id);
       if (folder !== null) await rm(folder, { recursive: true, force: true }).catch(() => undefined);
@@ -1234,6 +1297,11 @@ export class BoardEngine {
     const workdir = record?.flow.workdir ?? stone?.workdir ?? null;
     const branch = record?.flow.code?.branch ?? stone?.branch ?? null;
     if (workdir === null || branch === null) return { status: 404, body: { error: { code: "no_code", message: "this machine holds no code for that task" } } };
+    // Work that is not on the branch would be left behind without a word: the receiver's person is told instead (Q2.271).
+    if (offset === 0) {
+      const unsaved = await this.code.unsaved(workdir, branch);
+      if (unsaved !== null) return { status: 409, body: { error: { code: "code_dirty", message: unsaved } } };
+    }
     const key = `${id}\0${have ?? ""}`;
     let held = this.bundles.get(key);
     if (held === undefined || this.now() - held.at > CODE_CACHE_MS) {

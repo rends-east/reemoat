@@ -201,6 +201,8 @@ export interface TaskDeskOptions {
   judges?: BoardJudges | null;
   /** The folder the config agent runs in; absent, this desk starts none (Q2.270). */
   boardAgentRoot?: string;
+  /** Where a run of a `code: none` column gets its empty folder, one per task (Q2.271). */
+  codelessRoot?: string;
 }
 
 export type MoveResult = { ok: true; task: TaskRecord } | { ok: false; code: "task_moved" | "task_working" | "no_column" | "no_exit"; message: string };
@@ -234,6 +236,7 @@ export class TaskDesk {
       judges: options.judges ?? null,
       fleet: options.peers?.handoffLinks === undefined ? null : () => this.fleet(),
       send: options.peers?.request === undefined ? null : (machine, request, timeoutMs) => this.send(machine, request, timeoutMs),
+      codelessRoot: options.codelessRoot ?? null,
     });
     this.engine.start();
   }

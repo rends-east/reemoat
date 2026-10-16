@@ -16,6 +16,8 @@ export type Bundled = { kind: "bundle"; file: string; size: number; head: string
 const GIT_MAX_BYTES = 4 * 1024 * 1024;
 /** Paths kept of one run's diff for the rules: enough to match against, never the whole tree. */
 const MAX_DIFF_PATHS = 500;
+/** Uncommitted paths a refused move names, so its person knows where to look. */
+const MAX_NAMED_PATHS = 5;
 
 export function branchFor(prefix: string, taskId: string): string {
   return `${prefix}/t-${taskId.replace(/^t_/, "")}`;
@@ -81,6 +83,23 @@ export class TaskCodeOps {
       return { head: await this.head(dir), refused: null };
     } catch (error) {
       return { head: await this.head(dir), refused: describeGit(error) };
+    }
+  }
+
+  /** What of a worktree's work its branch would not carry to another machine, in words; null when it carries all of it. */
+  async unsaved(dir: string, branch: string): Promise<string | null> {
+    try {
+      const lines = textOf(await this.run(dir, ["status", "--porcelain", "--untracked-files=all"])).split("\n").filter((line) => line.length > 0);
+      if (lines.length > 0) {
+        const paths = lines.slice(0, MAX_NAMED_PATHS).map((line) => line.slice(3));
+        return `${lines.length} file(s) not committed: ${paths.join(", ")}${lines.length > MAX_NAMED_PATHS ? ", …" : ""}`;
+      }
+      const head = await this.head(dir);
+      const tip = await this.branchHead(dir, branch);
+      if (head !== tip) return `its worktree is not on the task's branch ${branch}, so the work there is not on it`;
+      return null;
+    } catch (error) {
+      return `its worktree could not be read: ${describeGit(error)}`;
     }
   }
 

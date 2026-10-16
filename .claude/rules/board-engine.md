@@ -70,6 +70,9 @@ moves a task lives here or nowhere; `boardcheck` drives it by table, with no dae
   role names (code goes to work), else the code's holder (work goes to code), else this
   machine, the least busy, by name. Every choice is written to the history with its
   reason.
+- **`code: none` (Q2.271)**: no project asked of a machine, not drawn to the holder, nothing
+  fetched; it works in its task's folder under `codelessRoot`, makes no control commit, and
+  continues only a conversation of its own kind (`columnCode`), as a run with code does.
 - **Its message**: `/<skill> <args>`, else the column's prompt, else **the brief where it
   opens a conversation and the return hint where it continues one** — the spec says brief
   on the task's first run; a new conversation knows nothing, so it gets the brief and the
@@ -146,8 +149,13 @@ One session per account that writes the board for its person; Edit board is its 
 - **The code is a branch, never a folder.** The receiver asks the holder
   `GET /peer/tasks/:id/code?have=` and takes a bundle in 512 KiB pieces
   (`CODE_PIECE_BYTES`), 64 MiB at most; a worktree moves forward only and only when clean,
-  else `code_diverged`. A project that is no repository does not move
-  (`code_not_portable`). The holder answers from its tombstone too.
+  else `code_diverged`. A project that is no repository does not move once it has run
+  (`code_not_portable`), `code: none` or not. The holder answers from its tombstone too.
+- **Only what is on the branch crosses (Q2.271).** Before a handoff into a column with code
+  the holder commits what is left, then needs a clean tree on the branch (`codeLeaves`,
+  `unsaved`), else `code_dirty`: the task stays, its run failed so a Retry moves it again.
+  `codePiece` refuses the same way (`409 code_dirty`), and a receiver takes the holder's
+  answered head as `code.head`, or a commit made by hand there is asked for forever.
 - **Machines are matched by the project's identity** (its origin, `projectIdentity`), read
   from folders the daemon's own sessions and tasks used (`checkoutFor`).
 - **Gates**: the link must carry `task:handoff` (`HANDOFF_SCOPE`, minted only where both

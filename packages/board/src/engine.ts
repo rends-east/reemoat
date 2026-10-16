@@ -1,5 +1,5 @@
 // What happens to a task next, as one pure function of the task, its board and what the owning daemon sees.
-import { columnById, isFlow, roleByName, STAY, type Board, type Exit, type FlowColumn, type Role, type WorkColumn } from "./config.js";
+import { columnById, columnCode, isFlow, roleByName, STAY, type Board, type Exit, type FlowColumn, type Role, type WorkColumn } from "./config.js";
 import { firstMatch, type RuleFacts } from "./rules.js";
 import { renderTemplate, RETURN_BY_HAND_TEMPLATE, RETURN_TEMPLATE, type TemplateValues } from "./template.js";
 
@@ -289,7 +289,9 @@ function startStep(task: BoardTask, board: Board, column: WorkColumn, world: Wor
   const role = runRole(task, board, column);
   if (role === null) return { kind: "ask", reason: "no_agent", detail: "assign an agent" };
   if (isClassifier(role, world)) return { kind: "ask", reason: "judge_only", detail: `${role.agent} only decides; it cannot run a column's work` };
-  const placed = place({ role, conversation: column.run.conversation, column: column.id, task, world });
+  // A conversation is continued only by a run of the same kind: one in a worktree is no place for a run without code, nor the reverse.
+  const sessions = task.sessions.filter((link) => columnCode(board, link.column) === column.run.code);
+  const placed = place({ role, conversation: column.run.conversation, column: column.id, task: { ...task, sessions }, world, code: column.run.code });
   if (!placed.ok) {
     const waited = task.wait !== null && task.wait.reason === "no_executor" && task.wait.entry === task.entry ? world.now - task.wait.since : 0;
     if (waited >= NO_EXECUTOR_ASK_MS) return { kind: "ask", reason: "no_executor", detail: `nothing could run ${placed.wanted} for a day` };
@@ -300,7 +302,7 @@ function startStep(task: BoardTask, board: Board, column: WorkColumn, world: Wor
     const taken = world.busy(column.id, world.self, task.id) + world.ahead(task, column.id, world.self);
     if (taken >= column.limit) return { kind: "wait", reason: "limit", detail: `${column.title} runs ${column.limit} at once here` };
   }
-  if (!world.hasCode(task)) {
+  if (column.run.code === "task" && !world.hasCode(task)) {
     const holder = task.code === null ? undefined : world.machines.find((machine) => machine.key === task.code!.holder);
     if (holder === undefined || !holder.online) return { kind: "wait", reason: "code_holder_offline", detail: `waiting for ${holder?.name ?? "the machine with the code"}` };
     return { kind: "sync" };
@@ -459,6 +461,8 @@ export interface PlaceInput {
   column: string;
   task: BoardTask;
   world: World;
+  /** Absent is `task`. A run with no code needs no checkout of the project and is not drawn to the code's machine. */
+  code?: "task" | "none";
 }
 
 export type Placement =
@@ -494,16 +498,19 @@ export function executorName(executor: Executor, machines: readonly MachineOffer
 
 /**
  * One executor for a run, deterministically: the conversation it continues, else the first machine the role is
- * pinned to (code goes to work), else where the code is (work goes to code), else the owner, the least busy, by name.
+ * pinned to (code goes to work), else where the code is (work goes to code) for a run that needs it, else the owner, the least
+ * busy, by name.
  */
 export function place(input: PlaceInput): Placement {
   const { role, task, world } = input;
+  const needsCode = input.code !== "none";
   const allowed = role.on === null ? null : role.on.map((name) => machineNamed(world.machines, name)).filter((one): one is MachineOffer => one !== undefined);
   const candidate = (machine: MachineOffer): AgentOffer | null => {
     if (!machine.online) return null;
     if (allowed !== null && !allowed.includes(machine)) return null;
     const project = task.project;
-    const hasProject = project === null || machine.projects === null || machine.projects.includes(project) || task.code?.holder === machine.key;
+    const hasProject =
+      !needsCode || project === null || machine.projects === null || machine.projects.includes(project) || task.code?.holder === machine.key;
     return hasProject ? offerFor(machine, role) : null;
   };
 
@@ -537,7 +544,7 @@ export function place(input: PlaceInput): Placement {
       const placed = pick(machine, "the role is pinned there");
       if (placed !== null) return placed;
     }
-  } else if (task.code !== null) {
+  } else if (task.code !== null && needsCode) {
     const placed = pick(world.machines.find((machine) => machine.key === task.code!.holder), "the code is there");
     if (placed !== null) return placed;
   }

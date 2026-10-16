@@ -42,7 +42,7 @@ export const BOARD_FIELDS = {
   top: ["version", "intake", "budget", "roles", "columns"],
   role: ["agent", "model", "on", "min_confidence"],
   column: ["id", "title", "show", "run", "next", "decide", "sees", "holder", "limit", "final"],
-  run: ["role", "skill", "args", "prompt", "conversation", "done_when"],
+  run: ["role", "skill", "args", "prompt", "conversation", "done_when", "code"],
   exit: ["to", "means", "label"],
   judge: ["rules"],
 } as const;
@@ -74,6 +74,14 @@ export interface Run {
   prompt: Template | null;
   conversation: "continue" | "new";
   doneWhen: "report" | "turn";
+  /** `none` runs in an empty folder: no code is fetched, committed or carried for it (Q2.271). */
+  code: "task" | "none";
+}
+
+/** Whether a run of this column works in the task's code; a waiting column, a lost one and a hand-attached conversation do. */
+export function columnCode(board: Board, column: string | null): Run["code"] {
+  const found = column === null ? null : columnById(board, column);
+  return found !== null && found.kind === "work" ? found.run.code : "task";
 }
 
 interface ColumnBase {
@@ -537,7 +545,7 @@ function readRun(pair: Pair, path: string, roles: Role[], refuse: Refuse): Run |
   }
   const f = empty ? new Map<string, Pair>() : fields(node as YAMLMap, path, BOARD_FIELDS.run, refuse);
   let ok = true;
-  const run: Run = { role: null, skill: null, args: null, prompt: null, conversation: "continue", doneWhen: "report" };
+  const run: Run = { role: null, skill: null, args: null, prompt: null, conversation: "continue", doneWhen: "report", code: "task" };
 
   const rolePair = f.get("role");
   if (rolePair !== undefined) {
@@ -599,6 +607,15 @@ function readRun(pair: Pair, path: string, roles: Role[], refuse: Refuse): Run |
       refuse(donePair.value as Node, join(path, "done_when"), "done_when is report or turn");
       ok = false;
     } else run.doneWhen = value;
+  }
+
+  const codePair = f.get("code");
+  if (codePair !== undefined) {
+    const value = stringOf(codePair.value);
+    if (value !== "task" && value !== "none") {
+      refuse(codePair.value as Node, join(path, "code"), "code is task or none");
+      ok = false;
+    } else run.code = value;
   }
   return ok ? run : null;
 }

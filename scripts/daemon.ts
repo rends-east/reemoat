@@ -386,6 +386,7 @@ const tasks = new TaskDesk({
   configs: stores.boards,
   // An empty folder this daemon owns, as the ask root is: the config agent writes a board, never a file (Q2.270).
   boardAgentRoot: join(stateHome, "board-agent"),
+  codelessRoot: join(stateHome, "board-runs"),
   customAgents: () => stores.customAgents.list().map((one) => ({ id: one.id, name: one.name, harness: one.harness })),
   onWarning: (detail: string) => console.error(`board: ${detail}`),
   // A role is asked on a bare session that belongs to no list, or by a plugin's classifier; the host opens below, so both are read late.

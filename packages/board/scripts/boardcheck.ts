@@ -325,6 +325,32 @@ process.stdout.write("\nstep, by table\n");
 
   const handoff = step(task({ column: "review", run: run({ column: "review" }) }), PINNED, world({ machines: [MAC, SERVER] }));
   check("the handoff names the pinned machine and why", handoff.kind === "handoff" ? [handoff.to, handoff.reason] : null, [SERVER.key, "the role is pinned there"]);
+
+  // A deploy pinned to a server that has no copy of the project, and notes in the task's own conversation, neither needing code (Q2.271).
+  const SHIP_TEXT =
+    "version: 1\nroles:\n  coder: { agent: claude }\n  deployer: { agent: claude, on: server }\ncolumns:\n  - { id: backlog, title: Backlog }\n" +
+    "  - { id: build, title: Build, run: { role: coder }, next: deploy }\n  - { id: deploy, title: Deploy, run: { role: deployer, code: none }, next: notes }\n" +
+    "  - { id: notes, title: Notes, run: { code: none } }\n";
+  const SHIP = parsed(SHIP_TEXT);
+  const SHIP_PINNED_CODER = SHIP_TEXT.replace("coder: { agent: claude }", "coder: { agent: claude, on: server }");
+  check("code is task unless a column says none", SHIP.columns.map((column) => (column.kind === "work" ? column.run.code : null)), [null, "task", "none", "none"]);
+  const bare = (column: string, over: Partial<BoardTask> = {}): BoardTask => task({ column, run: run({ column }), ...over });
+  const elsewhere = { repo: "github.com/rends-east/reemoat", branch: "reemoat/t-1", base: "c0", head: "c1", holder: SERVER.key };
+  const noProject = { ...SERVER, projects: [] };
+  check("a run without code goes to its pinned machine, which has no copy of the project", kindOf(step(bare("deploy"), SHIP, world({ machines: [MAC, noProject] }))), "handoff");
+  check("a run with code would wait for it there", kindOf(step(bare("build"), parsed(SHIP_PINNED_CODER), world({ machines: [MAC, noProject] }))), "wait:no_executor");
+  check("a run without code starts with nothing fetched, the code being elsewhere", kindOf(step(bare("notes", { code: elsewhere }), SHIP, world({ machines: [MAC, SERVER], hasCode: () => false }))), "start");
+  const link = (id: string, column: string, attachedAt: number) => ({ id, column, executor: { agent: "claude", customAgent: null, machine: MAC.key }, attachedAt });
+  const continued = (one: BoardTask, ids: string[]): unknown => {
+    const next = step(one, SHIP, world({ list: ids.map((id) => session({ id })) }));
+    return next.kind === "start" ? next.session : kindOf(next);
+  };
+  check("a run without code never continues a conversation in the worktree", continued(bare("notes", { sessions: [link("s1", "build", 1)] }), ["s1"]), null);
+  check("but continues one of another run without code", continued(bare("notes", { sessions: [link("s1", "build", 1), link("s2", "deploy", 2)] }), ["s1", "s2"]), "s2");
+  check("and a run with code never continues one in an empty folder", continued(bare("build", { sessions: [link("s2", "deploy", 2)] }), ["s2"]), null);
+
+  const dirty = applyStep(bare("build"), SHIP, { kind: "ask", reason: "code_dirty", detail: "1 file(s) not committed: a.ts" }, 5);
+  check("work left out of the branch fails the run, which is what a person retries", [dirty.run?.state, dirty.ask?.reason, kindOf(step(dirty, SHIP, world()))], ["failed", "code_dirty", "nothing"]);
   const lost = step(task({ column: "gone" }), LOOP, world());
   check("a lost column's task goes to intake by the board's own hand", lost, { kind: "move", to: "backlog", exit: null, by: { kind: "config" } });
 }
@@ -456,6 +482,16 @@ process.stdout.write("\nplace, by table\n");
     "nor one without the project",
     where({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, projects: ["github.com/other/repo"] }] }) }),
     "claude@server",
+  );
+  check(
+    "unless the run needs no code",
+    where({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, projects: ["github.com/other/repo"] }] }), code: "none" }),
+    [SERVER.key, null, "the role is pinned there", null],
+  );
+  check(
+    "and such a run is not drawn to the code",
+    where({ role: role(), conversation: "new", column: "b", task: task({ code: { repo: "r", branch: "b", base: "c", head: "d", holder: SERVER.key } }), world: world({ machines: two }), code: "none" }),
+    [MAC.key, null, "the task is here", null],
   );
   const custom: MachineOffer = { ...MAC, agents: [CLAUDE, { id: "ca_1", name: "Reviewer", kind: "custom", harness: "codex" }] };
   const byName = place({ role: role({ agent: "reviewer" }), conversation: "new", column: "b", task: task(), world: world({ machines: [custom] }) });

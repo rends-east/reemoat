@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 128 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 129 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 490 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 89 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 165 | `###` |
-| | | **1210** | |
+| | | **1211** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1210 rather than the 604
+dividers. So the count is over **both** depths, and it says 1211 rather than the 605
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -10558,7 +10558,7 @@ continues its own conversation on its worktree moved forward; a stale epoch and 
 without the scope are refused; a move to a machine that is away waits, and goes once it is
 back. Not through a relay: the bundle's weight and time there are Q7.163's.
 
-**Status.** Current.
+**Status.** Current. What may cross, and a run that needs no code, are Q2.271.
 
 ### Q2.270 — Who writes the board for its person, and what may reach that agent?
 
@@ -10615,6 +10615,59 @@ at create and at rename; messaging refused and its tools absent; the note on its
 message and on no other session's; an apply on a moved revision refused, one on the current
 one applied, sent, and kept by the other machine; a replacement that will not start putting
 the old one back; and a restart renaming a hand-named `config`.
+
+**Status.** Current.
+
+### Q2.271 — What crosses to another machine with a task, and what does a run that needs no code take?
+
+**Question.** The owner, 2026-10-16, reading Q2.269 back: a control commit a hook refused
+left the work out of the branch and the task moved anyway, so a reviewer elsewhere read code
+without the last change and a deploy shipped it; and a machine that does no code work (a
+deploy box with no checkout) could take no run at all, since `place` wanted the project
+there and the run fetched the branch first. Asked, they chose: the person sorts a refusal
+out, nothing retries on its own; uncommitted work stays on its machine only where code
+would cross; and a column may say it needs no code.
+
+**Decision.**
+
+- **`code: none` on a column's `run`** (`Run.code`, default `task`). Such a run works in an
+  empty folder of its task's (`codelessRoot`, `$REEMOAT_HOME/board-runs/<task id>`, kept for
+  its next such run), with no worktree; `place` asks no project of a machine for it and does
+  not draw it to the code's holder; `startStep` fetches nothing; its end makes no control
+  commit and leaves the holder where it was. A conversation is continued only by a run of the
+  same kind (`columnCode` over the task's links), or a run with code would continue in an
+  empty folder and one without in a worktree.
+- **Only what is on the task's branch crosses, and a move that would leave work behind does
+  not happen.** Before a handoff into a column that needs the code, the machine holding it
+  commits what is left (`codeLeaves`, `board: before the move to <machine>`) and then
+  requires a clean tree with HEAD on the task's branch (`TaskCodeOps.unsaved`). Otherwise the
+  task stays, asked with `code_dirty` and the hook's words or the files; the run is marked
+  failed, so the task's page offers Retry, and a Retry is a move into the same column. A
+  move into a `code: none` column is never held back.
+- **The holder refuses the same way** (`codePiece`, `409 code_dirty`), for a task that went
+  through a `code: none` column and then to a third machine: the receiver's person is told
+  which machine and which files.
+- **A receiver takes the holder's head as the task's** (`syncCode`): a commit made on the
+  holder after its run ended (the fix for a refusal, made by hand) moved the branch past
+  `code.head`, and the receiver asked for code it already had, answered "current", and asked
+  again, with no pause between.
+- **A folder that is no git repository still never moves once it has run**, `code: none` or
+  not: nothing names where its folder is, so a later run with code would start in the first
+  machine's path on another.
+
+**Rejected.** *An agent retry*, the run's own agent told the hook's words and given another
+turn: the owner's call was the person's. *`--no-verify` on the control commit*: it would
+always cross, past the hooks the person set, and a review and a deploy would get what failed
+them. *The check on every move*: a deploy of what is already pushed has nothing to wait for.
+
+**Measured.** `boardcheck`: the field and its refusal, placement without the project and
+away from the code, no fetch, continuation by kind, and `code_dirty` failing the run.
+`daemoncheck`, two daemons on stub agents and a refusing `pre-commit`: the task kept on the
+Mac with the hook's words and nothing on the server; retried with the hook gone, the leftover
+committed and the server holding it; a `code: none` run going with the work uncommitted, in
+its own folder with no branch fetched; the next column's fetch refused by the Mac, naming the
+file; and, committed by hand and retried, the run starting on the commit made by hand. With
+the head not taken from the holder, that last run never starts.
 
 **Status.** Current.
 
@@ -46454,6 +46507,14 @@ its edges.
   another machine's `/peer/tasks` does not yet retire an older one here.
 - **The switch to move tasks in the app's settings.** The control plane and the daemon
   carry `tasksMove`; nothing in the app sets it yet, and its default is on, as messaging's is.
+- **A first run on another machine starts in the first machine's path.** A task that has
+  never run carries no code, so `launch` opens its first run in `cwd` as the task names it,
+  and on a machine whose clone sits elsewhere that run fails. Read off the code, not driven:
+  the fleet driver's task always runs on the Mac first (Q2.271).
+- **A `code: none` folder is never removed.** One per task under `board-runs`, kept for the
+  task's next such run; a deleted or moved task leaves it, as it leaves its sessions.
+- **What a reviewer is told of the change.** A prompt can name the task and the last report,
+  not the branch or the commits a run went from and to.
 - **Out of the spec's scope**: a limit across the fleet, copies of tasks in waiting
   columns, machine tags, several boards, an order inside a column, a finger dragging a
   card, timers in columns.

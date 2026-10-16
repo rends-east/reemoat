@@ -119,7 +119,8 @@ export function applyStep(task: BoardTask, board: Board, step: Step, now: number
       return moveTask(task, board, step.to, step.exit, step.by, now);
     case "ask": {
       let run = task.run;
-      if (run !== null && step.reason === "run_failed") run = { ...run, state: "failed", endedAt: now };
+      // A code_dirty run never started; failed, it is what the task's page offers Retry on, which moves it in again.
+      if (run !== null && (step.reason === "run_failed" || step.reason === "code_dirty")) run = { ...run, state: "failed", endedAt: now };
       if (run !== null && step.reason === "no_report" && step.turn !== undefined) run = { ...run, stoppedAt: step.turn };
       return { ...task, run, ask: { reason: step.reason, entry: task.entry, at: now, detail: step.detail }, wait: null, moving: null };
     }

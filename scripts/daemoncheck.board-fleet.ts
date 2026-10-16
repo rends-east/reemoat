@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { REVIEW_LOOP_TEXT } from "@reemoat/board";
@@ -120,6 +120,8 @@ process.stdout.write("\nthe board across machines: the coder on a Mac, the revie
     hub: PeerHub;
     app: { fetch(request: Request): Response | Promise<Response> };
     down: boolean;
+    /** Where its runs without code get their folders. */
+    runs: string;
   }
   const machines = new Map<string, Machine>();
   const linkTo = (from: Machine, to: { id: string; name: string }, scopes: string[]): PeerLink => ({
@@ -137,7 +139,7 @@ process.stdout.write("\nthe board across machines: the coder on a Mac, the revie
   const skew = new Map<string, number>();
   const make = (id: string, name: string, other: { id: string; name: string }): Machine => {
     const registry = new SessionRegistry(new MemoryEventStore(), null, { worktreeRoot: tmp(`fleet-wt-${name}-`), branchPrefix: "reemoat", defaultMode: "auto" }, new FleetRuntime(), null);
-    const machine = { id, name, down: false } as Machine;
+    const machine = { id, name, down: false, runs: tmp(`fleet-runs-${name}-`) } as Machine;
     const network: PeerNetwork = {
       links: () => [linkTo(machine, other, scopesOf.get(id) ?? ["session:message", "task:handoff"])],
       request: async (link, request) => {
@@ -162,6 +164,7 @@ process.stdout.write("\nthe board across machines: the coder on a Mac, the revie
       configs: new MemoryBoardConfigStore(),
       tickMs: 0,
       machineName: name,
+      codelessRoot: machine.runs,
       now: () => Date.now() + (skew.get(id) ?? 0),
       // The server's harness, asked as a judge from the Mac's board, says ship.
       judges: { ask: async () => '{"exit": "ship", "confidence": 0.8}' },
@@ -313,6 +316,104 @@ process.stdout.write("\nthe board across machines: the coder on a Mac, the revie
   );
   const verdict = (await asked.json()) as { exit?: unknown; confidence?: unknown };
   check("a role asked on another machine answers from there, read as strictly as here", [asked.status, verdict.exit, verdict.confidence], [200, "ship", 0.8]);
+
+  process.stdout.write("  work left out of the branch, and a column that needs no code (Q2.271)\n");
+  // A commit hook that refuses, set on the Mac's clone and so on every worktree of it; an empty folder of hooks takes it back.
+  const hooks = tmp("fleet-hooks-");
+  writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\necho 'lint says no' >&2\nexit 1\n", { mode: 0o755 });
+  const noHooks = tmp("fleet-nohooks-");
+  git(macRepo, "config", "core.hooksPath", hooks);
+  mac.desk.engine.putBoard(
+    REVIEW_LOOP_TEXT.replace(
+      "  cheap:    { agent: claude, model: haiku }\n",
+      "  cheap:    { agent: claude, model: haiku }\n  maker:    { agent: claude, on: mac }\n  deployer: { agent: claude, on: server }\n  checker:  { agent: claude, on: server }\n",
+    ) +
+      "  - { id: make, title: Make, run: { role: maker }, next: ship }\n" +
+      "  - { id: ship, title: Ship, run: { role: deployer, code: none, done_when: turn }, next: verify }\n" +
+      "  - { id: verify, title: Verify, run: { role: checker, conversation: new, done_when: turn } }\n",
+    mac.desk.engine.current.revision,
+  );
+
+  const second = mac.desk.create({ title: "Add the changelog", brief: "Write CHANGES.md.", agent: "claude", customAgent: null, assignee: "agent", status: "ready", cwd: macRepo, key: null });
+  if (second === "full") throw new Error("daemoncheck: full");
+  const id2 = second.task.id;
+  mac.desk.move(id2, { to: "build" });
+  await mac.desk.engine.kick(id2);
+  const coder2 = await runOn(mac, id2);
+  const macWork2 = mac.desk.get(id2)!.flow.workdir!;
+  writeFileSync(join(macWork2, "CHANGES.md"), "a change\n");
+  await finish(mac, coder2, { summary: "Wrote CHANGES.md.", status: "review" });
+  await until(() => mac.desk.get(id2)?.flow.ask?.reason === "code_dirty");
+  const held = mac.desk.get(id2)!;
+  check(
+    "a hook that refuses the commit keeps the task on its machine, needing its person, with the hook's words",
+    [where(id2)?.name, held.flow.column, held.flow.run?.state, held.flow.ask?.detail.startsWith("the task's code here could not be committed, so it does not go to server:"), held.flow.ask?.detail.includes("lint says no")],
+    ["mac", "review", "failed", true, true],
+  );
+  check("and nothing of it reached the server", [server.desk.get(id2), git(serverRepo, "branch", "--list", held.flow.code!.branch)], [null, ""]);
+
+  git(macRepo, "config", "core.hooksPath", noHooks);
+  mac.desk.move(id2, { to: "review" });
+  await until(() => server.desk.get(id2)?.flow.run?.state === "working");
+  const serverWork2 = server.desk.get(id2)!.flow.workdir!;
+  check(
+    "fixed and retried, what was left is committed before the move, and the server has it",
+    [
+      where(id2)?.name,
+      mac.desk.tombstones().some((stone) => stone.id === id2),
+      server.desk.history(id2).some((one) => one.text === "what was left in the task's worktree was committed before the move to server"),
+      readFileSync(join(serverWork2, "CHANGES.md"), "utf8"),
+      git(serverWork2, "log", "-1", "--format=%s"),
+    ],
+    ["server", true, true, "a change\n", "board: before the move to server"],
+  );
+
+  git(macRepo, "config", "core.hooksPath", hooks);
+  const third = mac.desk.create({ title: "Ship the release", brief: "Write SHIP.md.", agent: "claude", customAgent: null, assignee: "agent", status: "ready", cwd: macRepo, key: null });
+  if (third === "full") throw new Error("daemoncheck: full");
+  const id3 = third.task.id;
+  mac.desk.move(id3, { to: "make" });
+  await mac.desk.engine.kick(id3);
+  const maker = await runOn(mac, id3);
+  const macWork3 = mac.desk.get(id3)!.flow.workdir!;
+  writeFileSync(join(macWork3, "SHIP.md"), "shipped\n");
+  await finish(mac, maker, { summary: "Wrote SHIP.md.", status: "review" });
+  await until(() => server.desk.get(id3)?.flow.run?.state === "working");
+  const shipping = server.desk.get(id3)!;
+  const deployer = server.registry.get(shipping.flow.run!.session!)!;
+  check(
+    "a column with no code goes even with the work uncommitted: nothing of the code goes with it",
+    [where(id3)?.name, shipping.flow.column, shipping.flow.workdir, git(serverRepo, "branch", "--list", shipping.flow.code!.branch)],
+    ["server", "ship", null, ""],
+  );
+  check(
+    "its run works in an empty folder of the task's own, made under the machine's root",
+    [realpathSync(deployer.workspace.root) === realpathSync(join(server.runs, id3)), deployer.workspace.mode, deployer.workspace.git],
+    [true, "plain", null],
+  );
+
+  await finish(server, deployer, { summary: "Shipped." });
+  await until(() => server.desk.get(id3)?.flow.ask?.reason === "code_dirty");
+  const refused = server.desk.get(id3)!;
+  check(
+    "the next column needs the code, and the Mac will not hand over a worktree with work left out of it",
+    [refused.flow.column, refused.flow.run?.state, refused.flow.ask?.detail],
+    ["verify", "failed", "the task's code on mac is not all on its branch: 1 file(s) not committed: SHIP.md"],
+  );
+
+  // Its person commits on the Mac by hand: the branch moves past the head the task names, and the server must take that one.
+  git(macRepo, "config", "core.hooksPath", noHooks);
+  git(macWork3, "add", "-A");
+  git(macWork3, "commit", "-q", "-m", "by hand");
+  const byHand = git(macWork3, "rev-parse", "HEAD");
+  server.desk.move(id3, { to: "verify" });
+  const checker = await runOn(server, id3);
+  const serverWork3 = server.desk.get(id3)!.flow.workdir!;
+  check(
+    "retried, the code comes, the commit made by hand is the head, and the run starts",
+    [checker.status === "running" || checker.status === "idle", readFileSync(join(serverWork3, "SHIP.md"), "utf8"), server.desk.get(id3)!.flow.code?.head === byHand],
+    [true, "shipped\n", true],
+  );
 
   scopesOf.set("m_mac", ["session:message"]);
   check("a link that does not carry task:handoff offers no machine to place a run on", (await mac.desk["fleet"]()).length, 0);

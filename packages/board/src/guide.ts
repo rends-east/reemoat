@@ -113,6 +113,12 @@ const FIELD_WORDS: { [L in Level]: Record<(typeof BOARD_FIELDS)[L][number], stri
       `${code("report")} (default): the run ends when a turn of its agent ends after it called ${code("task_update")} with ` +
       `${code("status: review")} or an ${code("outcome")}. ${code("turn")}: the run ends when the agent's turn does, report or ` +
       "not; use it for a skill or prompt that does not know the board, with rules or a role to pick the exit.",
+    code:
+      `${code("task")} (default): the run works in the task's code, its worktree in a git project, and the code goes with the ` +
+      `task to whichever machine runs it. ${code("none")}: the run works in an empty folder of the task's own on the machine that ` +
+      "runs it; no code is fetched, committed or carried for it, and that machine needs no copy of the project. Use it for work " +
+      "that needs no checkout: a deploy of what is already pushed, a release note, a message. It continues only a conversation " +
+      `of another ${code("code: none")} run, and a ${code("task")} run never continues one of those.`,
   },
   exit: {
     to: "Required. The id of the column this exit leads to: any column but a view, this one included.",
@@ -238,9 +244,11 @@ Under ${code("done_when: report")} a turn that ends without a report stops the t
 
 ### Where a run goes
 
-In order: the conversation it continues; else the first machine in its role's ${code("on")} that is online, offers the agent and has the project; else, for a role with no ${code("on")}, the machine holding the task's code; else the machine that owns the task; else the least busy machine that can, then by name. A run placed on another machine moves the task there, its code as a git branch. That needs the person to let tasks move between those machines in the app; a project that is not a git repository cannot move. When nothing can take a run it waits, and after ${hours(NO_EXECUTOR_ASK_MS)} the person is asked.
+In order: the conversation it continues; else the first machine in its role's ${code("on")} that is online, offers the agent and has the project (a ${code("code: none")} run needs no project); else, for a role with no ${code("on")} and a run that needs the code, the machine holding the task's code; else the machine that owns the task; else the least busy machine that can, then by name. A run placed on another machine moves the task there, and its code as a git branch unless the run has ${code("code: none")}. That needs the person to let tasks move between those machines in the app; a task in a folder that is not a git repository cannot move once it has run, whatever its next column. When nothing can take a run it waits, and after ${hours(NO_EXECUTOR_ASK_MS)} the person is asked.
 
 In a git project a task has one worktree per machine, on the branch ${code("reemoat/t-<id>")}, and every run there works in it. When a run ends the board commits what it changed, and that diff is what the ${code("diff")} facts and ${code("sees")} read.
+
+Only what is committed on that branch reaches another machine. Before a run that needs the code goes elsewhere, the board commits what is left in the worktree, as at a run's end. If a commit hook refuses it, files stay uncommitted, or the worktree is on another branch, the task does not go: it stays on its machine, needs the person, and says why, with the hook's words or the files. The person fixes it in the conversation that made the work and presses Retry. The machine with the code refuses to hand it over the same way when the task went through a ${code("code: none")} column first. So when a work column's next column runs on another machine, have its prompt end with everything committed and the hooks passing, and say why in a ${code("#")} comment.
 
 ## Exits: ${code("next")}
 
