@@ -31,8 +31,13 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
     held: number[];
     send(message: unknown): void;
     awaiting: Map<number, () => void>;
+    /** What it publishes, and each set_config_option it was sent, in order. */
+    options: any[];
+    sets: string[];
   }
   const agents = new Map<string, Agent>();
+  // Off but for the one section that needs controls: a published control changes every snapshot after it.
+  let publish: (() => any[]) | null = null;
   let launched = 0;
   let outbound = 9000;
 
@@ -71,13 +76,21 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
           case acp.methods.agent.session.new:
           case acp.methods.agent.session.resume: {
             const acpId = message["params"]?.["sessionId"] ?? `c_board_${++launched}`;
-            current = agents.get(acpId) ?? { acpId, prompts: [], mcpServers: [], held: [], send, awaiting };
+            current = agents.get(acpId) ?? { acpId, prompts: [], mcpServers: [], held: [], send, awaiting, options: publish?.() ?? [], sets: [] };
             current.mcpServers = message["params"]?.["mcpServers"] ?? current.mcpServers;
             current.send = send;
             current.awaiting = awaiting;
             current.held = [];
             agents.set(acpId, current);
-            send({ jsonrpc: "2.0", id, result: message["method"] === acp.methods.agent.session.new ? { sessionId: acpId } : {} });
+            const configOptions = current.options.length === 0 ? {} : { configOptions: current.options };
+            send({ jsonrpc: "2.0", id, result: message["method"] === acp.methods.agent.session.new ? { sessionId: acpId, ...configOptions } : configOptions });
+            break;
+          }
+          case acp.methods.agent.session.setConfigOption: {
+            const { configId, value } = message["params"] ?? {};
+            current?.sets.push(`${configId}=${value}`);
+            for (const option of current?.options ?? []) if (option.id === configId) option.currentValue = value;
+            send({ jsonrpc: "2.0", id, result: { configOptions: current?.options ?? [] } });
             break;
           }
           case acp.methods.agent.session.prompt: {
@@ -204,8 +217,10 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
 
   let rpcId = 0;
   const tool = async (managed: ManagedSession, name: string, args: unknown = {}) => {
-    const authorization = agentOf(managed).mcpServers[0]?.headers?.find((h: any) => h.name === "Authorization")?.value ?? "";
-    const response = await fetch(endpoint.url, {
+    const server = agentOf(managed).mcpServers[0];
+    const authorization = server?.headers?.find((h: any) => h.name === "Authorization")?.value ?? "";
+    // The endpoint the agent was handed, which is its own world's.
+    const response = await fetch(server?.url ?? endpoint.url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization },
       body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: args } }),
@@ -486,9 +501,59 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
     "approve → Backlog: the board no longer has that column",
   ]);
 
+  process.stdout.write("  a role's model, effort and mode, set on its agent as each of its runs starts\n");
+  {
+    publish = () => [
+      { id: "model", name: "Model", category: "model", type: "select", currentValue: "sonnet", options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }] },
+      { id: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: "medium", options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }] },
+      { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "default", options: [{ value: "default", name: "Default" }, { value: "plan", name: "Plan" }] },
+    ];
+    const lensed = world();
+    const lensEndpoint = await PeerMcpEndpoint.listen(lensed.hub, lensed.desk);
+    lensed.hub.setEndpoint(lensEndpoint.url);
+    lensed.registry.setPeerMcpServers((sid, caps) => lensed.hub.mcpServersFor(sid, caps));
+    const coderLine = "coder:    { agent: claude }";
+    lensed.desk.engine.putBoard(REVIEW_LOOP_LOCAL_TEXT.replace(coderLine, 'coder:    { agent: claude, model: opus, effort: High, mode: plan, instructions: "Test first." }'), 0);
+    const made = lensed.desk.create({ title: "Lens", brief: "Lens.", agent: "claude", customAgent: null, assignee: "agent", status: "ready", cwd: work, key: null, column: "build" });
+    if (made === "full") throw new Error("daemoncheck: full");
+    const lensId = made.task.id;
+    await lensed.desk.engine.kick(lensId);
+    const runOf = (): ManagedSession => lensed.registry.get(lensed.desk.get(lensId)!.flow.run!.session!)!;
+    const coded = runOf();
+    await until(() => agentOf(coded).prompts.length === 1);
+    check("the model, the effort matched by its name, then the mode", agentOf(coded).sets, ["model=opus", "effort=high", "mode=plan"]);
+    check("and the run's note carries the role's instructions", agentOf(coded).prompts[0]?.includes("Test first."), true);
+
+    await coded.setMode("default");
+    await finish(coded, { report: { summary: "Built.", status: "review" } });
+    await until(() => lensed.desk.get(lensId)?.flow.column === "review" && lensed.desk.get(lensId)?.flow.run?.session != null);
+    const reviewed = runOf();
+    check("a role with none of them sets nothing", agentOf(reviewed).sets, []);
+    await finish(reviewed, { report: { summary: "One bug.", outcome: "fix" } });
+    await until(() => agentOf(coded).prompts.length === 2);
+    check(
+      "back in the coder's conversation the mode its person changed is the role's again, and an effort already held is not sent",
+      agentOf(coded).sets,
+      ["model=opus", "effort=high", "mode=plan", "mode=default", "model=opus", "mode=plan"],
+    );
+
+    lensed.desk.engine.putBoard(REVIEW_LOOP_LOCAL_TEXT.replace(coderLine, "coder:    { agent: claude, effort: max, mode: yolo }"), lensed.desk.engine.current.revision);
+    const other = lensed.desk.create({ title: "Unknown", brief: "x", agent: "claude", customAgent: null, assignee: "agent", status: "ready", cwd: work, key: null, column: "build" });
+    if (other === "full") throw new Error("daemoncheck: full");
+    await lensed.desk.engine.kick(other.task.id);
+    const unknown = lensed.registry.get(lensed.desk.get(other.task.id)!.flow.run!.session!)!;
+    await until(() => agentOf(unknown).prompts.length === 1);
+    check(
+      "a choice the agent does not offer is left, the history says so, and the run goes on",
+      [agentOf(unknown).sets, lensed.desk.history(other.task.id).filter((one) => one.kind === "note").map((one) => one.text)],
+      [[], ["claude offers no effort called max, so it was not set", "claude offers no mode called yolo, so it was not set"]],
+    );
+    publish = null;
+  }
+
   process.stdout.write("  roles that decide: a harness asked once, a classifier, and what each abstains on\n");
   // One reviewer, then the cheap harness, then a classifier with a floor, then you.
-  const asked: { agent: string; prompt: string; model: string | null }[] = [];
+  const asked: { agent: string; prompt: string; model: string | null; effort: string | null }[] = [];
   let harnessSays = "";
   let classifierSays: unknown = null;
   const judging = world({ configs: new MemoryBoardConfigStore() });
@@ -500,15 +565,18 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
     tickMs: 0,
     machineName: "mac",
     judges: {
-      ask: async (agent, prompt, model) => {
-        asked.push({ agent, prompt, model });
+      ask: async (agent, prompt, { model, effort }) => {
+        asked.push({ agent, prompt, model, effort });
         return harnessSays;
       },
       classifiers: () => [{ id: "jev:jev", name: "jev" }],
       classify: async () => classifierSays,
     },
   });
-  const ladder = REVIEW_LOOP_LOCAL_TEXT.replace("cheap:    { agent: claude, model: haiku }", "cheap:    { agent: claude, model: haiku }\n  quick:    { agent: jev, min_confidence: 0.8 }")
+  const ladder = REVIEW_LOOP_LOCAL_TEXT.replace(
+    "cheap:    { agent: claude, model: haiku }",
+    'cheap:    { agent: claude, model: haiku, effort: low, instructions: "Judge as the on-call." }\n  quick:    { agent: jev, min_confidence: 0.8 }',
+  )
     .replace("decide: [self, cheap, human]", "decide: [self, quick, cheap, human]")
     .replace("run: { role: coder }", "run: { role: coder, done_when: turn }");
   judgeDesk.engine.putBoard(ladder, 0);
@@ -551,10 +619,11 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
   await finish(unsure.reviewer, { say: "Reviewed." });
   const fixedByCheap = await settledAt(unsure.id);
   check(
-    "below its floor it abstains, and the harness role is asked next, with its model",
-    [fixedByCheap.column, fixedByCheap.events, asked.at(-1)?.agent, asked.at(-1)?.model],
-    ["build", ["quick did not decide: 50% is below its floor", "cheap: fix · 70%"], "claude", "haiku"],
+    "below its floor it abstains, and the harness role is asked next, with its model and effort",
+    [fixedByCheap.column, fixedByCheap.events, asked.at(-1)?.agent, asked.at(-1)?.model, asked.at(-1)?.effort],
+    ["build", ["quick did not decide: 50% is below its floor", "cheap: fix · 70%"], "claude", "haiku", "low"],
   );
+  check("and through its instructions", asked.at(-1)!.prompt.includes("judge by them:\nJudge as the on-call."), true);
   check("the harness was shown the exits, the contract and what the column sees", [/- fix: the review found problems/.test(asked.at(-1)!.prompt), /Answer with one JSON object/.test(asked.at(-1)!.prompt)], [true, true]);
 
   for (const [name, says, classifier] of [

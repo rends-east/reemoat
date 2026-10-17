@@ -425,6 +425,14 @@ export interface TaskExitButton {
   to: string;
 }
 
+/** A file a person gave a task or a comment, kept on the task's machine (Q2.273). */
+export interface TaskFile {
+  id: string;
+  name: string;
+  mime: string | null;
+  bytes: number;
+}
+
 /** One task as its own machine's daemon answers it; `status` is settled there, never by a client (Q2.258). */
 export interface TaskSnapshot {
   id: string;
@@ -457,6 +465,8 @@ export interface TaskSnapshot {
   createdAt: number;
   updatedAt: number;
   sessions: TaskSessionRef[];
+  /** The files it was made with; an older daemon keeps none. */
+  files?: TaskFile[];
 }
 
 /** What is left on a machine of a task that went to another. */
@@ -509,6 +519,8 @@ export interface TaskCommentView {
   request: { kind: "permission" | "elicitation"; id: string } | null;
   entry: number;
   delivered: boolean;
+  /** What a person attached to it. */
+  files?: TaskFile[];
   state: "open" | "closed" | null;
   pending: unknown;
 }

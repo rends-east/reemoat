@@ -5,6 +5,8 @@ import { STAY, type Exit, type Sees } from "./config.js";
 export const MAX_JUDGE_PROMPT_BYTES = 8 * 1024;
 export const MAX_SEEN_LAST_MESSAGE_BYTES = 4 * 1024;
 export const MAX_SEEN_DIFF_BYTES = 6 * 1024;
+/** A role's instructions, as much of them as a question carries: the rest of the 8 KiB is what the judge reads. */
+export const MAX_JUDGE_INSTRUCTIONS_BYTES = 2 * 1024;
 /** A harness role has this long to answer before it is taken to abstain. */
 export const JUDGE_TIMEOUT_MS = 120_000;
 /** A classifier from a plugin, this long. */
@@ -54,10 +56,21 @@ const LABELS: Record<Sees, string> = {
  * The question a role is asked: the exits with what each means, the answer's one shape, and what the column's `sees` lets it
  * read, each piece within its own bound and the whole within an ask's, cut from the end of the list until it fits.
  */
-export function judgePrompt(title: string, column: string, exits: readonly Exit[], sees: readonly Sees[], context: SeenContext): string {
+export function judgePrompt(
+  title: string,
+  column: string,
+  exits: readonly Exit[],
+  sees: readonly Sees[],
+  context: SeenContext,
+  instructions: string | null = null,
+): string {
+  const lens =
+    instructions === null || instructions.trim().length === 0
+      ? " "
+      : `\n\nYour user wrote these instructions for you in their board; judge by them:\n${clipBytes(instructions.trim(), MAX_JUDGE_INSTRUCTIONS_BYTES)}\n\n`;
   const head =
     `You are deciding where a task on a board goes next. The task is "${title.replace(/["\r\n]/g, " ")}", and its work in the ` +
-    `${column.replace(/[\r\n]/g, " ")} column is over. Pick one exit:\n` +
+    `${column.replace(/[\r\n]/g, " ")} column is over.${lens}Pick one exit:\n` +
     exits.map((exit) => `- ${exit.name}: ${exit.means ?? exit.label}`).join("\n") +
     "\n\nAnswer with one JSON object and nothing else: " +
     '{"exit": "<one of the names above>", "confidence": <a number from 0 to 1>}. ' +

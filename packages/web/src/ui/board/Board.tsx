@@ -131,8 +131,8 @@ export function Board({ state }: { state: AppState }): ReactNode {
           <MeBody state={state} active={{ session: null, task: null }} rows={null} />
         </div>
       )}
-      {/* Its own scroller on both axes, with no bar drawn (the owner's call, 2026-10-15): a long column must not move the others. */}
-      <div ref={area} className={`no-scrollbar min-h-0 flex-1 overflow-x-auto px-5 pb-3 ${shown === "board" ? "flex" : "hidden"}`}>
+      {/* Sideways with a bar to grab (Q3.745); each column scrolls down by itself with none, so a long one moves no other. */}
+      <div ref={area} className={`board-scroll min-h-0 flex-1 overflow-x-auto px-5 pb-3 ${shown === "board" ? "flex" : "hidden"}`}>
         {/* While a card is carried the others take no pointer: none lights up under the copy, and the drag is followed on window. */}
         <FlipBoundary order={order} className={`flex min-h-0 shrink-0 gap-3 ${carried === null ? "" : "[&_[data-flip]]:pointer-events-none"}`}>
           {lanes.map(({ column, count, items }) => {

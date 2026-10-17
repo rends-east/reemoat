@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 129 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 490 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 132 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 492 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 89 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 165 | `###` |
-| | | **1211** | |
+| | | **1216** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1211 rather than the 605
+dividers. So the count is over **both** depths, and it says 1216 rather than the 608
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -10668,6 +10668,153 @@ committed and the server holding it; a `code: none` run going with the work unco
 its own folder with no branch fetched; the next column's fetch refused by the Mac, naming the
 file; and, committed by hand and retried, the run starting on the commit made by hand. With
 the head not taken from the holder, that last run never starts.
+
+**Status.** Current.
+
+### Q2.272 — What may a role set besides its agent and model, and where do its instructions go?
+
+**Question.** The owner, 2026-10-16: a role in the board's config may give a default effort, a
+default mode its runs start in, and a prompt added to all of its work, a lens for instance.
+
+**Decision.**
+
+- **Three fields on a role**: `effort`, `mode` and `instructions` (`BOARD_FIELDS`). Effort and
+  mode are the agent's own choices, as a model is: bounded by length alone
+  (`MAX_CHOICE_CHARS`) and matched at use against what that agent publishes, by value, else
+  by value or name in any case (`choiceNamed`). Never by substring, as `pickModel` matches a
+  model: `high` is inside `xhigh`. Instructions are plain text, not a template, up to
+  `MAX_ROLE_INSTRUCTIONS_CHARS`.
+- **Set at the start of every run of the role, a continued conversation's too** (`pickEffort`
+  and `pickMode`, after `pickModel`, since a model can change which efforts there are). Two
+  roles on one harness share a conversation under `conversation: continue`, so the mode is the
+  role's for its run, whatever the last role or the person set there. A choice already held is
+  not sent; one the agent does not offer is a note in the task's history, and the run goes on.
+- **Instructions ride every run's note** (`runNote`), named as the person's words for that
+  role, on a continued conversation too; a `board-task` tag inside them is broken, so they
+  cannot close the note. A role that judges is asked through them (`judgePrompt`), cut to
+  `MAX_JUDGE_INSTRUCTIONS_BYTES` so the 8 KiB question keeps room for what `sees` shows, and at
+  its effort (`chooseEffort`), where an effort the agent lacks is no refusal. A role asked on
+  another machine carries both in `POST /peer/judge`, and an older receiver ignores them.
+- **Mode is not a judge's**: a bare ask already refuses every permission.
+
+**Rejected.** *Setting them only when a conversation opens*: the conversation a run continues
+may be another role's, so its mode and effort would be that role's. *`prompt` as the field's
+name*: a run's `prompt` is the message it sends, and these words go with every message; one
+word for both would have the config agent write one where it meant the other. *Checking an
+effort or a mode when the board is parsed*: the choices are each harness's and each build's,
+and the parser knows no agent.
+
+**Compatibility.** A daemon older than this refuses such a board (an unknown field) and runs
+the default (Q2.266), so every daemon first, as for `code:` (Q2.271).
+
+**Measured.** `boardcheck`: each refusal, the match, the note on a new and on a continued
+conversation, and the judge's question inside 8 KiB with long instructions. `daemoncheck`, on a
+stub publishing a model, an effort and a mode control: the three sent in that order before the
+run's message; the mode its person changed put back on the role's next run in that
+conversation, an effort already held not sent again; a choice the agent lacks noted and never
+sent; a judge asked at its effort and through its instructions.
+
+**Status.** Current.
+
+### Q2.273 — How does a person give a task, or a comment on one, files?
+
+**Question.** The owner, 2026-10-16: why can files not be sent to a task or in a comment?
+Add it, urgently.
+
+**Decision.**
+
+- **A store of their own, never the session uploads table.** `task_files` beside `uploads`,
+  under `$REEMOAT_HOME/task-files`, kept by a second `Uploads` (`TaskFiles`). The uploads
+  table is pruned against the sessions at every start, which would take a task's files the
+  first time the daemon came up; the folder is a fourth remover tree in `daemon.ts`'s list.
+- **Staged, then taken by the request that names them.** `POST /tasks/uploads?name=` streams a
+  file into `STAGED`, as a session upload is; `POST /tasks` and `POST /tasks/:id/comments` take
+  `attachments` (as many as a message carries) and `claim` moves each to the task, kept as
+  sent, so the day-old sweep of unsent files never reaches it. A create checks every id before
+  it makes the task, and one that cannot take them removes the task, so the same request again
+  is the retry; the same create under a key a task holds answers that task, its files taken by
+  the first. A task keeps at most `MAX_TASK_FILES` and `MAX_TASK_FILE_BYTES`, its comments'
+  included, past which the request is refused.
+- **What the agent gets.** A run that opens a conversation sends the task's own files with its
+  message (`launch`); one continuing a conversation does not, since that conversation had
+  them. A comment's files go into a working run's conversation as its person's message, with
+  the words or alone; with no run at work they wait (`pendingFiles`) and go with the next
+  run's message whichever conversation it is, and its note says which comment they came with.
+- **Copied into the session as its own** (`keepCopy`, a clone where the filesystem makes one):
+  its transcript hands them back through the session's route, its budget counts them, and an
+  agent editing one edits its own copy, never the task's.
+- **Read back** by `GET /tasks/:id/files/:fileId`, served as every download is. The task's
+  snapshot names its files (`files`), a comment its own.
+- **Deleting a task deletes its files**; its conversations keep their copies. A task that went
+  to another machine keeps its files here while its tombstone stands, for when it comes back
+  (`sweep`).
+
+**Rejected.** *A session's uploads route*: a task has no session until a run, and a comment
+waiting for the next run has none at all. *A hard link into the session*: one inode, so an
+agent editing the file it was given would rewrite the task's.
+
+**Compatibility.** The daemons first: an app asking an older daemon to keep a file is refused,
+and says the machine is too old. An older client sends no `attachments`, and an older daemon's
+snapshot has no `files`, which reads as none.
+
+**Measured.** `daemoncheck.board-files`: a staged file, the refusals (an id nothing staged,
+eleven ids, a comment of nothing), a create taking a file and the same create again, the
+download, a comment of files alone waiting and its note, a run's first message carrying the
+task's and the comment's files, each kept as the session's own and named in its transcript, a
+comment with a file into a working run, a create that starts with its files, a handoff's files
+read field by field, and a delete.
+
+**Status.** Current. Files do not cross to another machine with a task (Q7.163).
+
+### Q2.274 — How does a board name a machine, and what may a pinned role take?
+
+**Question.** The owner, 2026-10-16: the config agent could not set the board up — it did not
+know which machine was the Mac mini, did not work out where things go, and pinned the roles by
+an id it dug out of the daemon's files. Then a task moved into a column whose role the owner
+had pinned with `claude@mac` was never picked up, and its card named Claude on `local`.
+
+**What was measured.** The config agent's `list_projects` answered one machine, `machine:
+null`: a session with a purpose takes no messaging, and the list of other machines is read over
+the caller's messaging links, so it saw none and no name for its own. It read
+`~/.reemoat/daemon.json` and the database (one read refused as credential exploration) and
+wrote `on: m_ffeaf8c7`. Every daemon called itself `local` while its links named the others by
+their owner's labels: on the Mac mini (`mac`) `mac` named nothing and `local` named two
+machines. The task lived on the MacBook with the Mac mini's folder, from which the MacBook reads
+no project, so `place` saw the folder's path as the project, which no other machine lists, and
+the run waited for `claude@mac` with nothing said; `place` on revision 12 answered that.
+
+**Decision.**
+
+- **A daemon knows the name its owner gave its machine.** The app sends it beside the links,
+  `self.name` on `PUT /peers/links` (`selfNameFromBody`), from the listing; the hub keeps it in
+  `machine_settings` (`setMachineName`), and the board names this machine by it (`ownName`), so
+  `on: mac` means the Mac mini on the Mac mini too. A link record that names no name, or another,
+  hands the links over again (`name_changed`). Without one a daemon still calls itself `local`.
+- **The config agent sees the machines a board may name**, as placing would: `board_get` lists
+  this machine by its name and every machine a run may go to, with their agents
+  (`machineWords`), whatever messaging says; `board_check` warns of a pin to a machine called
+  nothing (`unknownMachines`). Its note says a machine is named as `board_get` lists it, never
+  found in the daemon's files.
+- **A pinned role takes a task that has never run**, whether or not the machine listed its
+  project: the person said where it goes, and with no code there is nothing to bring. It starts
+  there in the task's folder; where that machine has none the run fails saying so (`its folder …
+  is not on this machine`). A task with code still goes only where the project is.
+- **A run nobody takes says why** (`unplaced`): no machine of that name, away, not running the
+  agent, or no copy of the project. Its card names the agent at the machine it is pinned to
+  (`queuedFor`), not on the task's own.
+
+**Not done.** New task offering another machine's folder for this one, which is how the task
+was made: the owner's word was to leave it.
+
+**Compatibility.** The daemons first: an older daemon ignores `self`, and an older app sends
+none, so the name comes with the next app.
+
+**Measured.** `boardcheck`: a pinned role with no code against one with code elsewhere, and
+each reason. `daemoncheck.board-fleet`: a task made on one machine in a folder no machine listed
+runs on the machine its role is pinned to; one whose folder that machine lacks fails in words;
+an unknown pin waits saying why and its card names that machine; `board_get` and `board_check`;
+a daemon learning its name, refusing an empty one and keeping it across a restart.
+`webcheck.agent-links`: the name sent with the links and a renamed machine told again.
 
 **Status.** Current.
 
@@ -31498,7 +31645,8 @@ the lock: the document is the window's height and does not move. In a WKWebView 
 itself (`scrollTop` 1960 of 1900) and nothing reaches the root. A snapshot does not hold
 the root's own stretch, so the lock on `html` is not measured there.
 
-**Status.** Current. Reverses the spec's stage 7 on the owner's word.
+**Status.** Current. Reverses the spec's stage 7 on the owner's word. Amended by Q3.745:
+the board's sideways bar is drawn again.
 
 #### Q3.740 — How does the app draw a board somebody wrote?
 
@@ -31626,6 +31774,43 @@ result. The mockups' column strip went too, and the phone's way in is still not 
 (Q7.165).
 
 **Status.** Current. Not seen in WKWebView.
+
+#### Q3.744 — Where does a person attach a file to a task or a comment?
+
+**Question.** As Q2.273: files on a task and on a comment.
+
+**Decision.**
+
+- **Picked, then sent with the press** (`PickedFile`, `usePickedFiles`), not uploaded on pick
+  as the composer's are: the machine a new task goes to is the assignee's, and may change
+  while the form is open. `uploadPicked` stages each on that machine one after another, then
+  the create or comment names them; a refusal leaves the files picked and says why.
+- **New task**: *Attach files* under the description, a drop anywhere on the form, a paste
+  into the description. The picked files outlive the sheet as the words do.
+- **A comment**: the paperclip beside its button, a drop on the box, a paste; files may go
+  with no words.
+- **Drawn as the transcript draws a message's**: an image shown, every file a download, under
+  the description for the task's own and under each comment for its.
+- **A task an agent on another machine is given carries its files** (`carryFiles`): the app
+  fetches each from the old machine and stages it on the new before the copy is made there,
+  since the daemons never move them.
+
+**Status.** Current. Not seen in WKWebView.
+
+#### Q3.745 — Does the board draw its sideways bar again?
+
+**Question.** The owner, 2026-10-18: "the slider at the bottom is gone, I can't see the
+columns past the screen's edge (done, say)". Q3.739 had taken the bar away, and with a
+mouse that has no sideways wheel nothing else reaches a column past the pane's edge
+except a drag, which rolls the board only while a card is carried.
+
+**Decision.** **The board's sideways bar is Q3.738's again**: drawn always, 14 px, in the
+palette's inks (`board-scroll`), both standard properties back to `auto` so the
+`::-webkit-scrollbar` styling applies. The columns keep scrolling down with no bar of their
+own (`no-scrollbar`), which Q3.739 decided and nothing here asked about.
+
+**Status.** Current. Amends Q3.739. Not seen in WKWebView this time; Q3.738 measured the
+same rule there.
 
 ## Deployment, packaging and code layout
 
@@ -46509,10 +46694,14 @@ its edges.
   carry `tasksMove`; nothing in the app sets it yet, and its default is on, as messaging's is.
 - **A first run on another machine starts in the first machine's path.** A task that has
   never run carries no code, so `launch` opens its first run in `cwd` as the task names it,
-  and on a machine whose clone sits elsewhere that run fails. Read off the code, not driven:
-  the fleet driver's task always runs on the Mac first (Q2.271).
+  and on a machine whose clone sits elsewhere that run fails, now in words (Q2.274). Driven
+  only where the folder is the same path on both.
 - **A `code: none` folder is never removed.** One per task under `board-runs`, kept for the
   task's next such run; a deleted or moved task leaves it, as it leaves its sessions.
+- **A task's files do not cross to another machine with it** (Q2.273). A handoff names them
+  and the receiver holds none, so a run there says in the history that they could not be
+  sent; the files stay where they were given, while its tombstone stands. Only the app's own
+  move of a task nobody started carries them (`carryFiles`).
 - **What a reviewer is told of the change.** A prompt can name the task and the last report,
   not the branch or the commits a run went from and to.
 - **Out of the spec's scope**: a limit across the fleet, copies of tasks in waiting

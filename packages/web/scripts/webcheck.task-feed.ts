@@ -139,12 +139,20 @@ process.stdout.write("\na task's page: the feed, the history, and what may be pr
   check(
     "a reply and a comment are one route, sent as typed, and only an agent's stop is drawn as an agent's words are",
     [
-      /void addComment\(entry, body\)/.test(feedSrc),
+      /void uploadPicked\(entry\.machineId, attached\.files, attached\.progress\)\s*\.then\(\(ids\) => addComment\(entry, body, ids\)\)/.test(feedSrc),
       /\{\.\.\.VERBATIM_FIELD\}/.test(feedSrc),
       /comment\.kind === "stop" \? \(\s*<div className="text-sm">\s*<Markdown text=\{comment\.text\} \/>/.test(feedSrc),
       (feedSrc.match(/<Markdown /g) ?? []).length,
     ],
     [true, true, true, 1],
+  );
+  check(
+    "a comment may be files alone, and every comment draws the files it carries (Q3.744)",
+    [
+      /\(sentText\(text\)\.trim\(\)\.length > 0 \|\| attached\.files\.length > 0\) && !busy/.test(feedSrc),
+      /<TaskFileList machineId=\{entry\.machineId\} taskId=\{entry\.task\.id\} files=\{files\} \/>/.test(feedSrc),
+    ],
+    [true, true],
   );
 
   const pageSrc = stripComments(srcFile("ui/board/TaskScreen.tsx"));

@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import {
   applyStep,
   boardHash,
+  choiceNamed,
   columnById,
   columnCode,
   columnForStatus,
@@ -16,7 +17,9 @@ import {
   MAX_COLUMN_TITLE_CHARS,
   MAX_EXIT_LABEL_CHARS,
   MAX_EXIT_MEANS_CHARS,
+  MAX_CHOICE_CHARS,
   MAX_EXITS,
+  MAX_ROLE_INSTRUCTIONS_CHARS,
   SEES,
   CLASSIFIER_TIMEOUT_MS,
   judged,
@@ -43,6 +46,7 @@ import {
   type MachineOffer,
   type Exit,
   type Phase,
+  type ResolvedRole,
   type SeenContext,
   type Sees,
   type Step,
@@ -53,14 +57,18 @@ import {
 } from "@reemoat/board";
 import { SessionLimitError, type ManagedSession, type SessionRegistry, type WorktreePolicy } from "../registry.js";
 import type { SessionEvent, SessionStatus } from "../events.js";
+import type { UploadRow } from "../uploads.js";
+import { probeExists } from "../stall.js";
 import {
   MAX_COMMENT_CHARS,
+  MAX_PENDING_TASK_FILES,
   type BoardConfigStore,
   type BoardRevision,
   type StoredTaskStatus,
   type TaskComment,
   type TaskEvent,
   type TaskEventKind,
+  type TaskFile,
   type TaskFlow,
   type TaskRecord,
   type TaskStore,
@@ -146,9 +154,14 @@ const MAX_MOVED_EVENTS = 50;
 
 /** Who a role's question goes to: a harness through one bare ask, or a plugin's classifier. */
 export interface BoardJudges {
-  ask(agent: string, prompt: string, model: string | null, signal: AbortSignal): Promise<string>;
+  ask(agent: string, prompt: string, choices: { model: string | null; effort: string | null }, signal: AbortSignal): Promise<string>;
   classifiers?(): readonly { id: string; name: string }[];
   classify?(classifier: string, input: { exits: { name: string; means: string | null; label: string }[]; context: SeenContext }, signal: AbortSignal): Promise<unknown>;
+}
+
+/** A task's files as uploads of a run's session, ready to send; absent, a task's files reach no agent (Q2.273). */
+export interface TaskFilePort {
+  intoSession(taskId: string, files: readonly TaskFile[], sessionId: string): Promise<UploadRow[]>;
 }
 
 export interface BoardEngineOptions {
@@ -156,7 +169,8 @@ export interface BoardEngineOptions {
   store: TaskStore;
   configs: BoardConfigStore;
   machineId: string | null;
-  machineName?: string;
+  /** What its owner calls this machine, read at every use: the app says it after the daemon starts (Q2.274). */
+  machineName?: string | (() => string | null);
   customAgents?: () => readonly { id: string; name: string; harness: string }[];
   now?: () => number;
   onWarning?: (detail: string) => void;
@@ -168,6 +182,7 @@ export interface BoardEngineOptions {
   send?: FleetSend | null;
   /** Where a run of a `code: none` column gets its empty folder; absent, such a run fails to start. */
   codelessRoot?: string | null;
+  files?: TaskFilePort | null;
 }
 
 export class BoardEngine {
@@ -235,9 +250,15 @@ export class BoardEngine {
     return this.options.machineId ?? "";
   }
 
+  /** What its owner calls this machine, or null before anybody has said. */
+  ownName(): string | null {
+    const named = this.options.machineName;
+    return (typeof named === "function" ? named() : named) ?? null;
+  }
+
   /** `claude@mac`: this machine by its name, another by the name its link gives it. */
   label(executor: Executor): string {
-    const here = { key: this.machineKey, name: this.options.machineName ?? HERE, online: true, agents: [], projects: null, running: 0 };
+    const here = { key: this.machineKey, name: this.ownName() ?? HERE, online: true, agents: [], projects: null, running: 0 };
     return executorName(executor, [here, ...this.fleetCache.map((one) => one.offer)]);
   }
 
@@ -377,7 +398,7 @@ export class BoardEngine {
           ? this.label(executor)
           : queuedFor === null
             ? "nobody"
-            : (queuedFor.customAgent ?? queuedFor.agent);
+            : this.queuedFor(queuedFor);
     return {
       column: task.column,
       phase: taskPhase,
@@ -395,6 +416,18 @@ export class BoardEngine {
       budget: task.budget,
       labels: [...task.labels],
     };
+  }
+
+  /** The agent a run is queued for, at the machine its role is pinned to: a card would otherwise draw it on the task's own. */
+  private queuedFor(role: ResolvedRole): string {
+    const agent = role.customAgent ?? role.agent;
+    const pinned = role.on?.[0];
+    if (pinned === undefined) return agent;
+    const lower = pinned.toLowerCase();
+    const known = [{ key: this.machineKey, name: this.ownName() ?? HERE }, ...this.fleetCache.map((one) => one.offer)].find(
+      (one) => one.key === pinned || one.name.toLowerCase() === lower,
+    );
+    return `${agent}@${known?.name ?? pinned}`;
   }
 
   /** A question's own clock where a session waits, the stop's where the board asked, the entry's where the column is theirs. */
@@ -583,7 +616,7 @@ export class BoardEngine {
       const custom = (this.options.customAgents?.() ?? []).filter((one) => harnesses.includes(one.harness));
       return {
         key: this.machineKey,
-        name: this.options.machineName ?? HERE,
+        name: this.ownName() ?? HERE,
         online: true,
         agents: [
           ...harnesses.map((id) => ({ id, name: id, kind: "harness" as const, harness: null })),
@@ -843,8 +876,10 @@ export class BoardEngine {
     let managed: ManagedSession;
     let workdir = record.flow.workdir;
     const codeless = columnCode(this.state.board, record.flow.column) === "none";
-    if (next.session !== null && this.registry.get(next.session) !== undefined) {
-      managed = this.registry.get(next.session)!;
+    const continued = next.session === null ? undefined : this.registry.get(next.session);
+    const continues = continued !== undefined;
+    if (continued !== undefined) {
+      managed = continued;
     } else if (codeless) {
       const asked = this.launchWith.get(record.id);
       this.launchWith.delete(record.id);
@@ -863,6 +898,8 @@ export class BoardEngine {
       const arrived = workdir === null && record.flow.code !== null ? await this.checkoutFor(record.flow.code.repo) : null;
       const asked = this.launchWith.get(record.id);
       this.launchWith.delete(record.id);
+      // A task made on one machine names that machine's folder: said in words where this one has none, not as a failed realpath.
+      if (workdir === null && arrived === null && (await probeExists(record.cwd)) === false) throw new Error(`its folder ${record.cwd} is not on this machine`);
       managed = await this.registry.create({
         agent: next.executor.agent,
         customAgent: next.executor.customAgent,
@@ -895,18 +932,47 @@ export class BoardEngine {
         });
       }
     }
+    // In this order: a model can change which efforts there are.
     if (next.model !== null) await this.pickModel(record, managed, next.model);
+    if (next.effort !== null) await this.pickEffort(record, managed, next.effort);
+    if (next.mode !== null) await this.pickMode(record, managed, next.mode);
     const startSeq = managed.turnsEnded;
     const logFrom = managed.log.stats().lastSeq;
     const startHead = codeless || workdir === null ? null : await this.code.head(workdir);
     const ready = await this.registry.readyForMessage(managed, "person");
     if (ready !== "ready") throw new Error(ready === "workspace_missing" ? "its folder is gone" : "its folder is not answering");
     const note = { text: next.note, mentions: [] };
-    const first = managed.prompt(next.message, [], null, note);
-    const sent = first.kind === "turn_in_flight" ? await managed.sendMidTurn(next.message, [], null, note) : first;
+    // A new conversation knows nothing of the task's files; one that worked on it had them with its first message.
+    const pending = record.flow.pendingFiles ?? [];
+    const attached = await this.filesFor(record, [...(continues ? [] : (record.flow.files ?? [])), ...pending], managed);
+    const first = managed.prompt(next.message, attached, null, note);
+    const sent = first.kind === "turn_in_flight" ? await managed.sendMidTurn(next.message, attached, null, note) : first;
     if (sent.kind !== "accepted" && sent.kind !== "steered" && sent.kind !== "queued") throw new Error(`the agent did not take the run's message (${sent.kind})`);
+    if (pending.length > 0) {
+      // Only those sent: a comment that came while this run started waits for the next.
+      const sentIds = new Set(pending.map((file) => file.id));
+      const latest = this.store.get(record.id) ?? record;
+      this.save({ ...latest, flow: { ...latest.flow, pendingFiles: (latest.flow.pendingFiles ?? []).filter((file) => !sentIds.has(file.id)) } });
+    }
     this.store.attach(record.id, managed.id, this.now());
     return { managed, started: { session: managed.id, startSeq, logFrom, startHead } };
+  }
+
+  /** This machine and every one a run may go to, as a placement would see them now: the names a board's `on` may say. */
+  async machines(): Promise<MachineOffer[]> {
+    const fleet = await this.fleetNow();
+    return [await this.offer(), ...fleet.map((one) => one.offer)];
+  }
+
+  /** The files this machine holds, put into the session's own to send; one it cannot is a history note, and the message goes without it. */
+  private async filesFor(record: TaskRecord, files: readonly TaskFile[], managed: ManagedSession): Promise<UploadRow[]> {
+    if (files.length === 0) return [];
+    const rows = (await this.options.files?.intoSession(record.id, files, managed.id)) ?? [];
+    if (rows.length < files.length) {
+      const missed = files.length - rows.length;
+      this.event(record, "note", `${missed === 1 ? "a file" : `${missed} files`} of this task could not be sent: ${missed === 1 ? "it is" : "they are"} not on this machine, or the conversation has no room`);
+    }
+    return rows;
   }
 
   /** The role's model as the agent's own config option; a name it does not offer is its to refuse, and the run goes on. */
@@ -926,6 +992,41 @@ export class BoardEngine {
       if (result.kind !== "ok") this.event(record, "note", `${managed.agent} did not take the model ${model} (${result.kind})`);
     } catch (error) {
       this.event(record, "note", `${managed.agent} did not take the model ${model}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** The role's effort as the agent's own choice, on every run: the person may have changed it in the conversation since. */
+  private async pickEffort(record: TaskRecord, managed: ManagedSession, effort: string): Promise<void> {
+    const option = managed.snapshot().agentConfig.options.find((one) => one.category === "thought_level" && one.kind === "select");
+    const value = option === undefined ? null : choiceNamed(option.choices, effort);
+    if (option === undefined || value === null) {
+      this.event(record, "note", `${managed.agent} offers no effort called ${effort}, so it was not set`);
+      return;
+    }
+    if (option.value === value) return;
+    await this.picked(record, managed, `the effort ${effort}`, () => managed.setConfigOption(option.id, value));
+  }
+
+  /** The role's mode, from the agent's modes or its mode control, whichever it publishes. */
+  private async pickMode(record: TaskRecord, managed: ManagedSession, mode: string): Promise<void> {
+    const config = managed.snapshot().agentConfig;
+    const option = config.options.find((one) => one.category === "mode" && one.kind === "select");
+    const choices = [...(config.modes?.available.map((one) => ({ value: one.id, name: one.name })) ?? []), ...(option?.choices ?? [])];
+    const value = choiceNamed(choices, mode);
+    if (value === null) {
+      this.event(record, "note", `${managed.agent} offers no mode called ${mode}, so it was not set`);
+      return;
+    }
+    if ((config.modes?.current ?? option?.value) === value) return;
+    await this.picked(record, managed, `the mode ${mode}`, () => managed.setMode(value));
+  }
+
+  private async picked(record: TaskRecord, managed: ManagedSession, what: string, set: () => Promise<{ kind: string }>): Promise<void> {
+    try {
+      const result = await set();
+      if (result.kind !== "ok") this.event(record, "note", `${managed.agent} did not take ${what} (${result.kind})`);
+    } catch (error) {
+      this.event(record, "note", `${managed.agent} did not take ${what}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -964,7 +1065,8 @@ export class BoardEngine {
         answer = readVerdict(value, exits);
       } else if (runnable !== undefined && judges !== null) {
         const harness = runnable.kind === "custom" ? (runnable.harness ?? runnable.id) : runnable.id;
-        const text = await bounded(JUDGE_TIMEOUT_MS, (signal) => judges.ask(harness, judgePrompt(task.title, column.title, exits, column.sees, context), role.model, signal));
+        const prompt = judgePrompt(task.title, column.title, exits, column.sees, context, role.instructions);
+        const text = await bounded(JUDGE_TIMEOUT_MS, (signal) => judges.ask(harness, prompt, { model: role.model, effort: role.effort }, signal));
         answer = parseVerdict(text, exits);
       } else {
         // Asked where the role's agent is: the context is gathered here, where the run ended, and the question goes with it.
@@ -977,7 +1079,17 @@ export class BoardEngine {
           const reply = await this.options.send(there.offer.key, {
             method: "POST",
             path: "/peer/judge",
-            body: { agent: role.agent, model: role.model, title: task.title, column: column.title, exits, sees: column.sees, context },
+            body: {
+              agent: role.agent,
+              model: role.model,
+              effort: role.effort,
+              instructions: role.instructions,
+              title: task.title,
+              column: column.title,
+              exits,
+              sees: column.sees,
+              context,
+            },
           }, JUDGE_TIMEOUT_MS + 5_000);
           answer = reply.ok && reply.status === 200 ? readVerdict(pickVerdict(reply.body), exits) : null;
           if (answer === null) why = `${there.offer.name} gave no answer it could read`;
@@ -1029,6 +1141,9 @@ export class BoardEngine {
     const title = typeof body["title"] === "string" ? body["title"].slice(0, 120) : "a task";
     const column = typeof body["column"] === "string" ? body["column"].slice(0, MAX_COLUMN_TITLE_CHARS) : "a column";
     const model = typeof body["model"] === "string" ? body["model"].slice(0, 128) : null;
+    // An older asker sends neither, and is judged as it was.
+    const effort = typeof body["effort"] === "string" ? body["effort"].slice(0, MAX_CHOICE_CHARS) : null;
+    const instructions = typeof body["instructions"] === "string" ? body["instructions"].slice(0, MAX_ROLE_INSTRUCTIONS_CHARS) : null;
     const offer = await this.offer();
     const lower = agent.toLowerCase();
     const judges = this.options.judges ?? null;
@@ -1042,7 +1157,8 @@ export class BoardEngine {
       const runnable = offer.agents.find((one) => one.kind !== "classifier" && (one.id === agent || (one.kind === "custom" && one.name.toLowerCase() === lower)));
       if (runnable === undefined) return { exit: null, confidence: null };
       const harness = runnable.kind === "custom" ? (runnable.harness ?? runnable.id) : runnable.id;
-      const text = await bounded(JUDGE_TIMEOUT_MS, (signal) => judges.ask(harness, judgePrompt(title, column, named, sees, context), model, signal));
+      const prompt = judgePrompt(title, column, named, sees, context, instructions);
+      const text = await bounded(JUDGE_TIMEOUT_MS, (signal) => judges.ask(harness, prompt, { model, effort }, signal));
       return parseVerdict(text, named) ?? { exit: null, confidence: null };
     } catch {
       // No answer is an abstention, as it would be on the asking machine.
@@ -1349,7 +1465,7 @@ export class BoardEngine {
    * On a task waiting on them that a run worked, it is their word on that work: the task goes back to the run's column, and its
    * agent has the comment at once (the owner's call, 2026-10-15).
    */
-  async addComment(record: TaskRecord, text: string): Promise<TaskComment> {
+  async addComment(record: TaskRecord, text: string, files: readonly TaskFile[] = []): Promise<TaskComment> {
     const touched = this.touched(record);
     const run = touched.flow.run;
     const managed = run !== null && run.state === "working" && run.session !== null ? this.registry.get(run.session) : undefined;
@@ -1357,20 +1473,34 @@ export class BoardEngine {
     if (managed !== undefined && !this.sessionOf(managed, true).gone) {
       const ready = await this.registry.readyForMessage(managed, "person");
       if (ready === "ready") {
-        const first = managed.prompt(text, [], null, null);
-        const sent = first.kind === "turn_in_flight" ? await managed.sendMidTurn(text, [], null, null) : first;
-        delivered = sent.kind === "accepted" || sent.kind === "steered" || sent.kind === "queued";
+        const attached = await this.filesFor(touched, files, managed);
+        // A comment of files alone, none of which could go, has nothing left to say now; it waits for the next run.
+        if (text.length > 0 || attached.length > 0) {
+          const first = managed.prompt(text, attached, null, null);
+          const sent = first.kind === "turn_in_flight" ? await managed.sendMidTurn(text, attached, null, null) : first;
+          delivered = sent.kind === "accepted" || sent.kind === "steered" || sent.kind === "queued";
+        }
       }
     }
     let latest = this.store.get(record.id) ?? touched;
     let back: string | null = null;
     if (!delivered) {
-      latest = { ...latest, flow: { ...latest.flow, notes: [...latest.flow.notes, text].slice(-MAX_NOTES) } };
+      const named = files.length === 0 ? "" : `(attached: ${files.map((file) => file.name).join(", ")})`;
+      const line = text.length === 0 ? named : named.length === 0 ? text : `${text}\n${named}`;
+      const pendingFiles = [...(latest.flow.pendingFiles ?? []), ...files].slice(-MAX_PENDING_TASK_FILES);
+      latest = { ...latest, flow: { ...latest.flow, notes: [...latest.flow.notes, line].slice(-MAX_NOTES), pendingFiles } };
       this.save(latest);
       back = this.sentBackTo(latest);
     }
     const reached = delivered || back !== null;
-    const comment = this.comment(latest, { kind: "comment", author: "you", text, sessionId: delivered ? (managed?.id ?? null) : null, delivered: reached });
+    const comment = this.comment(latest, {
+      kind: "comment",
+      author: "you",
+      text,
+      sessionId: delivered ? (managed?.id ?? null) : null,
+      delivered: reached,
+      ...(files.length === 0 ? {} : { files: [...files] }),
+    });
     if (back !== null) this.move(latest, back, null);
     void this.kick(record.id);
     return comment;

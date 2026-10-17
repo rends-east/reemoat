@@ -16,7 +16,7 @@ paths:
 
 A task is what somebody wants done on one machine, and the sessions doing it. Q2.258 to
 Q2.262 are the daemon's half, Q3.719 to Q3.737 the client's, Q7.162 what is not built;
-the configurable board is `board-engine.md` and Q3.739 to Q3.742.
+the board and a task's files are `board-engine.md` and Q3.739 to Q3.744.
 `web-shell.md` owns the list as a layout and `machine-gestures.md` its pager;
 `agent-messaging.md` owns the `reemoat` server these tools are served on.
 
@@ -181,7 +181,7 @@ holder's round mark (`HolderAvatar`) and name, and under the name the machine, s
 only when somebody holds it; no mark moves (Q3.731, Q3.737). Its assignee is a control of its own over the
 card's press, opening `AgentMenu`, portaled out of the lane's scroller; a second press on it
 closes the menu, and another card's moves it there. The board's sideways bar is drawn
-always, 14 px (`board-scroll`, Q3.738).
+always, 14 px (`board-scroll`, Q3.745).
 
 **A card is dragged between columns** (`useCardDrag`, Q3.728):
 

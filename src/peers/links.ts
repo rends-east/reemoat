@@ -97,6 +97,15 @@ export function policyFromBody(body: unknown): PeerPolicyDelivery | null | strin
   };
 }
 
+/** The name the app gives this machine beside its links (`self.name`), null where it gives none, or what is wrong with it. */
+export function selfNameFromBody(body: unknown): { name: string } | null | string {
+  if (typeof body !== "object" || body === null) return null;
+  const self = (body as Record<string, unknown>)["self"];
+  if (self === undefined || self === null) return null;
+  if (typeof self !== "object" || !field((self as Record<string, unknown>)["name"])) return "self.name is this machine's name";
+  return { name: (self as Record<string, string>)["name"]!.trim() };
+}
+
 function field(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_LINK_FIELD_CHARS && !/[\u0000-\u001f]/.test(value);
 }

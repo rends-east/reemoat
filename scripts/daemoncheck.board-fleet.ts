@@ -415,6 +415,78 @@ process.stdout.write("\nthe board across machines: the coder on a Mac, the revie
     [true, "shipped\n", true],
   );
 
+  process.stdout.write("  a machine by the name its owner gave it, and a task made where its folder is not (Q2.274)\n");
+  const { callTaskTool } = await import("../src/tasks/mcp.js");
+  const PINNED =
+    "version: 1\nroles:\n  dev: { agent: claude@server }\ncolumns:\n  - { id: backlog, title: Backlog }\n" +
+    "  - { id: build, title: Build, run: { role: dev }, next: done }\n  - { id: done, title: Done, final: true }\n";
+  mac.desk.engine.putBoard(PINNED, mac.desk.engine.current.revision);
+  const made4 = (cwd: string) => {
+    const one = mac.desk.create({ title: "In the server's folder", brief: "Look around.", agent: "claude", customAgent: null, assignee: "agent", status: "ready", cwd, key: null });
+    if (one === "full") throw new Error("daemoncheck: full");
+    mac.desk.move(one.task.id, { to: "build" });
+    void mac.desk.engine.kick(one.task.id);
+    return one.task.id;
+  };
+  // A plain folder no session has used: the Mac reads no project from it, and the server lists no such project.
+  const plain = tmp("fleet-plain-");
+  const id4 = made4(plain);
+  await until(() => server.desk.get(id4)?.flow.run?.state === "working");
+  const pinnedRun = server.registry.get(server.desk.get(id4)!.flow.run!.session!)!;
+  check(
+    "a task that has never run goes where its role is pinned, though no machine listed its folder, and starts in it there",
+    [where(id4)?.name, realpathSync(pinnedRun.workspace.root) === realpathSync(plain)],
+    ["server", true],
+  );
+  const id5 = made4(join(plain, "gone"));
+  await until(() => server.desk.get(id5)?.flow.ask?.reason === "run_failed");
+  check(
+    "one whose folder that machine does not have either says so in words, not as a failed realpath",
+    server.desk.get(id5)?.flow.ask?.detail,
+    `the run could not start: its folder ${join(plain, "gone")} is not on this machine`,
+  );
+
+  mac.desk.engine.putBoard(PINNED.replace("claude@server", "claude@nowhere"), mac.desk.engine.current.revision);
+  const id6 = made4(plain);
+  await until(() => mac.desk.get(id6)?.flow.wait?.reason === "no_executor");
+  const queued = mac.desk.get(id6)!;
+  check(
+    "a run no machine takes says why, and its card names the machine it waits for rather than the task's own",
+    [queued.flow.wait?.detail, mac.desk.snapshot(queued).holder],
+    ["waiting for claude@nowhere: no machine is called nowhere", "claude@nowhere"],
+  );
+  const got = (await callTaskTool(mac.desk, "s_none", "board_get", {})) as { structuredContent: { machines: { name: string | null; this: boolean }[] } };
+  check(
+    "board_get lists the machines a role may name, this one by its own name",
+    got.structuredContent.machines.map((one) => [one.name, one.this]),
+    [["mac", true], ["server", false]],
+  );
+  const checked = (await callTaskTool(mac.desk, "s_none", "board_check", { text: PINNED.replace("claude@server", "claude@macmini") })) as { structuredContent: { warnings: string[] } };
+  check("and board_check warns of a pin to a machine nobody is called", checked.structuredContent.warnings, ['roles.dev: no machine is called "macmini"']);
+
+  // A daemon with no name given at its start learns it from the app, beside its links, and keeps it.
+  const settings = new Map<string, string>();
+  const named = () => {
+    const registry = new SessionRegistry(new MemoryEventStore(), null, { worktreeRoot: tmp("fleet-wt-named-"), branchPrefix: "reemoat", defaultMode: "auto" }, new FleetRuntime(), null);
+    const hub = new PeerHub({ registry, enabled: true, machineId: "m_named", policy: { readPolicy: (key) => settings.get(key) ?? null, writePolicy: (key, value) => void settings.set(key, value) } });
+    const desk = new TaskDesk({ registry, store: new MemoryTaskStore(), peers: hub, configs: new MemoryBoardConfigStore(), tickMs: 0 });
+    return { desk, app: createApp({ registry, verifier, instanceId: "i_named", startedAt: Date.now(), peers: { hub, links: { replaceAll: () => {} } as never }, tasks: desk }).app };
+  };
+  const first = named();
+  const before = first.desk.engine.ownName();
+  const put = (body: unknown) =>
+    first.app.fetch(new Request("http://d/peers/links", { method: "PUT", headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" }, body: JSON.stringify(body) }));
+  const wrong = await put({ links: [], self: { name: "" } });
+  const right = await put({ links: [], self: { name: "mac" } });
+  const again = named();
+  check(
+    "a daemon learns its name with its links, refuses an empty one, and still has it after a restart",
+    [before, wrong.status, right.status, first.desk.engine.ownName(), again.desk.engine.ownName(), first.desk.engine.label({ agent: "claude", customAgent: null, machine: "m_named" })],
+    [null, 400, 200, "mac", "mac", "claude@mac"],
+  );
+  first.desk.engine.stop();
+  again.desk.engine.stop();
+
   scopesOf.set("m_mac", ["session:message"]);
   check("a link that does not carry task:handoff offers no machine to place a run on", (await mac.desk["fleet"]()).length, 0);
   void tokenFor;

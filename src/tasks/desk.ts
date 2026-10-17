@@ -20,10 +20,12 @@ import {
   type TaskAssignee,
   type TaskComment,
   type TaskEvent,
+  type TaskFile,
   type TaskRecord,
   type TaskStatus,
   type TaskStore,
 } from "./store.js";
+import type { ClaimResult, TaskFiles } from "./files.js";
 import {
   DISPATCH_NICKNAME,
   isAgentRef,
@@ -85,6 +87,8 @@ export interface TaskSnapshot {
   createdAt: number;
   updatedAt: number;
   sessions: TaskSessionRef[];
+  /** The files it was made with (Q2.273); a comment's are on the comment. */
+  files: TaskFile[];
 }
 
 export interface NewTask {
@@ -120,6 +124,8 @@ export interface TaskChange {
 /** The other machines' half, handed in: the hub's links and its switches (Q2.244). */
 export interface TaskPeers {
   readonly machineId: string | null;
+  /** What its owner calls this machine, once the app has said; absent on a desk with no network (Q2.274). */
+  readonly machineName?: string | null;
   /** Linked machines this caller's agent may ask now: none where messaging is off, isolated, or off for the conversation. */
   linksFor(callerId: string): PeerLink[];
   askLink(link: PeerLink, path: string, timeoutMs: number): Promise<PeerAnswer>;
@@ -203,6 +209,8 @@ export interface TaskDeskOptions {
   boardAgentRoot?: string;
   /** Where a run of a `code: none` column gets its empty folder, one per task (Q2.271). */
   codelessRoot?: string;
+  /** Where a task's files are kept; absent, a task takes none (Q2.273). */
+  files?: TaskFiles | null;
 }
 
 export type MoveResult = { ok: true; task: TaskRecord } | { ok: false; code: "task_moved" | "task_working" | "no_column" | "no_exit"; message: string };
@@ -216,6 +224,7 @@ export class TaskDesk {
   private readonly remote = new Map<string, { at: number; answer: Promise<Remote<unknown>> }>();
   readonly engine: BoardEngine;
   readonly boardAgents: BoardAgents | null;
+  readonly files: TaskFiles | null;
 
   constructor(options: TaskDeskOptions) {
     this.registry = options.registry;
@@ -228,7 +237,7 @@ export class TaskDesk {
       store: options.store,
       configs: options.configs ?? new MemoryBoardConfigStore(),
       machineId: options.peers?.machineId ?? null,
-      ...(options.machineName === undefined ? {} : { machineName: options.machineName }),
+      machineName: () => options.machineName ?? this.peers?.machineName ?? null,
       ...(options.customAgents === undefined ? {} : { customAgents: options.customAgents }),
       ...(options.onWarning === undefined ? {} : { onWarning: options.onWarning }),
       now: this.now,
@@ -237,7 +246,9 @@ export class TaskDesk {
       fleet: options.peers?.handoffLinks === undefined ? null : () => this.fleet(),
       send: options.peers?.request === undefined ? null : (machine, request, timeoutMs) => this.send(machine, request, timeoutMs),
       codelessRoot: options.codelessRoot ?? null,
+      files: options.files ?? null,
     });
+    this.files = options.files ?? null;
     this.engine.start();
   }
 
@@ -297,8 +308,17 @@ export class TaskDesk {
     return this.store.get(id);
   }
 
+  byKey(key: string): TaskRecord | null {
+    return this.store.byKey(key);
+  }
+
   snapshot(task: TaskRecord): TaskSnapshot {
     return this.snapshotOf(task, this.attachedSessions().get(task.id) ?? []);
+  }
+
+  /** This machine as a listing names it: by leaving it out, with the name its owner gave it beside. */
+  private thisMachine(): BoardMachine {
+    return { id: null, label: this.engine.ownName(), isThis: true };
   }
 
   /** The task a session works on, which is the only one its agent may change. */
@@ -318,6 +338,7 @@ export class TaskDesk {
       const oldestDone = all.filter((task) => this.isClosed(task)).sort((a, b) => a.updatedAt - b.updatedAt)[0];
       if (oldestDone === undefined) return "full";
       this.store.remove(oldestDone.id);
+      void this.files?.forget(oldestDone.id);
     }
     const at = this.now();
     const column = input.column ?? this.engine.columnForStatus(input.status);
@@ -505,9 +526,33 @@ export class TaskDesk {
     return this.store.comments(id);
   }
 
-  async comment(id: string, text: string): Promise<TaskComment | null> {
+  /** The staged files a create named, moved to the task it made and written on it; the task is the caller's to take back on a refusal. */
+  async claimFiles(id: string, ids: readonly string[]): Promise<ClaimResult> {
+    if (ids.length === 0) return { ok: true, files: [] };
+    if (this.files === null) return { ok: false, code: "upload_write_failed", detail: "this daemon keeps no task files" };
+    const claimed = await this.files.claim(id, ids);
     const task = this.store.get(id);
-    return task === null ? null : this.engine.addComment(task, text);
+    if (claimed.ok && task !== null) this.store.save({ ...task, flow: { ...task.flow, files: [...(task.flow.files ?? []), ...claimed.files] } });
+    return claimed;
+  }
+
+  /** A comment and the staged files it names; null where the task is gone. */
+  async comment(id: string, text: string, ids: readonly string[] = []): Promise<TaskComment | Extract<ClaimResult, { ok: false }> | null> {
+    const task = this.store.get(id);
+    if (task === null) return null;
+    let files: TaskFile[] = [];
+    if (ids.length > 0) {
+      if (this.files === null) return { ok: false, code: "upload_write_failed", detail: "this daemon keeps no task files" };
+      const claimed = await this.files.claim(id, ids);
+      if (!claimed.ok) return claimed;
+      files = claimed.files;
+    }
+    return this.engine.addComment(this.store.get(id) ?? task, text, files);
+  }
+
+  /** Where a task's file is kept, for the download route. */
+  file(id: string, fileId: string): { path: string; name: string } | null {
+    return this.store.get(id) === null ? null : (this.files?.find(id, fileId) ?? null);
   }
 
   /** The feed, each question read off its session: open with the request as the session holds it, or closed. */
@@ -526,6 +571,7 @@ export class TaskDesk {
   remove(id: string): boolean {
     if (this.store.get(id) === null) return false;
     this.store.remove(id);
+    void this.files?.forget(id);
     return true;
   }
 
@@ -539,6 +585,10 @@ export class TaskDesk {
       this.store.detach(attachment.sessionId);
       dropped += 1;
     }
+    // A task that went elsewhere keeps its files here while it may come back: they do not cross with it (Q7.163).
+    const since = this.now() - TOMBSTONE_KEEP_MS;
+    const kept = new Set([...this.store.list().map((task) => task.id), ...this.store.tombstones().filter((stone) => stone.at >= since).map((stone) => stone.id)]);
+    void this.files?.sweep(kept);
     return dropped;
   }
 
@@ -721,7 +771,7 @@ export class TaskDesk {
   }
 
   async listProjects(callerId: string): Promise<ProjectListing> {
-    const machines: ProjectRows[] = [{ machine: THIS_MACHINE, ...(await this.localProjects()) }];
+    const machines: ProjectRows[] = [{ machine: this.thisMachine(), ...(await this.localProjects()) }];
     const unreachable: ProjectListing["unreachable"] = [];
     for (const [link, answer] of await this.askLinks(callerId, "/peer/projects", remoteProjectsOf)) {
       if ("reason" in answer) unreachable.push({ machine: link.targetName, reason: answer.reason });
@@ -731,7 +781,7 @@ export class TaskDesk {
   }
 
   async listTasks(callerId: string): Promise<TaskListing> {
-    const tasks = this.localRows().map((row) => ({ machine: THIS_MACHINE, ...row }));
+    const tasks = this.localRows().map((row) => ({ machine: this.thisMachine(), ...row }));
     const unreachable: TaskListing["unreachable"] = [];
     for (const [link, answer] of await this.askLinks(callerId, "/peer/tasks", remoteTasksOf)) {
       if ("reason" in answer) unreachable.push({ machine: link.targetName, reason: answer.reason });
@@ -823,6 +873,7 @@ export class TaskDesk {
       budget: view.budget,
       labels: view.labels,
       sessions,
+      files: task.flow.files ?? [],
     };
   }
 
@@ -863,7 +914,6 @@ export class TaskDesk {
   }
 }
 
-const THIS_MACHINE: BoardMachine = { id: null, label: null, isThis: true };
 
 function machineOf(link: PeerLink): BoardMachine {
   return { id: link.targetMachineId, label: link.targetName, isThis: false };
@@ -881,7 +931,7 @@ function resolveMachine(
   ownId: string | null,
 ): { machine: BoardMachine; agents: string[] } | string {
   const own = listing.machines.find((row) => row.machine.isThis);
-  const here = { machine: THIS_MACHINE, agents: own?.agents ?? [] };
+  const here = { machine: own?.machine ?? { id: null, label: null, isThis: true }, agents: own?.agents ?? [] };
   if (proposal.machine === null) return here;
   const asked = parseAddress(proposal.machine);
   if (asked.ref !== null && asked.ref === ownId) return here;
@@ -889,7 +939,7 @@ function resolveMachine(
   const byId = asked.ref === null ? undefined : others.find((row) => row.machine.id === asked.ref);
   if (byId !== undefined) return { machine: byId.machine, agents: byId.agents };
   const name = (asked.name ?? "").toLowerCase();
-  if (asked.ref === null && (name === "this machine" || name === "this")) return here;
+  if (asked.ref === null && (name === "this machine" || name === "this" || (name.length > 0 && name === (here.machine.label ?? "").toLowerCase()))) return here;
   const named = asked.ref === null ? others.filter((row) => (row.machine.label ?? "").toLowerCase() === name) : [];
   if (named.length === 1) return { machine: named[0]!.machine, agents: named[0]!.agents };
   const known = others.map((row) => machineAddress(row.machine)).filter((one): one is string => one !== null);

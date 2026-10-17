@@ -180,6 +180,7 @@ export interface StoreBundle {
   agentStrip: SqliteAgentStripStore;
   machineSettings: SqliteMachineSettingsStore;
   uploads: SqliteUploadStore;
+  taskFiles: SqliteUploadStore;
   plugins: SqlitePluginRecordStore;
   pluginData: SqlitePluginDataStore;
   peerLinks: SqlitePeerLinkStore;
@@ -249,6 +250,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const agentStrip = new SqliteAgentStripStore(db);
   const machineSettings = new SqliteMachineSettingsStore(db);
   const uploads = new SqliteUploadStore(db);
+  const taskFiles = new SqliteUploadStore(db, "task_files", "owner_id");
   const plugins = new SqlitePluginRecordStore(db, options.onDegraded);
   const pluginData = new SqlitePluginDataStore(db);
   const peerLinks = new SqlitePeerLinkStore(db);
@@ -271,6 +273,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     agentStrip,
     machineSettings,
     uploads,
+    taskFiles,
     plugins,
     pluginData,
     peerLinks,
@@ -1025,21 +1028,26 @@ export class SqliteUploadStore implements UploadIndex {
   private readonly removeStmt: StatementSync;
   private readonly removeSessionStmt: StatementSync;
 
-  constructor(db: DatabaseSync) {
+  /** The same rows in either table: a session's uploads, or a task's files (`task_files`, keyed on `owner_id`). */
+  constructor(
+    db: DatabaseSync,
+    table: "uploads" | "task_files" = "uploads",
+    private readonly owner: "session_id" | "owner_id" = "session_id",
+  ) {
     this.insertStmt = db.prepare(
       // consumed_at is bound, not NULL: an image the agent returned is inserted already consumed.
-      "INSERT INTO uploads (session_id, upload_id, name, orig_name, mime, bytes, created_at, consumed_at) " +
+      `INSERT INTO ${table} (${owner}, upload_id, name, orig_name, mime, bytes, created_at, consumed_at) ` +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
-    this.getStmt = db.prepare("SELECT * FROM uploads WHERE session_id = ? AND upload_id = ?");
+    this.getStmt = db.prepare(`SELECT * FROM ${table} WHERE ${owner} = ? AND upload_id = ?`);
     this.consumeStmt = db.prepare(
-      "UPDATE uploads SET consumed_at = ? WHERE session_id = ? AND upload_id = ? AND consumed_at IS NULL",
+      `UPDATE ${table} SET consumed_at = ? WHERE ${owner} = ? AND upload_id = ? AND consumed_at IS NULL`,
     );
-    this.listForStmt = db.prepare("SELECT * FROM uploads WHERE session_id = ? ORDER BY created_at");
-    this.sessionsStmt = db.prepare("SELECT DISTINCT session_id FROM uploads");
-    this.expiredStmt = db.prepare("SELECT * FROM uploads WHERE consumed_at IS NULL AND created_at < ?");
-    this.removeStmt = db.prepare("DELETE FROM uploads WHERE session_id = ? AND upload_id = ?");
-    this.removeSessionStmt = db.prepare("DELETE FROM uploads WHERE session_id = ?");
+    this.listForStmt = db.prepare(`SELECT * FROM ${table} WHERE ${owner} = ? ORDER BY created_at`);
+    this.sessionsStmt = db.prepare(`SELECT DISTINCT ${owner} FROM ${table}`);
+    this.expiredStmt = db.prepare(`SELECT * FROM ${table} WHERE consumed_at IS NULL AND created_at < ?`);
+    this.removeStmt = db.prepare(`DELETE FROM ${table} WHERE ${owner} = ? AND upload_id = ?`);
+    this.removeSessionStmt = db.prepare(`DELETE FROM ${table} WHERE ${owner} = ?`);
   }
 
   insert(row: UploadRow): void {
@@ -1057,7 +1065,7 @@ export class SqliteUploadStore implements UploadIndex {
 
   get(sessionId: string, uploadId: string): UploadRow | null {
     const row = this.getStmt.get(sessionId, uploadId);
-    return row === undefined ? null : toUploadRow(row);
+    return row === undefined ? null : toUploadRow(row, this.owner);
   }
 
   /** Idempotent: an id named by a second prompt keeps the first timestamp. */
@@ -1066,15 +1074,15 @@ export class SqliteUploadStore implements UploadIndex {
   }
 
   listFor(sessionId: string): UploadRow[] {
-    return this.listForStmt.all(sessionId).map(toUploadRow);
+    return this.listForStmt.all(sessionId).map((row) => toUploadRow(row, this.owner));
   }
 
   listSessions(): string[] {
-    return this.sessionsStmt.all().map((row) => String(row["session_id"]));
+    return this.sessionsStmt.all().map((row) => String(row[this.owner]));
   }
 
   expired(createdBefore: number): UploadRow[] {
-    return this.expiredStmt.all(createdBefore).map(toUploadRow);
+    return this.expiredStmt.all(createdBefore).map((row) => toUploadRow(row, this.owner));
   }
 
   remove(sessionId: string, uploadId: string): void {
@@ -1086,10 +1094,10 @@ export class SqliteUploadStore implements UploadIndex {
   }
 }
 
-function toUploadRow(row: Record<string, unknown>): UploadRow {
+function toUploadRow(row: Record<string, unknown>, owner: "session_id" | "owner_id"): UploadRow {
   const consumed = row["consumed_at"];
   return {
-    sessionId: String(row["session_id"]),
+    sessionId: String(row[owner]),
     uploadId: String(row["upload_id"]),
     name: String(row["name"]),
     origName: String(row["orig_name"]),

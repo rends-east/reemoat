@@ -42,6 +42,35 @@ export function labelsOf(value: unknown): string[] | null {
   return out;
 }
 
+/** A file a person gave a task or a comment on it: what is shown of it, and the id it is kept under on the task's machine (Q2.273). */
+export interface TaskFile {
+  id: string;
+  name: string;
+  mime: string | null;
+  bytes: number;
+}
+
+/** A task keeps at most this many files and bytes, its comments' included; past them a create or comment is refused. */
+export const MAX_TASK_FILES = 100;
+export const MAX_TASK_FILE_BYTES = 1024 * 1024 * 1024;
+/** Files from comments no run has had yet, sent with the next run's message; the newest kept, as its notes are. */
+export const MAX_PENDING_TASK_FILES = 20;
+
+/** Files as another daemon or a stored row wrote them, each read field by field; anything not shaped as one is left out. */
+export function taskFilesOf(value: unknown): TaskFile[] {
+  if (!Array.isArray(value)) return [];
+  const out: TaskFile[] = [];
+  for (const one of value.slice(0, MAX_TASK_FILES)) {
+    const file = one as Record<string, unknown> | null;
+    if (file === null || typeof file !== "object") continue;
+    const { id, name, mime, bytes } = file;
+    if (typeof id !== "string" || !/^u_[0-9a-f]{16}$/.test(id) || typeof name !== "string" || name.length === 0 || name.length > 256) continue;
+    if (!(mime === null || (typeof mime === "string" && mime.length <= 128)) || typeof bytes !== "number" || !Number.isInteger(bytes) || bytes < 0) continue;
+    out.push({ id, name, mime, bytes });
+  }
+  return out;
+}
+
 /** Where a task stands on its board: what the engine reads and writes, kept whole in one row (Q2.264). */
 export interface TaskFlow {
   column: string;
@@ -72,6 +101,10 @@ export interface TaskFlow {
   project?: string | null;
   /** A move to another machine under way: where, since when, and when it is next sent (Q2.269). */
   handoff?: { to: string; name: string; since: number; tries: number; nextAt: number; epoch: number } | null;
+  /** The files it was made with: every new conversation on it gets them with its first message (Q2.273). */
+  files?: TaskFile[];
+  /** Files from comments no run has had yet, which go with the next run's message. */
+  pendingFiles?: TaskFile[];
 }
 
 /** The four statuses an older build stored, and the default board's column each stands for. */
@@ -170,6 +203,8 @@ export interface TaskComment {
   entry: number;
   /** A person's comment reached its agent: into a working run's session, or the run it sent the task back for. */
   delivered: boolean;
+  /** What a person attached to it; absent on everything else. */
+  files?: TaskFile[];
 }
 
 /** What is left here of a task that went to another machine: where it went, and this machine's checkout of its code, which it may still be asked for. */

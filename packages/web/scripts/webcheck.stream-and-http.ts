@@ -644,6 +644,8 @@ process.stdout.write("\nhow long a slow route is given\n");
     // A task that starts launches its agent as a session does; the brief is then accepted without waiting on it.
     ["POST", "/tasks", [...availability, ["git.ts", "GIT_TIMEOUT_MUTATE_MS"], agentStart]],
     ["POST", "/tasks/t_1/start", [...availability, ["git.ts", "GIT_TIMEOUT_MUTATE_MS"], agentStart]],
+    // The config agent's folder is its own, so no worktree is made.
+    ["POST", "/board/agent", [...availability, agentStart]],
     ["POST", "/sessions/s_1/resume", [agentStart]],
     // A control that restarts or wakes the agent, then restores the rest of its config.
     ["POST", "/sessions/s_1/config", [agentStart, ["session.ts", "SET_CONFIG_TIMEOUT_MS"]]],

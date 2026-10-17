@@ -137,8 +137,8 @@ absent. Q4.105.
 - The plugin root is realpath'd once at open, or `containedIn` (which compares as
   written when `realpath` throws) refuses its own children. `createWorkspace` does the
   same. Q5.105.
-- Three remover trees — uploads, worktrees, plugins — and no two may nest; `daemon.ts`
-  tests them pairwise over a named list. Q5.74.
+- Four remover trees — uploads, worktrees, plugins, task files — and no two may nest;
+  `daemon.ts` tests them pairwise over a named list. Q5.74.
 - `PluginRuntime` is an interface with one implementation and stays one: the sandbox
   seam, and how `daemoncheck` drives a start that never completes, an unanswered
   invocation and a crash after `ready`. No `kind`, for `SessionRuntime`'s reason. Q1.616.

@@ -586,10 +586,10 @@ class AppStore implements StreamSink {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private readonly links = new LinkSync({
     link: (id) => cp.linkMachine(id),
-    push: async (id, links, policy) => {
+    push: async (id, links, policy, name) => {
       const daemon = this.daemons.get(machineId(id));
       if (daemon === undefined) throw new Error("that machine is no longer in the list");
-      return daemon.putPeerLinks(links, policy);
+      return daemon.putPeerLinks(links, policy, name);
     },
     now: () => Date.now(),
   });
@@ -1543,7 +1543,7 @@ class AppStore implements StreamSink {
         if (promote || this.snapshot.me === null || changed) void this.refreshMe();
         if (firstListing) void this.beginSetUp();
         // Only while unknown: settings screens re-read it through refreshConfig.
-        if (this.snapshot.config === null) void this.loadConfig();
+        if (this.snapshot.config === null && this.snapshot.configRead !== "known") void this.loadConfig();
       }
     } catch (error) {
       // A sign-out is the credential's, already handled inside `cpFetch`: it says nothing about the server.

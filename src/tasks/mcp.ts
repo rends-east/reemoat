@@ -1,4 +1,4 @@
-import { BOARD_GUIDE, formatBoardError, parseBoard, simulate, type Board } from "@reemoat/board";
+import { BOARD_GUIDE, formatBoardError, parseBoard, simulate, type Board, type MachineOffer } from "@reemoat/board";
 import { machineAddress, type ProjectListing, type TaskDesk, type TaskListing } from "./desk.js";
 import {
   BOARD_APPLY_TOOL_NAME,
@@ -60,9 +60,10 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
       // What the config agent writes over must be the newest any machine holds, or board_apply refuses it a moment later.
       if (desk.isBoardAgent(callerId)) await desk.pullNewestBoard();
       const state = desk.engine.current;
+      const machines = await desk.engine.machines();
       return {
-        content: [{ type: "text", text: `Revision ${state.revision}.\n\n${boardWords(state.board)}\n\nThe YAML:\n${state.text}` }],
-        structuredContent: { revision: state.revision, hash: state.hash, text: state.text },
+        content: [{ type: "text", text: `Revision ${state.revision}.\n\n${boardWords(state.board)}\n\n${machineWords(machines, desk.engine.ownName())}\n\nThe YAML:\n${state.text}` }],
+        structuredContent: { revision: state.revision, hash: state.hash, text: state.text, machines: machineRows(machines, desk.engine.ownName()) },
       };
     }
     case BOARD_CHECK_TOOL_NAME: {
@@ -73,7 +74,10 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
         const lines = parsed.errors.map(formatBoardError);
         return { content: [{ type: "text", text: `It does not parse:\n${lines.join("\n")}` }], structuredContent: { ok: false, errors: lines } };
       }
-      return { content: [{ type: "text", text: `It parses.\n\n${boardWords(parsed.board)}` }], structuredContent: { ok: true, errors: [] } };
+      const machines = await desk.engine.machines();
+      const warnings = unknownMachines(parsed.board, machines);
+      const warned = warnings.length === 0 ? "" : `\n\nIt parses, but a run would wait for ever on these:\n${warnings.map((one) => `- ${one}`).join("\n")}\n${machineWords(machines, desk.engine.ownName())}`;
+      return { content: [{ type: "text", text: `It parses.\n\n${boardWords(parsed.board)}${warned}` }], structuredContent: { ok: true, errors: [], warnings } };
     }
     case BOARD_SIMULATE_TOOL_NAME: {
       const script = args["script"];
@@ -128,10 +132,51 @@ export async function callTaskTool(desk: TaskDesk, callerId: string, name: strin
   }
 }
 
+/** The machines a role may be pinned to, and the names a board gives them: this one's own once its owner has said it (Q2.274). */
+function machineWords(machines: readonly MachineOffer[], ownName: string | null): string {
+  const [here, ...others] = machines;
+  const runs = (machine: MachineOffer): string => {
+    const agents = machine.agents.filter((one) => one.kind !== "classifier").map((one) => one.name);
+    return agents.length === 0 ? "runs no agent now" : `runs ${agents.join(", ")}`;
+  };
+  const lines = ["Machines a role may name in on, or as agent@machine:"];
+  if (here !== undefined) {
+    lines.push(
+      ownName === null
+        ? `- this machine, which has no name here yet: name it by its id ${here.key}; ${runs(here)}`
+        : `- ${here.name}: this machine (${here.key}); ${runs(here)}`,
+    );
+  }
+  for (const machine of others) lines.push(`- ${machine.name} (${machine.key}); ${runs(machine)}`);
+  if (others.length === 0) lines.push("No other machine takes this board's runs: none is linked to this one with moving tasks between them switched on.");
+  return lines.join("\n");
+}
+
+function machineRows(machines: readonly MachineOffer[], ownName: string | null): unknown[] {
+  return machines.map((machine, index) => ({
+    name: index === 0 && ownName === null ? null : machine.name,
+    id: machine.key,
+    this: index === 0,
+    agents: machine.agents.filter((one) => one.kind !== "classifier").map((one) => one.name),
+  }));
+}
+
+/** Every machine a role is pinned to that this machine knows by no name or id: its runs would wait for it for ever. */
+function unknownMachines(board: Board, machines: readonly MachineOffer[]): string[] {
+  const out: string[] = [];
+  for (const role of board.roles) {
+    for (const name of role.on ?? []) {
+      const lower = name.toLowerCase();
+      if (!machines.some((machine) => machine.key === name || machine.name.toLowerCase() === lower)) out.push(`roles.${role.name}: no machine is called ${JSON.stringify(name)}`);
+    }
+  }
+  return out;
+}
+
 function projectsResult(listing: ProjectListing): unknown {
   const lines: string[] = [];
   for (const row of listing.machines) {
-    const name = row.machine.isThis ? "This machine" : (machineAddress(row.machine) ?? "Another machine");
+    const name = row.machine.isThis ? thisMachineWords(row.machine.label) : (machineAddress(row.machine) ?? "Another machine");
     lines.push(`${name} · agents: ${row.agents.length === 0 ? "none ready" : row.agents.join(", ")}`);
     if (row.projects.length === 0) lines.push("- (no project has had a session here yet; any absolute folder path works)");
     for (const project of row.projects) lines.push(`- ${project}`);
@@ -142,6 +187,7 @@ function projectsResult(listing: ProjectListing): unknown {
     structuredContent: {
       machines: listing.machines.map((row) => ({
         machine: machineAddress(row.machine),
+        name: row.machine.label,
         isThis: row.machine.isThis,
         agents: row.agents,
         projects: row.projects,
@@ -151,11 +197,15 @@ function projectsResult(listing: ProjectListing): unknown {
   };
 }
 
+function thisMachineWords(name: string | null): string {
+  return name === null ? "This machine" : `This machine, ${name}`;
+}
+
 function tasksResult(listing: TaskListing): unknown {
   const lines: string[] = [];
   let heading: string | null = null;
   for (const task of listing.tasks) {
-    const name = task.machine.isThis ? "This machine" : (machineAddress(task.machine) ?? "Another machine");
+    const name = task.machine.isThis ? thisMachineWords(task.machine.label) : (machineAddress(task.machine) ?? "Another machine");
     if (name !== heading) {
       heading = name;
       lines.push(`${name}:`);
@@ -182,7 +232,8 @@ function boardWords(board: Board): string {
   for (const role of board.roles) {
     lines.push(
       `Role ${role.name}: ${role.agent}${role.model === null ? "" : ` with ${role.model}`}${role.on === null ? "" : ` on ${role.on.join(", ")}`}` +
-        `${role.minConfidence === null ? "" : `, abstaining below ${role.minConfidence}`}.`,
+        `${role.effort === null ? "" : `, effort ${role.effort}`}${role.mode === null ? "" : `, mode ${role.mode}`}` +
+        `${role.minConfidence === null ? "" : `, abstaining below ${role.minConfidence}`}${role.instructions === null ? "" : ", with instructions of its own"}.`,
     );
   }
   for (const column of board.columns) {

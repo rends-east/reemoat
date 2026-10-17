@@ -208,6 +208,8 @@ export type Step =
       /** The conversation it continues, or null for a new one. */
       session: string | null;
       model: string | null;
+      effort: string | null;
+      mode: string | null;
       message: string;
       note: string;
       reason: string;
@@ -266,6 +268,9 @@ export interface ResolvedRole {
   agent: string;
   customAgent: string | null;
   model: string | null;
+  effort: string | null;
+  mode: string | null;
+  instructions: string | null;
   on: string[] | null;
   minConfidence: number | null;
 }
@@ -276,13 +281,16 @@ export function runRole(task: BoardTask, board: Board, column: WorkColumn): Reso
     const role = roleByName(board, column.run.role);
     return role === null ? null : fromRole(role);
   }
-  if (task.own !== null) return { name: null, agent: task.own.agent, customAgent: task.own.customAgent, model: null, on: null, minConfidence: null };
+  if (task.own !== null) {
+    return { name: null, agent: task.own.agent, customAgent: task.own.customAgent, model: null, effort: null, mode: null, instructions: null, on: null, minConfidence: null };
+  }
   const fallback = roleByName(board, "default");
   return fallback === null ? null : fromRole(fallback);
 }
 
 function fromRole(role: Role): ResolvedRole {
-  return { name: role.name, agent: role.agent, customAgent: null, model: role.model, on: role.on, minConfidence: role.minConfidence };
+  const { name, agent, model, effort, mode, instructions, on, minConfidence } = role;
+  return { name, agent, customAgent: null, model, effort, mode, instructions, on, minConfidence };
 }
 
 function startStep(task: BoardTask, board: Board, column: WorkColumn, world: World): Step {
@@ -294,8 +302,8 @@ function startStep(task: BoardTask, board: Board, column: WorkColumn, world: Wor
   const placed = place({ role, conversation: column.run.conversation, column: column.id, task: { ...task, sessions }, world, code: column.run.code });
   if (!placed.ok) {
     const waited = task.wait !== null && task.wait.reason === "no_executor" && task.wait.entry === task.entry ? world.now - task.wait.since : 0;
-    if (waited >= NO_EXECUTOR_ASK_MS) return { kind: "ask", reason: "no_executor", detail: `nothing could run ${placed.wanted} for a day` };
-    return { kind: "wait", reason: "no_executor", detail: `waiting for ${placed.wanted}` };
+    if (waited >= NO_EXECUTOR_ASK_MS) return { kind: "ask", reason: "no_executor", detail: `nothing could run ${placed.wanted} for a day: ${placed.why}` };
+    return { kind: "wait", reason: "no_executor", detail: `waiting for ${placed.wanted}: ${placed.why}` };
   }
   if (placed.executor.machine !== world.self) return { kind: "handoff", to: placed.executor.machine, executor: placed.executor, reason: placed.reason };
   if (column.limit !== null) {
@@ -313,6 +321,8 @@ function startStep(task: BoardTask, board: Board, column: WorkColumn, world: Wor
     executor: placed.executor,
     session: placed.session,
     model: role.model,
+    effort: role.effort,
+    mode: role.mode,
     message: runMessage(task, board, column, continues),
     note: runNote(task, board, column, continues),
     reason: placed.reason,
@@ -429,6 +439,14 @@ export function runNote(task: BoardTask, board: Board, column: WorkColumn, conti
     `Added by Reemoat, not written by your user: this conversation works on the task "${noteText(task.title)}" on their task board, ` +
       `now in its ${noteText(column.title)} column.`,
   );
+  // Every run, a continued one too: another role may have had this conversation last.
+  const role = runRole(task, board, column);
+  if (role?.instructions != null) {
+    lines.push(
+      `You work here as its ${noteText(role.name ?? "")} role. Your user wrote these instructions for that role in their board; follow them in all of this run's work:\n` +
+        role.instructions.replace(/<(\/?board-task)/gi, "<\\$1"),
+    );
+  }
   if (!continues) {
     const sentBrief = column.run.skill === null && column.run.prompt === null;
     if (!sentBrief) lines.push(`The task's brief:\n${task.brief}`);
@@ -467,7 +485,7 @@ export interface PlaceInput {
 
 export type Placement =
   | { ok: true; executor: Executor; session: string | null; reason: string; fresh: string | null }
-  | { ok: false; wanted: string };
+  | { ok: false; wanted: string; why: string };
 
 function offerFor(machine: MachineOffer, role: ResolvedRole): AgentOffer | null {
   const want = role.customAgent ?? role.agent;
@@ -505,13 +523,18 @@ export function place(input: PlaceInput): Placement {
   const { role, task, world } = input;
   const needsCode = input.code !== "none";
   const allowed = role.on === null ? null : role.on.map((name) => machineNamed(world.machines, name)).filter((one): one is MachineOffer => one !== undefined);
+  // A machine its role is pinned to is its person's word: a task that has never run brings no code, and starts there in its own folder.
+  const hasProject = (machine: MachineOffer): boolean =>
+    !needsCode ||
+    task.project === null ||
+    machine.projects === null ||
+    machine.projects.includes(task.project) ||
+    task.code?.holder === machine.key ||
+    (allowed !== null && task.code === null);
   const candidate = (machine: MachineOffer): AgentOffer | null => {
     if (!machine.online) return null;
     if (allowed !== null && !allowed.includes(machine)) return null;
-    const project = task.project;
-    const hasProject =
-      !needsCode || project === null || machine.projects === null || machine.projects.includes(project) || task.code?.holder === machine.key;
-    return hasProject ? offerFor(machine, role) : null;
+    return hasProject(machine) ? offerFor(machine, role) : null;
   };
 
   let fresh: string | null = null;
@@ -555,7 +578,19 @@ export function place(input: PlaceInput): Placement {
     .sort((a, b) => a.running - b.running || a.name.localeCompare(b.name) || (a.key < b.key ? -1 : 1));
   if (rest.length > 0) return pick(rest[0], rest.length > 1 && rest[0]!.running < rest[1]!.running ? "it runs the least" : "the first by name")!;
   const agent = role.customAgent ?? role.agent;
-  return { ok: false, wanted: role.on === null ? agent : `${agent}@${role.on.join("|")}` };
+  return { ok: false, wanted: role.on === null ? agent : `${agent}@${role.on.join("|")}`, why: unplaced(role, allowed, world.machines) };
+}
+
+/** Why no machine took a run, said of the first machine that came closest: what a person can do something about. */
+function unplaced(role: ResolvedRole, allowed: readonly MachineOffer[] | null, machines: readonly MachineOffer[]): string {
+  const agent = role.customAgent ?? role.agent;
+  if (role.on !== null && allowed !== null && allowed.length === 0) return `no machine is called ${role.on.join(" or ")}`;
+  const looked = allowed ?? machines;
+  const online = looked.filter((machine) => machine.online);
+  if (online.length === 0) return allowed === null ? "no machine is online" : `${looked.map((one) => one.name).join(" and ")} ${looked.length === 1 ? "is" : "are"} away`;
+  const running = online.filter((machine) => offerFor(machine, role) !== null);
+  if (running.length === 0) return allowed === null ? `no machine runs ${agent}` : `${online[0]!.name} does not run ${agent}`;
+  return allowed === null ? `no machine that runs ${agent} has this project` : `${running[0]!.name} has no copy of this project`;
 }
 
 /** Sessions first, then the run, then the column. */

@@ -100,6 +100,20 @@ CREATE TABLE IF NOT EXISTS uploads (
 
 CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads (created_at);
 
+-- A task's files and the ones staged for a task: owner_id is the task's id, or `staged` until a create or comment names it.
+-- Never pruned with the sessions, which is why it is not the uploads table.
+CREATE TABLE IF NOT EXISTS task_files (
+  owner_id    TEXT    NOT NULL,
+  upload_id   TEXT    NOT NULL,
+  name        TEXT    NOT NULL,
+  orig_name   TEXT    NOT NULL,
+  mime        TEXT,
+  bytes       INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL,
+  consumed_at INTEGER,
+  PRIMARY KEY (owner_id, upload_id)
+);
+
 CREATE TABLE IF NOT EXISTS daemon (
   id          INTEGER PRIMARY KEY CHECK (id = 1),
   instance_id TEXT    NOT NULL,

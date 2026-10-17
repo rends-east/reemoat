@@ -8,6 +8,7 @@ paths:
   - plugins/**
   - packages/web/src/boardAgent.ts
   - packages/web/src/ui/board/BoardAgent.tsx
+  - packages/web/src/ui/board/TaskFiles.tsx
 ---
 
 # The configurable board: its YAML, its engine, and tasks between machines
@@ -45,6 +46,10 @@ moves a task lives here or nowhere; `boardcheck` drives it by table, with no dae
   (`newerBoard`, `BoardEngine.adopt`). No stored board is the default at revision 0.
 - **A board this build cannot parse keeps the daemon on the default** and warns; it never
   stops a daemon (`compatibility.md` rule 2). 20 revisions kept (`MAX_BOARD_REVISIONS`).
+- **A role's `effort` and `mode` are the agent's own choices (Q2.272)**: checked for length
+  only, matched at use by `choiceNamed` (never by substring), set after the model at the
+  start of **every** run of the role, a continued conversation's too; one not offered is a
+  history note. Its `instructions` ride every run's note and its judging question.
 
 ## A task's flow (Q2.264)
 
@@ -69,7 +74,11 @@ moves a task lives here or nowhere; `boardcheck` drives it by table, with no dae
 - **Placed by `place`**: the conversation it continues, else the first machine a pinned
   role names (code goes to work), else the code's holder (work goes to code), else this
   machine, the least busy, by name. Every choice is written to the history with its
-  reason.
+  reason, and a run nobody takes says why (`unplaced`).
+- **A machine is its owner's name for it (Q2.274)**: this one by `ownName`, from `self.name`
+  on `PUT /peers/links`, else `local`; another by its link. A pinned role takes a task that has
+  never run whether or not that machine listed the project, to start in its folder there.
+  `board_get` lists the names; `board_check` warns of one nothing is called.
 - **`code: none` (Q2.271)**: no project asked of a machine, not drawn to the holder, nothing
   fetched; it works in its task's folder under `codelessRoot`, makes no control commit, and
   continues only a conversation of its own kind (`columnCode`), as a run with code does.
@@ -89,6 +98,20 @@ moves a task lives here or nowhere; `boardcheck` drives it by table, with no dae
 - **A start from a route waits for its launch** (`TaskDesk.startNow`) and answers the
   launch's own refusal (`launchRefused`, shared with `POST /sessions`); one the board makes
   by itself turns a refusal into `run_failed`, or a wait for a session slot.
+
+## A task's files (Q2.273)
+
+- **Their own store, never the session uploads**, which a start prunes against the
+  sessions: `TaskFiles` over `task_files`. `POST /tasks/uploads` stages one; the create or
+  comment naming it in `attachments` takes it (`claim`), a create checking every id first.
+- **A run that opens a conversation sends the task's own files with its message**; one that
+  continues does not, as that conversation had them (`launch`).
+- **A comment's go into a working run's conversation, else wait in `pendingFiles`** for the
+  next run's message, whichever conversation, its note naming the comment they came with.
+- **A file the machine does not hold is a history note**, and the message goes without it.
+- **The client uploads at the press, never on pick** (`uploadPicked`, Q3.744): New task's
+  machine is the assignee's and may change while the form is open. Its move of a task
+  nobody started carries them itself (`carryFiles`); the board's handoff does not.
 
 ## Judges (Q2.267)
 
@@ -151,6 +174,9 @@ One session per account that writes the board for its person; Edit board is its 
   (`CODE_PIECE_BYTES`), 64 MiB at most; a worktree moves forward only and only when clean,
   else `code_diverged`. A project that is no repository does not move once it has run
   (`code_not_portable`), `code: none` or not. The holder answers from its tombstone too.
+- **A task's files do not cross** (Q2.273): a handoff names them (`taskFilesOf` reads them
+  field by field) and the receiver holds none, so its run notes them as not sent. They stay
+  here while the tombstone does.
 - **Only what is on the branch crosses (Q2.271).** Before a handoff into a column with code
   the holder commits what is left, then needs a clean tree on the branch (`codeLeaves`,
   `unsaved`), else `code_dirty`: the task stays, its run failed so a Retry moves it again.
@@ -168,8 +194,9 @@ One session per account that writes the board for its person; Edit board is its 
 
 | | |
 |---|---|
-| A board | 64 KiB of YAML; 32 roles, 32 columns, 8 exits, 6 judges, 16 rules, 16 machines a role names; a column title 40, a prompt 16 000, skill args 2 000 characters; budget 1–50 (8), a column's limit 1–64 |
+| A board | 64 KiB of YAML; 32 roles, 32 columns, 8 exits, 6 judges, 16 rules, 16 machines a role names; a column title 40, a prompt 16 000, skill args 2 000, a role's effort and mode 64, its instructions 4 000 characters; budget 1–50 (8), a column's limit 1–64 |
 | A run's engine | 16 steps per event; waiting runs looked at every 30 s; no executor for a day asks its person |
-| A judge | 8 KiB of question (last message 4 KiB, diff 6 KiB, cut from the end of `sees`); 120 s a harness, 10 s a classifier |
+| A judge | 8 KiB of question (instructions 2 KiB, last message 4 KiB, diff 6 KiB, cut from the end of `sees`); 120 s a harness, 10 s a classifier |
 | The feed and history | 200 entries each per task; a comment 8 000 characters, 2 000 of each when it moves |
+| Files | 10 per create or comment, 100 MiB each; 100 files and 1 GiB a task, its comments' included; 20 wait for the next run; one staged and never named goes after a day |
 | A move | 30 s per try, retried 30 s → 10 min, given up after 24 h; code 64 MiB in 512 KiB pieces, a bundle kept 10 min; tombstones 30 days |

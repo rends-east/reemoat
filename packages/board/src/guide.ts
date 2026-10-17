@@ -8,6 +8,7 @@ import {
   EXIT_NAME,
   MAX_BOARD_BYTES,
   MAX_BUDGET,
+  MAX_CHOICE_CHARS,
   MAX_COLUMN_LIMIT,
   MAX_COLUMN_TITLE_CHARS,
   MAX_COLUMNS,
@@ -19,6 +20,7 @@ import {
   MAX_MODEL_CHARS,
   MAX_ON_MACHINES,
   MAX_PROMPT_CHARS,
+  MAX_ROLE_INSTRUCTIONS_CHARS,
   MAX_ROLES,
   MAX_SKILL_ARGS_CHARS,
   MIN_BUDGET,
@@ -35,7 +37,14 @@ import { DEFAULT_BOARD_TEXT, REVIEW_LOOP_TEXT } from "./presets.js";
 import { MAX_RULES, RULE_FACTS } from "./rules.js";
 import { MAX_SIMULATED_EVENTS } from "./simulate.js";
 import { RETURN_HINT, TEMPLATE_NAMES, type TemplateName } from "./template.js";
-import { CLASSIFIER_TIMEOUT_MS, JUDGE_TIMEOUT_MS, MAX_JUDGE_PROMPT_BYTES, MAX_SEEN_DIFF_BYTES, MAX_SEEN_LAST_MESSAGE_BYTES } from "./verdict.js";
+import {
+  CLASSIFIER_TIMEOUT_MS,
+  JUDGE_TIMEOUT_MS,
+  MAX_JUDGE_INSTRUCTIONS_BYTES,
+  MAX_JUDGE_PROMPT_BYTES,
+  MAX_SEEN_DIFF_BYTES,
+  MAX_SEEN_LAST_MESSAGE_BYTES,
+} from "./verdict.js";
 
 const FENCE = "```";
 const code = (word: string): string => `\`${word}\``;
@@ -68,10 +77,22 @@ const FIELD_WORDS: { [L in Level]: Record<(typeof BOARD_FIELDS)[L][number], stri
     model:
       `A model, at most ${MAX_MODEL_CHARS} characters, picked from the agent's own model list by value or name, for its runs and ` +
       "its judging. One the agent does not offer leaves its default, and the task's history says so.",
+    effort:
+      `How hard the agent thinks: one of its own effort choices (such as ${code("high")}), by value or name in any case, at most ` +
+      `${MAX_CHOICE_CHARS} characters. Set after the model, for its runs and its judging; one the agent does not offer leaves its ` +
+      "own, and a run's history says so.",
+    mode:
+      `The mode its runs start in: one of the agent's own modes (such as ${code("plan")}), matched and bounded as ${code("effort")} ` +
+      "is. Set at every run's start, a continued conversation's too. A mode that asks before acting waits on the person; one " +
+      "that asks nothing runs the role unwatched.",
+    instructions:
+      `The person's standing words for the role, at most ${MAX_ROLE_INSTRUCTIONS_CHARS} characters: a lens, a standard, what to ` +
+      `look for. Every run's note carries them whole, a continued conversation's too; a judging question, their first ` +
+      `${kib(MAX_JUDGE_INSTRUCTIONS_BYTES)}. Plain text, not a template.`,
     on:
-      `The machines the role may run on, by preference: one name or a list of at most ${MAX_ON_MACHINES}, each a machine's name as ` +
-      `${code("list_projects")} prints it (in any case, at most ${MAX_MACHINE_NAME_CHARS} characters) or its id. Without it the role ` +
-      "runs on any machine that offers its agent. Name the machine here or after `@`, not both.",
+      `The machines the role may run on, by preference: one name or a list of at most ${MAX_ON_MACHINES}, each a machine's name or id ` +
+      `as ${code("board_get")} lists them (in any case, at most ${MAX_MACHINE_NAME_CHARS} characters); ${code("board_check")} warns of one ` +
+      "it does not know. Without it the role runs on any machine that offers its agent. Name the machine here or after `@`, not both.",
     min_confidence:
       "A number from zero to one. A judging answer with a lower confidence counts as none, and the next judge is asked; one " +
       "that gives no confidence is not checked.",
@@ -228,7 +249,7 @@ The first that applies:
 3. A new conversation, or the task's first run: the task's brief.
 4. A continued conversation: the return hint, ${code(RETURN_HINT)}, without the exit where the person moved the task by hand.
 
-With the message goes a note: the task and the column; in a new conversation the brief, where the message was not it, and where the task came back from; how to finish (with two or more exits and ${code("self")} in ${code("decide")}, each exit and its ${code("means")}, to name one as ${code("task_update")}'s ${code("outcome")}; else, under ${code("done_when: report")}, to call ${code("task_update")} with ${code("status: review")}); and the person's comments since the last run.
+With the message goes a note: the task and the column; the role's ${code("instructions")}, on every run; in a new conversation the brief, where the message was not it, and where the task came back from; how to finish (with two or more exits and ${code("self")} in ${code("decide")}, each exit and its ${code("means")}, to name one as ${code("task_update")}'s ${code("outcome")}; else, under ${code("done_when: report")}, to call ${code("task_update")} with ${code("status: review")}); and the person's comments since the last run.
 
 ### Prompt templates
 
@@ -273,7 +294,7 @@ ${code("decide")} is a list of at most ${MAX_DECIDE} judges, asked in order unti
 
 - ${code("self")}: the run's own agent, by the ${code("outcome")} it gave ${code("task_update")}. Work columns only.
 - ${code("{ rules: [...] }")}: the first rule that holds (see Rules).
-- A role's name: the role is asked once per entry, shown the exits with their ${code("means")} and what ${code("sees")} allows, and answers ${code('{"exit": "<name>", "confidence": <zero to one>}')}. It abstains when its answer cannot be read, names an exit the column lacks, says it cannot tell, takes longer than ${JUDGE_TIMEOUT_MS / 1000} seconds (${CLASSIFIER_TIMEOUT_MS / 1000} for a plugin's classifier), or gives a confidence under its ${code("min_confidence")}.
+- A role's name: the role is asked once per entry, shown its ${code("instructions")}, the exits with their ${code("means")} and what ${code("sees")} allows, and answers ${code('{"exit": "<name>", "confidence": <zero to one>}')}. It abstains when its answer cannot be read, names an exit the column lacks, says it cannot tell, takes longer than ${JUDGE_TIMEOUT_MS / 1000} seconds (${CLASSIFIER_TIMEOUT_MS / 1000} for a plugin's classifier), or gives a confidence under its ${code("min_confidence")}.
 - ${code("human")}: the person picks. In a work column the task shows that it needs them, with the exits as buttons; in a waiting column the exits are its buttons.
 
 A judge with no answer passes to the next. A judge that answers ${code(STAY)}, a role or a rule's ${code(`then: ${STAY}`)}, hands the choice to the person at once, and the judges after it are not asked. Every automatic move spends one of the task's ${code("budget")}.
@@ -329,7 +350,12 @@ version: 1
 budget: 6                       # the person asked to be pulled in sooner than the default
 roles:
   coder:    { agent: claude }
-  reviewer: { agent: codex, on: [server, mac] }    # the server first; the mac when it is away
+  reviewer:
+    agent: codex
+    on: [server, mac]           # the server first; the mac when it is away
+    effort: high
+    instructions: |             # the person's lens for every review
+      Review as the on-call engineer: what breaks, what is untested. Not style.
   triage:   { agent: claude, model: haiku, min_confidence: 0.7 }   # cheap; unsure answers go to the person
 columns:
   - { id: inbox, title: Inbox }

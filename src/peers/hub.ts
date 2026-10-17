@@ -70,6 +70,7 @@ const REMOTE_MESSAGING_OFF = "Agent messaging is off on that machine.";
 export const MACHINE_ISOLATED = "This machine's sessions are isolated: they can message only each other.";
 export const REMOTE_ISOLATED = "Agent messaging on that machine is limited to its own sessions.";
 const POLICY_KEY: PeerPolicyKey = "peerMessagesPolicy";
+const NAME_KEY: PeerPolicyKey = "machineName";
 
 export type PeerStatus = "working" | "idle" | "waiting_for_user" | "asleep" | "starting";
 
@@ -241,6 +242,7 @@ export class PeerHub {
   readonly enabled: boolean;
   private readonly policyStore: PeerPolicyStore | null;
   private policy: PeerPolicy;
+  private name: string | null;
   private readonly network: PeerNetwork | null;
   readonly machineId: string | null;
   private readonly outbox: PeerOutbox | null;
@@ -275,6 +277,7 @@ export class PeerHub {
     this.seen = options.seen ?? memorySeen();
     this.policyStore = options.policy ?? null;
     this.policy = storedPolicy(this.policyStore?.readPolicy(POLICY_KEY) ?? null);
+    this.name = this.policyStore?.readPolicy(NAME_KEY) ?? null;
     this.now = options.now ?? Date.now;
     this.warn = options.onWarning ?? null;
     this.askWaitMs = options.askWaitMs ?? ASK_WAIT_MS;
@@ -300,6 +303,17 @@ export class PeerHub {
   }
 
   /** A delivery older than the one applied changes nothing; answers whether this one did (Q1.654). */
+  /** What its owner calls this machine, as the app last said with its links; null until one has. Other machines know it by the same name. */
+  get machineName(): string | null {
+    return this.name;
+  }
+
+  setMachineName(name: string): void {
+    if (name === this.name) return;
+    this.name = name;
+    this.policyStore?.writePolicy(NAME_KEY, name);
+  }
+
   setPolicy(next: PeerPolicyDelivery): boolean {
     if (next.at < this.policy.at) return false;
     const was = this.policy;

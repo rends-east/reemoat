@@ -16,6 +16,7 @@ import { Markdown } from "../Markdown";
 import { PermissionCard } from "../PermissionCard";
 import { toast } from "../Toast";
 import { addComment, readFeed } from "./actions";
+import { AttachButton, PickedFiles, TaskFileList, uploadPicked, usePickedFiles } from "./TaskFiles";
 
 function ago(at: number): string {
   if (at <= 0) return "";
@@ -214,17 +215,19 @@ function Entry({ comment, entry, state }: { comment: TaskCommentView; entry: Boa
   }
 
   // What its agent last said is drawn as the conversation draws an agent's words; a person's and a report's are drawn as sent.
+  const files = comment.files ?? [];
   return (
     <div className="flex flex-col gap-1">
       {head}
-      <div className="rounded-lg border border-edge px-3 py-2.5">
+      <div className="flex flex-col gap-2 rounded-lg border border-edge px-3 py-2.5">
         {comment.kind === "stop" ? (
           <div className="text-sm">
             <Markdown text={comment.text} />
           </div>
         ) : (
-          <p className="text-sm whitespace-pre-wrap wrap-anywhere">{comment.text}</p>
+          comment.text.length > 0 && <p className="text-sm whitespace-pre-wrap wrap-anywhere">{comment.text}</p>
         )}
+        <TaskFileList machineId={entry.machineId} taskId={entry.task.id} files={files} />
       </div>
     </div>
   );
@@ -234,16 +237,20 @@ function Entry({ comment, entry, state }: { comment: TaskCommentView; entry: Boa
 function CommentBox({ entry, replying, onSent }: { entry: BoardTask; replying: boolean; onSent: () => void }): ReactNode {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const attached = usePickedFiles();
   const area = useRef<HTMLTextAreaElement | null>(null);
-  const ready = sentText(text).trim().length > 0 && !busy && !entry.unavailable;
+  // Files may go with no words, as a message's may.
+  const ready = (sentText(text).trim().length > 0 || attached.files.length > 0) && !busy && !entry.unavailable;
   const send = (): void => {
     if (!ready) return;
     const body = sentText(text);
     setBusy(true);
-    void addComment(entry, body)
+    void uploadPicked(entry.machineId, attached.files, attached.progress)
+      .then((ids) => addComment(entry, body, ids))
       .then(
         () => {
           setText("");
+          attached.clear();
           if (area.current !== null) {
             area.current.value = "";
             fitToContent(area.current);
@@ -255,29 +262,53 @@ function CommentBox({ entry, replying, onSent }: { entry: BoardTask; replying: b
       .finally(() => setBusy(false));
   };
   return (
-    <div className="flex items-end gap-2">
-      <textarea
-        {...VERBATIM_FIELD}
-        ref={area}
-        rows={1}
-        aria-label={replying ? "Reply to the agent" : "Comment"}
-        placeholder={replying ? "Reply to the agent" : "Write a comment"}
-        value={text}
-        disabled={entry.unavailable}
-        onChange={(event) => {
-          setText(event.target.value);
-          fitToContent(event.target);
-        }}
-        onKeyDown={(event) => {
-          if (answerKey(event, !window.matchMedia("(pointer: coarse)").matches) !== "advance") return;
-          event.preventDefault();
-          send();
-        }}
-        className="min-h-11 min-w-0 flex-1 resize-none rounded-md border border-edge-strong bg-surface px-3 py-2.5 text-sm leading-5 outline-none"
-      />
-      <Button tone="primary" size="sm" disabled={!ready} onClick={send} className="mb-1">
-        {busy ? <Spinner /> : replying ? "Reply" : "Comment"}
-      </Button>
+    <div
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        const files = [...event.dataTransfer.files];
+        if (files.length === 0) return;
+        event.preventDefault();
+        attached.add(files);
+      }}
+      className="flex flex-col gap-2"
+    >
+      <PickedFiles files={attached.files} onRemove={attached.remove} busy={busy} />
+      <div className="flex items-end gap-2">
+        <textarea
+          {...VERBATIM_FIELD}
+          ref={area}
+          rows={1}
+          aria-label={replying ? "Reply to the agent" : "Comment"}
+          placeholder={replying ? "Reply to the agent" : "Write a comment"}
+          value={text}
+          disabled={entry.unavailable}
+          onChange={(event) => {
+            setText(event.target.value);
+            fitToContent(event.target);
+          }}
+          // Only when there are files: a text paste must fall through untouched.
+          onPaste={(event) => {
+            const files = [...(event.clipboardData?.files ?? [])];
+            if (files.length === 0) return;
+            event.preventDefault();
+            attached.add(files);
+          }}
+          onKeyDown={(event) => {
+            if (answerKey(event, !window.matchMedia("(pointer: coarse)").matches) !== "advance") return;
+            event.preventDefault();
+            send();
+          }}
+          className="min-h-11 min-w-0 flex-1 resize-none rounded-md border border-edge-strong bg-surface px-3 py-2.5 text-sm leading-5 outline-none"
+        />
+        <div className="mb-1 flex shrink-0 items-center gap-1">
+          <AttachButton onPick={attached.add} disabled={busy || entry.unavailable} />
+          <Button tone="primary" size="sm" disabled={!ready} onClick={send}>
+            {busy ? <Spinner /> : replying ? "Reply" : "Comment"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

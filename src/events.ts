@@ -439,8 +439,11 @@ export function isMachineSettingKey(value: unknown): value is MachineSettingKey 
   return typeof value === "string" && Object.hasOwn(MACHINE_SETTING_MEMBERS, value);
 }
 
-/** Beside the settings in machine_settings, and written only by PUT /peers/links: PATCH /settings never names it (Q1.654). */
-export type PeerPolicyKey = "peerMessagesPolicy";
+/**
+ * Beside the settings in machine_settings, and written only by PUT /peers/links: PATCH /settings never names them (Q1.654).
+ * `machineName` is what its owner calls this machine, which a board's `on` names it by (Q2.274).
+ */
+export type PeerPolicyKey = "peerMessagesPolicy" | "machineName";
 
 /** Judged by `data.errorKind` only, never the message; never throws. */
 export function isAuthFailure(event: { type: string; data?: unknown }): boolean {

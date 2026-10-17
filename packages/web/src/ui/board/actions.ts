@@ -32,6 +32,8 @@ export interface NewTaskInput {
   /** A proposal's id, or one minted for this form: the same key sent again makes no second task. */
   key?: string;
   start: boolean;
+  /** Files already staged on that machine (`uploadPicked`). */
+  attachments?: string[];
 }
 
 /** Rejects with what the daemon said, for the form or the card to draw; the caller decides where to go next. */
@@ -50,6 +52,7 @@ export async function createTask(input: NewTaskInput): Promise<{ task: TaskSnaps
     cwd: input.cwd,
     key: input.key ?? taskKey(),
     start: input.start,
+    ...(input.attachments === undefined || input.attachments.length === 0 ? {} : { attachments: input.attachments }),
   });
   return landed(input.machineId, answer);
 }
@@ -134,10 +137,10 @@ export function legacyTarget(drawn: Board, column: string): Exclude<TaskStatus, 
 }
 
 /** A person's word on a task's feed: into the run's conversation while one works, else into the next run's note. */
-export async function addComment(entry: Pick<BoardTask, "machineId" | "task">, text: string): Promise<TaskCommentView> {
+export async function addComment(entry: Pick<BoardTask, "machineId" | "task">, text: string, attachments: readonly string[] = []): Promise<TaskCommentView> {
   const daemon = store.daemonFor(entry.machineId);
   if (daemon === undefined) throw new Error(NOT_CONNECTED);
-  const { comment } = await daemon.addTaskComment(entry.task.id, text);
+  const { comment } = await daemon.addTaskComment(entry.task.id, text, attachments);
   board.refresh(entry.machineId);
   return comment;
 }
@@ -273,11 +276,28 @@ export async function moveToMachine(
     cwd,
     key: entry.task.key ?? taskKey(),
     start,
+    attachments: await carryFiles(entry, to.machineId),
   });
   // Drawn once, where it went: the copy left behind leaves the board before its delete is answered.
   board.forget(entry.machineId, entry.task.id);
   await deleteTask(entry);
   return { machineId: to.machineId, taskId: made.task.id, session: made.session };
+}
+
+/** The task's files fetched from its machine and staged on another, for the copy made there: the daemons never move them (Q2.273). */
+async function carryFiles(entry: BoardTask, to: MachineId): Promise<string[]> {
+  const files = entry.task.files ?? [];
+  if (files.length === 0) return [];
+  const from = store.daemonFor(entry.machineId);
+  const there = store.daemonFor(to);
+  if (from === undefined || there === undefined) throw new Error(NOT_CONNECTED);
+  const ids: string[] = [];
+  for (const file of files) {
+    const blob = await from.downloadTaskFile(entry.task.id, file.id);
+    const staged = await there.uploadTaskFile(new File([blob], file.name, { type: file.mime ?? "" }), file.name, () => {}, new AbortController().signal);
+    ids.push(staged.upload.uploadId);
+  }
+  return ids;
 }
 
 export async function deleteTask(entry: BoardTask): Promise<void> {

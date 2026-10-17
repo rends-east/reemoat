@@ -8,7 +8,9 @@ import {
   MAX_TASK_COMMENTS,
   MAX_TASK_SUMMARY_CHARS,
   MAX_TASK_TITLE_CHARS,
+  MAX_PENDING_TASK_FILES,
   TASK_EVENT_KINDS,
+  taskFilesOf,
   type TaskAssignee,
   type TaskComment,
   type TaskEvent,
@@ -138,6 +140,8 @@ export function readHandoff(raw: unknown): HandoffPayload | string {
       request: null,
       entry: count(comment["entry"]) ? comment["entry"] : 0,
       delivered: comment["delivered"] === true,
+      // Named, never sent: a task's files stay on the machine they were given to (Q2.273).
+      ...(Array.isArray(comment["files"]) ? { files: taskFilesOf(comment["files"]) } : {}),
     });
   }
   const events: Omit<TaskEvent, "seq">[] = [];
@@ -181,7 +185,13 @@ export function readHandoff(raw: unknown): HandoffPayload | string {
       key: task["key"] as string | null,
       createdAt: task["createdAt"] as number,
     },
-    flow: { ...flowDefaults(), ...(flow as Partial<TaskFlow>), epoch },
+    flow: {
+      ...flowDefaults(),
+      ...(flow as Partial<TaskFlow>),
+      epoch,
+      files: taskFilesOf(flow["files"]),
+      pendingFiles: taskFilesOf(flow["pendingFiles"]).slice(-MAX_PENDING_TASK_FILES),
+    },
     comments,
     events,
   };

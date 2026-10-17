@@ -1,6 +1,7 @@
 // One question to an agent on a bare Session that belongs to no session list, so no view has anything to subtract (Q7.27).
 // Its agent is reachable only by shutdown here; the exposure is bounded by MAX_CONCURRENT_ASKS and ASK_TIMEOUT_MS.
 
+import { choiceNamed } from "@reemoat/board";
 import type { AgentId } from "./acp/agents.js";
 import type { AgentRouting } from "./acp/systems.js";
 import type { AgentConfigOption } from "./events.js";
@@ -122,7 +123,7 @@ export class AgentAskRuns {
    * Throws AgentAskError for everything a caller can act on.
    * signal ends the wait when the caller leaves; it does not undo a spawn already under way.
    */
-  async ask(agent: AgentId, prompt: string, model?: string, signal?: AbortSignal): Promise<AgentAskAnswer> {
+  async ask(agent: AgentId, prompt: string, model?: string, signal?: AbortSignal, effort?: string): Promise<AgentAskAnswer> {
     if (Buffer.byteLength(prompt, "utf8") > MAX_ASK_PROMPT_BYTES) {
       throw new AgentAskError("model_prompt_too_large", `a prompt may be at most ${MAX_ASK_PROMPT_BYTES} bytes`);
     }
@@ -138,6 +139,7 @@ export class AgentAskRuns {
       // Re-checked inside the try: a caller that left during Session.start must still reach the finally that disposes it.
       stopIfGone(signal);
       if (chosen.length > 0) await this.choose(session, agent, chosen);
+      if (effort !== undefined) await this.chooseEffort(session, effort);
       return { text: await this.collect(session, prompt, signal), agent };
     } finally {
       await this.release(session);
@@ -314,6 +316,13 @@ export class AgentAskRuns {
       );
     }
     await session.setConfigOption(option.id, model);
+  }
+
+  /** Unlike a model, an effort the agent does not offer is no refusal: the ask runs at the agent's own. */
+  private async chooseEffort(session: Session, effort: string): Promise<void> {
+    const option = session.agentConfig.options.find((one) => one.category === "thought_level" && one.kind === "select");
+    const value = option === undefined ? null : choiceNamed(option.choices, effort);
+    if (option !== undefined && value !== null && option.value !== value) await session.setConfigOption(option.id, value);
   }
 
   private async start(agent: AgentId): Promise<Session> {

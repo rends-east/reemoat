@@ -104,8 +104,8 @@ Flags: `--url`, `--api-key`, `--enroll-code`, `--label`, `--dir` (default
 and `sudo` for exactly one command, which it asks about first:
 `sudo loginctl enable-linger <you>`, and only on a Linux that will not start your
 services at boot without it. It tries that unprivileged before it asks; `--yes`
-tries only a `sudo` that needs no password, and with no terminal nothing is run as
-root at all. The run's last lines say whether the daemon comes back by itself
+tries only a `sudo` that needs no password, and with no terminal and no `--yes`
+nothing is run as root at all. The run's last lines say whether the daemon comes back by itself
 after a reboot, with the command where it does not. Reemoat's own state is under
 `~/.reemoat` and the checkout. The
 coding-agent CLIs are not part of `pnpm install` — nothing vendors them any more —

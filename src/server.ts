@@ -67,14 +67,17 @@ import { CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS, CORS_MAX_AGE_SECONDS } from "./
 import { RELAY_PROTOCOL_VERSION } from "./relay/protocol.js";
 import { DAEMON_VERSION } from "./version.js";
 import type { PeerHub } from "./peers/hub.js";
-import { linksFromBody, policyFromBody } from "./peers/links.js";
+import { linksFromBody, policyFromBody, selfNameFromBody } from "./peers/links.js";
 import type { SqlitePeerLinkStore } from "./store/sqlite.js";
 import type { TaskChange, TaskDesk } from "./tasks/desk.js";
+import type { ClaimResult } from "./tasks/files.js";
 import {
   CREATED_TASK_STATUSES,
   isTaskAssignee,
   labelsOf,
   MAX_COMMENT_CHARS,
+  MAX_TASK_FILE_BYTES,
+  MAX_TASK_FILES,
   MAX_TASK_LABEL_CHARS,
   MAX_TASK_LABELS,
   MAX_TASKS,
@@ -195,7 +198,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 // POST routes that stream their body and count their own bytes: exempt from MAX_BODY_BYTES, and their body is cancelled whoever answers.
 function isStreamingRoute(method: string, path: string): boolean {
   if (method !== "POST") return false;
-  return /^\/sessions\/[^/]+\/uploads$/.test(path) || path === "/fs/import" || path === "/plugins";
+  return /^\/sessions\/[^/]+\/uploads$/.test(path) || path === "/tasks/uploads" || path === "/fs/import" || path === "/plugins";
 }
 
 type AppEnv = { Variables: { principal: Principal } };
@@ -1608,8 +1611,11 @@ export function createApp(options: ServerOptions): AppBundle {
     if (typeof links === "string") return jsonError(c, 400, "bad_request", links);
     const policy = policyFromBody(body);
     if (typeof policy === "string") return jsonError(c, 400, "bad_request", policy);
+    const self = selfNameFromBody(body);
+    if (typeof self === "string") return jsonError(c, 400, "bad_request", self);
     // Before the links and with no await between: switched off, nothing may go out over the old set (Q1.654).
     if (policy !== null) peers.hub.setPolicy(policy);
+    if (self !== null) peers.hub.setMachineName(self.name);
     peers.links.replaceAll(links);
     return c.json({
       links: links.map((link) => ({ id: link.id, target: { id: link.targetMachineId, name: link.targetName }, expiresAt: link.expiresAt })),
@@ -1682,6 +1688,14 @@ export function createApp(options: ServerOptions): AppBundle {
     }
     const labels = labelsOf(body["labels"]);
     if (labels === null) return jsonError(c, 400, "bad_request", `labels are up to ${MAX_TASK_LABELS} words of ${MAX_TASK_LABEL_CHARS} characters`);
+    const attachments = attachmentIdsOf(c, body["attachments"]);
+    if (attachments instanceof Response) return attachments;
+    const unstaged = attachments.length === 0 || tasks.files === null ? null : tasks.files.missing(attachments);
+    if (attachments.length > 0 && tasks.files === null) return jsonError(c, 503, "uploads_unavailable", "this daemon keeps no task files");
+    // A key a task already holds answers that task, whose files the first copy of this request took.
+    if (unstaged !== null && (typeof key !== "string" || tasks.byKey(key) === null)) {
+      return jsonError(c, 400, "unknown_attachment", "no such upload waiting for a task", { uploadId: unstaged });
+    }
 
     // Written before the launch, so a second copy of this request during a slow start finds the first by its key.
     const made = tasks.create({
@@ -1701,13 +1715,20 @@ export function createApp(options: ServerOptions): AppBundle {
       return jsonError(c, 429, "too_many_tasks", `this machine holds ${MAX_TASKS} tasks and none of them is done`, { limit: MAX_TASKS });
     }
     if (made.existing) return c.json({ task: tasks.snapshot(made.task), existing: true });
+    // Before any run is started or kicked: its first message carries them.
+    const claimed = await tasks.claimFiles(made.task.id, attachments);
+    if (!claimed.ok) {
+      tasks.remove(made.task.id);
+      return taskFilesRefused(c, claimed);
+    }
+    const holding = tasks.get(made.task.id) ?? made.task;
     if (start !== true) {
       // Put in a column that works, its run starts on its own (Q2.264).
       void tasks.engine.kick(made.task.id);
-      return c.json({ task: tasks.snapshot(made.task) }, 201);
+      return c.json({ task: tasks.snapshot(holding) }, 201);
     }
 
-    const started = await tasks.startNow(made.task, { nickname: spec.nickname, worktree: spec.worktree });
+    const started = await tasks.startNow(holding, { nickname: spec.nickname, worktree: spec.worktree });
     if (started.started === null) {
       // A start that was refused leaves no task behind: sending the same request again is the retry.
       tasks.remove(made.task.id);
@@ -1889,12 +1910,73 @@ export function createApp(options: ServerOptions): AppBundle {
     if (tasks.get(c.req.param("id")) === null) return noTask(c);
     const body = await requireJson(c);
     if (body instanceof Response) return body;
+    const attachments = attachmentIdsOf(c, body["attachments"]);
+    if (attachments instanceof Response) return attachments;
     const text = typeof body["text"] === "string" ? body["text"].trim() : "";
-    if (text.length === 0 || text.length > MAX_COMMENT_CHARS || text.includes("\0")) {
+    // Files may go with no words, as a message's may.
+    if ((text.length === 0 && attachments.length === 0) || text.length > MAX_COMMENT_CHARS || text.includes("\0")) {
       return jsonError(c, 400, "bad_request", `text is a comment of at most ${MAX_COMMENT_CHARS} characters`, { max: MAX_COMMENT_CHARS });
     }
-    const comment = await tasks.comment(c.req.param("id"), text);
-    return comment === null ? noTask(c) : c.json({ comment }, 201);
+    if (attachments.length > 0 && tasks.files === null) return jsonError(c, 503, "uploads_unavailable", "this daemon keeps no task files");
+    const comment = await tasks.comment(c.req.param("id"), text, attachments);
+    if (comment === null) return noTask(c);
+    return "ok" in comment ? taskFilesRefused(c, comment) : c.json({ comment }, 201);
+  });
+
+  // A file for a task not made yet or a comment not sent yet: staged here until the create or comment names it (Q2.273).
+  app.post("/tasks/uploads", write, async (c) => {
+    const refuse = async <T>(answer: () => T): Promise<T> => {
+      await cancelBody(c.req.raw.body as ReadableStream<Uint8Array> | null);
+      return answer();
+    };
+    if (tasks === null) return refuse(() => tasksOff(c));
+    if (registry.isShuttingDown) return refuse(() => shuttingDown(c));
+    const files = tasks.files;
+    if (files === null) return refuse(() => jsonError(c, 503, "uploads_unavailable", "this daemon keeps no task files"));
+    const requested = c.req.query("name") ?? "";
+    const named = sanitizeUploadName(requested);
+    if (!named.ok) return refuse(() => jsonError(c, 400, "invalid_name", "that filename cannot be stored", { reason: named.reason }));
+    const mime = parseMime(c.req.header("content-type"));
+    if (mime === undefined) return refuse(() => jsonError(c, 400, "invalid_mime", "content-type must be type/subtype"));
+    const declared = Number.parseInt(c.req.header("content-length") ?? "", 10);
+    if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
+      return refuse(() => jsonError(c, 413, "upload_too_large", `a file may not exceed ${MAX_UPLOAD_BYTES} bytes`, { limit: MAX_UPLOAD_BYTES, declared }));
+    }
+    const body = c.req.raw.body;
+    if (body === null) return jsonError(c, 400, "bad_request", "expected a request body");
+    const result = await files.stage({ name: named.name, origName: requested, mime, body: body as ReadableStream<Uint8Array> });
+    switch (result.kind) {
+      case "ok":
+        return c.json(
+          { upload: { uploadId: result.row.uploadId, name: result.row.name, originalName: result.row.origName, mime: result.row.mime, bytes: result.row.bytes, createdAt: result.row.createdAt } },
+          201,
+        );
+      case "too_large":
+        return jsonError(c, 413, "upload_too_large", `a file may not exceed ${MAX_UPLOAD_BYTES} bytes`, { limit: MAX_UPLOAD_BYTES });
+      case "quota":
+        return jsonError(c, 413, "upload_quota_exceeded", "files not yet given to a task already fill this machine's space for them", { limit: MAX_SESSION_UPLOAD_BYTES, used: result.used });
+      case "too_many":
+        return jsonError(c, 409, "upload_limit", `${MAX_UPLOADS_PER_SESSION} files are already waiting to be given to a task`, { limit: MAX_UPLOADS_PER_SESSION });
+      case "rate": {
+        const seconds = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+        c.header("Retry-After", String(seconds));
+        return jsonError(c, 429, "upload_rate_limited", `too much has been uploaded for tasks lately — try again in ${seconds}s`, {
+          limit: UPLOAD_RATE_BYTES,
+          windowMs: UPLOAD_RATE_WINDOW_MS,
+          retryAfterMs: result.retryAfterMs,
+        });
+      }
+      case "write_failed":
+        return jsonError(c, 503, "upload_write_failed", "that file could not be stored", { detail: result.detail });
+    }
+  });
+
+  app.get("/tasks/:id/files/:fileId", read, async (c) => {
+    if (tasks === null) return tasksOff(c);
+    if (tasks.get(c.req.param("id")) === null) return noTask(c);
+    const file = tasks.file(c.req.param("id"), c.req.param("fileId"));
+    if (file === null) return jsonError(c, 404, "upload_not_found", "this task keeps no such file");
+    return serveFile(c, file.path, file.name);
   });
 
   // The account's board, as YAML: read whole, written whole against the revision it was read at (Q2.266).
@@ -3464,6 +3546,35 @@ function listRank(session: SessionSnapshot): number {
   if (awaitingHuman(session)) return 0;
   if (session.pinned) return 1;
   return session.exit === null ? 2 : 3;
+}
+
+/** A create's or a comment's `attachments`: upload ids, as many as one message may carry. */
+function attachmentIdsOf(c: Context, value: unknown): string[] | Response {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return jsonError(c, 400, "bad_request", "attachments must be an array of upload ids");
+  if (value.length > MAX_PROMPT_ATTACHMENTS) {
+    return jsonError(c, 400, "too_many_attachments", `at most ${MAX_PROMPT_ATTACHMENTS} files at once`, { limit: MAX_PROMPT_ATTACHMENTS });
+  }
+  const ids: string[] = [];
+  for (const id of value) {
+    if (typeof id !== "string" || id.length === 0 || id.length > 64) return jsonError(c, 400, "bad_request", "each attachment must be a non-empty upload id");
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function taskFilesRefused(c: Context, refused: Extract<ClaimResult, { ok: false }>): Response {
+  switch (refused.code) {
+    case "unknown_attachment":
+      return jsonError(c, 400, "unknown_attachment", "no such upload waiting for a task", { uploadId: refused.uploadId });
+    case "task_files_full":
+      return jsonError(c, 409, "task_files_full", `a task keeps at most ${MAX_TASK_FILES} files and ${MAX_TASK_FILE_BYTES} bytes`, {
+        limit: MAX_TASK_FILES,
+        bytes: MAX_TASK_FILE_BYTES,
+      });
+    case "upload_write_failed":
+      return jsonError(c, 503, "upload_write_failed", "those files could not be given to the task", { detail: refused.detail });
+  }
 }
 
 // Always octet-stream, attachment, nosniff and no-store: a rendered HTML or SVG response would run on the daemon's origin.

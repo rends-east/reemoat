@@ -182,11 +182,13 @@ export class DaemonClient {
   putPeerLinks(
     links: readonly MachineLinkGrant[],
     policy: { messaging: boolean; isolated?: boolean; policyAt?: number } | null = null,
+    /** What its owner calls this machine, which a board's `on` names it by; an older daemon ignores it (Q2.274). */
+    name: string | null = null,
   ): Promise<{
     links: { id: string; target: { id: string; name: string }; expiresAt: number }[];
     messaging?: PeerMessagingState;
   }> {
-    const body = policy === null ? { links } : { links, ...policy };
+    const body = { links, ...(policy ?? {}), ...(name === null ? {} : { self: { name } }) };
     return this.machine.request("/peers/links", { method: "PUT", body: JSON.stringify(body) });
   }
 
@@ -351,8 +353,24 @@ export class DaemonClient {
     cwd: string;
     key: string;
     start: boolean;
+    /** Files staged by `uploadTaskFile`, which the first message of every new conversation on it carries (Q2.273). */
+    attachments?: string[];
   }): Promise<{ task: TaskSnapshot; session?: SessionSnapshot; sent?: boolean; existing?: boolean }> {
     return this.machine.request("/tasks", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /** A file for a task or a comment not sent yet, staged on this machine until the create or comment names it. */
+  uploadTaskFile(
+    file: File,
+    name: string,
+    onProgress: (fraction: number) => void,
+    signal: AbortSignal,
+  ): Promise<{ upload: { uploadId: string; name: string; mime: string | null; bytes: number } }> {
+    return this.machine.upload(`/tasks/uploads?name=${encodeURIComponent(name)}`, file, onProgress, signal);
+  }
+
+  downloadTaskFile(id: string, fileId: string): Promise<Blob> {
+    return this.machine.download(`/tasks/${encodeURIComponent(id)}/files/${encodeURIComponent(fileId)}`);
   }
 
   /**
@@ -372,8 +390,12 @@ export class DaemonClient {
   }
 
   /** Into the run's conversation while one works, else into the next run's note. */
-  addTaskComment(id: string, text: string): Promise<{ comment: TaskCommentView }> {
-    return this.machine.request(`/tasks/${encodeURIComponent(id)}/comments`, { method: "POST", body: JSON.stringify({ text }) });
+  addTaskComment(id: string, text: string, attachments: readonly string[] = []): Promise<{ comment: TaskCommentView }> {
+    return this.machine.request(`/tasks/${encodeURIComponent(id)}/comments`, {
+      method: "POST",
+      // Omit the key when empty, so an older daemon sees the body it always saw.
+      body: JSON.stringify(attachments.length === 0 ? { text } : { text, attachments }),
+    });
   }
 
   /** The account's board as this daemon holds it; an older daemon answers the bare 404 `meansRouteAbsent` reads. */

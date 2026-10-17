@@ -874,7 +874,7 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
     "every row starts nobody's, keeping the agent proposed for a later Start, offers its person too, and one press adds it or, with an agent picked, starts it (Q3.727, Q3.736)",
     [
       /return \{ assignee: null, machineId, project: proposal\.project \};/.test(card),
-      /agent: agent === null \? \(proposal\.agent \?\? heldRoster\(machineId\)\?\.agents\[0\]\?\.id \?\? "claude"\) : agent\.kind === "custom" \? "" : agent\.id,/.test(card),
+      /agent: agent === null \? \(proposal\.agent \?\? heldRoster\(machineId\)\?\.agents\[0\]\?\.harness \?\? "claude"\) : agent\.kind === "custom" \? "" : agent\.id,/.test(card),
       /const start = agent !== null && column === null;/.test(card),
       /\bnobody\s+you\s+disabled=\{busy !== null\}/.test(card),
       /assignee: agent !== null \? "agent" : edited\.assignee === "you" \? "you" : "nobody",/.test(card),
@@ -1077,7 +1077,7 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
     [
       /className=\{`flex min-h-0 w-76 shrink-0 flex-col rounded-xl/.test(boardSrc),
       /<FlipBoundary order=\{order\} className=\{`flex min-h-0 shrink-0 gap-3/.test(boardSrc),
-      /<div ref=\{area\} className=\{`no-scrollbar min-h-0 flex-1 overflow-x-auto px-5 pb-3 \$\{shown === "board" \? "flex" : "hidden"\}`\}>/.test(boardSrc),
+      /<div ref=\{area\} className=\{`board-scroll min-h-0 flex-1 overflow-x-auto px-5 pb-3 \$\{shown === "board" \? "flex" : "hidden"\}`\}>/.test(boardSrc),
       /label=\{`New task in \$\{column\.title\}`\}/.test(boardSrc),
       /onClick=\{\(\) => navigate\(boardConfigPath\(\)\)\}/.test(boardSrc),
       /flex-1 basis-0|min-w-52/.test(boardSrc),
@@ -1086,13 +1086,15 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
   );
   const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
   check(
-    "no bar is drawn under the columns or in them: the board and each column scroll with none (the owner's call, 2026-10-15; reverses Q3.738)",
+    "the board's sideways bar is drawn always, 14 px, with both standard properties back to auto so the pseudo-elements apply, while each column scrolls down with none (Q3.745)",
     [
-      /\.board-scroll/.test(css),
+      /\.board-scroll \{\s*scrollbar-width: auto;\s*scrollbar-color: auto;/.test(css),
+      /\.board-scroll::-webkit-scrollbar \{\s*height: 14px;/.test(css),
       /<div data-lane-scroll className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto/.test(boardSrc),
       /\.no-scrollbar \{\s*scrollbar-width: none;/.test(css),
+      /<div ref=\{area\} className=\{`no-scrollbar/.test(boardSrc),
     ],
-    [false, true, true],
+    [true, true, true, true, false],
   );
   check(
     "a card is one size whatever it holds: its title on one line with its age, its phase or why it waits, who holds it with the machine under, and its exits (Q3.731, Q3.737)",
@@ -1171,9 +1173,29 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
   );
   check(
     "handing one nobody started to another machine makes it there under its key first, then takes it off this one",
-    /key: entry\.task\.key \?\? taskKey\(\),\s*start,\s*\}\);\s*board\.forget\(entry\.machineId, entry\.task\.id\);\s*await deleteTask\(entry\);/.test(actionsSrc),
+    /key: entry\.task\.key \?\? taskKey\(\),\s*start,\s*attachments: await carryFiles\(entry, to\.machineId\),\s*\}\);\s*board\.forget\(entry\.machineId, entry\.task\.id\);\s*await deleteTask\(entry\);/.test(actionsSrc),
     true,
   );
+  check(
+    "and carries its files: fetched from the machine it leaves and staged on the one it goes to, since no daemon moves them (Q3.744)",
+    [
+      /const blob = await from\.downloadTaskFile\(entry\.task\.id, file\.id\);/.test(actionsSrc),
+      /await there\.uploadTaskFile\(new File\(\[blob\], file\.name/.test(actionsSrc),
+    ],
+    [true, true],
+  );
+  {
+    const newTaskSrc = stripComments(srcFile("ui/board/NewTask.tsx"));
+    check(
+      "New task's files go to the machine the task is made on, at the press, before the create that names them (Q3.744)",
+      [
+        /void uploadPicked\(machineId, attached\.files, attached\.progress\)\s*\.then\(\(attachments\) => \{/.test(newTaskSrc),
+        /cwd,\s*start,\s*attachments,\s*\}\);/.test(newTaskSrc),
+        /onPaste=\{\(event\) => \{\s*const files = \[\.\.\.\(event\.clipboardData\?\.files \?\? \[\]\)\];\s*if \(files\.length === 0\) return;/.test(newTaskSrc),
+      ],
+      [true, true, true],
+    );
+  }
   check(
     "a column a press asks for is drawn at once and held until its answer, for a change and for an agent picked to start (Q3.728)",
     [

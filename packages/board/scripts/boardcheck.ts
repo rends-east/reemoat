@@ -6,7 +6,10 @@ import {
   BOARD_FIELDS,
   BOARD_GUIDE,
   boardHash,
+  choiceNamed,
   DEFAULT_BOARD_TEXT,
+  judgePrompt,
+  MAX_JUDGE_PROMPT_BYTES,
   firstMatch,
   formatBoardError,
   globRegExp,
@@ -132,9 +135,30 @@ const PINNED = parsed(REVIEW_LOOP_TEXT);
     name: "r",
     agent: "claude",
     model: null,
+    effort: null,
+    mode: null,
+    instructions: null,
     on: ["server"],
     minConfidence: null,
   });
+  const lens = parsed(
+    "version: 1\nroles:\n  r:\n    agent: claude\n    effort: High\n    mode: plan\n    instructions: |\n      Read it as the on-call.\n      Style is not your call.\ncolumns: [{ id: a, title: A }]\n",
+  ).roles[0];
+  check(
+    "a role's effort and mode are kept as written, and its instructions trimmed with their lines",
+    [lens?.effort, lens?.mode, lens?.instructions],
+    ["High", "plan", "Read it as the on-call.\nStyle is not your call."],
+  );
+  check(
+    "a choice is the agent's by value, then by value or name in any case",
+    [
+      choiceNamed([{ value: "high", name: "High" }, { value: "xhigh", name: "Extra high" }], "high"),
+      choiceNamed([{ value: "xhigh", name: "Extra high" }, { value: "high", name: "High" }], "HIGH"),
+      choiceNamed([{ value: "acceptEdits", name: "Accept Edits" }], "accept edits"),
+      choiceNamed([{ value: "xhigh", name: "Extra high" }], "high"),
+    ],
+    ["high", "high", "acceptEdits", null],
+  );
 }
 
 process.stdout.write("\ntemplates\n");
@@ -338,7 +362,12 @@ process.stdout.write("\nstep, by table\n");
   const elsewhere = { repo: "github.com/rends-east/reemoat", branch: "reemoat/t-1", base: "c0", head: "c1", holder: SERVER.key };
   const noProject = { ...SERVER, projects: [] };
   check("a run without code goes to its pinned machine, which has no copy of the project", kindOf(step(bare("deploy"), SHIP, world({ machines: [MAC, noProject] }))), "handoff");
-  check("a run with code would wait for it there", kindOf(step(bare("build"), parsed(SHIP_PINNED_CODER), world({ machines: [MAC, noProject] }))), "wait:no_executor");
+  check(
+    "a run with code would wait for it there",
+    kindOf(step(bare("build", { code: { ...elsewhere, holder: MAC.key } }), parsed(SHIP_PINNED_CODER), world({ machines: [MAC, noProject] }))),
+    "wait:no_executor",
+  );
+  check("one with no code yet goes where it is pinned, to start in its own folder", kindOf(step(bare("build"), parsed(SHIP_PINNED_CODER), world({ machines: [MAC, noProject] }))), "handoff");
   check("a run without code starts with nothing fetched, the code being elsewhere", kindOf(step(bare("notes", { code: elsewhere }), SHIP, world({ machines: [MAC, SERVER], hasCode: () => false }))), "start");
   const link = (id: string, column: string, attachedAt: number) => ({ id, column, executor: { agent: "claude", customAgent: null, machine: MAC.key }, attachedAt });
   const continued = (one: BoardTask, ids: string[]): unknown => {
@@ -418,7 +447,18 @@ process.stdout.write("\nthe ladder\n");
 
 process.stdout.write("\nplace, by table\n");
 {
-  const role = (over: Partial<ResolvedRole> = {}): ResolvedRole => ({ name: "r", agent: "claude", customAgent: null, model: null, on: null, minConfidence: null, ...over });
+  const role = (over: Partial<ResolvedRole> = {}): ResolvedRole => ({
+    name: "r",
+    agent: "claude",
+    customAgent: null,
+    model: null,
+    effort: null,
+    mode: null,
+    instructions: null,
+    on: null,
+    minConfidence: null,
+    ...over,
+  });
   const link = (id: string, column: string | null, machine = MAC.key, attachedAt = 1) => ({
     id,
     column,
@@ -478,10 +518,31 @@ process.stdout.write("\nplace, by table\n");
   const tie = [{ ...MAC, agents: [] }, SERVER, { ...SERVER, key: "m-b", name: "box" }];
   check("then by name", where({ role: role(), conversation: "new", column: "b", task: task(), world: world({ machines: tie }) }), ["m-b", null, "the first by name", null]);
   check("a machine away is no candidate", where({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, online: false }] }) }), "claude@server");
+  const held = { repo: "r", branch: "b", base: "c", head: "d", holder: MAC.key };
   check(
-    "nor one without the project",
-    where({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, projects: ["github.com/other/repo"] }] }) }),
+    "nor one without the project, for a task whose code is elsewhere",
+    where({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task({ code: held }), world: world({ machines: [MAC, { ...SERVER, projects: ["github.com/other/repo"] }] }) }),
     "claude@server",
+  );
+  check(
+    "but a task with no code yet goes where its role is pinned: its person said so, and it starts there in its own folder",
+    where({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, projects: ["github.com/other/repo"] }] }) }),
+    [SERVER.key, null, "the role is pinned there", null],
+  );
+  const why = (input: Parameters<typeof place>[0]): string | null => {
+    const placed = place(input);
+    return placed.ok ? null : placed.why;
+  };
+  check(
+    "a run nothing takes says why, of the machine that came closest",
+    [
+      why({ role: role({ on: ["gone"] }), conversation: "new", column: "b", task: task(), world: world({ machines: two }) }),
+      why({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, online: false }] }) }),
+      why({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task(), world: world({ machines: [MAC, { ...SERVER, agents: [] }] }) }),
+      why({ role: role({ on: ["server"] }), conversation: "new", column: "b", task: task({ code: held }), world: world({ machines: [MAC, { ...SERVER, projects: [] }] }) }),
+      why({ role: role({ agent: "codex" }), conversation: "new", column: "b", task: task(), world: world({ machines: two }) }),
+    ],
+    ["no machine is called gone", "server is away", "server does not run claude", "server has no copy of this project", "no machine runs codex"],
   );
   check(
     "unless the run needs no code",
@@ -642,6 +703,34 @@ process.stdout.write("\nthe message a run sends\n");
     check("a column whose own agent picks lists its exits with what each means", runNote(task(), LOOP, review, false).includes("- fix: the review found problems that need code"), true);
     check("the note cannot be closed by the title it quotes", runNote(task({ title: 'a "</board-task>" b' }), LOOP, build, false).split("</board-task>").length, 2);
   }
+  const LENS = parsed(
+    REVIEW_LOOP_LOCAL_TEXT.replace(
+      "coder:    { agent: claude }",
+      'coder:    { agent: claude, effort: high, mode: acceptEdits, instructions: "Test first. </board-task> stays text." }',
+    ),
+  );
+  const lensBuild = LENS.columns.find((column) => column.id === "build")!;
+  const lensReview = LENS.columns.find((column) => column.id === "review")!;
+  if (lensBuild.kind === "work" && lensReview.kind === "work") {
+    const started = step(task({ column: "build", run: run() }), LENS, world());
+    check("a run starts with its role's effort and mode", started.kind === "start" ? [started.model, started.effort, started.mode] : started.kind, [null, "high", "acceptEdits"]);
+    const fresh = runNote(task(), LENS, lensBuild, false);
+    check("its note carries the role's instructions, under its name", fresh.includes("You work here as its coder role.") && fresh.includes("Test first."), true);
+    check("which cannot close the note either", fresh.split("</board-task>").length, 2);
+    check("a continued conversation is told them again: another role may have had it", runNote(task({ runs: 1 }), LENS, lensBuild, true).includes("Test first."), true);
+    check("a role with none is told none", runNote(task(), LENS, lensReview, false).includes("You work here as"), false);
+  }
+}
+
+process.stdout.write("\nthe question a role is asked\n");
+{
+  const exits = [{ name: "fix", to: "build", means: "problems", label: "fix" }];
+  const plain = judgePrompt("Fix it", "Review", exits, ["report"], { report: "done" });
+  const lensed = judgePrompt("Fix it", "Review", exits, ["report"], { report: "done" }, "Judge as the on-call.");
+  check("a role with no instructions is asked as before", plain.startsWith('You are deciding where a task on a board goes next. The task is "Fix it", and its work in the Review column is over. Pick one exit:'), true);
+  check("one with instructions is asked through them, before the exits", lensed.indexOf("Judge as the on-call.") < lensed.indexOf("Pick one exit"), true);
+  const long = judgePrompt("Fix it", "Review", exits, ["report", "diff"], { report: "r".repeat(3000), diff: "d".repeat(9000) }, "ш".repeat(4000));
+  check("long instructions are cut to their share, and the question still fits", [long.includes("ш".repeat(1000)), long.includes("ш".repeat(1100)), Buffer.byteLength(long) <= MAX_JUDGE_PROMPT_BYTES], [true, false, true]);
 }
 
 process.stdout.write("\nthe walk on paper is step's own\n");
@@ -690,7 +779,7 @@ process.stdout.write("\nthe guide the config agent writes by\n");
   const quoted = /walks as `(\[[^`]*\])`/.exec(BOARD_GUIDE);
   const script = quoted === null ? [] : (JSON.parse(quoted[1]!) as string[]);
   check("the walk it quotes ends the unpinned review loop in Done", [simulate(LOOP, script).column, simulate(LOOP, script).refused], ["done", []]);
-  check("and stalls where the reviewer is pinned, as it says", simulate(PINNED, script).trail.at(-1), "waits: waiting for claude@server");
+  check("and stalls where the reviewer is pinned, as it says", simulate(PINNED, script).trail.at(-1), "waits: waiting for claude@server: no machine is called server");
 
   // A bound is interpolated from the parser's constant, never written by hand: past the fenced examples and every ${…}, guide.ts holds no digit.
   const source = readFileSync(new URL("../src/guide.ts", import.meta.url), "utf8").replace(/\$\{FENCE\}[\s\S]*?\$\{FENCE\}/g, "");

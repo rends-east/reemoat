@@ -38,10 +38,14 @@ export interface LinkSyncRecord {
   /** The isolation flag handed over; absent on a record older than it, whose daemon was never isolated. */
   isolated?: boolean;
   policyAt?: number;
+  /** The machine's own name handed over beside its links; absent on a record older than it, so that machine is told once. */
+  name?: string;
 }
 
 export interface LinkCandidate {
   id: string;
+  /** What its owner calls it: the name other machines know it by, which its daemon is told with its links (Q2.274). */
+  name: string;
   owned: boolean;
   enrolled: boolean;
   relayOnline: boolean;
@@ -60,6 +64,7 @@ export type LinkSyncWhy =
   | "never_synced"
   | "policy_changed"
   | "targets_changed"
+  | "name_changed"
   | "expiring"
   | "stale"
   | "forced"
@@ -87,6 +92,7 @@ export interface LinkSyncStatus {
 export function linkCandidate(machine: MachineState): LinkCandidate {
   return {
     id: machine.id,
+    name: machine.name,
     owned: machine.owned,
     enrolled: machine.enrolled,
     relayOnline: machine.relayOnline,
@@ -155,6 +161,7 @@ export function linkSyncDecision(input: {
   if (policyMoved) return { sync: true, why: "policy_changed" };
   if (last === null) return { sync: true, why: "never_synced" };
   if (!sameTargets(last.targets, [...input.targets].sort())) return { sync: true, why: "targets_changed" };
+  if (last.name !== machine.name) return { sync: true, why: "name_changed" };
   if (last.earliestExpiresAt !== null && last.earliestExpiresAt - now < LINK_RENEW_WITHIN_MS) {
     return { sync: true, why: "expiring" };
   }
@@ -176,7 +183,8 @@ function isRecord(value: unknown): value is LinkSyncRecord {
     typeof held["syncedAt"] === "number" &&
     (held["messaging"] === undefined || typeof held["messaging"] === "boolean") &&
     (held["isolated"] === undefined || typeof held["isolated"] === "boolean") &&
-    (held["policyAt"] === undefined || typeof held["policyAt"] === "number")
+    (held["policyAt"] === undefined || typeof held["policyAt"] === "number") &&
+    (held["name"] === undefined || typeof held["name"] === "string")
   );
 }
 
@@ -226,11 +234,12 @@ export function forgetLinkRecord(key: string): void {
 export interface LinkSyncDeps {
   /** `POST /v1/machines/:id/links`. */
   link(machineId: string): Promise<MachineLinkAnswer>;
-  /** `PUT /peers/links` on that machine's daemon, with exactly what `link` answered; `policy` is null when it answered none. */
+  /** `PUT /peers/links` on that machine's daemon, with exactly what `link` answered; `policy` is null when it answered none. `name` is the machine's own. */
   push(
     machineId: string,
     links: readonly MachineLinkGrant[],
     policy: { messaging: boolean; isolated?: boolean; policyAt?: number } | null,
+    name: string,
   ): Promise<unknown>;
   now(): number;
 }
@@ -320,7 +329,7 @@ export class LinkSync {
       answer = await this.deps.link(id);
     } catch (error) {
       this.failures.set(id, { at: now, text: errorText(error) });
-      await this.deliverPolicyAlone(scope, id, error);
+      await this.deliverPolicyAlone(scope, machine, error);
       return { verdict, outcome: "failed" };
     }
     const links = answer.links;
@@ -334,7 +343,7 @@ export class LinkSync {
           };
     let pushed: unknown;
     try {
-      pushed = await this.deps.push(id, links, policy);
+      pushed = await this.deps.push(id, links, policy, machine.name);
     } catch (error) {
       // Only the daemon's bare 404: the control plane answers an unrouted path with its envelope.
       if (meansRouteAbsent(error)) {
@@ -364,12 +373,14 @@ export class LinkSync {
       messaging: policy?.messaging ?? machine.messaging,
       isolated: policy?.isolated ?? machine.isolated,
       ...(policy?.policyAt === undefined ? {} : { policyAt: policy.policyAt }),
+      name: machine.name,
     });
     return { verdict, outcome: "synced" };
   }
 
   /** A machine that can hold no link is still told its switch, from the refusal's detail; its links wait on the usual retry. */
-  private async deliverPolicyAlone(scope: LinkScope, id: string, error: unknown): Promise<void> {
+  private async deliverPolicyAlone(scope: LinkScope, machine: LinkCandidate, error: unknown): Promise<void> {
+    const id = machine.id;
     const detail = error instanceof ApiError ? error.detail : null;
     if (detail === null || typeof detail !== "object") return;
     const { messaging, isolated, policyAt } = detail as Record<string, unknown>;
@@ -378,7 +389,7 @@ export class LinkSync {
     const policy = { messaging, ...(isolated === undefined ? {} : { isolated }), policyAt };
     let pushed: unknown;
     try {
-      pushed = await this.deps.push(id, [], policy);
+      pushed = await this.deps.push(id, [], policy, machine.name);
     } catch {
       // The failure already recorded is the link's; this one is retried with it.
       return;

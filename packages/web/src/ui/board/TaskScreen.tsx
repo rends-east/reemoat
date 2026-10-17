@@ -43,6 +43,7 @@ import { heldRoster, type Assignee } from "./assignees";
 import { FeedComments, FeedHistory, TaskBlock, useTaskFeed } from "./Feed";
 import { holderLabel } from "./Holder";
 import { AssigneeDropdown, assigneeChoiceOf, folderOn, ProjectDropdown, type AssigneeChoice } from "./Pickers";
+import { TaskFileList } from "./TaskFiles";
 import { useBoard, useBoardWatch, useLiveTasks } from "./useBoard";
 
 /** A task's own page, laid out as a tracker's ticket: what was asked and what came of it, beside who does it and where (Q3.725). */
@@ -496,6 +497,8 @@ function Brief({
           </div>
         </>
       )}
+      {/* What it was made with; a comment's files are on the comment. */}
+      <TaskFileList machineId={entry.machineId} taskId={entry.task.id} files={entry.task.files ?? []} />
     </section>
   );
 }

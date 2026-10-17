@@ -291,7 +291,7 @@ export function TaskListBody({
                     selected={item.kind === "card" && item.card.kind === "task" && isActive(item.card.entry, active)}
                     landed={landed === item.key}
                     onLanded={() => setLanded(null)}
-                    handlers={item.kind === "card" ? drag.bind(item.card, group.column.id, item.key) : null}
+                    handlers={item.kind === "card" ? drag.bind(item.card, group.column.id, item.key, item.card.kind === "task" && item.card.entry.unavailable) : null}
                   />
                 ))}
               </section>

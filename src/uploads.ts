@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants, lstatSync } from "node:fs";
-import { chmod, mkdir, open, readdir, readFile, rm, stat, type FileHandle } from "node:fs/promises";
+import { chmod, copyFile, mkdir, open, readdir, readFile, rename, rm, stat, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -837,6 +837,81 @@ export class Uploads {
       rows.push(row);
     }
     return { ok: true, rows };
+  }
+
+  rowsOf(sessionId: string): UploadRow[] {
+    return this.index.listFor(sessionId);
+  }
+
+  /** Every id a row is kept under. */
+  owners(): string[] {
+    return this.index.listSessions();
+  }
+
+  /**
+   * Files staged under `from`, moved to `to` and kept there as sent, so the sweep that takes an unsent file never takes them.
+   * The new row goes first: a crash before the rename leaves the staged row, which the next open finds whole, and the new one,
+   * which it finds empty and drops.
+   */
+  async claim(from: string, uploadIds: readonly string[], to: string): Promise<ResolveResult | { ok: false; failed: string }> {
+    if (!safeSegment(from) || !safeSegment(to)) return { ok: false, failed: "unusable owner id" };
+    const found = this.resolve(from, uploadIds);
+    if (!found.ok) return found;
+    const moved: UploadRow[] = [];
+    for (const row of found.rows) {
+      const next: UploadRow = { ...row, sessionId: to, consumedAt: Date.now() };
+      try {
+        await mkdir(join(this.root, to), { recursive: true, mode: 0o700 });
+        this.index.insert(next);
+        try {
+          await rename(join(this.root, from, row.uploadId), join(this.root, to, row.uploadId));
+        } catch (error) {
+          this.index.remove(to, row.uploadId);
+          throw error;
+        }
+        this.index.remove(from, row.uploadId);
+      } catch (error) {
+        return { ok: false, failed: describeError(error) };
+      }
+      moved.push(next);
+    }
+    return { ok: true, rows: moved };
+  }
+
+  /**
+   * A file this daemon already holds in another store, put among a session's own as a person's file not yet sent: a task's
+   * file for its run. A clone where the filesystem makes one, so the bytes are held once and an agent's edit stays its own.
+   */
+  async keepCopy(sessionId: string, source: { path: string; name: string; mime: string | null; bytes: number }): Promise<UploadRow | null> {
+    if (!safeSegment(sessionId)) return null;
+    const room = roomFor(this.sentFiles(sessionId), source.bytes, USER_BUDGET);
+    if (!room.ok) {
+      this.onWarning(`no room in session ${sessionId} for ${source.name}`);
+      return null;
+    }
+    const uploadId = `u_${randomBytes(8).toString("hex")}`;
+    const dir = join(this.root, sessionId, uploadId);
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await chmod(dir, 0o700).catch(() => {
+        // Best effort, as everywhere else here.
+      });
+      await copyFile(source.path, join(dir, source.name), constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+    } catch (error) {
+      await this.discard(dir);
+      this.onWarning(`could not put ${source.name} into session ${sessionId}: ${describeError(error)}`);
+      return null;
+    }
+    const row: UploadRow = { sessionId, uploadId, name: source.name, origName: source.name, mime: source.mime, bytes: source.bytes, createdAt: Date.now(), consumedAt: null };
+    try {
+      this.index.insert(row);
+    } catch (error) {
+      await this.discard(dir);
+      this.onWarning(`could not record ${source.name} in session ${sessionId}: ${describeError(error)}`);
+      return null;
+    }
+    for (const old of room.evict) await this.drop(old);
+    return row;
   }
 
   markConsumed(sessionId: string, uploadIds: readonly string[]): void {

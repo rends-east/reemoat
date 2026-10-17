@@ -420,6 +420,29 @@ kbd {
   display: none;
 }
 
+/* The board's sideways bar is its way right for a mouse with no sideways wheel: drawn always and wide enough to grab (Q3.745). */
+.board-scroll {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+  overscroll-behavior-x: contain;
+}
+.board-scroll::-webkit-scrollbar {
+  height: 14px;
+}
+.board-scroll::-webkit-scrollbar-track {
+  margin-inline: 20px;
+  border-radius: 9999px;
+  background: var(--color-raised);
+}
+.board-scroll::-webkit-scrollbar-thumb {
+  border: 3px solid var(--color-raised);
+  border-radius: 9999px;
+  background: var(--color-edge-strong);
+}
+.board-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
 /* Hidden because the thin scrollbar rule on * disables ::-webkit-scrollbar styling; AgentStrip draws its own fading thumb. */
 .fade-scrollbar {
   scrollbar-width: none;

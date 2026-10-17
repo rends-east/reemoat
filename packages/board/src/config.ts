@@ -16,6 +16,9 @@ export const MAX_EXIT_MEANS_CHARS = 500;
 export const MAX_SKILL_ARGS_CHARS = 2_000;
 export const MAX_PROMPT_CHARS = 16_000;
 export const MAX_MODEL_CHARS = 128;
+/** An effort or a mode: a choice the agent itself publishes, by its value or its name. */
+export const MAX_CHOICE_CHARS = 64;
+export const MAX_ROLE_INSTRUCTIONS_CHARS = 4_000;
 export const MAX_MACHINE_NAME_CHARS = 64;
 export const MAX_COLUMN_LIMIT = 64;
 export const DEFAULT_BUDGET = 8;
@@ -40,7 +43,7 @@ export const DEFAULT_SEES: readonly Sees[] = ["report", "last_message"];
 /** Every key each level of a board takes: what parseBoard refuses an unknown field against, and what the guide documents. */
 export const BOARD_FIELDS = {
   top: ["version", "intake", "budget", "roles", "columns"],
-  role: ["agent", "model", "on", "min_confidence"],
+  role: ["agent", "model", "effort", "mode", "instructions", "on", "min_confidence"],
   column: ["id", "title", "show", "run", "next", "decide", "sees", "holder", "limit", "final"],
   run: ["role", "skill", "args", "prompt", "conversation", "done_when", "code"],
   exit: ["to", "means", "label"],
@@ -52,6 +55,10 @@ export interface Role {
   /** A harness, an assembled agent or a plugin's classifier, without the machine. */
   agent: string;
   model: string | null;
+  effort: string | null;
+  mode: string | null;
+  /** The person's words for every run and every verdict of this role. */
+  instructions: string | null;
   /** Machines by preference, as named; null is every machine. */
   on: string[] | null;
   minConfidence: number | null;
@@ -150,6 +157,13 @@ export function isFlow(column: Column | null): column is FlowColumn {
 
 export function viewColumn(board: Board): ViewColumn | null {
   return board.columns.find((column): column is ViewColumn => column.kind === "view") ?? null;
+}
+
+/** The agent's own choice a role's effort or mode names: by its value, else by its value or name in any case. */
+export function choiceNamed(choices: readonly { value: string; name: string }[], wanted: string): string | null {
+  const lower = wanted.toLowerCase();
+  const found = choices.find((one) => one.value === wanted) ?? choices.find((one) => one.value.toLowerCase() === lower || one.name.toLowerCase() === lower);
+  return found?.value ?? null;
 }
 
 /** Where a role's agent and its machines part: `claude@server` is `claude` on `server`. */
@@ -381,6 +395,28 @@ function readRole(node: Node | null, path: string, name: string, refuse: Refuse)
     } else model = model!.trim();
   }
 
+  const choice = (key: "effort" | "mode"): string | null => {
+    const pair = f.get(key);
+    if (pair === undefined) return null;
+    const value = isScalar(pair.value) && (typeof pair.value.value === "string" || typeof pair.value.value === "number") ? String(pair.value.value) : null;
+    if (!oneLine(value, MAX_CHOICE_CHARS)) {
+      refuse(pair.value as Node, join(path, key), `${key} is one of the agent's own choices, a name of at most ${MAX_CHOICE_CHARS} characters`);
+      return null;
+    }
+    return value!.trim();
+  };
+  const effort = choice("effort");
+  const mode = choice("mode");
+
+  let instructions: string | null = null;
+  const instructionsPair = f.get("instructions");
+  if (instructionsPair !== undefined) {
+    const text = stringOf(instructionsPair.value);
+    if (text === null || text.trim().length === 0 || text.length > MAX_ROLE_INSTRUCTIONS_CHARS || text.includes("\0")) {
+      refuse(instructionsPair.value as Node, join(path, "instructions"), `instructions are text of 1 to ${MAX_ROLE_INSTRUCTIONS_CHARS} characters`);
+    } else instructions = text.trim();
+  }
+
   let minConfidence: number | null = null;
   const confidencePair = f.get("min_confidence");
   if (confidencePair !== undefined) {
@@ -388,7 +424,7 @@ function readRole(node: Node | null, path: string, name: string, refuse: Refuse)
     if (value === null || !(value >= 0 && value <= 1)) refuse(confidencePair.value as Node, join(path, "min_confidence"), "min_confidence is a number from 0 to 1");
     else minConfidence = value;
   }
-  return { name, agent, model, on, minConfidence };
+  return { name, agent, model, effort, mode, instructions, on, minConfidence };
 }
 
 interface ColumnDraft {

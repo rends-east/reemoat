@@ -11,11 +11,13 @@ import { Field } from "../kit/Field";
 import { createTask, legacyTarget } from "./actions";
 import { takingMachines, useRosters, type Assignee } from "./assignees";
 import { ANOTHER_FOLDER, AssigneeDropdown, folderOn, ProjectDropdown } from "./Pickers";
+import { AttachButton, PickedFiles, uploadPicked, usePickedFiles, type PickedFile } from "./TaskFiles";
 import { useBoard } from "./useBoard";
 
 // Module state, as New session's nickname is: the sheet unmounts when a finger drags it down, and the words must outlast that.
 let titleDraft = "";
 let briefDraft = "";
+let filesDraft: readonly PickedFile[] = [];
 
 /**
  * The form behind New task, in a tracker's order: what it is, who does it and where, then what to tell them. Nobody does it
@@ -48,8 +50,11 @@ export function NewTask({ state, machineId: fromRoute, column: asked }: { state:
   const [typed, setTyped] = useState("");
   const [title, setTitle] = useState(titleDraft);
   const [brief, setBrief] = useState(briefDraft);
-  const [busy, setBusy] = useState<"add" | "start" | null>(null);
+  const [busy, setBusy] = useState<"files" | "add" | "start" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const attached = usePickedFiles(filesDraft, (files) => {
+    filesDraft = files;
+  });
 
   const taskFolders = tasks.filter((entry) => entry.machineId === machineId).map((entry) => entry.task.cwd);
   const chosenProject = machineId === null ? "" : (project ?? folderOn(state, machineId, "", offers.get(machineId) ?? null, taskFolders));
@@ -66,22 +71,29 @@ export function NewTask({ state, machineId: fromRoute, column: asked }: { state:
 
   const create = (): void => {
     if (busy !== null || machineId === null) return;
-    setBusy(start || works ? "start" : "add");
+    setBusy(attached.files.length > 0 ? "files" : start || works ? "start" : "add");
     setError(null);
-    void createTask({
-      machineId,
-      ...(title.trim().length > 0 ? { title: title.trim() } : {}),
-      brief,
-      agent: runs === null ? "claude" : runs.kind === "custom" ? "" : runs.id,
-      customAgent: runs?.kind === "custom" ? runs.id : null,
-      assignee: start || works || assignee !== null ? "agent" : (picked as "nobody" | "you"),
-      ...(column !== null && flows ? { column: column.id } : legacy === "review" || legacy === "done" ? { status: legacy } : {}),
-      cwd,
-      start,
-    })
+    // Sent to the machine the task is made on, at the press: picking another assignee before it moves nothing.
+    void uploadPicked(machineId, attached.files, attached.progress)
+      .then((attachments) => {
+        setBusy(start || works ? "start" : "add");
+        return createTask({
+          machineId,
+          ...(title.trim().length > 0 ? { title: title.trim() } : {}),
+          brief,
+          agent: runs === null ? "claude" : runs.kind === "custom" ? "" : runs.id,
+          customAgent: runs?.kind === "custom" ? runs.id : null,
+          assignee: start || works || assignee !== null ? "agent" : (picked as "nobody" | "you"),
+          ...(column !== null && flows ? { column: column.id } : legacy === "review" || legacy === "done" ? { status: legacy } : {}),
+          cwd,
+          start,
+          attachments,
+        });
+      })
       .then(({ task, session }) => {
         titleDraft = "";
         briefDraft = "";
+        attached.clear();
         // The board it was added to is the page to land on: a start opens its conversation, and a column's + goes back to the column.
         selectMachine(BOARD);
         navigate(session !== null ? sessionPath(session) : column !== null ? under : taskPath(machineId, task.id), true);
@@ -92,7 +104,18 @@ export function NewTask({ state, machineId: fromRoute, column: asked }: { state:
 
   return (
     <div className={SHEET_SCREEN}>
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
+      <div
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          const files = [...event.dataTransfer.files];
+          if (files.length === 0) return;
+          event.preventDefault();
+          attached.add(files);
+        }}
+        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5"
+      >
         <Field label="Title">
           {({ id, describedBy }) => (
             <input
@@ -172,21 +195,34 @@ export function NewTask({ state, machineId: fromRoute, column: asked }: { state:
                 briefDraft = event.target.value;
                 setBrief(event.target.value);
               }}
+              // Only when there are files: a text paste must fall through untouched.
+              onPaste={(event) => {
+                const files = [...(event.clipboardData?.files ?? [])];
+                if (files.length === 0) return;
+                event.preventDefault();
+                attached.add(files);
+              }}
               placeholder="What should be done, and what done looks like"
               // Not FIELD: that is a one-line box, and a vertical padding may not be composed onto it.
               className="min-h-32 flex-1 resize-none rounded-md border border-edge-strong bg-surface px-3 py-2 text-sm leading-5 outline-none"
             />
           )}
         </Field>
+
+        {/* The agent gets them with the task's first message, in every new conversation on it. */}
+        <div className="flex flex-col gap-2">
+          <PickedFiles files={attached.files} onRemove={attached.remove} busy={busy !== null} />
+          <AttachButton onPick={attached.add} disabled={busy !== null} text="Attach files" />
+        </div>
       </div>
 
       <div className={SHEET_FOOT}>
         <span role="status" aria-live="polite" className={`min-w-0 flex-1 text-2xs wrap-anywhere ${error === null ? "text-muted" : "text-danger"}`}>
-          {error !== null ? error : busy === "start" ? "this can take up to 45 seconds" : ""}
+          {error !== null ? error : busy === "start" ? "this can take up to 45 seconds" : busy === "files" ? "sending the files…" : ""}
         </span>
         {/* One press: an agent picked on New task starts, as Running's + does; anything else is added. */}
         <Button tone="primary" disabled={!ready || busy !== null} onClick={create}>
-          {busy === "start" ? "Starting the agent…" : busy === "add" ? "Adding…" : start || works ? "Start" : "Add"}
+          {busy === "files" ? "Sending files…" : busy === "start" ? "Starting the agent…" : busy === "add" ? "Adding…" : start || works ? "Start" : "Add"}
         </Button>
       </div>
     </div>

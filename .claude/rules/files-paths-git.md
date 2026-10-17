@@ -69,8 +69,8 @@ paths:
   agreeing with `createWorkspace` about the root. Both sides in one namespace: resolve the
   deepest existing component and rebuild the uncreated leaves onto it, or a symlinked
   root makes every `POST /sessions` throw `outside_worktree_root`. Q5.36.
-- **Remover trees must not nest** (`plugins.md` adds a third); `daemon.ts` refuses to
-  start on it. The upload sweep also `lstat`s each session directory, upload ids being
+- **Remover trees must not nest** (`plugins.md` adds a third, a task's files a fourth);
+  `daemon.ts` refuses to start on it. The upload sweep also `lstat`s each session directory, upload ids being
   guessable. Q5.74.
 - **An oversized upload is refused on the header first, and the body is always
   cancelled** — unlink, rmdir, cancel. `Uploads.receive`'s counter is the only

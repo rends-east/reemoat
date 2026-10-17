@@ -75,7 +75,7 @@ export function ProposalsCard({ proposals }: { proposals: readonly TaskProposal[
           brief: proposal.brief,
           // A task no agent holds keeps the agent its proposer named as what a start would launch (Q2.261, Q2.262); one left to a
           // column's role still names one, the machine's first.
-          agent: agent === null ? (proposal.agent ?? heldRoster(machineId)?.agents[0]?.id ?? "claude") : agent.kind === "custom" ? "" : agent.id,
+          agent: agent === null ? (proposal.agent ?? heldRoster(machineId)?.agents[0]?.harness ?? "claude") : agent.kind === "custom" ? "" : agent.id,
           ...(column === null ? {} : { column }),
           customAgent: agent?.kind === "custom" ? agent.id : null,
           assignee: agent !== null ? "agent" : edited.assignee === "you" ? "you" : "nobody",

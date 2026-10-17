@@ -21,6 +21,7 @@ type Grant = import("../src/wire.js").MachineLinkGrant;
 const DAY = 24 * 60 * 60 * 1000;
 const machine = (id: string, over: Partial<Candidate> = {}): Candidate => ({
   id,
+  name: id,
   owned: true,
   enrolled: true,
   relayOnline: true,
@@ -37,11 +38,12 @@ process.stdout.write("\nwhen a machine is handed its links again\n");
 {
   const now = 1_800_000_000_000;
   const record = (
-    over: Partial<{ targets: string[]; earliestExpiresAt: number | null; syncedAt: number; messaging: boolean; isolated: boolean }> = {},
+    over: Partial<{ targets: string[]; earliestExpiresAt: number | null; syncedAt: number; messaging: boolean; isolated: boolean; name: string }> = {},
   ) => ({
     targets: ["m_b", "m_c"],
     earliestExpiresAt: now + 80 * DAY,
     syncedAt: now - 60_000,
+    name: "m_a",
     ...over,
   });
   const decide = (over: Partial<Parameters<typeof linkSyncDecision>[0]> = {}) =>
@@ -58,6 +60,11 @@ process.stdout.write("\nwhen a machine is handed its links again\n");
   check("the two numbers are the contract's", [LINK_RENEW_WITHIN_MS / DAY, LINK_RESYNC_AFTER_MS / DAY], [45, 1]);
   check("a machine handed the same set a minute ago is left alone", decide(), { sync: false, why: "current" });
   check("one never handed anything is handed its links", decide({ last: null }), { sync: true, why: "never_synced" });
+  check(
+    "one renamed is told its new name, and one handed links before names went with them is told its name once (Q2.274)",
+    [decide({ machine: machine("m_a", { name: "mac" }) }), decide({ last: { ...record(), name: undefined } }).why],
+    [{ sync: true, why: "name_changed" }, "name_changed"],
+  );
   check("even when there is nobody to link it to, so a set left behind is cleared", decide({ last: null, targets: [] }), {
     sync: true,
     why: "never_synced",
@@ -318,6 +325,7 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   const minted = new Map<string, Grant[]>();
   const pushedLinks = new Map<string, readonly Grant[]>();
   const pushedPolicy = new Map<string, unknown>();
+  const pushedNames = new Map<string, string>();
   let daemonRefusal: ((id: string) => unknown) | null = null;
   let controlPlaneRefusal: unknown = null;
   const sync = new LinkSync({
@@ -328,10 +336,11 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
       minted.set(id, answer);
       return { links: answer };
     },
-    push: async (id, links, policy) => {
+    push: async (id, links, policy, name) => {
       calls.push(`push ${id}`);
       pushedLinks.set(id, links);
       pushedPolicy.set(id, policy);
+      pushedNames.set(id, name);
       const refusal = daemonRefusal?.(id);
       if (refusal !== undefined) throw refusal;
       return { links: [] };
@@ -369,8 +378,9 @@ process.stdout.write("\nwhat the sync sends, and to whom\n");
   check(
     "what was handed over is remembered: the earliest expiry, when, who it would link to by this client's count, and the switches",
     held,
-    { targets: ["m_b", "m_c", "m_off"], earliestExpiresAt: clock + 60 * DAY, syncedAt: clock, messaging: true, isolated: false },
+    { targets: ["m_b", "m_c", "m_off"], earliestExpiresAt: clock + 60 * DAY, syncedAt: clock, messaging: true, isolated: false, name: "m_a" },
   );
+  check("and each daemon is told its own machine's name with them (Q2.274)", ["m_a", "m_b", "m_c"].map((id) => pushedNames.get(id)), ["m_a", "m_b", "m_c"]);
   check(
     "a control plane that answered no policy hands the daemon none, so an older server never switches one off",
     ["m_a", "m_b", "m_c"].map((id) => pushedPolicy.get(id)),
@@ -741,13 +751,13 @@ process.stdout.write("\nthe messaging policy rides the links, and only as the co
     }),
   );
   check(
-    "a record written before the flag still reads, as on, while one with a mangled flag is dropped",
+    "a record written before the flag still reads, as on (its machine is told its name once, never a moved policy), while one with a mangled flag is dropped",
     [
       readLinkRecord(linkRecordKey(scope, "m_old")) !== null,
       linkSyncDecision({ machine: machine("m_old"), targets: ["m_b"], last: readLinkRecord(linkRecordKey(scope, "m_old")), tooOldOn: undefined, failedAt: null, now: clock }).why,
       readLinkRecord(linkRecordKey(scope, "m_bad")),
     ],
-    [true, "current", null],
+    [true, "name_changed", null],
   );
   storage.delete("reemoat.agentLinks");
 }
@@ -835,9 +845,9 @@ process.stdout.write("\nthe sync rides the machine list, and nothing else\n");
 
   const daemon = stripComments(srcFile("daemon.ts"));
   check(
-    "the daemon is sent { links } unread, with the control plane's policy beside them only when it answered one",
+    "the daemon is sent { links } unread, with the control plane's policy beside them only when it answered one, and its own name",
     [
-      /const body = policy === null \? \{ links \} : \{ links, \.\.\.policy \};/.test(daemon),
+      /const body = \{ links, \.\.\.\(policy \?\? \{\}\), \.\.\.\(name === null \? \{\} : \{ self: \{ name \} \}\) \};/.test(daemon),
       /request\("\/peers\/links", \{ method: "PUT", body: JSON\.stringify\(body\) \}\)/.test(daemon),
     ],
     [true, true],

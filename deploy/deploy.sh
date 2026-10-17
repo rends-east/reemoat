@@ -220,7 +220,8 @@ INSTALL_DEPS='^package\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^packages
 # Root manifest only: a packages/web or lockfile-only change must not restart the daemon and drop its live turns.
 RESTART_DEPS='^package\.json$'
 
-SHARED='^src/'
+# The workspace packages the daemon imports as source run in its process too.
+SHARED='^src/|^packages/(board|protocol)/src/'
 
 # Only this machine's init system's template: the other one is inert here and must not trigger a reload.
 UNITS="^deploy/$INIT_SYSTEM/"

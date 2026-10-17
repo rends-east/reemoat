@@ -65,6 +65,7 @@ import { PeerMcpEndpoint } from "../src/peers/mcp.js";
 import { TaskDesk } from "../src/tasks/desk.js";
 import { createPeerNetwork } from "../src/peers/links.js";
 import { resolveUploadRoot, Uploads } from "../src/uploads.js";
+import { TaskFiles } from "../src/tasks/files.js";
 import { DEFAULT_BRANCH_PREFIX, resolveWorktreeRoot } from "../src/worktree.js";
 
 const DEFAULT_PORT = 7887;
@@ -257,12 +258,14 @@ try {
 }
 
 const pluginRoot = expandHome(process.env["REEMOAT_PLUGIN_ROOT"] ?? join(stateHome, "plugins"));
+const taskFileRoot = join(stateHome, "task-files");
 
 // No two remover trees may nest, or one remover can reach into another's tree.
 const REMOVER_TREES: readonly { name: string; path: string }[] = [
   { name: "REEMOAT_UPLOAD_ROOT", path: uploadRoot },
   { name: "REEMOAT_WORKTREE_ROOT", path: workspacePolicy.worktreeRoot },
   { name: "REEMOAT_PLUGIN_ROOT", path: pluginRoot },
+  { name: "the task files folder", path: taskFileRoot },
 ];
 for (const [index, tree] of REMOVER_TREES.entries()) {
   for (const other of REMOVER_TREES.slice(index + 1)) {
@@ -287,6 +290,18 @@ try {
 
 if (stores.prunedSessions.length > 0) {
   void uploads.forgetSessions(stores.prunedSessions);
+}
+
+let taskFileStore: Uploads;
+try {
+  taskFileStore = await Uploads.open({
+    root: taskFileRoot,
+    index: stores.taskFiles,
+    onWarning: (detail: string) => console.error(`task files: ${detail}`),
+  });
+} catch (error) {
+  console.error(`cannot open the task files folder: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(2);
 }
 
 // Built before the runtime, registry and restore: with contributions unknown, restore would drop every preset on a plugin's harness.
@@ -387,12 +402,13 @@ const tasks = new TaskDesk({
   // An empty folder this daemon owns, as the ask root is: the config agent writes a board, never a file (Q2.270).
   boardAgentRoot: join(stateHome, "board-agent"),
   codelessRoot: join(stateHome, "board-runs"),
+  files: new TaskFiles(taskFileStore, uploads),
   customAgents: () => stores.customAgents.list().map((one) => ({ id: one.id, name: one.name, harness: one.harness })),
   onWarning: (detail: string) => console.error(`board: ${detail}`),
   // A role is asked on a bare session that belongs to no list, or by a plugin's classifier; the host opens below, so both are read late.
   judges: {
-    ask: async (agent: string, prompt: string, model: string | null, signal: AbortSignal) =>
-      (await agentAsks.ask(agent as AgentId, prompt, model ?? undefined, signal)).text,
+    ask: async (agent: string, prompt: string, choices: { model: string | null; effort: string | null }, signal: AbortSignal) =>
+      (await agentAsks.ask(agent as AgentId, prompt, choices.model ?? undefined, signal, choices.effort ?? undefined)).text,
     classifiers: () => pluginHost?.classifiers() ?? [],
     classify: async (id: string, input: unknown) => {
       if (pluginHost === null) throw new Error("plugins are switched off on this machine");
@@ -791,6 +807,7 @@ async function shutdown(signal: string): Promise<void> {
   await agentAsks.shutdown();
   await pluginHost?.shutdown();
   await uploads.shutdown();
+  await taskFileStore.shutdown();
   await registry.shutdown();
   // After the agents: a tool call in flight during their stop still gets an answer.
   peers.close();

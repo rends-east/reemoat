@@ -35,8 +35,22 @@ it — so a citation here would be the one kind nothing checks.
   a plugin's classifier, then you. A question holds the task and is answered from the
   task's feed or its chat alike; a turn that ends with no report stops it for you. A run
   pinned to another machine takes the task there with its code, as commits on the task's
-  branch, and back. Agents can read, check, walk and propose a board.
+  branch, and back. A role names its agent and model, and may name the effort and mode
+  each of its runs starts in and instructions of its own, a lens say, that go with every
+  run and every verdict. Agents can read, check, walk and propose a board.
   `pnpm boardcheck` drives the rules by table.
+- **A board names your machines as you do.** Each machine now knows the name you gave it,
+  so `claude@mac` means the same machine everywhere, and the config agent lists the
+  machines it can name instead of hunting for ids. A task pinned to a machine goes there
+  even before that machine has seen its project, and one that cannot start, or waits,
+  says why on its card.
+- **Files on a task and on a comment.** New task takes files under its description, by
+  the paperclip, a drop or a paste, and a comment takes them beside its button, with
+  words or alone. The agent gets a task's files with the first message of every new
+  conversation on it, and a comment's in its conversation while it works, or with the
+  next run's message. Each is kept on the task's machine, shown under the description or
+  the comment, and downloads from there; they do not go with a task its board sends to
+  another machine.
 
 - **Tasks, and a board of them.** *Board* leads the machines where *All* stood: on it,
   every machine's tasks; a machine's own page holds its conversations. A task is a title,
