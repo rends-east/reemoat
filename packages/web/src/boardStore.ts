@@ -85,6 +85,8 @@ class BoardStore {
   /** What each machine's task sessions were last heard doing, so a change asks that board again at once (Q3.726). */
   private readonly sessionsKey = new Map<MachineId, string>();
   private readonly asked = new Map<string, Asked & { press: number }>();
+  /** Where a drop put a task among its column's cards, held apart from a move's press so neither release takes the other's (Q2.278). */
+  private readonly placed = new Map<string, { rank: number; at: number; press: number }>();
   private presses = 0;
   private snapshot: BoardSnapshot = {
     tasks: [],
@@ -168,6 +170,19 @@ class BoardStore {
     return () => {
       if (this.asked.get(key)?.press !== press) return;
       this.asked.delete(key);
+      this.publish(false);
+    };
+  }
+
+  /** Draws a task at the place a drop put it until its daemon answers; the returned release is called once it has. */
+  place(machine: MachineId, taskId: string, rank: number): () => void {
+    const key = taskRefKey(machine, taskId);
+    const press = (this.presses += 1);
+    this.placed.set(key, { rank, at: Date.now(), press });
+    this.publish(false);
+    return () => {
+      if (this.placed.get(key)?.press !== press) return;
+      this.placed.delete(key);
       this.publish(false);
     };
   }
@@ -320,7 +335,11 @@ class BoardStore {
     );
     // A poll that changed nothing redraws nothing: every session row's menu reads this store.
     const asked = new Map([...this.asked].map(([key, { press: _, ...held }]): [string, Asked] => [key, held]));
-    const pressed = [...this.asked].map(([key, held]) => `${key}:${held.press}`).join(",");
+    for (const [key, { rank, at }] of this.placed) {
+      const held = asked.get(key);
+      asked.set(key, { ...held, rank, at: Math.max(held?.at ?? 0, at) });
+    }
+    const pressed = [...this.asked, ...this.placed].map(([key, held]) => `${key}:${held.press}`).join(",");
     const copiesKey = [...copies].map(([id, copy]) => `${id}:${copy.revision}:${copy.hash}`).join(",");
     const configuredKey = [...configured].map(([id, stamp]) => `${id}:${stamp.revision}:${stamp.hash}`).join(",");
     const stones = [...this.held].map(([id, held]) => `${id}:${held.tombstones.map((one) => `${one.id}@${one.epoch}>${one.movedTo}`).join(";")}`).join(",");

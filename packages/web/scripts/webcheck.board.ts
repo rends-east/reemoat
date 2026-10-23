@@ -23,6 +23,7 @@ const {
   boardSignature,
   boardTasks,
   columnOn,
+  columnOrder,
   columnTitle,
   drawnColumns,
   exitsOf,
@@ -35,6 +36,8 @@ const {
   needingYou,
   needOf,
   phaseOf,
+  placeAmong,
+  placeable,
   projectName,
   readBoardDocument,
   readStamp,
@@ -45,6 +48,7 @@ const {
   rememberBoards,
   shownStatus,
   taskGroups,
+  titleHas,
   cardHolder,
   taskHolder,
   taskKey,
@@ -325,10 +329,12 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
         { holder: "claude@mac" },
         { reason: "waiting for claude@server" },
         { epoch: 3 },
+        { files: [{ id: "u_1", name: "shot.png", mime: "image/png", bytes: 1 }] },
+        { rank: 7.5 },
       ].map((patch) => moved(patch) === boardSignature(drawn)),
       boardSignature(boardTasks(fleet.map((machine) => (machine.id === "m_b" ? { ...machine, reach: "offline" as const } : machine)), boards)) === boardSignature(drawn),
     ],
-    [true, [false, false, false, false, false, false, false, false, false, false], false],
+    [true, [false, false, false, false, false, false, false, false, false, false, false, false], false],
   );
   check(
     "so a poll that brought no news redraws nothing and writes nothing, and a board that is not this account's is forgotten",
@@ -376,6 +382,40 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
     ["t_2", "t_3", "t_3", "t_3", "t_2", "t_2", ""],
   );
   check("an empty needle matches everything", matchesTask(all[0]!, "   "), true);
+  const ranked = [
+    entry("t_r1", "m_a", { createdAt: 10, rank: null }),
+    entry("t_r2", "m_b", { createdAt: 20, rank: 5 }),
+    entry("t_r3", "m_a", { createdAt: 30, rank: null }),
+    entry("t_r4", "m_b", { createdAt: 5, rank: 25 }),
+  ];
+  check(
+    "a place a person gave a task leads its column, on every machine at once, and one never moved stands by its age (Q2.278)",
+    [...ranked].sort(columnOrder).map((one) => one.task.id),
+    ["t_r3", "t_r4", "t_r1", "t_r2"],
+  );
+  const lane = [...ranked].sort(columnOrder);
+  const rest = lane.filter((one) => one.task.id !== "t_r2");
+  check(
+    "a card let go between two takes the middle of their places, at the top one above the first, at the bottom one under the last, and an empty lane asks for nothing",
+    [
+      placeAmong(rest, 1, ranked[1]!).map((one) => [one.entry.task.id, one.rank]),
+      placeAmong(rest, 0, ranked[1]!).map((one) => [one.entry.task.id, one.rank]),
+      placeAmong(rest, 3, ranked[1]!).map((one) => [one.entry.task.id, one.rank]),
+      placeAmong([], 0, ranked[1]!),
+    ],
+    [[["t_r2", 27.5]], [["t_r2", 31]], [["t_r2", 9]], []],
+  );
+  const tight = [entry("t_a", "m_a", { createdAt: 1, rank: 2 }), entry("t_b", "m_a", { createdAt: 1, rank: 2 }), entry("t_c", "m_a", { createdAt: 1 }), entry("t_d", "m_a", { createdAt: 1, rank: null })];
+  check(
+    "where the gap has no number left every card there is spaced again, the one carried included, and a task its daemon keeps no place for is never written",
+    [
+      placeAmong(tight, 1, entry("t_m", "m_a", { createdAt: 1, rank: null })).map((one) => [one.entry.task.id, one.rank]),
+      placeable(ranked[0]!),
+      placeable(tight[2]!),
+      placeable({ ...ranked[0]!, unavailable: true }),
+    ],
+    [[["t_a", 7], ["t_m", 6], ["t_b", 5], ["t_d", 3]], true, false, false],
+  );
   check(
     "what waits on you is counted by phase, where the list is looking, an unavailable machine's included",
     [needingYou(all), needingYou(all, M("m_a")), needingYou(all, M("m_b")), needingYou(drawn)],
@@ -463,6 +503,13 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
     "an assignee a press named is drawn at once, in the column it was in, and an answer that says the same keeps the entry as it was (Q3.732)",
     [[named.task.assignee, named.task.agent, named.column], liveBoard(answered, () => null, new Map([[taskRefKey("m_a", "t_1"), naming]]))[0] === answered[0]],
     [["agent", "codex", "backlog"], true],
+  );
+  const placing = liveBoard(all, () => null, new Map([[taskRefKey("m_a", "t_1"), { rank: 99, at: now }]])).find((one) => one.task.id === "t_1")!;
+  const placedHere = [{ ...all[0]!, task: { ...all[0]!.task, rank: 99, updatedAt: now } }];
+  check(
+    "a place a drop asked for is drawn at once, and an answer with that place keeps the entry as it was (Q2.278)",
+    [placing.task.rank, placing.column, liveBoard(placedHere, () => null, new Map([[taskRefKey("m_a", "t_1"), { rank: 99, at: now }]]))[0] === placedHere[0]],
+    [99, "backlog", true],
   );
   const moving = { ...naming, machine: "studio" };
   const drawnMoving = liveBoard(answered, () => null, new Map([[taskRefKey("m_a", "t_1"), moving]]))[0]!;
@@ -556,6 +603,22 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
       { kind: "you" },
       { kind: "nobody" },
       { kind: "agent", agent: "codex", customAgent: null, nickname: null },
+    ],
+  );
+  check(
+    "a task's files are read where the daemon sent them, a row naming none is dropped, and an older daemon's task has none (Q2.276)",
+    [
+      readTask({ id: "t", title: "x", files: [{ id: "u_1", name: "shot.png", mime: "image/png", bytes: 9 }, { id: "u_2", name: "notes" }, { name: "no id" }, 3] })?.files,
+      "files" in readTask({ id: "t", title: "x" })!,
+      [readTask({ id: "t", title: "x", rank: 3.5 })?.rank, readTask({ id: "t", title: "x", rank: null })?.rank, readTask({ id: "t", title: "x", rank: "high" })?.rank, "rank" in readTask({ id: "t", title: "x" })!],
+    ],
+    [
+      [
+        { id: "u_1", name: "shot.png", mime: "image/png", bytes: 9 },
+        { id: "u_2", name: "notes", mime: null, bytes: 0 },
+      ],
+      false,
+      [3.5, null, null, false],
     ],
   );
   check(
@@ -1053,13 +1116,13 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
   process.stdout.write("  the board's pane\n");
   const boardSrc = stripComments(srcFile("ui/board/Board.tsx"));
   check(
-    "the board is the list's own view drawn a second time: one needle, one filter, and no state but which of the two the pane shows, an assignee's menu and a landing",
+    "the board is the list's own view drawn a second time, its needle and filter, narrowed by the board's own title search; no state but that search, which of the two the pane shows, an assignee's menu and a landing (Q3.748)",
     [
       /const view = currentView\(sessionGroups\(state\)\);/.test(boardSrc),
-      /taskGroups\(tasks, boardView\(view\), Date\.now\(\), drawn\)/.test(boardSrc),
+      /taskGroups\(tasks\.filter\(\(entry\) => titleHas\(entry, needle\)\), boardView\(view\), Date\.now\(\), drawn\)/.test(boardSrc),
       [...boardSrc.matchAll(/const \[(\w+), set\w+\] = useState/g)].map((one) => one[1]),
     ],
-    [true, true, ["shown", "assigning", "landed"]],
+    [true, true, ["needle", "shown", "assigning", "landed", "open", "pressed"]],
   );
   check(
     "the columns are the account's board, never a view of conversations, which stay in the list; each a lane of its own, the one a card would land in drawn so and a refused one faded (Q3.731)",
@@ -1195,6 +1258,22 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
       ],
       [true, true, true],
     );
+    const screenSrc = stripComments(srcFile("ui/board/TaskScreen.tsx"));
+    check(
+      "the description's editor takes a paste, a drop and a pick of files, sends them first, and names their ids in the same change (Q2.277)",
+      [
+        /onPaste=\{\(event\) => \{\s*const files = \[\.\.\.\(event\.clipboardData\?\.files \?\? \[\]\)\];\s*if \(files\.length === 0\) return;\s*event\.preventDefault\(\);\s*picked\.add\(files\);/.test(screenSrc),
+        /onDrop=\{\(event\) => \{\s*const files = \[\.\.\.event\.dataTransfer\.files\];/.test(screenSrc),
+        /<AttachButton onPick=\{picked\.add\}/.test(screenSrc),
+        /return uploadPicked\(entry\.machineId, files, progress\)\s*\.then\(\(attachments\) => changeTask\(entry, \{ \.\.\.\(next === null \? \{\} : \{ brief: next \}\), \.\.\.\(attachments\.length === 0 \? \{\} : \{ attachments \}\) \}\)\)/.test(screenSrc),
+      ],
+      [true, true, true, true],
+    );
+    check(
+      "and an older daemon's answer without them is a refusal, since it drops what it does not know without a word",
+      /const kept = new Set\(\(answer\.files \?\? \[\]\)\.map\(\(file\) => file\.id\)\);\s*if \(\(change\.attachments \?\? \[\]\)\.some\(\(id\) => !kept\.has\(id\)\)\) throw new Error\(FILES_NOT_KEPT\);/.test(actionsSrc),
+      true,
+    );
   }
   check(
     "a column a press asks for is drawn at once and held until its answer, for a change and for an agent picked to start (Q3.728)",
@@ -1220,14 +1299,14 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
   );
 
   process.stdout.write("  dragging a card between columns\n");
-  const { dropRefused, landsIn, laneItems, slotHolder, LIFTED } = await import("../src/ui/board/cardDrag.js");
+  const { dropRefused, landsIn, laneItems, placesAt, slotHolder, LIFTED } = await import("../src/ui/board/cardDrag.js");
   check(
     "every column takes a card but the view of conversations: a task is not a conversation (Q3.728)",
     drawnColumns(LOOP).map((column) => dropRefused("chats", column.id)),
     [true, false, false, false, false, false],
   );
   const asCard = (one: BoardTask) => ({ kind: "task" as const, entry: one });
-  const carriedCard = { card: asCard(all[0]!), key: "m_a/t_1", from: "backlog", width: 1, height: 1, settling: null };
+  const carriedCard = { card: asCard(all[0]!), key: "m_a/t_1", from: "backlog", at: null, fromAt: null, width: 1, height: 1, settling: null };
   check(
     "it lands only in another column that takes it; its own, none and the view all send it back",
     [
@@ -1260,6 +1339,103 @@ process.stdout.write("\nthe task board: gathered by this client, drawn in the co
       slotHolder(DEFAULT_BOARD, asCard(all[0]!), "done"),
     ],
     [["slot:chat:agent", "card:t_9"], { kind: "nobody" }],
+  );
+  const lifted0 = { ...carriedCard, fromAt: 0 };
+  const backlogCards = [asCard(all[0]!), asCard(all[6]!), asCard(all[2]!)];
+  const keysBut = ["m_a/t_7", "m_b/t_3"];
+  check(
+    "in its own column the slot follows the pointer, and let go where it was lifted it goes back; in another the slot is under the pointer where its daemon keeps a place (Q2.278)",
+    [
+      placesAt({ ...lifted0, over: "backlog", at: { index: 2, keys: keysBut } }, SESSIONS_VIEW),
+      placesAt({ ...lifted0, over: "backlog", at: { index: 0, keys: keysBut } }, SESSIONS_VIEW),
+      placesAt({ ...lifted0, over: "backlog", at: null }, SESSIONS_VIEW),
+      kinds(laneItems("backlog", backlogCards, { ...lifted0, over: "backlog", at: { index: 2, keys: keysBut } }, DEFAULT_BOARD, SESSIONS_VIEW)),
+      kinds(laneItems("backlog", backlogCards, { ...lifted0, over: "backlog", at: { index: 0, keys: keysBut } }, DEFAULT_BOARD, SESSIONS_VIEW)),
+      kinds(laneItems("review", [asCard(entry("t_9", "m_a", { status: "review", createdAt: 9 }))], { ...lifted0, over: "review", at: { index: 0, keys: ["m_a/t_9"] } }, DEFAULT_BOARD, SESSIONS_VIEW)),
+    ],
+    [
+      { column: "backlog", slot: { index: 2, keys: keysBut } },
+      null,
+      null,
+      ["card:t_7", "card:t_3", "slot:t_1:nobody"],
+      ["ghost:t_1", "card:t_7", "card:t_3"],
+      ["slot:t_1:you", "card:t_9"],
+    ],
+  );
+  check(
+    "a card let go among others writes its place beside any move, and in its own column moves nothing else (Q2.278)",
+    [
+      /if \(card\.kind === "task" && slot !== null\) place\(card\.entry, slot\);\s*if \(to === from\) return;/.test(dropSrc),
+      /const writes = placeAmong\(lane, slot\.index, entry\);/.test(dropSrc),
+      /const release = board\.place\(entry\.machineId, entry\.task\.id, rank\);/.test(stripComments(srcFile("ui/board/actions.ts"))),
+    ],
+    [true, true, true],
+  );
+  const { keptScroll } = await import("../src/ui/keptScroll.js");
+  const scroller = (under: boolean) => {
+    const heard: (() => void)[] = [];
+    return {
+      scrollTop: 0,
+      scrollLeft: 0,
+      closest: () => (under ? {} : null),
+      addEventListener: (_kind: string, listener: () => void) => void heard.push(listener),
+      scroll(top: number) {
+        this.scrollTop = top;
+        for (const listener of heard) listener();
+      },
+    };
+  };
+  const first = scroller(false);
+  keptScroll("webcheck")(first as never);
+  first.scroll(420);
+  const picture = scroller(true);
+  keptScroll("webcheck")(picture as never);
+  picture.scroll(7);
+  const back = scroller(false);
+  keptScroll("webcheck")(back as never);
+  check(
+    "a scroller that went away with its screen is put back where it stood, and the list a back swipe draws neither takes nor writes a place (Q3.747)",
+    [back.scrollTop, picture.scrollTop, keptScroll("webcheck") === keptScroll("webcheck")],
+    [420, 7, true],
+  );
+  const shellSrc = stripComments(srcFile("ui/SessionBrowser.tsx"));
+  const wideSrc = stripComments(srcFile("ui/board/Board.tsx"));
+  check(
+    "the list, the board, its columns and For you each keep their place across a task opened over them (Q3.747)",
+    [
+      /keptScroll\("list"\)\(node\);/.test(shellSrc),
+      /keptScroll\("board"\)\(node\);/.test(wideSrc),
+      /ref=\{keptScroll\(`board:\$\{column\.id\}`\)\}/.test(wideSrc),
+      /ref=\{keptScroll\("board:you"\)\}/.test(wideSrc),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "every card and line of a task names it whole on a long hover, where it is cut (Q3.747)",
+    [
+      (stripComments(srcFile("ui/board/TaskList.tsx")).match(/title=\{entry\.task\.title\}/g) ?? []).length,
+      (wideSrc.match(/title=\{entry\.task\.title\}/g) ?? []).length,
+      (stripComments(srcFile("ui/board/TaskBand.tsx")).match(/title=\{entry\.task\.title\}/g) ?? []).length,
+    ],
+    [3, 1, 1],
+  );
+  check(
+    "the board's own search keeps the tasks whose title holds what was typed, case aside, never by its brief, and nothing typed keeps them all (Q3.748)",
+    [
+      titleHas(entry("t_s", "m_a", { title: "DQA-117 Внедрить индикатор" }), "  внедрить "),
+      titleHas(entry("t_s", "m_a", { title: "DQA-117 Внедрить индикатор", brief: "в списке чатов" }), "чатов"),
+      titleHas(entry("t_s", "m_a", { title: "x" }), "   "),
+    ],
+    [true, false, true],
+  );
+  check(
+    "its press sits left of Edit board on the board's tab alone, and the columns are drawn from the tasks it keeps",
+    [
+      /\{shown === "board" && <BoardSearch value=\{needle\} onChange=\{search\} \/>\}\s*<Button size="sm" tone="ghost" onClick=\{\(\) => navigate\(boardConfigPath\(\)\)\}>/.test(wideSrc),
+      /taskGroups\(tasks\.filter\(\(entry\) => titleHas\(entry, needle\)\), boardView\(view\), Date\.now\(\), drawn\)/.test(wideSrc),
+      /autoFocus=\{pressed\}/.test(wideSrc),
+    ],
+    [true, true, true],
   );
   const dragSrc = stripComments(srcFile("ui/board/cardDrag.ts"));
   check(

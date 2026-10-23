@@ -6,6 +6,7 @@ import {
   DEFAULT_BUDGET,
   DEFAULT_SEES,
   EXIT_NAME,
+  LAST_RUN,
   MAX_BOARD_BYTES,
   MAX_BUDGET,
   MAX_CHOICE_CHARS,
@@ -114,8 +115,9 @@ const FIELD_WORDS: { [L in Level]: Record<(typeof BOARD_FIELDS)[L][number], stri
       `Work columns only. At most this many runs of the column at once on one machine, a whole number up to ${MAX_COLUMN_LIMIT}; ` +
       "the rest queue in the order they entered. Default: no limit.",
     final:
-      `Waiting columns only. ${code("true")} closes the task: it is done here whatever its conversations do, and no judge runs. ` +
-      `Default ${code("false")}. Its exits, if any, are buttons, to reopen a task say.`,
+      `Waiting columns only. ${code("true")} closes the task: it is done here whatever its conversations do, and no judge runs but ` +
+      `its ${code("wake")}'s. Default ${code("false")}. Its exits, if any, are buttons, to reopen a task say.`,
+    wake: `Waiting columns only. Where the task goes when the person writes on it here; see Wake.`,
   },
   run: {
     role:
@@ -153,6 +155,10 @@ const FIELD_WORDS: { [L in Level]: Record<(typeof BOARD_FIELDS)[L][number], stri
   },
   judge: {
     rules: `The one key of a map in ${code("decide")}: ${code("{ rules: [...] }")}, a list of rules (see Rules).`,
+  },
+  wake: {
+    next: `Required. Exits as a column's ${code("next")} writes them; a ${code("to")} may also be ${code(LAST_RUN)}.`,
+    decide: `Judges as a column's ${code("decide")}, without ${code("self")}. Required with two or more exits; without it the one exit is taken at once.`,
   },
 };
 
@@ -233,7 +239,7 @@ ${fieldList("column")}
 Which fields each kind takes:
 
 - Work column: ${codes(["id", "title", "run", "next", "decide", "sees", "limit"])}.
-- Waiting column: ${codes(["id", "title", "next", "decide", "sees", "holder", "final"])}.
+- Waiting column: ${codes(["id", "title", "next", "decide", "sees", "holder", "final", "wake"])}.
 - View: ${codes(["id", "title", "show"])}, and nothing else.
 
 ## Run
@@ -330,6 +336,30 @@ The operators, by the kind of fact:
 
 ${code("match")} is a glob over the whole value: ${code("*")} and ${code("?")} stay inside one path segment, ${code("**")} crosses them, as in ${code("src/**/*.ts")}. A fact with no value makes its condition false: every ${code("diff")} fact where the project is not a git repository, and ${code("outcome")} where the agent named none.
 
+## Wake: when the person writes
+
+A comment on a task whose run is at work goes into its conversation. On one that waits, its column's ${code("wake")} says where it goes:
+
+- ${code("wake: build")}: to that column, as the person's own move, spending no budget.
+- ${code(`wake: ${LAST_RUN}`)}: to the column its last run worked in, else the first work column. The default, but in the intake.
+- ${code("wake: false")}: nowhere; the comment waits for the next run. The intake's default.
+- ${code("{ next, decide }")}:
+
+${fieldList("wake")}
+
+A role judging a wake reads the comment first, then what ${code("sees")} allows. ${code(STAY)}, ${code("human")} or the end of the ladder leaves the task where it is. Wherever it goes, its next run's note carries the comment.
+
+${FENCE}
+  - id: done
+    title: Done
+    final: true
+    wake:
+      next:
+        fix:   { to: build, means: "the comment asks for a change" }
+        check: { to: review, means: "it asks for another look" }
+      decide: [triage]          # a role; a plugin's classifier, such as jev, the same way
+${FENCE}
+
 ## Examples
 
 The default board, which every machine runs until a board is stored. Backlog is the intake; moving a task into Running starts its own agent, and its report moves it to Review, which waits for the person.
@@ -414,6 +444,7 @@ ${FENCE}
    - ${code("outcome <exit>")}: it reports naming that exit, and its turn ends.
    - ${code("silent")}: its turn ends with no report.
    - ${code("<role> <exit|stay|none> [confidence]")}: the role being asked answers; ${code("none")} is no answer.
+   - ${code("comment [words]")}: the person writes on the task.
 
    It answers with every step taken, where the task ends and in what state, and each line that did not apply. The walk has one machine, which offers every agent but is none of the machines an ${code("on")} names, so a pinned role's run waits there: walk a copy with the pin removed to see past it. It has no code, labels or project either, so rules on those never hold. With its reviewer unpinned, the review loop above walks as ${code('["move build", "report", "outcome fix", "report", "silent", "cheap ship 0.9", "press merge"]')}.
 5. Apply it with ${code("board_apply")}: ${code("text")}, the whole board; ${code("revision")}, the revision ${code("board_get")} showed; ${code("why")}, one short paragraph on what changed and why. If it answers that the revision moved, somebody else changed the board: call ${code("board_get")} again and make your change again on the new text. Never apply over a revision you have not read.

@@ -102,8 +102,9 @@ moves a task lives here or nowhere; `boardcheck` drives it by table, with no dae
 ## A task's files (Q2.273)
 
 - **Their own store, never the session uploads**, which a start prunes against the
-  sessions: `TaskFiles` over `task_files`. `POST /tasks/uploads` stages one; the create or
-  comment naming it in `attachments` takes it (`claim`), a create checking every id first.
+  sessions: `TaskFiles` over `task_files`. `POST /tasks/uploads` stages one; the create,
+  comment or `PATCH` naming it in `attachments` takes it (`claim`), a create checking every
+  id first, a `PATCH` before its words, so a refusal changes nothing (Q2.277).
 - **A run that opens a conversation sends the task's own files with its message**; one that
   continues does not, as that conversation had them (`launch`).
 - **A comment's go into a working run's conversation, else wait in `pendingFiles`** for the
@@ -124,6 +125,10 @@ its floor; an answer that names no confidence is not checked against one. Each v
 is history with its role, exit, confidence, entry and revision.
 
 - **A classifier only decides**: named in `run` it is no executor (`judge_only`).
+- **A wake is a ladder of its own (Q2.279)**: `wake: { next, decide }` on a waiting column, asked
+  about one comment (`flow.woken`), which leads its question. Its verdicts and question carry the
+  comment's id (`Verdict.wake`), so a role on both ladders never reads one answer as the other's.
+  One that asks nobody moves in the comment's request, as the person's move.
 - **Automatic moves spend the budget; anything a person does gives it back**
   (`humanActed`): a move, a comment, an edit, an answer.
 
@@ -132,9 +137,10 @@ is history with its role, exit, confidence, entry and revision.
 A question is a window on a request in a session (`request` names it); its state is read
 off the session every time (`TaskDesk.feed`), so the chat and the feed answer one request.
 A stop holds the agent's last message; a reply is a comment, which goes into a working
-run's conversation as its person's message, else into the next run's note. On a task in a
-column that waits on its person (not the intake, not a closing one) it also sends the task
-back to its last run's column (`sentBackTo`), so the agent has it at once. 200 kept.
+run's conversation as its person's message, else into the next run's note. On a task that waits
+it also wakes it: the column's `wake` sends it on (`wakeStep`, Q2.279), by default to its last
+run's column, one no run worked to where a start goes (`lastRunColumn`, Q2.275), and from the
+intake nowhere. 200 kept.
 
 ## The config agent (Q2.270, Q3.743)
 
@@ -196,7 +202,7 @@ One session per account that writes the board for its person; Edit board is its 
 |---|---|
 | A board | 64 KiB of YAML; 32 roles, 32 columns, 8 exits, 6 judges, 16 rules, 16 machines a role names; a column title 40, a prompt 16 000, skill args 2 000, a role's effort and mode 64, its instructions 4 000 characters; budget 1–50 (8), a column's limit 1–64 |
 | A run's engine | 16 steps per event; waiting runs looked at every 30 s; no executor for a day asks its person |
-| A judge | 8 KiB of question (instructions 2 KiB, last message 4 KiB, diff 6 KiB, cut from the end of `sees`); 120 s a harness, 10 s a classifier |
+| A judge | 8 KiB of question (instructions 2 KiB, a wake's comment 4 KiB and first, last message 4 KiB, diff 6 KiB, cut from the end of `sees`); 120 s a harness, 10 s a classifier |
 | The feed and history | 200 entries each per task; a comment 8 000 characters, 2 000 of each when it moves |
 | Files | 10 per create or comment, 100 MiB each; 100 files and 1 GiB a task, its comments' included; 20 wait for the next run; one staged and never named goes after a day |
 | A move | 30 s per try, retried 30 s → 10 min, given up after 24 h; code 64 MiB in 512 KiB pieces, a bundle kept 10 min; tombstones 30 days |

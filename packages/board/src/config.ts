@@ -35,6 +35,8 @@ const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,64}$/;
 export const STAY = "stay";
 /** The name a `next: <column>` shorthand's one exit goes by. */
 export const SHORTHAND_EXIT = "next";
+/** Where a wake may send a task besides a column: where its last run worked. No column id holds an underscore. */
+export const LAST_RUN = "last_run";
 export const RESERVED_ROLES: readonly string[] = ["self", "human"];
 export const SEES = ["brief", "summary", "report", "last_message", "diff_stat", "diff"] as const;
 export type Sees = (typeof SEES)[number];
@@ -44,10 +46,11 @@ export const DEFAULT_SEES: readonly Sees[] = ["report", "last_message"];
 export const BOARD_FIELDS = {
   top: ["version", "intake", "budget", "roles", "columns"],
   role: ["agent", "model", "effort", "mode", "instructions", "on", "min_confidence"],
-  column: ["id", "title", "show", "run", "next", "decide", "sees", "holder", "limit", "final"],
+  column: ["id", "title", "show", "run", "next", "decide", "sees", "holder", "limit", "final", "wake"],
   run: ["role", "skill", "args", "prompt", "conversation", "done_when", "code"],
   exit: ["to", "means", "label"],
   judge: ["rules"],
+  wake: ["next", "decide"],
 } as const;
 
 export interface Role {
@@ -69,6 +72,13 @@ export interface Exit {
   to: string;
   means: string | null;
   label: string;
+}
+
+/** Where a person's comment sends a task that waits here (Q2.279): an exit's `to` may be `last_run`. */
+export interface Wake {
+  exits: Exit[];
+  /** null moves the task through its one exit at once, as its person's own move. */
+  decide: Judge[] | null;
 }
 
 export type Judge = { kind: "self" } | { kind: "human" } | { kind: "role"; role: string } | { kind: "rules"; rules: Rule[] };
@@ -108,6 +118,8 @@ export interface WaitColumn extends ColumnBase {
   sees: Sees[];
   holder: "you" | "nobody";
   final: boolean;
+  /** null keeps a comment as a note for the next run. */
+  wake: Wake | null;
 }
 
 export interface WorkColumn extends ColumnBase {
@@ -227,7 +239,8 @@ export function parseBoard(text: string): ParsedBoard {
   }
 
   const roles = readRoles(top.get("roles"), refuse);
-  const columns = readColumns(top.get("columns"), root, roles, refuse);
+  const wakeless = new Set<string>();
+  const columns = readColumns(top.get("columns"), root, roles, wakeless, refuse);
 
   let intake: string | null = columns.find((column) => column.kind !== "view")?.id ?? null;
   const intakePair = top.get("intake");
@@ -241,10 +254,14 @@ export function parseBoard(text: string): ParsedBoard {
   }
 
   if (errors.length > 0 || intake === null) return { ok: false, errors: sorted(errors) };
-  // A shorthand exit is pressed as the column it leads to.
   for (const column of columns) {
     if (column.kind === "view") continue;
-    for (const exit of column.exits) if (exit.label === "") exit.label = columns.find((one) => one.id === exit.to)?.title ?? exit.to;
+    // A waiting column that names no wake sends a comment where the task last worked, the intake excepted (Q2.275).
+    if (column.kind === "wait" && wakeless.has(column.id)) column.wake = column.id === intake ? null : { exits: [{ name: SHORTHAND_EXIT, to: LAST_RUN, means: null, label: "" }], decide: null };
+    // A shorthand exit is pressed as the column it leads to.
+    for (const exit of [...column.exits, ...(column.kind === "wait" ? (column.wake?.exits ?? []) : [])]) {
+      if (exit.label === "") exit.label = exit.to === LAST_RUN ? "where it last worked" : (columns.find((one) => one.id === exit.to)?.title ?? exit.to);
+    }
   }
   return { ok: true, board: { version: BOARD_VERSION, intake, budget, roles, columns } };
 }
@@ -435,7 +452,7 @@ interface ColumnDraft {
   title: string;
 }
 
-function readColumns(pair: Pair | undefined, root: YAMLMap, roles: Role[], refuse: Refuse): Column[] {
+function readColumns(pair: Pair | undefined, root: YAMLMap, roles: Role[], wakeless: Set<string>, refuse: Refuse): Column[] {
   if (pair === undefined) {
     refuse(root, "columns", `columns is required: a list of 1 to ${MAX_COLUMNS} columns`);
     return [];
@@ -481,7 +498,7 @@ function readColumns(pair: Pair | undefined, root: YAMLMap, roles: Role[], refus
   let viewSeen = false;
   for (const draft of drafts) {
     if (draft === null) continue;
-    const column = readColumn(draft, ids, viewIds, roles, refuse);
+    const column = readColumn(draft, ids, viewIds, roles, wakeless, refuse);
     if (column === null) continue;
     if (column.kind === "view") {
       if (viewSeen) refuse(draft.f.get("show")!, join(draft.path, "show"), "a board has at most one view of sessions");
@@ -495,7 +512,7 @@ function readColumns(pair: Pair | undefined, root: YAMLMap, roles: Role[], refus
   return columns;
 }
 
-function readColumn(draft: ColumnDraft, ids: Set<string>, viewIds: Set<string>, roles: Role[], refuse: Refuse): Column | null {
+function readColumn(draft: ColumnDraft, ids: Set<string>, viewIds: Set<string>, roles: Role[], wakeless: Set<string>, refuse: Refuse): Column | null {
   const { f, path, id, title } = draft;
   const showPair = f.get("show");
   if (showPair !== undefined) {
@@ -528,18 +545,11 @@ function readColumn(draft: ColumnDraft, ids: Set<string>, viewIds: Set<string>, 
     }
   }
 
-  // Every exit a person-less judge picks between says what it means, or the judge is guessing.
   const judged = working ? exits.length >= 2 : exits.length >= 1;
-  if (judged && decide.some((judge) => judge.kind === "self" || judge.kind === "role")) {
-    for (const exit of exits) {
-      if (exit.means === null) {
-        refuse(exitNodes.get(exit.name), `${join(path, "next")}.${exit.name}`, "means is required: say when this exit is the right one, for the agent or role that picks it");
-      }
-    }
-  }
+  if (judged) meansRequired(exits, decide, exitNodes, join(path, "next"), refuse);
 
   if (working) {
-    for (const key of ["holder", "final"]) {
+    for (const key of ["holder", "final", "wake"]) {
       if (f.has(key)) refuse(f.get(key)!, join(path, key), `${key} is for a column without run`);
     }
     let limit: number | null = null;
@@ -569,7 +579,47 @@ function readColumn(draft: ColumnDraft, ids: Set<string>, viewIds: Set<string>, 
     if (!isScalar(finalPair.value) || typeof finalPair.value.value !== "boolean") refuse(finalPair.value as Node, join(path, "final"), "final is true or false");
     else final = finalPair.value.value;
   }
-  return { kind: "wait", id, title, exits, decide, sees, holder, final };
+  const wakePair = f.get("wake");
+  if (wakePair === undefined) wakeless.add(id);
+  const wake = wakePair === undefined ? null : readWake(wakePair, join(path, "wake"), ids, viewIds, roles, refuse);
+  return { kind: "wait", id, title, exits, decide, sees, holder, final, wake };
+}
+
+/** Every exit a person-less judge picks between says what it means, or the judge is guessing. */
+function meansRequired(exits: readonly Exit[], decide: readonly Judge[], nodes: Map<string, unknown>, path: string, refuse: Refuse): void {
+  if (!decide.some((judge) => judge.kind === "self" || judge.kind === "role")) return;
+  for (const exit of exits) {
+    if (exit.means === null) refuse(nodes.get(exit.name), `${path}.${exit.name}`, "means is required: say when this exit is the right one, for the agent or role that picks it");
+  }
+}
+
+/** `false`, one target (a column or `last_run`), or `{next, decide}`: the same exits and judges a column leaves by. */
+function readWake(pair: Pair, path: string, ids: Set<string>, viewIds: Set<string>, roles: Role[], refuse: Refuse): Wake | null {
+  const value = pair.value;
+  if (isScalar(value) && typeof value.value === "boolean") {
+    if (value.value) refuse(value, path, "wake is a column, last_run, false, or {next, decide}");
+    return null;
+  }
+  const nodes = new Map<string, unknown>();
+  if (!isMap(value)) {
+    const exits = readExits(pair, path, ids, viewIds, nodes, refuse, true);
+    return exits.length === 0 ? null : { exits, decide: null };
+  }
+  const f = fields(value, path, BOARD_FIELDS.wake, refuse);
+  const nextPair = f.get("next");
+  if (nextPair === undefined) {
+    refuse(value, join(path, "next"), "next is required: where a comment may send the task");
+    return null;
+  }
+  const exits = readExits(nextPair, join(path, "next"), ids, viewIds, nodes, refuse, true);
+  const decidePair = f.get("decide");
+  if (decidePair === undefined) {
+    if (exits.length > 1) refuse(value, join(path, "decide"), "decide is required with two or more exits: who picks one");
+    return exits.length === 0 ? null : { exits, decide: null };
+  }
+  const decide = readDecide(decidePair, join(path, "decide"), false, roles, exits, ids, refuse);
+  meansRequired(exits, decide, nodes, join(path, "next"), refuse);
+  return exits.length === 0 ? null : { exits, decide };
 }
 
 function readRun(pair: Pair, path: string, roles: Role[], refuse: Refuse): Run | null {
@@ -663,11 +713,13 @@ function readExits(
   viewIds: Set<string>,
   nodes: Map<string, unknown>,
   refuse: Refuse,
+  lastRun = false,
 ): Exit[] {
   if (pair === undefined) return [];
   const target = (node: unknown, where: string): string | null => {
     const id = stringOf(node);
     if (id === null) refuse(node as Node, where, "an exit leads to a column id");
+    else if (lastRun && id === LAST_RUN) return id;
     else if (!ids.has(id)) refuse(node as Node, where, `there is no column ${JSON.stringify(id)}`);
     else if (viewIds.has(id)) refuse(node as Node, where, "a view of sessions holds no tasks");
     else return id;

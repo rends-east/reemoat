@@ -101,7 +101,7 @@ All's flat list. Nothing in `machineSwipe.ts` or `tabPill.ts` may learn of the b
   intake and the closing columns start folded (`foldedFirst`). A working task's mark breathes here and above a conversation, never on the
   board (`still`). Q3.733.
 - **`j`/`k` walk nothing on the board's page** (`visibleRows` answers `[]`). One search
-  field, which names what it searches.
+  field, which names what it searches; the board pane adds one by title (Q3.748).
 - **A waiting task says so in place**: weight and the blocked dot (`TaskMark`), as a
   waiting session does. A row is one button; nothing mounts into it.
 - **`ui/board/useBoard.ts`, `Proposals.tsx`, `Pickers.tsx` and `assignees.ts` import no
@@ -165,22 +165,21 @@ page. `/task/new` is a sheet, `/task/new/in/:column` a column's + (`newTaskInPat
 
 - **The assignee is a machine and an agent in one choice** (`AssigneeDropdown`): every
   machine that can take a task (`takingMachines`), each a group of what New session would
-  offer there (`useRosters`: `orderStrip`, `startableHere`, `!hidden`). One control in the
-  form, the page and each proposal row.
+  offer there (`useRosters`: `orderStrip`, `startableHere`, `!hidden`). One control in
+  form, page and proposal row.
 - **Another machine moves a task nobody started** (`moveTask`): created there under its
   key, then deleted here; the folder by `folderOn`. A task with a conversation offers its
   own machine only.
 
 **The board** (Q3.721) is `HomePane` at lg while the board is the list's page: the
-list's own view drawn again, with no state but a press's wait, a pick and a landing.
-Imported with the shell, never lazy: a chunk on the first switch blanked the pane 300 ms
-(Q3.729). Four lanes of their own colour, never `bg-chip` (the code chip's), each a fixed
-width (`w-76`) with a + making a task in it; the board scrolls sideways. A card is one
-height whatever it holds: the title on one line with the task's age beside it, the
+list's own view drawn again, with no state but a press's wait, a pick, a landing and that search.
+Imported with the shell, never lazy (Q3.729). Lanes of their own colour, never `bg-chip`, each a fixed
+width (`w-76`) with a + making a task in it. A card is one
+height: the title on one line with its age beside it, the
 holder's round mark (`HolderAvatar`) and name, and under the name the machine, small,
 only when somebody holds it; no mark moves (Q3.731, Q3.737). Its assignee is a control of its own over the
-card's press, opening `AgentMenu`, portaled out of the lane's scroller; a second press on it
-closes the menu, and another card's moves it there. The board's sideways bar is drawn
+card's press, opening `AgentMenu`, portaled out of the lane's scroller; a second press closes it,
+another card's moves it. The board's sideways bar is drawn
 always, 14 px (`board-scroll`, Q3.745).
 
 **A card is dragged between columns** (`useCardDrag`, Q3.728):
@@ -190,15 +189,17 @@ always, 14 px (`board-scroll`, Q3.745).
   tilted by `LIFTED`, which `animate-lift` repeats in CSS; the cursor is set on the
   document, the one such style here.
 - The column under the pointer is found by x within `LANE_REACH`; `dropRefused` lets a
-  card an agent is on go to Done alone. The slot opens where `columnOrder` will put it.
+  card an agent is on go to Done alone. The slot opens where `placesAt` says.
 - Let go, the copy flies into its slot or back (Escape is overlay.ts's); a stalled
   flight lands late on a timer. Into Running (`useTaskDrop`) the agent the backlog named
   starts; any other card asks who in `AgentMenu`, opened by the card in the area that took
   it, and waits there as nobody's. A cancel releases the hold.
-- **A press whose card moved carries nothing**: one that closes the agent menu remounts
-  the card it landed on, and a copy measured off the removed node flew in from the corner.
+- **A press whose card moved carries nothing** (one closing the agent menu remounts it).
 - **The list's lines drag the same way** on the `y` axis, a folded group taking one into
   its heading (Q3.733). A landed ring has room above a lane's first card; a line's is inset.
+- **A column orders by `taskRank`** (`rank`, else age); the slot follows the pointer where the
+  daemon keeps one (Q2.278). Scrollers keep their place (`keptScroll`); `title` is the whole
+  name (Q3.747).
 - `FlipBoundary` slides the rest, measuring before the DOM changes and only when `order`
   does; a card from another column fades in, or it slides behind its scroller. Nothing
   moves under reduced motion.

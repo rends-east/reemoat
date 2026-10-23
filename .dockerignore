@@ -81,6 +81,8 @@
 !packages/protocol/package.json
 # The board package, for the gate's sake as the crypto package is: its manifest for --frozen-lockfile, its source for the build.
 !packages/board/package.json
+# The external client: its manifest alone, for --frozen-lockfile. Nothing in the image builds or runs it.
+!packages/cli/package.json
 !packages/board/src
 !packages/protocol/src
 !packages/web/package.json

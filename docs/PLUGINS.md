@@ -718,10 +718,14 @@ export with the column's exits and what the column lets a judge see:
 
 ```js
 export async function ask(ctx, { exits, context }) {
-  // exits: [{ name, means, label }]; context: { brief?, summary?, report?, last_message?, diff_stat?, diff? }
+  // exits: [{ name, means, label }]; context: { comment?, brief?, summary?, report?, last_message?, diff_stat?, diff? }
   return { exit: "ship", confidence: 0.91 }; // or { exit: "stay" }, or { exit: null }
 }
 ```
+
+A column's `wake` asks the same way when a person writes on a task that waits there, and
+`context.comment` is what they wrote: the exits are the wake's, and `stay` leaves the task where
+it is.
 
 An exit the column does not have, any other shape, a throw, or no answer in **10 seconds**
 is an abstention, and so is a confidence under the role's `min_confidence`; the next

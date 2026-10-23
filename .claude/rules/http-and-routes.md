@@ -31,6 +31,7 @@ pnpm client plugins | plugin install <archive> | plugin remove <id>   # .tar.gz 
 pnpm client devices | devices approve <code> | devices remove <id>     # the machine's own list (e2ee.md)
 pnpm client devices lock | devices unlock
 pnpm client plugin enable <id> | disable <id> | view <id> [screen|settings]
+# a remote machine's tasks and board, by API key: pnpm reemoat (cli.md); this one is loopback
 ```
 
 ## Invariants

@@ -1,4 +1,4 @@
-import { BOARD_GUIDE, formatBoardError, parseBoard, simulate, type Board, type MachineOffer } from "@reemoat/board";
+import { BOARD_GUIDE, formatBoardError, LAST_RUN, parseBoard, simulate, type Board, type MachineOffer } from "@reemoat/board";
 import { machineAddress, type ProjectListing, type TaskDesk, type TaskListing } from "./desk.js";
 import {
   BOARD_APPLY_TOOL_NAME,
@@ -252,9 +252,17 @@ function boardWords(board: Board): string {
           `${exits.length === 0 ? "no exits" : `exits ${exits}, decided by ${judges}`}.`,
       );
     } else {
+      const wake = column.wake;
+      const target = (to: string): string => (to === LAST_RUN ? "where it last worked" : to);
+      const woken =
+        wake === null
+          ? "a comment stays a note"
+          : wake.decide === null
+            ? `a comment sends it to ${target(wake.exits[0]!.to)}`
+            : `a comment sends it by ${wake.exits.map((exit) => `${exit.name} → ${target(exit.to)}`).join(", ")}, decided by ${wake.decide.map((judge) => (judge.kind === "role" ? judge.role : judge.kind)).join(", ")}`;
       lines.push(
         `- ${column.id} "${column.title}": waits${column.holder === "you" ? " for your user" : ""}${column.final ? ", and closes the task" : ""}; ` +
-          `${exits.length === 0 ? "no exits" : `exits ${exits}, decided by ${judges}`}.`,
+          `${exits.length === 0 ? "no exits" : `exits ${exits}, decided by ${judges}`}; ${woken}.`,
       );
     }
   }

@@ -26,6 +26,7 @@ import {
   judgePrompt,
   JUDGE_TIMEOUT_MS,
   MAX_SEEN_DIFF_BYTES,
+  MAX_WAKE_TEXT_CHARS,
   parseVerdict,
   readVerdict,
   legacyStatus,
@@ -36,8 +37,11 @@ import {
   phase,
   runRole,
   step,
+  wakeable,
+  wakeStep,
   withReport,
   withVerdict,
+  withWake,
   type Actor,
   type Board,
   type BoardError,
@@ -351,6 +355,7 @@ export class BoardEngine {
       wait: flow.wait,
       judging: flow.judging,
       moving: flow.moving,
+      woken: flow.woken ?? null,
       sessions,
       from: flow.from,
       last: flow.last,
@@ -473,6 +478,7 @@ export class BoardEngine {
       wait: task.wait,
       judging: task.judging,
       moving: task.moving,
+      woken: task.woken ?? null,
       from: task.from,
       last: task.last,
       notes: [...task.notes],
@@ -795,7 +801,17 @@ export class BoardEngine {
       }
       case "move": {
         this.move(record, next.to, next.exit, next.by);
+        // A wake's move into a work column takes its comment to the run there; one into a waiting column leaves it a note.
+        if (task.woken != null && next.by.kind !== "config" && columnById(board, next.to)?.kind === "work") this.markDelivered(record.id, task.woken.comment);
         return true;
+      }
+      case "stay": {
+        const written = this.writeTask(record, applyStep(task, board, next, now));
+        const where = columnById(board, task.column)?.title ?? task.column;
+        const why =
+          next.by.kind === "config" ? `${where} has nowhere to send it` : next.by.kind === "human" ? "no judge sent it anywhere" : `${actorName(next.by)} kept it in ${where}`;
+        this.event(written, "note", `${why}; the comment waits for the next run`, { by: actorName(next.by) });
+        return false;
       }
       case "start": {
         let launched: { managed: ManagedSession; started: { session: string; startSeq: number; logFrom: number; startHead: string | null } };
@@ -1049,11 +1065,13 @@ export class BoardEngine {
     if (column === null || column.kind === "view") return;
     const role = next.role;
     const exits = next.exits;
+    // A wake's judge is asked about its comment, which leads what it reads (Q2.279).
+    const comment = next.wake !== undefined && task.woken?.comment === next.wake ? task.woken.text : null;
     let answer: VerdictAnswer | null = null;
     let why: string | null = null;
     try {
       const offer = await this.offer();
-      const context = await this.seen(record, task, column.sees);
+      const context: SeenContext = { ...(comment === null ? {} : { comment }), ...(await this.seen(record, task, column.sees)) };
       const lower = role.agent.toLowerCase();
       const classifier = offer.agents.find((one) => one.kind === "classifier" && (one.id === role.agent || one.name.toLowerCase() === lower));
       const runnable = offer.agents.find((one) => one.kind !== "classifier" && (one.id === role.agent || (one.kind === "custom" && one.name.toLowerCase() === lower)));
@@ -1065,7 +1083,7 @@ export class BoardEngine {
         answer = readVerdict(value, exits);
       } else if (runnable !== undefined && judges !== null) {
         const harness = runnable.kind === "custom" ? (runnable.harness ?? runnable.id) : runnable.id;
-        const prompt = judgePrompt(task.title, column.title, exits, column.sees, context, role.instructions);
+        const prompt = judgePrompt(task.title, column.title, exits, column.sees, context, role.instructions, comment);
         const text = await bounded(JUDGE_TIMEOUT_MS, (signal) => judges.ask(harness, prompt, { model: role.model, effort: role.effort }, signal));
         answer = parseVerdict(text, exits);
       } else {
@@ -1089,6 +1107,7 @@ export class BoardEngine {
               exits,
               sees: column.sees,
               context,
+              ...(comment === null ? {} : { comment }),
             },
           }, JUDGE_TIMEOUT_MS + 5_000);
           answer = reply.ok && reply.status === 200 ? readVerdict(pickVerdict(reply.body), exits) : null;
@@ -1103,11 +1122,12 @@ export class BoardEngine {
     const verdict = why !== null ? { exit: null, confidence: null, abstained: why } : judged(answer, role.minConfidence);
     const latest = this.store.get(id);
     if (latest === null) return;
-    if (latest.flow.entry !== entry) {
+    if (latest.flow.entry !== entry || (next.wake !== undefined && latest.flow.woken?.comment !== next.wake)) {
       this.event(latest, "verdict", `${role.name} answered after the task moved on, which moves nothing`, { by: role.name, confidence: verdict.confidence });
       return;
     }
-    const written = this.writeTask(latest, withVerdict(this.boardTask(latest), { entry, judge: role.name, exit: verdict.exit, confidence: verdict.confidence, at: this.now() }));
+    const wake = next.wake === undefined ? {} : { wake: next.wake };
+    const written = this.writeTask(latest, withVerdict(this.boardTask(latest), { entry, judge: role.name, exit: verdict.exit, confidence: verdict.confidence, at: this.now(), ...wake }));
     const percent = verdict.confidence === null ? "" : ` · ${Math.round(verdict.confidence * 100)}%`;
     this.event(
       written,
@@ -1144,6 +1164,9 @@ export class BoardEngine {
     // An older asker sends neither, and is judged as it was.
     const effort = typeof body["effort"] === "string" ? body["effort"].slice(0, MAX_CHOICE_CHARS) : null;
     const instructions = typeof body["instructions"] === "string" ? body["instructions"].slice(0, MAX_ROLE_INSTRUCTIONS_CHARS) : null;
+    // A wake's question carries its comment; an older asker sends none.
+    const comment = typeof body["comment"] === "string" ? body["comment"].slice(0, MAX_WAKE_TEXT_CHARS) : null;
+    if (comment !== null) context.comment = comment;
     const offer = await this.offer();
     const lower = agent.toLowerCase();
     const judges = this.options.judges ?? null;
@@ -1157,7 +1180,7 @@ export class BoardEngine {
       const runnable = offer.agents.find((one) => one.kind !== "classifier" && (one.id === agent || (one.kind === "custom" && one.name.toLowerCase() === lower)));
       if (runnable === undefined) return { exit: null, confidence: null };
       const harness = runnable.kind === "custom" ? (runnable.harness ?? runnable.id) : runnable.id;
-      const prompt = judgePrompt(title, column, named, sees, context, instructions);
+      const prompt = judgePrompt(title, column, named, sees, context, instructions, comment);
       const text = await bounded(JUDGE_TIMEOUT_MS, (signal) => judges.ask(harness, prompt, { model, effort }, signal));
       return parseVerdict(text, named) ?? { exit: null, confidence: null };
     } catch {
@@ -1241,7 +1264,7 @@ export class BoardEngine {
         key: fields.key,
         createdAt: fields.createdAt,
       },
-      flow: { ...flow, epoch, workdir: null, handoff: null, moving: null, judging: null, wait: null },
+      flow: { ...flow, epoch, workdir: null, handoff: null, moving: null, judging: null, wait: null, woken: null },
       comments: this.store.comments(record.id).map((one) => ({ ...one, text: one.text.slice(0, MAX_MOVED_COMMENT_CHARS) })),
       events: this.store.events(record.id).slice(-MAX_MOVED_EVENTS),
     };
@@ -1462,8 +1485,7 @@ export class BoardEngine {
 
   /**
    * A person's comment: into the run's conversation while one is at work, as their own message, else into the next run's note.
-   * On a task waiting on them that a run worked, it is their word on that work: the task goes back to the run's column, and its
-   * agent has the comment at once (the owner's call, 2026-10-15).
+   * On a task that waits, its column's wake sends it on, at once where it asks no judge (Q2.275, Q2.279).
    */
   async addComment(record: TaskRecord, text: string, files: readonly TaskFile[] = []): Promise<TaskComment> {
     const touched = this.touched(record);
@@ -1482,39 +1504,45 @@ export class BoardEngine {
         }
       }
     }
+    const id = `c_${randomBytes(6).toString("base64url")}`;
     let latest = this.store.get(record.id) ?? touched;
-    let back: string | null = null;
+    let woke = false;
     if (!delivered) {
       const named = files.length === 0 ? "" : `(attached: ${files.map((file) => file.name).join(", ")})`;
       const line = text.length === 0 ? named : named.length === 0 ? text : `${text}\n${named}`;
       const pendingFiles = [...(latest.flow.pendingFiles ?? []), ...files].slice(-MAX_PENDING_TASK_FILES);
       latest = { ...latest, flow: { ...latest.flow, notes: [...latest.flow.notes, line].slice(-MAX_NOTES), pendingFiles } };
       this.save(latest);
-      back = this.sentBackTo(latest);
+      const task = this.boardTask(latest);
+      if (latest.flow.handoff == null && wakeable(task, this.state.board)) {
+        latest = this.writeTask(latest, withWake(task, { id, text: line }, this.now()));
+        woke = true;
+      }
     }
-    const reached = delivered || back !== null;
     const comment = this.comment(latest, {
+      id,
       kind: "comment",
       author: "you",
       text,
       sessionId: delivered ? (managed?.id ?? null) : null,
-      delivered: reached,
+      delivered,
       ...(files.length === 0 ? {} : { files: [...files] }),
     });
-    if (back !== null) this.move(latest, back, null);
+    // A wake that waits on no role is taken now, with nothing awaited since it was armed, so the answer says where the comment went.
+    const column = woke ? columnById(this.state.board, latest.flow.column) : null;
+    if (column !== null && column.kind === "wait") {
+      const task = this.boardTask(latest);
+      const next = wakeStep(task, this.state.board, column);
+      if (next.kind === "move" || next.kind === "stay") await this.apply(latest, task, next, { started: null, refused: null });
+    }
     void this.kick(record.id);
-    return comment;
+    return this.store.comments(record.id).find((one) => one.id === id) ?? comment;
   }
 
-  /** Where a comment sends a task back: from a column that waits on its person, not the intake or a closing one, to its last run's. */
-  private sentBackTo(record: TaskRecord): string | null {
-    const board = this.state.board;
-    const flow = record.flow;
-    const at = columnById(board, flow.column);
-    if (at === null || at.kind !== "wait" || at.final || at.holder !== "you" || flow.column === board.intake) return null;
-    if (flow.moving !== null || flow.judging !== null || flow.handoff != null) return null;
-    const last = flow.last?.column ?? null;
-    return last !== null && columnById(board, last)?.kind === "work" ? last : null;
+  /** A comment the task's wake carried to a run: it is that run's to read now, not a note left for later. */
+  private markDelivered(taskId: string, commentId: string): void {
+    const comment = this.store.comments(taskId).find((one) => one.id === commentId);
+    if (comment !== undefined && !comment.delivered) this.store.saveComment(taskId, { ...comment, delivered: true });
   }
 
   /** task_update from a session: the summary is the task's, and the run's report only from the run's own session. */

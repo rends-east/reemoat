@@ -414,7 +414,12 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
   await finish(await runSession(two), { report: { status: "review" } });
 
   process.stdout.write("  a working column with nobody to run it, until somebody is named there\n");
-  await call("PUT", "/board", "version: 1\ncolumns:\n  - { id: backlog, title: Backlog }\n  - { id: build, title: Build, run: {}, next: review }\n  - { id: review, title: Review, holder: you }\n", { "content-type": "text/yaml" });
+  await call(
+    "PUT",
+    "/board",
+    "version: 1\ncolumns:\n  - { id: backlog, title: Backlog }\n  - { id: build, title: Build, run: {}, next: review }\n  - { id: review, title: Review, holder: you }\n  - { id: shelf, title: Shelf }\n  - { id: done, title: Done, final: true }\n",
+    { "content-type": "text/yaml" },
+  );
   const orphan = (await call("POST", "/tasks", { title: "Orphan", brief: "Nobody yet.", agent: "claude", assignee: "nobody", cwd: work })).body.task.id;
   await call("POST", `/tasks/${orphan}/move`, { to: "build" });
   const unnamed = await settled(orphan);
@@ -439,6 +444,66 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
   check("and the history says you sent it back", commentHistory.at(-1), "Review → Build by you");
   await finish(orphanRun, { report: { status: "review" } });
   await settled(orphan);
+
+  // Q2.275: the owner wrote on a task in Done and nothing worked on it.
+  await call("POST", `/tasks/${orphan}/move`, { to: "done" });
+  const reopened = await call("POST", `/tasks/${orphan}/comments`, { text: "One more thing." });
+  check("a comment on a closed task reaches its agent too: back to its last run's column", [reopened.status, reopened.body.comment.delivered, (await settled(orphan)).column], [201, true, "build"]);
+  await until(() => agentOf(orphanRun).prompts.length === 3);
+  check(
+    "into the same conversation, coming back from Done with your words in the note",
+    [agentOf(orphanRun).prompts[2]?.startsWith("The task came back from Done"), agentOf(orphanRun).prompts[2]?.includes("- One more thing.")],
+    [true, true],
+  );
+  await finish(orphanRun, { report: { status: "review" } });
+  await settled(orphan);
+  // The owner's board had its Done written with no `final` and no holder: a column that waits on nobody.
+  await call("POST", `/tasks/${orphan}/move`, { to: "shelf" });
+  const shelved = await call("POST", `/tasks/${orphan}/comments`, { text: "Are you there?" });
+  check("and so does one on a column that waits on nobody and closes nothing", [shelved.body.comment.delivered, (await settled(orphan)).column], [true, "build"]);
+  await until(() => agentOf(orphanRun).prompts.length === 4);
+  check("its words reach the same conversation", agentOf(orphanRun).prompts[3]?.includes("- Are you there?"), true);
+  await finish(orphanRun, { report: { status: "review" } });
+  await settled(orphan);
+  const closed =(await call("POST", "/tasks", { title: "Closed", brief: "Never run.", agent: "claude", cwd: work, status: "done" })).body.task.id;
+  check("a task made closed stands in Done with no run", [(await settled(closed)).column, (await taskOf(closed)).run], ["done", null]);
+  const woken = await call("POST", `/tasks/${closed}/comments`, { text: "Actually, do it." });
+  const wokenRun = await runSession(closed);
+  check("and one no run worked goes where a start would, its agent sent the brief", [woken.body.comment.delivered, (await taskOf(closed)).column, agentOf(wokenRun).prompts[0]?.startsWith("Never run.")], [true, "build", true]);
+  check("with your words in its note", agentOf(wokenRun).prompts[0]?.includes("- Actually, do it."), true);
+  await finish(wokenRun, { report: { status: "review" } });
+  await settled(closed);
+  const parked = (await call("POST", "/tasks", { title: "Parked", brief: "Not yet.", agent: "claude", cwd: work })).body.task.id;
+  const noted = await call("POST", `/tasks/${parked}/comments`, { text: "For later." });
+  check("the intake still keeps a comment for the first start", [noted.body.comment.delivered, (await settled(parked)).column], [false, "backlog"]);
+  // Q2.279: each waiting column names where a comment sends the task; false keeps it a note.
+  await call(
+    "PUT",
+    "/board",
+    "version: 1\ncolumns:\n  - { id: backlog, title: Backlog }\n  - { id: build, title: Build, run: {}, next: review }\n" +
+      "  - { id: review, title: Review, holder: you, wake: false }\n  - { id: shelf, title: Shelf, wake: build }\n  - { id: done, title: Done, final: true, wake: shelf }\n",
+    { "content-type": "text/yaml" },
+  );
+  const kept = await call("POST", `/tasks/${orphan}/comments`, { text: "Noted, no rush." });
+  check("wake: false keeps a comment a note where the task waits", [kept.body.comment.delivered, (await settled(orphan)).column], [false, "review"]);
+  await call("POST", `/tasks/${orphan}/move`, { to: "done" });
+  const toShelf = await call("POST", `/tasks/${orphan}/comments`, { text: "Park it." });
+  check("wake: shelf sends it there, and that waiting column runs nothing, so the comment stays a note", [toShelf.body.comment.delivered, (await settled(orphan)).column], [false, "shelf"]);
+  check(
+    "the history says your comment moved it, and nothing woke it again on arrival",
+    (await call("GET", `/tasks/${orphan}/comments`)).body.events.filter((event: any) => event.kind === "moved").slice(-2).map((event: any) => event.text),
+    ["Review → Done by you", "Done → Shelf by you"],
+  );
+  const toBuild = await call("POST", `/tasks/${orphan}/comments`, { text: "Now do it." });
+  check("wake: build sends it to work at once", [toBuild.body.comment.delivered, (await settled(orphan)).column], [true, "build"]);
+  await until(() => agentOf(orphanRun).prompts.length === 5);
+  check(
+    "and its run's note carries every comment it waited with",
+    ["Noted, no rush.", "Park it.", "Now do it."].map((words) => agentOf(orphanRun).prompts[4]?.includes(`- ${words}`)),
+    [true, true, true],
+  );
+  await finish(orphanRun, { report: { status: "review" } });
+  await settled(orphan);
   await call("PUT", "/board", REVIEW_LOOP_LOCAL_TEXT.replace("limit: 3", "limit: 1"), { "content-type": "text/yaml" });
 
   process.stdout.write("  the board's own tools: read, check, walk on paper, and a card that changes nothing until Apply\n");
@@ -448,6 +513,15 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
     got.structuredContent.text.includes("limit: 1"),
     /- review "Review": runs reviewer with \/review in a new conversation, done on its turn's end; exits fix → build, ship → approve, decided by self, cheap, human\./.test(got.content[0].text),
   ], [(await call("GET", "/board")).body.revision, true, true]);
+  check(
+    "and says where a comment sends a task in each waiting column",
+    got.content[0].text.split("\n").filter((line: string) => /^- (backlog|approve|done) /.test(line)),
+    [
+      '- backlog "Backlog": waits; no exits; a comment stays a note.',
+      '- approve "Approve": waits for your user; exits merge → done, changes → build, decided by human; a comment sends it to where it last worked.',
+      '- done "Done": waits, and closes the task; no exits; a comment sends it to where it last worked.',
+    ],
+  );
   const checked = await tool(coder, "board_check", { text: "version: 1\ncolumns: [{ id: a, title: A, next: b }]\n" });
   check("board_check names every line a draft fails on, and is no error", [checked.isError === true, checked.structuredContent.errors], [false, ['2:36 columns[0].next: there is no column "b"']]);
   const walked = await tool(coder, "board_simulate", { script: ["move build", "report", "outcome fix", "report", "silent", "cheap ship 0.9", "press merge"] });
@@ -554,6 +628,7 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
   process.stdout.write("  roles that decide: a harness asked once, a classifier, and what each abstains on\n");
   // One reviewer, then the cheap harness, then a classifier with a floor, then you.
   const asked: { agent: string; prompt: string; model: string | null; effort: string | null }[] = [];
+  const classified: unknown[] = [];
   let harnessSays = "";
   let classifierSays: unknown = null;
   const judging = world({ configs: new MemoryBoardConfigStore() });
@@ -570,7 +645,10 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
         return harnessSays;
       },
       classifiers: () => [{ id: "jev:jev", name: "jev" }],
-      classify: async () => classifierSays,
+      classify: async (_id, input) => {
+        classified.push(input);
+        return classifierSays;
+      },
     },
   });
   const ladder = REVIEW_LOOP_LOCAL_TEXT.replace(
@@ -638,6 +716,43 @@ process.stdout.write("\nthe board: columns, runs and exits, on stub agents whose
     const left = await settledAt(one.id);
     check(`${name} leaves the pick to you`, [left.column, left.phase], ["review", "needs_you"]);
   }
+  // Q2.279: a comment on a task that waits is judged by the column's wake, with the roles a column's own ladder uses.
+  const wakeLadder = ladder.replace(
+    "      changes: { to: build, label: Request changes }\n",
+    "      changes: { to: build, label: Request changes }\n    wake:\n      next:\n" +
+      '        redo:  { to: last_run, means: "the comment asks for a change" }\n        merge: { to: done, means: "the comment says ship it" }\n' +
+      "      decide: [quick, cheap]\n",
+  );
+  judgeDesk.engine.putBoard(wakeLadder, judgeDesk.engine.current.revision);
+  check("the board with a judged wake is the one running", judgeDesk.engine.current.text.includes("decide: [quick, cheap]"), true);
+  classifierSays = { exit: "stay", confidence: 0.95 };
+  const thanks = await judgeDesk.comment(sure.id, "Thanks, looks right.");
+  const stayed = await settledAt(sure.id);
+  check(
+    "a classifier sure enough keeps it here, asked with the comment and the exits",
+    [stayed.column, stayed.events.at(-1), (thanks as { delivered?: boolean }).delivered, (classified.at(-1) as any)?.context?.comment, (classified.at(-1) as any)?.exits?.map((one: any) => one.name)],
+    ["approve", "quick: stay · 95%", false, "Thanks, looks right.", ["redo", "merge"]],
+  );
+  check("and the history says it stays, the comment waiting", judgeDesk.history(sure.id).at(-1)?.text, "quick kept it in Approve; the comment waits for the next run");
+  classifierSays = { exit: "merge", confidence: 0.5 };
+  harnessSays = '{"exit": "redo", "confidence": 0.8}';
+  await judgeDesk.comment(sure.id, "The header is still red.");
+  await until(() => judgeDesk.get(sure.id)?.flow.column === "review");
+  check(
+    "below its floor the classifier abstains, and the harness sends it to where it last worked",
+    [(await settledAt(sure.id)).events.slice(-2), judgeDesk.history(sure.id).filter((one) => one.kind === "moved").at(-1)?.text],
+    [["quick did not decide: 50% is below its floor", "cheap: redo · 80%"], "Approve → Review (redo) by cheap · 80%"],
+  );
+  check(
+    "the harness was asked about that comment, in a wake's words",
+    [asked.at(-1)!.prompt.includes("it waits in the Approve column, where your user has just written on it"), asked.at(-1)!.prompt.includes("Your user's comment:\nThe header is still red.")],
+    [true, true],
+  );
+  check(
+    "the comment it moved on reads as sent, the one before it as kept",
+    judgeDesk.comments(sure.id).filter((one) => one.kind === "comment").map((one) => [one.text, one.delivered]),
+    [["Thanks, looks right.", false], ["The header is still red.", true]],
+  );
   const classifierRun = ladder.replace("run: { role: reviewer,", "run: { role: quick,");
   judgeDesk.engine.putBoard(classifierRun, judgeDesk.engine.current.revision);
   const onlyDecides = judgeDesk.create({ title: "Classifier run", brief: "x", agent: "claude", customAgent: null, assignee: "agent", status: "ready", cwd: work, key: null, column: "review" });

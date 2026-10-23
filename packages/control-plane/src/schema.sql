@@ -21,7 +21,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
   key_hash   TEXT    NOT NULL,
   created_at INTEGER NOT NULL,
   revoked_at INTEGER,
-  last_used_at INTEGER
+  last_used_at INTEGER,
+  -- The X25519 key a script holding this key dials with (Q1.661). Not unique: a refusal would say another account holds it.
+  public_key TEXT,
+  key_set_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (prefix);

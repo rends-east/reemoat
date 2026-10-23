@@ -1,15 +1,5 @@
 import { WebSocket } from "ws";
-import {
-  FRAME,
-  LengthReader,
-  NoiseHandshake,
-  decodeFrame,
-  encodeFrame,
-  encodeJsonFrame,
-  frameLength,
-  type CipherState,
-  type StaticKey,
-} from "@reemoat/protocol";
+import { ChannelExchange, type StaticKey } from "@reemoat/protocol";
 import { RELAY_URL_HEADER } from "../relay/protocol.js";
 
 /** The relay's app-facing path. A copy, since src/ may not import the relay's; relaycheck compares the two. */
@@ -54,119 +44,58 @@ export async function peerRequest(
   const body = request.body === undefined ? null : new TextEncoder().encode(JSON.stringify(request.body));
   return await new Promise<PeerAnswer>((resolve) => {
     const ws = new WebSocket(url, { maxPayload: 2 * MAX_PEER_RESPONSE_BYTES });
-    const reader = new LengthReader();
-    const handshake = NoiseHandshake.start({ initiator: true, staticKey, remoteStatic: remote });
-    let send: CipherState | null = null;
-    let receive: CipherState | null = null;
-    let head: { status: number } | null = null;
-    const chunks: Buffer[] = [];
-    let received = 0;
+    const exchange = ChannelExchange.start({
+      staticKey,
+      remoteStatic: remote,
+      hello: { capability: target.token },
+      request: { method: request.method, path: request.path, headers: body === null ? {} : { "content-type": "application/json" }, body },
+      carrier: { send: (bytes) => ws.send(bytes) },
+      maxResponseBytes: MAX_PEER_RESPONSE_BYTES,
+    });
     let settled = false;
 
     const give = (answer: PeerAnswer): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      exchange.abort("settled");
       ws.terminate();
       resolve(answer);
     };
-    const fail = (status: number, code: string, relayUrl: string | null = null): void =>
-      give({ ok: false, status, code, relayUrl });
+    const fail = (status: number, code: string, relayUrl: string | null = null): void => give({ ok: false, status, code, relayUrl });
     const timer = setTimeout(() => fail(0, "timeout"), timeoutMs);
     timer.unref();
 
-    const write = (frame: Uint8Array): void => {
-      ws.send(frameLength(send!.encrypt(new Uint8Array(0), frame)));
-    };
-
-    ws.on("open", () => {
-      void handshake
-        .writeMessage()
-        .then((first: Uint8Array) => ws.send(frameLength(first)))
-        .catch(() => fail(0, "handshake_failed"));
-    });
-    ws.on("message", (data: Buffer) => {
-      for (const message of reader.push(new Uint8Array(data))) {
-        if (send === null) {
-          void handshake
-            .readMessage(message)
-            .then(() => {
-              const transport = handshake.split();
-              send = transport.send;
-              receive = transport.receive;
-              write(encodeJsonFrame(FRAME.HELLO, { capability: target.token }));
-            })
-            .catch(() => fail(0, "handshake_failed"));
-          continue;
-        }
-        let frame: { type: number; payload: Uint8Array } | null;
-        try {
-          frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
-        } catch {
-          fail(0, "crypto_failure");
-          return;
-        }
-        if (frame === null) continue;
-        switch (frame.type) {
-          case FRAME.READY:
-            write(
-              encodeJsonFrame(FRAME.REQUEST, {
-                method: request.method,
-                path: request.path,
-                headers: body === null ? {} : { "content-type": "application/json" },
-                body: body !== null,
-              }),
-            );
-            if (body !== null) {
-              write(encodeFrame(FRAME.REQUEST_BODY, body));
-              write(encodeFrame(FRAME.REQUEST_END));
-            }
-            break;
-          case FRAME.RESPONSE:
-            try {
-              head = JSON.parse(new TextDecoder().decode(frame.payload)) as { status: number };
-            } catch {
-              fail(0, "unreadable_response");
-            }
-            break;
-          case FRAME.RESPONSE_BODY:
-            received += frame.payload.length;
-            if (received > MAX_PEER_RESPONSE_BYTES) {
-              fail(0, "response_too_large");
-              return;
-            }
-            chunks.push(Buffer.from(frame.payload));
-            break;
-          case FRAME.RESPONSE_END: {
-            const text = Buffer.concat(chunks).toString("utf8");
-            let parsed: unknown = null;
-            try {
-              parsed = text.length === 0 ? null : JSON.parse(text);
-            } catch {
-              parsed = null;
-            }
-            give({ ok: true, status: head?.status ?? 0, body: parsed });
-            break;
+    void exchange.outcome.then((outcome) => {
+      switch (outcome.kind) {
+        case "answered": {
+          const text = new TextDecoder().decode(outcome.body);
+          let parsed: unknown = null;
+          try {
+            parsed = text.length === 0 ? null : JSON.parse(text);
+          } catch {
+            parsed = null;
           }
-          case FRAME.FAILED: {
-            let status = 401;
-            let reason = "refused";
-            try {
-              const failed = JSON.parse(new TextDecoder().decode(frame.payload)) as { code?: unknown; reason?: unknown };
-              reason = String(failed.reason ?? reason);
-              // Its own status, so the daemon's 502 (its loopback did not answer) reads as the relay's does.
-              if (typeof failed.code === "number" && Number.isInteger(failed.code) && failed.code >= 400 && failed.code < 600) {
-                status = failed.code;
-              }
-            } catch {
-              // The code alone is enough to report.
-            }
-            fail(status, reason);
-            break;
-          }
+          return give({ ok: true, status: outcome.status, body: parsed });
         }
+        // Its own status, so the daemon's 502 (its loopback did not answer) reads as the relay's does.
+        case "refused":
+          return fail(outcome.status ?? 401, outcome.reason);
+        case "too_large":
+          return fail(0, "response_too_large");
+        case "unusable":
+          return fail(0, "unreadable_response");
+        case "handshake_failed":
+        case "crypto_failure":
+        case "closed":
+          return fail(0, outcome.kind);
+        case "aborted":
+          return fail(0, outcome.reason);
       }
     });
+
+    ws.on("open", () => exchange.opened());
+    ws.on("message", (data: Buffer) => exchange.receiveBytes(new Uint8Array(data)));
     // The relay refuses on the upgrade's status line; a 421 names the relay that holds the tunnel.
     ws.on("unexpected-response", (_req, res) => {
       const moved = res.headers[RELAY_URL_HEADER];
@@ -174,6 +103,6 @@ export async function peerRequest(
     });
     ws.on("error", () => fail(0, "unreachable"));
     // A channel that ends with neither an answer nor a refusal is settled now rather than by the timer.
-    ws.on("close", () => fail(0, "closed"));
+    ws.on("close", () => exchange.closed());
   });
 }

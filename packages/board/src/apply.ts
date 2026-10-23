@@ -2,6 +2,9 @@
 import { columnById, type Board } from "./config.js";
 import type { Actor, BoardTask, Executor, Step, TaskRun, Verdict } from "./engine.js";
 
+/** As much of a comment as a wake keeps for its judges. */
+export const MAX_WAKE_TEXT_CHARS = 8_000;
+
 export interface Started {
   session: string;
   /** Turns the session had ended before the run's message. */
@@ -52,6 +55,7 @@ export function moveTask(task: BoardTask, board: Board, to: string, exit: string
     wait: null,
     judging: null,
     moving: null,
+    woken: null,
     budget: by.kind === "human" ? board.budget : spends(by) ? Math.max(0, task.budget - 1) : task.budget,
   };
 }
@@ -114,9 +118,11 @@ export function applyStep(task: BoardTask, board: Board, step: Step, now: number
       };
     }
     case "judge":
-      return { ...task, judging: { judge: step.judge, entry: task.entry, since: now } };
+      return { ...task, judging: { judge: step.judge, entry: task.entry, since: now, ...(step.wake === undefined ? {} : { wake: step.wake }) } };
     case "move":
       return moveTask(task, board, step.to, step.exit, step.by, now);
+    case "stay":
+      return { ...task, woken: null };
     case "ask": {
       let run = task.run;
       // A code_dirty run never started; failed, it is what the task's page offers Retry on, which moves it in again.
@@ -145,14 +151,21 @@ export function withReport(
   };
 }
 
-/** A role's answer, kept for its entry; one for an entry the task has left is late. */
+/** A role's answer, kept for its entry and its comment; one for an entry the task has left, or a comment already settled, is late. */
 export function withVerdict(task: BoardTask, verdict: Verdict): BoardTask {
   if (verdict.entry !== task.entry) return task;
+  if (verdict.wake !== undefined && verdict.wake !== task.woken?.comment) return task;
+  const same = (one: { judge: string; wake?: string }): boolean => one.judge === verdict.judge && one.wake === verdict.wake;
   return {
     ...task,
-    verdicts: [...task.verdicts.filter((one) => one.judge !== verdict.judge), verdict],
-    judging: task.judging?.judge === verdict.judge ? null : task.judging,
+    verdicts: [...task.verdicts.filter((one) => !same(one)), verdict],
+    judging: task.judging !== null && same(task.judging) ? null : task.judging,
   };
+}
+
+/** A person's comment, for the column's wake to send the task by (Q2.279). */
+export function withWake(task: BoardTask, comment: { id: string; text: string }, now: number): BoardTask {
+  return { ...task, woken: { comment: comment.id, text: comment.text.slice(0, MAX_WAKE_TEXT_CHARS), entry: task.entry, at: now } };
 }
 
 /** A person acted on the task: the budget is whole again, and a stop for want of them is theirs to have answered. */

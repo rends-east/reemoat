@@ -464,6 +464,17 @@ holder, from the keys screen or `cpctl keys --revoke`, and by nobody else — an
 admin has no verb over anybody's keys (Q1.631). The Devices screen says so rather
 than implying it is the complete inventory of what can reach an account.
 
+⚠ **An API key may now reach a machine over the relay** (Q1.661). It holds one X25519
+key of its own, bound to its row by the script that holds it (`pnpm reemoat`), and the
+capabilities it mints name that key, so a channel opens for it as for a device. That
+changes what a leaked key is worth: it used to reach no machine but over loopback, and now
+reaches **every machine of the account that is not locked**. The machine's own list is the
+boundary — a locked machine files a new key as pending with a code and refuses it until
+somebody lets it in (Q1.655) — so lock any machine a script reaches. Revoking the key ends
+its binding with it; a capability already minted lives out its 300 seconds. The key pair
+sits in a `0600` file, not a keyring. The shared secret, under `REEMOAT_AUTH=both`, opens no
+channel at all (Q1.662).
+
 **Registration is a user-enumeration oracle, knowingly** (Q7.78). A taken name
 answers `409`, because a name is the login and a form nobody can complete is not a
 form. What bounds it: every branch of the route costs the same scrypt, so it is

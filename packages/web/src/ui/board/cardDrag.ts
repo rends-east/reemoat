@@ -1,11 +1,12 @@
 // The board's card drag (Q3.728), and the list's (Q3.733). A mouse arms on movement, as the rail's row drag does; the card is
-// lifted into a copy that follows the pointer above every scroller, the column under it opens a slot where the board's own
-// order will put the card, and on release the copy settles into that slot or back where it came from. A finger does not drag
-// a card. Once armed the pointer is followed on window, since the card it left may unmount.
+// lifted into a copy that follows the pointer above every scroller, the column under it opens a slot under the pointer, its own
+// included, where its daemon keeps a place (Q2.278), else where the board's own order will put it, and on release the copy
+// settles into that slot or back where it came from. A finger does not drag a card. Once armed the pointer is followed on
+// window, since the card it left may unmount.
 
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { columnById } from "@reemoat/board";
-import { cardHolder, columnOrder, pressedInto, taskHolder, type Board, type BoardTask, type TaskHolder } from "../../board";
+import { cardHolder, columnOrder, placeable, pressedInto, taskHolder, type Board, type BoardTask, type TaskHolder } from "../../board";
 import type { SessionRow } from "../../store";
 import { useDismissible } from "../overlay";
 import { driftFor, MOUSE_SLOP } from "../rowDrag";
@@ -25,12 +26,22 @@ export function dropRefused(view: string, to: string): boolean {
   return to === view;
 }
 
+/** Where a card would go among a column's other cards: their keys as drawn, and its slot among them (Q2.278). */
+export interface Slot {
+  index: number;
+  keys: readonly string[];
+}
+
 export interface Carried {
   card: DragCard;
   key: string;
   from: string;
   /** The column under the pointer, or null between and outside them. */
   over: string | null;
+  /** Its slot among the cards under the pointer; null where it cannot be put among them. */
+  at: Slot | null;
+  /** Its slot where it was lifted, so letting it go there again is no move. */
+  fromAt: number | null;
   width: number;
   height: number;
   /** Set once let go: the copy is flying into its slot, or back to where it was lifted from. */
@@ -41,6 +52,19 @@ export interface Carried {
 export function landsIn(carried: Carried, view: string): string | null {
   const { over, from } = carried;
   return over === null || over === from || dropRefused(view, over) ? null : over;
+}
+
+/** Where a card let go now goes: into another column, or to another place in its own; null sends it back. */
+export function placesAt(carried: Carried, view: string): { column: string; slot: Slot | null } | null {
+  const lands = landsIn(carried, view);
+  if (lands !== null) return { column: lands, slot: carried.at };
+  const { over, from, at, fromAt } = carried;
+  return over === from && at !== null && at.index !== fromAt ? { column: from, slot: at } : null;
+}
+
+/** Whether a card can be put among others: a task whose daemon keeps its place. */
+export function canPlace(card: DragCard): boolean {
+  return card.kind === "task" && placeable(card.entry);
 }
 
 /** The key a card, a list line and a slot of one task share. */
@@ -68,24 +92,27 @@ export function slotHolder(board: Board, card: DragCard, column: string): TaskHo
 }
 
 /**
- * The ghost stays where the card was lifted until another column would take it; the slot opens where the board's order puts it,
- * drawn as it will be there (Q3.732). A conversation made a task is the newest task there, so it opens at the top.
+ * The ghost stays where the card was lifted until it would go elsewhere; the slot opens under the pointer, or where the board's
+ * order puts a card its daemon keeps no place for, drawn as it will be there (Q3.732, Q2.278). A conversation made a task is
+ * the newest task there, so it opens at the top.
  */
 export function laneItems(column: string, cards: readonly DragCard[], carried: Carried | null, board: Board, view: string): DragItem[] {
-  const lands = carried === null ? null : landsIn(carried, view);
+  const place = carried === null ? null : placesAt(carried, view);
   const items: DragItem[] = cards.flatMap((card): DragItem[] => {
     const key = card.kind === "task" ? cardKey(card.entry) : chatKey(card.row);
     if (carried === null || carried.key !== key) return [{ kind: "card", card, key }];
-    return lands === null ? [{ kind: "ghost", card, key }] : [];
+    return place === null ? [{ kind: "ghost", card, key }] : [];
   });
-  if (carried === null || lands !== column) return items;
+  if (carried === null || place === null || place.column !== column) return items;
   const holder = slotHolder(board, carried.card, column);
   const { card } = carried;
   const landed: DragCard = card.kind === "task" ? { kind: "task", entry: { ...card.entry, column } } : card;
   const at =
-    landed.kind === "task"
-      ? items.filter((item) => item.card.kind === "task" && columnOrder(item.card.entry, landed.entry) < 0).length
-      : 0;
+    place.slot !== null
+      ? Math.min(place.slot.index, items.length)
+      : landed.kind === "task"
+        ? items.filter((item) => item.card.kind === "task" && columnOrder(item.card.entry, landed.entry) < 0).length
+        : 0;
   items.splice(at, 0, { kind: "slot", card: landed, key: carried.key, holder });
   return items;
 }
@@ -130,7 +157,27 @@ function scrollerOf(node: HTMLElement | null): HTMLElement | null {
 }
 
 /** `x` is the board's columns side by side; `y` is a list's groups one under another, a folded one taking a card under its heading. `view` is the column that takes no card. */
-export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) => void, view: string, axis: "x" | "y" = "x"): CardDrag {
+/** Where a card sits once a slide under way has ended: a slot opening must not chase the cards its opening moves. */
+function restingMiddle(node: HTMLElement): number {
+  const box = node.getBoundingClientRect();
+  const shift = getComputedStyle(node).transform;
+  return box.top - (shift === "none" ? 0 : new DOMMatrixReadOnly(shift).m42) + box.height / 2;
+}
+
+/** A column's task cards as drawn, top to bottom, the carried one left out. */
+function cardsIn(lane: HTMLElement, carried: string): HTMLElement[] {
+  return [...lane.querySelectorAll<HTMLElement>("[data-flip]")].filter((node) => {
+    const key = node.dataset["flip"] ?? "";
+    return key !== carried && !key.startsWith("chat:");
+  });
+}
+
+function sameSlot(a: Slot | null, b: Slot | null): boolean {
+  return a === b || (a !== null && b !== null && a.index === b.index && a.keys.join("\n") === b.keys.join("\n"));
+}
+
+/** `onDrop` is told the slot among the column's cards where the card can be put among them, else null. */
+export function useCardDrag(onDrop: (card: DragCard, from: string, to: string, slot: Slot | null) => void, view: string, axis: "x" | "y" = "x"): CardDrag {
   const [carried, setCarried] = useState<Carried | null>(null);
   const held = useRef<Carried | null>(null);
   held.current = carried;
@@ -142,6 +189,7 @@ export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) =
   const press = useRef<Press | null>(null);
   const pointer = useRef({ x: 0, y: 0, grabX: 0, grabY: 0 });
   const lastOver = useRef<string | null>(null);
+  const lastAt = useRef<Slot | null>(null);
   const board = useRef<HTMLElement | null>(null);
   const lanes = useRef(new Map<string, HTMLElement>());
   const laneRefs = useRef(new Map<string, (node: HTMLElement | null) => void>());
@@ -170,14 +218,29 @@ export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) =
     return null;
   };
 
+  // The pointer's slot among a column's cards: past a card's middle it is below that card.
+  const slotIn = (column: string, carried: string, y: number): Slot | null => {
+    const lane = lanes.current.get(column);
+    if (lane === undefined) return null;
+    const cards = cardsIn(lane, carried);
+    let index = 0;
+    for (const node of cards) {
+      if (y <= restingMiddle(node)) break;
+      index += 1;
+    }
+    return { index, keys: cards.map((node) => node.dataset["flip"] ?? "") };
+  };
+
   const track = (): void => {
     place();
     const now = held.current;
     if (now === null || now.settling !== null) return;
     const over = columnAt(pointer.current.x, pointer.current.y);
-    if (over === lastOver.current) return;
+    const at = over === null || !canPlace(now.card) ? null : slotIn(over, now.key, pointer.current.y);
+    if (over === lastOver.current && sameSlot(at, lastAt.current)) return;
     lastOver.current = over;
-    setCarried((before) => (before === null || before.settling !== null ? before : { ...before, over }));
+    lastAt.current = at;
+    setCarried((before) => (before === null || before.settling !== null ? before : { ...before, over, at }));
   };
 
   const roll = (): void => {
@@ -220,8 +283,8 @@ export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) =
     press.current = null;
     setCarried((before) => {
       if (before === null || before.settling !== null) return before;
-      const lands = back ? null : landsIn(before, viewRef.current);
-      return { ...before, over: lands ?? before.from, settling: lands === null ? "back" : "in" };
+      const place = back ? null : placesAt(before, viewRef.current);
+      return place === null ? { ...before, over: before.from, at: null, settling: "back" } : { ...before, over: place.column, settling: "in" };
     });
   }, []);
 
@@ -235,9 +298,23 @@ export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) =
     const box = at.node.getBoundingClientRect();
     pointer.current = { x, y, grabX: at.x - box.left, grabY: at.y - box.top };
     suppress.current = true;
+    const lane = canPlace(at.card) ? lanes.current.get(at.column) : undefined;
+    const lifted = lane === undefined ? -1 : cardsIn(lane, "").findIndex((node) => node.dataset["flip"] === at.key);
+    const slot = lifted < 0 ? null : slotIn(at.column, at.key, y);
     lastOver.current = at.column;
+    lastAt.current = slot;
     document.documentElement.style.cursor = "grabbing";
-    setCarried({ card: at.card, key: at.key, from: at.column, over: at.column, width: box.width, height: box.height, settling: null });
+    setCarried({
+      card: at.card,
+      key: at.key,
+      from: at.column,
+      over: at.column,
+      at: slot,
+      fromAt: lifted < 0 ? null : lifted,
+      width: box.width,
+      height: box.height,
+      settling: null,
+    });
     rolling.current = requestAnimationFrame(roll);
   };
 
@@ -296,8 +373,8 @@ export function useCardDrag(onDrop: (card: DragCard, from: string, to: string) =
     const head = slot === null && now.over !== null ? (lanes.current.get(now.over)?.querySelector<HTMLElement>("[data-lane-head]") ?? null) : null;
     const target = slot ?? head;
     const land = (): void => {
-      const lands = now.settling === "in" ? landsIn(now, viewRef.current) : null;
-      if (lands !== null) dropped.current(now.card, now.from, lands);
+      const place = now.settling === "in" ? placesAt(now, viewRef.current) : null;
+      if (place !== null) dropped.current(now.card, now.from, place.column, place.slot);
       setCarried(null);
     };
     if (node === null || target === null || reducedMotion()) {

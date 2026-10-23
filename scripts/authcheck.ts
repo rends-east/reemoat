@@ -193,6 +193,10 @@ check("an empty credential is refused", codeOf(shared.verify("")), "missing_toke
 const sharedOk = shared.verify("hunter2");
 check("it grants every scope", sharedOk.ok ? [...sharedOk.principal.scopes] : null, [...ALL_SCOPES]);
 check("it never expires", sharedOk.ok ? sharedOk.principal.expiresAt : "?", null);
+// It names no key, so a channel that authenticated one refuses it, and a wrong guess there reads exactly as a right one (Q1.662).
+check("the right secret on a channel is refused", codeOf(shared.verify("hunter2", now, aliceChannel)), "unbound_capability");
+check("and a wrong one is refused alike", codeOf(shared.verify("hunter3", now, aliceChannel)), "unbound_capability");
+check("the default channel is loopback", shared.verify("hunter2", now).ok, true);
 
 // A capability names the device key the encrypted channel must have authenticated: authentication, not authorization.
 
@@ -260,6 +264,7 @@ process.stdout.write("\nthe device a capability was minted for\n");
 process.stdout.write("\nboth modes at once\n");
 const both = new CompositeVerifier(signed, shared);
 check("a secret still works", both.verify("hunter2", now).ok, true);
+check("but opens no channel", codeOf(both.verify("hunter2", now, aliceChannel)), "unbound_capability");
 check("a signed token still works", both.verify(good, now, aliceChannel).ok, true);
 check(
   "a bad signed token keeps its own failure",

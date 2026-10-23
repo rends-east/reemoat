@@ -27,6 +27,34 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **A column says where a comment sends its task.** `wake` on a waiting column is where a task
+  goes when you write on it there: `wake: running` sends a task in Done back to Running, `false`
+  keeps your words for its next run, and `{ next, decide }` lets rules, a role or a plugin's
+  classifier pick, shown your comment. Without it a comment goes where the task last worked, as
+  before. Update every daemon before a board uses it: an older one cannot read that board and
+  runs the default one.
+
+- **The board has a search of its own.** The magnifier left of *Edit board* opens a field, and
+  as you type the board keeps only the tasks whose title holds what you typed. Escape, or
+  leaving it empty, closes it.
+
+- **Tasks can be put in order.** Drag a card or a line up or down its column, or into a place
+  in another one; the order is the board's, the same on every device. A task's whole name shows
+  on a long hover over its card or line. Needs the daemon updated: an older one's tasks keep
+  their newest-first order and are not moved up and down.
+
+- **Files can be added to a task that is already made.** Edit its description and paste,
+  drop or attach them; they are kept with the task and go to its agent with the brief.
+  Needs the daemon updated: an older one keeps a task's files only from when it was made,
+  and the app says so rather than losing them quietly.
+
+- **Tasks and the board from your own scripts, from anywhere.** `pnpm reemoat` (and the
+  `@reemoat/cli` library) creates, starts, moves, comments on and waits for tasks, and reads and
+  writes the board, on any machine of yours with an API key. It binds a key pair of its own to the
+  API key and goes the app's way, over the encrypted channel through the relay, so the server never
+  sees a brief. A machine with its device lock on asks for the script to be let in once, by code.
+  Ship the control plane first; daemons need nothing new.
+
 - **A board you write.** The board's columns, what runs in each, who decides where a task
   goes next and on which machine are one YAML document, with every refusal named by its
   line. Today's four columns are its default. The daemons move tasks by it whether or not
@@ -214,6 +242,18 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- **The list and the board stay where they were** when a task is opened and closed again,
+  rather than going back to the top.
+
+- **A comment on a task in Done gets the agent working.** It used to wait, marked *for the
+  next run*, for a run nothing would start. Now a comment on a task in any column but the
+  first sends it back to the column its last run was in, and the agent gets your words at
+  once. A task no run has worked on starts as a press on Start would.
+- **A task's description and comments can be selected and copied.** Only the
+  conversation took a selection; the task page's words now do too.
+- **A task's files are shown on its page.** A task made with files drew none of them:
+  the board dropped them when it read the task, and a board that read it in the instant
+  before they were attached would have kept it without them.
 - **Codex's questions reach you.** Asked to ask something, Codex used a question tool of
   its own whose question never reached the app, and then said it had asked. Codex is
   now given the same question tool Cursor has, a card with a button per answer, and is
@@ -286,6 +326,12 @@ it — so a citation here would be the one kind nothing checks.
 - **A conversation that is streaming is no longer cut off when another request to its
   machine fails**, and one whose connection does drop is redialled at once instead of
   after the machine is checked again.
+
+### Security
+
+- **The shared secret no longer opens an encrypted channel** under `REEMOAT_AUTH=both`; it was
+  meant for loopback only and still works there. Machines set up by the installer use `signed` and
+  were never open to it.
 
 ## [0.13.0] - 2026-10-04
 

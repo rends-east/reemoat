@@ -42,6 +42,8 @@ tunnel. Q1.10.
   With no root held, only a signing key already held may introduce one; a held root is
   replaced by its own signature alone. Each has its own `typ`, so none verifies as a token.
 - **The oldest active key signs** (`tokenSigningKey`): rotating publishes, retiring switches.
+- **The shared secret opens no channel**: `SharedSecretVerifier` refuses one that names a key
+  before comparing, and `CompositeVerifier` passes the channel through (Q1.662). Loopback only.
 
 ## Layout
 

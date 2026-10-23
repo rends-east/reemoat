@@ -1,0 +1,25 @@
+{
+  "name": "@reemoat/cli",
+  "version": "0.13.0",
+  "description": "Create and move Reemoat tasks from your own scripts: an API key, a device key bound to it, and the same encrypted channel through the relay the app uses.",
+  "license": "AGPL-3.0-only",
+  "author": "rends-east",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rends-east/reemoat.git",
+    "directory": "packages/cli"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@reemoat/protocol": "workspace:*",
+    "ws": "^8.21.3"
+  }
+}

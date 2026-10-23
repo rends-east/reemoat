@@ -89,6 +89,8 @@ export interface TaskSnapshot {
   sessions: TaskSessionRef[];
   /** The files it was made with (Q2.273); a comment's are on the comment. */
   files: TaskFile[];
+  /** Its place among its column's cards, higher first; null is its age (Q2.278). */
+  rank: number | null;
 }
 
 export interface NewTask {
@@ -119,6 +121,8 @@ export interface TaskChange {
   assignee?: TaskAssignee;
   cwd?: string;
   labels?: string[];
+  /** A finite number, or null for its age again. */
+  rank?: number | null;
 }
 
 /** The other machines' half, handed in: the hub's links and its switches (Q2.244). */
@@ -466,7 +470,9 @@ export class TaskDesk {
   change(id: string, change: TaskChange, by: string | null = null): TaskRecord | null {
     let task = this.store.get(id);
     if (task === null) return null;
-    if (by === null) task = this.engine.touched(task);
+    // A card put elsewhere in its column answers nothing the task waits on (Q2.278).
+    const placing = Object.keys(change).every((key) => key === "rank");
+    if (by === null && !placing) task = this.engine.touched(task);
     if (change.status !== undefined) {
       const to = this.engine.columnForStatus(change.status);
       if (to !== task.flow.column) task = this.engine.move(task, to, null);
@@ -480,13 +486,14 @@ export class TaskDesk {
     if (change.assignee !== undefined) next.assignee = change.assignee;
     if (change.cwd !== undefined) next.cwd = change.cwd;
     if (change.labels !== undefined) next.flow = { ...next.flow, labels: change.labels };
+    if (change.rank !== undefined) next.flow = { ...next.flow, rank: change.rank };
     if (change.summary !== undefined) {
       next.summary = change.summary.length === 0 ? null : change.summary;
       next.summaryAt = next.summary === null ? null : at;
       next.summaryBy = next.summary === null ? null : by;
     }
     this.store.save({ ...next, status: this.store.get(id)?.status ?? next.status });
-    void this.engine.kick(id);
+    if (!placing) void this.engine.kick(id);
     return this.store.get(id) ?? next;
   }
 
@@ -532,7 +539,9 @@ export class TaskDesk {
     if (this.files === null) return { ok: false, code: "upload_write_failed", detail: "this daemon keeps no task files" };
     const claimed = await this.files.claim(id, ids);
     const task = this.store.get(id);
-    if (claimed.ok && task !== null) this.store.save({ ...task, flow: { ...task.flow, files: [...(task.flow.files ?? []), ...claimed.files] } });
+    if (claimed.ok && task !== null) {
+      this.store.save({ ...task, updatedAt: this.now(), flow: { ...task.flow, files: [...(task.flow.files ?? []), ...claimed.files] } });
+    }
     return claimed;
   }
 
@@ -874,6 +883,7 @@ export class TaskDesk {
       labels: view.labels,
       sessions,
       files: task.flow.files ?? [],
+      rank: task.flow.rank ?? null,
     };
   }
 

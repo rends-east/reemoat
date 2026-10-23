@@ -897,10 +897,11 @@ async function main(): Promise<void> {
         expiresAt: number;
         machine: { relayUrl: string | null; relayOnline: boolean };
       }>("/v1/tokens", { method: "POST", body: JSON.stringify({ machine }) });
+      // No REEMOAT_URL: the relay answers plain HTTP with 426, so this token is spent over loopback on the machine itself.
       show(body, () => {
-        out(`export REEMOAT_URL=${body.machine.relayUrl ?? ""}`);
         out(`export REEMOAT_TOKEN=${body.token}`);
         out(`# expires ${new Date(body.expiresAt).toISOString()}`);
+        out("# loopback only: REEMOAT_URL=http://127.0.0.1:7887 on the machine itself; a remote machine is pnpm reemoat");
       });
       return;
     }

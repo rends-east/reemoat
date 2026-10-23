@@ -381,6 +381,19 @@ check(
   [],
 );
 
+// Not published (Q4.131); its dependencies are the root's own specs, so a bump of one moves both.
+const cliPkg = read("packages/cli/package.json");
+check("@reemoat/cli names the version the workspace is at", capture(cliPkg, VERSION_IN_MANIFEST), rootVersion);
+const cliDeps = (JSON.parse(cliPkg) as { dependencies?: Record<string, string> }).dependencies ?? {};
+check(
+  "every dependency of @reemoat/cli is the root's, at the same spec",
+  Object.entries(cliDeps)
+    .filter(([name, version]) => rootDeps[name] !== version)
+    .map(([name, version]) => `${name}: ${version} on the client, ${rootDeps[name] ?? "absent"} on the root`),
+  [],
+);
+check("and it is private, so nothing publishes it by accident", (JSON.parse(cliPkg) as { private?: unknown }).private, true);
+
 check(
   "the daemon names the version the workspace is at",
   capture(read("src/version.ts"), /^export const DAEMON_VERSION = "([^"]+)";$/m),

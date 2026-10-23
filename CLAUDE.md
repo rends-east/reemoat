@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1216 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1228 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -328,6 +328,11 @@ curl -fsSL 'https://<control-plane>/install.sh' | sh   # a machine, from nothing
                                      #   installer that joins *it*, and a checkout copy refuses rather
                                      #   than picking one. Hands off to `install.sh daemon
                                      #   --non-interactive` once the env file exists
+pnpm reemoat task add --machine m --cwd '~/x' --agent claude --brief '…' --key k --start
+                                     # packages/cli: a script's way to a machine's tasks and board from
+                                     #   anywhere, with REEMOAT_SERVER and REEMOAT_API_KEY — the app's own
+                                     #   encrypted channel, with a key pair bound to the API key (Q1.661).
+                                     #   Not published (Q4.131); there is no orchestrator agent (Q7.166)
 pnpm harness --agent codex --prompt "hi"  # drives a bare Session locally, with no daemon
 pnpm doorprobe --door codex:routed   # one way of pointing a harness at a foreign model endpoint, driven
                                      #   against a loopback recorder and no vendor; `--list` names the
@@ -390,7 +395,8 @@ client. **Two things narrow that, neither on by itself for the first:** a daemon
 keeps its own list of the keys that reached it, and its owner can lock the machine
 to that list, after which a signed capability for an unknown key is refused
 (Q1.655); and the app keeps the key it first reached a machine with, and never
-dials a different one the server names later (Q1.657).
+dials a different one the server names later (Q1.657). A script's device key is a `0600` file
+bound to its API key, and the shared secret opens no channel (Q1.661, Q1.662).
 
 **The signing key is wrapped at rest only where `REEMOAT_CP_KEY_SECRET` is set**, and
 the Authority's entry point alone reads it (Q1.658). **A rotation reaches daemons on
@@ -607,6 +613,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `agent-catalogue.md` | `packages/web/src/openrouter.ts`, `agents.ts`, `ui/AgentBuilder.tsx`, `src/acp/systems.ts` | The three places a model's name can come from, and which one the browser fetches · the one system whose two spellings are the same models · what the reader drops and why greying it would be worse · what has been tried in a heading and taken back out, twice |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |
 | `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts`, `packages/protocol/src/frames.ts` | What ships with what, and why a client nobody can push decides the rest · negotiated against announced · which way an unknown value must fail · which side ships first, and the one rule that produces both orders · how to make a breaking change without a flag day · what is still one |
+| `cli.md` | `packages/cli/src/`, `scripts/relaycheck.cli-e2e.ts` | How a script reaches a machine with an API key, and what each hop sees · where its key lives and why never under `REEMOAT_HOME` · the machine key it holds and the silence that means it changed · what it sends again and what it never does · its exit codes |
 | `e2ee.md` | `packages/protocol/`, `src/e2ee.ts`, `machinekey.ts`, `devices.ts`, `packages/web/src/e2ee.ts`, `machinePins.ts`, `deviceAccess.ts`, `packages/control-plane/src/machinekeys.ts`, `packages/native/src-tauri/src/device.rs` | What the relay can read and what it cannot · which static key each end holds, where it is kept and who may touch it · why the capability may not ride the handshake · what a tag failure may not do, and the one refusal that cannot say why · what the device binding proves, and the two paths it deliberately does not reach · what a machine's own list of devices is, what the lock over it refuses, and what it grandfathers · what two screens compare before a device is let in · which key the app dials when the server names another |
 
 **Keeping this file small is `docscheck`'s job, not a preference.** It fails the

@@ -110,7 +110,9 @@ process.stdout.write("\na task's files: staged, given to a task or a comment, an
   // Never the default root: that is the real ~/.reemoat/worktrees.
   const registry = new SessionRegistry(new MemoryEventStore(), null, { worktreeRoot: tmp("files-wt-"), branchPrefix: "reemoat", defaultMode: "auto" }, new FilesRuntime(), sessionUploads);
   const store = new MemoryTaskStore();
-  const desk = new TaskDesk({ registry, store, configs: new MemoryBoardConfigStore(), tickMs: 0, machineName: "mac", files: new TaskFiles(taskStore, sessionUploads) });
+  // A clock that moves on every read, so a write after the create is told apart from it within one millisecond.
+  let clock = Date.now();
+  const desk = new TaskDesk({ registry, store, configs: new MemoryBoardConfigStore(), tickMs: 0, machineName: "mac", files: new TaskFiles(taskStore, sessionUploads), now: () => ++clock });
   const { app } = createApp({ registry, instanceId: "i_files", startedAt: Date.now(), peers: null, tasks: desk, verifier });
   const auth = { authorization: `Bearer ${tokenFor("u_alice")}` };
   const call = async (method: string, path: string, body?: unknown) => {
@@ -138,6 +140,11 @@ process.stdout.write("\na task's files: staged, given to a task or a comment, an
   const made = await call("POST", "/tasks", { ...base, key: "with-notes", attachments: [notes.body.upload.uploadId] });
   const id: string = made.body.task.id;
   check("a create takes the files it names, and the task says what it was made with", [made.status, made.body.task.files.map((file: any) => [file.name, file.bytes])], [201, [["notes.txt", 9]]]);
+  check(
+    "and taking them is a change to the task, so a read between the row and its files is not the same task (Q2.276)",
+    made.body.task.updatedAt > made.body.task.createdAt,
+    true,
+  );
   const again = await call("POST", "/tasks", { ...base, key: "with-notes", attachments: [notes.body.upload.uploadId] });
   check("the same create sent again answers that task, its files already taken", [again.status, again.body.existing, again.body.task.id], [200, true, id]);
   check("taken, a file is the task's and no longer waits", [taskStore.rowsOf(STAGED).length, taskStore.rowsOf(id).map((row) => row.name)], [0, ["notes.txt"]]);
@@ -145,6 +152,36 @@ process.stdout.write("\na task's files: staged, given to a task or a comment, an
   const fetched = await app.fetch(new Request(`http://d/tasks/${id}/files/${fileId}`, { headers: auth }));
   check("a task's file is downloaded as any file the daemon serves", [fetched.status, fetched.headers.get("content-type"), await fetched.text()], [200, "application/octet-stream", "the notes"]);
   check("and one it does not keep is not found", said(await call("GET", `/tasks/${id}/files/u_0000000000000000`)), "404 upload_not_found");
+
+  const plain = await call("POST", "/tasks", { ...base, key: "edit-files" });
+  const plainId: string = plain.body.task.id;
+  const briefOf = async (): Promise<string> => (await call("GET", "/tasks")).body.tasks.find((task: any) => task.id === plainId).brief;
+  const refusedEdit = await call("PATCH", `/tasks/${plainId}`, { brief: "Changed.", attachments: ["u_0000000000000000"] });
+  check("an edit naming a file nothing staged is refused, and leaves the words as they were (Q2.277)", [said(refusedEdit), await briefOf()], ["400 unknown_attachment", base.brief]);
+  const added = await upload("added.png", "added png", "image/png");
+  const edited = await call("PATCH", `/tasks/${plainId}`, { brief: "With a picture.", attachments: [added.body.upload.uploadId] });
+  check(
+    "an edit adds the files it names to the task's own, with its words",
+    [edited.status, edited.body.task.brief, edited.body.task.files.map((file: any) => file.name)],
+    [200, "With a picture.", ["added.png"]],
+  );
+  const more = await upload("more.txt", "more", "text/plain");
+  const alone = await call("PATCH", `/tasks/${plainId}`, { attachments: [more.body.upload.uploadId] });
+  check("and files alone are a change too, after the ones it held", [alone.status, alone.body.task.files.map((file: any) => file.name)], [200, ["added.png", "more.txt"]]);
+  check("an edit naming nothing is still refused", said(await call("PATCH", `/tasks/${plainId}`, {})), "400 bad_request");
+  const unplaced = store.get(plainId)!;
+  const placed = await call("PATCH", `/tasks/${plainId}`, { rank: 12.5 });
+  check(
+    "a task's place in its column is its own change, kept with its flow, and answers nothing it waits on (Q2.278)",
+    [placed.status, placed.body.task.rank, store.get(plainId)?.flow.rank, placed.body.task.brief, placed.body.task.budget === plain.body.task.budget, placed.body.task.updatedAt > unplaced.updatedAt],
+    [200, 12.5, 12.5, "With a picture.", true, true],
+  );
+  check(
+    "a task never placed says null, null puts it back to its age, and a place that is not a number is refused",
+    [plain.body.task.rank, (await call("PATCH", `/tasks/${plainId}`, { rank: null })).body.task.rank, said(await call("PATCH", `/tasks/${plainId}`, { rank: "top" })), said(await call("PATCH", `/tasks/${plainId}`, { rank: [3] }))],
+    [null, null, "400 bad_request", "400 bad_request"],
+  );
+  await call("DELETE", `/tasks/${plainId}`);
 
   const shot = await upload("shot.png", "png bytes", "image/png");
   check("a comment with no words is refused unless files come with it", said(await call("POST", `/tasks/${id}/comments`, { text: " " })), "400 bad_request");

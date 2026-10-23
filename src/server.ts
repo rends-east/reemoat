@@ -1811,10 +1811,25 @@ export function createApp(options: ServerOptions): AppBundle {
       // Naming an agent assigns it, in the backlog too, where it moves nothing (Q2.261).
       if (names) change.assignee ??= "agent";
     }
-    if (Object.keys(change).length === 0) {
-      return jsonError(c, 400, "bad_request", "name a title, brief, summary, status, agent, assignee, labels or cwd to change");
+    if (body["rank"] !== undefined) {
+      const rank = body["rank"];
+      if (rank !== null && !(typeof rank === "number" && Number.isFinite(rank))) {
+        return jsonError(c, 400, "bad_request", "rank must be a finite number or null");
+      }
+      change.rank = rank;
     }
-    const changed = tasks.change(c.req.param("id"), change);
+    const attachments = attachmentIdsOf(c, body["attachments"]);
+    if (attachments instanceof Response) return attachments;
+    if (Object.keys(change).length === 0 && attachments.length === 0) {
+      return jsonError(c, 400, "bad_request", "name a title, brief, summary, status, agent, assignee, labels, cwd, rank or attachments to change");
+    }
+    if (attachments.length > 0) {
+      if (tasks.files === null) return jsonError(c, 503, "uploads_unavailable", "this daemon keeps no task files");
+      // The files first: one refused leaves the task as it was (Q2.277).
+      const claimed = await tasks.claimFiles(c.req.param("id"), attachments);
+      if (!claimed.ok) return taskFilesRefused(c, claimed);
+    }
+    const changed = Object.keys(change).length === 0 ? tasks.get(c.req.param("id")) : tasks.change(c.req.param("id"), change);
     return changed === null ? noTask(c) : c.json({ task: tasks.snapshot(changed) });
   });
 

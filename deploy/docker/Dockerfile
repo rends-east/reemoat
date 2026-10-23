@@ -64,6 +64,8 @@ COPY packages/web/package.json ./packages/web/
 COPY packages/protocol/package.json ./packages/protocol/
 # The board package is a workspace member too, for the same reason.
 COPY packages/board/package.json ./packages/board/
+# And the external client, a member nothing in the image runs (Q4.131).
+COPY packages/cli/package.json ./packages/cli/
 
 # ---------------------------------------------------------------------------
 # gate — vite, in its own stage so its toolchain never reaches the runtime image

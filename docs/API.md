@@ -191,7 +191,7 @@ older than these answers the bare 404 every unknown route gets, which the app re
 |---|---|
 | `GET /tasks` | Every task here, each with the sessions attached to it. `status` is settled on every read: `done` as written, else `needs_you` while a request waits in one of its sessions, `running` while one works, else `ready` as written (the backlog) and `review` for anything else. `assignee` is who holds it in the backlog: `agent` (the task's `agent`, named), `you` (its person) or `nobody`; an older daemon omits it |
 | `POST /tasks` | `{brief, agent \| customAgent, cwd, title?, key?, start?, assignee?, status?, attachments?}`. `attachments` names files `POST /tasks/uploads` staged, which become the task's and go with the first message of every new conversation on it (`400 unknown_attachment` before anything is made, `409 task_files_full` past a task's 100 files or 1 GiB). Without `title` the task is named from the brief's first line. `assignee` is `agent` unless it says `nobody` or `you`, the agent then only what a start would launch; one that starts is its agent's whatever it says. `status` puts it in `ready` (the default), `review` or `done`, and is refused beside `start`. With `start: true` the daemon launches the agent exactly as `POST /sessions` would, attaches it and sends the brief as its first message, and answers `{task, session, sent}`; every refusal a session create has is this route's too, and a refused start leaves no task. A second create under a `key` a task already holds answers that task with `existing: true` and starts nothing. `429 too_many_tasks` only where the machine is full and no task is done |
-| `PATCH /tasks/:id` | `{title?, brief?, summary?, status?, agent?, customAgent?, assignee?, cwd?}`. `status` is `ready`, `running`, `review` or `done`; `400 status_not_settable` for `needs_you`, which only the daemon says. An agent's `task_update` says `running` or `review` only: `done` is its person's. An empty `summary` clears it. The agent and folder are who the next start launches, refused as a start refuses them (`400 invalid_agent`, `404 custom_agent_not_found`); either alone keeps the other. Naming an agent assigns it and moves nothing; `assignee` `nobody` or `you` hands the task to nobody or its person |
+| `PATCH /tasks/:id` | `{title?, brief?, summary?, status?, agent?, customAgent?, assignee?, cwd?, rank?, attachments?}`. `rank` is its place among its column's cards, higher first, a finite number or null for its age; alone it answers nothing the task waits on, and an older daemon sends none and ignores it. `attachments` are staged upload ids added to the task's files before anything else changes, refused as a create refuses them; an older daemon ignores them, so a client looks for them in the answer. `status` is `ready`, `running`, `review` or `done`; `400 status_not_settable` for `needs_you`, which only the daemon says. An agent's `task_update` says `running` or `review` only: `done` is its person's. An empty `summary` clears it. The agent and folder are who the next start launches, refused as a start refuses them (`400 invalid_agent`, `404 custom_agent_not_found`); either alone keeps the other. Naming an agent assigns it and moves nothing; `assignee` `nobody` or `you` hands the task to nobody or its person |
 | `DELETE /tasks/:id` | The task and its attachments. Its sessions stay |
 | `POST /tasks/:id/start` | A first start or another attempt: launches what the task holds, or the `agent`, `customAgent` or `cwd` the body names instead, which the task then holds, assigned, and answers as a starting create does |
 | `PUT /tasks/:id/sessions/:sessionId` · `DELETE /tasks/:id/sessions/:sessionId` | Attach a session of this machine, which moves it off any task that held it; detach it. `404 not_attached` for a session that is not on that task |
@@ -311,7 +311,7 @@ like a code or a fingerprint taken out (Q1.656); a name left empty is `null`.
 
 ---
 
-## The control plane — 72 routes
+## The control plane — 73 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -337,12 +337,13 @@ these, so a new route is private by doing nothing. "Public" is not
 
 | | |
 |---|---|
-| `GET /v1/me` | Who this credential is, and what it may reach, with `permissions: {agentMessaging}` — the account's switch |
+| `GET /v1/me` | Who this credential is, and what it may reach, with `permissions: {agentMessaging}` — the account's switch, and `apiKey` — the key asking, its `bound` and `keySetAt`, `null` for a session |
 | `POST /v1/me/password` | Requires the current one, even under a valid session |
 | `POST /v1/me/delete` | Your own account, irreversibly: `{currentPassword}`, required whenever the account has a password, whichever credential presents. Everything `DELETE /v1/admin/users/:id` removes, with your machines revoked and reported as `machinesRevoked`. `409 last_admin` for a server's only enabled admin, `401 invalid_password` for a wrong password — about the body, not the credential |
 | `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in. Each row names the **device** it belongs to where there is one, and falls back to what the `User-Agent` says where there is not |
 | `GET` · `POST /v1/me/devices` · `DELETE /v1/me/devices/:id` | The installations registered on this account. A **device** is not a session and not a credential: a session is one bearer token with an expiry, a device is the computer or phone that keeps producing them, and holding its id proves nothing — it is read only after a session token has already resolved. Registering binds the caller's current session, adopts an id it already holds, and **ignores one it does not** rather than refusing (an id that was retired would otherwise close a sign-in loop with no exit); it refuses an API key with `409 device_needs_session`, because a key has no session for a device to hang off, and `409 device_limit` at the cap — a **refusal** rather than an eviction, so that somebody holding one live session cannot sign every device of the owner out. `POST /v1/login` carries the same block optionally and answers `deviceId`. The listing includes **recently retired** rows, because the question it exists to answer is usually asked after something has gone wrong. Retiring one ends every session bound to it and **no other device's**; `404 device_not_found` covers "no such device" and "not yours" alike. Devices are **not** an authorization subject — a grant is `(user, machine)`, so every device of one person reaches the same fleet — and `relay/authorize.ts` reads no device row, so a revocation stops that installation here on the next request and leaves a machine token already minted alone for its remaining ~300s. `SECURITY.md` carries the windows |
-| `GET` · `POST /v1/me/keys` · `DELETE /v1/me/keys/:keyId` | API keys |
+| `GET` · `POST /v1/me/keys` · `DELETE /v1/me/keys/:keyId` | API keys. A row says whether it is `bound` and since `keySetAt`, never to what |
+| `PUT /v1/me/keys/current/binding` | `{publicKey, replace?}`: the X25519 key the **asking** API key dials with, so the capabilities it mints name it (Q1.661). The same key again changes nothing; another is `409 key_bound_elsewhere` with `detail.keySetAt` unless `replace: true`; a session gets `409 binding_needs_api_key`. A revoke ends it with the key |
 | `PUT /v1/me/permissions` | `{agentMessaging?, tasksMove?}` for every machine you own, answering it with `policyAt`. Off revokes every live link either end of which is yours, in the same write, so the relay refuses the next message between two machines before either daemon hears. Each machine's own switch is kept under it. Q1.654 |
 | `PUT /v1/me/email` · `POST /v1/me/email/verify` | The address is the recovery channel: a session changes it alone, an API key proves the password first |
 
@@ -355,7 +356,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `POST /v1/machines/:id/revoke` | Retire one, which gives its slot back to the limit |
 | `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
 | `DELETE /v1/machines/:id/grants/me` | **Give up a share somebody made to you.** The three routes above all resolve through ownership, so a grantee could reach none of them — and a share is written for any `userId` with no consent asked, so what somebody can do to you unasked now has something you can do about it. Your own grant only, and there is no `userId` parameter: the caller is the subject, and a route that took an id would be `DELETE /v1/admin/grants` under another name. `409 grant_is_owner` on a machine you own, because `GET /v1/machines` joins `grants` and an owner without one owns a machine in no list — retiring it is the verb for that; `404 grant_not_found` for both "no such grant" and "no such machine", which is the same anti-mapping rule |
-| `POST /v1/tokens` | The short-lived capability the app spends on one machine. Quota is checked **after** the grant is proved. The answer is also **how a client learns where that machine is and what it will answer as**: `machine.relayUrl`, `machine.relayOnline`, and `machine.key` — the machine's X25519 static, which is IK's precondition and therefore the thing without which no channel can be opened at all. `null` there means a machine that has not dialled since it learned to announce one, and the client turns that into a sentence about updating it rather than into a session without it: there is no mode to fall back to. A route and a key are the same kind of fact — *how to reach this thing* — so they are minted together rather than fetched twice and left to disagree. **`409 device_key_required`** refuses a signed-in installation that has registered no device key: a capability minted for it could not open a channel, so the answer is a refusal with a remedy rather than a credential that fails later about the wrong thing. An **API key** is the deliberate exception and is minted **without** a binding, because a key is no sign-in and has no device to bind to — such a capability works over loopback and is refused by any daemon it reaches on a channel, which is the honest shape rather than a let-off |
+| `POST /v1/tokens` | The short-lived capability the app spends on one machine. Quota is checked **after** the grant is proved. The answer is also **how a client learns where that machine is and what it will answer as**: `machine.relayUrl`, `machine.relayOnline`, and `machine.key` — the machine's X25519 static, which is IK's precondition and therefore the thing without which no channel can be opened at all. `null` there means a machine that has not dialled since it learned to announce one, and the client turns that into a sentence about updating it rather than into a session without it: there is no mode to fall back to. A route and a key are the same kind of fact — *how to reach this thing* — so they are minted together rather than fetched twice and left to disagree. **`409 device_key_required`** refuses a signed-in installation that has registered no device key: a capability minted for it could not open a channel, so the answer is a refusal with a remedy rather than a credential that fails later about the wrong thing. An **API key** bound with `PUT /v1/me/keys/current/binding` is minted with `cnf` for its key and `dev` set to its own id, which is what a script reaching a machine from anywhere spends (`pnpm reemoat`, below). One never bound is minted **without** one: it works over loopback and is refused by any daemon it reaches on a channel |
 | `POST /v1/machines/:id/links` | **Let one of your machines' agents message another's.** `POST` is asked of the **source**, which must be yours (`404 machine_not_found` otherwise, grantee or not), enrolled (`409 machine_not_enrolled`), keyed (`409 machine_key_missing` — the link is bound to that key) and switched on (`403 machine_over_limit` / `owner_disabled`). It answers one link per **other** machine you own that is enrolled, keyed, live, granted to you and within your limit — `{links: [{id, token, expiresAt, target: {id, name, key, relayUrl}}]}`, an empty list when there is none — finding the live `lk_` row or writing one, and minting each a fresh capability every time: `aud` the target, `sub` you, `scp` exactly `["session:message"]`, `cnf.jkt` the **source machine's** key from this service's own pin, `lnk`/`src`/`srcl` naming the link, the source and your label for it, and **90 days** of life, since revocation is the relay reading the row on every channel rather than expiry. Nothing about it is a grant, and no grant ever carries that scope. The app hands the answer to the source's daemon; the Authority holds no message. Nothing lists or removes one link: switching the machine off or isolating it revokes every link it is either end of, and the relay refuses a revoked link's next channel as `404 machine_not_found` (Q3.676). The answer also carries `messaging`, `isolated` and `policyAt`: a source that is off is answered `{links: [], messaging: false}` and one that is isolated `{links: [], messaging: true, isolated: true}`, both before its key is asked about; `machine_key_missing` carries `{messaging, isolated, policyAt}` in its `detail` for the app to hand over with an empty set; a target that is off or isolated is left out. Q7.150, Q1.654 |
 | `PUT /v1/machines/:id/permissions` | `{agentMessaging?, isolated?, tasksMove?}` for one machine you own, at least one of them (`404 machine_not_found` otherwise), answering its own two values and `policyAt`. `isolated` keeps its sessions to each other while messaging is on there, and is kept while it is off. Off or isolated revokes every live link it is either end of, in the same write. Q1.654 |
 
@@ -405,6 +406,49 @@ one of them ends — the page that says the product is an app and, where
 no device key, so it cannot open the encrypted channel a daemon is reached through —
 it could load the app and reach no machine at all. The gate's list above is closed:
 an address outside it answers the error envelope, whatever the method. Q1.649.
+
+## From a script — `pnpm reemoat`
+
+Your own logic — a CI job, a cron, a server of yours — creates and moves tasks on any machine of
+yours with an API key, from anywhere. **It goes the app's way, not around it**: the client in
+`packages/cli` makes a device key on first use, binds it to the API key
+(`PUT /v1/me/keys/current/binding`), and opens the same encrypted channel through the relay the
+app opens. The Authority sees which machine and a public key; the relay carries bytes it cannot
+read; **a brief reaches nobody but the machine**. Q1.661, Q4.131.
+
+```bash
+export REEMOAT_SERVER=https://<the address you sign in at>  REEMOAT_API_KEY=rk_…  REEMOAT_MACHINE=<id or name>
+pnpm reemoat machines
+pnpm reemoat task add --cwd '~/code/app' --agent claude --brief 'Fix the flaky test' --key ci-1234 --start
+pnpm reemoat task wait <id> --until review,done --timeout 3600
+pnpm reemoat task move <id> --to done
+pnpm reemoat board > board.yaml; pnpm reemoat board put board.yaml --revision <n>
+```
+
+- **The daemon's own routes, unchanged**: `POST /tasks`, `PATCH`, `/start`, `/move`, `/comments`,
+  `GET /tasks`, `GET`/`PUT /board`, with the grant's scopes there. The library is
+  `reemoat({server, apiKey})` → `tasks`, `board`, `machines()`, and `request()` for any other route.
+- **A `key` makes a create safe to send again**: the same key answers the task it made
+  (`existing: true`). The client makes one when none is given, and retries only what is safe to.
+- **Quote a `~`** in `--cwd`: the machine expands it, and an unquoted one is your own shell's home.
+- **Turn the machine's lock on** where a script reaches it (`pnpm client devices lock`, or the app):
+  a key that leaked then reaches nothing. A new script waits as pending with a code; it prints the
+  same code, exits 3, and is let in from the app's device list or with
+  `pnpm client devices approve <code>`. Nothing was sent.
+- **One API key per installation.** A second one with the same key is `key_bound_elsewhere`;
+  `reemoat device rebind` moves the binding, after which the first stops reaching machines.
+- **For CI**, `reemoat device export` prints `REEMOAT_DEVICE_KEY` to keep as a secret beside the
+  API key, approved once; `REEMOAT_MACHINE_KEY` pins the machine before first contact. Keys
+  otherwise live in `~/.config/reemoat` (`REEMOAT_CLIENT_HOME`), one per server and account, `0600`.
+- **Exit codes**: 0 done, 1 refused, 2 usage, 3 waiting to be let in, 4 the machine's key changed
+  (`reemoat machines trust <m> --fingerprint <fp>` after comparing it), 5 unreachable, 6 a wait ran
+  out. `--json` puts answers and errors on stdout.
+
+| What is revoked | When the script stops |
+|---|---|
+| The API key | its next request to the Authority; a token already minted, ≤ 300 s + 60 s |
+| The key's device row on the machine (`pnpm client devices remove`) | at once, open channels included |
+| Over loopback (`REEMOAT_URL`) | ≤ 360 s, as a plain bearer |
 
 ## What is served to a browser
 

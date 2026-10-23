@@ -3,6 +3,7 @@ import { useCallback, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   chatsWithoutTask,
+  columnOrder,
   columnTitle,
   DONE_RECENT_MS,
   cardHolder,
@@ -156,7 +157,13 @@ function MeLine({ row, board, selected }: { row: MeRow; board: Board; selected: 
   const holder = cardHolder(entry, board);
   return (
     <div className={selected ? "bg-raised" : "hover:bg-raised/50"}>
-      <button type="button" onClick={() => openTask(entry)} aria-current={selected ? "page" : undefined} className="tap block w-full text-left">
+      <button
+        type="button"
+        onClick={() => openTask(entry)}
+        aria-current={selected ? "page" : undefined}
+        title={entry.task.title}
+        className="tap block w-full text-left"
+      >
         <span className="flex min-w-0 items-center gap-2 py-3.5 pr-3 pl-3 lg:py-2.5">
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
@@ -395,7 +402,8 @@ function ListItem({
       onAnimationEnd={landed ? onLanded : undefined}
       className={`relative select-none ${selected ? "bg-raised" : "hover:bg-raised/50"} ${landed ? "animate-landed-in" : ""}`}
     >
-      <button type="button" onClick={open} aria-current={selected ? "page" : undefined} className="tap block w-full text-left">
+      {/* The whole title on a long hover, where the line cuts it. */}
+      <button type="button" onClick={open} aria-current={selected ? "page" : undefined} title={entry.task.title} className="tap block w-full text-left">
         <LineFace entry={entry} board={board} />
       </button>
     </div>
@@ -455,7 +463,7 @@ export function ColumnBody({
     .filter((entry) => entry.column === column && (shown.machine === null || entry.machineId === shown.machine))
     .filter((entry) => !(shown.done === "recent" && isFinal(account.board, column) && now - entry.task.updatedAt > DONE_RECENT_MS))
     .filter((entry) => matchesTask(entry, view.query))
-    .sort((a, b) => b.task.createdAt - a.task.createdAt || (a.task.id < b.task.id ? -1 : 1));
+    .sort(columnOrder);
   const taken = rows === null ? all : all.slice(0, Math.max(0, rows));
   const asking = tasks.length === 0 && state.machines.some((machine) => machine.reach !== "offline" && !read.has(machine.id));
   return (
@@ -484,7 +492,7 @@ function TaskLine({ entry, board, selected }: { entry: BoardTask; board: Board; 
   };
   return (
     <div className={`relative select-none ${selected ? "bg-raised" : "hover:bg-raised/50"}`}>
-      <button type="button" onClick={open} aria-current={selected ? "page" : undefined} className="tap block w-full text-left">
+      <button type="button" onClick={open} aria-current={selected ? "page" : undefined} title={entry.task.title} className="tap block w-full text-left">
         <span className="flex min-w-0 items-center gap-2 py-3.5 pr-3 pl-3 lg:py-2.5">
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">

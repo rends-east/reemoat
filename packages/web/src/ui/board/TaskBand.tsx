@@ -41,6 +41,7 @@ export function TaskBand({ state, sessionRef }: { state: AppState; sessionRef: S
         type="button"
         onClick={() => navigate(taskPath(entry.machineId, entry.task.id))}
         aria-label={`Task: ${entry.task.title}, ${where}`}
+        title={entry.task.title}
         className="tap flex w-full items-start gap-2 rounded-lg bg-raised/50 px-3 py-2 text-left hover:bg-raised"
       >
         <span className="flex h-5 shrink-0 items-center">

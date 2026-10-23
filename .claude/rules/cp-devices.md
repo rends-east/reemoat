@@ -102,7 +102,8 @@ stands; only the name moved); Settings → Devices is the device section.
 Neither is stated on the screen at rest (Q3.686): the second is said in Retire's
 confirmation, the first is the API keys screen's.
 
-1. **An API-key caller has no device**; nothing in the list revokes one.
+1. **An API-key caller has no device**; nothing in the list revokes one. A script's key pair
+   sits on the key's own row and ends with the key (`bindApiKey`, Q1.661), never here.
 2. **A minted machine token keeps working**: nothing on the token-verifying side reads a
    device. Per-device revocation is a grouping key over sessions plus a bind refusal, not
    a new boundary.

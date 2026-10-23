@@ -207,7 +207,7 @@ function Entry({ comment, entry, state }: { comment: TaskCommentView; entry: Boa
       <div className="flex flex-col gap-1">
         {head}
         <div className="rounded-lg border border-edge px-3 py-2.5">
-          <p className="text-sm whitespace-pre-wrap wrap-anywhere">{comment.text}</p>
+          <p className="sel-root text-sm whitespace-pre-wrap wrap-anywhere select-text">{comment.text}</p>
           <p className="mt-1 text-2xs text-muted">Closed</p>
         </div>
       </div>
@@ -215,17 +215,18 @@ function Entry({ comment, entry, state }: { comment: TaskCommentView; entry: Boa
   }
 
   // What its agent last said is drawn as the conversation draws an agent's words; a person's and a report's are drawn as sent.
+  // The words take a selection and the box does not, as the bubble's (Q3.746).
   const files = comment.files ?? [];
   return (
     <div className="flex flex-col gap-1">
       {head}
       <div className="flex flex-col gap-2 rounded-lg border border-edge px-3 py-2.5">
         {comment.kind === "stop" ? (
-          <div className="text-sm">
+          <div className="text-sm select-text">
             <Markdown text={comment.text} />
           </div>
         ) : (
-          comment.text.length > 0 && <p className="text-sm whitespace-pre-wrap wrap-anywhere">{comment.text}</p>
+          comment.text.length > 0 && <p className="sel-root text-sm whitespace-pre-wrap wrap-anywhere select-text">{comment.text}</p>
         )}
         <TaskFileList machineId={entry.machineId} taskId={entry.task.id} files={files} />
       </div>

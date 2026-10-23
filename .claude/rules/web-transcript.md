@@ -68,8 +68,8 @@ are `background-work.md`'s.
   `WKWebView`, since a programmatic `Range` ignores `user-select`). Q3.636.
 - **Nothing outside this column takes a selection**: `body[data-app]` is `user-select: none`
   (on body, where every portal mounts; `gate.html` carries no `data-app`), and the column's
-  `select-text` turns it back on. The other doors are `AskCard`'s context box and a text
-  field, which keeps `text` from the engine's sheet and needs no rule. `webcheck` holds the
+  `select-text` turns it back on. The other doors are `AskCard`'s context box, a task's
+  description and comments (Q3.746), and a text field, which needs no rule. `webcheck` holds the
   files that turn it on as a census. A drag begun on chrome that reaches the column selects
   from the column's start, which is the engine's. Q3.717.
 - **A link is drawn only where there is somewhere to go**: `openableHref` in `ui/links.ts`

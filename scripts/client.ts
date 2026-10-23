@@ -113,7 +113,7 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   A control plane is still where the token comes from, and REEMOAT_URL is where
   the request goes: a daemon on this computer. A *remote* machine is reachable
   only over an encrypted channel, which needs a device key this tool does not
-  have and the Reemoat app does — so for another machine, use the app.
+  have — for another machine, use the app, or pnpm reemoat for its tasks and board.
 `;
 
 class ApiError extends Error {
@@ -212,8 +212,8 @@ function noRouteMessage(): string {
   }
   return (
     `no route to ${MACHINE}: its relay carries encrypted channels only, and this client holds no ` +
-    `device key to open one. Use the Reemoat app for a remote machine, or set REEMOAT_URL to a ` +
-    `daemon on this computer`
+    `device key to open one. Use the Reemoat app for a remote machine (pnpm reemoat for its tasks and ` +
+    `board), or set REEMOAT_URL to a daemon on this computer`
   );
 }
 

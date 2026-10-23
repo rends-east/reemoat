@@ -75,9 +75,13 @@ export class SharedSecretVerifier implements TokenVerifier {
 
   constructor(private readonly secret: string) {}
 
-  verify(token: string | null): VerifyResult {
+  verify(token: string | null, _now?: number, channel: ChannelIdentity = NO_CHANNEL): VerifyResult {
     if (token === null || token.length === 0) {
       return { ok: false, code: "missing_token", message: "missing bearer token" };
+    }
+    // Before the match: the secret names no key, so it binds none, and a channel must not tell a right guess from a wrong one (Q1.662).
+    if (channel.peerKeyThumbprint !== null) {
+      return { ok: false, code: "unbound_capability", message: "the shared secret names no device key, so it opens no channel" };
     }
     if (!secretMatches(token, this.secret)) {
       return { ok: false, code: "bad_credential", message: "invalid bearer token" };
@@ -276,7 +280,7 @@ export class CompositeVerifier implements TokenVerifier {
       return { ok: false, code: "missing_token", message: "missing bearer token" };
     }
     // By shape, so a signed token can never fall through to the shared-secret arm and escape the device binding.
-    return looksLikeSignedToken(token) ? this.signed.verify(token, now, channel) : this.shared.verify(token);
+    return looksLikeSignedToken(token) ? this.signed.verify(token, now, channel) : this.shared.verify(token, now, channel);
   }
 }
 

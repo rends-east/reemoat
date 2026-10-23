@@ -5,6 +5,8 @@ import { STAY, type Exit, type Sees } from "./config.js";
 export const MAX_JUDGE_PROMPT_BYTES = 8 * 1024;
 export const MAX_SEEN_LAST_MESSAGE_BYTES = 4 * 1024;
 export const MAX_SEEN_DIFF_BYTES = 6 * 1024;
+/** A person's comment, as much of it as a wake's question carries; it comes first, so nothing else cuts it. */
+export const MAX_SEEN_COMMENT_BYTES = 4 * 1024;
 /** A role's instructions, as much of them as a question carries: the rest of the 8 KiB is what the judge reads. */
 export const MAX_JUDGE_INSTRUCTIONS_BYTES = 2 * 1024;
 /** A harness role has this long to answer before it is taken to abstain. */
@@ -12,8 +14,8 @@ export const JUDGE_TIMEOUT_MS = 120_000;
 /** A classifier from a plugin, this long. */
 export const CLASSIFIER_TIMEOUT_MS = 10_000;
 
-/** What the owning daemon read for a judge, each piece optional: a piece nobody could read is left out. */
-export type SeenContext = Partial<Record<Sees, string | null>>;
+/** What the owning daemon read for a judge, each piece optional: a piece nobody could read is left out. A wake's carries its comment. */
+export type SeenContext = Partial<Record<Sees | "comment", string | null>>;
 
 export interface VerdictAnswer {
   /** An exit's name, stay, or null for no opinion. */
@@ -54,7 +56,8 @@ const LABELS: Record<Sees, string> = {
 
 /**
  * The question a role is asked: the exits with what each means, the answer's one shape, and what the column's `sees` lets it
- * read, each piece within its own bound and the whole within an ask's, cut from the end of the list until it fits.
+ * read, each piece within its own bound and the whole within an ask's, cut from the end of the list until it fits. A wake's
+ * question is about a person's comment, which leads.
  */
 export function judgePrompt(
   title: string,
@@ -63,19 +66,24 @@ export function judgePrompt(
   sees: readonly Sees[],
   context: SeenContext,
   instructions: string | null = null,
+  comment: string | null = null,
 ): string {
   const lens =
     instructions === null || instructions.trim().length === 0
       ? " "
       : `\n\nYour user wrote these instructions for you in their board; judge by them:\n${clipBytes(instructions.trim(), MAX_JUDGE_INSTRUCTIONS_BYTES)}\n\n`;
+  const where = column.replace(/[\r\n]/g, " ");
   const head =
-    `You are deciding where a task on a board goes next. The task is "${title.replace(/["\r\n]/g, " ")}", and its work in the ` +
-    `${column.replace(/[\r\n]/g, " ")} column is over.${lens}Pick one exit:\n` +
+    `You are deciding where a task on a board goes next. The task is "${title.replace(/["\r\n]/g, " ")}", and ` +
+    (comment === null ? `its work in the ${where} column is over.` : `it waits in the ${where} column, where your user has just written on it.`) +
+    `${lens}Pick one exit:\n` +
     exits.map((exit) => `- ${exit.name}: ${exit.means ?? exit.label}`).join("\n") +
     "\n\nAnswer with one JSON object and nothing else: " +
     '{"exit": "<one of the names above>", "confidence": <a number from 0 to 1>}. ' +
-    'Answer {"exit": "stay"} to leave the choice to a person, or {"exit": null} if you cannot tell.\n';
+    (comment === null ? 'Answer {"exit": "stay"} to leave the choice to a person' : 'Answer {"exit": "stay"} to leave the task where it is') +
+    ', or {"exit": null} if you cannot tell.\n';
   const pieces: string[] = [];
+  if (comment !== null && comment.trim().length > 0) pieces.push(`\nYour user's comment:\n${clipBytes(comment.trim(), MAX_SEEN_COMMENT_BYTES)}\n`);
   for (const one of sees) {
     const raw = context[one];
     if (raw === undefined || raw === null || raw.trim().length === 0) continue;

@@ -31,6 +31,7 @@
     "doorprobe": "tsx scripts/doorprobe.ts",
     "daemon": "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE:-64} tsx scripts/daemon.ts",
     "client": "tsx scripts/client.ts",
+    "reemoat": "tsx packages/cli/src/bin.ts",
     "check": "pnpm typecheck && pnpm protocolcheck && pnpm boardcheck && pnpm authcheck && pnpm daemoncheck && pnpm gatewaycheck && pnpm relaycheck && pnpm webcheck && pnpm nativecheck && pnpm pincheck && pnpm deploycheck && pnpm docscheck",
     "typecheck": "tsc --noEmit && pnpm --filter @reemoat/web typecheck",
     "authcheck": "tsx scripts/authcheck.ts",

@@ -20,11 +20,13 @@ import {
 import { drawnInNoList } from "./boardAgent";
 import type { MachineId, SessionId, SessionRef } from "./ids";
 import type { Reach } from "./machine";
+import { rankBetween } from "./sessionOrder";
 import type { SessionRow } from "./store";
 import {
   AGENT_IDS,
   type TaskAssignee,
   type TaskExitButton,
+  type TaskFile,
   type TaskPhase,
   type TaskSessionRef,
   type TaskSnapshot,
@@ -276,6 +278,8 @@ export interface Asked {
   assignee?: AskedAssignee;
   /** The machine it is moving to, as drawn: the task here is deleted once it is made there, so this answers nothing (Q3.736). */
   machine?: string;
+  /** Where it was put among its column's cards (Q2.278). */
+  rank?: number;
   /** When it was asked: the change it stands for is that new, so a task let go in Done is not hidden as done long ago. */
   at: number;
 }
@@ -286,6 +290,7 @@ function answers(entry: BoardTask, pressed: Asked): boolean {
   if (pressed.machine !== undefined) return false;
   if (pressed.column !== undefined && pressed.column !== entry.column) return false;
   if (assignee !== undefined && (assignee.assignee !== task.assignee || assignee.agent !== task.agent || assignee.customAgent !== task.customAgent)) return false;
+  if (pressed.rank !== undefined && pressed.rank !== task.rank) return false;
   return pressed.at <= task.updatedAt;
 }
 
@@ -312,7 +317,12 @@ export function liveBoard(
     }
     const pressed = asked.get(taskRefKey(entry.machineId, entry.task.id));
     if (pressed === undefined || answers(entry, pressed)) return settled;
-    const task: TaskSnapshot = { ...settled.task, ...pressed.assignee, updatedAt: Math.max(settled.task.updatedAt, pressed.at) };
+    const task: TaskSnapshot = {
+      ...settled.task,
+      ...pressed.assignee,
+      ...(pressed.rank === undefined ? {} : { rank: pressed.rank }),
+      updatedAt: Math.max(settled.task.updatedAt, pressed.at),
+    };
     const moved = entry.configured && pressed.column !== undefined && pressed.column !== settled.column ? pressedInto(board, task, pressed.column) : null;
     return {
       ...settled,
@@ -356,6 +366,9 @@ export function boardSignature(tasks: readonly BoardTask[]): string {
         entry.task.run === undefined || entry.task.run === null ? "" : `${entry.task.run.n}:${entry.task.run.state}:${entry.task.run.executor ?? ""}`,
         `${entry.task.assignee}:${entry.task.agent}:${entry.task.customAgent ?? ""}`,
         entry.task.sessions.map((session) => `${session.id}:${session.status}:${session.nickname}`).join(","),
+        // Claimed after the row is written, so a read between the two holds none of them (Q2.276).
+        (entry.task.files ?? []).map((file) => file.id).join(","),
+        entry.task.rank === undefined ? "" : String(entry.task.rank),
       ].join("\u0000"),
     )
     .join("\u0001");
@@ -398,9 +411,41 @@ export function matchesTask(entry: BoardTask, needle: string): boolean {
   return haystack.some((field) => field.toLowerCase().includes(wanted));
 }
 
-/** The order inside a column: the newest task leads, and nothing the poll moves reorders it. */
+/** The board's own search: a task whose title holds what was typed, case aside; nothing typed keeps every task (Q3.748). */
+export function titleHas(entry: BoardTask, needle: string): boolean {
+  const wanted = needle.trim().toLowerCase();
+  return wanted.length === 0 || entry.task.title.toLowerCase().includes(wanted);
+}
+
+/** A task's place in its column: where a person put it, else its age, so one never moved stands where the newest-first order put it (Q2.278). */
+export function taskRank(task: Pick<TaskSnapshot, "rank" | "createdAt">): number {
+  return task.rank ?? task.createdAt;
+}
+
+/** The order inside a column: the highest place leads, then the newest, and nothing the poll moves reorders it. */
 export function columnOrder(a: BoardTask, b: BoardTask): number {
-  return b.task.createdAt - a.task.createdAt || (a.task.id < b.task.id ? -1 : 1);
+  return taskRank(b.task) - taskRank(a.task) || b.task.createdAt - a.task.createdAt || (a.task.id < b.task.id ? -1 : 1);
+}
+
+/** Whether a card can be put among the others: its daemon keeps a place, which an older one names none of. */
+export function placeable(entry: BoardTask): boolean {
+  return entry.task.rank !== undefined && !entry.unavailable;
+}
+
+/**
+ * The places a card let go at `index` among `lane` (drawn order, the card itself left out) is written with: one between its
+ * neighbours, or, where that gap has no number left, every card there spaced again. An empty lane asks for none.
+ */
+export function placeAmong(lane: readonly BoardTask[], index: number, moving: BoardTask): { entry: BoardTask; rank: number }[] {
+  if (lane.length === 0) return [];
+  const slot = Math.min(Math.max(index, 0), lane.length);
+  const above = lane[slot - 1];
+  const below = lane[slot];
+  const mid = rankBetween(above === undefined ? null : taskRank(above.task), below === undefined ? null : taskRank(below.task));
+  if (mid !== null) return [{ entry: moving, rank: mid }];
+  const order = [...lane.slice(0, slot), moving, ...lane.slice(slot)];
+  const top = order.reduce((best, one) => Math.max(best, taskRank(one.task)), Number.NEGATIVE_INFINITY);
+  return order.flatMap((one, at) => (one.task.rank === undefined ? [] : [{ entry: one, rank: top + order.length - at }]));
 }
 
 function kept(entry: BoardTask, view: BoardView, board: Board, now: number): boolean {
@@ -734,7 +779,20 @@ export function readTask(raw: unknown): TaskSnapshot | null {
         },
       ];
     }),
+    // What it was made with, drawn under its description (Q2.276).
+    ...(Array.isArray(row["files"]) ? { files: readTaskFiles(row["files"]) } : {}),
+    // Absent on a daemon that keeps no place, which takes the card's drag up and down away (Q2.278).
+    ...("rank" in row ? { rank: nullableNumber(row["rank"]) } : {}),
   };
+}
+
+function readTaskFiles(raw: unknown[]): TaskFile[] {
+  return raw.flatMap((one): TaskFile[] => {
+    if (typeof one !== "object" || one === null) return [];
+    const file = one as Record<string, unknown>;
+    if (typeof file["id"] !== "string" || typeof file["name"] !== "string") return [];
+    return [{ id: file["id"], name: file["name"], mime: nullableText(file["mime"]), bytes: nullableNumber(file["bytes"]) ?? 0 }];
+  });
 }
 
 export function readTasks(raw: unknown): TaskSnapshot[] {

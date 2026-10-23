@@ -62,7 +62,8 @@ tree disagrees with:
    `packages/protocol/package.json`, the `VERSION` literal in
    `packages/control-plane/src/app.ts`, `DAEMON_VERSION` in `src/version.ts`, and
    a new dated heading in `CHANGELOG.md` with the `## [Unreleased]` content moved
-   under it.
+   under it. `packages/board/package.json` and `packages/cli/package.json` follow too, and
+   `pincheck` holds both, though neither is a release site.
 2. `pnpm pincheck` — this is what tells you whether you got six of them. The
    seventh, `app.ts`'s `VERSION`, is asserted by `relaycheck` instead, against the
    served `GET /v1/instance` response rather than against the file; `pincheck`

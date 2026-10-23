@@ -43,7 +43,7 @@ import { heldRoster, type Assignee } from "./assignees";
 import { FeedComments, FeedHistory, TaskBlock, useTaskFeed } from "./Feed";
 import { holderLabel } from "./Holder";
 import { AssigneeDropdown, assigneeChoiceOf, folderOn, ProjectDropdown, type AssigneeChoice } from "./Pickers";
-import { TaskFileList } from "./TaskFiles";
+import { AttachButton, PickedFiles, TaskFileList, uploadPicked, usePickedFiles, type PickedFile } from "./TaskFiles";
 import { useBoard, useBoardWatch, useLiveTasks } from "./useBoard";
 
 /** A task's own page, laid out as a tracker's ticket: what was asked and what came of it, beside who does it and where (Q3.725). */
@@ -144,6 +144,18 @@ function TaskPage({ entry, state, back }: { entry: BoardTask; state: AppState; b
     setBusy(kind);
     void run()
       .catch((cause: unknown) => toast("error", errorText(cause)))
+      .finally(() => setBusy(null));
+  };
+  // The files go to the task's machine first, then the words and their ids in one change (Q2.277).
+  const saveBrief = (next: string | null, files: readonly PickedFile[], progress: (localId: string, fraction: number) => void): Promise<void> => {
+    if (busy !== null) return Promise.reject(new Error("busy"));
+    setBusy("brief");
+    return uploadPicked(entry.machineId, files, progress)
+      .then((attachments) => changeTask(entry, { ...(next === null ? {} : { brief: next }), ...(attachments.length === 0 ? {} : { attachments }) }))
+      .catch((cause: unknown) => {
+        toast("error", errorText(cause));
+        throw cause;
+      })
       .finally(() => setBusy(null));
   };
   const openLead = (): void => {
@@ -351,7 +363,7 @@ function TaskPage({ entry, state, back }: { entry: BoardTask; state: AppState; b
           </div>
 
           <div className="flex min-w-0 flex-col gap-8 lg:col-start-1 lg:row-start-2">
-            <Brief entry={entry} disabled={still} busy={busy === "brief"} onSave={(brief) => act("brief", () => changeTask(entry, { brief }))} />
+            <Brief entry={entry} disabled={still} busy={busy === "brief"} onSave={saveBrief} />
             <FeedHistory read={feed.read} />
             <Activity entry={entry} state={state} />
             <FeedComments read={feed.read} reload={feed.reload} entry={entry} state={state} />
@@ -450,10 +462,29 @@ function Brief({
   entry: BoardTask;
   disabled: boolean;
   busy: boolean;
-  onSave: (brief: string) => void;
+  /** `null` where the words did not change; rejects on a refusal, which keeps the editor open with what was typed and picked. */
+  onSave: (brief: string | null, files: readonly PickedFile[], progress: (localId: string, fraction: number) => void) => Promise<void>;
 }): ReactNode {
   const [draft, setDraft] = useState<string | null>(null);
+  const picked = usePickedFiles();
   const brief = entry.task.brief;
+  const save = (text: string): void => {
+    const next = text === brief ? null : text;
+    if (picked.files.length === 0) {
+      setDraft(null);
+      // The toast said why.
+      if (next !== null) onSave(next, [], () => {}).catch(() => {});
+      return;
+    }
+    onSave(next, picked.files, picked.progress).then(
+      () => {
+        picked.clear();
+        setDraft(null);
+      },
+      // The toast said why; what was typed and picked stays.
+      () => {},
+    );
+  };
   return (
     <section className="flex flex-col gap-2">
       <div className="flex min-h-7 items-center gap-2">
@@ -467,35 +498,55 @@ function Brief({
       </div>
       {draft === null ? (
         // A person's or a proposing agent's words, drawn as sent and never parsed; what the next start hands its agent.
-        <p className="text-sm whitespace-pre-wrap wrap-anywhere">{brief}</p>
+        <p className="sel-root text-sm whitespace-pre-wrap wrap-anywhere select-text">{brief}</p>
       ) : (
-        <>
+        <div
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+          }}
+          onDrop={(event) => {
+            const files = [...event.dataTransfer.files];
+            if (files.length === 0) return;
+            event.preventDefault();
+            picked.add(files);
+          }}
+          className="flex flex-col gap-2"
+        >
           <textarea
             {...VERBATIM_FIELD}
             autoFocus
             aria-label="Description"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
+            // Only when there are files: a text paste must fall through untouched.
+            onPaste={(event) => {
+              const files = [...(event.clipboardData?.files ?? [])];
+              if (files.length === 0) return;
+              event.preventDefault();
+              picked.add(files);
+            }}
             className="min-h-40 w-full resize-y rounded-md border border-edge-strong bg-surface px-3 py-2 text-sm leading-5 outline-none"
           />
-          <div className="flex justify-end gap-2">
-            <Button size="sm" onClick={() => setDraft(null)}>
-              Cancel
-            </Button>
+          <PickedFiles files={picked.files} onRemove={picked.remove} busy={busy} />
+          <div className="flex items-center gap-2">
+            <AttachButton onPick={picked.add} disabled={busy} text="Attach files" />
             <Button
               size="sm"
-              tone="primary"
-              disabled={draft.trim().length === 0}
+              disabled={busy}
               onClick={() => {
-                const next = draft;
+                picked.clear();
                 setDraft(null);
-                if (next !== brief) onSave(next);
               }}
+              className="ml-auto"
             >
+              Cancel
+            </Button>
+            <Button size="sm" tone="primary" disabled={busy || draft.trim().length === 0} onClick={() => save(draft)}>
+              {busy && <Spinner />}
               Save
             </Button>
           </div>
-        </>
+        </div>
       )}
       {/* What it was made with; a comment's files are on the comment. */}
       <TaskFileList machineId={entry.machineId} taskId={entry.task.id} files={entry.task.files ?? []} />

@@ -38,7 +38,6 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
   // Read here, not handed in: sections before this one add a second key, and the control plane signs with the oldest active one.
   const keys = activeSigningKeys(db);
   const signing = keys[keys.length - 1]!;
-  const acp = await import("@agentclientprotocol/sdk");
   process.stdout.write("\nagents on two machines, through the relay\n");
 
   check("the daemon dials the path the relay listens on", PEER_CHANNEL_PATH, RELAY_CHANNEL_PATH);
@@ -56,85 +55,7 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
   );
   const cp = createControlPlaneApp({ db, issuer, tokenTtlSeconds: 300, relayUrl, relay: ctx.registry });
   const asOwner = { authorization: `Bearer ${apiKey.key}`, "content-type": "application/json" };
-
-  interface Stub {
-    prompts: string[];
-    held: unknown;
-    finish: () => void;
-  }
-  const stubs = new Map<string, Stub>();
-  let launched = 0;
-  const spawn = (): AgentProcess => {
-    const toAgent = new PassThrough();
-    const toClient = new PassThrough();
-    const send = (m: unknown) => toClient.write(`${JSON.stringify(m)}\n`);
-    let current: Stub | null = null;
-    let buffer = "";
-    toAgent.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        if (line.trim().length === 0) continue;
-        const message = JSON.parse(line) as Record<string, any>;
-        const id = message["id"];
-        switch (message["method"]) {
-          case acp.methods.agent.initialize:
-            send({
-              jsonrpc: "2.0",
-              id,
-              result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { mcpCapabilities: { http: true } }, authMethods: [] },
-            });
-            break;
-          case acp.methods.agent.session.new: {
-            const sessionId = `s_e2e_${++launched}`;
-            const stub: Stub = { prompts: [], held: null, finish: () => {} };
-            stub.finish = () => {
-              if (stub.held === null) return;
-              const ending = stub.held;
-              stub.held = null;
-              send({ jsonrpc: "2.0", id: ending, result: { stopReason: "end_turn" } });
-            };
-            stubs.set(sessionId, stub);
-            current = stub;
-            send({ jsonrpc: "2.0", id, result: { sessionId } });
-            break;
-          }
-          case acp.methods.agent.session.prompt:
-            current?.prompts.push(
-              (message["params"]?.["prompt"] ?? []).map((block: any) => (block?.type === "text" ? block.text : "")).join(""),
-            );
-            if (current !== null) current.held = id;
-            break;
-          default:
-            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
-        }
-      }
-    });
-    return {
-      stdin: toAgent,
-      stdout: toClient,
-      stderr: new PassThrough(),
-      handle: null,
-      onceStartError: () => () => {},
-      onceExit: () => () => {},
-      hasExited: false,
-      waitForExit: async () => true,
-      endStdin: () => toAgent.end(),
-      kill: async () => {},
-    };
-  };
-  class StubRuntime extends LocalRuntime {
-    override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "kimi", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
-    }
-    override describe(agent: AgentId): AgentLaunchConfig {
-      return { id: agent, displayName: agent, command: `/nonexistent/relaycheck/${agent}`, args: [], env: {}, authHint: "", inSessionCwd: false };
-    }
-    override async launch(): Promise<AgentProcess> {
-      return spawn();
-    }
-  }
+  const { stubs, StubRuntime } = await stubAgents("s_e2e");
 
   let clock = Date.now();
   const machine = async (label: string) => {
@@ -249,7 +170,7 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
     }
     return test();
   };
-  const stubOf = (managed: ManagedSession): Stub => stubs.get(managed.agentSessionId ?? "")!;
+  const stubOf = (managed: ManagedSession): StubAgent => stubs.get(managed.agentSessionId ?? "")!;
   const promptsOf = (managed: ManagedSession): PromptEvent[] =>
     managed.log
       .read(0, 10_000, 1 << 24)
@@ -365,4 +286,90 @@ export async function peerEndToEnd(ctx: PeerEndToEnd): Promise<void> {
   for (const managed of [lead, worker]) await managed.stop();
   await studio.close();
   await laptop.close();
+}
+
+export interface StubAgent {
+  prompts: string[];
+  held: unknown;
+  finish: () => void;
+}
+
+/** kimi as a stub that answers ACP in memory: each session records its prompts and holds its turn until finish(). */
+export async function stubAgents(prefix: string): Promise<{ stubs: Map<string, StubAgent>; StubRuntime: new () => LocalRuntime }> {
+  const acp = await import("@agentclientprotocol/sdk");
+  type Stub = StubAgent;
+  const stubs = new Map<string, Stub>();
+  let launched = 0;
+  const spawn = (): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (m: unknown) => toClient.write(`${JSON.stringify(m)}\n`);
+    let current: Stub | null = null;
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { mcpCapabilities: { http: true } }, authMethods: [] },
+            });
+            break;
+          case acp.methods.agent.session.new: {
+            const sessionId = `${prefix}_${++launched}`;
+            const stub: Stub = { prompts: [], held: null, finish: () => {} };
+            stub.finish = () => {
+              if (stub.held === null) return;
+              const ending = stub.held;
+              stub.held = null;
+              send({ jsonrpc: "2.0", id: ending, result: { stopReason: "end_turn" } });
+            };
+            stubs.set(sessionId, stub);
+            current = stub;
+            send({ jsonrpc: "2.0", id, result: { sessionId } });
+            break;
+          }
+          case acp.methods.agent.session.prompt:
+            current?.prompts.push(
+              (message["params"]?.["prompt"] ?? []).map((block: any) => (block?.type === "text" ? block.text : "")).join(""),
+            );
+            if (current !== null) current.held = id;
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      handle: null,
+      onceStartError: () => () => {},
+      onceExit: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    };
+  };
+  class StubRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "kimi", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return { id: agent, displayName: agent, command: `/nonexistent/relaycheck/${agent}`, args: [], env: {}, authHint: "", inSessionCwd: false };
+    }
+    override async launch(): Promise<AgentProcess> {
+      return spawn();
+    }
+  }
+  return { stubs, StubRuntime };
 }

@@ -57,6 +57,10 @@ export interface TaskChangeBody {
   /** Nobody or its person; naming an agent assigns it (Q2.261, Q2.262). */
   assignee?: TaskAssignee;
   cwd?: string;
+  /** Files staged by `uploadTaskFile`, added to the task's own; an older daemon drops them without a word (Q2.277). */
+  attachments?: string[];
+  /** Its place among its column's cards (Q2.278). */
+  rank?: number | null;
 }
 
 export class DaemonClient {

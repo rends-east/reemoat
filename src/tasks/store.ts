@@ -1,5 +1,5 @@
 // What somebody wants done on this machine, and the sessions doing it (Q2.258). Implemented in store/sqlite.ts.
-import type { AskReason, Executor, LastRun, TaskCode, TaskRun, Verdict, WaitReason } from "@reemoat/board";
+import type { AskReason, Executor, LastRun, TaskCode, TaskRun, Verdict, WaitReason, Woken } from "@reemoat/board";
 
 export const TASK_STATUSES = ["ready", "running", "needs_you", "review", "done"] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -105,6 +105,10 @@ export interface TaskFlow {
   files?: TaskFile[];
   /** Files from comments no run has had yet, which go with the next run's message. */
   pendingFiles?: TaskFile[];
+  /** Where a person put it among its column's cards, higher first; absent or null is its age (Q2.278). */
+  rank?: number | null;
+  /** A comment its column's wake has yet to send it somewhere by (Q2.279). */
+  woken?: Woken | null;
 }
 
 /** The four statuses an older build stored, and the default board's column each stands for. */

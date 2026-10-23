@@ -467,6 +467,8 @@ export interface TaskSnapshot {
   sessions: TaskSessionRef[];
   /** The files it was made with; an older daemon keeps none. */
   files?: TaskFile[];
+  /** Its place among its column's cards, higher first; null is its age, absent a daemon that keeps no place (Q2.278). */
+  rank?: number | null;
 }
 
 /** What is left on a machine of a task that went to another. */

@@ -13,6 +13,7 @@ import { generateKeyPairSync, randomBytes, scryptSync } from "node:crypto";
 import { jwkThumbprint, parseClaims, publicKeyToJwk, signToken, x25519Jwk, type TokenClaims } from "../src/token.js";
 import { describeError } from "../src/http.js";
 import { RelayTunnel } from "../src/relay/tunnel.js";
+import { cliEndToEnd } from "./relaycheck.cli-e2e.js";
 import { peerEndToEnd } from "./relaycheck.peer-e2e.js";
 import { signingKeysAndRoot } from "./relaycheck.keys.js";
 import { SignedTokenVerifier } from "../src/auth.js";
@@ -6143,7 +6144,56 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
     keys: { id: string; prefix: string; revokedAt: number | null }[];
   };
   check("you can list your own keys", own.keys.length, 1);
-  check("and the row carries nothing secret", Object.keys(own.keys[0] ?? {}).sort(), ["createdAt", "id", "lastUsedAt", "prefix", "revokedAt"]);
+  // Whether a key is bound and since when, never the key it is bound to (Q1.661).
+  check("and the row carries nothing secret", Object.keys(own.keys[0] ?? {}).sort(), ["bound", "createdAt", "id", "keySetAt", "lastUsedAt", "prefix", "revokedAt"]);
+
+  process.stdout.write("  a device key bound to an API key (Q1.661)\n");
+  {
+    const appSource = readFileSync(new URL("../packages/control-plane/src/app.ts", import.meta.url), "utf8");
+    const keyOf = (): string => Buffer.from(generateStaticKey().publicKey).toString("base64url");
+    const [first, second] = [keyOf(), keyOf()];
+    const bind = (body: unknown, headers: Record<string, string> = theirs): Promise<Response> =>
+      send("/v1/me/keys/current/binding", { method: "PUT", headers, body: JSON.stringify(body) });
+    const asSession = { authorization: `Bearer ${curieSession}`, "content-type": "application/json" };
+    check("a session binds nothing here: its device carries its key", await outcome(await bind({ publicKey: first }, asSession)), [409, "binding_needs_api_key"]);
+    check("a key that is not 32 bytes of base64url is refused", await outcome(await bind({ publicKey: "not-a-key" })), [400, "bad_request"]);
+    check("and so is a replace that is not a boolean", await outcome(await bind({ publicKey: first, replace: "yes" })), [400, "bad_request"]);
+    const bound = (await (await bind({ publicKey: first })).json()) as { keyId: string; bound: boolean; keySetAt: number; replaced: boolean };
+    check("an API key binds the key it dials with", [bound.keyId, bound.bound, bound.replaced, typeof bound.keySetAt], [own.keys[0]?.id, true, false, "number"]);
+    const again = (await (await bind({ publicKey: first })).json()) as { keySetAt: number; replaced: boolean };
+    check("the same key again changes nothing, its time included", [again.replaced, again.keySetAt], [false, bound.keySetAt]);
+    const elsewhere = await bind({ publicKey: second });
+    const refusal = (await elsewhere.clone().json()) as { error: { detail: { keySetAt: number } } };
+    check("another installation's key is refused rather than moved", [await outcome(elsewhere), refusal.error.detail.keySetAt], [[409, "key_bound_elsewhere"], bound.keySetAt]);
+    const moved = (await (await bind({ publicKey: second, replace: true })).json()) as { replaced: boolean };
+    check("unless it asks to replace it", moved.replaced, true);
+    check(
+      "the row holds the key that replaced it",
+      db.prepare("SELECT public_key FROM api_keys WHERE id = ?").get(own.keys[0]?.id ?? "")?.["public_key"],
+      second,
+    );
+    const listedKeys = await (await send("/v1/me/keys", { headers: theirs })).text();
+    check(
+      "the listing says it is bound and never what to",
+      [(JSON.parse(listedKeys) as { keys: { bound: boolean }[] }).keys[0]?.bound, listedKeys.includes(second)],
+      [true, false],
+    );
+    const meKey = ((await (await send("/v1/me", { headers: theirs })).json()) as { apiKey: { id: string; bound: boolean } | null }).apiKey;
+    check("and /v1/me names the asking key", [meKey?.id, meKey?.bound], [own.keys[0]?.id, true]);
+    const meSession = ((await (await send("/v1/me", { headers: asSession })).json()) as { apiKey: unknown }).apiKey;
+    check("which a session has none of", meSession, null);
+    check(
+      "the binding names the asking key alone, never one from the request",
+      /bindApiKey\(db, caller\.userId, caller\.apiKeyId,/.test(appSource) && !/bindApiKey\([^)]*c\.req\.param/.test(appSource),
+      true,
+    );
+    check(
+      "and api_keys is updated in three places: its use, its revocation and its binding",
+      [...appSource.matchAll(/"UPDATE api_keys SET (\w+)/g)].map((found) => found[1]).sort(),
+      ["last_used_at", "public_key", "revoked_at"],
+    );
+  }
+
   const keyId = own.keys[0]?.id ?? "";
   check("revoking the key you are holding is allowed", (await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: theirs })).status, 200);
   check("and it stops authenticating immediately", await outcome(await send("/v1/me", { headers: theirs })), [401, "api_key_revoked"]);
@@ -7841,6 +7891,7 @@ process.stdout.write("\na link's claims, read once and by parseClaims\n");
 
 // While the shared relay is still up: it starts two daemons of its own against it.
 await peerEndToEnd({ db, issuer: ISSUER, relayUrl, registry, check, waitForTunnel });
+await cliEndToEnd({ db, issuer: ISSUER, relayUrl, relayPort, registry, check, waitForTunnel });
 
 relayListener.close();
 daemon.close();

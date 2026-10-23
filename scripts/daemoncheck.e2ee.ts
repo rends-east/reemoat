@@ -4,6 +4,7 @@ import type { AddressInfo, Socket } from "node:net";
 import { Duplex, PassThrough } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
+  ChannelExchange,
   FRAME,
   LengthReader,
   MAX_FRAME_PAYLOAD,
@@ -16,6 +17,8 @@ import {
   frameLength,
   generateStaticKey,
   localStaticKey,
+  type ChannelOutcome,
+  type ChannelRequest,
   type CipherState,
   type CloseFrame,
   type ResponseFrame,
@@ -919,6 +922,78 @@ const UPLOAD_FRAMES = 14;
     "and the upload went through the daemon's own backpressure",
     peer.inboundPauses > 0,
     `${peer.inboundPauses} pause/resume cycle(s) on the way up`,
+  );
+}
+
+process.stdout.write("\nthe shared initiator, against the real responder\n");
+{
+  // The one initiator a daemon's link and a script's client both run (packages/protocol/src/initiator.ts).
+  const exchange = async (request: ChannelRequest, options: { maxResponseBytes?: number; capability?: string } = {}): Promise<ChannelOutcome> => {
+    const toDaemon = new PassThrough();
+    const toPeer = new PassThrough();
+    const wire = Duplex.from({ readable: toDaemon, writable: toPeer });
+    const one = ChannelExchange.start({
+      staticKey: localStaticKey(device.secretKey),
+      remoteStatic: machine.publicKey,
+      hello: { capability: options.capability ?? boundToken("u_initiator", deviceThumbprint) },
+      request,
+      carrier: { send: (bytes) => toDaemon.write(bytes) },
+      maxResponseBytes: options.maxResponseBytes ?? 1 << 20,
+    });
+    toPeer.on("data", (chunk: Buffer) => one.receiveBytes(new Uint8Array(chunk)));
+    toPeer.on("close", () => one.closed());
+    serveSecureSession({ stream: wire, staticKey: localStaticKey(machine.secretKey), verifier, local: fixtureLocal });
+    one.opened();
+    const outcome = await one.outcome;
+    wire.destroy();
+    return outcome;
+  };
+  const text = (outcome: ChannelOutcome): string => (outcome.kind === "answered" ? new TextDecoder().decode(outcome.body) : outcome.kind);
+
+  const got = await exchange({ method: "GET", path: "/echo", headers: { "x-test": "kept" } });
+  check(
+    "a GET is answered whole, with the session's own capability pinned on it",
+    got.kind === "answered" ? [got.status, JSON.parse(text(got)).xTest, String(JSON.parse(text(got)).authorization).startsWith("Bearer ")] : got.kind,
+    [200, "kept", true],
+  );
+  const body = new Uint8Array(3 * MAX_FRAME_PAYLOAD + 17).fill(7);
+  const posted = await exchange({ method: "POST", path: "/slurp", body });
+  check("a body past one frame goes in pieces and arrives whole", text(posted), JSON.stringify({ read: body.length }));
+  for (const method of ["PATCH", "DELETE", "PUT"]) {
+    const answered = await exchange({ method, path: "/echo" });
+    check(`and ${method} is carried as any method is`, answered.kind === "answered" ? answered.status : answered.kind, 200);
+  }
+  check("an answer past the cap is refused, never cut", (await exchange({ method: "GET", path: "/echo" }, { maxResponseBytes: 8 })).kind, "too_large");
+  const refused = await exchange({ method: "GET", path: "/echo" }, { capability: boundToken("u_initiator", strangerThumbprint) });
+  check(
+    "a capability for another device is refused before anything is sent",
+    refused.kind === "refused" ? [refused.status, refused.reason, refused.requestSent] : refused.kind,
+    [401, "wrong_device", false],
+  );
+  const local = (request: ChannelRequest): string => {
+    try {
+      ChannelExchange.start({
+        staticKey: localStaticKey(device.secretKey),
+        remoteStatic: machine.publicKey,
+        hello: { capability: "x" },
+        request,
+        carrier: { send: () => {} },
+        maxResponseBytes: 1,
+      });
+      return "(started)";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+  check(
+    "and what the responder would refuse is refused here first, with nothing dialled",
+    [
+      local({ method: "POST", path: "/x", headers: { "Content-Length": "5" } }),
+      local({ method: "GET", path: "/x", headers: { authorization: "Bearer other" } }),
+      local({ method: "GE T", path: "/x" }),
+      local({ method: "GET", path: "x" }),
+    ].map((message) => message !== "(started)"),
+    [true, true, true, true],
   );
 }
 

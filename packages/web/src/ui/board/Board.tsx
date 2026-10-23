@@ -1,4 +1,4 @@
-import { Plus, SlidersHorizontal } from "lucide-react";
+import { Plus, Search, SlidersHorizontal } from "lucide-react";
 import { useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -9,6 +9,7 @@ import {
   PHASE_LABEL,
   SESSIONS_VIEW,
   taskGroups,
+  titleHas,
   type Board as BoardConfig,
   type BoardTask,
   type Column,
@@ -20,6 +21,7 @@ import { humanRequests, needsHuman } from "../../wire";
 import { AgentMark } from "../AgentIcons";
 import { Button, Icon, IconButton, MachineLabel, nicknameLine, sessionLabel, shortDuration, StatusDot } from "../bits";
 import { currentView, groupsVersion, subscribeGroups } from "../groups";
+import { keptScroll } from "../keptScroll";
 import { LAYER } from "../overlay";
 import { openStarted, openTask, type AssignTo } from "./actions";
 import { AgentMenu } from "./AgentMenu";
@@ -46,6 +48,10 @@ export function holderName(entry: BoardTask, holder: TaskHolder): string {
 /** Which of the two the pane draws: the board, or what needs its person on every machine. Per device, never stored. */
 let pane: "board" | "you" = "board";
 
+/** What the board's own search holds, and whether its field is open: kept while a task is opened over the board (Q3.748). */
+let searched = "";
+let searchOpen = false;
+
 /**
  * The account's board, every machine's tasks together, in the columns its YAML names (Q3.740); the conversations stay in
  * the list. A card is dragged between columns, which is a move from the column it was seen in (Q3.728). The columns keep
@@ -59,7 +65,12 @@ export function Board({ state }: { state: AppState }): ReactNode {
   // The list's own needle and filters: one view, drawn twice.
   useSyncExternalStore(subscribeGroups, groupsVersion);
   const view = currentView(sessionGroups(state));
-  const groups = taskGroups(tasks, boardView(view), Date.now(), drawn);
+  const [needle, setNeedle] = useState(searched);
+  const search = (next: string): void => {
+    searched = next;
+    setNeedle(next);
+  };
+  const groups = taskGroups(tasks.filter((entry) => titleHas(entry, needle)), boardView(view), Date.now(), drawn);
   const columns = flowColumns(drawn);
   const viewId = SESSIONS_VIEW;
   const [shown, setShown] = useState(pane);
@@ -79,6 +90,7 @@ export function Board({ state }: { state: AppState }): ReactNode {
   const area = useCallback((node: HTMLElement | null) => {
     drag.boardRef(node);
     drops.areaRef(node);
+    keptScroll("board")(node);
   }, []);
   useRostersRead(state, true);
   useRostersRead(state, carried !== null);
@@ -116,6 +128,7 @@ export function Board({ state }: { state: AppState }): ReactNode {
           ))}
         </div>
         <span className="ml-auto" />
+        {shown === "board" && <BoardSearch value={needle} onChange={search} />}
         <Button size="sm" tone="ghost" onClick={() => navigate(boardConfigPath())}>
           <Icon as={SlidersHorizontal} size={14} />
           {writable ? "Edit board" : "Board settings"}
@@ -127,7 +140,7 @@ export function Board({ state }: { state: AppState }): ReactNode {
         </Button>
       </div>
       {shown === "you" && (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        <div ref={keptScroll("board:you")} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           <MeBody state={state} active={{ session: null, task: null }} rows={null} />
         </div>
       )}
@@ -161,7 +174,7 @@ export function Board({ state }: { state: AppState }): ReactNode {
                   />
                 </h2>
                 {/* The top pad is the landed ring's: the first card's would be cut by this scroller's edge. */}
-                <div data-lane-scroll className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pt-0.5 pb-2">
+                <div data-lane-scroll className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pt-0.5 pb-2" ref={keptScroll(`board:${column.id}`)}>
                   {items.map((item) => (
                     <LaneItem
                       key={`${item.kind}:${item.key}`}
@@ -224,6 +237,59 @@ export function Board({ state }: { state: AppState }): ReactNode {
   );
 }
 
+/** A press opens a field; what is typed keeps on the board only the tasks whose title holds it (the owner's call, 2026-10-23; Q3.748). */
+function BoardSearch({ value, onChange }: { value: string; onChange: (next: string) => void }): ReactNode {
+  const [open, setOpen] = useState(searchOpen || value.length > 0);
+  // Focused when a press opens it, never when the board comes back with it open.
+  const [pressed, setPressed] = useState(false);
+  const show = (next: boolean): void => {
+    searchOpen = next;
+    setOpen(next);
+    setPressed(next);
+  };
+  const close = (): void => {
+    onChange("");
+    show(false);
+  };
+  if (!open) {
+    return (
+      <Button size="sm" tone="ghost" ariaLabel="Search tasks" title="Search tasks" onClick={() => show(true)}>
+        <Icon as={Search} size={14} />
+      </Button>
+    );
+  }
+  return (
+    <span className="relative w-64 shrink">
+      <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-faint">
+        <Icon as={Search} size={13} />
+      </span>
+      {/* Autofill opt-outs, as the list's search box has: a password manager once filled one with the account's email. */}
+      <input
+        type="search"
+        name="board-search"
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck={false}
+        data-1p-ignore=""
+        data-lpignore="true"
+        autoFocus={pressed}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        // Escape empties it and folds it away; the window's own Escape then blurs, as it does any field.
+        onKeyDown={(event) => {
+          if (event.key === "Escape") close();
+        }}
+        onBlur={() => {
+          if (value.trim().length === 0) close();
+        }}
+        aria-label="Search tasks by title"
+        placeholder="Search tasks"
+        className="min-h-9 w-full rounded-md border border-edge-strong bg-surface py-1.5 pr-2.5 pl-8 text-sm outline-none"
+      />
+    </span>
+  );
+}
+
 /** A column's kind as its mark: the view of conversations a session's dot, work a fill, the intake dashed, a closing one a tick, any other wait hollow. */
 function ColumnMark({ column }: { column: Column }): ReactNode {
   if (column.kind === "view") return <span className="inline-block h-2 w-2 shrink-0 rounded-full border border-fg" />;
@@ -283,8 +349,8 @@ function LaneItem({
       onAnimationEnd={landed ? onLanded : undefined}
       className={`group relative shrink-0 rounded-lg select-none ${landed ? "animate-landed" : ""}`}
     >
-      {/* The card's press, under its face: a press on the assignee or an exit is that control's own. */}
-      <button type="button" onClick={() => openTask(entry)} aria-label={entry.task.title} className="tap absolute inset-0 rounded-lg" />
+      {/* The card's press, under its face: a press on the assignee or an exit is that control's own. Its title shows the whole name on a long hover. */}
+      <button type="button" onClick={() => openTask(entry)} aria-label={entry.task.title} title={entry.task.title} className="tap absolute inset-0 rounded-lg" />
       <CardFace
         entry={entry}
         board={board}

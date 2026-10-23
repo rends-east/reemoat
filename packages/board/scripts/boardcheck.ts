@@ -9,6 +9,7 @@ import {
   choiceNamed,
   DEFAULT_BOARD_TEXT,
   judgePrompt,
+  lastRunColumn,
   MAX_JUDGE_PROMPT_BYTES,
   firstMatch,
   formatBoardError,
@@ -32,8 +33,11 @@ import {
   simulate,
   step,
   TEMPLATE_NAMES,
+  moveTask,
+  wakeable,
   withReport,
   withVerdict,
+  withWake,
   type Board,
   type BoardTask,
   type MachineOffer,
@@ -760,6 +764,106 @@ process.stdout.write("\nthe walk on paper is step's own\n");
   check("the budget stops a walk too", simulate(looping, ["move build", "report", "outcome fix", "report", "outcome fix"]).trail.at(-1), "needs you: the board moved this task as many times in a row as it may without you");
 }
 
+process.stdout.write("\na comment on a task that waits: wake (Q2.279)\n");
+{
+  // The owner's board as it stood: Done names no wake, and its last run was Push's, which is where Q2.275 sent a comment.
+  const OWNER_TEXT =
+    "version: 1\nroles:\n  dev: { agent: claude }\n  triage: { agent: jev }\ncolumns:\n  - { id: backlog, title: Backlog }\n" +
+    "  - { id: running, title: Running, run: { role: dev }, next: push }\n  - { id: push, title: Push, run: { role: dev }, next: done }\n" +
+    "  - { id: done, title: Done }\n";
+  const OWNER = parsed(OWNER_TEXT);
+  const wakeOf = (board: Board, id: string): unknown => {
+    const column = board.columns.find((one) => one.id === id);
+    return column?.kind === "wait" ? column.wake : "not a waiting column";
+  };
+  check("a waiting column that names none sends a comment where the task last worked", wakeOf(OWNER, "done"), {
+    exits: [{ name: "next", to: "last_run", means: null, label: "where it last worked" }],
+    decide: null,
+  });
+  check("the intake keeps it as a note", wakeOf(OWNER, "backlog"), null);
+  check("so does wake: false anywhere", wakeOf(parsed(OWNER_TEXT.replace("{ id: done, title: Done }", "{ id: done, title: Done, wake: false }")), "done"), null);
+  const RUNNING = parsed(OWNER_TEXT.replace("{ id: done, title: Done }", "{ id: done, title: Done, wake: running }"));
+  check("wake: running is one exit there, labelled with its title", wakeOf(RUNNING, "done"), {
+    exits: [{ name: "next", to: "running", means: null, label: "Running" }],
+    decide: null,
+  });
+  check("an intake may name one too", wakeOf(parsed(OWNER_TEXT.replace("{ id: backlog, title: Backlog }", "{ id: backlog, title: Backlog, wake: running }")), "backlog") !== null, true);
+
+  const last = { column: "push", outcome: null, report: "pushed", diff: null, agent: "claude", message: null, range: null };
+  const done = (over: Partial<BoardTask> = {}): BoardTask => task({ column: "done", entry: 6, runs: 3, last, ...over });
+  const woken = (one: BoardTask, id = "c_1"): BoardTask => withWake(one, { id, text: "the header is still red" }, 7);
+  check("by default it goes back to Push, its last run's column", step(woken(done()), OWNER, world()), { kind: "move", to: "push", exit: null, by: { kind: "human" } });
+  check("wake: running sends it to Running instead", step(woken(done()), RUNNING, world()), { kind: "move", to: "running", exit: null, by: { kind: "human" } });
+  check("a task no run worked goes where a start would", lastRunColumn(task({ column: "done" }), OWNER), "running");
+  check("one whose last column is gone too", lastRunColumn(done({ last: { ...last, column: "gone" } }), OWNER), "running");
+  check("a board with no work column has nowhere to send it", step(woken(task({ column: "b" })), parsed("version: 1\ncolumns:\n  - { id: a, title: A }\n  - { id: b, title: B }\n"), world()), { kind: "stay", by: { kind: "config" } });
+  check("a comment from an earlier entry wakes nothing", kindOf(step({ ...woken(done()), entry: 7 }, OWNER, world())), "nothing");
+  check("a wake the board took away since keeps it here", step(woken(done()), parsed(OWNER_TEXT.replace("{ id: done, title: Done }", "{ id: done, title: Done, wake: false }")), world()), {
+    kind: "stay",
+    by: { kind: "config" },
+  });
+  check("and a stay is the comment settled", applyStep(woken(done()), OWNER, { kind: "stay", by: { kind: "human" } }, 9).woken, null);
+  check("so is any move", moveTask(woken(done()), OWNER, "running", null, { kind: "human" }, 9).woken, null);
+
+  check("a comment wakes a task in Done", wakeable(done(), OWNER), true);
+  check("not in the intake", wakeable(task(), OWNER), false);
+  check("nor while a judge decides", wakeable(done({ judging: { judge: "triage", entry: 6, since: 0 } }), OWNER), false);
+  check("nor while a comment already does", wakeable(woken(done()), OWNER), false);
+  check("nor while it moves", wakeable(done({ moving: { kind: "handoff", since: 0 } }), OWNER), false);
+  check("nor on a task held for its person", wakeable(done({ ask: { reason: "handoff_failed", entry: 6, at: 0, detail: "" } }), OWNER), false);
+
+  const JUDGED = parsed(
+    OWNER_TEXT.replace(
+      "{ id: done, title: Done }",
+      "{ id: done, title: Done, decide: [triage], next: { reopen: { to: running, means: reopen } }, wake: { next: { fix: { to: running, means: a change }, again: { to: last_run, means: push again } }, decide: [{ rules: [{ when: { labels: { has: frozen } }, then: stay }] }, triage] } }",
+    ),
+  );
+  check("a wake with a ladder asks its role about this comment", step(woken(done()), JUDGED, world()), {
+    kind: "judge",
+    judge: "triage",
+    role: JUDGED.roles[1],
+    exits: [
+      { name: "fix", to: "running", means: "a change", label: "fix" },
+      { name: "again", to: "push", means: "push again", label: "again" },
+    ],
+    wake: "c_1",
+  });
+  check("its rules first", step(woken(done({ labels: ["frozen"] })), JUDGED, world()), { kind: "stay", by: { kind: "rules", index: 0 } });
+  const asking = woken(done({ judging: { judge: "triage", entry: 6, since: 0, wake: "c_1" } }));
+  check("while it is asked, nothing", kindOf(step(asking, JUDGED, world())), "nothing");
+  const said = (exit: string | null, wake?: string): BoardTask =>
+    withVerdict(asking, { entry: 6, judge: "triage", exit, confidence: 0.9, at: 8, ...(wake === undefined ? { wake: "c_1" } : { wake }) });
+  check("its answer moves the task, spending the budget", step(said("again"), JUDGED, world()), { kind: "move", to: "push", exit: "again", by: { kind: "role", role: "triage", confidence: 0.9 } });
+  check("the answer clears the question", said("again").judging, null);
+  check("its stay keeps it here", step(said("stay"), JUDGED, world()), { kind: "stay", by: { kind: "role", role: "triage", confidence: 0.9 } });
+  check("and no answer leaves it to you, here", step(said(null), JUDGED, world()), { kind: "stay", by: { kind: "human" } });
+  check("an answer about another comment is late", said("again", "c_0").verdicts, []);
+  const column = withVerdict(done(), { entry: 6, judge: "triage", exit: "reopen", confidence: 1, at: 1 });
+  check("the column's own verdict is not the wake's", kindOf(step(woken(column), JUDGED, world())), "judge");
+  check("nor the wake's the column's", kindOf(step(applyStep(said("stay"), JUDGED, { kind: "stay", by: { kind: "human" } }, 9), JUDGED, world())), "judge");
+
+  const exits = [{ name: "fix", to: "running", means: "a change", label: "fix" }];
+  const asked = judgePrompt("Header", "Done", exits, ["report"], { report: "pushed" }, null, "the header is still red");
+  check("a wake's question says the person just wrote", asked.includes('and it waits in the Done column, where your user has just written on it. Pick one exit:'), true);
+  check("and reads the comment before what the column shows", asked.indexOf("the header is still red") < asked.indexOf("pushed"), true);
+  check("its stay keeps the task, rather than asking a person", asked.includes('Answer {"exit": "stay"} to leave the task where it is'), true);
+
+  const walk = (board: Board): string[] => simulate(board, ["move running", "report", "report", "comment the header is still red"]).trail.slice(-3);
+  check("walked: a comment on Done goes back to Push by default", walk(OWNER), [
+    "you write on it in Done",
+    "Done → Push by your comment",
+    "Push runs in its conversation: The task came back from Done: a report",
+  ]);
+  check("and to Running under wake: running", walk(RUNNING).slice(1, 2), ["Done → Running by your comment"]);
+  check(
+    "a judged wake walks by its role's answer",
+    simulate(JUDGED, ["move running", "report", "report", "triage stay", "comment again please", "triage fix 0.8"]).trail.slice(-6, -1),
+    ["triage answers stay", "you write on it in Done", "asks triage", "triage answers fix · 80%", "Done → Running (fix) by triage"],
+  );
+  check("a comment in the intake waits", simulate(OWNER, ["comment first"]).trail.at(-1), "you write on it: the comment waits for the next run");
+  check("and so does one while a judge decides", simulate(JUDGED, ["move running", "report", "report", "comment now"]).trail.slice(-2), ["asks triage", "you write on it: the comment waits for the next run"]);
+}
+
 process.stdout.write("\nthe guide the config agent writes by\n");
 {
   const examples = [...BOARD_GUIDE.matchAll(/```yaml\n([\s\S]*?)```/g)].map((match) => match[1]!);
@@ -773,7 +877,7 @@ process.stdout.write("\nthe guide the config agent writes by\n");
   check("every rule fact, prompt name and sees value is named in it", [...Object.keys(RULE_FACTS), "visits.<column>", ...TEMPLATE_NAMES, ...SEES].filter((one) => !named(one)), []);
   check("nothing in it was interpolated from nothing", ["undefined", "NaN", "[object Object]"].filter((word) => BOARD_GUIDE.includes(word)), []);
   const bytes = Buffer.byteLength(BOARD_GUIDE);
-  check("it is at most 24 KiB", bytes <= 24 * 1024 ? "within" : `${bytes} bytes`, "within");
+  check("it is at most 26 KiB", bytes <= 26 * 1024 ? "within" : `${bytes} bytes`, "within");
 
   // The walk the guide quotes is the one this driver walks, so the sentence around it cannot go stale.
   const quoted = /walks as `(\[[^`]*\])`/.exec(BOARD_GUIDE);

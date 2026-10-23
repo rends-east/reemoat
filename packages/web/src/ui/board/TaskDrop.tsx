@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { columnTitle, type BoardTask } from "../../board";
+import { columnTitle, placeAmong, type BoardTask } from "../../board";
 import { board } from "../../boardStore";
 import { errorText } from "../../http";
 import type { SessionRef } from "../../ids";
@@ -13,6 +13,7 @@ import {
   movedMeanwhile,
   moveTo,
   openStarted,
+  placeTask,
   refusedWhileWorking,
   setTaskStatus,
   startHere,
@@ -22,7 +23,7 @@ import {
 } from "./actions";
 import { AgentMenu, ChoiceMenu } from "./AgentMenu";
 import { heldRoster, loadRoster } from "./assignees";
-import { cardKey, chatKey, type DragCard } from "./cardDrag";
+import { cardKey, chatKey, type DragCard, type Slot } from "./cardDrag";
 import { folderOn, type AssigneeChoice } from "./Pickers";
 import { useBoard, useLiveTasks } from "./useBoard";
 
@@ -35,8 +36,8 @@ export function useRostersRead(state: AppState, now: boolean): void {
 }
 
 export interface TaskDrop {
-  /** A card let go in a column. */
-  drop: (card: DragCard, from: string, to: string) => void;
+  /** A card let go in a column, at a slot among its cards where it can be put among them. */
+  drop: (card: DragCard, from: string, to: string, slot: Slot | null) => void;
   /** A move pressed on a card, an exit or a column: drawn at once, and asked again with a stop where its agent works. */
   move: (entry: BoardTask, target: MoveTo) => void;
   /** Hands a task to whoever was picked, with the folder it lands in where that is another machine; answers the conversation a start made. */
@@ -127,7 +128,18 @@ export function useTaskDrop(state: AppState, onLanded: (key: string) => void): T
     ).catch(fail);
   };
 
-  const drop = (card: DragCard, _from: string, to: string): void => {
+  // Its place among the cards it was let go between, written beside any move, each held apart until answered (Q2.278).
+  const place = (entry: BoardTask, slot: Slot): void => {
+    const byKey = new Map(tasks.map((one) => [cardKey(one), one]));
+    const lane = slot.keys.flatMap((key) => byKey.get(key) ?? []);
+    const writes = placeAmong(lane, slot.index, entry);
+    if (writes.length > 0) onLanded(cardKey(entry));
+    for (const write of writes) void placeTask(write.entry, write.rank).catch(fail);
+  };
+
+  const drop = (card: DragCard, from: string, to: string, slot: Slot | null): void => {
+    if (card.kind === "task" && slot !== null) place(card.entry, slot);
+    if (to === from) return;
     if (card.kind === "task") dropTask(card.entry, to);
     else dropChat(card, to);
   };

@@ -29,6 +29,10 @@ The relay is a fourth thing and is neither: it moves bytes for a caller the
 Authority has already vouched for, and parses none of them. `.claude/rules/relay.md`
 is its area.
 
+A script driving tasks from outside (`pnpm reemoat`, Q1.661) changes none of this: it asks
+this service which machine and binds a public key to its API key, and its tasks go to the
+machine over the same channel the app's do. No brief arrives here.
+
 ## Three properties this division buys
 
 **An outage here cannot reach work already running.** A daemon verifies tokens

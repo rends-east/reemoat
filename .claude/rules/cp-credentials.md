@@ -72,7 +72,9 @@ paths:
   `DELETE /v1/me/keys/:keyId`, the holder's own; its `user_id` clause makes a listed key
   id worthless to anybody else. The other `UPDATE` is `touchKey`: `last_used_at` on an
   accepted bearer, at most once per `KEY_TOUCH_INTERVAL_MS`, never on a revoked row
-  (Q1.629). **No password change retires a key**; an admin's remedy is the account.
+  (Q1.629). The third is `bindApiKey`, the key pair a script dials with, written only for
+  `caller.apiKeyId` and only where the row still holds what was read (Q1.661); `relaycheck`
+  counts all three. **No password change retires a key**; an admin's remedy is the account.
   As with `sessionOf`: a property the code appears to have and nothing enforces is worse
   than one it visibly lacks. Q1.408, Q1.631.
 - **A credential does not outlive the person who minted it**: `burnUserCodes` runs
@@ -120,4 +122,4 @@ paths:
 | Sessions | 30 days absolute, 14 idle, `last_seen_at` at most every 15 min. 10 per user, oldest revoked. Origins clamped at 256 chars of `User-Agent`, 64 of address. Revoked rows kept **7 days**, then swept at startup with their origins |
 | Authenticated writes | **60 per minute per `<user, route>`**, then a flat 10s: bounds cost, not guessing. `writeKey(userId, what)`, `what` a fixed literal per route. Q1.413 |
 | Login throttle | **5 failures per 15 min per `<name, address>`**, then 30s doubling (exponent clamped at 30) to 15 min. `ADDRESS_THROTTLE` **30 per address** (shared by NATs and offices); a `429` reports the longer. 10 000 keys per instance; `MAX_KEY_CHARS` is computed as the longest key any builder writes (325, `loginKey`; `relaycheck` asserts every builder fits); 254 per login identifier, 120 per name half elsewhere, addresses 64, mail keys 254. In memory: a restart clears it |
-| API keys | **10 live per account** |
+| API keys | **10 live per account**, one bound key pair each |

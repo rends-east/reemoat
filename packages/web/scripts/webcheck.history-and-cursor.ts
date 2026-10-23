@@ -769,6 +769,8 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
       "ui/MentionLink.tsx",
       "ui/PeerMessage.tsx",
       "ui/SentFile.tsx",
+      "ui/board/Feed.tsx",
+      "ui/board/TaskScreen.tsx",
       "ui/settings/OneTimeSecret.tsx",
     ],
   );
@@ -782,6 +784,25 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
     "a sweep that would see one written that way",
     /user-?select["']?\s*[:=]\s*["'](?:text|all|auto|contain)/i.test('node.style.webkitUserSelect = "text";'),
     true,
+  );
+  // Q3.746: a task's page is written words too. Each block takes the selection itself, so its bordered box paints none.
+  const feed = stripComments(srcFile("ui/board/Feed.tsx"));
+  const taskScreen = stripComments(srcFile("ui/board/TaskScreen.tsx"));
+  const selectable = (source: string, drawn: string): boolean =>
+    new RegExp(`<p className="sel-root [^"]*\\bselect-text">\\{${drawn}\\}</p>`).test(source);
+  check(
+    "a task's description, a comment, a report and a closed question can be selected, and a stop's words",
+    [
+      selectable(taskScreen, "brief"),
+      (feed.match(/<p className="sel-root [^"]*\bselect-text">\{comment\.text\}<\/p>/g) ?? []).length,
+      /<div className="text-sm select-text">\s*<Markdown text=\{comment\.text\} \/>/.test(feed),
+    ],
+    [true, 2, true],
+  );
+  check(
+    "and never the box around them",
+    [/className="[^"]*\brounded-lg border[^"]*\bselect-text\b/.test(feed), /<(?:li|ol|section)[^>]*\bselect-text\b/.test(feed)],
+    [false, false],
   );
 
   // What takes no selection is copied by a control, and a copy that failed may not send anybody to select it.

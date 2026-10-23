@@ -155,6 +155,7 @@ import {
   listDevices,
   readDeviceId,
   readDeviceInput,
+  readDevicePublicKey,
   revokeDevice,
 } from "./devices.js";
 import { listSessions, mintSession, resolveSession, revokeAllSessions, revokeSession, touchSession } from "./sessions.js";
@@ -279,6 +280,8 @@ interface Caller {
   via: "api_key" | "session";
   sessionId: string | null;
   deviceId: string | null;
+  /** The key that authenticated this request, so a binding can only ever be the caller's own (Q1.661). */
+  apiKeyId: string | null;
 }
 
 type AppEnv = { Variables: { caller: Caller } };
@@ -378,7 +381,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const writeThrottle = new LoginThrottle(WRITE_THROTTLE);
 
   // Null means carry on. Recorded with fail, since a legitimate write is still a write.
-  // There are **eighteen** call sites; relaycheck compares that word with the calls.
+  // There are **nineteen** call sites; relaycheck compares that word with the calls.
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
     const key = writeKey(caller.userId, what);
@@ -1280,6 +1283,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       machineLimit: quota.limit,
       canAddMachine: owned < quota.limit,
       permissions: { agentMessaging: accountMessaging(db, caller.userId).on },
+      // The key asking, so a script can see whether it is bound without listing every key.
+      apiKey: caller.apiKeyId === null ? null : (apiKeyRows(db, caller.userId).find((row) => row["id"] === caller.apiKeyId) ?? null),
     });
   });
 
@@ -1543,6 +1548,36 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       Date.now(),
     );
     return c.json({ apiKey: key.key }, 201);
+  });
+
+  // The X25519 key a script dials with, held on the key's own row so it ends with the key (Q1.661). Only the key asking binds itself.
+  app.put("/v1/me/keys/current/binding", async (c) => {
+    const writeGuard = spendWrite(c, "key_bind");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    if (caller.apiKeyId === null) {
+      return jsonError(c, 409, "binding_needs_api_key", "a signed-in device binds its key on its device — only an API key binds one here");
+    }
+    const body = await readJsonObject(c);
+    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    const publicKey = readDevicePublicKey(body["publicKey"]);
+    if (publicKey === null) return jsonError(c, 400, "bad_request", "publicKey is an X25519 public key, 43 characters of unpadded base64url");
+    const replace = body["replace"];
+    if (replace !== undefined && typeof replace !== "boolean") return jsonError(c, 400, "bad_request", "replace is true or false");
+
+    const bound = bindApiKey(db, caller.userId, caller.apiKeyId, publicKey, replace === true);
+    if (bound.kind === "revoked") return jsonError(c, 401, "api_key_revoked", "this API key has been revoked");
+    if (bound.kind === "elsewhere") {
+      return jsonError(
+        c,
+        409,
+        "key_bound_elsewhere",
+        "this API key is already bound to another installation's key — give each installation its own API key, or send replace: true",
+        { keySetAt: bound.keySetAt },
+      );
+    }
+    return c.json({ keyId: caller.apiKeyId, bound: true, keySetAt: bound.keySetAt, replaced: bound.kind === "replaced" });
   });
 
   // A session is enough; an API key must prove the password first, since the address is the reset channel (Q1.630, Q1.403).
@@ -2104,8 +2139,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       return jsonError(c, 403, "no_scopes", "this grant carries no usable scopes");
     }
 
-    // Unbound only for an API key, which has no device; a signed-in installation without a device key is refused.
-    const deviceKey = caller.deviceId === null ? null : deviceKeyFor(db, caller.deviceId);
+    // An API key binds the key on its own row, else it is unbound and good on loopback alone; a signed-in installation without one is refused.
+    const deviceKey =
+      caller.apiKeyId !== null ? apiKeyDeviceKey(db, caller.apiKeyId) : caller.deviceId === null ? null : deviceKeyFor(db, caller.deviceId);
     if (caller.deviceId !== null && deviceKey === null) {
       return jsonError(
         c,
@@ -2130,8 +2166,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       // RFC 7800 confirmation: the daemon compares it with the handshake's static key, using the thumbprint function in src/token.ts.
       ...(deviceKey === null ? {} : { cnf: { jkt: jwkThumbprint(x25519Jwk(Buffer.from(deviceKey, "base64url"))) } }),
       // Advisory, never a decision, and only so a refusal can name an
-      // installation somebody can go and look at.
-      ...(caller.deviceId === null ? {} : { dev: caller.deviceId }),
+      // installation somebody can go and look at: a bound key is named by its own id.
+      ...(caller.deviceId !== null ? { dev: caller.deviceId } : deviceKey !== null && caller.apiKeyId !== null ? { dev: caller.apiKeyId } : {}),
     };
 
     return c.json({
@@ -3554,6 +3590,7 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
         via: "session",
         sessionId: resolved.session.id,
         deviceId: resolved.session.deviceId,
+        apiKeyId: null,
       });
       return next();
     }
@@ -3592,6 +3629,7 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
         // No session, therefore no device. Said here rather than left to the
         // type, because it is also why `POST /v1/me/devices` refuses a key.
         deviceId: null,
+        apiKeyId: String(row["key_id"]),
       });
       return next();
     }
@@ -3722,10 +3760,10 @@ function readLabel(raw: unknown): { ok: true; label: string } | { ok: false; mes
   return { ok: true, label };
 }
 
-// Never key_hash; revoked rows are listed rather than filtered, so a leaked key can be seen dead.
+// Never key_hash, nor the bound key itself; revoked rows are listed rather than filtered, so a leaked key can be seen dead.
 function apiKeyRows(db: DatabaseSync, userId: string): Record<string, unknown>[] {
   return db
-    .prepare("SELECT id, prefix, created_at, revoked_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC")
+    .prepare("SELECT id, prefix, created_at, revoked_at, last_used_at, public_key, key_set_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC")
     .all(userId)
     .map((row) => ({
       id: String(row["id"]),
@@ -3733,7 +3771,34 @@ function apiKeyRows(db: DatabaseSync, userId: string): Record<string, unknown>[]
       createdAt: Number(row["created_at"]),
       revokedAt: row["revoked_at"] === null ? null : Number(row["revoked_at"]),
       lastUsedAt: row["last_used_at"] === null ? null : Number(row["last_used_at"]),
+      bound: row["public_key"] !== null,
+      keySetAt: row["key_set_at"] === null ? null : Number(row["key_set_at"]),
     }));
+}
+
+type KeyBinding =
+  | { kind: "same" | "bound" | "replaced"; keySetAt: number }
+  | { kind: "elsewhere"; keySetAt: number | null }
+  | { kind: "revoked" };
+
+// One conditional write over the key as read, so two first runs at once cannot both believe they bound it.
+function bindApiKey(db: DatabaseSync, userId: string, keyId: string, publicKey: string, replace: boolean, now = Date.now()): KeyBinding {
+  const row = db.prepare("SELECT public_key, key_set_at FROM api_keys WHERE id = ? AND user_id = ? AND revoked_at IS NULL").get(keyId, userId);
+  if (row === undefined) return { kind: "revoked" };
+  const held = row?.["public_key"] === null || row?.["public_key"] === undefined ? null : String(row["public_key"]);
+  const heldAt = row?.["key_set_at"] === null || row?.["key_set_at"] === undefined ? null : Number(row["key_set_at"]);
+  if (held === publicKey && heldAt !== null) return { kind: "same", keySetAt: heldAt };
+  if (held !== null && !replace) return { kind: "elsewhere", keySetAt: heldAt };
+  const changed = db
+    .prepare("UPDATE api_keys SET public_key = ?, key_set_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND public_key IS ?")
+    .run(publicKey, now, keyId, userId, held);
+  if (Number(changed.changes) !== 1) return { kind: "elsewhere", keySetAt: null };
+  return { kind: held === null ? "bound" : "replaced", keySetAt: now };
+}
+
+function apiKeyDeviceKey(db: DatabaseSync, keyId: string): string | null {
+  const value = db.prepare("SELECT public_key FROM api_keys WHERE id = ? AND revoked_at IS NULL").get(keyId)?.["public_key"];
+  return typeof value === "string" ? value : null;
 }
 
 /** How stale last_used_at may get before a request writes it; exported for relaycheck. */

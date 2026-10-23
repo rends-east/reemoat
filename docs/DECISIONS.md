@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 153 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 132 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 492 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 69 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 155 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments, messages between agents, tasks | 137 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card, the task board | 495 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 70 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 116 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 89 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 165 | `###` |
-| | | **1216** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 166 | `###` |
+| | | **1228** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1216 rather than the 608
+dividers. So the count is over **both** depths, and it says 1228 rather than the 617
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -4246,7 +4246,9 @@ bounds.
 the signing key, so it can name any device key it likes. This closes theft of a
 serialized capability, not a hostile issuer.
 
-**Status.** Current. `src/auth.ts` holds the check; Q7.37 is the phase.
+**Status.** Current. `src/auth.ts` holds the check; Q7.37 is the phase. Amended by Q1.661: an
+API key may hold a key pair of its own, and its capabilities then name it; the anti-downgrade
+rule is unchanged, and by Q1.662 it covers the shared secret too.
 
 
 ### Q1.649 — Deleting the browser branch of the app
@@ -4961,6 +4963,81 @@ by its id, and the next sign-in answered `invalid_login`; the only admin got the
 refusal with the button back. Not rendered in WKWebView.
 
 **Status.** Current. Narrows Q1.307's "deleting yourself is refused" to the admin route.
+
+### Q1.661 — May an API key reach a machine over the relay?
+
+**Question.** The owner, 2026-10-18, after an orchestrator agent was planned and taken
+back out: *"leave only the option to send tasks in from outside and to act on the board by
+API key; let orchestration be the person's own work outside Reemoat"*, from anywhere,
+*"just by API to the authority or the relay"*. A key reached only a daemon on its own
+computer: the relay carries encrypted channels alone (Q7.143), a channel refuses a
+capability with no device key (Q1.648), and an API key has no device to bind one to.
+
+**Decision. A key holds one X25519 public key on its own row, and a capability minted
+under it names that key.** `PUT /v1/me/keys/current/binding` writes `api_keys.public_key`
+for the key asking, never one named in the request (`bindApiKey`, one conditional write
+over the key as read). `POST /v1/tokens` then mints `cnf.jkt` for it, and `dev` as the
+key's own id, so the machine's device list names the key a person can go and find. A key
+never bound mints as before, good on loopback alone. The client that holds the key pair is
+`packages/cli` (Q4.131); the Authority sees which machine and a public key, never a task.
+
+- **Write-once unless replaced.** The same key again changes nothing, its time included;
+  another key is `409 key_bound_elsewhere` with when the binding was made, and moves only
+  with `replace: true`. One API key per installation is the rule the sentence states.
+- **Not unique across rows**: a refusal would tell one account that another holds a key,
+  the linking Q1.651 keeps out of the devices table.
+- **It ends with the key.** A revoke ends the binding in the same row; there is no second
+  lifecycle to forget.
+
+**Rejected.**
+- *A device for an API key* (lifting `device_needs_session`): devices hang off sessions,
+  so the key would need a column into a table that shares `id` and `revoked_at` with
+  `user_sessions` (the join `cp-devices.md` refuses), a retirement would either kill the key
+  (a second writer of what a key is) or quietly stop the binding, script rows would spend
+  the 20 devices a person's phones need, and the Devices screen's *its sign-ins end* would
+  be false. The machine's lock never reads the Authority's row anyway (Q1.655).
+- *A public key on every mint*: the same authority with nothing stored or shown.
+- *Signing in with a password from the script*: sessions expire and the eleventh evicts the
+  oldest, which an unattended job cannot survive.
+- *The Authority, or the relay, taking a task in the clear*: a brief is a prompt, which may
+  not arrive there (`authority.md`), and the relay has no plaintext path to take it on.
+
+**What it costs, written down.** Before, a leaked key reached no machine quietly: it could
+mint no bound capability and register no device. Now it reaches every machine of the
+account that is not locked, over a channel. The lock (Q1.655) is the boundary — a new key
+waits as `pending` with the code it prints — and `docs/API.md` tells anyone pointing a script
+at a machine to turn it on. A rebind from elsewhere breaks the real installation
+(`wrong_device`, then `key_bound_elsewhere`), which is a tripwire, not a fence: the key can
+mint another key. Keys with scopes of their own are the real answer and are not built
+(Q7.166).
+
+**Driven.** `relaycheck`: every refusal of the route one at a time, the row never listing the
+key it holds, and `relaycheck.cli-e2e.ts` end to end through the shipped relay — the brief
+absent from every byte it carried, a token naming the key and the key's id, the lock's code
+equal to the script's own, an unbound key's channel refused, a revoked key signing nobody in.
+
+**Status.** Current. Amends Q1.648's "an API key mints unbound".
+
+### Q1.662 — Does the shared secret open a channel?
+
+**Question.** Found while planning Q1.661: under `REEMOAT_AUTH=both`, `CompositeVerifier`
+sent anything not shaped like a signed token to the shared-secret check, and that check
+ignored the channel. The relay authorizes a channel by one token and the daemon checks the
+capability in HELLO by another, so a holder of the machine's `REEMOAT_TOKEN` and any signed
+token for it that got past the relay could open a channel with a key of their own choosing.
+
+**Decision. No: the shared secret names no key, so a channel refuses it,** as it refuses a
+capability with no `cnf` (`unbound_capability`). `SharedSecretVerifier` asks before it
+compares, so a channel never tells a right guess from a wrong one; `CompositeVerifier`
+passes the channel through. Loopback is unchanged: no channel, the secret works.
+
+**How far it reached.** A locked machine still refused the unknown key (`DeviceGate.admit`
+runs on the shared-secret principal too); every installer writes `signed`, so only a daemon
+set to `both` by hand was open; and nothing was decrypted: it was a gap in authentication,
+never in encryption. Driven by `authcheck` both ways, and through the shipped relay in
+`relaycheck.cli-e2e.ts`.
+
+**Status.** Current.
 
 ## Session lifecycle, questions and attachments
 
@@ -10466,7 +10543,7 @@ and a restart mid-run that still reaches its exit with its commit.
 - **A stop holds the agent's last message** (`lastAgentMessage`); replying is commenting.
 - **A comment goes into a working run's conversation** as its person's message, mid-turn
   too, and otherwise waits in the next run's note. Any of it gives the budget back.
-- **A comment on a task that waits on its person sends it back to work** (`sentBackTo`):
+- **A comment on a task that waits on its person sends it back to work** (`lastRunColumn`, Q2.279):
   from a column held by you that is neither the intake nor a closing one, to the column its
   last run was in, by you, the comment in the new run's note and the hint with no exit's
   parentheses. The owner wrote "Сделай заново" on a task in Review, saw *for the next run*
@@ -10474,7 +10551,7 @@ and a restart mid-run that still reaches its exit with its commit.
   (2026-10-15). The intake, a closing column and a parked one keep it as a note.
 - `GET` and `POST /tasks/:id/comments`; the history rides the same `GET`. 200 kept of each.
 
-**Status.** Current.
+**Status.** Current, amended by Q2.275: every waiting column but the intake sends a task back.
 
 ### Q2.266 — How strict is the board's YAML, and how do the daemons agree on one?
 
@@ -10764,7 +10841,7 @@ task's and the comment's files, each kept as the session's own and named in its 
 comment with a file into a working run, a create that starts with its files, a handoff's files
 read field by field, and a delete.
 
-**Status.** Current. Files do not cross to another machine with a task (Q7.163).
+**Status.** Current, amended by Q2.277: an edit adds files too. Files do not cross to another machine with a task (Q7.163).
 
 ### Q2.274 — How does a board name a machine, and what may a pinned role take?
 
@@ -10817,6 +10894,201 @@ a daemon learning its name, refusing an empty one and keeping it across a restar
 `webcheck.agent-links`: the name sent with the links and a renamed machine told again.
 
 **Status.** Current.
+
+### Q2.275 — What does a comment on a closed task do?
+
+**Question.** The owner, 2026-10-19: "if a task is in Done I cannot write in a comment to get
+the agent working". Q2.265 kept a comment in a closing column as a note for a next run that
+nothing would start, and drew it as *for the next run*.
+
+**Decision.** **Every column that waits sends a task back, the intake alone excepted**
+(`lastRunColumn`, `wake`'s default since Q2.279): to its last run's column, the comment in the note and the hint *The task came
+back from Done*. A task no run worked goes to the board's first work column, where a start puts
+it, so its agent opens a conversation with the brief and the comment in the note. The intake
+still keeps a comment as a note for the first start, and a task being judged or moved is still
+not sent anywhere.
+
+**Why not the final column alone.** The first cut of this entry sent a task back from a column
+held by its person or a `final` one, and the owner's comment on Done that afternoon still sat
+as a note: their board, written by the config agent, has `{ id: done, title: Done }` with no
+`final` and no holder, so that Done waits on nobody. What a column is called says nothing about
+what it is, and a comment on a task an agent worked is that agent's to act on wherever the task
+waits.
+
+**Compatibility.** The daemon alone; an older one keeps the comment as a note, as before.
+
+**Measured.** `daemoncheck.board`: a task moved to Done after a run comes back to Build in
+the same conversation with the hint and the words, and so does one in a column with no holder
+and no `final`; one made closed starts in Build with the brief; a backlog task's comment stays
+a note.
+
+**Status.** Current, amended by Q2.279: where a comment sends a task is the column's `wake`, and
+this entry's rule is its default. Amends Q2.265.
+
+### Q2.276 — Why did a task made with files show none?
+
+**Question.** The owner, 2026-10-21, after 80 tickets were loaded into a backlog with their
+screenshots: "you did not attach the pictures". The daemon held all 104 files and served each
+one; the task page drew none of them.
+
+**Decision.** **The board reads a task's files.** `readTask` re-reads every field a board
+draws, one by one, and `files` was never among them: Q2.273 added the field to the snapshot
+and `TaskFileList` to the page, but every task the page drew came through `readTask`, so no
+task's files were ever drawn. Comments kept theirs because the feed is not re-read that way.
+`readTask` now takes `files`, dropping a row that names no id or name.
+
+**And a claim is a change.** `POST /tasks` writes the row before it claims the files, so that
+a second copy of the request finds the first by its key. A read in between holds the task
+with no files, and the next read differed from it in nothing `boardSignature` looked at: the
+same `updatedAt`, since the claim left it alone. `boardStore.publish` returns early on an
+unchanged key, so the first copy would stay drawn. So `claimFiles` moves `updatedAt` and the
+signature carries the files' ids. Both halves are needed: the daemon's alone can land in the
+create's millisecond, and the client's alone leaves `updatedAt` saying nothing changed.
+
+**Why the first fix missed.** The race was found first and fixed, and re-saving every task
+moved its `updatedAt` on the owner's screen ("Updated 12m ago") while the page still drew no
+file. The parser was the cause. The race would have hidden the files even with it fixed.
+
+**Compatibility.** The app half is what the owner sees, and it reads any daemon that sends
+`files`; one that sends none draws none, as before.
+
+**Measured.** On the owner's board: 80 tasks and 104 files on the daemon, none drawn, before
+and after `updatedAt` moved. `webcheck.board`: `readTask` keeps a task's files, drops a row
+naming no id, and gives an older daemon's task no `files`; a copy that differs only in its
+files is a different board. `daemoncheck.board-files`: a create with files answers an
+`updatedAt` past its `createdAt`.
+
+**Status.** Current.
+
+### Q2.277 — How are files added to a task already made?
+
+**Question.** The owner, 2026-10-21: "Ctrl+V does not attach a file to the task's
+description". New task took a paste, a drop and a pick, and so did a comment; the task page's
+description editor took text alone, and `PATCH /tasks/:id` had no field for files, so a task
+kept only what it was made with.
+
+**Decision.** **`PATCH /tasks/:id` takes `attachments`**, staged upload ids as a create names
+them, and the description's editor takes a paste, a drop and a pick (`Brief`, `saveBrief`). The
+files are uploaded at Save and named with the words in one change; the daemon claims them first
+(`claimFiles`), so a refusal leaves the words as they were too, and the editor stays open with
+what was typed and picked. They join the task's own files, which a run sends with the brief
+when it opens a conversation; a run at work does not get them, as it does not get an edited
+brief. A file sent to the agent at once is a comment's.
+
+**Why a field and not a route.** A comment already carries files the same way, and a route
+of its own would make one Save two requests that can half succeed.
+
+**Compatibility.** An older daemon ignores a field it does not know and answers the change
+without the files. `changeTask` looks for every id in the answer's `files` and says the
+machine needs updating where one is missing (`FILES_NOT_KEPT`); the staged files expire on
+their own after a day.
+
+**Measured.** `daemoncheck.board-files`: an edit naming an unknown upload is refused with the
+brief unchanged; an edit adds its files after the ones the task held, with its words; files
+alone are a change. `webcheck.board`: the editor's paste, drop and pick, the upload before the
+change, and the refusal on an answer without the files.
+
+**Status.** Current. Amends Q2.273.
+
+### Q2.278 — Where does a task stand among its column's cards?
+
+**Question.** The owner, 2026-10-23: "let me swap tasks, drag them up and down". A column drew
+its tasks newest first and nothing a person did moved one, so 80 tickets loaded in one go stood
+in the order the import happened to make them.
+
+**Decision.** **A task keeps a place, `rank` in its flow**: a number, higher first, null for its
+age. A column orders by the place, else the task's age, then the newest, then the id
+(`columnOrder`, `taskRank`), so a task nobody moved stands where newest-first put it and one made
+later still leads. `PATCH /tasks/:id` takes `rank`, a finite number or null, and the snapshot
+carries it. It lives in the flow, so a handoff carries it to the next machine and no column was
+added. A change of place alone answers nothing the task waits on: it gives no budget back and
+steps nothing (`placing` in `TaskDesk.change`), and moves `updatedAt` as every change does
+(Q2.276).
+
+**The number** is the session list's (Q3.569, `rankBetween`): a card let go between two takes
+the middle of their places, above the first one more, under the last one less, and where the gap
+has no number left every card there is spaced again (`placeAmong`). Places are numbers on every
+machine alike, so a column of several machines' tasks orders as one, and a drop writes only the
+task that moved, on its own machine.
+
+**Why not on the device.** A tracker's order is the board's, the same on a phone and a desktop.
+`machineOrder` is per device because a desktop's strip is not a phone's; nothing like that holds
+of a column.
+
+**Compatibility.** An older daemon sends no `rank`: its tasks stand by their age and are not
+moved up and down (`placeable`), and between columns they move as before. An older client
+ignores the field and draws its old order.
+
+**Measured.** `daemoncheck.board-files`: a place is kept in the flow and answered on the
+snapshot, the budget is left alone, null puts it back, a non-number is refused.
+`webcheck.board`: the order across machines, the middle and both ends, the spacing again, a
+press drawn until answered, and the signature.
+
+**Status.** Current. Amends Q3.728.
+
+### Q2.279 — Where does a comment send a task that waits, and who decides?
+
+**Question.** The owner, 2026-10-23: "add a parameter to the config, on_awake or something like
+it: where a task goes if you write in it while it is idle. A task in Done should go to Running
+when I write in it. Like everything, it may be decided by a judge or jev: unify it." Q2.275 sent
+it to its last run's column, a rule written in the engine, and on the owner's board that is
+Push: their tasks reach Done through Running, Deploy and Push, so a word on a finished task asked
+for a second push of what it was about.
+
+**Decision.** **A waiting column says where a comment sends its task: `wake`.** It takes what a
+column's leaving takes, so nothing about it is a second vocabulary:
+
+- `wake: <column>` is one exit there, taken at once as the person's own move, so it spends no
+  budget and the hint is the hand-moved one, as Q2.275's was;
+- `wake: last_run` is the column its last run worked in, else where a start goes: Q2.275, now
+  the default for every waiting column but the intake. No column id holds an underscore, so the
+  word can never be a column's;
+- `wake: false` keeps the comment as the next run's note, the intake's default;
+- `wake: { next, decide }` is exits as `next` writes them, any `to` also `last_run`, and a ladder
+  as `decide` writes it, without `self`, since no run is at work. Rules, a harness role or a
+  plugin's classifier (jev) decide as they do anywhere; `stay`, `human` or the end of the ladder
+  leaves the task where it is.
+
+A judge on a wake is asked about **that comment**. The question says the person just wrote and
+carries the words first, before what `sees` allows (`judgePrompt`'s `comment`, 4 KiB); a
+classifier gets them as `context.comment`, and `/peer/judge` carries them as `comment`. Its verdict
+is kept under the comment's id (`Verdict.wake`), and so is its question (`judging.wake`), so a role
+that judges both the column and its wake never reads one answer as the other's. The comment the
+wake is about is `flow.woken`. Any move or stay clears it, and while it is there, or a judge
+decides, or the task moves to another machine, a further comment is a note and wakes nothing.
+`wakeStep` is the pure function, reached from `step`, so `board_simulate` walks a wake as the
+daemon takes it (`comment [words]`).
+
+**A wake that asks nobody is taken in the comment's own request**, as Q2.275's was, with nothing
+awaited between arming it and moving, so the answer says where the comment went. A judged one
+is taken by the next step. A comment reads as sent once its wake moves the task into a work
+column, whose run carries it, and as kept otherwise: a wake into a waiting column takes no agent
+the words.
+
+**Why not a field on the comment, or a button.** The owner asked for configuration and for
+judges, and the column is where a board already says what may move a task and who picks. A
+choice made per comment would be the person picking every time, which is what `human` already is.
+
+**Why not on a work column.** A comment on a run at work goes into its conversation (Q2.265);
+the cases left there (a run failed, or asking for an exit) are the person's to answer by a
+button. `wake` on a column with `run` is refused.
+
+**The guide grew past its check.** `board_guide` was 24,450 bytes against a 24 KiB assertion,
+and the section on `wake` is about 1.4 KiB at its shortest; the check is 26 KiB.
+
+**Compatibility.** A daemon from before this cannot parse a board with `wake` and runs the
+default board until updated (`compatibility.md` rule 2), so every daemon goes first. A board
+without `wake` behaves as before on both. An older peer asked to judge a wake ignores `comment`
+and judges blind; one that sends none to a newer peer is judged as before.
+
+**Measured.** `boardcheck`: every refusal, the defaults, `last_run` read for a task and for a
+board with no work column, the ladder with keyed verdicts both ways, the question's words, and
+the owner's board walked on paper (Push by default, Running under `wake: running`).
+`daemoncheck.board`: `false` keeps a note, a wake into a waiting column leaves it unsent and does
+not wake again there, `build` starts the run with every waiting comment in its note, and a
+classifier then a harness judge a wake, asked with the comment.
+
+**Status.** Current. Amends Q2.275.
 
 ## The web client
 
@@ -30963,6 +31235,7 @@ range. A configuration object, even an empty one, paints it.
 is Chromium and a selection never begins in a `none` block.
 
 **Status.** Current. Amends Q3.696 and narrows Q3.638 to the column it was written for.
+Widened by Q3.746 to a task's description and comments.
 
 #### Q3.718 — A provider a key alone reaches said "not installed" and offered somebody else's CLI
 
@@ -31811,6 +32084,66 @@ own (`no-scrollbar`), which Q3.739 decided and nothing here asked about.
 
 **Status.** Current. Amends Q3.739. Not seen in WKWebView this time; Q3.738 measured the
 same rule there.
+
+#### Q3.746 — Can a task's words be copied?
+
+**Question.** The owner, 2026-10-19: "I cannot copy the text of any comment; it is text".
+Q3.717 left selection to the conversation, and a task's page is not in it, so its comments
+and its description could be neither selected nor copied.
+
+**Decision.** **A task's written words take a selection**: the description, a comment, a
+report, a closed question and a stop's words, each block with `select-text` and `sel-root`
+on the element holding the text, never on its bordered box, as the bubble's (Q3.636, Q3.638).
+The headings, the captions, the history, the properties and the buttons still take none.
+`webcheck` adds `Feed.tsx` and `TaskScreen.tsx` to the census and pins each block.
+
+**Status.** Current. Widens Q3.717. Not seen in WKWebView.
+
+#### Q3.747 — How is a card moved up and down, and what keeps the list where it was?
+
+**Question.** The owner, 2026-10-23, three asks at once: drag tasks up and down; "if I open a
+task and come back, my scroll stays rather than going back to the top"; and "on a long hover
+over a task's name, show its whole name". They had looked for DQA-117 among 79 backlog cards and
+not found it: each task opened sent the list back to its top, and a cut title said nothing more.
+
+**Decision.**
+
+- **A card's slot follows the pointer, in its own column too** (`placesAt`, `Slot`): past a
+  card's middle it is below it, measured where that card rests once a slide ends
+  (`restingMiddle`), so the slot does not chase the cards its opening moves. Let go where it was
+  lifted it goes back; elsewhere in its column it writes its place (`placeTask`, Q2.278); in
+  another column it moves as before and writes its place beside the move. A card its daemon
+  keeps no place for opens its slot where the order puts it, as before. The list's lines drag
+  the same way.
+- **The place is held apart from a move's press** (`placed` in the board store, merged into
+  `asked`), so neither request's answer takes the other's drawing back.
+- **A scroller keeps its place by name** (`keptScroll`): the list, the board sideways, each
+  column and For you, put back when they mount and followed while they scroll, in memory only.
+  The list a back swipe draws under a conversation is a picture cut to one screen and neither
+  takes nor writes a place (`data-back-under`); a page turn still starts its page at the top
+  (Q3.655).
+- **A task's card and line carry its whole title in `title`**, which the platform shows on a
+  long hover: the board's card, the list's line, For you, and the band above its conversation.
+
+**Status.** Current. Amends Q3.728 and Q3.733.
+
+#### Q3.748 — Does the board have a search of its own?
+
+**Question.** The owner, 2026-10-23: "add a search button left of Edit board; pressed, it opens a
+field, and as I type only the tasks with that text in their title stay on the board". The board
+drew the list's needle (Q3.721, Q3.724), whose field is in the list, which the owner keeps folded
+at lg; and that needle matches a task's brief, labels and folder as well as its title.
+
+**Decision.** **A press left of Edit board opens a field** (`BoardSearch`), on the Board tab
+alone; what is typed keeps the tasks whose title holds it, case aside (`titleHas`), on top of
+the list's needle and filter, which still apply. What it holds and whether it is open are kept
+in memory, so a task opened over the board and closed again finds it as it was (Q3.747); it takes
+focus only on a press. Escape, or leaving it empty, folds it away. The list's search is as it was.
+
+**Why the title alone.** The owner's words, and the briefs here are Plane tickets with their link
+and comments: a word in one matched most of the board.
+
+**Status.** Current. Amends Q3.721 and Q3.724.
 
 ## Deployment, packaging and code layout
 
@@ -34590,6 +34923,30 @@ stripping comments from both versions. Measurements that had lived only in
 **The rest of the cost is not in the repository.** The same transcripts put 28–51% of a
 task in the model's own retained reasoning (about 1.6× per step after the move from Opus 5
 to Opus 5.5 on 2026-09-22) and 25–33% in reading code piecemeal in the main context.
+
+**Status.** Current.
+
+### Q4.131 — Where does the external client live, and why is it not published?
+
+**Decision. `packages/cli`, `@reemoat/cli`, a workspace member consumed as source and
+`private`,** run as `pnpm reemoat` and imported as a library (`reemoat()`). It imports nothing
+from `src/` or `packages/web`, so it can be published later without a rewrite, and only
+`bin.ts` prints.
+
+- **One initiator, not a second.** The channel a daemon's link opens and the one this client
+  opens are one `ChannelExchange` in `@reemoat/protocol`, with no transport inside it;
+  `peerRequest` keeps its signature over it. `weighOfferedKey` moved there too, so the app and
+  a script hold a machine's key by the same rule (Q1.657).
+- **Written down twice for the image**, as every member is: `.dockerignore` and the
+  Dockerfile's manifest line, since `--frozen-lockfile` checks every importer. Nothing in the
+  image runs it. `pincheck` holds its version and its dependencies to the root's.
+- **`ws`, not Node's own `WebSocket`**: only `ws` hands over a refused upgrade's status line,
+  which is where the relay says `no_tunnel` and a 421's relay.
+- **`pnpm client` stays loopback.** It imports the daemon's own modules and is the machine's
+  way back in after every device is lost (`e2ee.md`); its sentence now names `pnpm reemoat`.
+
+**Not published** until the owner says so: an npm package means a bundle (the protocol and
+`@noble` inside it), a `bin`, and a release site `pincheck` would have to know. Q7.166.
 
 **Status.** Current.
 
@@ -45158,7 +45515,9 @@ than discovered later:**
   The CLI refuses with a sentence naming the remedy — the app for a remote
   machine, `REEMOAT_URL` for a local one — rather than degrading. Adding a
   plaintext path back for one CLI would put the fleet's traffic in the clear again
-  for whoever holds a token.
+  for whoever holds a token. [⚠ amended by Q1.661: a remote client exists again, `pnpm
+  reemoat`, on the app's own channel with a key pair bound to an API key; still no
+  plaintext path, and by Q1.662 `REEMOAT_TOKEN` opens no channel.]
 - **The relay's CORS surface is gone**, and `CORS_ALLOW_METHODS` had its only
   relay-side driver there. A WebSocket handshake is not preflighted, so there is
   no browser question left for that process to answer. `src/cors.ts` is still the
@@ -46666,7 +47025,8 @@ are its edges, each left on purpose or on the owner's word.
   nothing records when a task began to need its person.
 - **The other five harnesses.** claude was driven end to end; the rest ask permission
   for each of the four tools as for any MCP tool, and none was measured.
-- **`pnpm client` verbs** for tasks.
+- **`pnpm client` verbs** for tasks. [Built instead as `pnpm reemoat task`, from anywhere with an
+  API key (Q1.661, Q4.131).]
 - **WKWebView's animations.** The board, its drag and its timings were driven there; its
   animations were not seen, the stand's screen being locked (Q3.728, Q3.729).
 
@@ -46728,5 +47088,29 @@ before the page, and `BOARD_GUIDE` is its draft. The conversation moving with th
 new one starts with the board alone. A way in on a phone: Edit board is reached from the
 board's bar, drawn at lg. `board_simulate` cannot walk past a role pinned with `on`, so the
 guide tells the agent to walk a copy without the pin.
+
+**Status.** Not built.
+
+### Q7.166 — What of driving the board from outside is not built?
+
+**Position.** The owner, 2026-10-18, on an orchestrator agent that had been planned in full (a
+session with a purpose, tools of its own to create, start, move and comment on tasks, and the
+daemon waking it as they changed): *"remove the central agent; leave only sending tasks in from
+outside and acting on the board by API key; let orchestration be the person's own work, outside
+Reemoat."* So no session gains a tool for it, and the nine task and board tools stay as they were
+for every session. What drives the board from outside is Q1.661's key and Q4.131's client; these
+are its edges.
+
+- **No orchestrator agent**, by the owner's word. Not to be proposed again unasked.
+- **Polling, not notifications.** `tasks.wait` and `reemoat task wait` ask `GET /tasks` every few
+  seconds, following a task the board hands to another machine by its tombstone; the daemon tells
+  nobody outside it when a task moves.
+- **Keys with scopes of their own**, so a script's key could reach tasks and no session: the real
+  answer to Q1.661's cost. A grant's scopes would be met with the key's.
+- **Publishing to npm**, other languages (the Noise vectors in `packages/protocol/vectors` are the
+  conformance kit), a key pair in the OS keyring, and more than one key pair per API key.
+- **Files.** A task's attachments need `POST /tasks/uploads` with a streamed body; downloads need
+  the pieces the app fetches (Q6.120). Sockets, and so `attach`, are not carried either.
+- **`GET /tasks/:id`.** The client reads one task off the listing.
 
 **Status.** Not built.

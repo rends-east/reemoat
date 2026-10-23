@@ -24,6 +24,15 @@ export {
 } from "./frames.js";
 export { approvalCode, keyFingerprint } from "./fingerprint.js";
 export {
+  ChannelExchange,
+  requestProblem,
+  type ChannelCarrier,
+  type ChannelExchangeOptions,
+  type ChannelOutcome,
+  type ChannelRequest,
+} from "./initiator.js";
+export { readMachineKey, weighOfferedKey, type OfferedKey } from "./pins.js";
+export {
   CipherState,
   generateStaticKey,
   localStaticKey,

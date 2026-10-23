@@ -182,6 +182,8 @@ function migrate(db: DatabaseSync): void {
   addColumn(db, has("machine_key_set_at"), "ALTER TABLE machines ADD COLUMN machine_key_set_at INTEGER");
   addColumn(db, users.has("password_changed_at"), "ALTER TABLE users ADD COLUMN password_changed_at INTEGER");
   addColumn(db, apiKeys.has("last_used_at"), "ALTER TABLE api_keys ADD COLUMN last_used_at INTEGER");
+  addColumn(db, apiKeys.has("public_key"), "ALTER TABLE api_keys ADD COLUMN public_key TEXT");
+  addColumn(db, apiKeys.has("key_set_at"), "ALTER TABLE api_keys ADD COLUMN key_set_at INTEGER");
   addColumn(db, userSessions.has("device_id"), "ALTER TABLE user_sessions ADD COLUMN device_id TEXT");
   addColumn(
     db,

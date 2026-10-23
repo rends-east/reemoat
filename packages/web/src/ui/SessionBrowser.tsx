@@ -83,6 +83,7 @@ import {
   type TaskFilter,
 } from "./groups";
 import { TaskListBody, useBoardWaiting, type ActiveTask } from "./board/TaskList";
+import { keptScroll } from "./keptScroll";
 import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
 import { RenameField, SessionMenu } from "./SessionMenu";
@@ -128,6 +129,7 @@ export function SessionBrowser({
     (node: HTMLDivElement | null): void => {
       drag.scrollerRef(node);
       swipe.scrollerRef(node);
+      keptScroll("list")(node);
     },
     [drag.scrollerRef, swipe.scrollerRef],
   );

@@ -116,6 +116,18 @@ export async function moveTo(entry: BoardTask, target: MoveTo, stop = false): Pr
   }
 }
 
+/** A card put among the others of its column: drawn there at once, until its daemon answers with the place (Q2.278). */
+export async function placeTask(entry: BoardTask, rank: number): Promise<void> {
+  const daemon = store.daemonFor(entry.machineId);
+  if (daemon === undefined) throw new Error(NOT_CONNECTED);
+  const release = board.place(entry.machineId, entry.task.id, rank);
+  try {
+    board.apply(entry.machineId, (await daemon.changeTask(entry.task.id, { rank })).task);
+  } finally {
+    release();
+  }
+}
+
 /** The refusal a move answers while the task's agent works: its person may stop the agent and move it. */
 export function refusedWhileWorking(cause: unknown): boolean {
   return ApiError.isApiError(cause) && cause.code === "task_working";
@@ -251,11 +263,17 @@ export async function changeTask(entry: BoardTask, change: TaskChangeBody, drawn
   };
   const release = Object.keys(asked).length === 0 ? null : board.hold(entry.machineId, entry.task.id, asked);
   try {
-    board.apply(entry.machineId, (await daemon.changeTask(entry.task.id, change)).task);
+    const answer = (await daemon.changeTask(entry.task.id, change)).task;
+    board.apply(entry.machineId, answer);
+    const kept = new Set((answer.files ?? []).map((file) => file.id));
+    if ((change.attachments ?? []).some((id) => !kept.has(id))) throw new Error(FILES_NOT_KEPT);
   } finally {
     release?.();
   }
 }
+
+/** An older daemon takes a task's files only when it is made, and answers a change that named some without them. */
+const FILES_NOT_KEPT = "That machine is too old to add files to a task it already holds. Update it, then attach them again.";
 
 /**
  * Hands a task nobody has started to an agent on another machine: made there under its key, then taken off this one, so a

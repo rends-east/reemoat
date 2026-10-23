@@ -141,7 +141,7 @@ process.stdout.write("\na task's page: the feed, the history, and what may be pr
     [
       /void uploadPicked\(entry\.machineId, attached\.files, attached\.progress\)\s*\.then\(\(ids\) => addComment\(entry, body, ids\)\)/.test(feedSrc),
       /\{\.\.\.VERBATIM_FIELD\}/.test(feedSrc),
-      /comment\.kind === "stop" \? \(\s*<div className="text-sm">\s*<Markdown text=\{comment\.text\} \/>/.test(feedSrc),
+      /comment\.kind === "stop" \? \(\s*<div className="text-sm select-text">\s*<Markdown text=\{comment\.text\} \/>/.test(feedSrc),
       (feedSrc.match(/<Markdown /g) ?? []).length,
     ],
     [true, true, true, 1],

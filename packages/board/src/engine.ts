@@ -1,5 +1,20 @@
 // What happens to a task next, as one pure function of the task, its board and what the owning daemon sees.
-import { columnById, columnCode, isFlow, roleByName, STAY, type Board, type Exit, type FlowColumn, type Role, type WorkColumn } from "./config.js";
+import {
+  columnById,
+  columnCode,
+  isFlow,
+  LAST_RUN,
+  roleByName,
+  SHORTHAND_EXIT,
+  STAY,
+  type Board,
+  type Exit,
+  type FlowColumn,
+  type Judge,
+  type Role,
+  type WaitColumn,
+  type WorkColumn,
+} from "./config.js";
 import { firstMatch, type RuleFacts } from "./rules.js";
 import { renderTemplate, RETURN_BY_HAND_TEMPLATE, RETURN_TEMPLATE, type TemplateValues } from "./template.js";
 
@@ -106,6 +121,16 @@ export interface Verdict {
   exit: string | null;
   confidence: number | null;
   at: number;
+  /** The comment a wake's judge answered; absent is the column's own ladder. */
+  wake?: string;
+}
+
+/** A person's comment on a task that waits, which its column's wake has yet to send somewhere (Q2.279). */
+export interface Woken {
+  comment: string;
+  text: string;
+  entry: number;
+  at: number;
 }
 
 export interface TaskCode {
@@ -161,8 +186,10 @@ export interface BoardTask {
   verdicts: readonly Verdict[];
   ask: { reason: AskReason; entry: number; at: number; detail: string } | null;
   wait: { reason: WaitReason; entry: number; since: number; detail: string } | null;
-  judging: { judge: string; entry: number; since: number } | null;
+  judging: { judge: string; entry: number; since: number; wake?: string } | null;
   moving: { kind: "handoff" | "sync"; since: number } | null;
+  /** Absent is none. */
+  woken?: Woken | null;
   sessions: readonly TaskSessionLink[];
   from: { column: string; exit: string | null } | null;
   last: LastRun | null;
@@ -217,8 +244,10 @@ export type Step =
       fresh: string | null;
     }
   | { kind: "end" }
-  | { kind: "judge"; judge: string; role: Role; exits: Exit[] }
+  | { kind: "judge"; judge: string; role: Role; exits: Exit[]; wake?: string }
   | { kind: "move"; to: string; exit: string | null; by: Actor }
+  /** A wake's ladder kept the task where it is; its comment waits for the next run. */
+  | { kind: "stay"; by: Actor }
   | { kind: "ask"; reason: AskReason; detail: string; turn?: number };
 
 export type Phase = "needs_you" | "working" | "judging" | "moving" | "queued" | "waiting";
@@ -246,6 +275,7 @@ export function step(task: BoardTask, board: Board, world: World): Step {
         return exitStep(task, board, column);
     }
   }
+  if (task.woken != null && task.woken.entry === task.entry) return wakeStep(task, board, column);
   if (column.final) return NOTHING;
   return exitStep(task, board, column);
 }
@@ -357,9 +387,9 @@ function exitStep(task: BoardTask, board: Board, column: FlowColumn): Step {
         break;
       }
       case "role": {
-        const verdict = task.verdicts.find((one) => one.entry === task.entry && one.judge === judge.role);
+        const verdict = task.verdicts.find((one) => one.entry === task.entry && one.judge === judge.role && one.wake === undefined);
         if (verdict === undefined) {
-          if (task.judging !== null && task.judging.entry === task.entry && task.judging.judge === judge.role) return NOTHING;
+          if (task.judging !== null && task.judging.entry === task.entry && task.judging.judge === judge.role && task.judging.wake === undefined) return NOTHING;
           const role = roleByName(board, judge.role);
           if (role === null) break;
           return { kind: "judge", judge: judge.role, role, exits };
@@ -376,6 +406,77 @@ function exitStep(task: BoardTask, board: Board, column: FlowColumn): Step {
     }
   }
   return human(task, column);
+}
+
+/** Whether a comment on the task now is one its column's wake sends somewhere: a waiting column with one, nothing judging or moving it. */
+export function wakeable(task: BoardTask, board: Board): boolean {
+  const column = columnById(board, task.column);
+  if (column === null || column.kind !== "wait" || column.wake === null) return false;
+  if (task.ask !== null && task.ask.entry === task.entry && STICKY_ASKS.includes(task.ask.reason)) return false;
+  return task.judging === null && task.moving === null && task.woken == null;
+}
+
+/** The column a wake's `last_run` is: where the task last ran, else where a start would go. */
+export function lastRunColumn(task: BoardTask, board: Board): string | null {
+  const last = task.last?.column ?? null;
+  if (last !== null && columnById(board, last)?.kind === "work") return last;
+  return board.columns.find((column) => column.kind === "work")?.id ?? null;
+}
+
+/** A wake's exits with `last_run` read for this task; one with nowhere to go is left out. */
+export function wakeExits(task: BoardTask, board: Board, column: WaitColumn): Exit[] {
+  return (column.wake?.exits ?? []).flatMap((exit) => {
+    const to = exit.to === LAST_RUN ? lastRunColumn(task, board) : exit.to;
+    return to === null ? [] : [{ ...exit, to }];
+  });
+}
+
+/**
+ * Where a person's comment sends a task that waits (Q2.279): its one exit at once, as their own move, or the wake's ladder,
+ * asked about this comment alone. Its end, or a stay, leaves the task here with the comment as the next run's note.
+ */
+export function wakeStep(task: BoardTask, board: Board, column: WaitColumn): Step {
+  const comment = task.woken!.comment;
+  const exits = wakeExits(task, board, column);
+  const decide: readonly Judge[] | null = column.wake?.decide ?? null;
+  if (exits.length === 0) return { kind: "stay", by: { kind: "config" } };
+  if (decide === null) {
+    const exit = exits[0]!;
+    return { kind: "move", to: exit.to, exit: exit.name === SHORTHAND_EXIT ? null : exit.name, by: { kind: "human" } };
+  }
+  const named = (name: string | null): Exit | undefined => exits.find((exit) => exit.name === name);
+  for (const judge of decide) {
+    switch (judge.kind) {
+      case "self":
+        break;
+      case "rules": {
+        const hit = firstMatch(judge.rules, factsOf(task));
+        if (hit === null) break;
+        const by: Actor = { kind: "rules", index: hit.index };
+        if (hit.then === STAY) return { kind: "stay", by };
+        const exit = named(hit.then);
+        if (exit !== undefined) return spend(task, { kind: "move", to: exit.to, exit: exit.name, by });
+        break;
+      }
+      case "role": {
+        const verdict = task.verdicts.find((one) => one.entry === task.entry && one.judge === judge.role && one.wake === comment);
+        if (verdict === undefined) {
+          if (task.judging !== null && task.judging.entry === task.entry && task.judging.judge === judge.role && task.judging.wake === comment) return NOTHING;
+          const role = roleByName(board, judge.role);
+          if (role === null) break;
+          return { kind: "judge", judge: judge.role, role, exits, wake: comment };
+        }
+        const by: Actor = { kind: "role", role: judge.role, confidence: verdict.confidence };
+        if (verdict.exit === STAY) return { kind: "stay", by };
+        const exit = named(verdict.exit);
+        if (exit !== undefined) return spend(task, { kind: "move", to: exit.to, exit: exit.name, by });
+        break;
+      }
+      case "human":
+        return { kind: "stay", by: { kind: "human" } };
+    }
+  }
+  return { kind: "stay", by: { kind: "human" } };
 }
 
 /** A person picks: in a work column the task needs them, in a waiting one its buttons wait. */
